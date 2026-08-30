@@ -1,205 +1,174 @@
-# 下一阶段执行计划
+# 拆仓后路线图 v3
 
 ## 状态与权威
 
-本文是 GitHub Projects #7 至 #14 的权威 Issue 级 Execution Plan v2，记录未来 target work、
-精确 dependency types、parallel branches、native descendant closure、readiness 与跨项目 flagship。
-它不描述当前 runtime behavior。
+本文是截至 2026-08-31 的权威拆仓后执行路线图，取代 Execution Plan
+v2，作为 K0 至 K5 的当前排序权威。除非某行明确标为“已完成”，本文都是
+目标工作；它不声称 typed compiler 已经存在。
 
-[下一阶段开发计划](Next-Stage-Development-Program.zh.md) 继续作为已接受的 Portfolio Architecture
-v1，负责八个领域、goals/non-goals 与 parent Issues。当前行为由 `docs/kernel-architecture/` 掌握，
-已接受决策由 `docs/adr/` 和英文 OpenSpec 掌握，live state 由 GitHub Issues/Projects 掌握。
-
-每个 implementation Issue 继承
+当前 runtime 事实以 `docs/kernel-architecture/` 为权威，已接受决策以
+`docs/adr/` 和英文 OpenSpec 为权威，版本/构建/CI 基线以
+[拆仓后开发契约](../../development/zh/Post-Split-Development-Contract.zh.md)
+为权威，实时 readiness 以 GitHub Issues 和 Projects 为权威。每个实现切片都继承
 [执行切片完成定义](../../development/zh/Execution-Slice-Definition-of-Done.zh.md)。
 
-## 2026-08-29 实时基线
+## 可核验的拆仓后基线
 
-- Projects #7 至 #14 保持 open/private，领域 scope 不变。
-- [#140](https://github.com/kevin-zf1123/photospider/issues/140) 为
-  `CLOSED/COMPLETED`；[PR #191](https://github.com/kevin-zf1123/photospider/pull/191)
-  交付一个 producer build、ccache、八个 build-smoke shards 与三个 labelled CTest consumers。
-  PR #188 未合并，不是 main evidence。
-- #139 与 #141 至 #240 保持 open future/planning targets；进入本图不会使 capability 成为 current。
-- 当前已有 `GraphDefinition`/YAML、`ComputePlan`、private Run cancellation/event paging、Region/
-  tile/halo、device transfer/residency 与 immutable `JobSpec -> Attempt -> Artifact/OutputCommit`。
-  `WorkflowDocument`、`OperationSemanticTraits`、plan digests、incremental compile、plan liveness/
-  materialization、retile、public request handle 与 complete flagship 仍是 target。
+- [#242](https://github.com/kevin-zf1123/photospider/issues/242) 已完成。Kernel
+  [PR #243](https://github.com/kevin-zf1123/photospider/pull/243)
+  从本仓移除 daemon/IPC authority，daemon
+  [PR #1](https://github.com/kevin-zf1123/photospider-daemon/pull/1)
+  建立了保留历史的独立仓。
+- `photospider` 是 embedded kernel、operation runtime、installed package 和未来 typed
+  compiler 的主开发仓。
+- `photospider-daemon` 处于 IPC v2 compatible-maintenance，拥有 client、protocol、
+  transport、codec、router、registries、`photospiderd` lifecycle 及 daemon 自有 tests/docs。
+  K0 不扩展 protocol v3。
+- Kernel Host/runtime、Job/worker、policy、trust、isolation 和 evidence code 仍保留实现且归
+  kernel 所有。K0 只默认关闭 single-tenant Job product，不删除 option、targets 或 tests。
+- 当前 source 具有 `GraphDefinition`/YAML ingestion 和 `ComputePlan` diagnostics。
+  `WorkflowDocument`、typed compiler IRs、semantic traits、plan digests、plan cache 和
+  incremental compilation 仍是未来目标。
 
-## Dependency 语义
+## 仓库与版本边界
 
-| Edge | 含义 |
-| --- | --- |
-| `Start` | 开始 design/implementation 前所需 decisions/contracts。 |
-| `Integration` | 只包含其输出是本切片接入真实 product path 所必需的 upstream prerequisite vertical。 |
-| `Completion` | Issue 关闭前所需 closure evidence/conformance；绝不是执行边。 |
+| 版本轴 | K0 值 | Owner | 兼容规则 |
+| --- | --- | --- | --- |
+| Photospider package | 0.1.0 | kernel 仓 | generated package file 接受 same minor |
+| PhotospiderDaemon package | 0.1.0 | daemon 仓 | generated package file 接受 same minor |
+| Local IPC protocol | v2 | daemon 仓 | 精确冻结的 60-method wire surface |
 
-Downstream adopters、联合演示、跨切片检查、package consumers 与证明切片可被消费的 evidence
-记录在 `Consumers / integration validation` 下。该章节不是 dependency class，不贡献执行边。
+虽然普通 package file 公告 same-minor compatibility，daemon producer 和 installed client
+当前仍精确要求 Photospider 0.1.0。Package compatibility 与 wire compatibility 相互
+独立。未来 WorkflowDocument、IR、planner、digest、plan-cache 和 trait 版本也是独立
+kernel contract；它们都不是 IPC 版本。
 
-Project parent 可以作为 Completion gate，但不能成为无差别 Start 或 Integration gate。
-Completion 作为关闭条件单独检查，绝不解析为 execution/scheduling edge。Issue-number order 不是
-serial calendar；满足自身 Start gate 的 contract、fixture、package 与 internal-refactor branches
-可以并行。
+## K0-K5 执行序列
 
-## Readiness 与字段
+### K0：稳定拆仓后开发基线
 
-`Work Type=AFK|HITL` 只描述 execution mode，不是 readiness。唯一 triage roles 为
-`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`。本 planning
-boundary 没有 open portfolio Issue 为 `ready-for-agent`：contract decisions 使用
-`ready-for-human`，未完整 implementation/aggregate slices 使用 `needs-triage`。Human contract 的
-Project `Verification=Planned`，缺 upstream decision/fixture 的 work 为 `Blocked`；#140 是唯一
-`Done / Verified` item。
+K0 建立 ownership、defaults、package ranges、presets、比例适当的 CI、Roadmap v3、
+focused Issues、agent guidance 和 verification。它不实现 typed compiler，也不实现
+protocol v3。
 
-只有完整满足公共 Definition of Done 的 accepted authority/schema decision、named fixture、
-fail-closed/fallback、exact dependency edges 与 executable evidence，才能提升为 `ready-for-agent`。
+K0 必须交付：
 
-## 交付 waves
+- kernel `kernel-dev`、`op-dev`、`legacy-full` presets；
+- single-tenant Job 默认 `OFF`，`legacy-full` 显式保留；
+- same-minor package files 与 daemon exact Photospider 0.1.0 discovery；
+- pinned daemon PR CI 与有界 scheduled current-main signal；
+- focused Host、compiler-version、plugin-DX 和 daemon-maintenance Issues；
+- 中英文契约、OpenSpec、tracking 和 clean verification。
 
-Waves 表示最短 product path；同一 wave 内满足自身 Start dependencies 的 branches 可以并行。
+### K1：冻结 compiler、document 与 plan 版本
 
-### Wave A：治理、机制与早期证据
+[#245](https://github.com/kevin-zf1123/photospider/issues/245) 只决定
+WorkflowDocument、semantic/optimized IR、planner、digest、plan-cache 和 operation-trait 版本及
+breaking migration。它是 open parent #196 的 focused native child。#199/#200 等待 #245，
+而不等待 #196 下全部 release、rollback、signing、persistence 与 artifact 工作关闭。
 
-- 保留已完成 [#140](https://github.com/kevin-zf1123/photospider/issues/140)；
-- 在 [#196](https://github.com/kevin-zf1123/photospider/issues/196) 冻结 version/schema/release/rollback；
-- 由 [#194](https://github.com/kevin-zf1123/photospider/issues/194) 定义 internal Host seams，
-  [#142](https://github.com/kevin-zf1123/photospider/issues/142) 与 plugin DX
-  [#143](https://github.com/kevin-zf1123/photospider/issues/143) 走独立支线；
-- 由 [#199](https://github.com/kevin-zf1123/photospider/issues/199) 定义 traits/facets，
-  [#200](https://github.com/kevin-zf1123/photospider/issues/200) 定义单向 WorkflowDocument migration；
-- 在成本实现前启动 [#212](https://github.com/kevin-zf1123/photospider/issues/212) baseline；
-- 由 [#214](https://github.com/kevin-zf1123/photospider/issues/214) 定义 MED base。
+### K2：先冻结 traits，再冻结 source document
 
-### Wave B：最小 compiler path 与早期验证入口
+1. [#199](https://github.com/kevin-zf1123/photospider/issues/199) 冻结最小
+   OperationSemanticTraits v1。
+2. [#200](https://github.com/kevin-zf1123/photospider/issues/200) 冻结 versioned
+   WorkflowDocument 及单向 GraphDefinition/YAML migration。
 
-- 交付 no-optimization path [#201](https://github.com/kevin-zf1123/photospider/issues/201) 与
-  identities [#202](https://github.com/kevin-zf1123/photospider/issues/202)；
-- 增量建立 [#148](https://github.com/kevin-zf1123/photospider/issues/148) validation/explain；
-- 并行推进 color [#158](https://github.com/kevin-zf1123/photospider/issues/158)、alpha
-  [#159](https://github.com/kevin-zf1123/photospider/issues/159)、channel
-  [#160](https://github.com/kevin-zf1123/photospider/issues/160)、rational time
-  [#215](https://github.com/kevin-zf1123/photospider/issues/215)；
-- 前移 Python/testbench [#176](https://github.com/kevin-zf1123/photospider/issues/176) /
-  [#177](https://github.com/kevin-zf1123/photospider/issues/177) 与 public request/update
-  [#224](https://github.com/kevin-zf1123/photospider/issues/224)。
+Trait v1 只覆盖 purity/side effects、determinism、cacheability、shape inference、Region/halo
+behavior、static/dynamic inputs、supported candidates 和 fail-closed `Unknown`。Time/media、
+numeric、fusion、in-place 与 materialization 只保留 extensible identity，不给出 v1 behavior promise。
 
-### Wave C：优化与物理 planning
+Operation ABI v1 exact-size C contract 不变。Traits 可使用 engine-owned registry 或单独版本化
+sidecar。无 traits 的 ABI-v1 plugin 为 `Unknown`，只允许保守 no-optimization lowering。
+第一版 WorkflowDocument 版本形状可扩展，但只支持一个 function、一个 region、一个 block，且无环。
 
-- [#149](https://github.com/kevin-zf1123/photospider/issues/149) canonical passes；
-- [#204](https://github.com/kevin-zf1123/photospider/issues/204) 至
-  [#208](https://github.com/kevin-zf1123/photospider/issues/208) 分别负责 affine、pointwise、channel、
-  temporal hoisting、materialization/fallback，并只依赖自身消费的 MED contract；
-- [#209](https://github.com/kevin-zf1123/photospider/issues/209) cost、
-  [#210](https://github.com/kevin-zf1123/photospider/issues/210) liveness/alias/peak memory、
-  [#211](https://github.com/kevin-zf1123/photospider/issues/211) tile/halo/retile/global fallback；
-- [#153](https://github.com/kevin-zf1123/photospider/issues/153) explicit transfer/residency planning。
+### K3：交付差分 Compiler MVP
 
-### Wave D：异构与交互 verticals
+[#201](https://github.com/kevin-zf1123/photospider/issues/201) 与
+[#202](https://github.com/kevin-zf1123/photospider/issues/202) 在 K2 后并行。两者必须共同
+证明 canonical no-optimization document-to-plan path，以及独立 semantic/optimized/plan identities。
+Unknown semantics 必须 reject 或保守 lowering；stale plan identity 不得执行。
 
-- [#154](https://github.com/kevin-zf1123/photospider/issues/154) named resident chain，随后由
-  [#213](https://github.com/kevin-zf1123/photospider/issues/213) calibration，
-  [#156](https://github.com/kevin-zf1123/photospider/issues/156) 稳定 explain evidence；
-- [#164](https://github.com/kevin-zf1123/photospider/issues/164) viewer/session；
-- graph history [#220](https://github.com/kevin-zf1123/photospider/issues/220) 与 pixel history
-  [#221](https://github.com/kevin-zf1123/photospider/issues/221) 分离；
-- [#222](https://github.com/kevin-zf1123/photospider/issues/222) brush boundary、
-  [#223](https://github.com/kevin-zf1123/photospider/issues/223) tile edits、
-  [#225](https://github.com/kevin-zf1123/photospider/issues/225) quality arbitration；
-- [#168](https://github.com/kevin-zf1123/photospider/issues/168) interaction evidence。
+K3 必须使用 engine-owned APIs 与 installed package consumers。Internal IR 不序列化进 daemon，
+[#194](https://github.com/kevin-zf1123/photospider/issues/194) 或无关外围 cleanup 不混入 #199。
 
-### Wave E：Renderer 与 batch 产品化
+### K4：删除 legacy planner，再做 incremental optimization
 
-- [#170](https://github.com/kevin-zf1123/photospider/issues/170) external renderer ownership 与
-  [#172](https://github.com/kevin-zf1123/photospider/issues/172) AOV/output schema 先于
-  [#171](https://github.com/kevin-zf1123/photospider/issues/171) scheduling；
-- Deep [#226](https://github.com/kevin-zf1123/photospider/issues/226) 与 multiview
-  [#227](https://github.com/kevin-zf1123/photospider/issues/227) 独立；
-- [#228](https://github.com/kevin-zf1123/photospider/issues/228) corpus/golden 先于
-  [#229](https://github.com/kevin-zf1123/photospider/issues/229) checkpoint/resume；
-- [#178](https://github.com/kevin-zf1123/photospider/issues/178) sequence、
-  [#230](https://github.com/kevin-zf1123/photospider/issues/230) manifest/outcomes、
-  [#231](https://github.com/kevin-zf1123/photospider/issues/231) durable resume；
-- [#180](https://github.com/kevin-zf1123/photospider/issues/180) 与
-  [#198](https://github.com/kevin-zf1123/photospider/issues/198) 完成 package/release consumers。
+差分路径证明 semantic equivalence 后，以一次 authority cut 删除 legacy planner，不保留双
+planner 或 compatibility alias。然后在新 authority 上实现
+[#203](https://github.com/kevin-zf1123/photospider/issues/203) incremental recompilation 与
+[#149](https://github.com/kevin-zf1123/photospider/issues/149) canonical dead/identity/constant/CSE passes。
 
-### Wave F：有界 production service
+### K5：先证明真实 operations，再进入 heterogeneous planning
 
-- [#182](https://github.com/kevin-zf1123/photospider/issues/182) identity/auth/quota 与
-  [#183](https://github.com/kevin-zf1123/photospider/issues/183) tenant state；
-- [#234](https://github.com/kevin-zf1123/photospider/issues/234) isolated worker/plugin 与
-  [#235](https://github.com/kevin-zf1123/photospider/issues/235) artifact/filesystem authorization；
-- private API [#232](https://github.com/kevin-zf1123/photospider/issues/232) 先于 public API
-  [#233](https://github.com/kevin-zf1123/photospider/issues/233)；
-- [#236](https://github.com/kevin-zf1123/photospider/issues/236) egress/secrets/recovery；
-- [#237](https://github.com/kevin-zf1123/photospider/issues/237) baseline、
-  [#238](https://github.com/kevin-zf1123/photospider/issues/238) chaos/rollback、
-  [#239](https://github.com/kevin-zf1123/photospider/issues/239) backup/restore/runbooks。
+在 cost、liveness、tiling、transfer、residency 与 heterogeneous placement 前，先用真实 operation
+package 和独立 oracle。P0 starter/conformance/embedded CPU runner 为
+[#246](https://github.com/kevin-zf1123/photospider/issues/246)。Data-provider tooling 为 P2 #247；
+lockfile #248 被 #200 阻塞；policy tooling #249 以延期 Compiler MVP 之后而关闭。
 
-首个 production scope 为 single-node、single-region、CPU-first、non-active-active。
+只有真实 operation compiler evidence 完成后，HEX planning 和 flagship vertical 才可成为活跃执行工作。
 
-## Native descendant map
-
-| Aggregate | 必需 descendants |
-| --- | --- |
-| #141 | [#194](https://github.com/kevin-zf1123/photospider/issues/194)、[#195](https://github.com/kevin-zf1123/photospider/issues/195) |
-| #144 | [#196](https://github.com/kevin-zf1123/photospider/issues/196)、[#197](https://github.com/kevin-zf1123/photospider/issues/197)、[#198](https://github.com/kevin-zf1123/photospider/issues/198) |
-| #146 | [#199](https://github.com/kevin-zf1123/photospider/issues/199)、[#200](https://github.com/kevin-zf1123/photospider/issues/200) |
-| #147 | [#201](https://github.com/kevin-zf1123/photospider/issues/201)、[#202](https://github.com/kevin-zf1123/photospider/issues/202)、[#203](https://github.com/kevin-zf1123/photospider/issues/203) |
-| #150 | [#204](https://github.com/kevin-zf1123/photospider/issues/204)–[#208](https://github.com/kevin-zf1123/photospider/issues/208) |
-| #152 | [#209](https://github.com/kevin-zf1123/photospider/issues/209)–[#211](https://github.com/kevin-zf1123/photospider/issues/211) |
-| #155 | [#212](https://github.com/kevin-zf1123/photospider/issues/212)、[#213](https://github.com/kevin-zf1123/photospider/issues/213) |
-| #161 | [#215](https://github.com/kevin-zf1123/photospider/issues/215)–[#217](https://github.com/kevin-zf1123/photospider/issues/217) |
-| #162 | [#218](https://github.com/kevin-zf1123/photospider/issues/218)、[#219](https://github.com/kevin-zf1123/photospider/issues/219) |
-| #165 | [#220](https://github.com/kevin-zf1123/photospider/issues/220)、[#221](https://github.com/kevin-zf1123/photospider/issues/221) |
-| #166 | [#222](https://github.com/kevin-zf1123/photospider/issues/222)、[#223](https://github.com/kevin-zf1123/photospider/issues/223) |
-| #167 | [#224](https://github.com/kevin-zf1123/photospider/issues/224)、[#225](https://github.com/kevin-zf1123/photospider/issues/225) |
-| #173 | [#226](https://github.com/kevin-zf1123/photospider/issues/226)、[#227](https://github.com/kevin-zf1123/photospider/issues/227) |
-| #174 | [#228](https://github.com/kevin-zf1123/photospider/issues/228)、[#229](https://github.com/kevin-zf1123/photospider/issues/229) |
-| #179 | [#230](https://github.com/kevin-zf1123/photospider/issues/230)、[#231](https://github.com/kevin-zf1123/photospider/issues/231) |
-| #184 | [#232](https://github.com/kevin-zf1123/photospider/issues/232)、[#233](https://github.com/kevin-zf1123/photospider/issues/233) |
-| #185 | [#234](https://github.com/kevin-zf1123/photospider/issues/234)–[#236](https://github.com/kevin-zf1123/photospider/issues/236) |
-| #186 | [#237](https://github.com/kevin-zf1123/photospider/issues/237)–[#239](https://github.com/kevin-zf1123/photospider/issues/239) |
-
-FND parent #139 直接新增 #192/#193；MED parent #157 直接新增 #214；#145 直接新增 flagship #240。
-Project completion 使用 verified descendant closure，不使用固定 five-child/six-item count。
-
-## 旗舰合成纵向路径
-
-[#240](https://github.com/kevin-zf1123/photospider/issues/240) 是唯一 cross-project closure Issue，
-只有一个 native parent #145，并属于 Projects #7 至 #14。它绝不成为第二 execution authority。
+## 关键路径
 
 ```text
-Read / Input Value
-  -> Affine Transform
-  -> Curve / Grade
-  -> Gaussian Blur
-  -> Mask + Over / Merge
-  -> OCIO Display
-  -> Viewer / File / Python result
+post-split contract (K0)
+  -> compiler/document/plan versions (#245)
+  -> OperationSemanticTraits v1 (#199)
+  -> WorkflowDocument (#200)
+  -> no-opt lowering + identities (#201 + #202)
+  -> delete the legacy planner
+  -> incremental compile + canonical passes (#203 + #149)
+  -> real operations and independent oracles
+  -> heterogeneous planner
 ```
 
-| Project | Flagship 职责 |
-| --- | --- |
-| FND #7 | Contract、fixture、oracle、golden、package 与 release-test governance。 |
-| IR #8 | WorkflowDocument -> IR -> plan、traits、identities、explain 与合法 optimizations。 |
-| HEX #9 | Cost、liveness、tile/halo、CPU/Metal placement、transfer、counters 与 fallback。 |
-| MED #10 | Fixed color/alpha/channel metadata、OCIO、Over legality 与 independent semantic oracle。 |
-| INT #11 | Small ROI、edit storm、public cancellation/update、preview/final、stale suppression。 |
-| REN #12 | External progressive AOV input 与 plan/trace/terminal evidence。 |
-| AUT #13 | Python 构图/消费/oracle compare 与 durable final batch。 |
-| SRV #14 | Isolated immutable job submit 与 authorized artifact/result replay。 |
+并行分支只能在各自 Start decision 已接受时推进。Project parent 与 Completion gate 不是 Start edge。
 
-证据必须包含 independent CPU oracle、fixed metadata、multiple resolutions、small ROI/halo、
-deterministic edit storm、final batch、plan/trace goldens、cache/transfer/reuse counters 与显式 CPU/
-Metal selection/fallback。Affine、true mask/Over、OCIO display 与 dedicated oracle 当前缺失；
-`add_weighted`/`curve_transform` 不能冒充这些 contracts。
+## 拆仓后 focused Issue map
+
+| 原 aggregate/mixed scope | 当前处置 |
+| --- | --- |
+| #195 installed Host + IPC callers | 以 superseded 关闭；kernel facade #244，daemon adoption `photospider-daemon#2` |
+| #196 广义 version/release policy | 保持 open；已完成 extraction #242，focused compiler-version child #245 |
+| #143 plugin tooling mega-slice | aggregate：operation #246、data provider #247、lockfile #248、deferred policy #249 |
+| daemon package/CI/protocol | daemon #3 package range、#4 pinned/scheduled CI、#5 IPC v2 maintenance、#6 compiler-blocked next protocol |
+
+完整 OPEN inventory 未发现可在不切分的情况下 native transfer 的 pure daemon-owned Issue。
+Mixed #195 在 kernel 仓保留历史和 native parent，以 reciprocal successors 保留 provenance。
+Closed #242 保留为历史 evidence，不转移。
+
+## Projects #7-#14 仍是长期域边界
+
+Roadmap v3 只改变活跃排序，不改变
+[下一阶段开发方案](Next-Stage-Development-Program.zh.md)中已接受的 Portfolio
+Architecture v1 domains。
+
+| Project | 保留的长期 authority |
+| --- | --- |
+| #7 FND | build/package/Host seam/plugin DX/release mechanisms |
+| #8 IR | WorkflowDocument、compiler IR、identities、plans 与 legal optimization |
+| #9 HEX | costs、memory/liveness、tile/halo、placement、transfer、residency、fallback |
+| #10 MED | color、alpha、channels、time 与 independent semantic oracles |
+| #11 INT | viewer/edit/history/cancellation/quality product semantics |
+| #12 REN | progressive renderer/AOV/checkpoint product semantics |
+| #13 AUT | Python/testbench/batch/provenance/resume product semantics |
+| #14 SRV | future kernel service、durable Job、worker、security 与 operational domains |
+
+Project #14 不是 standalone IPC v2 daemon。其 deferred Job、worker、policy、trust、isolation、evidence
+和 service targets 仍归 kernel 所有。原 Execution Plan v2 Wave F 只在 Git history 中保留为
+portfolio planning context，不是当前 Compiler 开发阶段。
+
+## CI 与跨仓 gate
+
+Kernel PR 验证 kernel、operation、compiler、package 与 installed consumer behavior。Kernel CI 不
+checkout daemon 仓。只有 kernel change 修改 installed API/package boundary，或 release gate 显式要求时，
+才请求 daemon downstream gate。
+
+Daemon PR 在支持平台验证 pinned supported kernel revision 与 frozen old four-cell baseline。
+Scheduled/manual Ubuntu job 把 current kernel `main` 作为 drift signal，不是每个 kernel PR 的 required check。
 
 ## 完成规则
 
-所有 future implementation Issues 保持 open，直到自身 evidence 完整。Aggregate 只有在 required
-descendants 完成后关闭；Project 只有在 verified descendant closure 与 parent evidence 完整后关闭。
-本 active planning change 在 human acceptance 前保持不归档。
-
-Dependency validator 只使用 Start 与 Integration edges 构建执行图；该图必须有零个强连通分量、
-零个互反依赖对。Completion gates 与 `Consumers / integration validation` references 单独审核，
-绝不贡献执行边。
+一个 Issue 只在 focused evidence、英文 authority、中文 mirror、implementation、tests、Project fields
+和 live dependencies 一致后关闭。Future compiler Issues 保持 open，直到它们真正实现各自 scope。
+K0 完成不能作为 K1-K5 capabilities 已存在的证据。

@@ -2987,8 +2987,14 @@ installed or exported.
 
 Build and run a bounded local campaign explicitly:
 
+The worker-protocol codec is part of the retained Job vertical, so the manual
+fuzz profile must explicitly enable that now-default-off product together with
+the fuzz targets.
+
 ```bash
-cmake -S . -B build-fuzz -DPHOTOSPIDER_BUILD_FUZZERS=ON
+cmake -S . -B build-fuzz \
+  -DPHOTOSPIDER_BUILD_SINGLE_TENANT_JOB=ON \
+  -DPHOTOSPIDER_BUILD_FUZZERS=ON
 cmake --build build-fuzz \
   --target fuzz_worker_protocol_codec \
            fuzz_isolated_cpu_invocation_codec -j

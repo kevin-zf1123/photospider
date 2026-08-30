@@ -468,9 +468,9 @@ child 的策略。
 
 - 不安装、不导出的 `photospider_single_tenant_job_internal` 与 `photospider-worker`
   target、protocol/manager unit coverage、process fixture/supervision integration coverage 与
-  Embedded product-path coverage 默认只存在于 Darwin 与 Linux。独立的
-  `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate 在其他系统默认关闭，拒绝在不支持的系统显式
-  启用；CMake 会同时断言 enabled 与 disabled profile 的 target inventory。
+  Embedded product-path coverage 只在 Darwin 或 Linux 显式启用独立的
+  `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate 时存在。该 gate 在所有系统默认关闭，拒绝在不支持的
+  系统显式启用；CMake 会同时断言 enabled 与 disabled profile 的 target inventory。
 - 外部 daemon 与 local IPC protocol v2 不受这个 kernel vertical 影响，也不序列化这些 Job、
   quota、checkpoint 或 durable artifact contract；private worker protocol v3 仍是本仓另一条
   源码私有 wire。

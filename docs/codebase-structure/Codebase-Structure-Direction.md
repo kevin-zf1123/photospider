@@ -43,7 +43,7 @@ Observed build targets in the current root `CMakeLists.txt`:
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter. | It discovers and links only OpenCV `core`. |
 | `photospider_policy_sdk` | Installable dependency-neutral pure-C policy ABI v1 SDK. | It carries one C11/C++17-compatible header and no execution/runtime dependency. |
 | `photospider` | Static installable backend product with archive name `libphotospider`. | Matches the desired static product and public Host shape while folding role-owned backend sources into one archive. |
-| `photospider_single_tenant_job_internal` | Non-installed Issue #99/#100 canonical JobSpec, tenant quota, durable Job/artifact, explicit retry/checkpoint, private worker protocol, and WorkerManager authority. | Its independent gate defaults on only for Darwin/Linux, and its internal/worker/unit/integration target inventory is absent elsewhere; it exports no package/API and remains outside every daemon composition. |
+| `photospider_single_tenant_job_internal` | Non-installed Issue #99/#100 canonical JobSpec, tenant quota, durable Job/artifact, explicit retry/checkpoint, private worker protocol, and WorkerManager authority. | Its independent gate defaults off and may be enabled only for Darwin/Linux; its target inventory is absent while disabled, it exports no package/API, and it remains outside every daemon composition. |
 | `photospider-worker` | Non-installed one-assignment process composition root for the source-private single-tenant Job vertical. | It is freshly execed per attempt, links the internal Job/Embedded Host closure, exposes no network listener or second assignment, and grants no durable Job/quota/artifact authority. |
 | `photospider_cli_common` | Object-library CLI command/TUI/autocomplete code plus the reusable `run_graph_cli` boundary under `apps/graph_cli/` and two role-owned benchmark service translation units. | Object injection places all CLI references before the selected product archive on single-pass static linkers; the benchmark sources remain exclusive to this non-installable helper/complete CLI closure and absent from the installable product. |
 | `graph_cli` | Process-policy-only entry point at `apps/graph_cli/main.cpp`. | Disables OpenCL, owns allocation-independent fatal exit policy, creates the embedded `Host` adapter, and has no daemon-client mode yet. |
@@ -390,9 +390,10 @@ CMake rules:
 - Internal targets may use `src/lib/` as a `PRIVATE` include root.
 - `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` independently gates the POSIX-backed
   Job internal target and its maintained unit/integration targets. It defaults
-  on only for Darwin/Linux, defaults off on every other system, and rejects an
-  explicit unsupported enable. Configure-time inventory assertions require all
-  profile-appropriate Job targets when enabled and forbid them when disabled.
+  off on every system, can be enabled explicitly on Darwin/Linux, and rejects
+  an explicit unsupported enable. Configure-time inventory assertions require
+  all profile-appropriate Job targets when enabled and forbid them when
+  disabled.
 - Installable targets expose only `include/photospider`.
 - The installation boundary copies headers only from
   `include/photospider/**`. Implementation headers under `src/lib/` are

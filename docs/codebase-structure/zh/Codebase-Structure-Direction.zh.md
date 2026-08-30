@@ -39,7 +39,7 @@ single-tenant Job/worker vertical。Daemon 拆仓从本树移除了重复的 pro
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
 | `photospider_policy_sdk` | 可安装、dependency-neutral 的纯 C policy ABI v1 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 execution/runtime dependency。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
-| `photospider_single_tenant_job_internal` | 不安装的 Issue #99/#100 canonical JobSpec、tenant quota、durable Job/artifact、显式 retry/checkpoint、private worker protocol 与 WorkerManager authority。 | 独立 gate 只在 Darwin/Linux 默认启用，其他系统不存在 internal/worker/unit/integration target inventory；它不导出 package/API，且不进入任何 daemon composition。 |
+| `photospider_single_tenant_job_internal` | 不安装的 Issue #99/#100 canonical JobSpec、tenant quota、durable Job/artifact、显式 retry/checkpoint、private worker protocol 与 WorkerManager authority。 | 独立 gate 默认关闭且只能在 Darwin/Linux 显式启用；关闭时不存在相关 target inventory，它不导出 package/API，且不进入任何 daemon composition。 |
 | `photospider-worker` | 源码私有 single-tenant Job 纵向路径的不安装、单 assignment process composition root。 | 每个 attempt 都会全新 exec；它链接 internal Job/Embedded Host closure，不暴露 network listener 或第二个 assignment，也不获得 durable Job/quota/artifact authority。 |
 | `photospider_cli_common` | `apps/graph_cli/` 下的 object-library CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Object 注入让所有 CLI reference 在 single-pass static linker 上位于所选 product archive 之前；benchmark 源仍只属于这个不可安装的 helper/完整 CLI closure，不会进入可安装产品。 |
 | `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
@@ -347,9 +347,9 @@ CMake 规则：
 
 - 内部 target 可以把 `src/lib/` 作为 `PRIVATE` include root。
 - `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` 独立控制 POSIX-backed Job internal target 及其持续维护
-  unit/integration target。它只在 Darwin/Linux 默认启用，在其他系统默认关闭，并拒绝显式的
-  unsupported enable。Configure-time inventory assertion 要求 enabled profile 中存在所有适用的
-  Job target，并禁止它们出现在 disabled profile 中。
+  unit/integration target。它在所有系统默认关闭，只能在 Darwin/Linux 显式启用，并拒绝
+  unsupported system 上的显式 enable。Configure-time inventory assertion 要求 enabled profile
+  中存在所有适用的 Job target，并禁止它们出现在 disabled profile 中。
 - 可安装 target 只暴露 `include/photospider`。
 - 安装边界只复制 `include/photospider/**` 下的头文件。`src/lib/` 下的实现头不会进入安装包，
   `photospider` 产品仍把 `src/lib/` 保持为 private include root。

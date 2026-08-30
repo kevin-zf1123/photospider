@@ -38,8 +38,9 @@ allocation 前约束 manifest/Job control file，并证明 frozen/archive/quota/
 process-crash containment 与 bounded cancellation/shutdown。它保留共享的
 128-configured-device admission/recovery 上限，以及 Job journal 对 not published、published
 but durability unconfirmed 与 confirmed committed 的显式区分。Published barrier failure 会
-保留 visible truth 并进入单调 control-plane fail-stop，而不尝试回滚。该 profile 只在 Darwin
-与 Linux 默认启用；unsupported system 不存在 Job/worker target inventory。该切片不能证明
+保留 visible truth 并进入单调 control-plane fail-stop，而不尝试回滚。该 profile 默认关闭，
+且只能在 Darwin 与 Linux 显式启用；disabled profile 与 unsupported system 都不存在
+Job/worker target inventory。该切片不能证明
 multi-tenant authorization、独立部署的 WorkerManager、authenticated network transport、
 standalone artifact data plane、syscall/device isolation 或 untrusted-plugin isolation。当前行为由
 [单租户 Job 纵向路径](../../kernel-architecture/zh/Single-Tenant-Job-Vertical.zh.md)定义。

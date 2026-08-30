@@ -1,0 +1,160 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "post-split-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "USE_ASAN": "OFF",
+        "USE_TSAN": "OFF",
+        "PHOTOSPIDER_BUILD_FUZZERS": "OFF",
+        "PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER": "OFF",
+        "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB": "OFF"
+      }
+    },
+    {
+      "name": "kernel-dev",
+      "displayName": "Dependency-neutral kernel development",
+      "description": "Build the embedded kernel and focused dependency-neutral tests without optional providers, CLI, or Job products.",
+      "inherits": "post-split-base",
+      "binaryDir": "${sourceDir}/build/kernel-dev",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
+        "PHOTOSPIDER_ENABLE_YAML": "OFF",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
+        "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF"
+      }
+    },
+    {
+      "name": "op-dev",
+      "displayName": "Operation SDK development",
+      "description": "Build the dependency-neutral operation runtime and installed pure-C SDK surface without unrelated products.",
+      "inherits": "post-split-base",
+      "binaryDir": "${sourceDir}/build/op-dev",
+      "cacheVariables": {
+        "BUILD_TESTING": "OFF",
+        "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
+        "PHOTOSPIDER_ENABLE_YAML": "OFF",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "OFF",
+        "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF"
+      }
+    },
+    {
+      "name": "legacy-full",
+      "displayName": "Historical complete development profile",
+      "description": "Retain the pre-K0 OpenCV, YAML, CLI, provider, plugin, Job, and complete test configuration explicitly on supported POSIX hosts.",
+      "inherits": "post-split-base",
+      "binaryDir": "${sourceDir}/build/legacy-full",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      },
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "PHOTOSPIDER_ENABLE_OPENCV": "ON",
+        "PHOTOSPIDER_ENABLE_YAML": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
+        "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
+        "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB": "ON"
+      }
+    },
+    {
+      "name": "legacy-full-portable",
+      "displayName": "Portable complete development profile",
+      "description": "Retain every portable historical product and test while leaving the Darwin/Linux-only Job vertical disabled.",
+      "inherits": "post-split-base",
+      "binaryDir": "${sourceDir}/build/legacy-full-portable",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "PHOTOSPIDER_ENABLE_OPENCV": "ON",
+        "PHOTOSPIDER_ENABLE_YAML": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
+        "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
+        "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "kernel-dev",
+      "displayName": "Build dependency-neutral kernel and tests",
+      "configurePreset": "kernel-dev"
+    },
+    {
+      "name": "op-dev",
+      "displayName": "Build operation runtime",
+      "configurePreset": "op-dev",
+      "targets": [
+        "photospider_operation_runtime"
+      ]
+    },
+    {
+      "name": "legacy-full",
+      "displayName": "Build complete historical profile",
+      "configurePreset": "legacy-full",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      }
+    },
+    {
+      "name": "legacy-full-portable",
+      "displayName": "Build portable complete profile",
+      "configurePreset": "legacy-full-portable"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "kernel-dev",
+      "displayName": "Test dependency-neutral kernel products",
+      "configurePreset": "kernel-dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "legacy-full",
+      "displayName": "Test complete historical profile",
+      "configurePreset": "legacy-full",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "legacy-full-portable",
+      "displayName": "Test portable complete profile",
+      "configurePreset": "legacy-full-portable",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
