@@ -190,6 +190,7 @@ def main() -> int:
     parser.add_argument("--build", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--cmake-executable", default="cmake")
+    parser.add_argument("--build-targets", nargs="+", required=True)
     parser.add_argument("--config", default="")
     args = parser.parse_args()
 
@@ -207,9 +208,7 @@ def main() -> int:
             "--build",
             str(build),
             "--target",
-            "photospider",
-            "photospider_operation_runtime",
-            "photospider_operation_opencv",
+            *args.build_targets,
         ]
         if args.config:
             build_product.extend(["--config", args.config])

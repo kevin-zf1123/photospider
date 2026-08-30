@@ -102,8 +102,9 @@ or estimator mints resource or gate ownership. `test_compute_run`,
 the complete direct-consumer set of this internal archive.
 
 `StaticProductConsumerSmoke` validates the kernel-only installed package.
-It installs the already configured product into a non-system temporary
-prefix, parses the generated installable-header allowlist, and requires the
+It builds the configured installable binary target closure, including any
+enabled optional provider module, and installs it into a non-system temporary
+prefix. It parses the generated installable-header allowlist and requires the
 installed include tree to match it exactly. It also inspects every installed
 Photospider package file and rejects source-repository or private `src/lib`
 paths.

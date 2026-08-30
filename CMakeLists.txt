@@ -3122,6 +3122,17 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
+    set(PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS
+        photospider
+        photospider_operation_runtime)
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        list(APPEND PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS
+            photospider_operation_opencv)
+    endif()
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        list(APPEND PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS
+            photospider_openexr_deep_provider)
+    endif()
     add_test(NAME StaticProductConsumerSmoke
         COMMAND ${Python3_EXECUTABLE} -B
             "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"
@@ -3129,6 +3140,8 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             --build "${CMAKE_BINARY_DIR}"
             --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
             --cmake-executable "${CMAKE_COMMAND}"
+            --build-targets
+                ${PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS}
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(StaticProductConsumerSmoke PROPERTIES

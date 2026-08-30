@@ -78,10 +78,11 @@ state 或 installed surface，也不授予 authority。Production operation gate
 `test_kernel_contracts` 与 `test_policy_execution` 构成该内部 archive 的完整 direct-consumer
 集合。
 
-`StaticProductConsumerSmoke` 验证 kernel-only installed package。它把已经配置好的 product
-安装到非系统临时 prefix，解析 generated installable-header allowlist，并要求 installed include
-tree 与之完全一致。它还检查每个已安装 Photospider package file，拒绝源码仓路径或 private
-`src/lib` 路径。
+`StaticProductConsumerSmoke` 验证 kernel-only installed package。它构建配置所启用的完整
+installable binary target closure（包括任何已启用的 optional provider module），再安装到非系统
+临时 prefix。它解析 generated installable-header allowlist，并要求 installed include tree 与之
+完全一致。它还检查每个已安装 Photospider package file，拒绝源码仓路径或 private `src/lib`
+路径。
 
 随后，smoke 创建一个 external C++17 consumer：include 每个 installed public header，请求
 required `embedded` 与 `operation_opencv` component，只链接 exported target，构造 embedded
