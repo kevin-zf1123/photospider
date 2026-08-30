@@ -2,14 +2,17 @@
 
 Photospider 有意只保留两个 GitHub Actions workflow：
 
-- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次由 ccache 加速的 producer 构建、六个独立 build-smoke runner 和三个并行 CTest label 分片。
+- `.github/workflows/ci.yml` 处理 PR 与日常维护 push，包含一次 preset healthcheck、一次由
+  ccache 加速的 legacy-full producer 构建、六个独立 build-smoke runner 和三个并行 CTest label 分片。
 - `.github/workflows/build-ci-image.yml` 在 `main` 的 `Dockerfile.ci` 发生变更或维护者手工触发时发布 Linux CI 镜像。
 
 仓库不再设置单独的 pull-request-target、sanitizer、scheduler-log、routing、evidence、provenance 或 aggregator workflow。本仓库按个人开发项目维护，因此 CI 围绕真正有用的构建与测试信号安排，而不是复刻 enterprise 审批或自授权证明机制。
 
 ## 日常 CI 流程
 
-`.github/workflows/ci.yml` 在向 `main` 和 `CI/**` push 时运行。每个 job 都使用 `ghcr.io/<owner>/<repo>/photospider-ci:latest`、递归 checkout submodule，并且只拥有仓库内容与 package 的读取权限。Job 形成一条带并行测试叶子的依赖链：
+`.github/workflows/ci.yml` 在 PR 及向 `main`/`CI/**` push 时运行。每个 job 都使用
+`ghcr.io/<owner>/<repo>/photospider-ci:latest`、递归 checkout submodule，并且只拥有仓库内容与
+package 的读取权限。Job 形成一条带并行测试叶子的依赖链：
 
 ```text
 healthcheck -> build -> build-smoke（6 个独立 matrix job）
@@ -25,12 +28,17 @@ healthcheck -> build -> build-smoke（6 个独立 matrix job）
 这只是用于跨 checkout 所有权边界保证容器内 Git 可用的设置，不是授权、
 protected-path 或 provenance 证明；它绝不使用通配符。
 
-随后 Healthcheck 有意只执行四项低成本检查：
+随后 Healthcheck 有意只执行以下低成本检查：
 
-1. 对 push 的 commit 运行 `git diff --check`。
-2. 显式检查 `ccache` executable 与版本，使未发布或陈旧的 CI 镜像直接失败，而不是静默绕过 launcher 编译。
-3. 把 C 与 C++ compiler launcher 设为 `ccache`，启用测试并关闭 ASan、TSan 与 fuzzer，执行一次 CMake configure。
-4. 构建 `public_header_self_containment`。
+1. 对 exact checked-out commit 运行 `git diff --check`。
+2. 显式检查 `ccache` executable 与版本，使未发布或陈旧的 CI 镜像在 producer 前失败。
+3. Configure `kernel-dev` 并构建 operation runtime target。
+4. Configure 并构建 `op-dev`。
+5. Configure `legacy-full` 并构建 `public_header_self_containment`。
+
+这些 path 由 `CMakePresets.json` 持续维护。`kernel-dev`/`op-dev` 默认关闭 Job、CLI、optional
+providers/plugins、OpenEXR 和 fuzzers；`legacy-full` 显式开启历史 Job/product closure。完整表格见
+[拆仓后开发契约](../../development/zh/Post-Split-Development-Contract.zh.md)。
 
 它不会对变更路径分类、推断 docs-only 运行、比较 protected path、检查其他 ref、构建完整产品，也不会决定后续 job 是否存在。
 
@@ -55,6 +63,7 @@ working directory 重写路径；deeper nested build 的 working directory 不�
 绝不会被发布或视为 release/debug 交付物。Runtime 行为仍由测试验证，任何 cache miss 都会正常编译。
 
 恢复后，producer 会清零 ccache statistics，通过显式 C 与 C++ ccache CMake launcher 进行 configure，
+并显式把保留的 single-tenant Job 设为 `ON`，
 只调用一次 Ninja，再打印得到的 hit/miss statistics。它把 `.ccache` 保存到新的 run-and-attempt key，
 供后续 workflow 使用；随后把 hidden `.ccache` directory 封装进不压缩的 tar，并将这个单一文件上传一次，
 作为保留一天的 `ccache-handoff` artifact。Tar 会跨 artifact ZIP 层保留 cache directory 内部结构与
@@ -86,7 +95,8 @@ Matrix 使用 `fail-fast: false`，因此 producer 成功后，每个 entry 都�
 statistics，并保持恢复的 cache 为 read-only，因此一个 consumer 不会改变其他 consumer 使用的
 producer snapshot。Artifact 交付本身是必需的，但单次 compiler-cache lookup 可以 miss 并正常编译。
 
-随后六个 runner 都以 producer 的 build type、测试选项和显式 C/C++ ccache launcher，执行同一条外层
+随后六个 runner 都以 producer 的 build type、测试选项和显式 C/C++ ccache launcher，执行同一条显式
+Job-enabled legacy 外层
 `cmake --fresh -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja`。它们会查询
 CTest JSON object model，并在选择自身 entry 前要求精确的六项 `build-smoke` inventory。测试本身可以
 构建外层 tree，也可以创建更深层 build/install tree；编译 key 匹配时，两者都会使用 read-only
@@ -106,6 +116,8 @@ label 错误时，不会把空选择误判为成功。
 Daemon package、IPC protocol、installed layout/RPATH 与 interoperability test 在外部
 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon) 仓库运行。这个 kernel
 workflow 不配置 daemon ownership，也不重复这些 test。
+Daemon downstream gate 只在 installed API/package breaking change 或显式 release check 时请求，
+不阻塞每个 kernel PR。
 
 ### 轻量 CTest runtime
 
@@ -160,29 +172,29 @@ diagnostic，绝不是正确性门禁。
 
 ## 本地检查
 
-本地验证应使用 native build；不要仅为复刻 GitHub Actions 而在 macOS 上模拟 Linux 镜像：
+本地验证应使用 native build；不要仅为复刻 GitHub Actions 而在 macOS 上模拟 Linux 镜像。
+在 final legacy-full pass 前 configure 三个持续维护的 presets：
 
 ```bash
-cmake -S . -B build/ci -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=ON \
-  -DUSE_ASAN=OFF \
-  -DUSE_TSAN=OFF \
-  -DPHOTOSPIDER_BUILD_FUZZERS=OFF
-cmake --build build/ci --parallel 2
+cmake --preset kernel-dev
+cmake --build --preset kernel-dev --parallel 2
+cmake --preset op-dev
+cmake --build --preset op-dev --parallel 2
+cmake --preset legacy-full
+cmake --build --preset legacy-full --parallel 2
 bash ci/scripts/package_ctest_runtime.sh \
-  build/ci CI-results/ctest-runtime.tar.gz
+  build/legacy-full CI-results/ctest-runtime.tar.gz
 tar -tzf CI-results/ctest-runtime.tar.gz
-ctest --test-dir build/ci --output-on-failure --parallel 2
+ctest --preset legacy-full --output-on-failure --parallel 2
 ```
 
 聚焦本地运行使用与 CI 相同的 primary label：
 
 ```bash
-ctest --test-dir build/ci --output-on-failure -L '^unit$'
-ctest --test-dir build/ci --output-on-failure -L '^integration$'
-ctest --test-dir build/ci --output-on-failure -L '^verification$'
-ctest --test-dir build/ci --output-on-failure -L '^build-smoke$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^unit$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^integration$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^verification$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^build-smoke$'
 ```
 
 持续维护的 `graph_cli_script_test.sh`、`propagation_script_test.sh`、`plugin_load_test.sh`、`execution_repeat_test.sh` 和 `sanitizer_test.sh` 仍可用于显式本地 product-boundary 或 sanitizer 检查。它们不是额外的 GitHub workflow，也不属于日常 push 路径。

@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'CI/**'
+  pull_request:
 
 permissions:
   contents: read
@@ -49,22 +50,19 @@ jobs:
           command -v ccache
           ccache --version
 
-      - name: Configure healthcheck tree
-        run: >-
-          cmake -S . -B build/healthcheck -G Ninja
-          -DCMAKE_BUILD_TYPE=${CI_BUILD_TYPE}
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DBUILD_TESTING=ON
-          -DUSE_ASAN=OFF
-          -DUSE_TSAN=OFF
-          -DPHOTOSPIDER_BUILD_FUZZERS=OFF
-
-      - name: Build public header self-containment
-        run: >-
-          cmake --build build/healthcheck
-          --target public_header_self_containment
-          --parallel ${CI_PARALLEL_LEVEL}
+      - name: Configure and build post-split CMake presets
+        run: |
+          cmake --preset kernel-dev
+          cmake --build --preset kernel-dev \
+            --target photospider_operation_runtime \
+            --parallel "${CI_PARALLEL_LEVEL}"
+          cmake --preset op-dev
+          cmake --build --preset op-dev \
+            --parallel "${CI_PARALLEL_LEVEL}"
+          cmake --preset legacy-full
+          cmake --build --preset legacy-full \
+            --target public_header_self_containment \
+            --parallel "${CI_PARALLEL_LEVEL}"
 
   build:
     needs: healthcheck
@@ -121,6 +119,7 @@ jobs:
           -DUSE_ASAN=OFF
           -DUSE_TSAN=OFF
           -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+          -DPHOTOSPIDER_BUILD_SINGLE_TENANT_JOB=ON
 
       - name: Build once
         run: >-
@@ -240,6 +239,7 @@ jobs:
           -DUSE_ASAN=OFF
           -DUSE_TSAN=OFF
           -DPHOTOSPIDER_BUILD_FUZZERS=OFF
+          -DPHOTOSPIDER_BUILD_SINGLE_TENANT_JOB=ON
 
       - name: Verify complete build-smoke inventory
         run: |

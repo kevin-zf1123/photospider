@@ -2,9 +2,10 @@
 
 Photospider intentionally keeps two GitHub Actions workflows:
 
-- `.github/workflows/ci.yml` handles ordinary pushes with one healthcheck,
-  one ccache-backed producer build, six independent build-smoke runners, and
-  three parallel CTest label shards.
+- `.github/workflows/ci.yml` handles pull requests and ordinary maintained
+  pushes with one preset healthcheck, one ccache-backed legacy-full producer
+  build, six independent build-smoke runners, and three parallel CTest label
+  shards.
 - `.github/workflows/build-ci-image.yml` publishes the Linux CI image when
   `Dockerfile.ci` changes on `main`, or when a maintainer dispatches it
   manually.
@@ -17,7 +18,8 @@ machinery.
 
 ## Daily CI flow
 
-`.github/workflows/ci.yml` runs on pushes to `main` and `CI/**`. Every job uses
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main` and
+`CI/**`. Every job uses
 `ghcr.io/<owner>/<repo>/photospider-ci:latest`, checks out submodules
 recursively, and receives only read access to repository contents and packages.
 Jobs form one dependency chain with parallel test leaves:
@@ -37,14 +39,20 @@ the checked-out `HEAD` is a commit. This is a container Git availability
 setting for the checkout's ownership boundary, not an authorization,
 protected-path, or provenance proof; it never uses a wildcard.
 
-The healthcheck then deliberately performs only four inexpensive checks:
+The healthcheck deliberately performs only these inexpensive checks:
 
-1. `git diff --check` for the pushed commit.
+1. `git diff --check` for the exact checked-out commit.
 2. An explicit `ccache` executable and version check, so an unpublished or
-   stale CI image fails instead of silently compiling without the launcher.
-3. A CMake configure with the C and C++ compiler launchers set to `ccache`,
-   testing enabled, and ASan, TSan, and fuzzers disabled.
-4. A build of `public_header_self_containment`.
+   stale CI image fails before the producer.
+3. Configure `kernel-dev` and build its operation runtime target.
+4. Configure and build `op-dev`.
+5. Configure `legacy-full` and build `public_header_self_containment`.
+
+These paths are maintained in `CMakePresets.json`. `kernel-dev` and `op-dev`
+default-disable Job, CLI, optional providers/plugins, OpenEXR, and fuzzers;
+`legacy-full` explicitly enables the historical Job/product closure. The
+[post-split development contract](../development/Post-Split-Development-Contract.md)
+owns the complete preset table.
 
 It does not classify changed paths, infer docs-only runs, compare protected
 paths, inspect another ref, build the full product, or decide whether later
@@ -79,7 +87,8 @@ published or treated as release/debug deliverables. Runtime behavior remains
 under test, and every cache miss compiles normally.
 
 After restore, the producer zeroes ccache statistics, configures C and C++
-through explicit `ccache` CMake launchers, invokes Ninja exactly once, and
+through explicit `ccache` CMake launchers with the retained single-tenant Job
+explicitly `ON`, invokes Ninja exactly once, and
 prints the resulting hit/miss statistics. It saves `.ccache` under the new
 run-and-attempt key for the next workflow, then creates an uncompressed tar
 containing the hidden `.ccache` directory and uploads that single file once as
@@ -121,7 +130,7 @@ the restored cache read-only, so one consumer cannot alter the producer
 snapshot used by another. Artifact delivery is required, but an individual
 compiler-cache lookup may miss and compile normally.
 
-All six runners then execute the same outer
+All six runners then execute the same Job-enabled legacy outer
 `cmake --fresh -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja`
 configuration with the producer's build type, test options, and explicit C and
 C++ ccache launchers. They query CTest's JSON object model and require the exact
@@ -150,7 +159,9 @@ Daemon package, IPC protocol, installed layout/RPATH, and interoperability
 tests run in the external
 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
 repository. This kernel workflow neither configures daemon ownership nor
-duplicates those tests.
+duplicates those tests. A daemon downstream gate is requested only for an
+installed API/package break or an explicit release check, not for every kernel
+pull request.
 
 ### Lightweight CTest runtime
 
@@ -252,29 +263,29 @@ runners rather than a repository-owned self-hosted runner.
 ## Local checks
 
 Use native builds for local validation; do not emulate the Linux image on
-macOS merely to mirror GitHub Actions:
+macOS merely to mirror GitHub Actions. Configure the three maintained presets
+before the final legacy-full pass:
 
 ```bash
-cmake -S . -B build/ci -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=ON \
-  -DUSE_ASAN=OFF \
-  -DUSE_TSAN=OFF \
-  -DPHOTOSPIDER_BUILD_FUZZERS=OFF
-cmake --build build/ci --parallel 2
+cmake --preset kernel-dev
+cmake --build --preset kernel-dev --parallel 2
+cmake --preset op-dev
+cmake --build --preset op-dev --parallel 2
+cmake --preset legacy-full
+cmake --build --preset legacy-full --parallel 2
 bash ci/scripts/package_ctest_runtime.sh \
-  build/ci CI-results/ctest-runtime.tar.gz
+  build/legacy-full CI-results/ctest-runtime.tar.gz
 tar -tzf CI-results/ctest-runtime.tar.gz
-ctest --test-dir build/ci --output-on-failure --parallel 2
+ctest --preset legacy-full --output-on-failure --parallel 2
 ```
 
 Focused local runs use the same primary labels as CI:
 
 ```bash
-ctest --test-dir build/ci --output-on-failure -L '^unit$'
-ctest --test-dir build/ci --output-on-failure -L '^integration$'
-ctest --test-dir build/ci --output-on-failure -L '^verification$'
-ctest --test-dir build/ci --output-on-failure -L '^build-smoke$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^unit$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^integration$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^verification$'
+ctest --test-dir build/legacy-full --output-on-failure -L '^build-smoke$'
 ```
 
 The maintained `graph_cli_script_test.sh`, `propagation_script_test.sh`,

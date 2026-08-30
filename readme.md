@@ -6,9 +6,16 @@ Photospider is a C++17 image-processing graph runtime. It loads YAML graphs,
 executes node dependencies, caches intermediate results, and exposes an
 embedded Host API plus an interactive CLI, REPL, and TUI.
 
+After the repository split, this is the primary development repository for the
+embedded kernel, operation runtime, installed package, and future typed
+compiler. The typed compiler remains roadmap work; the current source still
+uses `GraphDefinition`/YAML ingestion and existing plan diagnostics.
+
 The foreground local daemon and typed IPC v2 client are owned by the separate
 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
 repository. That product consumes an installed Photospider kernel package.
+The daemon repository is in IPC v2 compatible-maintenance and does not expand
+protocol v3 or own internal compiler IR.
 
 `graph_cli` always uses the embedded Host and does not connect to the daemon.
 See the [architecture overview](docs/kernel-architecture/Overview.md).
@@ -21,6 +28,8 @@ The default profile needs CMake 3.16+, a C++17 compiler, OpenCV (`core`,
 `imgproc`, `imgcodecs`, and `videoio`), yaml-cpp, Threads, FTXUI, OpenSSL Crypto,
 and OpenSSL Crypto. The maintained test profile also uses nlohmann/json; the
 commands below disable test targets only for a smaller user build.
+The retained single-tenant Job product also defaults to `OFF`; enable it
+explicitly only when building that product and its maintained tests.
 
 On macOS:
 
@@ -67,6 +76,27 @@ The OpenCV provider, OpenCV operation plugins, public OpenCV adapter, and
 `graph_cli` default to `OFF` when their required capability is disabled.
 Explicitly enabling one of those targets without its capability fails during
 configuration with a targeted diagnostic.
+
+### Development presets
+
+The repository maintains three post-split CMake presets:
+
+```bash
+cmake --preset kernel-dev
+cmake --build --preset kernel-dev -j
+
+cmake --preset op-dev
+cmake --build --preset op-dev -j
+
+cmake --preset legacy-full
+cmake --build --preset legacy-full -j
+```
+
+`kernel-dev` and `op-dev` exclude Job, CLI, optional providers/plugins, and
+other unnecessary products. `legacy-full` explicitly enables the historical
+Job/CLI/provider/plugin closure. The
+[post-split development contract](docs/development/Post-Split-Development-Contract.md)
+defines the exact option and CI boundary.
 
 ### CLI and REPL
 
@@ -115,6 +145,8 @@ cmake --build photospider-daemon/build -j
 
 `graph_cli` remains an embedded frontend and does not auto-connect. The daemon
 repository owns its protocol document, package, CI, lifecycle, and tests.
+It currently requires exact Photospider 0.1.0 and maintains a separate
+same-minor daemon package plus exact IPC protocol v2.
 
 ### Install and integrate
 
@@ -129,7 +161,8 @@ CMake installs the kernel, public headers, enabled SDK components, and
 capability metadata. It does not install `graph_cli`; run the CLI from
 `build/bin/graph_cli`. An OpenCV-disabled install does not install or advertise
 `operation_opencv`; its package config discovers only the dependencies recorded
-as enabled by the producer.
+as enabled by the producer. The generated Photospider 0.x package version file
+uses same-minor compatibility rather than same-major compatibility.
 
 | Use case | CMake component | Imported target |
 | --- | --- | --- |
@@ -162,6 +195,8 @@ contracts and required entry points.
 | Local daemon and typed IPC | [External daemon repository](https://github.com/kevin-zf1123/photospider-daemon) |
 | Operation and policy extensions | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
 | Build and validation guidance | [Testing and validation](docs/development/Testing-and-Validation.md) |
+| Post-split versions, presets, and CI | [Post-Split Development Contract](docs/development/Post-Split-Development-Contract.md) |
+| Typed-compiler execution order | [Post-Split Roadmap v3](docs/roadmap/Next-Stage-Execution-Plan.md) |
 
 English documentation is authoritative. Matching files under the relevant
 `zh/` directories provide maintained, reader-oriented Chinese translations.
