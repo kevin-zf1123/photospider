@@ -323,9 +323,10 @@ service-transition failure 都会 fail-stop。直接拥有内部 Kernel 的
 调用方同样必须在析构前停止并发调用。这些 joined boundary 也是每个 live 或 staged
 `GraphModel` diagnostic store 的 lifetime fence；store 本身不拥有 thread 或 detached lifetime。
 
-`photospiderd` 围绕该 embedded Host contract 拥有 daemon session identity、job admission、Host
-serialization 与 shutdown drainage。其准确 mapping、lease、socket 与 shutdown 规则定义在
-`../../codebase-structure/zh/IPC-Protocol-v2.zh.md`；它们不属于 graph-kernel ownership。
+外部 daemon 仓库围绕这个 installed embedded Host contract 拥有 session identity、job admission、
+Host serialization 与 shutdown drainage。其 mapping、lease、socket 与 shutdown 规则由
+[IPC Protocol v2 中文版](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/zh/IPC-Protocol-v2.zh.md)
+定义；它们不属于 graph-kernel ownership。
 
 ## 当前错误表面
 
@@ -450,8 +451,6 @@ replacement 继续保持当前行为。Public cancellation 与 lifecycle telemet
 - `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/unit/test_graph_document_adapter.cpp`
-- `tests/integration/test_ipc_daemon.cpp`
-- `tests/unit/test_ipc_protocol.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`

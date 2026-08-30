@@ -414,10 +414,11 @@ have the same duty to stop concurrent callers before destruction. The joined
 boundaries are also the lifetime fence for each live or staged `GraphModel`
 diagnostic store; the store owns no thread or detached lifetime.
 
-`photospiderd` owns daemon session identity, job admission, Host serialization,
-and shutdown drainage around this embedded Host contract. Its exact mapping,
-lease, socket, and shutdown rules are defined in
-`../codebase-structure/IPC-Protocol-v2.md`; they are not graph-kernel ownership.
+The external daemon repository owns session identity, job admission, Host
+serialization, and shutdown drainage around this installed embedded Host
+contract. Its mapping, lease, socket, and shutdown rules are defined by
+[IPC Protocol v2](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/IPC-Protocol-v2.md);
+they are not graph-kernel ownership.
 
 ## Current Error Surface
 
@@ -557,8 +558,6 @@ lifecycle telemetry are intentionally not exposed through Host, CLI, or IPC.
 - `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/unit/test_graph_document_adapter.cpp`
-- `tests/integration/test_ipc_daemon.cpp`
-- `tests/unit/test_ipc_protocol.cpp`
 - `tests/integration/test_disk_cache_diagnostic_concurrency.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_compute_service_split.cpp`

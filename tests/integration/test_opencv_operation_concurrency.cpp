@@ -27,7 +27,7 @@
 #include "photospider/data/image_view.hpp"
 #include "photospider/host/host.hpp"
 #include "providers/opencv/opencv_operation_provider_test_access.hpp"
-#include "support/ipc_host_spy.hpp"
+#include "support/host_spy.hpp"
 
 namespace ps {
 namespace {
@@ -811,14 +811,13 @@ TEST(OpenCvOperationConcurrency,
   const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
   write_benchmark_probe_graph(yaml_path);
 
-  testing::IpcHostSpy host;
+  testing::HostSpy host;
   BenchmarkService service(host);
   const BenchmarkSessionConfig config =
       make_probe_benchmark_config(yaml_path, 0);
 
   const BenchmarkResult result = service.Run(temp.root().string(), config, 1);
-  const std::vector<testing::IpcHostInvocation> invocations =
-      host.invocations();
+  const std::vector<testing::HostInvocation> invocations = host.invocations();
   const auto configured = std::find_if(
       invocations.begin(), invocations.end(), [](const auto& call) {
         return call.method == "execution.configure_defaults";
@@ -869,14 +868,13 @@ TEST(OpenCvOperationConcurrency,
   write_benchmark_probe_graph(yaml_path);
   write_mixed_benchmark_config(temp.root() / "benchmark_config.yaml");
 
-  testing::IpcHostSpy host;
+  testing::HostSpy host;
   BenchmarkService service(host);
   ::testing::internal::CaptureStderr();
   const std::vector<BenchmarkResult> results =
       service.RunAll(temp.root().string());
   const std::string diagnostics = ::testing::internal::GetCapturedStderr();
-  const std::vector<testing::IpcHostInvocation> invocations =
-      host.invocations();
+  const std::vector<testing::HostInvocation> invocations = host.invocations();
 
   ASSERT_EQ(results.size(), 3U);
   EXPECT_EQ(results[0].benchmark_name, "one_thread");
@@ -923,7 +921,7 @@ TEST(OpenCvOperationConcurrency,
   const std::filesystem::path yaml_path = temp.root() / "probe.yaml";
   write_benchmark_probe_graph(yaml_path);
 
-  testing::IpcHostSpy host;
+  testing::HostSpy host;
   OperationStatus rejected;
   rejected.ok = false;
   rejected.message = "benchmark process setup rejected";
@@ -1043,7 +1041,7 @@ TEST(OpenCvOperationConcurrency,
  * @throws Nothing when the embedded Host rejects the request before callback
  *         execution and leaves the loaded Graph closable.
  * @note Absence, not zero, represents an uncapped Run. This keeps public Host
- *       and IPC validation aligned with `ComputeRunQos`.
+ *       and Host validation aligned with `ComputeRunQos`.
  */
 TEST(OpenCvOperationConcurrency,
      HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter) {

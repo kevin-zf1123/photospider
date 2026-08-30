@@ -442,10 +442,10 @@ execution list|get|set|help
 `execution_worker_count`。已移除的 `scheduler` 命令和 `scheduler_*` 键会被
 直接拒绝，不进行翻译。
 
-IPC 协议版本 2 用八个 `policy.*` 和六个 `execution.*` 方法取代旧方法族，其中
-包括非破坏性的 `execution.trace`。守护进程恰好通告 60 个排序且唯一的方法。
-协议版本 1 和旧方法名会在访问 Host 之前被拒绝。精确 schema 与边界维护在
-[`IPC-Protocol-v2.zh.md`](../../codebase-structure/zh/IPC-Protocol-v2.zh.md) 中。
+外部 daemon 的 IPC protocol version 2 在精确排序的 60-method inventory 中暴露八个
+`policy.*` 和六个 `execution.*` 方法，其中包括非破坏性的 `execution.trace`。Protocol
+version 1 和旧 method name 会在访问 Host 之前被拒绝。精确 schema 与边界维护在
+[IPC Protocol v2 中文版](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/zh/IPC-Protocol-v2.zh.md) 中。
 
 ## 可观察性与生命周期证明
 
@@ -822,10 +822,8 @@ pool header 共享完全相同的嵌套类型，但不会形成 forwarding contr
 - `src/lib/runtime/graph_runtime.hpp` 和 `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `src/lib/graph/graph_cache_service.*`
-- `src/lib/ipc/output_store.*`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
-- `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
@@ -847,7 +845,6 @@ pool header 共享完全相同的嵌套类型，但不会形成 forwarding contr
 - `tests/verification/b1_immutable_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
-- `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 

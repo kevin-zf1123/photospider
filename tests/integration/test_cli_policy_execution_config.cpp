@@ -15,7 +15,7 @@
 #include "graph_cli/cli_config.hpp"
 #include "graph_cli/command/commands.hpp"
 #include "photospider/core/result_types.hpp"
-#include "support/ipc_host_spy.hpp"
+#include "support/host_spy.hpp"
 
 namespace {
 
@@ -270,7 +270,7 @@ TEST(CliPolicyExecutionConfigParsing,
  * @throws Nothing when validation raises `std::invalid_argument` first.
  */
 TEST(CliPolicyExecutionConfigApply, RejectsInvalidValuesBeforeHostAccess) {
-  ps::testing::IpcHostSpy host;
+  ps::testing::HostSpy host;
   CliConfig config;
 
   for (const int worker_count :
@@ -288,7 +288,7 @@ TEST(CliPolicyExecutionConfigApply, RejectsInvalidValuesBeforeHostAccess) {
  * @throws Nothing when each accepted snapshot reaches the Host exactly once.
  */
 TEST(CliPolicyExecutionConfigApply, PreservesAcceptedValuesAtHostBoundary) {
-  ps::testing::IpcHostSpy host;
+  ps::testing::HostSpy host;
   CliConfig config;
   config.policy_interactive_type = "interactive";
   config.policy_throughput_type = "throughput";
@@ -320,7 +320,7 @@ TEST(CliPolicyExecutionConfigApply, PreservesAcceptedValuesAtHostBoundary) {
  * @throws Nothing when policy succeeds and execution raises exactly once.
  */
 TEST(CliPolicyExecutionConfigApply, PropagatesHostRejection) {
-  ps::testing::IpcHostSpy host;
+  ps::testing::HostSpy host;
   host.set_status(
       "execution.configure_defaults",
       ps::OperationStatus{
@@ -345,7 +345,7 @@ TEST(CliPolicyExecutionConfigApply, HostRejectionStopsRunGraphCliStartup) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "startup-cache");
 
-  ps::testing::IpcHostSpy host;
+  ps::testing::HostSpy host;
   host.set_status(
       "execution.configure_defaults",
       ps::OperationStatus{
@@ -379,7 +379,7 @@ TEST(CliOptionActions, FailedReadReturnsTwoWithoutEnteringRepl) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "failed-read-cache");
 
-  ps::testing::IpcHostSpy host;
+  ps::testing::HostSpy host;
   host.set_status(
       "graph.load",
       ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
@@ -420,7 +420,7 @@ TEST(CliOptionActions, LoadedSessionFeedsLaterOutputWhenSwitchPolicyIsOff) {
   write_policy_execution_config(config_path, 1, "option-cache",
                                 /*switch_after_load=*/false);
 
-  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-option-session"});
+  ps::testing::HostSpy host(ps::GraphSessionId{"loaded-option-session"});
   std::array<std::string, 7> arguments = {
       "graph_cli",  "--config", config_path.string(), "-r",
       "input.yaml", "-o",       "output.yaml"};
@@ -454,7 +454,7 @@ TEST(CliOptionActions, FailedOutputAfterSuccessfulReadReturnsTwo) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "failed-output-cache");
 
-  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-failure"});
+  ps::testing::HostSpy host(ps::GraphSessionId{"loaded-before-failure"});
   host.set_status(
       "graph.save",
       ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
@@ -501,7 +501,7 @@ TEST(CliOptionActions, FailedPrintAfterSuccessfulReadReturnsTwo) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "failed-print-cache");
 
-  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-print"});
+  ps::testing::HostSpy host(ps::GraphSessionId{"loaded-before-print"});
   host.set_status(
       "inspect.dependency_tree",
       ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
@@ -542,7 +542,7 @@ TEST(CliOptionActions, ShortTraversalNeedsNoFollowingArgument) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "traversal-cache");
 
-  ps::testing::IpcHostSpy host(ps::GraphSessionId{"traversal-session"});
+  ps::testing::HostSpy host(ps::GraphSessionId{"traversal-session"});
   std::array<std::string, 6> arguments = {
       "graph_cli", "--config", config_path.string(), "-r", "input.yaml", "-t"};
   std::vector<char*> argv;
@@ -576,7 +576,7 @@ TEST(CliOptionActions, FailedTraversalAfterSuccessfulReadReturnsTwo) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "failed-traversal-cache");
 
-  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-traversal"});
+  ps::testing::HostSpy host(ps::GraphSessionId{"loaded-before-traversal"});
   host.set_status(
       "inspect.traversal_orders",
       ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
@@ -622,7 +622,7 @@ TEST(CliOptionActions, FailedCacheClearAfterSuccessfulReadReturnsTwo) {
   const auto config_path = directory.root() / "config.yaml";
   write_policy_execution_config(config_path, 1, "failed-cache-clear-root");
 
-  ps::testing::IpcHostSpy traversal_host(
+  ps::testing::HostSpy traversal_host(
       ps::GraphSessionId{"parser-reset-traversal"});
   std::array<std::string, 6> traversal_arguments = {
       "graph_cli", "--config", config_path.string(), "-r", "input.yaml", "-t"};
@@ -641,7 +641,7 @@ TEST(CliOptionActions, FailedCacheClearAfterSuccessfulReadReturnsTwo) {
   ASSERT_EQ(traversal_exit_code, 0);
   ASSERT_EQ(traversal_host.call_count("inspect.traversal_orders"), 1U);
 
-  ps::testing::IpcHostSpy host(ps::GraphSessionId{"loaded-before-cache-clear"});
+  ps::testing::HostSpy host(ps::GraphSessionId{"loaded-before-cache-clear"});
   host.set_status(
       "cache.clear_all",
       ps::OperationStatus{false, ps::OperationErrorDomain::Graph,
@@ -690,7 +690,7 @@ TEST(CliSessionSwitch, CopyRequiresSuccessfulSourceSave) {
   stale_yaml.close();
   ASSERT_TRUE(stale_yaml);
 
-  ps::testing::IpcHostSpy host;
+  ps::testing::HostSpy host;
   host.set_status(
       "graph.save",
       ps::OperationStatus{false, ps::OperationErrorDomain::Graph,

@@ -39,7 +39,6 @@ A dependency-disabled installed Host build is:
 ```bash
 cmake -S . -B build/minimal \
   -DBUILD_TESTING=OFF \
-  -DPHOTOSPIDER_BUILD_IPC=OFF \
   -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
   -DPHOTOSPIDER_ENABLE_YAML=OFF
 cmake --build build/minimal --target photospider_kernel photospider -j
@@ -58,19 +57,11 @@ The main executable is:
 build/bin/graph_cli
 ```
 
-On macOS/Linux, when `PHOTOSPIDER_BUILD_IPC=ON`, build the local daemon
-separately:
-
-```bash
-cmake --build build --target photospiderd -j
-```
-
 Plugin and runtime outputs:
 
 | Output | Path | Availability |
 | --- | --- | --- |
 | executable | `build/bin/graph_cli` | when `PHOTOSPIDER_BUILD_GRAPH_CLI=ON` |
-| local daemon | `build/bin/photospiderd` | macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON` |
 | backend libraries | `build/lib` | base build |
 | operation plugins | `build/plugins` | when their targets are built |
 | policy plugins | `build/policies` | when their targets are built |
@@ -123,54 +114,23 @@ Process exit statuses are 0 for successful actions or a normal REPL exit, 1
 for an invalid command-line option, 2 for a recoverable configuration,
 startup, action, or REPL failure, and 3 for resource exhaustion.
 
-### Local daemon and typed IPC client
+### External local daemon and typed IPC client
 
-On macOS/Linux, `PHOTOSPIDER_BUILD_IPC` defaults to `ON`. Start the foreground
-daemon on its protected per-user socket:
+Daemon source, public IPC headers, package exports, protocol documentation, and
+tests live in the separate
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+repository. This kernel repository exposes no daemon build option or IPC CMake
+component. The standalone daemon consumes an installed
+`Photospider::photospider` target; its public client separately exposes
+`PhotospiderDaemon::client`.
 
-```bash
-./build/bin/photospiderd
-```
-
-An explicit socket must be absolute and live in a uid-owned protected
-directory:
-
-```bash
-mkdir -m 700 /tmp/photospider-demo
-./build/bin/photospiderd --socket /tmp/photospider-demo/daemon.sock
-```
-
-The daemon creates a persistent mode-`0600` `${socket}.lock`, holds an
-exclusive nonblocking lifecycle lock while inspecting/reclaiming and serving
-the socket, and releases it only after socket cleanup. The lock file remains
-after shutdown so concurrent or later instances always synchronize on one
-stable inode.
-
-The installed C++17 target `Photospider::photospider_ipc_client` exposes the
-move-only `ps::ipc::Client` and complete `create_ipc_host(socket_path)` adapter.
-The Client provides the exact 60 typed version 2 methods for daemon identity,
-graph/inspection, polling compute and protected named-Value artifact archive
-delivery, bounded events/traces, cache, operation plugins, process policy, and
-private execution routes. Graph loads retain the caller's safe Host session name as request
-metadata but return a separate opaque daemon session id; disconnecting the
-client does not close that session.
-
-An IPC-only CMake consumer selects the installed component explicitly:
-
-```cmake
-find_package(Photospider CONFIG REQUIRED COMPONENTS ipc_client)
-target_link_libraries(app PRIVATE Photospider::photospider_ipc_client)
-```
-
-This lookup resolves only Threads. The default component-less lookup and
-`COMPONENTS embedded` discover only the dependencies enabled in the producer:
-OpenCV and yaml-cpp in the default profile, neither in the
-dependency-disabled profile, plus Threads and applicable Apple framework
-dependencies when required by enabled features. Unknown required components,
-or required `ipc_client` against an IPC-disabled install, fail package
-discovery. An OpenCV-disabled install reports optional `operation_opencv` as
-unavailable and rejects it when required; it does not export the adapter target
-or install its header.
+The default component-less lookup and `COMPONENTS embedded` discover only the
+dependencies enabled in the kernel producer: OpenCV and yaml-cpp in the default
+profile, neither in the dependency-disabled profile, plus Threads and
+applicable Apple framework dependencies when required by enabled features.
+Unknown required components fail package discovery. An OpenCV-disabled install
+reports optional `operation_opencv` as unavailable and rejects it when
+required; it does not export the adapter target or install its header.
 
 Extension DSOs use separate installed components:
 
@@ -210,37 +170,10 @@ lifecycle capability. The operation SDK likewise exposes no mutable backend
 owner. The retired C++ operation registration headers, component, symbols,
 aliases, and source-tree extension includes have no forwarding compatibility.
 
-The IPC Host implements all 58 current non-destructor Host virtuals through
-short-lived typed connections. Compute submits once, polls immediately and then
-at a 10/20/40/80/160/320/500-ms cadence without a synchronous total timeout;
-owned async workers are stopped, woken, interrupted, completed as Transport
-`client_stopped` (5), and joined during adapter destruction. Values mode
-performs strict same-user artifact validation while the delivery lease is
-active, creates a temporary read-only archive mapping, verifies and detaches
-the exact bytes, unmaps and closes exactly once, reconstructs fresh local
-Values, and then releases the matching job/lease.
-
-Every accepted compute reports `cancellable:false` and advances only through
-`queued`, `running`, `succeeded`, or `failed`. A terminal failure is a normal
-successful polling response containing an immutable exact Graph- or
-Daemon-domain `OperationStatus`; RPC/admission/lookup failures remain separate.
-Across embedded and IPC calls, the sole status vocabulary distinguishes
-`none`, `transport`, `protocol`, `graph`, and `daemon`, and callers must branch
-on domain/code/name rather than diagnostic text. The
-daemon retains at most 64 active jobs, 256 terminal jobs, 64 named-Value archives,
-one GiB of artifact bytes with a 512-MiB per-artifact ceiling, 8,192 compute
-events per session, and 65,536 execution-trace entries per session. Event
-drains are destructive pages of at most 1,024 entries; trace pages are
-non-destructive pages of at most 4,096 entries, and every frame is capped at
-16 MiB. Issue #73 adds private cooperative cancellation inside the embedded
-Kernel/ComputeService boundary, but it does not add a Host virtual, CLI command,
-or IPC method. User-controlled compute cancellation, `daemon.shutdown`, TCP,
-Windows transport, and `graph_cli --connect` therefore remain unavailable, and
-daemon jobs continue to report `cancellable:false`. The CLI options and REPL
-commands in this manual remain local embedded-Host behavior and do not
-auto-connect to a daemon. See
-`docs/codebase-structure/IPC-Protocol-v2.md` for framing, errors, polling,
-output security, socket selection, and lifecycle details.
+The external daemon retains the frozen IPC v2 contract, while the CLI options
+and REPL commands in this manual remain local embedded-Host behavior and do not
+auto-connect. Consult that repository for framing, polling, output security,
+socket lifecycle, exact method inventory, and compatibility gates.
 
 ## 3. REPL Mode
 
@@ -542,17 +475,9 @@ Build the CLI:
 cmake --build build --target graph_cli -j
 ```
 
-Build and run focused IPC product tests on macOS/Linux:
-
-```bash
-cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
-  test_compute_request_registry test_collection_snapshot_registry \
-  test_output_store test_event_stream_boundaries test_ipc_daemon \
-  public_header_self_containment -j
-ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|ExecutionTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonPolicy|IpcDaemonExecution|IpcObservationFixtureDaemon|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
-```
+Daemon and IPC compatibility tests run in the external daemon repository. The
+kernel package smoke here builds only an installed embedded consumer and the
+maintained SDK/package boundaries.
 
 Run registered CTest tests:
 

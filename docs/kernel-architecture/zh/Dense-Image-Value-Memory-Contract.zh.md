@@ -229,12 +229,12 @@ equal endpoint/storage identity 通过 type-aware 比较读取 integer domain，
 - `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
 - `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
-- `src/lib/ipc/`、`src/lib/server/worker/` 与 `src/lib/server/state/`
+- `src/lib/server/worker/` 与 `src/lib/server/state/`
 
-长期测试覆盖 Value construction、signed coordinate、sample conversion、artifact reconstruction、
-Host result、IPC lease、worker/durable replay、OpenCV lifetime、普通 OpenEXR round trip 和
-provider-defined Deep 行为。source-residue search 仅是 migration evidence，不注册为 CTest 或 CI
-behavior test。
+长期 kernel test 覆盖 Value construction、signed coordinate、sample conversion、artifact
+reconstruction、Host result、worker/durable replay、OpenCV lifetime、普通 OpenEXR round trip 和
+provider-defined Deep 行为；外部 daemon test 覆盖 IPC lease。source-residue search 仅是
+migration evidence，不注册为 CTest 或 CI behavior test。
 Production-route OpenCV 回归还会覆盖 full parallel、dirty HP 与 dirty RT 在
 inference/allocation 前完成 normalization，包括 multi-sibling context identity、zero/opaque 常量、
 raw pixel 与 `[0,1]` authority retention。

@@ -1127,7 +1127,6 @@ class ProviderDisabledProfileTest(unittest.TestCase):
             "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
             "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
             "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
-            "PHOTOSPIDER_BUILD_IPC": "OFF",
             "CMAKE_GENERATOR": "Synthetic",
         }
         subject.validate_provider_disabled_cache(values)

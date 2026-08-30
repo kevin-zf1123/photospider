@@ -844,7 +844,6 @@ def validate_reusable_producer(repo: Path, build: Path, config: str) -> None:
         )
     expected_values = {
         "BUILD_TESTING": "ON",
-        "PHOTOSPIDER_BUILD_IPC": "OFF",
         "PHOTOSPIDER_ENABLE_OPENCV": "OFF",
         "PHOTOSPIDER_ENABLE_YAML": "OFF",
         "PHOTOSPIDER_BUILD_GRAPH_CLI": "OFF",
@@ -2865,7 +2864,6 @@ def main() -> int:
                     "-B",
                     str(build),
                     "-DBUILD_TESTING=ON",
-                    "-DPHOTOSPIDER_BUILD_IPC=OFF",
                     "-DPHOTOSPIDER_ENABLE_OPENCV=OFF",
                     "-DPHOTOSPIDER_ENABLE_YAML=OFF",
                     "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
@@ -2999,7 +2997,6 @@ def main() -> int:
             "-S",
             str(repo),
             "-DBUILD_TESTING=OFF",
-            "-DPHOTOSPIDER_BUILD_IPC=OFF",
             "-DPHOTOSPIDER_ENABLE_OPENCV=OFF",
             "-DPHOTOSPIDER_ENABLE_YAML=OFF",
             "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",

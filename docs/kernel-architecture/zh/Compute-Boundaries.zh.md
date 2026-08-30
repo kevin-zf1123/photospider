@@ -1017,8 +1017,8 @@ cancellation 会永久拒绝 HP commit 并请求取消 HP child。HP cancellatio
 回滚已经提交的 RT proxy。更新的 realtime generation 会 supersede 两个旧 child，并拒绝旧的
 pending gate；如果旧 RT proxy 先完成 commit，它会保持可见，但旧 HP sibling 仍因 generation
 过期而被拒绝。最新 generation 失败绝不会重新激活旧 generation 的 commit right。Installed
-Host、CLI 与 IPC protocol version 2 surface 不暴露 cancellation entry；IPC job 继续报告
-`cancellable: false`。
+Host 与 CLI surface 不暴露 cancellation entry；外部 daemon 的 protocol version 2 job 继续报告
+`cancellable:false`。
 
 对于 progressive request，HP callback 不会分别操作 gate 与 observer。它会调用一个
 `ComputeRunLease` operation：先观察 deadline cancellation，再持有 HP Run terminal-arbiter
@@ -1279,7 +1279,6 @@ owner。
 - `src/lib/core/ops.cpp`
 - `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
-- `src/lib/ipc/output_store.*`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device/device_completion.*`
 - `src/lib/execution/device/residency_manager.*`
@@ -1295,7 +1294,6 @@ owner。
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
-- `src/lib/ipc/request_router.cpp`
 - `src/lib/graph/graph_state_executor.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_resource_admission.cpp`
@@ -1308,7 +1306,6 @@ owner。
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
-- `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/unit/test_progressive_compute.cpp`

@@ -131,7 +131,7 @@ def validate_provider_disabled_cache(values: dict[str, str]) -> None:
     @throws RuntimeError If a required cache entry is missing or has an
       unexpected value.
     @note OpenCV, YAML, graph CLI, and operation plugins intentionally remain
-      enabled; only the repository operation provider and IPC are disabled.
+      enabled; only the repository operation provider is disabled.
     """
 
     expected = {
@@ -141,7 +141,6 @@ def validate_provider_disabled_cache(values: dict[str, str]) -> None:
         "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
         "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
         "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "OFF",
-        "PHOTOSPIDER_BUILD_IPC": "OFF",
     }
     mismatches = {
         key: (expected_value, values.get(key))
@@ -862,7 +861,6 @@ def main() -> int:
             str(work),
             f"-DCMAKE_BUILD_TYPE={configuration}",
             "-DBUILD_TESTING=ON",
-            "-DPHOTOSPIDER_BUILD_IPC=OFF",
             "-DPHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF",
         ],
         repo,

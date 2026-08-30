@@ -21,8 +21,8 @@ policy lifetime；RT publication 不受之后 stale HP result 的回滚影响。
 cooperative Run cancellation：显式请求与 monotonic deadline 会与 failure 和 Run-owned commit
 contender 竞争；匹配的 queued work 会被清除，已经进入的 work 会排空，dependent re-entry 会被
 拒绝，且已接受的 cancellation 不能发布 staged state。Sibling gate 仍为 `Pending` 时，RT
-cancellation 会拒绝 HP commit 并请求 HP cancellation。Installed Host、CLI 与 IPC protocol v2
-surface 仍不可取消，IPC job 继续报告 `cancellable: false`。Issue #74 增加 checked per-Graph
+cancellation 会拒绝 HP commit 并请求 HP cancellation。Installed Host 与 CLI surface 仍不可取消；
+外部 daemon 的 protocol v2 job 继续报告 `cancellable:false`。Issue #74 增加 checked per-Graph
 supersession generation、精确 key 的 latest pending coalescing、每个 admitted key 的一个 persistent
 continuation ticket、稳定 supersession cancellation、current-generation commit authority 与确定性
 `RunGroup` aggregate settlement。现有有界 compute-request lane worker 是唯一 logical active

@@ -19,14 +19,13 @@ Compute captures request-owned Graph/proxy snapshots through graph-state, runs
 planning and operations outside it through the selected execution route, and
 re-enters it only for exact-revision validation and no-throw publication.
 
-On macOS/Linux the same public Host seam also has a complete installed IPC
-adapter. `create_ipc_host(socket_path)` implements all 58 current
-non-destructor virtuals through the exact typed 60-method version 2 protocol;
-`photospiderd` owns a separate embedded Host and admits every backend operation
-through it. This remote path adds polling jobs, bounded registries, and
-protected output artifacts without exposing backend ownership. `graph_cli`
-continues to construct the embedded adapter and does not auto-connect to the
-daemon.
+The standalone
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+repository is an installed consumer of this Host package. It owns IPC protocol
+v2, the typed client, private transport/server implementation, foreground
+daemon, and real-process tests. This kernel tree owns none of those targets or
+sources. `graph_cli` continues to construct the embedded adapter and does not
+auto-connect to a daemon.
 
 `Kernel` is the internal multi-graph composition facade. `ComputeService` is
 the internal compute facade, while narrower collaborators own planning,
@@ -57,9 +56,6 @@ The root `CMakeLists.txt` builds these internal modules:
 | `photospider_operation_opencv` | Installable opt-in OpenCV adapter using only the OpenCV `core` component; it exists only with `PHOTOSPIDER_ENABLE_OPENCV=ON`. |
 | `photospider_policy_sdk` | Installable dependency-neutral interface target carrying the self-contained pure-C policy ABI header plus C11/C++17 requirements. |
 | `photospider` | Static installable backend product, archived as `libphotospider`, linked by enabled CLI and embedded Host frontends. It exports `Photospider::photospider` and remains buildable with OpenCV and YAML disabled; operation plugins publish exact pure-C ABI v1 roots/suites and never receive private registry state. |
-| `photospider_ipc_client` | Installed static typed Unix IPC client plus the complete IPC Host adapter. It exports `Photospider::photospider_ipc_client`, implements all 60 direct Client methods and all 58 current Host virtuals, and does not link the backend or expose JSON/POSIX implementation types. |
-| `photospider_ipc_server_internal` | Non-installed bounded Unix listener, typed router, and private session/job/snapshot/output registries. It serializes all backend access through one daemon-owned Host. |
-| `photospiderd` | Installed foreground macOS/Linux daemon that owns one embedded Host, a protected per-user socket and output store, and deterministic joined shutdown. |
 | `photospider_cli_common` | Non-installable application OBJECT helper, present only with `PHOTOSPIDER_BUILD_GRAPH_CLI=ON`, built from `apps/graph_cli/src/` plus `src/lib/benchmark/benchmark_service.cpp` and `src/lib/benchmark/benchmark_yaml_generator.cpp`: REPL commands, TUI editors, autocomplete, CLI config, and CLI benchmark services. Object injection places CLI references before the selected static product archive on single-pass linkers. |
 | `graph_cli` | End-user executable whose process entry point is `apps/graph_cli/main.cpp`; its derived default is `ON` only when both OpenCV and YAML capabilities are enabled. |
 
@@ -104,24 +100,6 @@ Package boundary:
   the producer and discovers only producer-enabled dependencies. The selected
   explicit components or component-less embedded default still control which
   available sets are imported.
-- On macOS/Linux with `PHOTOSPIDER_BUILD_IPC=ON`, installation also exports
-  `Photospider::photospider_ipc_client`, installs exactly the three
-  `include/photospider/ipc/` headers and `photospiderd`, and keeps the server
-  library private. An IPC-only consumer requests `COMPONENTS ipc_client` and
-  resolves only `Threads`; component-less discovery preserves the embedded
-  default and its backend dependencies. Because the daemon's static Host
-  closure loads the shared operation runtime, a relative
-  `CMAKE_INSTALL_LIBDIR` receives a loader-relative install lookup derived from
-  `CMAKE_INSTALL_FULL_BINDIR` to `CMAKE_INSTALL_FULL_LIBDIR`:
-  `@loader_path/<computed-relative-path>` on macOS and
-  `$ORIGIN/<computed-relative-path>` on other Unix/ELF platforms. This covers
-  default and nested relative directories as well as an absolute bindir. An
-  explicitly absolute `CMAKE_INSTALL_LIBDIR` instead receives that absolute
-  full runtime directory without a loader token. `DESTDIR` remains only a
-  staging prefix and is not encoded in either lookup; Windows receives no
-  RPATH. The default package smoke and the isolated nested-relative,
-  absolute-libdir, and absolute-bindir layout matrix both remove loader
-  override variables and execute installed `photospiderd --help`.
 - `Photospider::photospider` carries `PHOTOSPIDER_STATIC` for consumers and
   keeps the `src/lib/` include root private to repository builds. In the build tree,
   the target's generated public include root contains only `photospider/`
@@ -138,14 +116,13 @@ Package boundary:
 - `Photospider::data_provider_sdk` is an interface-only producer target with
   no link interface. C11 and C++17 providers receive only the installed include
   root; Host-side registry/Value consumers link `operation_runtime` separately.
-- Package components are `embedded`, `ipc_client`, `data_provider_sdk`,
+- Package components are `embedded`, `data_provider_sdk`,
   `operation_plugin_sdk`, `operation_runtime`, `operation_opencv`,
   `openexr_deep_provider`, and `policy_sdk`. Omitting components preserves the
   embedded default and does not import the provider. `data_provider_sdk` and
   `policy_sdk` discover no external package; `operation_plugin_sdk`/
   `operation_runtime` discover none; `operation_opencv` discovers only OpenCV
-  `core`; `openexr_deep_provider` discovers only `OpenEXR::OpenEXR`; and
-  `ipc_client` resolves only Threads. If optional `operation_opencv` discovery
+  `core`; and `openexr_deep_provider` discovers only `OpenEXR::OpenEXR`. If optional `operation_opencv` discovery
   cannot find OpenCV
   `core`, the package remains found, `Photospider_operation_opencv_FOUND` is
   false, its target is not imported, and dependency-free requested targets
@@ -188,6 +165,9 @@ Package boundary:
   `include/photospider/policy`, shared device labels under
   `include/photospider/core/device.hpp`, and full mutable/private declarations
   under their role-owned `src/lib` homes.
+- The external daemon consumes required component `embedded` from an isolated
+  install prefix and publishes its client through its own package. This kernel
+  package exports no daemon, IPC client, protocol header, or transport target.
 
 ## Runtime Ownership
 
@@ -195,19 +175,10 @@ Package boundary:
 graph TD
     CLI["CLI / REPL / TUI"] --> EmbeddedHost["embedded Host adapter"]
     Frontend["Embedded frontend"] --> Host["ps::Host seam"]
-    RemoteFrontend["Explicit IPC frontend"] --> Host
     Host --> EmbeddedHost
-    Host --> IpcHost["complete IPC Host adapter"]
-    IpcHost --> Client["typed 60-method Client"]
-    Client --> Socket["protected Unix socket"]
-    Socket --> Daemon["photospiderd"]
-    Daemon --> DaemonHost["daemon-owned embedded Host"]
     EmbeddedHost --> InteractionService
-    DaemonHost --> InteractionService
     EmbeddedHost --> YamlGraphDocumentAdapter["one shared YAML document adapter"]
-    DaemonHost --> YamlGraphDocumentAdapter
     EmbeddedHost --> YamlCacheMetadataCodec["one shared YAML cache-metadata adapter"]
-    DaemonHost --> YamlCacheMetadataCodec
     EmbeddedHost --> PluginManager["process PluginManager"]
     InteractionService --> Kernel
 
@@ -264,8 +235,8 @@ the disabled profile; explicit representation IO returns `GraphErrc::Io`.
 the image and metadata owners. Kernel and those services have no default
 persistence constructors or implicit fallback adapters. The private
 explicit-dependency Host root is used by substitution
-tests. The IPC Host remains a client-side transport adapter; only the
-daemon-owned embedded Host composes backend persistence.
+tests. The external daemon creates this same embedded composition root from the
+installed package; its transport adapter remains outside this source tree.
 
 Each embedded Host owns its Kernel, graph runtimes, and async coordination, but
 operation plugins are different: every Host and Kernel reaches the same
@@ -283,12 +254,9 @@ ids and nonzero generations; `cpu`, `serial_debug`, and `gpu_pipeline`
 remain private process execution routes. Reserved-start transactions exchange
 ready grants for execution grants exactly once before entering a route.
 
-The IPC Host owns only client-side connections, interruptible polling workers,
-and temporary mapped named-Value archive lifetimes. Daemon sessions, accepted jobs, snapshots, output
-leases, and the backend Host remain daemon-owned. Destroying the adapter wakes
-and joins its pollers but does not close sessions, unload plugins, or repeat a
-mutation. The exact socket, protocol, status, quota, and artifact lifecycle is
-defined in `../codebase-structure/IPC-Protocol-v2.md`.
+The exact socket, protocol, status, quota, artifact, and shutdown lifecycle is
+owned and tested by the external daemon repository. Its normative contract is
+[IPC Protocol v2](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/IPC-Protocol-v2.md).
 
 ## Main Components
 
@@ -297,10 +265,7 @@ defined in `../codebase-structure/IPC-Protocol-v2.md`.
 | `Kernel` | Multi-graph facade, service owner, runtime bootstrapper, top-level graph/cache/compute API. |
 | `ps::Host` | Public frontend interface under `include/photospider/host`; returns copied request/result/snapshot values and hides Kernel, GraphModel, and GraphRuntime. |
 | `embedded Host adapter` | In-process Host implementation backed by per-adapter `Kernel` and `InteractionService` state; all adapters share the process operation plugin owner. |
-| `IPC Host adapter` | Complete installed Host implementation backed only by typed short-lived Client calls. It composes polling compute, joins async workers, preserves exact status domains, temporarily maps and detaches protected named-Value archives, then reconstructs fresh local Values. |
-| `ps::ipc::Client` | Move-only direct client with owned values for the exact sorted 60-method version 2 inventory; it validates correlated result shapes and exposes no raw JSON call. |
-| `photospiderd` | Foreground local service that owns one embedded Host and serializes all Host calls while independently serving metadata and job polling. |
-| daemon registries | Private bounded ownership for opaque sessions, compute jobs, stable collection snapshots, protected outputs, and delivery leases; none are public backend handles. |
+| external daemon composition | Installed-package consumer owned by the standalone daemon repository; it creates an embedded Host but exports no transport or protocol type from this kernel package. |
 | `GraphRuntime` | Per-graph resource container with model, graph-state lane, exact-64-total compute-request lane, one latest-wins coordinator, fixed-capacity execution trace ring, copied HP/RT route bindings, and a Graph lifetime anchor; it owns no native platform state. |
 | `GraphModel` | Graph state holder with a non-reused strong instance identity, checked authoritative revision, private node/topology storage, cache root, timing data, quiet/skip-save flags, and complete compute snapshot/publication primitives. |
 | `InteractionService` | Internal wrapper around `Kernel` used by the embedded Host adapter and backend code; frontends, including the CLI, use the public Host seam. |
@@ -309,7 +274,7 @@ defined in `../codebase-structure/IPC-Protocol-v2.md`.
 | `RunGroup` | Realtime request owner for distinct HP Full and RT Interactive child Runs, their observation leases, shared cancellation source, RT-first gate, and deterministic aggregate outcome. |
 | `ComputeRun` | Private request owner for one non-realtime HP domain or one realtime HP/RT child domain. Each Run owns an immutable descriptor with exact Graph identity/revision and supersession identity, monotonic phase, one terminal arbiter, stable cooperative-cancellation reason, and shared-control full-plan/temporary or dirty staging storage. Built-in CPU full, dirty, and preflight work retains stable leases and composite task identity through the fixed multi-Graph service and its lifecycle registry. Public cancellation control remains future. |
 | `RunLifecycleRegistry` | Process-owned atomic fence for Graph registration, candidate admission, standalone/realtime-bundle installation, Graph close, process shutdown, exact Run finalization, and empty-row removal. |
-| `ExecutionLifecycleTelemetry` | Source-private fixed-capacity lifecycle event/counter store used to prove close and shutdown settlement; it exposes copied diagnostics without ownership or a public Host/IPC method. |
+| `ExecutionLifecycleTelemetry` | Source-private fixed-capacity lifecycle event/counter store used to prove close and shutdown settlement; it exposes copied diagnostics without ownership or a public Host method. |
 | `GraphTraversalService` | Topology-only traversal orders, ending-node discovery, ancestor checks, upstream dependency queries, and downstream dependent queries backed by `GraphModel` adjacency. |
 | `RoiPropagationService` | ROI/spatial propagation boundary for upstream ROI computation and graph-level forward/backward ROI projection. |
 | `GraphExtentResolver` | HP-authoritative output extent resolver used by ROI propagation and dirty-region planning. |
@@ -393,37 +358,10 @@ Typical embedded Host compute flow:
    consumed async futures may propagate `std::bad_alloc` as documented by the
    installable interface.
 
-Typical IPC Host compute flow:
-
-1. An explicit daemon frontend creates `ps::Host` through
-   `create_ipc_host(socket_path)`; construction does not contact or start a
-   daemon.
-2. A compute call opens a short-lived typed Client, submits once, and receives
-   `queued` with `cancellable:false`. The sole daemon worker advances the job
-   through `running` to immutable `succeeded` or `failed` after exactly one
-   embedded Host compute call.
-3. The adapter polls immediately and then waits
-   10/20/40/80/160/320/500 ms, repeating the 500-ms cap without a synchronous
-   total timeout. Each status RPC is attempted once; terminal state, the first
-   exact RPC failure, or adapter stop ends polling.
-4. Terminal Host/output failure is a normal correlated job value whose nested
-   `OperationStatus` preserves exact Graph or Daemon semantics; RPC,
-   admission, and lookup failures remain separate. Across the public Host
-   boundary the sole status vocabulary distinguishes `none`, `transport`,
-   `protocol`, `graph`, and `daemon`, and transport never becomes graph IO.
-5. Values mode validates a same-user mode-`0600` named-Value archive under its
-   delivery lease, maps it read-only, verifies and detaches the exact bytes,
-   unmaps/closes exactly once, reconstructs fresh local Values, and then
-   attempts matching job/lease release.
-6. Async adapter destruction signals stop, wakes waits, interrupts active
-   descriptors, completes unfinished futures as Transport
-   `client_stopped` (5), and joins workers without resubmitting or closing
-   daemon-owned sessions.
-
-Production bounds include 64 active and 256 retained terminal compute jobs;
-64 artifacts, one GiB total retained bytes, and 512 MiB per artifact; 8,192
-compute events; and 65,536 execution-trace entries. The full method mapping and
-all string/page/snapshot/frame limits live in the maintained protocol document.
+The corresponding daemon-client compute flow, exact 60-method protocol
+inventory, negative routes, bounded registries, protected artifacts,
+reconnection, and signal-drain behavior are maintained by the external
+daemon repository and validated against an installed kernel package.
 
 ### Bounded Event and Trace Observation
 
@@ -593,11 +531,11 @@ but no payload. Canonical descriptor/content/layout identities and a
 byte-preserving artifact envelope support those Values without flattening
 them into ordinary dense images.
 
-DI-4 completed the remaining external migration. Embedded and IPC Hosts return
+DI-4 completed the remaining external migration. Embedded Hosts return
 canonical ordered named Values and expose metadata-only inspection without
-waiting for or mapping payload. IPC OutputStore, worker protocol v3, worker
-data-plane references, and durable manifests carry canonical named Value
-artifact sets; every decode validates framing, versions, identity joins,
+waiting for or mapping payload. External daemon output, worker protocol v3,
+worker data-plane references, and durable manifests carry canonical named
+Value artifact sets; every decode validates framing, versions, identity joins,
 digests, payload bounds, and the local data definition before publication.
 Replay preserves portable artifact identity but creates fresh local allocation,
 revision, producer, fence, and binding identities.
@@ -802,10 +740,7 @@ this current-state document.
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_graph_document_injection.cpp`
 - `tests/integration/test_kernel_contracts.cpp`
-- `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/static_product_consumer_smoke.py`
-- `tests/integration/photospiderd_install_layout_smoke.py`
-- `tests/integration/ipc_disabled_install_smoke.py`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_value_identity_dso.cpp`

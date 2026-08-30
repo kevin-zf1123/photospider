@@ -556,7 +556,6 @@ receipts, or durability. The future post-publication cache outcome and
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
 - `src/lib/graph/graph_model.*`
 - `src/lib/runtime/kernel_compute.cpp`
-- `src/lib/ipc/output_store.*`
 - `src/lib/compute/request/compute_cache_policy.*`
 - `src/lib/compute/dispatch/compute_node_task_runner.*`
 - `src/lib/compute/dispatch/compute_task_dispatcher.*`

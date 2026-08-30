@@ -3,7 +3,7 @@
 Photospider intentionally keeps two GitHub Actions workflows:
 
 - `.github/workflows/ci.yml` handles ordinary pushes with one healthcheck,
-  one ccache-backed producer build, eight independent build-smoke runners, and
+  one ccache-backed producer build, six independent build-smoke runners, and
   three parallel CTest label shards.
 - `.github/workflows/build-ci-image.yml` publishes the Linux CI image when
   `Dockerfile.ci` changes on `main`, or when a maintainer dispatches it
@@ -23,7 +23,7 @@ recursively, and receives only read access to repository contents and packages.
 Jobs form one dependency chain with parallel test leaves:
 
 ```text
-healthcheck -> build -> build-smoke (8 independent matrix jobs)
+healthcheck -> build -> build-smoke (6 independent matrix jobs)
                      -> unit
                      -> integration
                      -> verification
@@ -102,14 +102,12 @@ roots `tests/image_artifact_codec_dependency_disabled` and
 
 ### Independent build-smoke runners
 
-The workflow has one fixed matrix entry for each of the eight build smokes in
+The workflow has one fixed matrix entry for each of the six build smokes in
 the default CI configuration:
 
 - `DependencyDisabledInstallSmoke`;
 - `OpenExrDeepProviderOptionOffSmoke`;
 - `StaticProductConsumerSmoke`;
-- `PhotospiderdInstallLayoutSmoke`;
-- `IpcDisabledInstallSmoke`;
 - `ImageArtifactCodecDependencyDisabledBuild`;
 - `OpenCvOperationProviderDisabledBuild`;
 - `PublicHeaderSelfContainment`.
@@ -123,11 +121,11 @@ the restored cache read-only, so one consumer cannot alter the producer
 snapshot used by another. Artifact delivery is required, but an individual
 compiler-cache lookup may miss and compile normally.
 
-All eight runners then execute the same outer
+All six runners then execute the same outer
 `cmake --fresh -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja`
 configuration with the producer's build type, test options, and explicit C and
 C++ ccache launchers. They query CTest's JSON object model and require the exact
-eight-entry `build-smoke` inventory before selecting their own entry. The test
+six-entry `build-smoke` inventory before selecting their own entry. The test
 itself may build the outer tree or create deeper build/install trees; both use
 the read-only producer cache where compilation keys match. Every runner prints
 its local ccache statistics after CTest.
@@ -137,7 +135,7 @@ tree. The CTest invocation combines an anchored exact `--tests-regex`, the exact
 `--label-regex '^build-smoke$'`, and `--no-tests=error`; a renamed, absent, or
 mislabelled entry therefore cannot pass as an empty selection.
 
-These eight jobs run in parallel with the `unit`, `integration`, and
+These six jobs run in parallel with the `unit`, `integration`, and
 `verification` label jobs. Their local outer and nested build/install outputs
 are not saved back to the read-only handoff or the cross-run Actions Cache and
 never enter `ctest-runtime`.
@@ -147,6 +145,12 @@ the unique `ctest-junit-build-smoke-<matrix-artifact>` artifact for seven days
 and warns if the report is unavailable. Adding or renaming a durable build
 smoke requires coordinated updates to its CTest registration, the fixed
 workflow matrix, and this inventory.
+
+Daemon package, IPC protocol, installed layout/RPATH, and interoperability
+tests run in the external
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+repository. This kernel workflow neither configures daemon ownership nor
+duplicates those tests.
 
 ### Lightweight CTest runtime
 

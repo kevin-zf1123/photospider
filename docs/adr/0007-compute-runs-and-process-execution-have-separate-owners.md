@@ -29,8 +29,9 @@ and monotonic deadlines contend with failure and a Run-owned commit contender;
 matching queued work is purged, entered work drains, dependent re-entry is
 rejected, and accepted cancellation cannot publish staged state. RT
 cancellation while the sibling gate is `Pending` denies HP commit and requests
-HP cancellation. Installed Host, CLI, and IPC protocol v2 surfaces remain
-non-cancellable and IPC jobs continue to report `cancellable: false`. Issue #74
+HP cancellation. Installed Host and CLI surfaces remain non-cancellable; the
+external daemon's protocol v2 jobs continue to report `cancellable:false`.
+Issue #74
 adds checked per-Graph supersession generations, exact-key latest pending
 coalescing, one persistent continuation ticket per admitted key, stable
 supersession cancellation, current-generation commit authority, and

@@ -552,12 +552,11 @@ Configuration uses `policy_dirs`, `policy_interactive_type`,
 `execution_worker_count`. Removed `scheduler` commands and `scheduler_*` keys
 are rejected without translation.
 
-IPC protocol version 2 replaces the old method family with eight `policy.*`
-and six `execution.*` methods, including non-destructive `execution.trace`.
-The daemon advertises exactly 60 sorted unique methods. Protocol version 1 and
-old method names are rejected before Host access. The exact schemas and bounds
-are maintained in
-[`IPC-Protocol-v2.md`](../codebase-structure/IPC-Protocol-v2.md).
+The external daemon's IPC protocol version 2 exposes eight `policy.*` and six
+`execution.*` methods, including non-destructive `execution.trace`, within its
+exact sorted 60-method inventory. Protocol version 1 and old method names are
+rejected before Host access. The exact schemas and bounds are maintained in
+[IPC Protocol v2](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/IPC-Protocol-v2.md).
 
 ## Observability and Lifecycle Proof
 
@@ -1037,10 +1036,8 @@ types without creating a forwarding or installed contract.
 - `src/lib/runtime/graph_runtime.hpp` and `.cpp`
 - `src/lib/runtime/kernel_execution_facade.cpp`
 - `src/lib/graph/graph_cache_service.*`
-- `src/lib/ipc/output_store.*`
 - `include/photospider/host/host.hpp`
 - `src/lib/host/embedded_host.cpp`
-- `src/lib/ipc/{codec,client,host,request_router}.cpp`
 - `tests/unit/test_policy_registry.cpp`
 - `tests/unit/test_compute_io_executor.cpp`
 - `tests/integration/test_openexr_deep_scanline_provider.cpp`
@@ -1062,7 +1059,6 @@ types without creating a forwarding or installed contract.
 - `tests/verification/b1_immutable_benchmark.cpp`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_metal_device_executor.cpp`
-- `tests/integration/test_ipc_daemon.cpp`
 - `tests/integration/dependency_disabled_install_smoke.py`
 - `tests/integration/static_product_consumer_smoke.py`
 

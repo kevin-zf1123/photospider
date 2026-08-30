@@ -5,7 +5,6 @@ include(CMakeFindDependencyMacro)
 set(Photospider_FOUND TRUE)
 set(Photospider_data_provider_sdk_FOUND TRUE)
 set(Photospider_embedded_FOUND TRUE)
-set(Photospider_ipc_client_FOUND @PHOTOSPIDER_BUILD_IPC@)
 set(Photospider_operation_plugin_sdk_FOUND TRUE)
 set(Photospider_operation_runtime_FOUND TRUE)
 set(Photospider_operation_opencv_FOUND @PHOTOSPIDER_ENABLE_OPENCV@)
@@ -28,13 +27,6 @@ if(Photospider_FIND_COMPONENTS)
     if(_Photospider_component STREQUAL "embedded")
       set(_Photospider_need_embedded TRUE)
       set(_Photospider_need_threads TRUE)
-    elseif(_Photospider_component STREQUAL "ipc_client")
-      set(_Photospider_need_threads TRUE)
-      if(NOT Photospider_ipc_client_FOUND AND
-         Photospider_FIND_REQUIRED_ipc_client)
-        set(_Photospider_component_error
-            "Photospider was built without the ipc_client component")
-      endif()
     elseif(_Photospider_component STREQUAL "data_provider_sdk" OR
            _Photospider_component STREQUAL "policy_sdk")
       # The pure-C provider ABI headers require no external package.

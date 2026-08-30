@@ -1332,9 +1332,9 @@ cannot roll back an RT proxy that already committed. A newer realtime
 generation supersedes both old children and denies an old pending gate; if the
 old RT proxy committed first it remains visible while the old HP sibling is
 still generation-stale. Failure of the newest generation never reactivates an
-older commit right. The installed Host, CLI, and IPC protocol version 2
-surfaces expose no cancellation entry; IPC jobs continue to report
-`cancellable: false`.
+older commit right. The installed Host and CLI surfaces expose no cancellation
+entry; the external daemon's protocol version 2 jobs continue to report
+`cancellable:false`.
 
 For progressive requests, the HP callback does not manipulate the gate or
 observer separately. It invokes one `ComputeRunLease` operation that first
@@ -1674,7 +1674,6 @@ Host method, Run identity, scheduler contract, or installed ABI.
 - `src/lib/core/ops.cpp`
 - `src/lib/core/dense_image_processing.*`
 - `src/lib/graph/graph_cache_service.*`
-- `src/lib/ipc/output_store.*`
 - `src/lib/execution/execution_task_runtime.hpp`
 - `src/lib/execution/device/device_completion.*`
 - `src/lib/execution/device/residency_manager.*`
@@ -1690,7 +1689,6 @@ Host method, Run identity, scheduler contract, or installed ABI.
 - `src/lib/runtime/kernel_compute.cpp`
 - `src/lib/host/embedded_host.cpp`
 - `src/lib/benchmark/benchmark_service.*`
-- `src/lib/ipc/request_router.cpp`
 - `src/lib/graph/graph_state_executor.*`
 - `tests/integration/test_compute_service_split.cpp`
 - `tests/integration/test_resource_admission.cpp`
@@ -1703,7 +1701,6 @@ Host method, Run identity, scheduler contract, or installed ABI.
 - `tests/integration/test_opencv_operation_concurrency.cpp`
 - `tests/integration/test_cpu_dense_tensor_image_operation.cpp`
 - `tests/integration/test_packed_fp4_dense_tensor.cpp`
-- `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_propagation_contracts.cpp`
 - `tests/unit/test_region_contracts.cpp`
 - `tests/unit/test_progressive_compute.cpp`

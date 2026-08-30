@@ -1,32 +1,24 @@
 # 代码库结构方向
 
-本文档同时记录 Photospider 当前已经具备的公开头/Host seam、静态产品和按角色归属的源码布局，
-已经实现的 version 2 daemon/IPC slice，以及已完成的 extension-SDK/internal-target 拆分。下文会明确区分当前状态与
-未来工作。
+本文档记录 Photospider kernel 主仓的结构：public Host seam、static embedded product、
+extension SDK、按角色归属的源码布局，以及源码私有的 Job/worker vertical。Daemon IPC v2
+是本 package 的独立 installed consumer，不归本仓所有。
 
 目标如下：
 
 - `libphotospider` 是面向嵌入式前端的稳定静态链接目标。
-- `photospiderd` 作为 foreground、同用户本地 Unix-domain sidecar，通过一个 embedded `ps::Host`
-  拥有 graph session；它不是当前的 system-service、多用户、远程或 TCP 产品。
-- `graph_cli` 保持为基础的交互式命令行前端。
-- Frontend 既可以进程内链接 `libphotospider`，也可以用 typed client 通过 IPC 与
-  `photospiderd` 交互。
+- `graph_cli` 保持为基础的 embedded 交互式前端。
+- Public extension author 只使用窄化后的 installed SDK component。
+- 外部 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+  仓库拥有 typed IPC client、private protocol implementation、`photospiderd`、protocol docs
+  和 daemon tests。它只消费 installed `Photospider::photospider` package，不依赖源码树。
 
 ## 当前摩擦
 
-当前仓库已经具备 public Host seam、可安装静态产品、迁移后的 CLI application tree、按角色归属的
-backend source tree、明确的 production plugin 目录、unit/integration 测试归属，以及 macOS/Linux
-version 2 daemon/IPC graph、inspection、polling-compute、protected named-Value output 与 bounded
-event/trace observation 以及 process-global operation-plugin router 行为。Installed typed IPC
-Client 现在为精确 60-method surface 全部提供 owned call，会验证每个 typed result，并把 stable
-cursor page 聚合为完整的 Host-shaped value。Installed IPC-backed Host 现在会通过 typed
-short-lived connection、会等待结束的异步轮询和确定性的停止顺序，实现当前全部 58 个非析构
-Host virtual。Values mode 当前会在 delivery lease 保护 result-to-open 的期间严格重新校验同用户
-regular file，创建临时 read-only archive mapping，验证并 detach 精确 bytes，随后恰好执行一次
-unmap/close，再重建全新 local Values 并释放匹配的 job/lease。Installed IPC-only package consumer
-现在已经闭合完整的
-symbol/export/header contract；plugin SDK 遵循下文记录的 extension contract。
+kernel 主仓现在具备 public Host seam、可安装静态产品、迁移后的 CLI tree、按角色归属的私有源码、
+production plugin 目录、unit/integration 测试归属、窄化后的 SDK export，以及源码私有的
+single-tenant Job/worker vertical。Daemon 拆仓从本树移除了重复的 protocol、package、process-shell
+和 test ownership，同时保留供外部 daemon 消费的 installed embedded Host dependency。
 
 当前根 `CMakeLists.txt` 中观察到的构建目标：
 
@@ -47,13 +39,10 @@ symbol/export/header contract；plugin SDK 遵循下文记录的 extension contr
 | `photospider_operation_opencv` | 可安装、显式 opt-in 的 OpenCV adapter。 | 只发现并链接 OpenCV `core`。 |
 | `photospider_policy_sdk` | 可安装、dependency-neutral 的纯 C policy ABI v1 SDK。 | 只携带一个兼容 C11/C++17 的 header，不带 execution/runtime dependency。 |
 | `photospider` | 静态可安装后端产品，归档文件名为 `libphotospider`。 | 已符合目标静态产品和 public Host 形态，同时把按角色归属的后端源码折叠进单一归档。 |
-| `photospider_single_tenant_job_internal` | 不安装的 Issue #99/#100 canonical JobSpec、tenant quota、durable Job/artifact、显式 retry/checkpoint、private worker protocol 与 WorkerManager authority。 | 独立 gate 只在 Darwin/Linux 默认启用，其他系统不存在 internal/worker/unit/integration target inventory；它不导出 package/API，且仍不进入 `photospiderd`。 |
+| `photospider_single_tenant_job_internal` | 不安装的 Issue #99/#100 canonical JobSpec、tenant quota、durable Job/artifact、显式 retry/checkpoint、private worker protocol 与 WorkerManager authority。 | 独立 gate 只在 Darwin/Linux 默认启用，其他系统不存在 internal/worker/unit/integration target inventory；它不导出 package/API，且不进入任何 daemon composition。 |
 | `photospider-worker` | 源码私有 single-tenant Job 纵向路径的不安装、单 assignment process composition root。 | 每个 attempt 都会全新 exec；它链接 internal Job/Embedded Host closure，不暴露 network listener 或第二个 assignment，也不获得 durable Job/quota/artifact authority。 |
 | `photospider_cli_common` | `apps/graph_cli/` 下的 object-library CLI 命令、TUI、自动补全代码、可复用 `run_graph_cli` 边界，以及两个按角色归属的 benchmark service 翻译单元。 | Object 注入让所有 CLI reference 在 single-pass static linker 上位于所选 product archive 之前；benchmark 源仍只属于这个不可安装的 helper/完整 CLI closure，不会进入可安装产品。 |
 | `graph_cli` | 位于 `apps/graph_cli/main.cpp`、只负责 process policy 的入口。 | 禁用 OpenCL，拥有不依赖分配的 fatal exit policy，创建 embedded `Host` adapter，尚无 daemon-client 模式。 |
-| `photospider_ipc_client` | 可安装 static typed Unix IPC client 与完整 Host adapter。 | 为 version 2 全部 60 个方法实现 typed owned call，并通过 `create_ipc_host` 实现当前全部 58 个非析构 Host virtual；不链接 backend，也不暴露 JSON/POSIX type。 |
-| `photospider_ipc_server_internal` | 不安装的 router、registry 与 bounded Unix listener。 | 串行化每个 Host call，并且刻意不进入 package export。 |
-| `photospiderd` | `apps/photospiderd/` 下已安装的 foreground process shell。 | 拥有一个 embedded Host、self-pipe signal policy、protected socket 与 deterministic cleanup。 |
 
 仍遗留和刚完成修复的接口泄漏：
 
@@ -208,11 +197,6 @@ include/photospider/plugin/
 include/photospider/policy/
   policy_plugin_api.h
 
-include/photospider/ipc/
-  client.hpp
-  host.hpp
-  protocol.hpp
-
 include/photospider/
   public_boundary.hpp
 ```
@@ -241,7 +225,6 @@ include/photospider/
   memory/
   plugin/
   policy/
-  ipc/
 
 src/lib/
   core/
@@ -271,7 +254,6 @@ src/lib/
   adapters/
     opencv/
     metal/
-  ipc/
 
 apps/
   graph_cli/
@@ -281,7 +263,6 @@ apps/
       autocomplete/
       command/
     resources/help/
-  photospiderd/
 
 plugins/
   ops/
@@ -295,9 +276,10 @@ tests/
   verification/
 ```
 
-所有现有 backend、plugin、维护中的测试与 version 2 IPC code 都已采用该布局。Issue #36 已创建
-`src/lib/ipc/`、`include/photospider/ipc/` 与 `apps/photospiderd/`，并实现真实 daemon 行为。
-Issue #38 已完成 operation extension contract，并移除八个过渡性 extension header；没有 shim 或
+所有 kernel backend、plugin、Job/worker 与维护中的 kernel test code 都已采用该布局。Issue #242
+在同一冻结提交的 compatibility gate 通过后，将原 daemon source/header subtree 与 process shell
+迁入外部 daemon 仓库。Issue #38 已完成 operation extension contract，并移除
+八个过渡性 extension header；没有 shim 或
 重复 declaration。Issue #75 删除拥有 worker 的 scheduler SDK，并增加只含一个 header 的
 `include/photospider/policy/` 纯 C contract。Policy registry/loading 位于 `src/lib/policy/`；私有
 route/runtime contract 位于 `src/lib/execution/`；policy-aware store 与 reserved-start logic 位于
@@ -305,7 +287,7 @@ route/runtime contract 位于 `src/lib/execution/`；policy-aware store 与 rese
 子目录。设备、隔离与传输机制在 `src/lib/execution/` 下分开；benchmark profile 按场景分组；
 server 持久真相与 worker supervision 在 `src/lib/server/` 下分开。唯一 Host 与逐设备权威 ledger
 实现保持在 `src/lib/runtime/`。这些私有
-implementation owner 都不会成为 public Host 或 IPC type。
+implementation owner 都不会成为 public Host type。
 
 命名规则：
 
@@ -337,11 +319,8 @@ implementation owner 都不会成为 public Host 或 IPC type。
 | `photospider_operation_opencv` | Static | 是 | 只使用 OpenCV `core` 的 opt-in public adapter。 |
 | `photospider_policy_sdk` | Interface | 是 | 一个 dependency-neutral 的纯 C ABI v1 header，携带 C11/C++17 usage requirement。 |
 | `photospider` / `libphotospider` | Static | 是 | 面向进程内前端的公共静态库。 |
-| `photospider_ipc_client` | Static | 是 | 面向 daemon 前端的客户端 IPC adapter。 |
 | `photospider_cli_common` | Object | 否 | CLI 命令解析、REPL、TUI、自动补全，以及两个仅供 CLI 使用的 benchmark service 翻译单元；object 注入位于所选 product archive 之前，且都不会进入可安装静态产品。 |
 | `graph_cli` | Executable | 否 | 基础交互式前端。 |
-| `photospider_ipc_server_internal` | Static | 否 | Version 2 router、session/admission registry、joined compute-request registry、protected listener 与 worker lifecycle。 |
-| `photospiderd` | Executable | 是 | 拥有一个 embedded `ps::Host` 与 IPC server 的 foreground daemon。 |
 | operation plugins | Shared | 可选 | 动态加载的操作扩展。 |
 | policy plugins | Shared | 可选 | 纯 C、仅负责排序的 policy 扩展。 |
 
@@ -361,10 +340,7 @@ graph TD
     data_provider_sdk["Photospider::data_provider_sdk"] --> data_providers["data-definition providers"]
     operation_opencv["Photospider::operation_opencv"] --> operation_runtime
     policy_sdk["Photospider::policy_sdk"] --> policy_plugins["policy plugins"]
-    ipc_client["photospider_ipc_client STATIC"] --> ipc_frontend["explicit IPC frontend"]
     libphotospider --> graph_cli
-    libphotospider --> photospiderd
-    ipc_server["daemon IPC server implementation"] --> photospiderd
 ```
 
 CMake 规则：
@@ -401,20 +377,10 @@ CMake 规则：
   `PhotospiderConfig.cmake` 会寻找这些依赖，因而外部嵌入式 consumer
   可以链接导出的 target，但 public Host/core 头不要求 OpenCV 或 `yaml-cpp` 类型。
   `${CMAKE_DL_LIBS}` 只在 CMake 判断目标平台需要时加入 dynamic-loader 库。
-- Package component 为 `embedded`、`ipc_client`、`data_provider_sdk`、`operation_plugin_sdk`、`operation_runtime`、
-  `operation_opencv`、`openexr_deep_provider` 与 `policy_sdk`。省略 component 时使用
-  `embedded`，保留上述 dependency 行为，且不会发现 OpenEXR。`data_provider_sdk`、
-  `policy_sdk`、`operation_plugin_sdk` 和 `operation_runtime` 不解析外部 package；
-  `operation_opencv` 只解析 OpenCV `core`。`openexr_deep_provider` 只在安装包构建时启用该
-  provider 的情况下可用，并且是唯一会请求 OpenEXR 3 的 component：required request 使用
-  `find_dependency(OpenEXR 3 CONFIG)`；optional request 使用
-  `find_package(OpenEXR 3 QUIET CONFIG)`，并在 `OpenEXR::OpenEXR` 不可用时把该 component
-  标记为 not-found。Provider-disabled install 的 required request 会在不尝试 OpenEXR
-  discovery 的情况下失败。显式 required `ipc_client`
-  component 只解析 Threads；optional
-  `embedded` 的 backend dependency 不可用时，该 component 会成为 not-found，但不会使 required
-  IPC component 无效。Unknown required component 会失败；IPC-disabled install 中的 required
-  IPC component 也会失败。
+- Package component 为 `embedded`、`data_provider_sdk`、`operation_plugin_sdk`、
+  `operation_runtime`、`operation_opencv`、`openexr_deep_provider` 与 `policy_sdk`。省略 component
+  时选择 `embedded`。外部 daemon 通过这个 installed component 获得完整 kernel，并通过自己的
+  package 发布 client。Unknown required component 会失败；kernel 不再拥有 daemon 或 IPC component。
 - 在 Apple 平台启用仓库 Metal-provider/OpenCV-operation-plugin profile 时，静态产品会为进程拥有的
   Metal executor 携带系统 `Metal` 与 `Foundation` framework 链接标志。Metal operation provider
   借用该 executor 的 invocation context，不再依赖 `CoreImage` 或 `CoreVideo`。Dependency-disabled
@@ -431,9 +397,8 @@ CMake 规则：
   `include/photospider/**`。
 - `graph_cli` 当前先链接 `photospider_cli_common` object，再链接 `libphotospider`，保持
   local/embedded；remote CLI mode 属后续工作。
-- `photospiderd` 链接 `libphotospider` 与不安装的 IPC server，并拥有一个 embedded
-  `ps::Host`。Installed client target 直接包含 codec object，不导出 backend、JSON target 或
-  server-internal target dependency。
+- 外部 daemon 仓库让 `photospiderd` 只链接 installed `Photospider::photospider` package 和
+  自己的 private server/client target。本仓不导出 daemon target、protocol header 或 raw transport。
 - Operation plugin 不会仅为了访问 registry 符号而链接宽泛共享后端。当前 operation ABI 是
   单独版本化、精确布局的 C11 contract。Host 会暂存每个完整 generation，再原子发布持有精确
   DSO lease 的私有 callback；C++ callback、registry object、exception 或 owner 都不会跨越
@@ -517,188 +482,26 @@ fence、单调 Graph close、显式 shutdown、精确 settlement 与 source-priv
 重复 authority 或陈旧 installed header。未来 general-resource 或 isolation slice 必须扩展私有 Host
 边界，不能把 execution authority 重新引入 policy。
 
-## Daemon 形态
+## 外部 Daemon 仓库
 
-`photospiderd` 是一个带小型 process shell 的 executable，背后是深层 Host-only server module。
+独立的 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+仓库是当前 foreground 同用户 Unix-domain sidecar、`PhotospiderDaemon::client`、private IPC
+router/server、精确 protocol v2 文档与维护中的 daemon tests 的唯一所有者。它的依赖方向严格单向：
 
-其当前 capability profile 是同用户本地 workstation sidecar：保持前台运行，只监听受保护的
-Unix-domain socket，并恰好创建一个 embedded Host。它不是后台 system service、多用户或
-multi-tenant service、远程 endpoint 或 TCP server。这些角色需要独立的 control-plane、transport、
-identity、authorization、isolation 与 lifecycle 设计。
-
-进程职责：
-
-- 创建并拥有一个 embedded `ps::Host`
-- 通过已安装 typed version 2 client 暴露 ping/version、graph load/close/list 与 graph/node/
-  dependency-tree inspection
-- 接受文档定义的 typed graph reload/save/clear、node YAML、node-list、cache、dirty
-  lifecycle、ROI、timing、last-IO 与 last-error request，并把每个 request 路由到恰好一次匹配的
-  Host call
-- 拥有 bounded polling compute job，并把成功的 nonempty named-Value result materialize 为带
-  stable delivery lease 的 protected archive metadata
-- 通过匹配的 Host observation API 直接路由 bounded destructive compute-event drain 与
-  non-destructive execution trace page
-- 强制 per-user directory/socket permission 与安全 live/stale handling
-- 通过 self-pipe 转换 SIGINT/SIGTERM，并执行 deterministic worker、session、Host 与 socket
-  cleanup
-- 保持 foreground-only，不提供 protocol shutdown method、pid file、TCP listener 或 daemonizing
-  fork
-
-它不应重复 graph 或 compute 逻辑。所有 graph-state operation 仍通过进程内前端使用的同一个 host 接口流转。
-
-推荐运行时图：
-
-GUI branch 是可用的 future consumer shape。虚线 CLI branch 仅表示方向：version 2 未实现
-`graph_cli --connect`，当前 CLI construction 仍为 embedded。
-
-```mermaid
-graph TD
-    gui["future GUI frontend"] --> ipc_client["photospider_ipc_client"]
-    cli_remote["future graph_cli --connect（不可用）"] -.-> ipc_client
-    cli_local["graph_cli local mode"] --> host_adapter["in-process host adapter"]
-    ipc_client --> socket["local IPC transport"]
-    socket --> daemon["photospiderd"]
-    daemon --> host_adapter
-    host_adapter --> interaction["Photospider host interface"]
-    interaction --> kernel["Kernel"]
-    kernel --> runtime["GraphRuntime"]
-    runtime --> graph_state["GraphStateExecutor"]
-    kernel --> compute["ComputeService"]
+```text
+PhotospiderDaemon::client -> Photospider::operation_runtime + Threads
+photospiderd -> installed Photospider::photospider + private daemon targets
 ```
 
-关键 seam 是 host interface，而不是 transport。如果 in-process adapter 和 IPC adapter 都满足同一个前端接口，
-前端即可选择本地嵌入或 daemon 模式，而不用学习两套不同的 graph/compute 语义。
-
-## IPC 协议方向
-
-精确维护的 version 2 wire、typed client、opaque-session、socket 与 shutdown contract 位于
-`IPC-Protocol-v2.zh.md`；本节把已实现 slice 放进更长期 migration direction。
-
-已实现的 version 2 transport：
-
-- macOS/Linux 使用 Unix domain socket。
-- macOS/Linux 之外 IPC disabled；named pipe 保留为后续 Windows 工作。
-- 不实现 TCP listener 或 remote/multi-user access mode；这是同用户本地 sidecar，而不是通用
-  service endpoint。
-- Socket path 按用户隔离，优先使用合法 `$XDG_RUNTIME_DIR`，否则使用
-  `/tmp/photospider-<uid>`。
-- Daemon-created directory 为 `0700`；bind 在 umask `0177` 下直接以精确 `0600` 创建
-  socket。
-- 持久 mode-`0600` `${socket}.lock` 会在不跟随 symlink 的前提下打开，并从 stale-path 检查到
-  经过 identity 检查的 socket cleanup 全程持有 nonblocking exclusive `flock`；lock inode
-  永不删除。Listener ownership 只会按 Candidate capture、由原 accept queue 观察到的真实 framed
-  pathname self-connect、最终 fixed-dirfd revalidation、无分配 cleanup activation 的顺序推进。
-  Proof 期间的 connect/write/accept/prefix classification 共享单一可取消绝对 deadline；backlog
-  不保留 proof slot。Non-probe client 保持有界，并且只在 router runtime 启动后进入普通
-  admission。保存的 scalar parent identity 会使稳定 rename/recreation fail closed，Active cleanup
-  会先 unlink 再关闭 listener。
-  Portable POSIX 无法使最终 pathname revalidation 与 unlink 对 same-uid writer 保持原子性；
-  权威边界见 `IPC-Protocol-v2.zh.md`。
-
-已实现的 version 2 协议：
-
-- 使用 four-byte big-endian bounded length，随后是 UTF-8 JSON object text。
-- 每个 request 都有 required integer `protocol_version`、nonempty bounded id、method name 与
-  params object；duplicate key 会被拒绝。
-- 每个 response 使用同一个 id，返回 result object 或 error object。
-- 请求/响应方法稳定后，再添加事件流 notification。
-
-不建议第一版使用 newline-delimited JSON，因为日志、多行诊断和未来二进制元数据会让 frame 解析变得含糊。
-除非项目明确接受生成代码、更大的依赖面和更复杂的插件/构建故事，否则第一步不建议使用 gRPC。
-
-Method group 与当前 wire availability：
-
-| Group | 示例方法 | 说明 |
-| --- | --- | --- |
-| daemon | `daemon.ping`, `daemon.version` | 已实现，且不获取 Host lock。`daemon.version.methods` 返回精确排序的 60-method inventory；installed typed Client 为每个 advertised method 提供 owned call，且没有 raw-JSON call。 |
-| graph | `graph.load`, `graph.close`, `graph.list`, `graph.reload`, `graph.save`, `graph.clear`, `graph.node_yaml.get`, `graph.node_yaml.set` | 已通过 Host 实现。Status-only mutation 使用 `result:{}`；清空 model state 后保留 opaque session mapping。 |
-| inspect | `inspect.graph`, `inspect.node`, `inspect.dependency_tree`, `inspect.node_ids`, `inspect.ending_nodes`, `inspect.roi_forward`, `inspect.roi_backward`, `inspect.dirty_region`, `inspect.compute_planning`, `inspect.recent_compute_planning`, `inspect.traversal_orders`, `inspect.traversal_details`, `inspect.trees_containing_node` | 已通过 copied Host value 实现。Full-value collection 使用 stable bounded cursor page；node/ROI/dirty/current-planning value 保持 indivisible direct result。Host order 与 duplicate 均保留。 |
-| dirty | `dirty.begin`, `dirty.update`, `dirty.end` | 已通过一次匹配的 Host lifecycle mutation 实现，并返回 copied dirty-region snapshot；完整 compact response size 会在 result-DOM 分配前完成 preflight。 |
-| cache | `cache.clear_all`, `cache.clear_drive`, `cache.clear_memory`, `cache.cache_all_nodes`, `cache.free_transient`, `cache.synchronize_disk` | 已作为 status-only Host call 实现；result 不包含 backend cache handle 或 path。 |
-| compute | `compute.submit`, `compute.status`, `compute.result`, `compute.release`, `compute.timing`, `compute.last_io_time`, `compute.last_error` | Polling job 与 diagnostic 已路由。Submit/status/result 使用 stable `{compute_id,session_id,state,cancellable,status,output}` value；state 精确为 `queued`、`running`、`succeeded` 与 `failed`，每个 job 都报告 `cancellable:false`。Submit、status、status-mode result、empty-Values result 与 failed result 的 `output` 保持 null。Terminal nonempty Values result 会重新验证 protected named-Value archive、刷新一个 stable 60-second delivery lease，并返回规定的 metadata object。Terminal release 原子返回 `{compute_id,released:true}`，接受 optional exact `delivery_id`，并且在 normal job removal 后仍能释放 matching orphaned lease。Timing 会对 aggregate compact response size 做 preflight；last error 是 nested diagnostic data。 |
-| policy | `policy.types`、`policy.description`、`policy.scan`、`policy.load`、`policy.loaded_plugins`、`policy.configure_defaults`、`policy.info`、`policy.replace` | 进程级纯 C type discovery/loading 与 Interactive/Throughput binding。Client 会聚合 stable type/plugin page，并验证复制的 binding/fault snapshot；Client 断开不会 retire process-owned DSO state。 |
-| execution | `execution.types`、`execution.description`、`execution.configure_defaults`、`execution.info`、`execution.replace`、`execution.trace` | 封闭词汇的私有 route control。Default 接受 `[0,8]` 中的 `worker_count`；info/replacement 以 session 为作用域，并与同 Graph compute/close 串行化。Trace 保持 bounded、non-destructive；不会有 route plugin 或物理 owner 跨过 IPC。 |
-| plugins | `plugins.load_report`、`plugins.unload_all`、`plugins.seed_builtins`、`plugins.ops_sources`、`plugins.ops_combined_keys`、`plugins.ops_combined_sources` | Operation-plugin control 只通过匹配 Host call 实现，并已在精确 60-method inventory 中公布。Installed typed Client 暴露全部 route、解码 exact report，并聚合按 key 排序的 stable view；Client 断开不会 unload 成功的 process-owned DSO。 |
-| events | `events.drain` | Bounded destructive event drain 已通过 Host 路由；installed typed Client 将其暴露为一次严格验证且不重试的 Host event batch。 |
-
-Named-Value archive 规则：
-
-- Value payload byte 不进入 JSON。
-- Private OutputStore 会把每份 validated canonical named-Value archive materialize 为一个 exact
-  mode-`0600` artifact，存放在 same-owner mode-`0700`
-  `<socket>.outputs/instance-<server_instance_id>` directory 下。Publication 受 quota 限制且
-  atomic；live access 与 cleanup 会在不跟随 symlink 的前提下重新验证 filesystem identity。
-- Private compute registry 保留 move-only OutputStore ownership；optional lease-aware release、
-  eviction、TTL expiry 或 shutdown 时，其 exact-once cleanup 会在 registry mutex 外执行。
-  每次 Values result 成功后，一个 stable delivery id 最多保护一个会被刷新为 60 秒的 lease。
-- Submit/status、status-mode、empty-Values 或 failed result 的 stable nullable `output` field
-  保持 null。Terminal nonempty Values result 只返回 `output_id`、`delivery_id`、protected
-  absolute archive path、`byte_size`、`digest_sha256`、`archive_version`、`value_count`、
-  filesystem device 与 inode。Registry 的 opaque reference 只会作为该规范化 `output_id`
-  出现；JSON 中不会出现额外 `output_reference` field、backend handle、payload byte、backend
-  cache path、image-library object 或 caller-selected result path。
-- `compute.release` 会在 mutation 前验证 optional stable delivery id。Matching id 会一起释放
-  job ownership 与 lease；如果 normal job release、terminal eviction 或 job TTL 已经删除 record，
-  同一 `(compute_id, delivery_id)` 仍可释放幸存的 orphan lease。
-
-Collection snapshot 规则：
-
-- Router 拥有一个 private type-erased `CollectionSnapshotRegistry`；它不新增 Host page API、
-  public ABI type、独立 page route 或 cursor release method。Runtime start 会启用 registry
-  admission，shutdown 开始时停止 admission，final shutdown 会清空其 record 与 reservation。
-- Private admission API 会预留一个 slot 与 64 MiB。Production 最多保留 64 records/256 MiB。
-  Publication 接受由 caller 测量且不超过 262,144 recursive public entries/64 MiB 的 value，把
-  multi-page value move 进 stable storage，并把 worst-case reservation 换成精确 measured byte。
-  Recursive entry 包含 outer vector/map row、node parameter map、存在的 spatial matrix、
-  dependency root/entry 与 nested node、traversal branch vector，以及 planning sample/dependency
-  vector；scalar object member 不计数。Registry 会独立保留真实 top-level row count，并拒绝少报的
-  recursive count；被拒绝的 publication 不产生 cursor 或 retained copy。
-- 唯一一次 Host call 返回后，dependency 与 traversal value 会在 shared-header/root copy 或
-  map-to-vector allocation 前完成 recursive pre-scan。Dependency byte accounting 会以精确 measured
-  entries array 替换 header 的 empty `entries: []` token，因此该 array 只计量一次。
-- 首个 request 使用 optional `limit`；continuation 会调用同一 method，携带 frozen typed
-  parameter，以及 `cursor`、精确 next `offset` 和 `limit`。Result 保留其 collection field，并新增
-  `offset`/`has_more`/nullable `cursor`。32-hex cursor 会冻结精确
-  method/session/original-parameter identity。Continuation 只使用 retained value，无需
-  live-session lookup，在 graph close 后仍可读取，不刷新 15-minute TTL，final page 会原子释放
-  record。
-- 逐 row 测量会计算并冻结 dynamic page ceiling，保证每个连续 page 都能装入 16 MiB frame；
-  计算包含合法 id 的最坏 escaping 与 page metadata。单个 indivisible oversize row 会在 cursor
-  publication 前被拒绝；能够装入的小 value 保持完整 single page。
-- Binding/type/offset mismatch 与 unknown well-formed cursor 会返回 private `CursorNotFound`，且
-  不会推进 retained record；malformed cursor/page arithmetic 会返回 private `InvalidParams`，且
-  不改变 record。TTL expiry 会删除 record 并释放其 measured quota。Injected limit、clock 与 id
-  支持 deterministic race test。Graph listing、node list、graph/tree inspection、traversal branch、
-  tree membership 与 recent planning history 会 reserve 并 page 这些 record。
-
-错误规则：
-
-- `OperationStatus` 与 `OperationErrorDomain` 是 embedded/IPC Host 唯一的 public status
-  vocabulary。Canonical success 使用 domain `none`、signed code zero 与空 name/message。
-- Recoverable failure 会精确保留 `transport`、`protocol`、`graph` 或 `daemon` 之一，并携带一个
-  signed code 与 stable name。当前 Graph code 使用显式 `GraphErrc` 1..9 mapping；transport
-  绝不会被改写为 Graph IO。
-- Diagnostic `message` 只提供 bounded human-readable context。Client behavior 必须按
-  domain/code/name 分支，绝不解析该文本。
-
-并发规则：
-
-- Daemon 最多接受 32 个 tracked client worker。
-- Host 不承诺 thread safety，因此每个 Host call 都使用一个 daemon-owned mutex；socket IO 绝不
-  持有它。
-- Ping/version 与 protocol validation 不获取 Host mutex。
-- Compute job 报告 literal `cancellable:false`，只会经过 `queued`、`running`、`succeeded` 或
-  `failed`，通过唯一 joined FIFO worker 执行，并且精确调用一次匹配的 synchronous Host
-  compute call。
-- Session close 会先把 row 标记为 closing，再等待 admitted Host call 与 queued/running job；只有
-  此后才可以获取 Host mutex。
-- Process shutdown 会停止 session/compute admission 与新 delivery lease，drain 并 join compute，
-  释放 terminal job ownership，等待 active lease 被释放或过期，最后才关闭 Host session。
+本 kernel 仓库不包含 daemon option、source/header subtree、process shell、package
+component/export、当前 protocol 文档或 daemon CTest/CI inventory。`graph_cli` 保持 embedded，
+不会自动连接。Protocol v3、wire cancellation/shutdown、remote 或 multi-user service profile，
+以及 typed compiler compatibility 都是独立的后续工作。
 
 ## 迁移状态与剩余顺序
 
-Frontend boundary、物理布局、daemon、typed Client、完整 IPC Host 与 extension SDK 的第 1-8 步都已
-在当前仓库落地，且没有改变 `ps::Host` 作为唯一 public seam 的地位。
+Frontend boundary、物理布局、extension SDK 与 daemon 所有权迁移均已完成，且没有改变
+`ps::Host` 作为 kernel 唯一 public frontend seam 的地位。
 
 Issue #69–#74 建立 Host-owned multi-Run execution、完整 resource vector、有界 ready store/fairness、
 exact-revision staging、cooperative cancellation、latest-wins supersession 与 realtime `RunGroup`
@@ -720,7 +523,7 @@ scratch 字节。权威的无环依赖表位于
      一个 translation unit。一个 object target 仅通过 public include root 以 C++17 编译所有非
      OpenCV 头；另一个 object target 仅使用声明的 `Photospider::operation_opencv` usage
      requirements 编译 `plugin/opencv_adapter.hpp`。聚合 target 同时依赖两者，因此可选 OpenCV
-     依赖不会掩盖 core、Host、IPC、operation-SDK 或 policy 头的意外耦合。
+     依赖不会掩盖 core、Host、operation-SDK 或 policy 头的意外耦合。
    - `include/photospider/public_boundary.hpp` 仍是可安装 include root 的 marker 头。
      稳定值契约位于 `include/photospider/core/` 下。
 2. **已完成：** 引入 `include/photospider/*`。
@@ -747,39 +550,19 @@ scratch 字节。权威的无环依赖表位于
    - 物理迁移保持现有 target、ABI 与 test 身份。原先单体的 execution-service 与
      worker-manager 实现现在由按职责划分的翻译单元编译，并共享源码私有状态声明；没有遗留
      forwarding header 或重复旧路径。
-6. **已完成 daemon slice：** `apps/photospiderd/` 现在拥有 foreground process、self-pipe
-   signal、protected socket、bounded worker 与 deterministic cleanup。
-7. **已完成 task 4.4 IPC Host adapter、制品与 package slice：** Installable typed
-   client 为全部 60 个 method
-   提供 owned call，严格验证 common 与 method-specific result shape，对每个 status 或 mutation
-   RPC 只尝试一次，聚合全部 private stable cursor page，并保留 output/delivery lease metadata。
-   `create_ipc_host(socket_path)` 通过为普通调用创建新的 typed connection，并为 async compute
-   使用会等待结束的 worker，实现当前全部 58 个非析构 Host virtual。Polling 立即开始，随后按
-   10/20/40/80/160/320/500 ms 等待，并以 500 ms 为上限；同步调用没有总超时。析构会发布
-   stop、唤醒 waiter、shutdown 活动 worker descriptor、把未完成 future 解析为 Transport code 5
-   `client_stopped`，再等待每个 worker 结束；不会重新提交、关闭 session、卸载 plugin 或回退到
-   embedded execution。Values consumer 会在 delivery lease 有效期间以不跟随符号链接的方式打开
-   制品，校验同用户 regular type、精确 mode、单链接、device/inode/size 与 archive digest，再创建
-   临时 read-only mapping，detach/decode 精确 archive，并恰好执行一次 unmap/close，随后重建全新
-   Value 并执行匹配的 lease-aware release。Installed package 门禁会编译每个 public header，再使用
-   `COMPONENTS ipc_client` 且禁用 backend package discovery，独立 configure 一个 IPC-only
-   external consumer。该 consumer 覆盖每个 Client lifecycle symbol、精确且唯一的全部 60 个
-   typed Client call、`create_ipc_host` 与全部 58 个 Host virtual 引用；export 只允许
-   `Threads::Threads`。Installed IPC-header gate 正向只允许当前 C++ standard-library include set
-   与已安装的 `photospider/` public include，并明确拒绝 raw JSON、socket address/descriptor、
-   file identity、file mapping 与 backend declaration。这是精确的 tested boundary，不声称穷举
-   POSIX vocabulary。Public Host/CLI/IPC cancellation 仍不可用；当前 private backend
-   cancellation source 与 cooperative Run control 不会进入该 installed surface。
-8. **已完成 extension boundary 工作：** Issue #38 先收紧 operation SDK，Issue #75 用 policy
+6. **已完成 daemon 所有权迁移：** Issue #242 冻结精确 full-stack commit，将 protocol v2 连同
+   历史提取到独立 daemon 仓库，通过 old-old/old-new/new-old/new-new compatibility gate，并从
+   kernel 树移除 daemon target、header、source、test 与规范性 protocol docs。Kernel 只保留
+   installed Host package。
+7. **已完成 extension boundary 工作：** Issue #38 先收紧 operation SDK，Issue #75 用 policy
    SDK 替代 scheduler SDK，Issue #132 再以 pure-C ABI v1 替换临时 operation surface。
    - Operation plugin 使用精确 root/suite/semantic record 加 Host-owned sink 与 grant；可选 C++
      helper 只生成同一 C ABI。Policy plugin 使用精确自然布局的 C ABI v1 record，以及
      metadata/create/select/destroy callback，不接收执行资源。
    - 八个旧 header 和五个旧 internal helper target 名均已移除，没有 compatibility wrapper 或 alias。
      Installed external consumer 会从 package SDK 构建两种 DSO，并通过 embedded Host 实际执行它们。
-   - 长期 integration coverage 还会通过仓库内 embedded Host、真实 `photospiderd` IPC 进程与真实
-     `graph_cli` 进程分别运行一条 external operation、external policy 与 compute 链路。
-     Operation 产生的 ROI 与复制的 policy binding/generation 会证明实际调用与配置，而不只是发现。
+   - 持久 kernel integration coverage 会通过 embedded Host 与 `graph_cli` 运行 installed extension
+     DSO。外部 daemon 仓库拥有对应的真实进程 IPC coverage。
 9. **已完成 DI-4 外部 Value 边界：** Issue #131 删除最终 ImageBuffer/DataType/Device 与
    side-effecting `io:save` surface；Host、cache、IPC、worker protocol v3、durable recovery、
    OpenCV/OpenEXR codec 与 CLI save 现在保留精确 Value 或 canonical portable archive。Identity
@@ -799,15 +582,10 @@ scratch 字节。权威的无环依赖表位于
 - 本地验证范围应匹配改动边界：实现期间运行 scoped static check、受影响 build target 与
   focused regression。本地 full build 或完整 CTest/JUnit 不是常设要求。GitHub Actions 是远程
   integration 环境；不要把 Docker 或本地 `linux/amd64` 模拟作为常规 preflight。
-- Daemon boundary 改动时构建 `photospider_ipc_client`、
-  `photospider_ipc_server_internal`、`photospiderd` 与 focused IPC test；`graph_cli` 保持
-  embedded/local regression target。
-- 将 embedded Host、真实 daemon IPC 与 `GraphCliPluginComputeSmoke` 路径作为长期 runtime test
-  保留。每条路径都会加载 lifecycle 纯 C operation ABI v1 DSO 与纯 C policy DSO，把两个 policy class 绑定
-  到 external type，选择私有 CPU route，并执行 parallel compute。各路径会检查结果的 `11x7`
-  absolute ROI 与复制的 policy/route state。CLI smoke 还会要求输出中的 binding generation、active
-  execution route 与 compute 后 ROI。其 config、graph、cache、trace、
-  FIFO 与 history home 都是 build tree 中的临时内容，不属于 overlay 或 issue-specific evidence。
+- Daemon boundary 改动应在外部 daemon 仓库中针对 installed kernel package 构建并测试；
+  `graph_cli` 在本仓保持 embedded/local regression target。
+- 将 embedded Host 与 `GraphCliPluginComputeSmoke` 路径作为本仓持久的 kernel runtime test；
+  外部真实 daemon coverage 不在本仓注册。
 - 对静态 package 工作，package consumer smoke test 应保留在 CTest 中，因为它执行真实 producer
   build/install、外部 find-package、public-header compile/link/run、安装后的 export/dependency、
   平台与 multi-configuration 边界。它还会仅用 installed SDK target 构建 operation/policy DSO，
@@ -852,25 +630,13 @@ scratch 字节。权威的无环依赖表位于
   并要求每个 mutation 都通过正常 scanner/compare 路径失败。
   应使用配置后的 `compile_commands.json` 显式运行该工具，并把临时 observation 写到仓库外；
   不得将它注册到 CTest/CI，也不得创建 `tests/results` artifact。
-- 维护 real-process IPC integration test：启动 `photospiderd`，通过 public typed client 与
-  malformed raw frame 验证行为。
-- 将 non-installed `ipc_output_fixture_daemon` 只作为该 integration test 的 dependency，而不为
-  它单独注册 CTest entry。它会在独立进程中使用 deterministic test Host 运行真实 internal
-  Server/router/OutputStore/Unix-socket/worker stack，从而在不改变 `photospiderd` startup、也不
-  在 fixture 中 seed plugin 的前提下，覆盖 protected named-Value artifact archive delivery、
-  bounded observation multiclient behavior 与 restart cleanup。Real product daemon test 另行通过 Host-only plugin route
-  加载仓库 lifecycle operation DSO，并检查 cross-client visibility。它的
-  fixture-only CLI 接受 protected fixed-width monotonic-clock control file，并通过 private internal
-  Server overload 注入较小的既有 snapshot/job/output limit、clock 与 id generator；这些 control
-  都不属于 `photospiderd`、其 environment 或 wire。
-- 对 daemon lifecycle 变更，覆盖 startup、graph load、compute 或 inspect、client disconnect、
-  signal shutdown 和 socket cleanup 行为。
+- 真实进程 daemon lifecycle、protocol、artifact、reconnect 与 signal-drain coverage 只在外部
+  daemon 仓库维护。
 
 ## 待决问题
 
-以下决策属于 version 2 之外的未来工作；当前 `graph_cli` construction 始终为 embedded，不会
-探测或自动连接 daemon：
-- `graph_cli` 是否永远默认本地进程内模式，还是在存在 daemon socket 时自动连接 `photospiderd`。
+未来的 `graph_cli` remote mode 必须显式消费外部 daemon package；当前 CLI construction 保持
+embedded，不执行 socket discovery 或自动连接。
 
 ## 参考仓库
 

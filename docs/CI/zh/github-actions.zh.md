@@ -2,7 +2,7 @@
 
 Photospider 有意只保留两个 GitHub Actions workflow：
 
-- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次由 ccache 加速的 producer 构建、八个独立 build-smoke runner 和三个并行 CTest label 分片。
+- `.github/workflows/ci.yml` 处理日常 push，包含一次 healthcheck、一次由 ccache 加速的 producer 构建、六个独立 build-smoke runner 和三个并行 CTest label 分片。
 - `.github/workflows/build-ci-image.yml` 在 `main` 的 `Dockerfile.ci` 发生变更或维护者手工触发时发布 Linux CI 镜像。
 
 仓库不再设置单独的 pull-request-target、sanitizer、scheduler-log、routing、evidence、provenance 或 aggregator workflow。本仓库按个人开发项目维护，因此 CI 围绕真正有用的构建与测试信号安排，而不是复刻 enterprise 审批或自授权证明机制。
@@ -12,7 +12,7 @@ Photospider 有意只保留两个 GitHub Actions workflow：
 `.github/workflows/ci.yml` 在向 `main` 和 `CI/**` push 时运行。每个 job 都使用 `ghcr.io/<owner>/<repo>/photospider-ci:latest`、递归 checkout submodule，并且只拥有仓库内容与 package 的读取权限。Job 形成一条带并行测试叶子的依赖链：
 
 ```text
-healthcheck -> build -> build-smoke（8 个独立 matrix job）
+healthcheck -> build -> build-smoke（6 个独立 matrix job）
                      -> unit
                      -> integration
                      -> verification
@@ -71,13 +71,11 @@ runtime，并只提供给三个 primary-label job。Packager 会把 compiler-cac
 
 ### 独立 build-smoke runner
 
-默认 CI 配置中的八个 build smoke 各自对应一个固定 matrix entry：
+默认 CI 配置中的六个 build smoke 各自对应一个固定 matrix entry：
 
 - `DependencyDisabledInstallSmoke`；
 - `OpenExrDeepProviderOptionOffSmoke`；
 - `StaticProductConsumerSmoke`；
-- `PhotospiderdInstallLayoutSmoke`；
-- `IpcDisabledInstallSmoke`；
 - `ImageArtifactCodecDependencyDisabledBuild`；
 - `OpenCvOperationProviderDisabledBuild`；
 - `PublicHeaderSelfContainment`。
@@ -88,9 +86,9 @@ Matrix 使用 `fail-fast: false`，因此 producer 成功后，每个 entry 都�
 statistics，并保持恢复的 cache 为 read-only，因此一个 consumer 不会改变其他 consumer 使用的
 producer snapshot。Artifact 交付本身是必需的，但单次 compiler-cache lookup 可以 miss 并正常编译。
 
-随后八个 runner 都以 producer 的 build type、测试选项和显式 C/C++ ccache launcher，执行同一条外层
+随后六个 runner 都以 producer 的 build type、测试选项和显式 C/C++ ccache launcher，执行同一条外层
 `cmake --fresh -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build/ci" -G Ninja`。它们会查询
-CTest JSON object model，并在选择自身 entry 前要求精确的八项 `build-smoke` inventory。测试本身可以
+CTest JSON object model，并在选择自身 entry 前要求精确的六项 `build-smoke` inventory。测试本身可以
 构建外层 tree，也可以创建更深层 build/install tree；编译 key 匹配时，两者都会使用 read-only
 producer cache。每个 runner 都会在 CTest 后打印自己的 ccache statistics。
 
@@ -98,12 +96,16 @@ Smoke job 绝不下载 `ctest-runtime`，也不会收到完整 producer tree。C
 `--tests-regex`、精确 `--label-regex '^build-smoke$'` 与 `--no-tests=error`，因此测试被重命名、缺失或
 label 错误时，不会把空选择误判为成功。
 
-八个 job 会与 `unit`、`integration` 和 `verification` label job 并行运行。它们在各自 runner 中产生的
+六个 job 会与 `unit`、`integration` 和 `verification` label job 并行运行。它们在各自 runner 中产生的
 外层及嵌套 build/install 输出不会写回 read-only handoff 或跨 run Actions Cache，也绝不会进入
 `ctest-runtime`。每个 job 把 report 写到
 `CI-results/build-smoke/<matrix-artifact>.junit.xml`；一个 `always()` step 会把它
 上传为唯一的 `ctest-junit-build-smoke-<matrix-artifact>` artifact，保留七天，report 不存在时只告警。
 新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、固定 workflow matrix 与本清单。
+
+Daemon package、IPC protocol、installed layout/RPATH 与 interoperability test 在外部
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon) 仓库运行。这个 kernel
+workflow 不配置 daemon ownership，也不重复这些 test。
 
 ### 轻量 CTest runtime
 

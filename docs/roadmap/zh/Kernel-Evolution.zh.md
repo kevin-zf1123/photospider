@@ -1251,8 +1251,8 @@ release。Runner 不会因此获得 cancellation、device 或 public API authori
 ## 服务器与插件隔离
 
 [ADR 0011](../../adr/zh/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md)
-冻结了该目标。它是目标契约，不能证明完整的多进程 server/isolation runtime 已存在。
-`photospiderd` 继续作为 IPC protocol v2 所述的同用户本地 workstation sidecar。其
+冻结了该目标。它是目标契约，不能证明完整的多进程 server/isolation runtime 已存在。外部
+daemon 仓库的 `photospiderd` 继续作为 IPC protocol v2 所述的同用户本地 workstation sidecar。其
 `0700`/`0600` 路径、session、opaque id、process-global plugin control 与私有 `OutputStore`
 都不是 network authentication、tenant authority、durable Job state 或 durable artifact
 authority。
