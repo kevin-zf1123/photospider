@@ -32,7 +32,7 @@ protected-path 或 provenance 证明；它绝不使用通配符。
 
 1. 对 exact checked-out commit 运行 `git diff --check`。
 2. 显式检查 `ccache` executable 与版本，使未发布或陈旧的 CI 镜像在 producer 前失败。
-3. Configure `kernel-dev` 并构建 operation runtime target。
+3. Configure 并构建完整 dependency-neutral `kernel-dev` profile，然后运行其长期 tests。
 4. Configure 并构建 `op-dev`。
 5. Configure `legacy-full` 并构建 `public_header_self_containment`。
 
@@ -179,6 +179,7 @@ diagnostic，绝不是正确性门禁。
 ```bash
 cmake --preset kernel-dev
 cmake --build --preset kernel-dev --parallel 2
+ctest --preset kernel-dev --output-on-failure --parallel 2
 cmake --preset op-dev
 cmake --build --preset op-dev --parallel 2
 cmake --preset legacy-full

@@ -69,12 +69,8 @@
   "buildPresets": [
     {
       "name": "kernel-dev",
-      "displayName": "Build dependency-neutral kernel products",
-      "configurePreset": "kernel-dev",
-      "targets": [
-        "photospider_kernel",
-        "photospider"
-      ]
+      "displayName": "Build dependency-neutral kernel and tests",
+      "configurePreset": "kernel-dev"
     },
     {
       "name": "op-dev",

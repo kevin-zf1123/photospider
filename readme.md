@@ -89,6 +89,7 @@ frontend.
 ```bash
 cmake --preset kernel-dev
 cmake --build --preset kernel-dev -j
+ctest --preset kernel-dev --output-on-failure
 
 cmake --preset op-dev
 cmake --build --preset op-dev -j

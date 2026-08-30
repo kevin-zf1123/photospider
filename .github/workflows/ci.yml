@@ -54,7 +54,9 @@ jobs:
         run: |
           cmake --preset kernel-dev
           cmake --build --preset kernel-dev \
-            --target photospider_operation_runtime \
+            --parallel "${CI_PARALLEL_LEVEL}"
+          ctest --preset kernel-dev \
+            --output-on-failure \
             --parallel "${CI_PARALLEL_LEVEL}"
           cmake --preset op-dev
           cmake --build --preset op-dev \

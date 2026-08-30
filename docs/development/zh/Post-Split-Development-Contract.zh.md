@@ -57,6 +57,7 @@ Preset 文件因为使用 schema version 3，声明最低 CMake 版本为 3.21�
 ```bash
 cmake --preset kernel-dev
 cmake --build --preset kernel-dev
+ctest --preset kernel-dev --output-on-failure
 
 cmake --preset op-dev
 cmake --build --preset op-dev

@@ -44,7 +44,8 @@ The healthcheck deliberately performs only these inexpensive checks:
 1. `git diff --check` for the exact checked-out commit.
 2. An explicit `ccache` executable and version check, so an unpublished or
    stale CI image fails before the producer.
-3. Configure `kernel-dev` and build its operation runtime target.
+3. Configure and build the complete dependency-neutral `kernel-dev` profile,
+   then run its maintained tests.
 4. Configure and build `op-dev`.
 5. Configure `legacy-full` and build `public_header_self_containment`.
 
@@ -270,6 +271,7 @@ before the final legacy-full pass:
 ```bash
 cmake --preset kernel-dev
 cmake --build --preset kernel-dev --parallel 2
+ctest --preset kernel-dev --output-on-failure --parallel 2
 cmake --preset op-dev
 cmake --build --preset op-dev --parallel 2
 cmake --preset legacy-full
