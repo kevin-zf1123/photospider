@@ -107,7 +107,15 @@
     {
       "name": "legacy-full",
       "displayName": "Build complete historical profile",
-      "configurePreset": "legacy-full"
+      "configurePreset": "legacy-full",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      }
     },
     {
       "name": "legacy-full-portable",
@@ -128,6 +136,14 @@
       "name": "legacy-full",
       "displayName": "Test complete historical profile",
       "configurePreset": "legacy-full",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      },
       "output": {
         "outputOnFailure": true
       }
