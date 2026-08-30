@@ -46,6 +46,10 @@ versions.
 ## Kernel configure presets
 
 Run `cmake --list-presets` to inspect the maintained presets.
+The preset file declares CMake 3.21 as its minimum because it uses preset
+schema version 3. This does not raise the project-wide CMake 3.16 minimum for
+direct `cmake -S . -B <build>` configuration; it is a requirement only for the
+maintained preset frontend.
 
 | Preset | Intended work | Default closure |
 | --- | --- | --- |

@@ -38,7 +38,8 @@ protected-path 或 provenance 证明；它绝不使用通配符。
 
 这些 path 由 `CMakePresets.json` 持续维护。`kernel-dev`/`op-dev` 默认关闭 Job、CLI、optional
 providers/plugins、OpenEXR 和 fuzzers；`legacy-full` 显式开启历史 Job/product closure。完整表格见
-[拆仓后开发契约](../../development/zh/Post-Split-Development-Contract.zh.md)。
+[拆仓后开发契约](../../development/zh/Post-Split-Development-Contract.zh.md)。Preset frontend
+要求 CMake 3.21；直接配置仍保留项目级 CMake 3.16 最低版本。
 
 它不会对变更路径分类、推断 docs-only 运行、比较 protected path、检查其他 ref、构建完整产品，也不会决定后续 job 是否存在。
 

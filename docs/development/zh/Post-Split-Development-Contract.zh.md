@@ -39,6 +39,9 @@ fail closed。Package match 不代表 wire match，wire match 也不使 compiler
 ## Kernel configure presets
 
 运行 `cmake --list-presets` 查看持续维护的 presets。
+Preset 文件因为使用 schema version 3，声明最低 CMake 版本为 3.21。这不会提高通过
+`cmake -S . -B <build>` 直接配置时的项目级 CMake 3.16 最低版本；CMake 3.21 只适用于
+持续维护的 preset frontend。
 
 | Preset | 用途 | 默认 closure |
 | --- | --- | --- |

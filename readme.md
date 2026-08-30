@@ -81,6 +81,11 @@ configuration with a targeted diagnostic.
 
 The repository maintains three post-split CMake presets:
 
+`CMakePresets.json` requires CMake 3.21 or newer. The direct `cmake -S . -B`
+configure path above remains supported with the project-wide CMake 3.16
+minimum; developers using the maintained presets need the newer preset
+frontend.
+
 ```bash
 cmake --preset kernel-dev
 cmake --build --preset kernel-dev -j

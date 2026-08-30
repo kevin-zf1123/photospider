@@ -52,7 +52,8 @@ These paths are maintained in `CMakePresets.json`. `kernel-dev` and `op-dev`
 default-disable Job, CLI, optional providers/plugins, OpenEXR, and fuzzers;
 `legacy-full` explicitly enables the historical Job/product closure. The
 [post-split development contract](../development/Post-Split-Development-Contract.md)
-owns the complete preset table.
+owns the complete preset table. The preset frontend requires CMake 3.21;
+direct configuration retains the project-wide CMake 3.16 minimum.
 
 It does not classify changed paths, infer docs-only runs, compare protected
 paths, inspect another ref, build the full product, or decide whether later
