@@ -55,7 +55,8 @@ maintained preset frontend.
 | --- | --- | --- |
 | `kernel-dev` | embedded kernel/runtime and maintained dependency-neutral tests | Job, CLI, optional providers/plugins, OpenEXR, and fuzzers off |
 | `op-dev` | operation runtime/SDK iteration | tests and optional large products off |
-| `legacy-full` | historical full developer/product validation | tests, CLI, OpenCV/YAML provider/plugin surface, and Job explicitly on |
+| `legacy-full` | historical full developer/product validation on Darwin/Linux | tests, CLI, OpenCV/YAML provider/plugin surface, and Job explicitly on |
+| `legacy-full-portable` | full portable validation on every host | the same portable test/CLI/provider/plugin surface, with unsupported Job off |
 
 The normal CMake default also leaves single-tenant Job `OFF`. The option,
 implementation, and maintained tests remain available when explicitly enabled.
@@ -74,6 +75,11 @@ cmake --build --preset op-dev
 cmake --preset legacy-full
 cmake --build --preset legacy-full
 ctest --preset legacy-full --output-on-failure
+
+# On non-Darwin/Linux hosts:
+cmake --preset legacy-full-portable
+cmake --build --preset legacy-full-portable
+ctest --preset legacy-full-portable --output-on-failure
 ```
 
 ## Kernel CI contract

@@ -603,11 +603,11 @@ product process configured to auto-reap `SIGCHLD` children.
 - The non-installed, non-exported
   `photospider_single_tenant_job_internal` and `photospider-worker` targets,
   protocol/manager unit coverage, process fixture/supervision integration
-  coverage, and Embedded product-path coverage exist by default only on Darwin
-  and Linux. The independent
-  `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate defaults off elsewhere, rejects an
-  explicit enable on unsupported systems, and CMake asserts the target
-  inventory in both enabled and disabled profiles.
+  coverage, and Embedded product-path coverage are available only when the
+  independent `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate is explicitly enabled
+  on Darwin or Linux. The gate defaults off on every system, rejects an explicit
+  enable on unsupported systems, and CMake asserts the target inventory in both
+  enabled and disabled profiles.
 - The external daemon and local IPC protocol v2 are unaffected by this kernel
   vertical and do not serialize these Job, quota, checkpoint, or
   durable-artifact contracts; private worker protocol v3 remains a distinct

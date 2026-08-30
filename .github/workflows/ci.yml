@@ -65,6 +65,10 @@ jobs:
           cmake --build --preset legacy-full \
             --target public_header_self_containment \
             --parallel "${CI_PARALLEL_LEVEL}"
+          cmake --preset legacy-full-portable
+          cmake --build --preset legacy-full-portable \
+            --target public_header_self_containment \
+            --parallel "${CI_PARALLEL_LEVEL}"
 
   build:
     needs: healthcheck

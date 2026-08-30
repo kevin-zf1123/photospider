@@ -79,7 +79,8 @@ configuration with a targeted diagnostic.
 
 ### Development presets
 
-The repository maintains three post-split CMake presets:
+The repository maintains three primary post-split CMake presets plus one
+portable fallback for hosts that cannot build the POSIX Job vertical:
 
 `CMakePresets.json` requires CMake 3.21 or newer. The direct `cmake -S . -B`
 configure path above remains supported with the project-wide CMake 3.16
@@ -96,11 +97,17 @@ cmake --build --preset op-dev -j
 
 cmake --preset legacy-full
 cmake --build --preset legacy-full -j
+
+# On non-Darwin/Linux hosts:
+cmake --preset legacy-full-portable
+cmake --build --preset legacy-full-portable -j
 ```
 
 `kernel-dev` and `op-dev` exclude Job, CLI, optional providers/plugins, and
-other unnecessary products. `legacy-full` explicitly enables the historical
-Job/CLI/provider/plugin closure. The
+other unnecessary products. On Darwin and Linux, `legacy-full` explicitly
+enables the historical Job/CLI/provider/plugin closure. The portable fallback
+retains the full portable CLI/provider/plugin/test closure but leaves the
+unsupported Job product off. The
 [post-split development contract](docs/development/Post-Split-Development-Contract.md)
 defines the exact option and CI boundary.
 

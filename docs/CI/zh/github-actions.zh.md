@@ -35,9 +35,12 @@ protected-path 或 provenance 证明；它绝不使用通配符。
 3. Configure 并构建完整 dependency-neutral `kernel-dev` profile，然后运行其长期 tests。
 4. Configure 并构建 `op-dev`。
 5. Configure `legacy-full` 并构建 `public_header_self_containment`。
+6. Configure `legacy-full-portable` 并构建同一个 public-header target。
 
 这些 path 由 `CMakePresets.json` 持续维护。`kernel-dev`/`op-dev` 默认关闭 Job、CLI、optional
-providers/plugins、OpenEXR 和 fuzzers；`legacy-full` 显式开启历史 Job/product closure。完整表格见
+providers/plugins、OpenEXR 和 fuzzers；`legacy-full` 在 Darwin/Linux 显式开启历史
+Job/product closure；`legacy-full-portable` 则在 Job 不受支持的 host 上保留完整 portable
+closure。完整表格见
 [拆仓后开发契约](../../development/zh/Post-Split-Development-Contract.zh.md)。Preset frontend
 要求 CMake 3.21；直接配置仍保留项目级 CMake 3.16 最低版本。
 
@@ -184,6 +187,9 @@ cmake --preset op-dev
 cmake --build --preset op-dev --parallel 2
 cmake --preset legacy-full
 cmake --build --preset legacy-full --parallel 2
+cmake --preset legacy-full-portable
+cmake --build --preset legacy-full-portable \
+  --target public_header_self_containment --parallel 2
 bash ci/scripts/package_ctest_runtime.sh \
   build/legacy-full CI-results/ctest-runtime.tar.gz
 tar -tzf CI-results/ctest-runtime.tar.gz

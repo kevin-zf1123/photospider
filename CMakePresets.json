@@ -52,9 +52,17 @@
     {
       "name": "legacy-full",
       "displayName": "Historical complete development profile",
-      "description": "Retain the pre-K0 OpenCV, YAML, CLI, provider, plugin, Job, and complete test configuration explicitly.",
+      "description": "Retain the pre-K0 OpenCV, YAML, CLI, provider, plugin, Job, and complete test configuration explicitly on supported POSIX hosts.",
       "inherits": "post-split-base",
       "binaryDir": "${sourceDir}/build/legacy-full",
+      "condition": {
+        "type": "inList",
+        "string": "${hostSystemName}",
+        "list": [
+          "Darwin",
+          "Linux"
+        ]
+      },
       "cacheVariables": {
         "BUILD_TESTING": "ON",
         "PHOTOSPIDER_ENABLE_OPENCV": "ON",
@@ -63,6 +71,22 @@
         "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
         "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
         "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB": "ON"
+      }
+    },
+    {
+      "name": "legacy-full-portable",
+      "displayName": "Portable complete development profile",
+      "description": "Retain every portable historical product and test while leaving the Darwin/Linux-only Job vertical disabled.",
+      "inherits": "post-split-base",
+      "binaryDir": "${sourceDir}/build/legacy-full-portable",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "PHOTOSPIDER_ENABLE_OPENCV": "ON",
+        "PHOTOSPIDER_ENABLE_YAML": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER": "ON",
+        "PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS": "ON",
+        "PHOTOSPIDER_BUILD_GRAPH_CLI": "ON",
+        "PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB": "OFF"
       }
     }
   ],
@@ -84,6 +108,11 @@
       "name": "legacy-full",
       "displayName": "Build complete historical profile",
       "configurePreset": "legacy-full"
+    },
+    {
+      "name": "legacy-full-portable",
+      "displayName": "Build portable complete profile",
+      "configurePreset": "legacy-full-portable"
     }
   ],
   "testPresets": [
@@ -99,6 +128,14 @@
       "name": "legacy-full",
       "displayName": "Test complete historical profile",
       "configurePreset": "legacy-full",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "legacy-full-portable",
+      "displayName": "Test portable complete profile",
+      "configurePreset": "legacy-full-portable",
       "output": {
         "outputOnFailure": true
       }

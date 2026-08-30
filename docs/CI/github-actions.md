@@ -48,10 +48,14 @@ The healthcheck deliberately performs only these inexpensive checks:
    then run its maintained tests.
 4. Configure and build `op-dev`.
 5. Configure `legacy-full` and build `public_header_self_containment`.
+6. Configure `legacy-full-portable` and build the same public-header target.
 
 These paths are maintained in `CMakePresets.json`. `kernel-dev` and `op-dev`
 default-disable Job, CLI, optional providers/plugins, OpenEXR, and fuzzers;
-`legacy-full` explicitly enables the historical Job/product closure. The
+`legacy-full` explicitly enables the historical Job/product closure on
+Darwin/Linux. `legacy-full-portable` validates the complete portable closure
+with Job disabled and remains usable on hosts where that POSIX product is
+unsupported. The
 [post-split development contract](../development/Post-Split-Development-Contract.md)
 owns the complete preset table. The preset frontend requires CMake 3.21;
 direct configuration retains the project-wide CMake 3.16 minimum.
@@ -276,6 +280,9 @@ cmake --preset op-dev
 cmake --build --preset op-dev --parallel 2
 cmake --preset legacy-full
 cmake --build --preset legacy-full --parallel 2
+cmake --preset legacy-full-portable
+cmake --build --preset legacy-full-portable \
+  --target public_header_self_containment --parallel 2
 bash ci/scripts/package_ctest_runtime.sh \
   build/legacy-full CI-results/ctest-runtime.tar.gz
 tar -tzf CI-results/ctest-runtime.tar.gz

@@ -47,7 +47,8 @@ Preset 文件因为使用 schema version 3，声明最低 CMake 版本为 3.21�
 | --- | --- | --- |
 | `kernel-dev` | embedded kernel/runtime 和长期 dependency-neutral tests | Job、CLI、optional providers/plugins、OpenEXR、fuzzers 关闭 |
 | `op-dev` | operation runtime/SDK 迭代 | tests 和 optional large products 关闭 |
-| `legacy-full` | 历史 full developer/product validation | tests、CLI、OpenCV/YAML provider/plugin surface、Job 显式开启 |
+| `legacy-full` | Darwin/Linux 上的历史 full developer/product validation | tests、CLI、OpenCV/YAML provider/plugin surface、Job 显式开启 |
+| `legacy-full-portable` | 所有 host 上的完整 portable validation | 保留同样的 portable test/CLI/provider/plugin surface，关闭不支持的 Job |
 
 普通 CMake 默认也把 single-tenant Job 设为 `OFF`。它的 option、implementation 与长期 tests
 仍可在显式启用时使用。本契约不创建 `heavy-evidence` architecture 或 placeholder option。
@@ -65,6 +66,11 @@ cmake --build --preset op-dev
 cmake --preset legacy-full
 cmake --build --preset legacy-full
 ctest --preset legacy-full --output-on-failure
+
+# 非 Darwin/Linux host 使用：
+cmake --preset legacy-full-portable
+cmake --build --preset legacy-full-portable
+ctest --preset legacy-full-portable --output-on-failure
 ```
 
 ## Kernel CI contract

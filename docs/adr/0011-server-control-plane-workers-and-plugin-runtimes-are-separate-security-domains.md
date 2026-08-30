@@ -52,9 +52,10 @@ bounded cancellation/shutdown. It retains the shared 128-configured-device
 admission/recovery maximum and the explicit Job-journal distinction between not
 published, published with durability unconfirmed, and confirmed committed. A
 published barrier failure retains visible truth and enters a monotonic control-
-plane fail-stop instead of attempting rollback. The profile defaults on only
-for Darwin and Linux and has no Job/worker target inventory on unsupported
-systems. It is not evidence of multi-tenant authorization, a separately
+plane fail-stop instead of attempting rollback. The profile defaults off and
+may be enabled explicitly only on Darwin and Linux; it has no Job/worker target
+inventory while disabled or on unsupported systems. It is not evidence of
+multi-tenant authorization, a separately
 deployed WorkerManager, authenticated network transport, standalone artifact
 data plane, syscall/device isolation, or untrusted-plugin isolation. Current
 behavior is defined by
