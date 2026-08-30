@@ -5,16 +5,28 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from cmake_build_smoke_support import (
+    cmake_cache_value,
+    producer_osx_architecture_arguments,
+)
 
 
-def run_checked(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def run_checked(
+    command: list[str],
+    cwd: Path,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """@brief Run one visible child command and require success.
 
     @param command Executable and arguments passed directly without a shell.
     @param cwd Existing child working directory.
+    @param environment Optional complete child environment. ``None`` inherits
+      the current process environment unchanged.
     @return Completed process with combined output after a zero exit status.
     @throws OSError If the process cannot start.
     @throws RuntimeError If the child exits with a nonzero status.
@@ -29,6 +41,7 @@ def run_checked(command: list[str], cwd: Path) -> subprocess.CompletedProcess[st
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=environment,
     )
     print(completed.stdout, end="", flush=True)
     if completed.returncode != 0:
@@ -109,6 +122,118 @@ def installed_files(prefix: Path) -> list[str]:
     )
 
 
+def configured_consumer_executable(
+    consumer_build: Path, requested_config: str
+) -> Path:
+    """@brief Resolve the built consumer from CMake target-file metadata.
+
+    @param consumer_build Configured external-consumer build tree.
+    @param requested_config Optional configuration passed to ``cmake --build``.
+    @return Strict absolute regular-file path declared by ``$<TARGET_FILE>``.
+    @throws OSError If a manifest or declared executable cannot be read.
+    @throws RuntimeError If the manifest is missing, ambiguous, malformed,
+      relative, outside the consumer build, or names an unbuilt target.
+    @note CMake, rather than the Python host, owns generator-specific layout
+      and the native executable suffix for single- and multi-config builds.
+    """
+
+    manifests = sorted(
+        consumer_build.glob("photospider_consumer_target_*.txt")
+    )
+    if requested_config:
+        preferred = (
+            consumer_build
+            / f"photospider_consumer_target_{requested_config}.txt"
+        )
+        manifests = [preferred] if preferred.is_file() else []
+    if len(manifests) != 1:
+        raise RuntimeError(
+            "installed kernel consumer target manifest is missing or "
+            f"ambiguous: {[path.name for path in manifests]}"
+        )
+    rows = manifests[0].read_text(encoding="utf-8").splitlines()
+    if len(rows) != 1 or not rows[0].strip():
+        raise RuntimeError(
+            "installed kernel consumer target manifest is malformed"
+        )
+    declared = Path(rows[0].strip())
+    if not declared.is_absolute():
+        raise RuntimeError(
+            "installed kernel consumer target manifest contains a relative path"
+        )
+    if declared.is_symlink():
+        raise RuntimeError(
+            "installed kernel consumer target manifest contains a symlink"
+        )
+    try:
+        executable = declared.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(
+            "installed kernel consumer target manifest names an unbuilt target"
+        ) from error
+    resolved_build = consumer_build.resolve(strict=True)
+    if resolved_build not in executable.parents or not executable.is_file():
+        raise RuntimeError(
+            "installed kernel consumer executable escaped its build tree"
+        )
+    return executable
+
+
+def consumer_runtime_environment(
+    prefix: Path,
+    producer_build: Path,
+    *,
+    system_name: str | None = None,
+) -> dict[str, str] | None:
+    """@brief Build the installed-consumer runtime loader environment.
+
+    @param prefix Isolated Photospider installation prefix.
+    @param producer_build Configured producer whose install layout is active.
+    @param system_name Optional platform override used by deterministic tests.
+    @return ``None`` outside Windows; on Windows, a copied environment with the
+      installed runtime directory prepended to ``PATH``.
+    @throws OSError If the producer cache cannot be read.
+    @throws RuntimeError If the Windows runtime destination is absolute or can
+      escape the isolated prefix.
+    @note Windows has no install RPATH. Prefixing, rather than replacing,
+      ``PATH`` preserves system and third-party dependency discovery while
+      selecting the just-installed Photospider runtime first.
+    """
+
+    active_system = platform.system() if system_name is None else system_name
+    if active_system != "Windows":
+        return None
+    install_bindir = (
+        cmake_cache_value(producer_build, "CMAKE_INSTALL_BINDIR").strip()
+        or "bin"
+    )
+    relative_bindir = Path(install_bindir)
+    windows_bindir = PureWindowsPath(install_bindir)
+    posix_bindir = PurePosixPath(install_bindir)
+    if (
+        windows_bindir.drive
+        or windows_bindir.root
+        or posix_bindir.is_absolute()
+        or os.pardir in windows_bindir.parts
+        or os.pardir in posix_bindir.parts
+    ):
+        raise RuntimeError(
+            "installed kernel consumer runtime directory must remain below "
+            "its prefix"
+        )
+    runtime_directory = prefix / relative_bindir
+    if not runtime_directory.is_dir():
+        raise RuntimeError(
+            "installed kernel consumer runtime directory is absent"
+        )
+    environment = os.environ.copy()
+    inherited_path = environment.get("PATH", "")
+    environment["PATH"] = str(runtime_directory)
+    if inherited_path:
+        environment["PATH"] += ";" + inherited_path
+    return environment
+
+
 def write_consumer(source: Path, include_lines: list[str]) -> None:
     """@brief Write one external embedded-Host package consumer.
 
@@ -133,6 +258,9 @@ target_compile_features(photospider_consumer PRIVATE cxx_std_17)
 target_link_libraries(photospider_consumer PRIVATE
   Photospider::photospider
   Photospider::operation_opencv)
+file(GENERATE
+  OUTPUT "${CMAKE_BINARY_DIR}/photospider_consumer_target_$<CONFIG>.txt"
+  CONTENT "$<TARGET_FILE:photospider_consumer>\\n")
 """,
         encoding="utf-8",
     )
@@ -183,6 +311,8 @@ def main() -> int:
     @return Zero only when positive package and negative ownership checks pass.
     @throws OSError or RuntimeError for filesystem, command, or contract failure.
     @note Cleanup runs in ``finally`` and remains confined below producer build.
+      Darwin children inherit the producer architecture; executable discovery
+      is CMake-authored; Windows runs against the installed runtime directory.
     """
 
     parser = argparse.ArgumentParser()
@@ -259,20 +389,20 @@ def main() -> int:
         ]
         if args.config and not os.environ.get("CMAKE_CONFIGURATION_TYPES"):
             configure.append(f"-DCMAKE_BUILD_TYPE={args.config}")
+        configure.extend(producer_osx_architecture_arguments(build))
         run_checked(configure, work)
         build_consumer = [args.cmake_executable, "--build", str(consumer_build)]
         if args.config:
             build_consumer.extend(["--config", args.config])
         run_checked(build_consumer, work)
-        candidates = [consumer_build / "photospider_consumer"]
-        if args.config:
-            candidates.insert(
-                0, consumer_build / args.config / "photospider_consumer"
-            )
-        executable = next((path for path in candidates if path.is_file()), None)
-        if executable is None:
-            raise RuntimeError("installed kernel consumer executable is absent")
-        run_checked([str(executable)], work)
+        executable = configured_consumer_executable(
+            consumer_build, args.config
+        )
+        run_checked(
+            [str(executable)],
+            work,
+            consumer_runtime_environment(prefix, build),
+        )
 
     finally:
         remove_transient_tree(work, build)

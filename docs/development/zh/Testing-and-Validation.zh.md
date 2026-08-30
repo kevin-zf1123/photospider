@@ -87,8 +87,13 @@ installable binary target closure（包括任何已启用的 optional provider m
 随后，smoke 创建一个 external C++17 consumer：include 每个 installed public header，请求
 required `embedded` 与 `operation_opencv` component，只链接 exported target，构造 embedded
 Host，并在运行时验证复制的 policy/execution inventory。Work tree 限定在 producer build 下，
-成功或失败都会在 `finally` 中移除。它不负责 daemon、IPC package、protocol、RPATH 或 process
-lifecycle；这些 installed-package 与 four-cell compatibility gate 由外部
+成功或失败都会在 `finally` 中移除。Child configure 会继承 producer 中有意义的 Darwin
+`CMAKE_OSX_ARCHITECTURES` 值。Single-config 与 multi-config generator 都以生成的
+`$<TARGET_FILE>` manifest 选择 executable，而不由 host-language 猜测文件名；这也覆盖原生
+Windows `.exe` 后缀。Windows 运行时会把 isolated prefix 下 producer 已安装的
+`CMAKE_INSTALL_BINDIR` 前置到 `PATH`，从而选择已安装的 operation-runtime DLL，而无需把 DLL
+复制进 consumer build。它不负责 daemon、IPC package、protocol、RPATH 或 process lifecycle；
+这些 installed-package 与 four-cell compatibility gate 由外部
 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon) 仓库维护。
 
 长期 `DependencyDisabledInstallSmoke` 会配置一个 OpenCV 与 YAML capability 均禁用的 clean

@@ -114,9 +114,16 @@ installed public header, requests required components `embedded` and
 `operation_opencv`, links only the exported targets, constructs an embedded
 Host, and verifies copied policy/execution inventories at runtime. Its work
 tree is confined below the producer build and removed in `finally` on both
-success and failure. It has no daemon, IPC package, protocol, RPATH, or
-process-lifecycle responsibility; those installed-package and four-cell
-compatibility gates are maintained in the external
+success and failure. The child configure inherits the producer's meaningful
+Darwin `CMAKE_OSX_ARCHITECTURES` value. A generated `$<TARGET_FILE>` manifest,
+not a host-language filename guess, selects the executable for single- and
+multi-config generators, including the native Windows `.exe` suffix. Windows
+execution prepends the producer's installed `CMAKE_INSTALL_BINDIR` below the
+isolated prefix to `PATH`, so the installed operation-runtime DLL is selected
+without copying it into the consumer build. The smoke has no daemon, IPC
+package, protocol, RPATH, or process-lifecycle responsibility; those
+installed-package and four-cell compatibility gates are maintained in the
+external
 [photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
 repository.
 
