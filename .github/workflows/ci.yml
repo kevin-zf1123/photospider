@@ -186,10 +186,6 @@ jobs:
             test: OpenExrDeepProviderOptionOffSmoke
           - artifact: static-product-consumer
             test: StaticProductConsumerSmoke
-          - artifact: photospiderd-install-layout
-            test: PhotospiderdInstallLayoutSmoke
-          - artifact: ipc-disabled-install
-            test: IpcDisabledInstallSmoke
           - artifact: image-artifact-codec-dependency-disabled-build
             test: ImageArtifactCodecDependencyDisabledBuild
           - artifact: opencv-operation-provider-disabled-build
@@ -260,10 +256,8 @@ jobs:
           expected = {
               "DependencyDisabledInstallSmoke",
               "ImageArtifactCodecDependencyDisabledBuild",
-              "IpcDisabledInstallSmoke",
               "OpenCvOperationProviderDisabledBuild",
               "OpenExrDeepProviderOptionOffSmoke",
-              "PhotospiderdInstallLayoutSmoke",
               "PublicHeaderSelfContainment",
               "StaticProductConsumerSmoke",
           }

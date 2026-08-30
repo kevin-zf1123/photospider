@@ -608,9 +608,10 @@ product process configured to auto-reap `SIGCHLD` children.
   `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate defaults off elsewhere, rejects an
   explicit enable on unsupported systems, and CMake asserts the target
   inventory in both enabled and disabled profiles.
-- `photospiderd` and local IPC protocol v2 are unchanged and do not serialize
-  these Job, quota, checkpoint, or durable-artifact contracts; private worker
-  protocol v3 is a distinct source-private wire.
+- The external daemon and local IPC protocol v2 are unaffected by this kernel
+  vertical and do not serialize these Job, quota, checkpoint, or
+  durable-artifact contracts; private worker protocol v3 remains a distinct
+  source-private wire in this repository.
 - The configured `TenantId` is trusted configuration, not authentication.
 - Trusted repository CPU operations for this vertical run in the attempt
   process. Tenant plugin ABI/network security, syscall isolation, and isolated

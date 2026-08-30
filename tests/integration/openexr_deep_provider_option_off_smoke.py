@@ -1059,7 +1059,6 @@ def main() -> int:
                 "-DPHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF",
                 "-DPHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=OFF",
                 "-DPHOTOSPIDER_BUILD_GRAPH_CLI=OFF",
-                "-DPHOTOSPIDER_BUILD_IPC=OFF",
                 f"-DPHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER={'ON' if enabled else 'OFF'}",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON",
                 "-DCMAKE_DISABLE_FIND_PACKAGE_yaml-cpp=ON",

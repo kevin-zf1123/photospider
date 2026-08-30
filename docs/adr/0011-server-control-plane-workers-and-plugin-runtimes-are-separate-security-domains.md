@@ -9,7 +9,8 @@ worker-manager, standalone artifact data plane, sandbox, or isolated-plugin
 target is current software behavior. Live delivery status remains in the linked
 Issue and Project.
 
-The current `photospiderd` remains unchanged. DI-3 separately replaces the
+The external daemon repository's current `photospiderd` remains unchanged.
+DI-3 separately replaces the
 operation-plugin registrar boundary with pure-C ABI v1 and lets each validated
 operation descriptor admitted from a signed package select its trusted in-
 process or supervised isolated CPU route. Data-definition and policy loaders
@@ -101,7 +102,8 @@ sandbox remain separate boundaries.
 The repository has a strong local/process baseline, but it is not a network
 service security model:
 
-- `photospiderd` is a foreground same-user Unix-domain sidecar. Its protected
+- The external daemon repository's `photospiderd` is a foreground same-user
+  Unix-domain sidecar. Its protected
   directory, socket, lock, and output files form a same-UID local access
   boundary. Protocol v2 has no tenant identity, end-user authentication, or
   remote transport trust model.
@@ -184,14 +186,15 @@ artifact, credential, quota, or Host resource authority.
 
 ### Local sidecar is not the server protocol
 
-`photospiderd` and protocol v2 remain the same-user local workstation sidecar.
+The external daemon repository's `photospiderd` and protocol v2 remain the
+same-user local workstation sidecar.
 Modes `0700`/`0600` and same-UID path identity are its local access boundary;
 they are not remote authentication, tenant isolation, or peer attestation.
 
 The future network service uses a new versioned protocol and composition root.
 It does not expose or tunnel the local router unchanged, reinterpret a session
 name as a tenant, promote process-global plugin mutation methods, or translate
-local opaque ids into server authority. Putting TLS in front of
+local opaque ids into server authority. Putting TLS in front of the external
 `photospiderd` is not a conforming server profile.
 
 ### Authentication and tenant authority
@@ -730,8 +733,8 @@ plane owns payload transfer and the control plane owns identities/metadata.
 - [ADR 0010](0010-execution-profile-slos-are-six-independent-benchmark-verdicts.md)
   remains an execution-profile evidence contract; its rows do not prove
   sandboxing or tenant isolation.
-- Current facts remain authoritative in
-  [IPC Protocol v2](../codebase-structure/IPC-Protocol-v2.md),
+- Current daemon facts remain authoritative in the external
+  [IPC Protocol v2](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/IPC-Protocol-v2.md),
   [Plugin ABI](../kernel-architecture/Plugin-ABI.md), and
   [Compute Boundaries](../kernel-architecture/Compute-Boundaries.md).
 - The [server and plugin isolation roadmap](../roadmap/Kernel-Evolution.md#server-and-plugin-isolation)

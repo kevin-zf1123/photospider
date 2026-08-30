@@ -7,7 +7,7 @@ tenant、Job、authentication、quota、artifact、worker 与 plugin 边界。�
 server、worker-manager、独立 artifact data plane、sandbox 或 isolated-plugin 目标已是当前软件行为。
 实时交付状态仍由所链接的 Issue 与 Project 维护。
 
-当前 `photospiderd` 保持不变。DI-3 另行以 pure-C ABI v1 替换 operation-plugin registrar
+外部 daemon 仓库当前的 `photospiderd` 保持不变。DI-3 另行以 pure-C ABI v1 替换 operation-plugin registrar
 边界，并允许每份从已签名 package 准入且经过验证的 operation descriptor 选择 trusted
 in-process 或 supervised isolated CPU 路径。Data-definition 与 policy loader 仍是彼此独立的
 版本化契约。Issues #99、#100 和 #105 现在实现了源码私有的本地 JobSpec 纵向路径，其中包含
@@ -78,7 +78,7 @@ trusted fallback。`WorkerManager`、`photospider-worker` 与通用 syscall/netw
 
 仓库已经具有稳固的本地/进程基线，但它并不是 network service security model：
 
-- `photospiderd` 是 foreground、同用户 Unix-domain sidecar。受保护 directory、socket、
+- 外部 daemon 仓库的 `photospiderd` 是 foreground、同用户 Unix-domain sidecar。受保护 directory、socket、
   lock 与 output file 构成同 UID 本地访问边界。Protocol v2 不包含 tenant identity、
   end-user authentication 或 remote transport trust model。
 - Daemon 的 session、compute-request、cursor、output、delivery 与 server-instance id 都是
@@ -152,13 +152,14 @@ Job、Graph、Run、artifact、credential、quota 或 Host resource authority。
 
 ### 本地 Sidecar 不是 Server Protocol
 
-`photospiderd` 与 protocol v2 继续作为同用户本地 workstation sidecar。`0700`/`0600`
+外部 daemon 仓库的 `photospiderd` 与 protocol v2 继续作为同用户本地 workstation sidecar。
+`0700`/`0600`
 mode 与同 UID path identity 是其本地访问边界；它们不是 remote authentication、tenant
 isolation 或 peer attestation。
 
 未来 network service 使用新的带版本 protocol 与 composition root。它不会原样暴露或 tunnel
 local router，不把 session name 重新解释为 tenant，不提升 process-global plugin mutation
-method，也不把 local opaque id 转换成 server authority。在 `photospiderd` 前加 TLS 不构成
+method，也不把 local opaque id 转换成 server authority。在外部 `photospiderd` 前加 TLS 不构成
 符合本决策的 server profile。
 
 ### Authentication 与 Tenant Authority
@@ -594,7 +595,8 @@ identity/metadata。
   authority 放入独立 artifact data plane。
 - [ADR 0010](0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md)
   继续作为 execution-profile evidence contract；其 row 不能证明 sandbox 或 tenant isolation。
-- 当前事实继续由 [IPC Protocol v2](../../codebase-structure/zh/IPC-Protocol-v2.zh.md)、
+- 当前 daemon 事实继续由外部
+  [IPC Protocol v2 中文版](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/codebase-structure/zh/IPC-Protocol-v2.zh.md)、
   [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)与
   [Compute Boundaries](../../kernel-architecture/zh/Compute-Boundaries.zh.md)权威记录。
 - [Server 与 plugin isolation 路线图](../../roadmap/zh/Kernel-Evolution.zh.md#服务器与插件隔离)

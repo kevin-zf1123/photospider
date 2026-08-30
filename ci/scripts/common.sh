@@ -61,9 +61,7 @@ log_reused_step() {
 # @brief Configure the selected CI profile in the shared build directory.
 # @return The CMake configure process status.
 # @throws Nothing; CMake failures are returned to the caller.
-# @note PHOTOSPIDER_BUILD_IPC is forwarded only when the caller selects it,
-#   which keeps revisions without that option compatible with the default
-#   profile.
+# @note The kernel profile contains no daemon-repository build options.
 configure_ci_build() {
   local configure_args=(
     -S "$REPO_ROOT"
@@ -74,11 +72,6 @@ configure_ci_build() {
     -DUSE_TSAN="${USE_TSAN:-OFF}"
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
   )
-  if [[ -n "${PHOTOSPIDER_BUILD_IPC:-}" ]]; then
-    configure_args+=(
-      -DPHOTOSPIDER_BUILD_IPC="$PHOTOSPIDER_BUILD_IPC"
-    )
-  fi
   cmake "${configure_args[@]}"
 }
 
@@ -112,20 +105,15 @@ ci_cache_value() {
 }
 
 # @brief Validate cache values required by the selected build profile.
-# @return Zero only when BUILD_TESTING and optional IPC state match the profile.
+# @return Zero only when BUILD_TESTING matches the selected profile.
 # @throws Nothing; missing or mismatched cache entries return nonzero.
-# @note The default profile accepts a revision without PHOTOSPIDER_BUILD_IPC,
-#   but requires ON when that option exists.
+# @note The default profile requires the maintained kernel test inventory.
 ci_profile_cache_is_valid() {
   local build_testing_value
-  local ipc_value
   build_testing_value=$(ci_cache_value BUILD_TESTING) || return 1
   case "$CI_BUILD_PROFILE" in
     default)
-      [[ "$build_testing_value" == ON ]] || return 1
-      if ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC); then
-        [[ "$ipc_value" == ON ]]
-      fi
+      [[ "$build_testing_value" == ON ]]
       ;;
     *)
       return 1
@@ -152,17 +140,13 @@ require_ci_profile_cache() {
 #   is false instead of silently compiling a replacement tree.
 ci_build_is_reusable() {
   local build_testing_value
-  local ipc_value
   [[ -f "$CI_BUILD_STAMP" && -f "$BUILD_DIR/CMakeCache.txt" ]] || return 1
   ci_profile_cache_is_valid || return 1
   build_testing_value=$(ci_cache_value BUILD_TESTING) || return 1
-  ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC 2>/dev/null ||
-    printf 'not-defined\n')
   grep -Fqx "build_dir=$BUILD_DIR" "$CI_BUILD_STAMP" &&
     grep -Fqx "source_dir=$REPO_ROOT" "$CI_BUILD_STAMP" &&
     grep -Fqx "profile=$CI_BUILD_PROFILE" "$CI_BUILD_STAMP" &&
-    grep -Fqx "build_testing=$build_testing_value" "$CI_BUILD_STAMP" &&
-    grep -Fqx "photospider_build_ipc=$ipc_value" "$CI_BUILD_STAMP"
+    grep -Fqx "build_testing=$build_testing_value" "$CI_BUILD_STAMP"
 }
 
 # @brief Stamp a completed profile build for downstream artifact consumers.
@@ -171,18 +155,14 @@ ci_build_is_reusable() {
 # @note The stamp records configuration identity but contains no credentials.
 mark_ci_build_reusable() {
   local build_testing_value
-  local ipc_value
   require_ci_profile_cache || return
   build_testing_value=$(ci_cache_value BUILD_TESTING) || return
-  ipc_value=$(ci_cache_value PHOTOSPIDER_BUILD_IPC 2>/dev/null ||
-    printf 'not-defined\n')
   mkdir -p "$BUILD_DIR"
   cat > "$CI_BUILD_STAMP" <<EOF
 build_dir=$BUILD_DIR
 source_dir=$REPO_ROOT
 profile=$CI_BUILD_PROFILE
 build_testing=$build_testing_value
-photospider_build_ipc=$ipc_value
 created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF
 }

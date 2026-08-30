@@ -471,8 +471,9 @@ child 的策略。
   Embedded product-path coverage 默认只存在于 Darwin 与 Linux。独立的
   `PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB` gate 在其他系统默认关闭，拒绝在不支持的系统显式
   启用；CMake 会同时断言 enabled 与 disabled profile 的 target inventory。
-- `photospiderd` 与 local IPC protocol v2 保持不变，不序列化这些 Job、quota、checkpoint 或
-  durable artifact contract；private worker protocol v3 是另一个源码私有 wire。
+- 外部 daemon 与 local IPC protocol v2 不受这个 kernel vertical 影响，也不序列化这些 Job、
+  quota、checkpoint 或 durable artifact contract；private worker protocol v3 仍是本仓另一条
+  源码私有 wire。
 - 配置的 `TenantId` 是可信配置，不是 authentication。
 - 此纵向路径中的可信仓库 CPU operation 在 attempt process 内运行。Tenant plugin
   ABI/network security、syscall isolation 与 isolated hostile-plugin runtime 仍不存在。

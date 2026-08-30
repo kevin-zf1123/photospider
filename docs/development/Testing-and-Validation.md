@@ -101,131 +101,35 @@ or estimator mints resource or gate ownership. `test_compute_run`,
 `test_host_adapter`, `test_kernel_contracts`, and `test_policy_execution` are
 the complete direct-consumer set of this internal archive.
 
-`StaticProductConsumerSmoke` enforces that boundary for both
-`BUILD_TESTING=ON` and `BUILD_TESTING=OFF` producer configurations. After the
-real product is installed to a non-system temporary prefix, the smoke reuses
-the daemon capability driver to remove LD/DYLD loader overrides and execute
-installed `photospiderd --help`; a missing relocatable operation runtime
-therefore fails instead of passing on file existence. Darwin then invokes and validates
-`xcrun --find llvm-nm`, then falls back to PATH `llvm-nm` and PATH `nm`;
-non-Darwin platforms never invoke `xcrun` and use the two PATH candidates in
-that order. Canonically identical executable paths run once. A candidate is
-usable only when it starts, exits successfully, emits symbols, and exposes the
-nine required anchors spanning all eight production seam objects. Otherwise
-the smoke records a path-free failure reason and tries the next candidate; no
-candidate or all unusable candidates fail closed. The first usable full symbol
-table is authoritative and rejects every hook function/helper/global fragment.
-The raw table is used only in memory for that decision; a forbidden symbol in the
-first usable table fails the verdict without trying a later candidate. The
-retained scan observation has a closed, path-free schema: stable `tool_source`,
-ordered structured attempt reasons, status and aggregate line/anchor/prohibited
-counts, plus counts keyed only by controlled symbol tokens. It retains no tool,
-archive, object, build, install, or workspace path; no raw symbol line or
-captured stdout/stderr; and no environment `PATH`. If aggregate package behavior
-fails, the JSON diagnostic is a whitelist projection of failed check labels,
-command statuses, and that sanitized scan observation rather than the complete
-transient observations. The smoke also rejects an installed test product
-archive, exported test target, or exported internal seam definition. This
-remains a labelled `build-smoke`; ordinary complete CTest selection does not
-make package construction part of runtime-test ownership.
+`StaticProductConsumerSmoke` validates the kernel-only installed package.
+It builds the configured installable binary target closure, including any
+enabled optional provider module, and installs it into a non-system temporary
+prefix. It parses the generated installable-header allowlist and requires the
+installed include tree to match it exactly. It also inspects every installed
+Photospider package file and rejects source-repository or private `src/lib`
+paths.
 
-`PhotospiderdInstallLayoutSmoke` separately configures three isolated
-dependency-disabled producer trees. It builds only the `photospiderd` target
-closure, then installs the configured package with nested relative
-`libexec/photospider` and `lib64` directories, an absolute libdir, or an
-absolute bindir paired with a relative libdir. Every case uses its configured
-prefix, removes loader overrides through the shared capability driver, and
-executes the installed daemon. The default relative `bin`/`lib` case remains
-part of `StaticProductConsumerSmoke`. All matrix build/install directories and
-absolute destinations are strict descendants of the CTest work root and are
-removed after either success or failure.
-
-The configured producer also serializes
-`PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` into a build-tree
-inventory using install-relative `include/photospider/...` paths. Before it
-writes any record, the CMake 3.16-compatible writer rejects a backslash, every
-CMake-representable ASCII C0 control (codes 1 through 31), and DEL; diagnostics
-identify the allowlist position without reproducing the rejected field.
-CMake strings cannot represent NUL, so the reader independently rejects all
-C0 controls including NUL, plus DEL, in a forged or externally modified
-manifest. LF is the only record separator. Ordinary spaces remain legal POSIX
-path data.
-
-The smoke rejects a missing, empty, duplicate, control-bearing, backslash-
-bearing, noncanonical, or non-header entry. It applies an exact
-`PurePosixPath` spelling/root/suffix check before generating the external
-consumer's include list, then requires the installed include tree to equal the
-configured path set. Missing and unexpected files therefore fail the same
-exact comparison; neither the driver nor the documentation maintains a second
-public-header count, and an unallowlisted source-tree file cannot silently
-widen the package surface. The safety regression round-trips an ordinary-space
-path through the production CMake writer and parser, and proves that every
-CMake-representable control and both parent-like and ordinary backslash paths
-fail before serialization.
-
-The smoke inspects every installed `Photospider*Targets*.cmake` file because
-the package separates base, OpenCV-dependent, and embedded-product targets
-into distinct export sets. Its dependency classifier recognizes only the exact
-OpenCV component target spellings that the producer accepts: bare lowercase
-names, lowercase `OpenCV::opencv_*` targets, and component-specific CamelCase
-targets such as `OpenCV::Core`; partial-name matches remain rejected. This is
-validated through the real exported package/consumer behavior rather than a
-synthetic verifier self-test. With OpenCV discovery disabled, a consumer
-requesting `COMPONENTS operation_plugin_sdk OPTIONAL_COMPONENTS operation_opencv`
-must keep the package and `operation_plugin_sdk` found, mark `operation_opencv` not
-found, import the dependency-free SDK/runtime targets, and omit
-`Photospider::operation_opencv`. Requiring `operation_opencv` under the same
-condition must fail package discovery. With OpenCV available, the adapter
-consumer imports that target through only the OpenCV `core` component and does
-not discover unrelated packages.
-
-When IPC is enabled, the package smoke builds and installs `photospider`,
-`photospider_ipc_client`, and `photospiderd`. It independently configures a
-default embedded consumer of `Photospider::photospider` and an IPC-only project
-that requests `COMPONENTS ipc_client`, disables OpenCV/`yaml-cpp` discovery,
-and links only `Photospider::photospider_ipc_client`. The latter therefore
-resolves only Threads and does not inherit the backend or JSON implementation
-target. That IPC-only consumer includes the installed protocol, Client, and Host-adapter headers,
-constructs `create_ipc_host()` without contacting a daemon, executes every
-safe public Client lifecycle symbol, and links a reference-only branch for all
-exact unique inventories of 60 typed Client calls plus all 58 non-destructor
-Host virtuals. Package
-inspection also requires the IPC archive and exact three-header surface,
-permits only `Threads::Threads` in the exported IPC link interface, positively
-allows only the current C++ standard-library and installed `photospider/`
-public includes, and rejects raw JSON, socket-address/descriptor, file-identity,
-file-mapping, and backend declarations. This is the gate's exact boundary, not
-an exhaustive promise about every possible POSIX spelling. With backend
-discovery disabled, `COMPONENTS ipc_client OPTIONAL_COMPONENTS embedded`
-succeeds with only `ipc_client` found, and an unknown optional component
-remains not-found without invalidating the package.
-
-The same smoke independently configures a C11 project that requests only
-`COMPONENTS policy_sdk`, builds a pure-C ABI-v1 policy DSO against
-`Photospider::policy_sdk`, and rejects OpenCV, yaml-cpp, or Threads leakage.
-The generated source probes the exact policy ABI constants and layouts. The
-external embedded consumer then loads that installed policy DSO and an
-installed operation DSO, configures policy and execution defaults, validates
-their public snapshots, and computes through both extensions. No generated
-consumer receives a source-tree include directory. The operation-SDK-only
-factory also uses installed `ValueBuilder`, `WriteLease`, `BufferHandle`,
-`ReadLease`, runtime identities, and ImageView to publish and read an immutable
-CPU DenseTensor Value. This proves that the V-3 headers and implementation
-symbols are complete without OpenCV, yaml-cpp, or Threads discovery.
-
-The durable
-`IpcDisabledInstallSmoke` configures a separate clean producer with
-`PHOTOSPIDER_BUILD_IPC=OFF` and `BUILD_TESTING=OFF`; it verifies that no IPC
-build forwarder, installed header, archive, executable, or exported target is
-advertised, a required `ipc_client` component fails discovery, and an external
-default embedded Host consumer still links and runs. Required unknown package
-components fail as well; optional disabled `ipc_client` and unknown components
-remain not-found without failing discovery; omitting components or requesting
-`embedded` retains the existing backend dependency resolution.
+The smoke then creates an external C++17 consumer that includes every
+installed public header, requests required components `embedded` and
+`operation_opencv`, links only the exported targets, constructs an embedded
+Host, and verifies copied policy/execution inventories at runtime. Its work
+tree is confined below the producer build and removed in `finally` on both
+success and failure. The child configure inherits the producer's meaningful
+Darwin `CMAKE_OSX_ARCHITECTURES` value. A generated `$<TARGET_FILE>` manifest,
+not a host-language filename guess, selects the executable for single- and
+multi-config generators, including the native Windows `.exe` suffix. Windows
+execution prepends the producer's installed `CMAKE_INSTALL_BINDIR` below the
+isolated prefix to `PATH`, so the installed operation-runtime DLL is selected
+without copying it into the consumer build. The smoke has no daemon, IPC
+package, protocol, RPATH, or process-lifecycle responsibility; those
+installed-package and four-cell compatibility gates are maintained in the
+external
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+repository.
 
 The durable `DependencyDisabledInstallSmoke` configures a clean producer with
 OpenCV and YAML capabilities disabled, disables OpenCV, yaml-cpp, and OpenEXR
-package discovery, turns off IPC, enables only the dependency-neutral test
+package discovery, enables only the dependency-neutral test
 surface, and builds the
 real `photospider_kernel` aggregate, `photospider` product,
 `test_cpu_dense_tensor_image_operation`, `test_packed_fp4_dense_tensor`,
@@ -277,7 +181,7 @@ optional provider dependency enters either producer or consumer.
 
 `OpenExrDeepProviderOptionOffSmoke` owns the narrower V-15 option boundary. It
 configures a fresh provider-OFF producer with `BUILD_TESTING=ON` while OpenCV,
-yaml-cpp, OpenEXR discovery, graph CLI, IPC, and repository operation providers
+yaml-cpp, OpenEXR discovery, graph CLI, and repository operation providers
 are disabled. The configure uses an expanded top-level CMake trace plus the
 completed cache to require zero executed OpenEXR package lookups and zero
 discovery keys. The driver performs the complete producer build, then builds
@@ -378,7 +282,7 @@ job starts from a fresh producer tree, restores only a cross-run ccache
 snapshot, performs one complete build, packages the CTest runtime, and saves
 the updated compiler cache for a later workflow. It also uploads one tarred
 snapshot of the current `.ccache` as the same-run compiler-cache handoff. A
-fixed eight-entry matrix names the default configuration's build smokes and
+fixed six-entry matrix names the default configuration's build smokes and
 creates one isolated runner per entry with `fail-fast: false`.
 Adding or renaming a durable build smoke requires coordinated updates to its
 CTest registration, the exact `build-smoke` label, appropriate `RUN_SERIAL`,
@@ -386,13 +290,13 @@ CTest registration, the exact `build-smoke` label, appropriate `RUN_SERIAL`,
 
 Every build-smoke runner checks out the producer commit, downloads the same-run
 ccache artifact, verifies and extracts its `.ccache`, and uses it read-only.
-All eight run the same outer `cmake --fresh` configure at the
+All six run the same outer `cmake --fresh` configure at the
 `$GITHUB_WORKSPACE/build/ci` binary path with the producer options and ccache
-launchers. They require the complete expected eight-entry CTest inventory
+launchers. They require the complete expected six-entry CTest inventory
 before selection. No build-smoke runner downloads the packaged runtime or a
 full producer tree. A compiler-cache miss compiles normally and is not a
 correctness failure. CTest combines an anchored exact test-name regex, the exact
-`build-smoke` label, and `--no-tests=error`. The eight jobs run in parallel with
+`build-smoke` label, and `--no-tests=error`. The six jobs run in parallel with
 the three runtime-label jobs, so one smoke failure neither cancels its peers nor
 blocks the already published runtime archive. Each `always()` upload reads a
 unique `CI-results/build-smoke/<matrix-artifact>.junit.xml` and publishes it as
@@ -430,24 +334,12 @@ non-label properties fail during configuration.
 Primary-repository CTest and CI entries are reserved for long-lived software
 behavior: correctness, performance, stability, multithreaded execution, error
 handling, compile boundaries, package consumption, and runtime API boundaries.
-`PhotospiderdCapabilityHelp`, `PhotospiderdInstallLayoutSmoke`,
 `StaticProductConsumerSmoke`, `GraphCliOptionBadAlloc`, GoogleTest discovery,
 and `PublicHeaderSelfContainment` satisfy that rule because they execute or
-compile the maintained product. The daemon help test uses a CMake script driver to run
-the real configuration-specific `photospiderd --help`, captures stdout and
-stderr, requires a numeric zero process result before matching the stable
-capability sentence, and diagnoses launch failure separately from nonzero exit.
-The driver removes loader override variables and is reused after package
-installation, so build-tree and install-tree resolution exercise their own
-declared lookup paths.
-`IpcDisabledInstallSmoke`, `DependencyDisabledInstallSmoke`, focused
-`test_ipc_protocol`/`test_ipc_host` cases, and real-process `test_ipc_daemon`
-cases follow the same rule: they exercise
-package, framing, typed client, complete IPC Host dispatch/polling/stop/artifact
-ownership, daemon lifecycle, concurrency, and cleanup behavior. Daemon tests
-use CTest timeouts plus bounded
-SIGTERM-to-SIGKILL-to-waitpid cleanup; they do not depend on fixed readiness
-sleeps.
+compile the maintained kernel product. Daemon package, protocol, process, and
+interoperability tests satisfy the same long-lived-behavior rule in the
+external daemon repository; they are not registered in this kernel CTest/CI
+inventory.
 `StaticProductConsumerSmoke` is limited to producer configure/build/install,
 external `find_package`, public-header compile/link/run, installed export and
 dependency boundaries, platform archive/link behavior, and multi-configuration
@@ -651,33 +543,25 @@ destruction. `test_compute_service_split` cancels from connected preflight on
 the private `serial_debug` route and proves that dirty HP and paired HP/RT requests enter
 neither the parameter dependent nor phase-two target work.
 
-Public non-expansion remains part of existing durable contracts:
-`test_ipc_protocol` locks the exact 60-method protocol-v2 inventory, rejects
-`compute.cancel`, round-trips every version-two status label, and requires
-`cancellable: false`; `test_compute_request_registry` locks the daemon job
-snapshot; `test_policy_registry` locks transactional ABI-v1 load rejection,
-binding-held DSO lifetime, and first-fault stability; and
-`StaticProductConsumerSmoke` compiles and runs the installed 58-virtual Host,
-60-call Client, pure-C operation ABI v1, and pure-C policy ABI v1 consumers. These
-tests must not gain a compatibility cancellation shim for this private change.
+Public non-expansion remains part of existing durable contracts.
+`test_policy_registry` locks transactional ABI-v1 load rejection,
+binding-held DSO lifetime, and first-fault stability; the embedded Host tests
+prove private cancellation does not become a public kernel control. The
+external daemon repository independently locks its exact protocol-v2
+inventory, rejects `compute.cancel`, and requires `cancellable:false`.
 
 Run the focused cancellation boundary with:
 
 ```bash
 cmake --build build \
   --target test_compute_run test_compute_service_split \
-  test_kernel_contracts test_ipc_protocol test_compute_request_registry \
-  test_policy_registry -j
+  test_kernel_contracts test_policy_registry -j
 ./build/tests/test_compute_run \
   --gtest_filter='ComputeRunCancellation.*:ComputeRunCommitArbiter.LinearizesCancellationBeforeOrAfterCommitClaim:ExecutionServiceCancellation.*'
 ./build/tests/test_compute_service_split \
   --gtest_filter='ComputeServiceCancellation.ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='ComputeContracts.SequentialCancellationAfterProviderReturnSuppressesPublication:ComputeContracts.CancellationBeforeCommitClaimSuppressesPublication:ComputeContracts.CancellationAfterCommitClaimPreservesPublication:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.CancelledComputeStillDrainsBeforeGraphClose'
-./build/tests/test_ipc_protocol \
-  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods:EnumCodec.RoundTripsEveryDefinedVersionTwoLabel:HostRoutedGraphStateProtocolTest.ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes'
-./build/tests/test_compute_request_registry \
-  --gtest_filter='ComputeRequestRegistrySubmission.PublishesQueuedCommitSnapshot'
 ./build/tests/test_policy_registry
 ```
 
@@ -835,16 +719,14 @@ parsing and exact Host application. `test_host_adapter` loads real pure-C
 operation ABI-v1 and pure-C policy ABI-v1 fixtures, configures both extensions,
 validates their snapshots, and computes through the private CPU route.
 `GraphCliPluginComputeSmoke` repeats that vertical slice through the real REPL.
-`test_ipc_protocol` and `test_ipc_daemon` own protocol-v2 routing, process-owned
-policy state, generation-changing replacement, scan, and shared execution
-defaults. `StaticProductConsumerSmoke` independently builds installed C11 and
-C++17 operation ABI consumers plus the C11 policy DSO before executing the
-same external-consumer path. The operation consumers assert every exact v1
-record layout and export only numeric/root pure-C discovery.
+The external daemon repository owns protocol-v2 routing, process-owned policy
+state, generation-changing replacement, scan, and shared execution-default
+coverage. `StaticProductConsumerSmoke` compiles every installed header and
+executes the embedded package consumer.
 
-The installed Host, CLI, and IPC protocol-v2 surfaces still expose no
-cancellation command. IPC continues to reject `compute.cancel` and publish
-`cancellable: false`; supersession remains a private embedded-kernel behavior,
+The installed Host and CLI surfaces still expose no cancellation command.
+The external daemon protocol continues to reject `compute.cancel` and publish
+`cancellable:false`; supersession remains private embedded-kernel behavior,
 not a new public control surface. The worker-owning scheduler ABI has no
 compatibility consumer.
 
@@ -856,8 +738,7 @@ cmake --build build \
   test_physical_execution_routes test_device_executor_registry \
   test_device_residency test_compute_run test_resource_ledger \
   test_resource_admission \
-  test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
-  test_ipc_daemon graph_cli -j
+  test_cli_policy_execution_config test_host_adapter graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
@@ -870,10 +751,6 @@ cmake --build build \
   --gtest_filter='CliPolicyExecutionConfigParsing.*:CliPolicyExecutionConfigApply.*'
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.PolicyScanAndOperationPluginUseStatusValues:EmbeddedHostAdapter.ExternalOperationAndPolicyPluginsDriveParallelCompute'
-./build/tests/test_ipc_protocol \
-  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods:HostRoutedGraphStateProtocolTest.PolicyAndExecution*:ClientExecutionDefaults.*'
-./build/tests/test_ipc_daemon \
-  --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
 ctest --test-dir build --output-on-failure \
   -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
 # Apple with PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON:
@@ -915,18 +792,15 @@ Focused companion regressions own the remaining boundaries:
   shared CPU admission across concurrent Runs; initial ready-store backpressure
   and priority ordering; dependent re-entry backpressure; and exact root
   release after success or failure.
-- `test_ipc_protocol` proves exact Graph status propagation, one-call mutation
-  behavior, and daemon session-name rollback after failed load.
-- `test_ipc_daemon` proves the real transport returns save `NotFound` and `Io`
-  exactly, leaves the remotely owned graph inspectable after destination
-  failure, and accepts a subsequent successful save.
+- The external daemon repository owns the corresponding protocol and
+  real-transport graph-status, failed-save, and reconnect regressions.
 
 Run the focused validation with:
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
   test_kernel_contracts test_resource_ledger test_resource_admission \
-  test_compute_run test_ipc_protocol test_ipc_daemon -j
+  test_compute_run -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
@@ -937,10 +811,6 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
   --gtest_filter='EmbeddedHostExecutionConfiguration.*'
 ./build/tests/test_compute_run \
   --gtest_filter='ExecutionService.*'
-./build/tests/test_ipc_protocol \
-  --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
-./build/tests/test_ipc_daemon \
-  --gtest_filter=IpcDaemonGraphLifecycle.PersistsAcrossClientsAndInspectsCopiedSnapshots
 ```
 
 These are maintained product-behavior tests. No migration-residue scan,
@@ -1092,10 +962,9 @@ hook.
 
 The post-plan, admission-wait, and retained-string observers, the gate
 predicate diagnostic, and the direct-resource diagnostics exist only in the
-non-installed internal test product. `StaticProductConsumerSmoke` requires the
-nine production anchors spanning all eight seam objects and rejects every
-matching state, setter, clearer, notification, helper, and diagnostic symbol
-from the installed archive.
+non-installed internal test product. `StaticProductConsumerSmoke` separately
+rejects source/private paths and any mismatch between the configured public-
+header allowlist and the installed package.
 
 Run the focused boundary with:
 
@@ -1148,11 +1017,10 @@ The existing product-boundary targets carry integration ownership:
 - `test_host_adapter` covers coalesced direct Host close, post-marker
   `NotFound`, close isolation, lane retirement order, and one composition-root
   shutdown.
-- `test_compute_request_registry`, `test_ipc_protocol`, `test_ipc_host`, and
-  `test_ipc_daemon` cover preallocated daemon close generations,
-  pre-invocation-only `HostCloseNotStarted`, exactly one Host call, lost
-  response without replay/reopen, late `NotFound`, Client/IPC Host local-only
-  destruction, accepted-job drainage, signal shutdown, and Host lifetime.
+- The external daemon repository covers daemon close generations,
+  pre-invocation-only close, exactly-once Host calls, lost responses without
+  replay, late `NotFound`, client-only destruction, accepted-job drainage,
+  signal shutdown, and Host lifetime.
 
 Run the focused lifecycle boundary with:
 
@@ -1161,8 +1029,7 @@ cmake --build build --target test_run_lifecycle_registry \
   test_execution_lifecycle_telemetry test_compute_run \
   test_compute_service_split test_kernel_contracts \
   test_kernel_lifecycle_concurrency test_resource_ledger \
-  test_policy_execution test_host_adapter test_compute_request_registry \
-  test_ipc_protocol test_ipc_host test_ipc_daemon -j
+  test_policy_execution test_host_adapter -j
 ./build/tests/test_run_lifecycle_registry
 ./build/tests/test_execution_lifecycle_telemetry
 ./build/tests/test_compute_run
@@ -1172,16 +1039,12 @@ cmake --build build --target test_run_lifecycle_registry \
 ./build/tests/test_resource_ledger
 ./build/tests/test_policy_execution
 ./build/tests/test_host_adapter
-./build/tests/test_compute_request_registry
-./build/tests/test_ipc_protocol
-./build/tests/test_ipc_host
-./build/tests/test_ipc_daemon
 ```
 
 The final delivery pass uses at most one clean native configure, one full
 build, and one complete CTest/JUnit run. Focused validation may precede that
 frozen pass, but it must not multiply the final full gate. GitHub CI performs
-one complete build and packages one runtime in the producer job. All eight
+one complete build and packages one runtime in the producer job. All six
 downstream `build-smoke` jobs download the producer's same-run read-only ccache
 artifact and fresh-configure their own outer trees. Only the `unit`,
 `integration`, and `verification` jobs use the packaged runtime. No job
@@ -1205,7 +1068,7 @@ IO, so these tests remain independent of OpenCV codec behavior while exercising
 the production runtime and cache service.
 
 `ImageArtifactCodecDependencyDisabledBuild` configures a fresh nested build with
-`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` and `PHOTOSPIDER_BUILD_IPC=OFF`,
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`,
 builds the provider-independent focused `test_kernel_contracts` target, and
 runs only the injected-codec cases. The target remains available without
 registering the complete kernel-contract binary in that profile's CTest
@@ -1312,13 +1175,14 @@ transfer aliases.
 
 DI-4 also has dedicated `test_dense_image_value_contracts`,
 `test_sample_conversion`, `test_value_artifact`, and
-`test_dense_image_processing` unit suites. IPC, Host, worker, durable, static
+`test_dense_image_processing` unit suites. Host, worker, durable, static
 package-consumer, OpenCV, and ordinary OpenEXR integration tests cover named
 Value delivery, metadata-only inspection, transactional reconstruction,
 artifact identity joins, adapter lifetime, independent data/display windows,
 exact HALF promotion, UINT32 code values, and fail-closed unsupported shapes or
 implicit conversions. OpenEXR Deep remains covered separately by its provider-
-defined variable-sample suite.
+defined variable-sample suite. The external daemon repository owns IPC
+delivery and reconstruction integration coverage.
 
 `test_variable_sample_field_extensions` owns seventeen standard-library-only V-14
 integration cases. A synthetic pure-C definition suite publishes versioned
@@ -1362,7 +1226,6 @@ proof, not another CTest entry or CI phase-completion check:
 cmake -S . -B build-v14-no-elide \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DBUILD_TESTING=ON \
-  -DPHOTOSPIDER_BUILD_IPC=OFF \
   -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
   -DPHOTOSPIDER_ENABLE_YAML=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON \
@@ -1398,7 +1261,8 @@ ctest --test-dir build --output-on-failure \
 four packed FP4 and seventeen V-14 extension cases in an actual
 OpenCV/YAML/OpenEXR-discovery-disabled
 product before proving the installed consumers.
-`StaticProductConsumerSmoke` proves the operation-SDK-only installed consumer.
+`StaticProductConsumerSmoke` proves the all-header embedded/OpenCV package
+consumer.
 `DependencyDisabledInstallSmoke` also loads two independently linked
 Value-using DSOs and proves that they mint from one shared runtime authority.
 Both installed consumers construct and evaluate Region and observe a
@@ -1591,12 +1455,7 @@ own directory name from becoming an OpenEXR marker while leaving real
 dependency names scannable. Its enabled companion accepts the generated
 provider target under either trusted spelling only after physical-prefix
 confinement and post-prefix component checks reject every later symlink or
-escape. `InstallConsumerArchitecturePropagationSafety` injects a synthetic
-mapping to lock bidirectional spelling, manifest acceptance, post-root symlink
-and escape counterexamples, dual-spelling evidence scrub, a real
-`-lOpenEXR` rejection, alias-spelled `libImath.dylib`/`libOpenEXR.dylib`
-rejections, and enabled-provider containment on every platform without
-touching `/tmp`.
+escape.
 
 `OpenCvOperationProviderBuildSmokeSafety` exercises those destructive guards,
 failure propagation, and postcondition only against a synthetic repository,
@@ -1647,10 +1506,6 @@ thresholds:
 - `HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter` requires
   a present zero public Run cap to fail with `GraphErrc::InvalidParameter`
   across synchronous, asynchronous, and image compute.
-- `IpcHostDispatch.MapsEveryCurrentHostVirtualWithoutFallback` and
-  `IpcHostCompute.RejectsZeroMaximumParallelismBeforeTransport` prove that the
-  IPC Host preserves a positive Run cap through all three compute conveniences
-  and rejects zero in the public Graph error domain before transport.
 - `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` repeats the built-in
   tiled `curve_transform` path three times at each `1/2/4/8` Run cap on one
   fixed eight-lane pool and requires exact callback overlap through a test-only
@@ -3158,9 +3013,10 @@ Deterministic registered GoogleTests remain the authority for canonical
 re-encoding, strict prefixes and truncation, trailing bytes, worker identity/
 digest/data-plane/heartbeat validation, isolated enum/count/rank/extent/stride/
 range/overflow/phase/overlap validation, optional task identity, page reuse,
-failure/cancellation/retry/concurrent Run behavior, and exact IPC schema. Use
-the manual targets to explore additional bounded inputs, never to replace those
-stable regression assertions.
+failure/cancellation/retry/concurrent Run behavior. Exact IPC schema fuzz and
+regression ownership belongs to the external daemon repository. Use the manual
+targets to explore additional bounded inputs, never to replace those stable
+regression assertions.
 
 ## CTest Registration
 
@@ -3201,29 +3057,19 @@ diagnostic concurrency cases, and `DependencyDisabledInstallSmoke`.
 
 The default CTest inventory intentionally contains no phase-completion scan,
 migration-residue check, stale-term search, Doxygen audit, or issue-specific
-orchestration. The daemon help driver, static package-consumer smoke, and graph
-CLI allocation-failure driver remain registered because they exercise real
-installed/runtime behavior.
+orchestration. The static package-consumer smoke and graph CLI allocation-
+failure driver remain registered because they exercise real installed/runtime
+behavior.
 
-For IPC changes, focused local product validation is:
+IPC/daemon changes are validated in the external daemon repository against an
+isolated installed kernel prefix. Its focused suite owns the exact method
+inventory, negative methods, client/server behavior, reconnect, installed
+layout/RPATH, four-cell frozen-baseline interoperability, and signal drainage.
+This kernel CTest inventory must not duplicate those targets or fixtures.
 
-```bash
-cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
-  test_compute_request_registry test_collection_snapshot_registry \
-  test_output_store test_event_stream_boundaries test_ipc_daemon \
-  public_header_self_containment -j
-ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|ExecutionTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientExecutionDefaults|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonExecution|IpcDaemonPolicy|IpcObservationFixtureDaemon|PhotospiderdCapabilityHelp|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
-```
-
-Temporary daemon processes, sockets, graph sessions, package prefixes, and
-consumer trees must be absent after these tests. The mode-`0600` persistent
-`${socket}.lock` inode is an intentional product synchronization artifact; a
-test-owned temporary root removes it with that root, while the real default
-runtime location preserves it. CTest output/JUnit and remote CI artifacts are
-the evidence; do not create `tests/results` or an issue-specific replay/
-provenance helper.
+Temporary graph sessions, package prefixes, and consumer trees must be absent
+after kernel tests. CTest output/JUnit and remote CI artifacts are the evidence;
+do not create `tests/results` or an issue-specific replay/provenance helper.
 
 ## Known Test Quality Caveat
 
@@ -3265,10 +3111,10 @@ packager reports the validated archive's exact physical byte count and tar
 entry count for artifact-size diagnosis, while ccache reports compiler hit/miss
 statistics. The producer uploads the runtime once. Three parallel jobs restore
 that archive and run the `unit`, `integration`, or `verification` label. In
-parallel, all eight build-smoke matrix jobs download and verify the same-run
+parallel, all six build-smoke matrix jobs download and verify the same-run
 ccache tar, use the extracted cache read-only, and never save it. Each performs
 an outer `cmake --fresh` configure with the producer options and launchers,
-requires the expected eight-item CTest inventory, then selects one statically
+requires the expected six-item CTest inventory, then selects one statically
 named test through an anchored exact-name regex plus the exact `build-smoke`
 label. An entry may build its outer tree or a deeper nested tree; a ccache miss
 continues as a normal compilation. Build-smoke jobs never download the runtime.
@@ -3312,9 +3158,9 @@ populate both handoffs, and give smokes a mixture of compatible hits and normal
 misses; later compatible workflows should begin warmer without making hit rate
 a gate.
 
-`ci/scripts/build_smoke_inventory.py` remains because the long-lived
-`InstallConsumerArchitecturePropagationSafety` product test imports it to
-validate configured build-smoke entries. Manual product-boundary drivers and
+`ci/scripts/build_smoke_inventory.py` remains because the hosted workflow uses
+it to validate the fresh configured build-smoke inventory before selecting one
+matrix entry. Manual product-boundary drivers and
 `sanitizer_test.sh` also remain available locally. The former orchestration,
 routing, runtime-capability, duplicate suite, and self-proof scripts are not
 CI entry points. The exact workflow, cache, artifact, and label contract is

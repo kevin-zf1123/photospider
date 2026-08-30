@@ -737,8 +737,6 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `src/lib/benchmark/i2/i2_host.hpp`
 - `src/lib/benchmark/i2/i2_profile.*`
 - `src/lib/benchmark/i2/i2_evidence.*`
-- `src/lib/ipc/request_router.cpp`
-- `src/lib/ipc/output_store.*`
 - `src/lib/graph/graph_cache_service.*`
 - `src/lib/execution/device/compute_io_executor.*`
 - `src/lib/compute/compute_service.*`
@@ -761,7 +759,6 @@ admitted-Run registry、Graph lifetime lease 与 close/shutdown lifecycle 所有
 - `tests/integration/test_kernel_contracts.cpp`
 - `tests/integration/test_host_adapter.cpp`
 - `tests/integration/test_opencv_operation_concurrency.cpp`
-- `tests/unit/test_ipc_protocol.cpp`
 - `tests/unit/test_compute_run.cpp`
 - `tests/unit/test_progressive_compute.cpp`
 - `tests/unit/test_i2_profile.cpp`

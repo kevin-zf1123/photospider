@@ -77,7 +77,6 @@ feedback/
 !src/**/*.mm
 !src/**/*.hpp
 !src/**/*.txt
-!src/lib/ipc/service_version.hpp.in
 
 # Repository-owned plugins
 !plugins/

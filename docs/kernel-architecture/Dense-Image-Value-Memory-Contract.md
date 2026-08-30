@@ -303,13 +303,13 @@ Primary contracts and implementations:
 - `src/lib/adapters/opencv/{value_adapter_opencv,image_artifact_codec_opencv}.*`
 - `src/lib/adapters/openexr/openexr_dense_image_codec.*`
 - `src/lib/adapters/openexr/openexr_deep_scanline_adapter.*`
-- `src/lib/ipc/`, `src/lib/server/worker/`, and `src/lib/server/state/`
+- `src/lib/server/worker/` and `src/lib/server/state/`
 
-Long-lived tests cover Value construction, signed coordinates, sample
-conversion, artifact reconstruction, Host results, IPC leases, worker/durable
-replay, OpenCV lifetime, ordinary OpenEXR round trips, and provider-defined
-Deep behavior. Source-residue searches are migration evidence only and are not
-registered as CTest or CI behavior tests.
+Long-lived kernel tests cover Value construction, signed coordinates, sample
+conversion, artifact reconstruction, Host results, worker/durable replay,
+OpenCV lifetime, ordinary OpenEXR round trips, and provider-defined Deep
+behavior. External daemon tests cover IPC leases. Source-residue searches are
+migration evidence only and are not registered as CTest or CI behavior tests.
 Production-route OpenCV regressions additionally cover full parallel, dirty HP,
 and dirty RT normalization before inference/allocation, including multi-sibling
 context identity, zero/opaque constants, raw pixels, and `[0,1]` retention.

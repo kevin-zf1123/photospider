@@ -1560,8 +1560,9 @@ public API authority.
 
 [ADR 0011](../adr/0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.md)
 freezes this target. It is a target contract, not evidence that its full
-multi-process server/isolation runtime exists. `photospiderd` remains the
-same-user local workstation sidecar described by IPC protocol v2. Its
+multi-process server/isolation runtime exists. The external daemon repository's
+`photospiderd` remains the same-user local workstation sidecar described by IPC
+protocol v2. Its
 `0700`/`0600` paths, sessions, opaque ids, process-global plugin controls, and
 private `OutputStore` are not network authentication, tenant authority,
 durable Job state, or durable artifact authority.

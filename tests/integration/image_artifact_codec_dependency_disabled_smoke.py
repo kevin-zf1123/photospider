@@ -67,7 +67,6 @@ def main() -> int:
             str(work),
             f"-DCMAKE_BUILD_TYPE={configuration}",
             "-DBUILD_TESTING=ON",
-            "-DPHOTOSPIDER_BUILD_IPC=OFF",
             "-DPHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF",
         ],
         repo,

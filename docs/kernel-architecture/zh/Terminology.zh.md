@@ -507,8 +507,6 @@ cache、policy 或物理 execution 语义的所有者。
 - `src/lib/graph/graph_state_executor.hpp`
 - `src/lib/graph/graph_io_service.*`
 - `src/lib/graph/graph_cache_service.*`
-- `src/lib/ipc/output_store.*`
-- `src/lib/ipc/request_router.cpp`
 - `src/lib/compute/dispatch/task_graph_planning.hpp`
 - `src/lib/compute/dirty/dirty_region_snapshot.hpp`
 - `src/lib/compute/execution/execution_service.hpp`

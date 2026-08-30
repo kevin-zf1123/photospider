@@ -84,21 +84,6 @@ else()
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
    CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(PHOTOSPIDER_IPC_PLATFORM_SUPPORTED ON)
-    set(PHOTOSPIDER_BUILD_IPC_DEFAULT ON)
-else()
-    set(PHOTOSPIDER_IPC_PLATFORM_SUPPORTED OFF)
-    set(PHOTOSPIDER_BUILD_IPC_DEFAULT OFF)
-endif()
-option(PHOTOSPIDER_BUILD_IPC
-    "Build the Unix local IPC client, server, and photospiderd"
-    ${PHOTOSPIDER_BUILD_IPC_DEFAULT})
-if(PHOTOSPIDER_BUILD_IPC AND NOT PHOTOSPIDER_IPC_PLATFORM_SUPPORTED)
-    message(FATAL_ERROR
-        "PHOTOSPIDER_BUILD_IPC requires CMAKE_SYSTEM_NAME Darwin or Linux")
-endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
-   CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PHOTOSPIDER_SINGLE_TENANT_JOB_PLATFORM_SUPPORTED ON)
     set(PHOTOSPIDER_BUILD_SINGLE_TENANT_JOB_DEFAULT ON)
 else()
@@ -198,11 +183,6 @@ set(PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS
     policy/policy_plugin_api.h
     public_boundary.hpp
 )
-set(PHOTOSPIDER_IPC_PUBLIC_HEADER_RELATIVE_PATHS
-    ipc/client.hpp
-    ipc/host.hpp
-    ipc/protocol.hpp
-)
 set(PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
     ${PHOTOSPIDER_BASE_PUBLIC_HEADER_RELATIVE_PATHS})
 if(PHOTOSPIDER_ENABLE_OPENCV)
@@ -213,12 +193,6 @@ set(PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT 34)
 if(PHOTOSPIDER_ENABLE_OPENCV)
     math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
         "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 1")
-endif()
-if(PHOTOSPIDER_BUILD_IPC)
-    list(APPEND PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
-        ${PHOTOSPIDER_IPC_PUBLIC_HEADER_RELATIVE_PATHS})
-    math(EXPR PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT
-        "${PHOTOSPIDER_EXPECTED_PUBLIC_HEADER_COUNT} + 3")
 endif()
 list(LENGTH PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS
     PHOTOSPIDER_ACTUAL_PUBLIC_HEADER_COUNT)
@@ -360,7 +334,7 @@ target_include_directories(photospider_data_provider_sdk INTERFACE
 
 # Public policy SDK: one dependency-neutral pure C ABI header. C11 producers
 # and C++17 producers/consumers receive only the generated/installed include
-# root; no Threads, OpenCV, yaml-cpp, Metal, embedded, IPC, or operation SDK
+# root; no Threads, OpenCV, yaml-cpp, Metal, embedded, or operation SDK
 # dependency crosses this target.
 add_library(photospider_policy_sdk INTERFACE)
 add_library(Photospider::policy_sdk ALIAS photospider_policy_sdk)
@@ -397,7 +371,7 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 if(BUILD_TESTING)
     find_program(PHOTOSPIDER_OPENSSL_EXECUTABLE NAMES openssl REQUIRED)
 endif()
-if(PHOTOSPIDER_BUILD_IPC OR BUILD_TESTING)
+if(BUILD_TESTING)
     find_package(nlohmann_json 3.9 REQUIRED)
 endif()
 
@@ -1395,120 +1369,6 @@ assert_target_omits_internal_product_test_definitions(
     photospider_product_seam_objects)
 assert_target_omits_internal_product_test_definitions(photospider)
 
-# ==============================================================================
-# 2a. Versioned Local IPC Products (Unix only)
-# ==============================================================================
-
-if(PHOTOSPIDER_BUILD_IPC)
-    configure_file(
-        "${PROJECT_SOURCE_DIR}/src/lib/ipc/service_version.hpp.in"
-        "${CMAKE_BINARY_DIR}/generated/ipc/service_version.hpp"
-        @ONLY)
-
-    add_library(photospider_ipc_client_objects OBJECT
-        src/lib/ipc/frame.cpp
-        src/lib/ipc/unix_socket.cpp
-        src/lib/ipc/codec.cpp
-        src/lib/ipc/client.cpp
-        src/lib/ipc/host.cpp
-    )
-    target_compile_features(photospider_ipc_client_objects PRIVATE cxx_std_17)
-    target_include_directories(photospider_ipc_client_objects PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src/lib"
-    )
-    target_link_libraries(photospider_ipc_client_objects PRIVATE
-        nlohmann_json::nlohmann_json
-        Threads::Threads)
-
-    add_library(photospider_ipc_client STATIC
-        $<TARGET_OBJECTS:photospider_ipc_client_objects>)
-    target_compile_definitions(photospider_ipc_client PUBLIC PHOTOSPIDER_STATIC)
-    target_compile_features(photospider_ipc_client PUBLIC cxx_std_17)
-    target_include_directories(photospider_ipc_client
-        PUBLIC
-            "$<BUILD_INTERFACE:${PHOTOSPIDER_BUILD_PUBLIC_INCLUDE_DIR}>"
-            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-    )
-    # IPC result decoding reconstructs named Value artifacts through the
-    # process-wide Value identity and validation implementation. Export the
-    # dependency so static IPC clients cannot omit the shared runtime that
-    # owns those symbols and identities.
-    target_link_libraries(photospider_ipc_client PUBLIC
-        Photospider::operation_runtime
-        Threads::Threads)
-
-    add_library(photospider_ipc_server_internal STATIC
-        src/lib/ipc/collection_snapshot_registry.cpp
-        src/lib/ipc/compute_request_registry.cpp
-        src/lib/ipc/output_store.cpp
-        src/lib/ipc/session_registry.cpp
-        src/lib/ipc/request_router.cpp
-        src/lib/ipc/server.cpp
-    )
-    target_compile_features(photospider_ipc_server_internal PRIVATE cxx_std_17)
-    target_include_directories(photospider_ipc_server_internal PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src/lib"
-    )
-    target_link_libraries(photospider_ipc_server_internal PRIVATE
-        photospider_ipc_client
-        Threads::Threads
-        nlohmann_json::nlohmann_json)
-
-    add_executable(photospiderd apps/photospiderd/main.cpp)
-    target_compile_features(photospiderd PRIVATE cxx_std_17)
-    target_include_directories(photospiderd PRIVATE
-        "${PROJECT_SOURCE_DIR}/include"
-        "${PROJECT_SOURCE_DIR}/src/lib"
-        "${CMAKE_BINARY_DIR}/generated"
-    )
-    target_link_libraries(photospiderd PRIVATE
-        photospider_ipc_server_internal
-        photospider_ipc_client
-        photospider
-        Threads::Threads)
-    # GNUInstallDirs permits nested relative directories and absolute
-    # destinations. For a relative LIBDIR, derive the loader-relative lookup
-    # from the configured full daemon directory to the configured full runtime
-    # directory instead of assuming one ".." level. An absolute LIBDIR is an
-    # explicit non-relocatable request and must remain an absolute lookup;
-    # DESTDIR is intentionally absent because it is only a staging prefix.
-    if(APPLE OR UNIX)
-        if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
-            set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
-                "${CMAKE_INSTALL_FULL_LIBDIR}")
-        else()
-            file(RELATIVE_PATH PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR
-                "${CMAKE_INSTALL_FULL_BINDIR}"
-                "${CMAKE_INSTALL_FULL_LIBDIR}")
-            if(PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR STREQUAL "")
-                set(PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR ".")
-            endif()
-            if(APPLE)
-                set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
-                    "@loader_path/${PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR}")
-            else()
-                set(PHOTOSPIDERD_INSTALL_RUNTIME_RPATH
-                    "$ORIGIN/${PHOTOSPIDERD_INSTALL_RELATIVE_LIBDIR}")
-            endif()
-        endif()
-    endif()
-    if(APPLE)
-        set_target_properties(photospiderd PROPERTIES
-            MACOSX_RPATH ON
-            INSTALL_RPATH "${PHOTOSPIDERD_INSTALL_RUNTIME_RPATH}")
-    elseif(UNIX)
-        set_target_properties(photospiderd PROPERTIES
-            INSTALL_RPATH "${PHOTOSPIDERD_INSTALL_RUNTIME_RPATH}")
-    endif()
-
-    message(STATUS
-        "Photospider IPC: enabled (Unix socket client + photospiderd v${PROJECT_VERSION})")
-else()
-    message(STATUS "Photospider IPC: disabled")
-endif()
-
 install(TARGETS photospider
     EXPORT PhotospiderEmbeddedTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -1545,18 +1405,6 @@ if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/photospider/providers
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
-endif()
-
-if(PHOTOSPIDER_BUILD_IPC)
-    install(TARGETS photospider_ipc_client
-        EXPORT PhotospiderTargets
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    )
-    install(TARGETS photospiderd
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 foreach(PUBLIC_HEADER_RELATIVE_PATH
@@ -2840,149 +2688,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
             PROPERTIES TIMEOUT 30)
     endif()
 
-    if(PHOTOSPIDER_BUILD_IPC)
-        add_executable(test_ipc_protocol tests/unit/test_ipc_protocol.cpp)
-        set_target_properties(test_ipc_protocol PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(test_ipc_protocol PRIVATE cxx_std_17)
-        target_include_directories(test_ipc_protocol PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests"
-            ${OpenCV_INCLUDE_DIRS})
-        target_compile_definitions(test_ipc_protocol PRIVATE
-            PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>"
-            PS_TEST_OP_PLUGIN_DIR="$<TARGET_FILE_DIR:lifecycle_op_plugin>")
-        target_link_libraries(test_ipc_protocol PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            photospider
-            GTest::gtest
-            GTest::gtest_main
-            nlohmann_json::nlohmann_json
-            Threads::Threads
-            ${CMAKE_DL_LIBS})
-        add_dependencies(test_ipc_protocol test_policy_plugin
-            lifecycle_op_plugin)
-
-        add_executable(test_ipc_host tests/unit/test_ipc_host.cpp)
-        set_target_properties(test_ipc_host PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(test_ipc_host PRIVATE cxx_std_17)
-        target_include_directories(test_ipc_host PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(test_ipc_host PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            photospider
-            GTest::gtest
-            GTest::gtest_main
-            nlohmann_json::nlohmann_json
-            Threads::Threads)
-
-        add_executable(test_compute_request_registry
-            tests/unit/test_compute_request_registry.cpp)
-        set_target_properties(test_compute_request_registry PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(test_compute_request_registry PRIVATE cxx_std_17)
-        target_include_directories(test_compute_request_registry PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(test_compute_request_registry PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            photospider
-            GTest::gtest
-            GTest::gtest_main
-            Threads::Threads)
-
-        add_executable(test_collection_snapshot_registry
-            tests/unit/test_collection_snapshot_registry.cpp)
-        set_target_properties(test_collection_snapshot_registry PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(test_collection_snapshot_registry PRIVATE cxx_std_17)
-        target_include_directories(test_collection_snapshot_registry PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(test_collection_snapshot_registry PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            GTest::gtest
-            GTest::gtest_main
-            Threads::Threads)
-
-        add_executable(test_output_store
-            tests/unit/test_output_store.cpp)
-        set_target_properties(test_output_store PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(test_output_store PRIVATE cxx_std_17)
-        target_include_directories(test_output_store PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(test_output_store PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            photospider
-            GTest::gtest
-            GTest::gtest_main
-            Threads::Threads)
-
-        # Long-lived integration fixture: a separate process with the real
-        # internal Server/router/socket/output stack and a deterministic Host.
-        # The helper itself is intentionally not registered with CTest.
-        add_executable(ipc_output_fixture_daemon
-            tests/support/ipc_output_fixture_daemon.cpp)
-        set_target_properties(ipc_output_fixture_daemon PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(ipc_output_fixture_daemon PRIVATE cxx_std_17)
-        target_include_directories(ipc_output_fixture_daemon PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(ipc_output_fixture_daemon PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            photospider
-            Threads::Threads)
-
-        add_executable(test_ipc_daemon
-            tests/integration/test_ipc_daemon.cpp)
-        set_target_properties(test_ipc_daemon PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${TEST_OUTPUT_DIR}"
-            BUILD_RPATH "${CMAKE_BINARY_DIR}/lib")
-        target_compile_features(test_ipc_daemon PRIVATE cxx_std_17)
-        target_compile_definitions(test_ipc_daemon PRIVATE
-            PS_PHOTOSPIDERD_PATH="$<TARGET_FILE:photospiderd>"
-            PS_IPC_OUTPUT_FIXTURE_DAEMON_PATH="$<TARGET_FILE:ipc_output_fixture_daemon>"
-            PS_TEST_OP_PLUGIN_DIR="$<TARGET_FILE_DIR:lifecycle_op_plugin>"
-            PS_TEST_POLICY_PLUGIN_PATH="$<TARGET_FILE:test_policy_plugin>")
-        target_include_directories(test_ipc_daemon PRIVATE
-            "${PROJECT_SOURCE_DIR}/include"
-            "${PROJECT_SOURCE_DIR}/src/lib"
-            "${PROJECT_SOURCE_DIR}/tests")
-        target_link_libraries(test_ipc_daemon PRIVATE
-            photospider_ipc_server_internal
-            photospider_ipc_client
-            photospider
-            GTest::gtest
-            GTest::gtest_main
-            Threads::Threads)
-        add_dependencies(test_ipc_daemon
-            photospiderd ipc_output_fixture_daemon lifecycle_op_plugin
-            test_policy_plugin)
-    endif()
-
     add_ps_test(test_propagation tests/integration/test_propagation.cpp)
     add_ps_test(test_propagation_contracts
         tests/unit/test_propagation_contracts.cpp)
@@ -3381,7 +3086,7 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         endif()
     endforeach()
 
-    # Core, Host, IPC, operation-SDK, and policy headers must remain
+    # Core, Host, operation-SDK, and policy headers must remain
     # self-contained without inheriting the optional OpenCV component.
     add_library(public_header_self_containment_objects OBJECT
         ${PHOTOSPIDER_PUBLIC_HEADER_SELF_CONTAINMENT_SOURCES}
@@ -3417,81 +3122,32 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
     # CTest is reserved for long-lived runtime, package-consumer, compile, and
     # error-boundary behavior. Migration/residue scanners and source-quality
     # audits are intentionally absent from the test inventory.
-    set(PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS
-        --expected-smoke DependencyDisabledInstallSmoke
-        --expected-smoke IpcDisabledInstallSmoke)
-    if(PHOTOSPIDER_BUILD_IPC)
-        list(APPEND
-            PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS
-            --expected-smoke StaticProductConsumerSmoke)
+    set(PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS
+        photospider
+        photospider_operation_runtime)
+    if(PHOTOSPIDER_ENABLE_OPENCV)
+        list(APPEND PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS
+            photospider_operation_opencv)
     endif()
-    add_test(NAME InstallConsumerArchitecturePropagationSafety
-        COMMAND ${Python3_EXECUTABLE} -B
-            "${PROJECT_SOURCE_DIR}/tests/integration/install_consumer_architecture_propagation_test.py"
-            --build-dir "${CMAKE_BINARY_DIR}"
-            --cmake-executable "${CMAKE_COMMAND}"
-            --ctest-executable "${CMAKE_CTEST_COMMAND}"
-            --config "$<CONFIG>"
-            --python-executable "${Python3_EXECUTABLE}"
-            ${PHOTOSPIDER_INSTALL_CONSUMER_EXPECTED_CTEST_ARGUMENTS}
-        WORKING_DIRECTORY
-            "${PROJECT_SOURCE_DIR}/tests/integration")
-    set_tests_properties(
-        InstallConsumerArchitecturePropagationSafety PROPERTIES
-        LABELS "${PHOTOSPIDER_VERIFICATION_TEST_LABEL}"
-        RESOURCE_LOCK verification-harness
-        TIMEOUT 30)
-    if(PHOTOSPIDER_BUILD_IPC)
-        add_test(NAME PhotospiderdCapabilityHelp
-            COMMAND ${CMAKE_COMMAND}
-                "-DPHOTOSPIDERD=$<TARGET_FILE:photospiderd>"
-                -P "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_capability_help.cmake")
-        set_tests_properties(PhotospiderdCapabilityHelp PROPERTIES
-            LABELS "${PHOTOSPIDER_INTEGRATION_TEST_LABEL}"
-            TIMEOUT 10)
-        add_test(NAME StaticProductConsumerSmoke
-            COMMAND ${Python3_EXECUTABLE} -B
-                "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"
-                --repo "${PROJECT_SOURCE_DIR}"
-                --build "${CMAKE_BINARY_DIR}"
-                --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
-                --cmake-executable "${CMAKE_COMMAND}"
-                --openssl-executable "${PHOTOSPIDER_OPENSSL_EXECUTABLE}"
-                --config $<CONFIG>
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-        set_tests_properties(StaticProductConsumerSmoke PROPERTIES
-            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
-            RUN_SERIAL TRUE
-            TIMEOUT 900)
-        add_test(NAME PhotospiderdInstallLayoutSmoke
-            COMMAND ${Python3_EXECUTABLE} -B
-                "${PROJECT_SOURCE_DIR}/tests/integration/photospiderd_install_layout_smoke.py"
-                --repo "${PROJECT_SOURCE_DIR}"
-                --build-root "${CMAKE_BINARY_DIR}"
-                --work
-                    "${CMAKE_BINARY_DIR}/tests/photospiderd_install_layout_smoke"
-                --cmake-executable "${CMAKE_COMMAND}"
-                --generator "${CMAKE_GENERATOR}"
-                --config $<CONFIG>
-                --osx-architectures "${CMAKE_OSX_ARCHITECTURES}"
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-        set_tests_properties(PhotospiderdInstallLayoutSmoke PROPERTIES
-            LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
-            RUN_SERIAL TRUE
-            TIMEOUT 1200)
+    if(PHOTOSPIDER_BUILD_OPENEXR_DEEP_PROVIDER)
+        list(APPEND PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS
+            photospider_openexr_deep_provider)
     endif()
-    add_test(NAME IpcDisabledInstallSmoke
+    add_test(NAME StaticProductConsumerSmoke
         COMMAND ${Python3_EXECUTABLE} -B
-            "${PROJECT_SOURCE_DIR}/tests/integration/ipc_disabled_install_smoke.py"
+            "${PROJECT_SOURCE_DIR}/tests/integration/static_product_consumer_smoke.py"
             --repo "${PROJECT_SOURCE_DIR}"
-            --work "${CMAKE_BINARY_DIR}/tests/ipc_disabled_install_smoke"
+            --build "${CMAKE_BINARY_DIR}"
+            --work "${CMAKE_BINARY_DIR}/tests/static_product_consumer_smoke"
             --cmake-executable "${CMAKE_COMMAND}"
+            --build-targets
+                ${PHOTOSPIDER_STATIC_PRODUCT_CONSUMER_BUILD_TARGETS}
             --config $<CONFIG>
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    set_tests_properties(IpcDisabledInstallSmoke PROPERTIES
+    set_tests_properties(StaticProductConsumerSmoke PROPERTIES
         LABELS "${PHOTOSPIDER_BUILD_SMOKE_LABEL}"
         RUN_SERIAL TRUE
-        TIMEOUT 600)
+        TIMEOUT 900)
     add_test(NAME ImageArtifactCodecDependencyDisabledBuild
         COMMAND ${Python3_EXECUTABLE}
             "${PROJECT_SOURCE_DIR}/tests/integration/image_artifact_codec_dependency_disabled_smoke.py"
@@ -3569,28 +3225,6 @@ if(PHOTOSPIDER_BUILD_FULL_TEST_SUITE)
         RUN_SERIAL TRUE
         TIMEOUT 300)
 
-    if(PHOTOSPIDER_BUILD_IPC)
-        photospider_enable_plugin_trust_test_environment(test_ipc_protocol)
-        photospider_discover_tests(test_ipc_protocol
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 30)
-        photospider_discover_tests(test_ipc_host
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 60)
-        photospider_discover_tests(test_compute_request_registry
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 30)
-        photospider_discover_tests(test_collection_snapshot_registry
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 30)
-        photospider_discover_tests(test_output_store
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 30)
-        photospider_enable_plugin_trust_test_environment(test_ipc_daemon)
-        photospider_discover_tests(test_ipc_daemon
-            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-            PROPERTIES TIMEOUT 60)
-    endif()
     photospider_discover_tests(test_op_registry_m31
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     photospider_enable_plugin_trust_test_environment(test_plugin_manager)
@@ -3886,8 +3520,6 @@ if(BUILD_TESTING)
             test_operation_plugin_abi
             test_optional_opencv_operation_provider
             test_plugin_manager
-            test_ipc_protocol
-            test_ipc_daemon
             test_host_adapter
             test_policy_registry
             test_policy_execution

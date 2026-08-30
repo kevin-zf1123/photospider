@@ -78,100 +78,26 @@ state 或 installed surface，也不授予 authority。Production operation gate
 `test_kernel_contracts` 与 `test_policy_execution` 构成该内部 archive 的完整 direct-consumer
 集合。
 
-`StaticProductConsumerSmoke` 会对 `BUILD_TESTING=ON` 与 `BUILD_TESTING=OFF` 两种 producer
-configuration 强制执行这条边界。真实 product 安装到非系统临时 prefix 后，smoke 会复用
-daemon capability driver，移除 LD/DYLD loader override，并执行 installed
-`photospiderd --help`；这样，缺失可重定位 operation runtime 时不会因只检查文件存在而通过。
-随后 Darwin 会先调用并验证
-`xcrun --find llvm-nm`，然后依次回退到 PATH `llvm-nm` 与 PATH `nm`；非 Darwin 平台绝不会
-调用 `xcrun`，只按上述顺序使用两个 PATH candidate。Canonical path 相同的 executable 只运行
-一次。Candidate 只有在能启动、成功退出、产生 symbol，并暴露覆盖八个 production seam
-object 的全部九个 required anchor 时才可用；否则 smoke 会记录不含路径的 failure reason
-并尝试下一项。没有
-candidate 或全部 candidate 都不可用时必须 fail closed。第一个可用的完整 symbol table 是权威
-结果，并用于拒绝任何 hook function/helper/global fragment；raw table 只在内存中参与该判定，
-因此第一个可用表只要包含 forbidden symbol 就会直接使 verdict 失败，不能通过尝试后续 candidate
-隐藏问题。保留的 scan observation 使用闭合且不含路径的 schema：稳定 `tool_source`、按顺序排列
-的结构化 attempt reason、status 与聚合 line/anchor/prohibited count，以及只以受控 symbol token
-为 key 的 count。它不会保留 tool/archive/object/build/install/workspace path、raw symbol line、
-captured stdout/stderr 或环境 `PATH`。若聚合 package behavior 失败，JSON diagnostic 只输出 failed
-check label、command status 与该 sanitized scan observation 的白名单投影，不再序列化完整的临时
-observations。Smoke 也会拒绝已安装的 test product archive、已导出的 test target 或已导出的内部
-seam definition。该测试继续属于带 label 的 `build-smoke`；普通完整 CTest selection 不会让
-package construction 混入 runtime-test ownership。
+`StaticProductConsumerSmoke` 验证 kernel-only installed package。它构建配置所启用的完整
+installable binary target closure（包括任何已启用的 optional provider module），再安装到非系统
+临时 prefix。它解析 generated installable-header allowlist，并要求 installed include tree 与之
+完全一致。它还检查每个已安装 Photospider package file，拒绝源码仓路径或 private `src/lib`
+路径。
 
-`PhotospiderdInstallLayoutSmoke` 会另行配置三个隔离、dependency-disabled 的 producer tree。
-它只构建 `photospiderd` target closure，随后安装已配置 package，分别覆盖嵌套相对目录
-`libexec/photospider` 与 `lib64`、absolute libdir，以及配合相对 libdir 的 absolute
-bindir。每个 case 都使用自身配置的 prefix，通过共享 capability driver 移除 loader override，
-并执行 installed daemon。默认相对 `bin`/`lib` case 仍由 `StaticProductConsumerSmoke`
-覆盖。全部 matrix build/install directory 与 absolute destination 都必须严格位于 CTest work
-root 之下，并在成功或失败后清理。
-
-配置后的 producer 还会把 `PHOTOSPIDER_INSTALLABLE_PUBLIC_HEADER_RELATIVE_PATHS` 序列化为
-build-tree inventory，其中使用安装相对路径 `include/photospider/...`。写入任何 record 前，
-兼容 CMake 3.16 的 writer 会拒绝反斜杠、CMake 可以表达的全部 ASCII C0 control（code 1 至 31）
-与 DEL；diagnostic 只标识 allowlist 位置，不复述被拒绝字段。CMake string 无法表达 NUL，因此
-reader 会独立拒绝伪造或被外部修改的 manifest 中包括 NUL 在内的全部 C0 control 以及 DEL。
-LF 是唯一的 record separator；普通空格仍是合法的 POSIX path 数据。
-
-Smoke 会拒绝缺失、空、重复、含 control、含反斜杠、非 canonical 或非 header 的 entry。
-它先执行精确的 `PurePosixPath` 拼写/root/suffix 检查，再从该 inventory 生成 external consumer
-的 include 清单，并要求已安装 include tree 与配置得到的路径集合完全相等。因此缺失文件与
-意外文件都会在同一项精确比较中失败；driver 和文档均不维护第二份 public-header 数量，
-未进入 allowlist 的 source-tree 文件也无法静默扩大 package surface。Safety regression 会让
-带普通空格的路径经过真实 CMake writer 与 parser 往返，并证明 CMake 可表达的每个 control、
-形似 parent 的反斜杠路径与普通反斜杠路径都会在序列化前失败。
-
-该 smoke 会检查每个已安装的 `Photospider*Targets*.cmake` 文件，因为 package 将基础 target、
-依赖 OpenCV 的 target 与 embedded-product target 分到不同 export set 中。它的 dependency
-classifier 只识别 producer 接受的精确 OpenCV component target 拼写：裸 lowercase name、lowercase
-`OpenCV::opencv_*` target，以及 `OpenCV::Core` 这类 component-specific CamelCase target；partial-name
-match 仍会被拒绝。验证证据来自真实 exported package/consumer 行为，而不是 synthetic verifier
-self-test。禁用 OpenCV discovery
-时，请求 `COMPONENTS operation_plugin_sdk OPTIONAL_COMPONENTS operation_opencv` 的 consumer 必须让
-package 与 `operation_plugin_sdk` 保持 found，将 `operation_opencv` 标记为 not found，导入无依赖的
-SDK/runtime target，并且不导入 `Photospider::operation_opencv`。在相同条件下 required
-`operation_opencv` 必须使 package discovery 失败。OpenCV 可用时，adapter consumer 仅通过 OpenCV
-`core` component 导入该 target，并且不会发现无关 package。
-
-IPC enabled 时，package smoke 会构建并安装 `photospider`、
-`photospider_ipc_client` 与 `photospiderd`。它会独立 configure 一个默认使用
-`Photospider::photospider` 的 embedded consumer，以及一个请求 `COMPONENTS ipc_client`、禁用
-OpenCV/`yaml-cpp` discovery、且只链接 `Photospider::photospider_ipc_client` 的 IPC-only project。
-后者因此只解析 Threads，不继承 backend 或 JSON implementation target。该 IPC-only consumer
-会 include 已安装的 protocol、Client
-与 Host-adapter header，在不连接 daemon 的情况下构造 `create_ipc_host()`，执行全部安全 public
-Client lifecycle symbol，并链接一个仅用于引用的分支，以精确且唯一的 inventory 覆盖全部 60 个
-typed Client call 与全部 58 个非析构 Host virtual。Package 检查还要求 IPC archive 与精确的三个
-header surface，导出的
-IPC link interface 只允许 `Threads::Threads`；header 正向只允许当前 C++ standard-library include
-与已安装的 `photospider/` public include，并拒绝 raw JSON、socket address/descriptor、file
-identity、file mapping 与 backend declaration。这是门禁实际保证的精确边界，不声称穷举全部
-可能的 POSIX 拼写。在禁用 backend discovery 时，
-`COMPONENTS ipc_client OPTIONAL_COMPONENTS embedded` 会只找到 `ipc_client` 并成功；unknown
-optional component 会保持 not-found，而不会使 package 无效。
-
-相同 smoke 还会独立 configure 一个只请求 `COMPONENTS policy_sdk` 的 C11 project，针对
-`Photospider::policy_sdk` 构建纯 C ABI-v1 policy DSO，并拒绝 OpenCV、yaml-cpp 或 Threads 泄漏。
-生成的源码会探测精确 policy ABI constant 与 layout。外部 embedded consumer 随后会加载该已安装
-policy DSO 与一个已安装 operation DSO，配置 policy/execution default，验证其 public snapshot，
-并通过两种 extension 完成 compute。任何生成的 consumer 都不会获得 source-tree include 目录。
-operation-SDK-only factory 还会使用 installed `ValueBuilder`、`WriteLease`、
-`BufferHandle`、`ReadLease`、runtime identity 与 ImageView 发布并读取 immutable CPU
-DenseTensor Value。这证明 V-3 header 与 implementation symbol 在不发现 OpenCV、yaml-cpp
-或 Threads 时仍完整。
-
-长期 `IpcDisabledInstallSmoke` 会用
-`PHOTOSPIDER_BUILD_IPC=OFF` 与 `BUILD_TESTING=OFF` 配置另一个 clean producer；它验证不会
-advertise IPC build forwarder、installed header、archive、executable 或 exported target，required
-`ipc_client` component discovery 会失败，同时 external default embedded Host consumer 仍能
-link/run。Required unknown component 也会失败；optional disabled `ipc_client` 与 unknown
-component 会保持 not-found 而不使 discovery 失败；省略 component 或请求 `embedded` 时继续
-解析既有 backend dependency。
+随后，smoke 创建一个 external C++17 consumer：include 每个 installed public header，请求
+required `embedded` 与 `operation_opencv` component，只链接 exported target，构造 embedded
+Host，并在运行时验证复制的 policy/execution inventory。Work tree 限定在 producer build 下，
+成功或失败都会在 `finally` 中移除。Child configure 会继承 producer 中有意义的 Darwin
+`CMAKE_OSX_ARCHITECTURES` 值。Single-config 与 multi-config generator 都以生成的
+`$<TARGET_FILE>` manifest 选择 executable，而不由 host-language 猜测文件名；这也覆盖原生
+Windows `.exe` 后缀。Windows 运行时会把 isolated prefix 下 producer 已安装的
+`CMAKE_INSTALL_BINDIR` 前置到 `PATH`，从而选择已安装的 operation-runtime DLL，而无需把 DLL
+复制进 consumer build。它不负责 daemon、IPC package、protocol、RPATH 或 process lifecycle；
+这些 installed-package 与 four-cell compatibility gate 由外部
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon) 仓库维护。
 
 长期 `DependencyDisabledInstallSmoke` 会配置一个 OpenCV 与 YAML capability 均禁用的 clean
-producer，禁用 OpenCV、yaml-cpp 与 OpenEXR 三个 package discovery，关闭 IPC，只启用
+producer，禁用 OpenCV、yaml-cpp 与 OpenEXR 三个 package discovery，只启用
 dependency-neutral test surface，
 并构建真实 `photospider_kernel` aggregate、`photospider` product 与
 `test_cpu_dense_tensor_image_operation`、`test_packed_fp4_dense_tensor` 与
@@ -211,7 +137,7 @@ retained Value traversal 仍保持有效，最终 owner/provider destroy 先于 
 任一 producer 或 consumer 都不会引入 source-tree include 或可选 provider dependency。
 
 `OpenExrDeepProviderOptionOffSmoke` 负责更窄的 V-15 option 边界。它会在禁用 OpenCV、
-yaml-cpp、OpenEXR discovery、graph CLI、IPC 与仓库 operation provider 的同时，用
+yaml-cpp、OpenEXR discovery、graph CLI 与仓库 operation provider 的同时，用
 `BUILD_TESTING=ON` 配置一个全新的 provider-OFF producer。Configure 会结合展开后的顶层 CMake
 trace 与最终 cache，要求实际执行的 OpenEXR package lookup 和 discovery key 都为零。Driver
 先完成 producer 的完整 build，再构建精确的 `test_variable_sample_field_extensions` target，随后
@@ -285,17 +211,17 @@ executable，它仍属于普通 `verification` 测试。
 CTest 会保留每个 build smoke，供本机直接运行。日常 GitHub Actions build job 会从全新 producer
 tree 开始，只恢复跨 run ccache snapshot，执行一次完整构建，打包 CTest runtime，再分别保存更新后的
 compiler cache 供后续 workflow 使用，并把当前 `.ccache` 的 tar snapshot 作为同 run compiler-cache
-handoff 上传。一个固定的八项 matrix 会列出默认配置中的 build smoke，并以 `fail-fast: false` 为每项
+handoff 上传。一个固定的六项 matrix 会列出默认配置中的 build smoke，并以 `fail-fast: false` 为每项
 创建隔离 runner。新增或重命名长期 build smoke 时，必须同步更新 CTest 注册、精确 `build-smoke`
 label、合适的 `RUN_SERIAL`、`RESOURCE_LOCK` 与
 `TIMEOUT` property，以及 workflow matrix 清单。
 
 每个 build-smoke runner 都会 checkout producer commit，下载同 run ccache artifact，验证并解开其中的
-`.ccache`，再以 read-only 方式使用它。八项都会用 producer options 与 ccache launcher，在
+`.ccache`，再以 read-only 方式使用它。六项都会用 producer options 与 ccache launcher，在
 `$GITHUB_WORKSPACE/build/ci` binary path 执行相同的外层 `cmake --fresh` configure，并在选择前要求
-完整的预期八项 CTest inventory。Build-smoke runner 不会下载 packaged runtime，也不会接收完整
+完整的预期六项 CTest inventory。Build-smoke runner 不会下载 packaged runtime，也不会接收完整
 producer tree。Compiler-cache miss 会正常编译，并非正确性失败。CTest 同时使用锚定的精确
-测试名称 regex、精确 `build-smoke` label 与 `--no-tests=error`。八个 job 会与三个 runtime-label job
+测试名称 regex、精确 `build-smoke` label 与 `--no-tests=error`。六个 job 会与三个 runtime-label job
 并行，因此一个 smoke 失败既不会取消其他 smoke，也不会阻断已经发布的 runtime archive。每个
 `always()` upload 都读取唯一的 `CI-results/build-smoke/<matrix-artifact>.junit.xml`，并将其发布为
 `ctest-junit-build-smoke-<matrix-artifact>`，保留七天；report 缺失时只告警。
@@ -324,20 +250,10 @@ configure 阶段失败。
 
 Primary repository 中的 CTest 与 CI entry 只用于长期软件行为：正确性、性能、稳定性、多线程
 执行、错误处理、编译边界、package consumption 和运行时 API 边界。
-`PhotospiderdCapabilityHelp`、`PhotospiderdInstallLayoutSmoke`、
-`StaticProductConsumerSmoke`、`GraphCliOptionBadAlloc`、GoogleTest discovery
-与 `PublicHeaderSelfContainment` 满足这一规则，
-因为它们会执行或编译维护中的产品。Daemon help 测试通过 CMake script driver 运行当前
-configuration 对应的真实 `photospiderd --help`，分别捕获 stdout 与 stderr，先要求进程结果是
-数值零，再匹配稳定 capability sentence；启动失败与非零退出会得到不同诊断。
-该 driver 会移除 loader override variable，并在 package 安装后复用，因此 build-tree 与
-install-tree resolution 都会验证自身声明的 lookup path。
-`IpcDisabledInstallSmoke`、`DependencyDisabledInstallSmoke`、focused
-`test_ipc_protocol`/`test_ipc_host` case 与 real-process `test_ipc_daemon` case 同样符合该规则：
-它们验证 package、framing、typed client、完整 IPC Host
-dispatch/polling/stop/artifact ownership、daemon lifecycle、concurrency 与 cleanup 行为。Daemon
-test 使用 CTest timeout 与 bounded
-SIGTERM-to-SIGKILL-to-waitpid cleanup，不依赖固定 readiness sleep。
+`StaticProductConsumerSmoke`、`GraphCliOptionBadAlloc`、GoogleTest discovery 与
+`PublicHeaderSelfContainment` 满足这一规则，因为它们会执行或编译维护中的 kernel product。
+Daemon package、protocol、process 与 interoperability test 在外部 daemon 仓库中遵循同一长期
+行为规则；它们不注册到这个 kernel 的 CTest/CI inventory。
 `StaticProductConsumerSmoke` 仅覆盖 producer configure/build/install、
 外部 `find_package`、public header compile/link/run、安装后的 export 与依赖边界、平台 archive/
 link 行为和 multi-configuration target discovery；它的行为判定不得包含 Git identity、staged 或
@@ -495,31 +411,23 @@ publication 前观察 cancellation；close case 则证明逻辑上已取消的 r
 私有 `serial_debug` route 的 connected preflight 内触发 cancellation，并证明 dirty HP 与配对 HP/RT
 request 都不会进入 parameter dependent 或 phase-two target work。
 
-Public surface 不扩张仍由现有长期契约负责：`test_ipc_protocol` 固定精确的 60-method protocol-v2
-inventory、拒绝 `compute.cancel`、round-trip 每个 version-two status label，并要求
-`cancellable: false`；`test_compute_request_registry` 固定 daemon job snapshot；
-`test_policy_registry` 固定事务型 ABI-v1 load rejection、由 binding 保持的 DSO lifetime 与首个
-fault stability；`StaticProductConsumerSmoke` 则会编译并运行已安装的 58-virtual Host、60-call
-Client、纯 C operation ABI v1 与纯 C policy ABI v1 consumer。这些测试不得为该私有变更新增
-compatibility cancellation shim。
+Public surface 不扩张仍由现有长期契约负责。`test_policy_registry` 固定事务型 ABI-v1 load
+rejection、由 binding 保持的 DSO lifetime 与首个 fault stability；embedded Host test 证明
+private cancellation 不会变成 public kernel control。外部 daemon 仓库独立固定其精确
+protocol-v2 inventory、拒绝 `compute.cancel`，并要求 `cancellable:false`。
 
 可用以下命令执行 focused cancellation boundary：
 
 ```bash
 cmake --build build \
   --target test_compute_run test_compute_service_split \
-  test_kernel_contracts test_ipc_protocol test_compute_request_registry \
-  test_policy_registry -j
+  test_kernel_contracts test_policy_registry -j
 ./build/tests/test_compute_run \
   --gtest_filter='ComputeRunCancellation.*:ComputeRunCommitArbiter.LinearizesCancellationBeforeOrAfterCommitClaim:ExecutionServiceCancellation.*'
 ./build/tests/test_compute_service_split \
   --gtest_filter='ComputeServiceCancellation.ConnectedPreflightCancellationSuppressesDirtyAndSiblingPublication'
 ./build/tests/test_kernel_contracts \
   --gtest_filter='ComputeContracts.SequentialCancellationAfterProviderReturnSuppressesPublication:ComputeContracts.CancellationBeforeCommitClaimSuppressesPublication:ComputeContracts.CancellationAfterCommitClaimPreservesPublication:ComputeContracts.RealtimeCommitSurvivesStaleHighPrecisionSibling:ComputeContracts.CancelledComputeStillDrainsBeforeGraphClose'
-./build/tests/test_ipc_protocol \
-  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods:EnumCodec.RoundTripsEveryDefinedVersionTwoLabel:HostRoutedGraphStateProtocolTest.ComputeLifecyclePreservesEveryTypedHostRequestFieldAndStableShapes'
-./build/tests/test_compute_request_registry \
-  --gtest_filter='ComputeRequestRegistrySubmission.PublishesQueuedCommitSnapshot'
 ./build/tests/test_policy_registry
 ```
 
@@ -643,14 +551,12 @@ pending Value dependency deferral、无需等待 producer 即可退役 continuat
 `test_cli_policy_execution_config` 固定事务型 policy/execution config parsing 与精确 Host
 application。`test_host_adapter` 会加载真实纯 C operation ABI-v1 与纯 C policy ABI-v1 fixture，
 配置两种 extension、验证其 snapshot，并通过私有 CPU route 完成 compute。`GraphCliPluginComputeSmoke`
-会通过真实 REPL 重复这条纵向路径。`test_ipc_protocol` 与 `test_ipc_daemon` 负责 protocol-v2
-routing、process-owned policy state、会改变 generation 的 replacement、scan 与共享 execution
-default。`StaticProductConsumerSmoke` 会独立构建已安装的 C11/C++17 operation ABI consumer 与
-C11 policy DSO，再执行同一条 external-consumer path。Operation consumer 会断言全部精确 v1
-record 布局，并且只导出数字/root 两个纯 C discovery symbol。
+会通过真实 REPL 重复这条纵向路径。外部 daemon 仓库负责 protocol-v2 routing、process-owned
+policy state、会改变 generation 的 replacement、scan 与共享 execution-default coverage。
+`StaticProductConsumerSmoke` 会编译每个 installed header，并执行 embedded package consumer。
 
-Installed Host、CLI 与 IPC protocol-v2 surface 仍不暴露 cancellation command。IPC 继续拒绝
-`compute.cancel` 并发布 `cancellable: false`；supersession 仍是私有 embedded-kernel 行为，不是
+Installed Host 与 CLI surface 仍不暴露 cancellation command。外部 daemon protocol 继续拒绝
+`compute.cancel` 并发布 `cancellable:false`；supersession 仍是私有 embedded-kernel 行为，不是
 新的 public control surface。拥有 worker 的 scheduler ABI 不再有 compatibility consumer。
 
 可用以下命令运行 focused policy/execution boundary：
@@ -661,8 +567,7 @@ cmake --build build \
   test_physical_execution_routes test_device_executor_registry \
   test_device_residency test_compute_run test_resource_ledger \
   test_resource_admission \
-  test_cli_policy_execution_config test_host_adapter test_ipc_protocol \
-  test_ipc_daemon graph_cli -j
+  test_cli_policy_execution_config test_host_adapter graph_cli -j
 ./build/tests/test_policy_registry
 ./build/tests/test_policy_execution
 ./build/tests/test_physical_execution_routes
@@ -675,10 +580,6 @@ cmake --build build \
   --gtest_filter='CliPolicyExecutionConfigParsing.*:CliPolicyExecutionConfigApply.*'
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.PolicyScanAndOperationPluginUseStatusValues:EmbeddedHostAdapter.ExternalOperationAndPolicyPluginsDriveParallelCompute'
-./build/tests/test_ipc_protocol \
-  --gtest_filter='ProtocolContract.AdvertisesAndRoutesExactlyTheNormativeVersionTwoMethods:HostRoutedGraphStateProtocolTest.PolicyAndExecution*:ClientExecutionDefaults.*'
-./build/tests/test_ipc_daemon \
-  --gtest_filter='IpcDaemonExecution.*:IpcDaemonPolicy.*'
 ctest --test-dir build --output-on-failure \
   -R '^(GraphCliPluginComputeSmoke|StaticProductConsumerSmoke)$'
 # Apple 且 PHOTOSPIDER_BUILD_OPENCV_OPERATION_PLUGINS=ON：
@@ -711,17 +612,15 @@ ctest --test-dir build --output-on-failure \
   和 recovery、checked-overflow rejection、并发 Run 的 shared CPU admission、initial
   ready-store backpressure 与 priority ordering、dependent re-entry backpressure，以及 success
   或 failure 后的 exact root release。
-- `test_ipc_protocol` 证明精确 Graph status 传递、mutation 只调用一次，以及 failed load 后
-  daemon session-name rollback。
-- `test_ipc_daemon` 证明真实 transport 精确返回 save `NotFound` 与 `Io`，destination failure 后
-  remotely owned graph 仍可 inspect，并接受随后成功的 save。
+- 外部 daemon 仓库负责对应的 protocol 与真实 transport Graph-status、failed-save 和 reconnect
+  regression。
 
 可用以下命令执行 focused validation：
 
 ```bash
 cmake --build build --target test_graph_document_errors test_host_adapter \
   test_kernel_contracts test_resource_ledger test_resource_admission \
-  test_compute_run test_ipc_protocol test_ipc_daemon -j
+  test_compute_run -j
 ./build/tests/test_graph_document_errors
 ./build/tests/test_host_adapter \
   --gtest_filter='EmbeddedHostAdapter.*Reload*'
@@ -732,10 +631,6 @@ cmake --build build --target test_graph_document_errors test_host_adapter \
   --gtest_filter='EmbeddedHostExecutionConfiguration.*'
 ./build/tests/test_compute_run \
   --gtest_filter='ExecutionService.*'
-./build/tests/test_ipc_protocol \
-  --gtest_filter=ProtocolGraphLoad.FailedHostLoadReleasesNameForRetry
-./build/tests/test_ipc_daemon \
-  --gtest_filter=IpcDaemonGraphLifecycle.PersistsAcrossClientsAndInspectsCopiedSnapshots
 ```
 
 这些是长期维护的产品行为测试。该验证面不应包含 migration-residue scan、Issue
@@ -850,9 +745,8 @@ production 或 installable test hook。
 
 Post-plan、admission-wait 与 retained-string observer、gate predicate diagnostic 以及
 direct-resource diagnostic 只存在于不安装的 internal test product 中。
-`StaticProductConsumerSmoke` 要求覆盖八个 seam object 的九个 production anchor，并拒绝
-installed archive 中出现任何匹配的 state、setter、clearer、notification、helper 或
-diagnostic symbol。
+`StaticProductConsumerSmoke` 会另行拒绝 source/private 路径，以及 configured public-header
+allowlist 与 installed package 的任何不一致。
 
 聚焦验证命令为：
 
@@ -897,10 +791,9 @@ physical counter selector，以及最终 `ServiceStopped` zero-counter event。
   shutdown rejection、跨 service shutdown、重复 shutdown 与最终 counter/event 顺序。
 - `test_host_adapter` 覆盖合并的 direct Host close、marker 后 `NotFound`、close isolation、lane
   retirement 顺序与唯一 composition-root shutdown。
-- `test_compute_request_registry`、`test_ipc_protocol`、`test_ipc_host` 与 `test_ipc_daemon` 覆盖
-  预分配 daemon close generation、只允许 invocation 前的 `HostCloseNotStarted`、恰好一次 Host
-  call、丢失 response 后不 replay/reopen、迟到 `NotFound`、Client/IPC Host 仅销毁本地状态、已接受
-  job drainage、signal shutdown 与 Host lifetime。
+- 外部 daemon 仓库覆盖 daemon close generation、只允许 invocation 前的 close、恰好一次 Host
+  call、丢失 response 后不 replay、迟到 `NotFound`、client-only destruction、已接受 job drainage、
+  signal shutdown 与 Host lifetime。
 
 可用以下命令执行 focused lifecycle boundary：
 
@@ -909,8 +802,7 @@ cmake --build build --target test_run_lifecycle_registry \
   test_execution_lifecycle_telemetry test_compute_run \
   test_compute_service_split test_kernel_contracts \
   test_kernel_lifecycle_concurrency test_resource_ledger \
-  test_policy_execution test_host_adapter test_compute_request_registry \
-  test_ipc_protocol test_ipc_host test_ipc_daemon -j
+  test_policy_execution test_host_adapter -j
 ./build/tests/test_run_lifecycle_registry
 ./build/tests/test_execution_lifecycle_telemetry
 ./build/tests/test_compute_run
@@ -920,15 +812,11 @@ cmake --build build --target test_run_lifecycle_registry \
 ./build/tests/test_resource_ledger
 ./build/tests/test_policy_execution
 ./build/tests/test_host_adapter
-./build/tests/test_compute_request_registry
-./build/tests/test_ipc_protocol
-./build/tests/test_ipc_host
-./build/tests/test_ipc_daemon
 ```
 
 最终 delivery pass 最多执行一次 clean native configure、一次 full build 和一次完整 CTest/JUnit。
 在源码与文档冻结前可以进行 focused validation，但不得重复最终 full gate。GitHub CI 会在 producer
-job 中执行一次完整构建并打包一份 runtime。八个下游 `build-smoke` job 都会下载 producer 的同 run
+job 中执行一次完整构建并打包一份 runtime。六个下游 `build-smoke` job 都会下载 producer 的同 run
 read-only ccache artifact，并 fresh-configure 各自的外层 tree。只有 `unit`、`integration` 与
 `verification` job 使用 packaged runtime。任何 job 都不会传输完整 producer tree。CI 不会把
 lifecycle provenance、stale-term search 或 source-quality audit 注册为产品测试。
@@ -946,7 +834,7 @@ codec，并且 codec 只能在 Kernel 析构完成后释放。Fake 不执行真�
 依赖 OpenCV codec 行为，但会执行生产 runtime 与 cache service。
 
 `ImageArtifactCodecDependencyDisabledBuild` 会用
-`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF` 与 `PHOTOSPIDER_BUILD_IPC=OFF`
+`PHOTOSPIDER_BUILD_OPENCV_OPERATION_PROVIDER=OFF`
 配置 fresh nested build，构建 provider-independent focused
 `test_kernel_contracts` target，并只运行注入式 codec 用例。该 target 在不把完整 kernel-contract
 binary 注册到此画像 CTest inventory 的前提下保持可用。这证明 Graph/cache 注入契约与 fake
@@ -1033,12 +921,13 @@ rank/count、zero 或 non-divisible block、nonfinite/nonpositive scale、错误
 alignment/overlap/size、quantized Strided publication 与 oversized blocked transfer alias。
 
 DI-4 另有专门的 `test_dense_image_value_contracts`、`test_sample_conversion`、
-`test_value_artifact` 与 `test_dense_image_processing` unit suite。IPC、Host、worker、durable、
+`test_value_artifact` 与 `test_dense_image_processing` unit suite。Host、worker、durable、
 static package-consumer、OpenCV 与普通 OpenEXR integration test 覆盖 named Value delivery、
 metadata-only inspection、transactional reconstruction、artifact identity join、adapter lifetime、
 彼此独立的 data/display window、精确 HALF promotion、UINT32 code value，以及对不支持 shape 或
 隐式 conversion 的 fail-closed 行为。OpenEXR Deep 继续由独立的 provider-defined
-variable-sample suite 覆盖。
+variable-sample suite 覆盖。外部 daemon 仓库拥有 IPC delivery 与 reconstruction integration
+coverage。
 
 `test_variable_sample_field_extensions` 拥有 17 个只使用标准库的 V-14 integration case。
 一个合成纯 C definition suite 会发布带版本的 VariableSampleField Schema、Facet 和 Layout record，
@@ -1073,7 +962,6 @@ callback caller 地址即时 materialize view。Scoped no-elide 运行必须以
 cmake -S . -B build-v14-no-elide \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DBUILD_TESTING=ON \
-  -DPHOTOSPIDER_BUILD_IPC=OFF \
   -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
   -DPHOTOSPIDER_ENABLE_YAML=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON \
@@ -1107,8 +995,8 @@ ctest --test-dir build --output-on-failure \
 `DependencyDisabledInstallSmoke` 会在真实禁用 OpenCV/YAML/OpenEXR discovery 的 product 中构建并
 运行全部 55 个 dense 用例、全部 4 个 packed FP4 用例与 17 个 V-14 extension 用例，再证明
 installed consumer；
-`StaticProductConsumerSmoke` 会证明 operation-SDK-only
-installed consumer。`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
+`StaticProductConsumerSmoke` 会证明 all-header embedded/OpenCV package consumer。
+`DependencyDisabledInstallSmoke` 还会加载两个独立链接且使用 Value 的
 DSO，证明它们从同一个 shared runtime authority mint identity。两个 installed consumer
 都会在没有 optional dependency 时构造并计算 Region，并观察同步 Ready Value fence。下述
 provider-disabled nested build 也会编译并运行全部 55 个 dense case 与该双 DSO case，因此真实
@@ -1252,10 +1140,6 @@ intermediate 或 leaf symlink、parent traversal，以及 driver basename 或 la
 受信拼写，从而避免 smoke 自身目录名成为 OpenEXR marker，同时保留真实 dependency 名称供扫描。
 它的启用态 companion 只有在 physical-prefix confinement 与 prefix 之后的 component 检查拒绝
 后续每个 symlink 或 escape 后，才会接受使用任一受信拼写的 generated provider target。
-`InstallConsumerArchitecturePropagationSafety` 会注入 synthetic mapping，在不触碰 `/tmp` 的前提下
-跨平台锁定双向拼写、manifest acceptance、root 之后的 symlink 与 escape 反例、双拼写 evidence
-scrub、真实 `-lOpenEXR` rejection、alias 拼写的 `libImath.dylib`/`libOpenEXR.dylib` rejection，
-以及 enabled-provider containment。
 
 `OpenCvOperationProviderBuildSmokeSafety` 只针对 disposable temporary root 下的 synthetic
 repository、ancestor 和无关 symlink target，验证这些破坏性 guard、失败传播和 postcondition。
@@ -1291,9 +1175,6 @@ operation-provider 与 benchmark Run-concurrency contract。它使用 Host-bound
   在发布 Graph session 前失败。
 - `HostComputeSurfacesRejectZeroMaximumParallelismAsInvalidParameter` 要求显式为零的 public
   Run cap 在同步、异步与 image compute 上都以 `GraphErrc::InvalidParameter` 失败。
-- `IpcHostDispatch.MapsEveryCurrentHostVirtualWithoutFallback` 与
-  `IpcHostCompute.RejectsZeroMaximumParallelismBeforeTransport` 证明 IPC Host 会通过三种
-  compute convenience 保留正 Run cap，并在 transport 前以 public Graph error domain 拒绝零。
 - `BuiltinCurveCallbacksReachRequestedWorkerConcurrency` 会在同一个固定八 lane pool 上、每个
   `1/2/4/8` Run cap 下重复三次 builtin tiled `curve_transform` 路径，并通过仅供测试的
   observer 要求精确 callback overlap。
@@ -2569,8 +2450,8 @@ plugin、quota、artifact、retry 或 publication capability。
 确定性且已注册的 GoogleTest 继续负责 canonical re-encoding、严格 prefix/truncation、trailing
 byte、worker identity/digest/data-plane/heartbeat validation、isolated enum/count/rank/extent/stride/
 range/overflow/phase/overlap validation、optional task identity、page reuse、failure/cancellation/retry/
-concurrent Run 行为，以及精确 IPC schema。手工 target 用于探索额外有界输入，绝不能取代这些稳定
-regression assertion。
+concurrent Run 行为。精确 IPC schema fuzz 与 regression ownership 属于外部 daemon 仓库。手工
+target 用于探索额外有界输入，绝不能取代这些稳定 regression assertion。
 
 ## CTest 注册
 
@@ -2598,24 +2479,15 @@ focused optional-provider GoogleTest、三个专用 disk-cache diagnostic concur
 `DependencyDisabledInstallSmoke`。
 
 默认 CTest inventory 刻意不包含 phase 完成度 scan、迁移 residue 检查、陈旧术语搜索、Doxygen
-audit 或 issue 专属编排。Daemon help driver、static package-consumer smoke 与 graph CLI
-allocation-failure driver 会继续注册，因为它们执行真实的安装/运行时行为。
+audit 或 issue 专属编排。Static package-consumer smoke 与 graph CLI allocation-failure driver
+会继续注册，因为它们执行真实的安装/运行时行为。
 
-IPC change 的 focused local product validation 为：
+IPC/daemon change 应在外部 daemon 仓库中针对隔离的 installed kernel prefix 验证。其 focused
+suite 负责精确 method inventory、negative method、client/server behavior、reconnect、installed
+layout/RPATH、同一冻结基线 four-cell interoperability 与 signal drainage。这个 kernel 的 CTest
+inventory 不得重复这些 target 或 fixture。
 
-```bash
-cmake --build build --target photospider_ipc_client \
-  photospider_ipc_server_internal photospiderd test_ipc_protocol test_ipc_host \
-  test_compute_request_registry test_collection_snapshot_registry \
-  test_output_store test_event_stream_boundaries test_ipc_daemon \
-  public_header_self_containment -j
-ctest --test-dir build --output-on-failure \
-  -R '^(FrameCodec|ProtocolEnvelope|IntegerCodec|ProtocolErrors|ProtocolParams|ProtocolGraphLoad|ProtocolGraphClose|ProtocolOperationPlugins|HostRoutedGraphStateProtocolTest|StableInspectionPagingProtocolTest|InspectionJson|SessionRegistry|ComputeRequestRegistry|CollectionSnapshotRegistry|OutputStore|ComputeEventRing|ExecutionTraceRing|UnixSocketConnect|ClientLifecycle|ClientSurface|ClientExecutionDefaults|ClientCollectionAggregation|ClientJobValidation|ClientRetryPolicy|ClientResultValidation|IpcHost|IpcDaemon|IpcDaemonOperationPlugins|IpcDaemonExecution|IpcDaemonPolicy|IpcObservationFixtureDaemon|PhotospiderdCapabilityHelp|StaticProductConsumerSmoke|IpcDisabledInstallSmoke|PublicHeaderSelfContainment)'
-```
-
-这些测试结束后，不得遗留 temporary daemon process、socket、graph session、package prefix 或
-consumer tree。Mode-`0600` 持久 `${socket}.lock` inode 是有意保留的产品同步 artifact；test-owned
-temporary root 会随 root 一起删除它，而真实 default runtime location 会保留它。CTest
+Kernel test 结束后，不得遗留 temporary graph session、package prefix 或 consumer tree。CTest
 output/JUnit 与 remote CI artifact 是证据；不要创建 `tests/results` 或 issue 专属
 replay/provenance helper。
 
@@ -2648,9 +2520,9 @@ Runtime archive 会排除 object file、`CMakeFiles`、Ninja dependency/log data
 CTest metadata 和 package configuration。Packager 会打印验证后 archive 的精确物理 byte count 与
 tar entry count，用于 artifact 体积诊断；ccache 则报告 compiler hit/miss statistics。Producer 只
 上传一次该 archive。三个并行 job 会恢复同一份 archive，并分别运行 `unit`、`integration` 或
-`verification` label。与此同时，八个 build-smoke matrix job 都会下载并验证同 run ccache tar，以
+`verification` label。与此同时，六个 build-smoke matrix job 都会下载并验证同 run ccache tar，以
 read-only 方式使用解开的 cache，且绝不保存它。每项都会使用 producer options 与 launcher 执行外层
-`cmake --fresh` configure，要求预期八项 CTest inventory，再通过锚定的精确名称 regex 与精确
+`cmake --fresh` configure，要求预期六项 CTest inventory，再通过锚定的精确名称 regex 与精确
 `build-smoke` label 选择一个静态列出的测试。Entry 可以构建外层 tree 或更深的 nested tree；ccache
 miss 会继续正常编译。Build-smoke job 不会下载 runtime。CMake 负责所有 primary label 以及
 `RUN_SERIAL`、`RESOURCE_LOCK` 与 `TIMEOUT` 约束；workflow 避免使用一条合并后的冗长 test-name
@@ -2683,8 +2555,8 @@ working directory，因此这些 CI object 绝不会被发布，也不会作为 
 ccache 的镜像后，第一次 run 预期由 producer 冷编译、填充两种 handoff，而 smoke 会同时出现兼容
 hit 与正常 miss；后续兼容 workflow 应以更热状态开始，但 hit rate 不会成为门禁。
 
-`ci/scripts/build_smoke_inventory.py` 会继续保留，因为长期产品测试
-`InstallConsumerArchitecturePropagationSafety` 会导入它来验证已配置 build-smoke entry。手工
+`ci/scripts/build_smoke_inventory.py` 会继续保留，因为托管 workflow 会用它在选择 matrix entry
+前验证 fresh configured build-smoke inventory。手工
 product-boundary driver 与 `sanitizer_test.sh` 也继续供本机显式使用。旧 orchestration、routing、
 runtime-capability、重复 suite 与 self-proof script 不再作为 CI 入口。精确 workflow、cache、
 artifact 与 label 契约记录在 `docs/CI/zh/github-actions.zh.md`。

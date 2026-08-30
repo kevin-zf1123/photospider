@@ -6,8 +6,9 @@ Photospider is a C++17 image-processing graph runtime. It loads YAML graphs,
 executes node dependencies, caches intermediate results, and exposes an
 embedded Host API plus an interactive CLI, REPL, and TUI.
 
-On macOS and Linux, it can also build a foreground, same-user local daemon and
-a typed IPC client.
+The foreground local daemon and typed IPC v2 client are owned by the separate
+[photospider-daemon](https://github.com/kevin-zf1123/photospider-daemon)
+repository. That product consumes an installed Photospider kernel package.
 
 `graph_cli` always uses the embedded Host and does not connect to the daemon.
 See the [architecture overview](docs/kernel-architecture/Overview.md).
@@ -18,8 +19,8 @@ See the [architecture overview](docs/kernel-architecture/Overview.md).
 
 The default profile needs CMake 3.16+, a C++17 compiler, OpenCV (`core`,
 `imgproc`, `imgcodecs`, and `videoio`), yaml-cpp, Threads, FTXUI, OpenSSL Crypto,
-and nlohmann/json when IPC is enabled. OpenSSL is required in every profile;
-the commands below disable test targets only for a smaller user build.
+and OpenSSL Crypto. The maintained test profile also uses nlohmann/json; the
+commands below disable test targets only for a smaller user build.
 
 On macOS:
 
@@ -53,7 +54,6 @@ yaml-cpp:
 ```bash
 cmake -S . -B build/minimal \
   -DBUILD_TESTING=OFF \
-  -DPHOTOSPIDER_BUILD_IPC=OFF \
   -DPHOTOSPIDER_ENABLE_OPENCV=OFF \
   -DPHOTOSPIDER_ENABLE_YAML=OFF
 cmake --build build/minimal --target photospider_kernel photospider -j
@@ -102,19 +102,19 @@ an implicit storage fallback.
 
 ### Local daemon and IPC
 
-On macOS and Linux, `PHOTOSPIDER_BUILD_IPC` defaults to `ON`. Build and start
-the foreground daemon with:
+This repository no longer builds or installs daemon targets, IPC headers, or a
+daemon package component. Build the standalone daemon repository against an
+installed Photospider package:
 
 ```bash
-cmake --build build --target photospider_ipc_client photospiderd -j
-./build/bin/photospiderd
+git clone https://github.com/kevin-zf1123/photospider-daemon.git
+cmake -S photospider-daemon -B photospider-daemon/build \
+  -DCMAKE_PREFIX_PATH=/desired/photospider/prefix
+cmake --build photospider-daemon/build -j
 ```
 
-`photospiderd` is a same-user local Unix-domain sidecar, not a system service,
-remote endpoint, or TCP server. The CLI does not connect to it.
-
-See the [IPC protocol](docs/codebase-structure/IPC-Protocol-v2.md) for its typed
-client, socket policy, lifecycle, and limits.
+`graph_cli` remains an embedded frontend and does not auto-connect. The daemon
+repository owns its protocol document, package, CI, lifecycle, and tests.
 
 ### Install and integrate
 
@@ -125,16 +125,15 @@ cmake --build build -j
 cmake --install build --prefix /desired/prefix
 ```
 
-CMake installs the backend, public headers, enabled SDK components, capability
-metadata, and `photospiderd` when IPC is enabled. It does not install
-`graph_cli`; run the CLI from `build/bin/graph_cli`. An OpenCV-disabled install
-does not install or advertise `operation_opencv`; its package config discovers
-only the dependencies recorded as enabled by the producer.
+CMake installs the kernel, public headers, enabled SDK components, and
+capability metadata. It does not install `graph_cli`; run the CLI from
+`build/bin/graph_cli`. An OpenCV-disabled install does not install or advertise
+`operation_opencv`; its package config discovers only the dependencies recorded
+as enabled by the producer.
 
 | Use case | CMake component | Imported target |
 | --- | --- | --- |
 | Embedded backend | `embedded` | `Photospider::photospider` |
-| Typed local IPC | `ipc_client` | `Photospider::photospider_ipc_client` |
 | Pure-C operation plugin | `operation_plugin_sdk` | `Photospider::operation_plugin_sdk` |
 | Data-definition provider | `data_provider_sdk` | `Photospider::data_provider_sdk` |
 | OpenCV operation adapter | `operation_opencv` | `Photospider::operation_opencv` |
@@ -160,7 +159,7 @@ contracts and required entry points.
 | CLI, REPL, configuration, and built-in operations | [User manual](manual.md) |
 | Architecture reading order | [Kernel architecture index](docs/kernel-architecture/README.md) |
 | Current modules and ownership | [Architecture overview](docs/kernel-architecture/Overview.md) |
-| Local daemon and typed IPC | [IPC protocol](docs/codebase-structure/IPC-Protocol-v2.md) |
+| Local daemon and typed IPC | [External daemon repository](https://github.com/kevin-zf1123/photospider-daemon) |
 | Operation and policy extensions | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
 | Build and validation guidance | [Testing and validation](docs/development/Testing-and-Validation.md) |
 
