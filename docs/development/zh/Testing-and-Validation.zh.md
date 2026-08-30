@@ -2427,8 +2427,13 @@ export。
 
 必须显式构建并运行有界本地 campaign：
 
+worker-protocol codec 属于保留的 Job vertical，因此手工 fuzz profile 必须在启用 fuzz targets 的
+同时显式开启这个现在默认关闭的 product。
+
 ```bash
-cmake -S . -B build-fuzz -DPHOTOSPIDER_BUILD_FUZZERS=ON
+cmake -S . -B build-fuzz \
+  -DPHOTOSPIDER_BUILD_SINGLE_TENANT_JOB=ON \
+  -DPHOTOSPIDER_BUILD_FUZZERS=ON
 cmake --build build-fuzz \
   --target fuzz_worker_protocol_codec \
            fuzz_isolated_cpu_invocation_codec -j
