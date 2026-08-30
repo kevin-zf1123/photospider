@@ -7942,7 +7942,9 @@ TEST(ComputeContracts, CancellationAfterCommitClaimPreservesPublication) {
  * @note The old RT child blocks after its visible proxy swap while the old HP
  * provider remains non-preemptible. Releasing RT lets the queued replacement
  * publication become current and supersede the old group before HP commit;
- * the valid old proxy stays visible until the latest group publishes.
+ * the valid old proxy stays visible until the latest group publishes. Future
+ * delivery precedes physical lane retirement, so teardown observes explicit
+ * coordinator quiescence before requiring zero lineage ownership.
  */
 TEST(ComputeContracts,
      RealtimeSupersessionAfterRtCommitPreservesProxyAndRejectsOldHp) {
@@ -8042,6 +8044,8 @@ TEST(ComputeContracts,
       << old_outcome.error->message;
   EXPECT_TRUE(latest_outcome.ok);
   EXPECT_FALSE(latest_outcome.error.has_value());
+  EXPECT_TRUE(wait_for_compute_request_quiescence(kernel, graph_name,
+                                                  std::chrono::seconds(2)));
 
   const float final_rt =
       testing::KernelTestAccess::runtime(kernel, graph_name)
