@@ -545,6 +545,8 @@ M1FairnessEvidenceInput make_product_class_start_input(
  * @throws Product, filesystem, observer, future, or synchronization failures.
  * @note The fixture has one real task per request. Provider gating establishes
  * simultaneous backlog; no elapsed completion time is compared to an SLO.
+ * Graph close joins each asynchronous Host status worker before the final
+ * observation snapshot, so the asserted publication cut is complete.
  */
 TEST(M1ProductPath,
      ThroughputSettlesInsideInteractiveBacklogWithBoundedStarts) {
@@ -647,10 +649,16 @@ TEST(M1ProductPath,
     ASSERT_TRUE(status.ok) << status.message;
   }
 
+  const M1ExecutionSnapshot settled =
+      wait_for_cpu_reservations(*m1_host, 0U, 0U, 5s);
+  EXPECT_EQ(settled.host_resources.reserved, ResourceVector{});
+  close_sessions(*host, sessions);
+
   const M1FairnessObservationSnapshot snapshot = observations.snapshot();
   ASSERT_FALSE(snapshot.overflowed);
   ASSERT_FALSE(snapshot.sequence_exhausted);
   ASSERT_FALSE(snapshot.qos_mismatch);
+  ASSERT_TRUE(snapshot.stable_publication_cut);
   const M1FairnessSummary fairness =
       evaluate_m1_fairness(make_product_class_start_input(snapshot));
   EXPECT_EQ(fairness.class_start_verdict, I1Verdict::Pass);
@@ -737,10 +745,6 @@ TEST(M1ProductPath,
   }
   EXPECT_TRUE(successful_throughput_settled_while_interactive_outstanding);
 
-  const M1ExecutionSnapshot settled =
-      wait_for_cpu_reservations(*m1_host, 0U, 0U, 5s);
-  EXPECT_EQ(settled.host_resources.reserved, ResourceVector{});
-  close_sessions(*host, sessions);
   m1_host->m1_shutdown_execution();
   m1_host->m1_shutdown_execution();
   const M1ExecutionSnapshot stopped = m1_host->m1_execution_snapshot(0U, 4096U);
