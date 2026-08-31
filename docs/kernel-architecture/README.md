@@ -32,6 +32,24 @@ implementation phase reports, migration status tables, undated TODO lists, or
 future runtime objects. A future concept enters this directory only after code
 and durable verification make it current software behavior.
 
+## Current Typed-Compiler Baseline
+
+The current tree has detached `GraphDefinition`/YAML ingestion, request-local
+`ComputePlan`, a full-task-graph cache key, formal Value/artifact cache, and the
+exact-size operation ABI v1. It has no `WorkflowDocument`,
+`OperationSemanticTraits`, `SemanticGraphIR`, `OptimizedGraphIR`, compiler
+`ExecutionPlan`, compiler digest service, or typed plan cache.
+
+[ADR 0014](../adr/0014-compiler-document-and-plan-versions-are-independent.md)
+and the
+[Compiler Version Contract](../development/Compiler-Version-Contract.md)
+freeze future version/canonical/digest/migration/cache/extension rules. Those
+accepted target contracts do not make any compiler object current behavior.
+Current details remain in [Graph Lifecycle](Graph-Lifecycle.md),
+[Compute Flow](Compute-Flow.md), [Cache Model](Cache-Model.md), and
+[Plugin ABI](Plugin-ABI.md); later implementation changes update those domain
+documents only when source and durable tests establish the new facts.
+
 ## Cross-Reference and Update Rules
 
 - Current documents may link ADRs for rationale and roadmaps for explicitly

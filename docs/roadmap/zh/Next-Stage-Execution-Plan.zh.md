@@ -9,7 +9,9 @@ v2，作为 K0 至 K5 的当前排序权威。除非某行明确标为“已完�
 当前 runtime 事实以 `docs/kernel-architecture/` 为权威，已接受决策以
 `docs/adr/` 和英文 OpenSpec 为权威，版本/构建/CI 基线以
 [拆仓后开发契约](../../development/zh/Post-Split-Development-Contract.zh.md)
-为权威，实时 readiness 以 GitHub Issues 和 Projects 为权威。每个实现切片都继承
+为权威，已接受 compiler identity 规则以
+[编译器版本契约](../../development/zh/Compiler-Version-Contract.zh.md)为权威，实时
+readiness 以 GitHub Issues 和 Projects 为权威。每个实现切片都继承
 [执行切片完成定义](../../development/zh/Execution-Slice-Definition-of-Done.zh.md)。
 
 ## 可核验的拆仓后基线
@@ -40,8 +42,9 @@ v2，作为 K0 至 K5 的当前排序权威。除非某行明确标为“已完�
 
 虽然普通 package file 公告 same-minor compatibility，daemon producer 和 installed client
 当前仍精确要求 Photospider 0.1.0。Package compatibility 与 wire compatibility 相互
-独立。未来 WorkflowDocument、IR、planner、digest、plan-cache 和 trait 版本也是独立
-kernel contract；它们都不是 IPC 版本。
+独立。已接受的 K1 契约给 WorkflowDocument、IR、planner、digest、plan-cache、trait、
+canonical-byte 与 extension schema 分配独立初始 `1.0` identity；它们都不是 package 或 IPC
+version。在各自 implementing Issue 落地前，这些 identity 仍属于 future runtime object。
 
 ## K0-K5 执行序列
 
@@ -66,6 +69,14 @@ K0 必须交付：
 WorkflowDocument、semantic/optimized IR、planner、digest、plan-cache 和 operation-trait 版本及
 breaking migration。它是 open parent #196 的 focused native child。#199/#200 等待 #245，
 而不等待 #196 下全部 release、rollback、signing、persistence 与 artifact 工作关闭。
+
+[ADR 0014](../../adr/zh/0014-compiler-document-and-plan-versions-are-independent.zh.md)
+与[编译器版本契约](../../development/zh/Compiler-Version-Contract.zh.md)接受 K1 的 contract-only
+结果：十三个独立 `1.0` identities、确定性 canonical bytes、三个 typed digest domains、显式
+directed compatibility、writer 不 downgrade、单向 durable migration、derived-artifact rebuild、
+typed plan-key/cache invalidation 与 versioned extension effects。该接受不实现任何 document、
+trait、IR、compiler、optimizer、planner、digest service、cache 或 execution path。K2 从 #199
+开始。
 
 ### K2：先冻结 traits，再冻结 source document
 

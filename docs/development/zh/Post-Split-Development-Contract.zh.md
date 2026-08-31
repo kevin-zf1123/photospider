@@ -3,7 +3,8 @@
 ## 目的
 
 本文是 IPC v2 daemon 拆仓后持续维护的 repository、version、preset 与 CI contract。
-它定义 K0 开发基线；它不声称未来 typed-compiler capability 已实现。
+它定义 K0 开发基线并链接已接受的 K1 version decision；它不声称未来 typed-compiler
+capability 已实现。
 
 路线排序以[拆仓后路线图 v3](../../roadmap/zh/Next-Stage-Execution-Plan.zh.md)为权威。
 当前 runtime behavior 仍以 `docs/kernel-architecture/` 为权威。
@@ -33,8 +34,12 @@ daemon 仓提 Issue。Mixed 工作拆为相互链接的 focused Issues，不保�
 0.x 开发的 same-minor package compatibility 刻意窄于 same-major。Daemon exact dependency 更窄，并且
 fail closed。Package match 不代表 wire match，wire match 也不使 compiler schema 兼容。
 
-未来 WorkflowDocument、IR、planner、digest、plan-cache 和 operation-trait 版本在 #245 中独立决定。
-它们不是 package 或 IPC 版本。
+已接受的[编译器版本契约](Compiler-Version-Contract.zh.md)为 canonical bytes、
+WorkflowDocument、operation traits、semantic/optimized IR、planner behavior、ExecutionPlan、
+三个 digest domains、plan-cache key/record 与 compiler extensions 分配独立初始 `1.0`
+identity。其 compatibility manifest 只接纳 exact `1.0 -> 1.0`，绝不推断 same-major
+compatibility，也不把 package 或 IPC version 当作 compiler admission。这些是已接受 target
+contracts，不是已实现 runtime objects。
 
 ## Kernel configure presets
 
@@ -102,7 +107,10 @@ layout/RPATH、lifecycle、ownership 与 old/new interoperability。
 
 ## Typed-compiler 交接约束
 
-K0 把未来开发交给 #245 -> #199 -> #200 -> #201/#202。在这些 Issues 落地前：
+K0 把 version decision 交给 #245。K1 现在通过
+[ADR 0014](../../adr/zh/0014-compiler-document-and-plan-versions-are-independent.zh.md)
+与编译器版本契约冻结这些 decision；runtime implementation 按 #199 -> #200 -> #201/#202
+推进。在这些 implementation Issues 落地前：
 
 - operation ABI v1 保持 exact-size pure-C contract；
 - traits 将来可使用 engine-owned registry 或 versioned sidecar；
@@ -113,7 +121,14 @@ K0 把未来开发交给 #245 -> #199 -> #200 -> #201/#202。在这些 Issues �
 - 第一版 WorkflowDocument 只包含一个 function、一个 region、一个 block，且无环；
 - internal WorkflowDocument/IR/planner state 永不暴露给 daemon。
 
-#194 Host 工作与无关 peripheral cleanup 与 #199 保持分离。K0 不实现 #199、#200、#201 或 #202。
+K1 还要求确定性 `PSCC` canonical bytes、typed domain-separated `PSDG` SHA-256 digests、
+显式 directed compatibility、unsupported downgrade、单向 durable source/sidecar migration、
+derived IR/plan/cache rebuild、包含全部 plan influence 的 key，以及 required extension fail
+closed。它不改变当前 GraphDefinition/YAML、ComputePlan、full-task-graph cache、Value/artifact
+cache、package、operation ABI 或 IPC behavior。
+
+#194 Host 工作与无关 peripheral cleanup 与 #199 保持分离。K0 与 K1 均不实现 #199、#200、
+#201 或 #202。
 
 ## 维护流程
 

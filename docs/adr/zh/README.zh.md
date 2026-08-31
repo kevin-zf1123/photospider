@@ -19,6 +19,7 @@ issue/project tracking 维护。
 | [0011](0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md) | Server control plane、worker、artifact authority 与 plugin runtime 属于不同安全域。 |
 | [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | Operation plugin 使用独立版本化 pure-C ABI。 |
 | [0013](0013-ordinary-dense-image-coordinates-samples-colors-and-statistics-are-separate-contracts.zh.md) | 普通 DenseImage 坐标、样本、颜色与统计是分离契约。 |
+| [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | Compiler、document、plan、digest、cache 与 extension 版本是相互独立的契约。 |
 
 新 ADR 使用下一个四位编号。被取代的 ADR 仍保留在序列中并链接到替代项，不能被
 静默改写或删除。

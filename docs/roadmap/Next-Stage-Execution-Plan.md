@@ -11,6 +11,8 @@ Current runtime facts remain authoritative in `docs/kernel-architecture/`,
 accepted decisions in `docs/adr/` and English OpenSpec, the version/build/CI
 baseline in the
 [Post-Split Development Contract](../development/Post-Split-Development-Contract.md),
+the accepted compiler identity rules in the
+[Compiler Version Contract](../development/Compiler-Version-Contract.md),
 and live readiness in GitHub Issues and Projects. Every implementation slice
 inherits the
 [Execution Slice Definition of Done](../development/Execution-Slice-Definition-of-Done.md).
@@ -44,9 +46,11 @@ inherits the
 
 The daemon producer and installed client currently require exact Photospider
 0.1.0 even though ordinary package files advertise same-minor compatibility.
-Package compatibility and wire compatibility are independent. Future
-WorkflowDocument, IR, planner, digest, plan-cache, and trait versions are also
-independent kernel contracts; none is an IPC version.
+Package compatibility and wire compatibility are independent. The accepted K1
+contract gives WorkflowDocument, IR, planner, digest, plan-cache, trait,
+canonical-byte, and extension schemas independent initial `1.0` identities;
+none is a package or IPC version. Those identities remain future runtime
+objects until their implementing Issues land.
 
 ## K0-K5 execution sequence
 
@@ -72,6 +76,16 @@ WorkflowDocument, semantic/optimized IR, planner, digest, plan-cache, and
 operation-trait versions plus breaking migration. It is a focused native child
 of open parent #196. #199 and #200 wait for #245, not for all release,
 rollback, signing, persistence, and artifact work under #196 to close.
+
+[ADR 0014](../adr/0014-compiler-document-and-plan-versions-are-independent.md)
+and the
+[Compiler Version Contract](../development/Compiler-Version-Contract.md)
+accept K1's contract-only outcome: thirteen independent `1.0` identities,
+deterministic canonical bytes, three typed digest domains, explicit directed
+compatibility, no writer downgrade, one-way durable migration, derived-artifact
+rebuild, typed plan-key/cache invalidation, and versioned extension effects.
+This acceptance implements no document, trait, IR, compiler, optimizer,
+planner, digest service, cache, or execution path. K2 begins with #199.
 
 ### K2: freeze traits, then the source document
 
