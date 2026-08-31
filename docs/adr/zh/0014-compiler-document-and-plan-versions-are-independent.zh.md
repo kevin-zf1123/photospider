@@ -117,8 +117,8 @@ cache record 的 compatibility 和 rebuild lifetime 不同。
 
 ### 推断 same-major compatibility
 
-拒绝原因：这些是 pre-1.0 compiler contracts，旧 reader 无法知道新增 field 或 extension 是否
-nonsemantic。
+拒绝原因：这些新引入的 compiler contracts 尚无经过评审的非 exact compatibility 证据，旧
+reader 无法知道新增 field 或 extension 是否 nonsemantic。
 
 ### Canonicalize YAML 或 JSON text
 

@@ -136,8 +136,9 @@ rebuild lifetimes.
 
 ### Infer same-major compatibility
 
-Rejected because these are pre-1.0 compiler contracts and an older reader
-cannot know that an added field or extension is nonsemantic.
+Rejected because these newly introduced compiler contracts have no reviewed
+non-exact compatibility evidence, and an older reader cannot know that an
+added field or extension is nonsemantic.
 
 ### Canonicalize YAML or JSON text
 
