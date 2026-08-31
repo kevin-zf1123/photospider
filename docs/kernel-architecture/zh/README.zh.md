@@ -24,6 +24,21 @@ change-local 计划和清单，但不是独立公开完成权威。已完成迁�
 入口。它们不得包含任务勾选、实施阶段报告、迁移状态表、没有时间边界的 TODO 或未来 runtime
 object。未来概念只有在代码和长期验证使其成为当前软件行为后，才会进入本目录。
 
+## 当前 typed-compiler 基线
+
+当前源码树具有独立 `GraphDefinition`/YAML ingestion、request-local `ComputePlan`、
+full-task-graph cache key、正式 Value/artifact cache 与 exact-size operation ABI v1。它没有
+`WorkflowDocument`、`OperationSemanticTraits`、`SemanticGraphIR`、`OptimizedGraphIR`、
+compiler `ExecutionPlan`、compiler digest service 或 typed plan cache。
+
+[ADR 0014](../../adr/zh/0014-compiler-document-and-plan-versions-are-independent.zh.md)
+与[编译器版本契约](../../development/zh/Compiler-Version-Contract.zh.md)冻结未来的
+version/canonical/digest/migration/cache/extension 规则。这些已接受 target contracts 不会让任何
+compiler object 成为当前 behavior。当前细节继续位于[图生命周期](Graph-Lifecycle.zh.md)、
+[计算流程](Compute-Flow.zh.md)、[缓存模型](Cache-Model.zh.md)与
+[插件 ABI](Plugin-ABI.zh.md)；只有当 source 与长期 tests 建立新事实时，后续 implementation
+change 才会更新这些 domain documents。
+
 ## 交叉引用与更新规则
 
 - 当前文档可以链接 ADR 说明理由，链接 roadmap 提供明确标记的未来背景；这些链接不会让目标

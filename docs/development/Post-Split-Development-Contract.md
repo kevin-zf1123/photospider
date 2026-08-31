@@ -3,8 +3,9 @@
 ## Purpose
 
 This document is the maintained repository, version, preset, and CI contract
-after the IPC v2 daemon split. It defines the K0 development baseline; it does
-not claim that future typed-compiler capabilities are implemented.
+after the IPC v2 daemon split. It defines the K0 development baseline and links
+the accepted K1 version decision; it does not claim that future typed-compiler
+capabilities are implemented.
 
 Roadmap ordering is authoritative in
 [Post-Split Roadmap v3](../roadmap/Next-Stage-Execution-Plan.md). Current runtime
@@ -39,9 +40,14 @@ Same-minor package compatibility is intentionally narrower than same-major for
 closed. A package match does not imply a wire match, and a wire match does not
 make compiler schemas compatible.
 
-Future WorkflowDocument, IR, planner, digest, plan-cache, and operation-trait
-versions are independently decided in #245. They are not package or IPC
-versions.
+The accepted
+[Compiler Version Contract](Compiler-Version-Contract.md) independently assigns
+initial `1.0` identities to canonical bytes, WorkflowDocument, operation
+traits, semantic/optimized IR, planner behavior, ExecutionPlan, three digest
+domains, plan-cache key/record, and compiler extensions. Its compatibility
+manifest admits exact `1.0 -> 1.0` only, never infers same-major compatibility,
+and never treats a package or IPC version as compiler admission. These are
+accepted target contracts, not implemented runtime objects.
 
 ## Kernel configure presets
 
@@ -116,8 +122,10 @@ support matrix lives in that repository's `docs/Version-and-CI-Compatibility.md`
 
 ## Typed-compiler handoff constraints
 
-K0 hands future development to #245 -> #199 -> #200 -> #201/#202. Until those
-Issues land:
+K0 handed version decisions to #245. K1 now freezes them in
+[ADR 0014](../adr/0014-compiler-document-and-plan-versions-are-independent.md)
+and the Compiler Version Contract; runtime implementation proceeds through
+#199 -> #200 -> #201/#202. Until those implementation Issues land:
 
 - operation ABI v1 remains the exact-size pure-C contract;
 - traits may later use an engine-owned registry or versioned sidecar;
@@ -132,8 +140,16 @@ Issues land:
   acyclic; and
 - internal WorkflowDocument/IR/planner state is never exposed to the daemon.
 
+K1 additionally requires deterministic `PSCC` canonical bytes, typed
+domain-separated `PSDG` SHA-256 digests, explicit directed compatibility,
+unsupported downgrade, one-way durable source/sidecar migration, derived IR/
+plan/cache rebuild, full plan-influence keys, and fail-closed required
+extensions. It changes no current GraphDefinition/YAML, ComputePlan,
+full-task-graph cache, Value/artifact cache, package, operation ABI, or IPC
+behavior.
+
 #194 Host work and unrelated peripheral cleanup remain separate from #199.
-K0 does not implement #199, #200, #201, or #202.
+Neither K0 nor K1 implements #199, #200, #201, or #202.
 
 ## Maintenance procedure
 
