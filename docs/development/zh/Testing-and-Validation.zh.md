@@ -25,9 +25,13 @@ Kernel test 覆盖：
   operation-v2 typed parameter schema、demand view，以及带精确 destroy/close count 的
   deterministic owner-allocation failure；
 - semantic IR 前的 unknown/missing/wrong-type/conflict parameter rejection；
+- side-effecting/non-cacheable operation 在 semantic、optimized 与 plan stage 中保持，
+  并覆盖串行重复执行时的 callback 顺序、调用次数与不复用旧 result；
 - Whole/Elementwise/Halo demand propagation 与 execution-time coverage；
 - 带 named oracle 或显式 `unchecked` identity，且不生成 verdict/evidence output 的
-  raw benchmark diagnostic。
+  raw benchmark diagnostic；当 oracle 返回拒绝或抛出异常时，仍保留已完成的
+  compile/plan/execute/operation/backend/digest observation，并独立报告 correctness。
+  由于 monotonic clock 可能只有微秒分辨率，duration 允许为零。
 
 Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、九方法 routing、
 临时 Session/Job lifecycle、restart loss、multi-Session behavior、cancellation、

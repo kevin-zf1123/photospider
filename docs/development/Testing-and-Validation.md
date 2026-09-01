@@ -28,9 +28,15 @@ Kernel tests cover:
   including operation-v2 typed parameter schemas, demand views, and
   deterministic owner-allocation failure with exact destroy/close counts;
 - parameter unknown/missing/wrong-type/conflict rejection before semantic IR;
+- side-effecting/non-cacheable operation preservation across semantic,
+  optimized, and plan stages, plus serial repeated-execution callback order,
+  invocation counts, and absence of result reuse;
 - Whole/Elementwise/Halo demand propagation and execution-time coverage;
 - raw benchmark diagnostics with a named oracle or explicit `unchecked`
-  identity and without verdict/evidence output.
+  identity and without verdict/evidence output, including rejected/throwing
+  oracles that retain completed compile/plan/execute/operation/backend/digest
+  observations while reporting correctness separately. Duration assertions
+  permit zero because the monotonic clock may have microsecond resolution.
 
 Daemon tests live in `photospider-daemon` and cover local frame validation,
 nine-method routing, ephemeral Session/Job lifecycle, restart loss,
