@@ -1,3 +1,5 @@
+#include <cmath>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -5,7 +7,8 @@
 #include "support/test_support.hpp"
 
 /**
- * @brief Exercises typed stage identity, validation, ordering, and staleness.
+ * @brief Exercises typed stage identity, exact parameter bits, validation,
+ * ordering, execution visibility, and staleness.
  * @return Zero when all checks pass.
  * @throws std::bad_alloc If test setup allocation fails.
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
@@ -71,6 +74,76 @@ int main() {
   PS_CHECK(equivalent_compiled.ok());
   PS_CHECK(compiled.value().semantic.digest().value ==
            equivalent_compiled.value().semantic.digest().value);
+
+  auto signed_zero_operations = std::make_shared<ps::OperationRegistry>();
+  ps::OperationTraits signed_zero_traits;
+  signed_zero_traits.parameter_schema = {ps::OperationParameterSpec{
+      "value", ps::OperationParameterType::Float64, true}};
+  PS_CHECK(signed_zero_operations
+               ->register_operation(ps::OperationDefinition{
+                   "test.signed_zero", signed_zero_traits,
+                   [](const ps::OperationInvocation& invocation)
+                       -> ps::Result<ps::Value> {
+                     const auto parameter = invocation.parameters.find("value");
+                     if (parameter == invocation.parameters.end()) {
+                       return ps::Result<ps::Value>(ps::Status::failure(
+                           ErrorCode::InvalidArgument,
+                           "signed-zero probe parameter is missing"));
+                     }
+                     const auto* value =
+                         std::get_if<double>(&parameter->second);
+                     if (!value) {
+                       return ps::Result<ps::Value>(ps::Status::failure(
+                           ErrorCode::InvalidArgument,
+                           "signed-zero probe parameter is not Float64"));
+                     }
+                     return ps::Result<ps::Value>(ps::Value::from_float64(
+                         std::signbit(*value) ? -1.0 : 1.0));
+                   }})
+               .ok());
+  PS_CHECK(signed_zero_operations->freeze().ok());
+  Compiler signed_zero_compiler(signed_zero_operations);
+  WorkflowDocument positive_zero_document;
+  positive_zero_document.nodes = {
+      WorkflowNode{1U, "test.signed_zero", {}, {{"value", 0.0}}}};
+  positive_zero_document.outputs = {WorkflowOutput{"value", 1U, "value"}};
+  WorkflowDocument negative_zero_document = positive_zero_document;
+  negative_zero_document.nodes.front().parameters = {{"value", -0.0}};
+  GraphContext positive_zero_graph(std::move(positive_zero_document));
+  GraphContext negative_zero_graph(std::move(negative_zero_document));
+  auto positive_zero = signed_zero_compiler.compile(positive_zero_graph);
+  auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
+  PS_CHECK(positive_zero.ok());
+  PS_CHECK(negative_zero.ok());
+  PS_CHECK(positive_zero.value().semantic.digest().value == "7ad5d0e23f1164b3");
+  PS_CHECK(positive_zero.value().optimized.digest().value ==
+           "02d649acb07e120a");
+  PS_CHECK(positive_zero.value().plan.digest().value == "b3201be660702a9c");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "61853ba3f4ca3fa0");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "e5682637a9eab433");
+  PS_CHECK(negative_zero.value().optimized.digest().value ==
+           "0d4103d0a4a6dcce");
+  PS_CHECK(negative_zero.value().plan.digest().value == "edee134b3dc08cfc");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "cd7b604b0b72766e");
+  PS_CHECK(positive_zero.value().semantic.digest().value !=
+           negative_zero.value().semantic.digest().value);
+  PS_CHECK(positive_zero.value().optimized.digest().value !=
+           negative_zero.value().optimized.digest().value);
+  PS_CHECK(positive_zero.value().plan.digest().value !=
+           negative_zero.value().plan.digest().value);
+  PS_CHECK(positive_zero.value().plan.cache_key().value !=
+           negative_zero.value().plan.cache_key().value);
+  ps::ExecutionContext signed_zero_execution(signed_zero_operations);
+  auto positive_zero_result =
+      signed_zero_execution.execute(positive_zero.value().plan);
+  auto negative_zero_result =
+      signed_zero_execution.execute(negative_zero.value().plan);
+  PS_CHECK(positive_zero_result.ok());
+  PS_CHECK(negative_zero_result.ok());
+  PS_CHECK(ps::test::named_scalar(positive_zero_result.value(), "value") ==
+           1.0);
+  PS_CHECK(ps::test::named_scalar(negative_zero_result.value(), "value") ==
+           -1.0);
 
   WorkflowDocument duplicate = ps::test::addition_document(1.0, 1.0);
   duplicate.nodes[1].id = 1U;

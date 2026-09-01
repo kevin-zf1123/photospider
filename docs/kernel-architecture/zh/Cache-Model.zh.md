@@ -10,5 +10,9 @@ Active tree 没有 graph-local runtime cache、filesystem cache、serialized Val
 cache codec、retention policy 或 recovery path。Caller 可丢弃全部 derived plan，再从
 `WorkflowDocument` 与 frozen operation set 重新编译。
 
+每个通过 schema validation 的 Float64 parameter 都会贡献 copied IEEE-754 binary64 value
+中存在的精确 bit。特别是，`+0.0` 与 `-0.0` 会产生不同的 semantic/optimized/plan digest，
+进而产生不同的 `PlanCacheKey`；cache 不能为一个 signed-zero workflow 复用另一个的 plan。
+
 Plan/result digest 与 timing 是普通 reproducibility diagnostic，不是 signature、durable
 identity、receipt 或 release evidence。

@@ -13,5 +13,11 @@ Value format, cache codec, retention policy, or recovery path. A caller may
 discard every derived plan and compile again from `WorkflowDocument` plus the
 frozen operation set.
 
+Every schema-valid Float64 parameter contributes the exact bits present in the
+copied IEEE-754 binary64 value. In particular, `+0.0` and `-0.0` produce
+different semantic/optimized/plan digests and therefore different
+`PlanCacheKey` values; a cache cannot reuse one signed-zero workflow for the
+other.
+
 Plan/result digests and timing are ordinary reproducibility diagnostics. They
 are not signatures, durable identities, receipts, or release evidence.

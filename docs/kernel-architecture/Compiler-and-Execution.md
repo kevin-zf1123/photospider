@@ -11,6 +11,12 @@ IR publication; built-ins do not synthesize defaults. Analysis publishes
 immutable `SemanticGraphIR` in node-id-tiebroken
 topological order plus `SemanticGraphDigest`.
 
+Each schema-valid Float64 parameter enters canonical stage identity using the
+exact copied IEEE-754 binary64 bits in fixed little-endian order. Signed zero
+is preserved, so sign-sensitive callbacks cannot share semantic, optimized,
+plan, or cache-key identity. The compiler introduces no finite-only rule and
+does not normalize NaN payloads or infinities.
+
 `Compiler::optimize` is an explicit conservative no-op in this baseline. It
 copies the semantic nodes into a distinct `OptimizedGraphIR` and produces a
 domain-separated `OptimizedGraphDigest`.
