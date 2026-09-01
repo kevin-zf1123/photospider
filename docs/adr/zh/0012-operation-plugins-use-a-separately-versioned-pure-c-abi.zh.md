@@ -30,6 +30,13 @@ value array、bounded facet record、selected local backend、cooperative cancel
 observation 与 host-owned single-publication output sink。Host 在 callback 返回前复制 output
 facet/bytes，并重建 validated Value。
 
+保持不变的 `int` callback result 具有闭合的 version-two vocabulary：success、ordinary
+failure、cooperative cancellation 与 backend unavailable。显式 backend-unavailable result
+会映射为 `BackendUnavailable`；只有 copied trait 允许 CPU fallback 的 GPU attempt 才能在
+CPU 上重试。ordinary failure 与所有 unknown nonzero integer 仍映射为 `OperationFailed`，
+绝不触发 fallback。backend-unavailable callback 不发布 output；callback signature 与
+descriptor layout 均保持不变。
+
 ### Data-definition ABI
 
 Data provider 只发布 bounded schema record：key、element type 与 maximum rank。Registry 会

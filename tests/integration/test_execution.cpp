@@ -518,6 +518,70 @@ int main() {
   PS_CHECK(fallback_result.value().diagnostics.selected_backends.at(2U) ==
            Backend::Cpu);
 
+  auto dso_operations = std::make_shared<OperationRegistry>();
+  OperationTraits dso_source_traits;
+  PS_CHECK(dso_operations
+               ->register_operation(OperationDefinition{
+                   "test.dso_source", dso_source_traits,
+                   [](const OperationInvocation&) -> Result<Value> {
+                     return Result<Value>(Value::from_float64(12.0));
+                   }})
+               .ok());
+  PS_CHECK(dso_operations->load_plugin(PS_OPERATION_FIXTURE_PATH).ok());
+  PS_CHECK(dso_operations->freeze().ok());
+  Compiler dso_compiler(dso_operations);
+  ExecutionContext dso_execution(dso_operations,
+                                 ExecutionContextConfig{1U, true, 8U, 1024U});
+  WorkflowDocument dso_fallback_document;
+  dso_fallback_document.nodes = {
+      WorkflowNode{1U, "test.dso_source", {}, {}},
+      WorkflowNode{2U,
+                   "fixture.gpu_fallback",
+                   {WorkflowInput{1U, "value"}},
+                   {}},
+  };
+  dso_fallback_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
+  GraphContext dso_fallback_graph(std::move(dso_fallback_document));
+  CompiledWorkflow dso_fallback_workflow =
+      compile_or_throw(&dso_compiler, dso_fallback_graph, true);
+  auto dso_fallback_result = dso_execution.execute(dso_fallback_workflow.plan);
+  PS_CHECK(dso_fallback_result.ok());
+  PS_CHECK(ps::test::named_scalar(dso_fallback_result.value(), "value") ==
+           12.0);
+  const auto& dso_diagnostics = dso_fallback_result.value().diagnostics;
+  PS_CHECK(
+      dso_diagnostics.fallback_reasons ==
+      std::vector<std::string>({"node 2: fixture GPU backend is unavailable"}));
+  PS_CHECK(dso_diagnostics.operation_timings.size() == 3U);
+  PS_CHECK(dso_diagnostics.operation_timings[1U].node_id == 2U);
+  PS_CHECK(dso_diagnostics.operation_timings[1U].backend == Backend::Gpu);
+  PS_CHECK(dso_diagnostics.operation_timings[1U].outcome ==
+           ErrorCode::BackendUnavailable);
+  PS_CHECK(dso_diagnostics.operation_timings[2U].node_id == 2U);
+  PS_CHECK(dso_diagnostics.operation_timings[2U].backend == Backend::Cpu);
+  PS_CHECK(dso_diagnostics.operation_timings[2U].outcome == ErrorCode::Ok);
+  PS_CHECK(dso_diagnostics.selected_backends.at(2U) == Backend::Cpu);
+
+  WorkflowDocument dso_failure_document;
+  dso_failure_document.nodes = {
+      WorkflowNode{1U, "test.dso_source", {}, {}},
+      WorkflowNode{2U, "fixture.gpu_failure", {WorkflowInput{1U, "value"}}, {}},
+  };
+  dso_failure_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
+  GraphContext dso_failure_graph(std::move(dso_failure_document));
+  CompiledWorkflow dso_failure_workflow =
+      compile_or_throw(&dso_compiler, dso_failure_graph, true);
+  auto dso_failure_result = dso_execution.execute(dso_failure_workflow.plan);
+  PS_CHECK(!dso_failure_result.ok());
+  PS_CHECK(dso_failure_result.status().code == ErrorCode::OperationFailed);
+  const std::vector<Value> dso_inputs{Value::from_float64(12.0)};
+  const std::vector<Region> dso_demands{Region::whole({1U})};
+  auto dso_unknown_result = dso_operations->invoke(
+      "fixture.gpu_unknown",
+      OperationInvocation{dso_inputs, dso_demands, {}, Backend::Gpu, {}});
+  PS_CHECK(!dso_unknown_result.ok());
+  PS_CHECK(dso_unknown_result.status().code == ErrorCode::OperationFailed);
+
   auto facet_operations = std::make_shared<OperationRegistry>();
   OperationTraits facet_source_traits;
   facet_source_traits.output_element_type = ElementType::UInt8;

@@ -22,6 +22,12 @@ host-owned output sink。它最多发布一个带 bounded facet 的 output；hos
 dense whole-Region Value。DSO input view 精确覆盖其 logical contiguous bytes；trailing
 backing bytes 会被拒绝，不能成为不可见的 plugin state。
 
+Synchronous callback 保持 `int` signature，但返回一个闭合的 version-two result：success、
+ordinary failure、cancellation 或 backend unavailable。backend unavailable 与 ordinary
+failure 不同，并且只有 copied trait 允许时才能从 GPU attempt 请求 CPU fallback。unknown
+nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailable 的 callback
+不发布 output，因此 fallback 不会复用 partial GPU Value。
+
 ## Validation
 
 Loading 验证 exact ABI version/structure size、pointer/array alignment、pointer/count pair、
