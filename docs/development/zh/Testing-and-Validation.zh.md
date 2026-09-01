@@ -18,6 +18,8 @@ Kernel test 覆盖：
 - 即使 operation key 相同也拒绝 cross-registry IR/plan；
 - CPU compile-plan-execute 与可选 GPU selection/fallback；
 - 多个独立 graph/execution context；
+- 跨 deterministic CPU/GPU FIFO 共享的 single ExecutionContext-wide waiting-callback
+  bound、worker pop 后的 capacity recovery，以及普通 mixed-lane concurrent Run；
 - bounded ready work 与 `ResourceLedger` settlement；
 - cross-backend copy/backend label、cancellation、stale completion 与 exception fence；
 - Value/Region/strided-layout/facet/buffer 负向契约；
@@ -52,6 +54,11 @@ Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
 
 Daemon validation 必须使用该隔离 prefix，绝不能使用 sibling checkout 或 private
 include directory。
+
+Deterministic cross-lane waiting test 使用只编入 noninstalled `photospider_test_kernel` 的
+private callback-enqueue hook。`BUILD_TESTING=ON` 时，product archive、installed kernel、
+export 与普通 consumer 仍不含 hook；`BUILD_TESTING=OFF` 时，test-kernel target 与其
+execution-hook object 都不存在。
 
 ## Sanitizer 与 malformed-input validation
 

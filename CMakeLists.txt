@@ -149,12 +149,14 @@ if(BUILD_TESTING)
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
     ${PHOTOSPIDER_KERNEL_SOURCES}
     src/lib/benchmark/raw_benchmark_test_hooks.cpp
+    src/lib/execution/execution_test_hooks.cpp
     src/lib/plugin/library_test_hooks.cpp)
   photospider_configure_kernel_target(photospider_test_kernel)
   target_compile_definitions(
     photospider_test_kernel
     PUBLIC PHOTOSPIDER_STATIC
-    PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS
+    PRIVATE PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS
+            PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS
             PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS)
 
   function(photospider_add_test target kernel_target)

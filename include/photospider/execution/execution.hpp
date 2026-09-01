@@ -24,7 +24,11 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint32_t cpu_workers = 0;
   /** @brief Whether one optional local GPU lane is present. */
   bool gpu_enabled = false;
-  /** @brief Maximum queued callbacks across concurrent Runs. */
+  /**
+   * @brief Single aggregate waiting-callback limit across CPU/GPU lanes.
+   * @note A callback releases its slot when a worker starts it; running
+   * callbacks do not consume this ExecutionContext-wide bound.
+   */
   std::uint32_t maximum_queued_tasks = 1024;
   /** @brief Maximum concurrently reserved modeled bytes. */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
@@ -99,17 +103,19 @@ struct PHOTOSPIDER_API ExecutionResult final {
  * @brief Explicit owner of bounded local CPU/GPU execution resources.
  *
  * @note Independent contexts may run concurrently. Destruction requests stop,
- * rejects queued callbacks, and joins every owned worker thread.
+ * rejects queued callbacks, releases their shared waiting admissions, and
+ * joins every owned worker thread.
  */
 class PHOTOSPIDER_API ExecutionContext final {
  public:
   /**
-   * @brief Creates fixed local workers, queues, and resource ledger.
+   * @brief Creates fixed workers, per-lane FIFOs, and shared admission owners.
    * @param operations Frozen operation registry retained for all Runs.
    * @param config Fixed local resource configuration.
    * @throws std::invalid_argument If registry/config is invalid.
    * @throws std::bad_alloc If worker/queue state allocation fails.
-   * @note CPU execution is always created; GPU is optional.
+   * @note CPU execution is always created; GPU is optional. Both lanes consume
+   * the single `maximum_queued_tasks` waiting bound.
    */
   explicit ExecutionContext(std::shared_ptr<OperationRegistry> operations,
                             ExecutionContextConfig config = {});
@@ -185,7 +191,7 @@ class PHOTOSPIDER_API ExecutionContext final {
   [[nodiscard]] bool gpu_enabled() const noexcept;
 
  private:
-  /** @brief Opaque worker pools, queue, and resource ledger. */
+  /** @brief Opaque pools, shared waiting admission, and resource ledger. */
   struct Impl;
   /** @brief Unique local execution ownership. */
   std::unique_ptr<Impl> impl_;

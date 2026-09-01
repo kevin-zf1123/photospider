@@ -129,6 +129,8 @@ plan-derived input Region。因此 Whole、Elementwise 与 overflow-safe clipped
 - stale handle、stale completion 与取消后 publication rejection；
 - exception fencing 和精确资源清理；
 - 可选 GPU path 不可用或拒绝工作时的 CPU fallback；
+- deterministic CPU 与 optional GPU FIFO 共享一个 ExecutionContext-wide waiting-callback
+  bound，running callback 不计入该数量；
 - 平台和 toolchain 支持时的普通负向、并发、ASAN、TSAN 与 fuzz coverage。
 
 ### 删除的产品领域
@@ -149,10 +151,11 @@ Active 产品不包含或宣传：
 - durable artifact authority、durable Value identity、output commit、receipt 或
   manifest-last publication。
 
-普通 bounded local concurrency 与 backpressure 仍保留。`ExecutionRun`、ready
-queue、CPU worker、可选 local GPU lane、`ResourceLedger`、transfer/residency
-tracking、deterministic scheduling、cancellation、fallback 和 stale-completion
-rejection 都是 kernel mechanism，不得改名为 daemon 或 service authority。
+普通 bounded local concurrency 与 backpressure 仍保留。`ExecutionRun`、per-lane
+deterministic FIFO、它们的 single shared waiting admission、CPU worker、可选 local GPU
+lane、`ResourceLedger`、transfer/residency tracking、deterministic scheduling、
+cancellation、fallback 和 stale-completion rejection 都是 kernel mechanism，不得改名为
+daemon 或 service authority。
 
 ### Benchmark
 

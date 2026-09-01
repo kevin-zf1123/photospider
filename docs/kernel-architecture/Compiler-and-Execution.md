@@ -33,9 +33,14 @@ frozen operation registry; it is excluded from digests and serialization.
 ## Execution
 
 `ExecutionContext` owns a fixed CPU pool, an optional one-worker GPU callback
-lane, bounded queues, a frozen operation registry, and a modeled-byte ledger.
-`execute` creates one private `ExecutionRun` with deterministic ready-step
-ordering and a caller-selected maximum parallelism.
+lane, one deterministic FIFO per lane, a frozen operation registry, and a
+modeled-byte ledger. Both FIFOs share the single nonblocking
+`maximum_queued_tasks` admission for callbacks that have not started. A worker
+releases the move-only admission token before entering the callback, so running
+callbacks do not occupy the waiting bound; rejection, exception, and shutdown
+drop paths release it exactly once. `execute` creates one private
+`ExecutionRun` with deterministic ready-step ordering and a caller-selected
+maximum parallelism.
 
 When a dependency and consumer have different backend labels, the Run creates
 a distinct validated Value by copying immutable bytes. The copy is explicit in

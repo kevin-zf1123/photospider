@@ -14,8 +14,9 @@ lifetime 必须分离。
 `GraphContext` 只拥有 copied `WorkflowDocument`、当前 nonzero revision 与 snapshot
 currentness state。它不拥有 worker、device queue、result registry 或 execution lifetime。
 
-`ExecutionContext` 拥有 ADR 0003 定义的 fixed local pool、bounded queue、frozen operation
-set 与 modeled-byte ledger。
+`ExecutionContext` 拥有 ADR 0003 定义的 fixed local pool、deterministic per-lane FIFO、
+它们的 single context-wide waiting-callback admission、frozen operation set 与 modeled-byte
+ledger。Running callback 已不再 waiting，因此不占该 shared queue bound。
 
 每次 `ExecutionContext::execute` 调用创建一个 source-private `ExecutionRun`。Run 拥有：
 

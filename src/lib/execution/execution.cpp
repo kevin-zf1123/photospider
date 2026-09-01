@@ -20,15 +20,171 @@
 #include <utility>
 #include <vector>
 
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+#include "execution/execution_test_hooks.hpp"
+#endif
+
 namespace ps {
 namespace {
 
 /**
- * @brief Bounded fixed-size callback pool used by one local backend lane.
+ * @brief ExecutionContext-wide nonblocking waiting-callback admission owner.
+ *
+ * Every successful acquisition represents one callback accepted by a CPU or
+ * GPU queue but not yet popped by a worker. Move-only leases release exactly
+ * once on worker start, enqueue rollback, exception unwinding, or queue drop.
+ */
+class WaitingAdmission final {
+ public:
+  /**
+   * @brief Move-only exact-release token for one waiting callback.
+   *
+   * @note A default or moved-from token owns no admission and is safe to drop.
+   */
+  class Lease final {
+   public:
+    /**
+     * @brief Constructs an empty non-owning token.
+     * @throws Nothing.
+     */
+    Lease() noexcept = default;
+
+    /**
+     * @brief Transfers one waiting-callback admission.
+     * @param other Source token left empty.
+     * @throws Nothing.
+     */
+    Lease(Lease&& other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)) {}
+
+    /**
+     * @brief Releases current ownership before accepting another token.
+     * @param other Source token left empty.
+     * @return This token.
+     * @throws Nothing.
+     */
+    Lease& operator=(Lease&& other) noexcept {
+      if (this != &other) {
+        release();
+        owner_ = std::exchange(other.owner_, nullptr);
+      }
+      return *this;
+    }
+
+    /**
+     * @brief Releases the owned waiting admission exactly once.
+     * @throws Nothing under the ExecutionContext lifetime contract.
+     */
+    ~Lease() noexcept { release(); }
+
+    /**
+     * @brief Forbids duplicating exact-release ownership.
+     * @param other Source token that cannot be copied.
+     * @throws Nothing; the operation is deleted.
+     */
+    Lease(const Lease& other) = delete;
+    /**
+     * @brief Forbids assigning duplicate exact-release ownership.
+     * @param other Source token that cannot be assigned.
+     * @return No value; the operation is deleted.
+     * @throws Nothing; the operation is deleted.
+     */
+    Lease& operator=(const Lease& other) = delete;
+
+    /**
+     * @brief Releases ownership early when a worker begins the callback.
+     * @return No value.
+     * @throws Nothing under the ExecutionContext lifetime contract.
+     * @note Repeated calls are idempotent.
+     */
+    void release() noexcept {
+      if (owner_) {
+        owner_->release();
+        owner_ = nullptr;
+      }
+    }
+
+   private:
+    friend class WaitingAdmission;
+
+    /**
+     * @brief Constructs one owning token.
+     * @param owner Context-wide admission owner.
+     * @throws Nothing.
+     */
+    explicit Lease(WaitingAdmission* owner) noexcept : owner_(owner) {}
+
+    /** @brief Admission owner receiving release, or null. */
+    WaitingAdmission* owner_ = nullptr;
+  };
+
+  /**
+   * @brief Constructs a positive shared waiting-callback limit.
+   * @param capacity Maximum aggregate callbacks waiting across all lanes.
+   * @throws std::invalid_argument If capacity is zero.
+   */
+  explicit WaitingAdmission(std::uint32_t capacity) : capacity_(capacity) {
+    if (capacity == 0U) {
+      throw std::invalid_argument("maximum queued tasks must be positive");
+    }
+  }
+
+  /**
+   * @brief Attempts immediate aggregate waiting admission.
+   * @return Owning token, or empty when the context-wide limit is full.
+   * @throws std::system_error If mutex acquisition fails.
+   * @note The comparison precedes increment, preventing unsigned overflow.
+   */
+  [[nodiscard]] std::optional<Lease> try_acquire() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (waiting_ >= capacity_) {
+      return std::nullopt;
+    }
+    ++waiting_;
+    return Lease(this);
+  }
+
+ private:
+  /**
+   * @brief Releases one previously acquired waiting admission.
+   * @return No value.
+   * @throws Nothing under the move-only token invariant.
+   */
+  void release() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (waiting_ != 0U) {
+      --waiting_;
+    }
+  }
+
+  /** @brief Serializes aggregate waiting count. */
+  std::mutex mutex_;
+  /** @brief Fixed positive aggregate limit. */
+  const std::size_t capacity_;
+  /** @brief Callbacks currently queued but not started. */
+  std::size_t waiting_ = 0U;
+};
+
+/**
+ * @brief Move-only backend-queue entry with shared admission ownership.
+ *
+ * @note Destruction before worker start rolls back the waiting token.
+ */
+struct QueuedCallback final {
+  /** @brief Complete callback invoked by exactly one worker. */
+  std::function<void()> callback;
+  /** @brief Aggregate waiting admission released before callback entry. */
+  WaitingAdmission::Lease admission;
+};
+
+/**
+ * @brief Fixed-size worker pool with one deterministic backend FIFO.
  *
  * Workers execute callbacks outside the queue mutex. Destruction rejects any
  * callback that has not started, requests every worker to stop, and joins the
- * complete worker set.
+ * complete worker set. Queue envelopes already own context-wide waiting
+ * admission, so the lane has no independent capacity that could multiply the
+ * public bound.
  *
  * @note Callers must arrange for no outstanding execution to depend on queued
  * callbacks when destroying the pool.
@@ -38,16 +194,15 @@ class ThreadPool final {
   /**
    * @brief Starts a fixed number of callback workers.
    * @param worker_count Positive number of owned threads.
-   * @param queue_capacity Positive maximum number of waiting callbacks.
-   * @throws std::invalid_argument If either bound is zero.
+   * @param backend Exact backend lane owned by this pool.
+   * @throws std::invalid_argument If worker_count is zero.
    * @throws std::system_error If a worker cannot be created.
    * @throws std::bad_alloc If worker or queue storage allocation fails.
    * @note Partially created workers are stopped and joined before rethrow.
    */
-  ThreadPool(std::uint32_t worker_count, std::uint32_t queue_capacity)
-      : queue_capacity_(queue_capacity) {
-    if (worker_count == 0U || queue_capacity == 0U) {
-      throw std::invalid_argument("thread-pool bounds must be positive");
+  ThreadPool(std::uint32_t worker_count, Backend backend) : backend_(backend) {
+    if (worker_count == 0U) {
+      throw std::invalid_argument("thread-pool worker count must be positive");
     }
     try {
       workers_.reserve(worker_count);
@@ -85,17 +240,21 @@ class ThreadPool final {
 
   /**
    * @brief Attempts to enqueue one callback without blocking.
-   * @param callback Complete callback ownership.
-   * @return True when queued; false when stopped or currently full.
+   * @param callback Complete callback and shared waiting-admission ownership.
+   * @return True when queued; false when stopped.
    * @throws std::bad_alloc If queue allocation fails before mutation.
-   * @note A true return transfers callback ownership to exactly one worker.
+   * @note A true return transfers callback/token ownership to exactly one
+   * worker; false or exception destroys the parameter and rolls admission back.
    */
-  [[nodiscard]] bool submit(std::function<void()> callback) {
+  [[nodiscard]] bool submit(QueuedCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_ || callbacks_.size() >= queue_capacity_) {
+    if (stopping_) {
       return false;
     }
     callbacks_.push_back(std::move(callback));
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    execution_testing::notify_callback_queued(backend_);
+#endif
     ready_.notify_one();
     return true;
   }
@@ -108,7 +267,7 @@ class ThreadPool final {
    */
   void worker_loop() noexcept {
     for (;;) {
-      std::function<void()> callback;
+      QueuedCallback callback;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         ready_.wait(lock, [this] { return stopping_ || !callbacks_.empty(); });
@@ -118,8 +277,9 @@ class ThreadPool final {
         callback = std::move(callbacks_.front());
         callbacks_.pop_front();
       }
+      callback.admission.release();
       try {
-        callback();
+        callback.callback();
       } catch (...) {
         // Execution callbacks have their own status fence. This final fence
         // preserves pool liveness if a future callback violates that contract.
@@ -153,12 +313,12 @@ class ThreadPool final {
   std::mutex mutex_;
   /** @brief Wakes workers for callbacks or shutdown. */
   std::condition_variable ready_;
-  /** @brief Bounded FIFO callback queue. */
-  std::deque<std::function<void()>> callbacks_;
+  /** @brief Deterministic FIFO governed by shared waiting admission. */
+  std::deque<QueuedCallback> callbacks_;
   /** @brief Owned fixed worker set. */
   std::vector<std::thread> workers_;
-  /** @brief Maximum number of callbacks waiting to start. */
-  std::size_t queue_capacity_ = 0U;
+  /** @brief Exact local backend lane served by this pool. */
+  [[maybe_unused]] const Backend backend_;
   /** @brief Monotonic stop flag guarded by `mutex_`. */
   bool stopping_ = false;
 };
@@ -527,11 +687,12 @@ Status validate_input_demand(const Value& value, const Region& demand) {
 /**
  * @brief Opaque fixed resource ownership for ExecutionContext.
  * @note Destruction order stops the optional GPU lane and required CPU pool
- * before releasing their shared registry and resource-ledger owners.
+ * before releasing their shared waiting-admission, resource-ledger, and
+ * registry owners.
  */
 struct ExecutionContext::Impl final {
   /**
-   * @brief Creates the required CPU pool, optional GPU lane, and byte ledger.
+   * @brief Creates both backend pools and shared waiting/byte admission owners.
    * @param operations Frozen operation registry.
    * @param requested Caller configuration.
    * @throws std::invalid_argument If configuration or registry is invalid.
@@ -542,19 +703,17 @@ struct ExecutionContext::Impl final {
        ExecutionContextConfig requested)
       : cpu_worker_count(resolve_cpu_workers(requested.cpu_workers)),
         gpu_available(requested.gpu_enabled),
-        queue_capacity(requested.maximum_queued_tasks),
+        maximum_waiting_callbacks(requested.maximum_queued_tasks),
         operation_registry(std::move(operations)),
         ledger(requested.maximum_live_bytes),
-        cpu_pool(cpu_worker_count, queue_capacity) {
+        waiting_admission(maximum_waiting_callbacks),
+        cpu_pool(cpu_worker_count, Backend::Cpu) {
     if (!operation_registry || !operation_registry->frozen()) {
       throw std::invalid_argument(
           "ExecutionContext requires a frozen operation registry");
     }
-    if (queue_capacity == 0U) {
-      throw std::invalid_argument("maximum queued tasks must be positive");
-    }
     if (gpu_available) {
-      gpu_pool = std::make_unique<ThreadPool>(1U, queue_capacity);
+      gpu_pool = std::make_unique<ThreadPool>(1U, Backend::Gpu);
     }
   }
 
@@ -562,12 +721,14 @@ struct ExecutionContext::Impl final {
   const std::uint32_t cpu_worker_count;
   /** @brief Fixed optional GPU-lane availability. */
   const bool gpu_available;
-  /** @brief Per-pool bounded callback queue size. */
-  const std::uint32_t queue_capacity;
+  /** @brief Context-wide maximum callbacks waiting across all lanes. */
+  const std::uint32_t maximum_waiting_callbacks;
   /** @brief Frozen operation registry retained beyond all callbacks. */
   std::shared_ptr<OperationRegistry> operation_registry;
   /** @brief Shared exact modeled-byte capacity. */
   ResourceLedger ledger;
+  /** @brief Shared CPU/GPU waiting-callback admission owner. */
+  WaitingAdmission waiting_admission;
   /** @brief Required fixed CPU callback pool. */
   ThreadPool cpu_pool;
   /** @brief Optional single local GPU callback lane. */
@@ -587,7 +748,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
  public:
   /**
    * @brief Builds dependency counters and initial deterministic ready set.
-   * @param impl Shared ExecutionContext resources that outlive this execution.
+   * @param cpu_pool Required CPU callback pool with context lifetime.
+   * @param gpu_pool Optional GPU callback pool with context lifetime.
+   * @param waiting_admission Context-wide waiting-callback owner.
+   * @param ledger Context-wide modeled-byte owner.
+   * @param operations Frozen registry shared by every callback.
    * @param plan Immutable validated physical plan.
    * @param cancellation Cooperative caller token.
    * @param maximum_parallelism Positive per-execution in-flight bound.
@@ -596,12 +761,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @note No callback is submitted during construction.
    */
   ExecutionRun(ThreadPool* cpu_pool, ThreadPool* gpu_pool,
-               ResourceLedger* ledger,
+               WaitingAdmission* waiting_admission, ResourceLedger* ledger,
                std::shared_ptr<OperationRegistry> operations,
                const ExecutionPlan* plan, CancellationToken cancellation,
                std::uint32_t maximum_parallelism)
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
+        waiting_admission_(waiting_admission),
         ledger_(ledger),
         operations_(std::move(operations)),
         plan_(plan),
@@ -612,8 +778,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         completed_(plan->steps().size(), false),
         remaining_dependencies_(plan->steps().size(), 0U),
         dependents_(plan->steps().size()) {
-    if (!cpu_pool_ || !ledger_ || !operations_ || !plan_ ||
-        plan_->revision() == 0U || plan_->steps().empty() ||
+    if (!cpu_pool_ || !waiting_admission_ || !ledger_ || !operations_ ||
+        !plan_ || plan_->revision() == 0U || plan_->steps().empty() ||
         maximum_parallelism_ == 0U) {
       throw std::invalid_argument("execution plan or bounds are invalid");
     }
@@ -745,11 +911,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   }
 
   /**
-   * @brief Submits one backend attempt or records bounded-queue backpressure.
+   * @brief Admits and submits one backend attempt or records backpressure.
    * @param step_index Valid physical step index.
    * @param backend CPU or optional local GPU lane.
    * @throws Nothing across callback/scheduler boundaries.
-   * @note Fallback preserves the existing in-flight count.
+   * @note Fallback preserves the existing in-flight count. Queue ownership
+   * releases shared admission before `execute_attempt` begins running.
    */
   void submit_attempt(std::size_t step_index, Backend backend) noexcept {
     try {
@@ -778,19 +945,27 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         return;
       }
       auto self = shared_from_this();
-      auto callback = [self, step_index, backend] {
+      std::function<void()> callback = [self, step_index, backend] {
         self->execute_attempt(step_index, backend);
       };
+      auto admission = waiting_admission_->try_acquire();
+      if (!admission.has_value()) {
+        finish_failure(Status::failure(
+            ErrorCode::ResourceExhausted,
+            "ExecutionContext waiting callback limit is exhausted"));
+        return;
+      }
+      QueuedCallback queued{std::move(callback), std::move(admission.value())};
       bool accepted = false;
       if (backend == Backend::Gpu) {
-        accepted = gpu_pool_ && gpu_pool_->submit(std::move(callback));
+        accepted = gpu_pool_ && gpu_pool_->submit(std::move(queued));
       } else {
-        accepted = cpu_pool_->submit(std::move(callback));
+        accepted = cpu_pool_->submit(std::move(queued));
       }
       if (!accepted) {
         finish_failure(
             Status::failure(ErrorCode::ResourceExhausted,
-                            "local backend callback queue is full or stopped"));
+                            "local backend callback queue is stopped"));
       }
     } catch (const std::bad_alloc&) {
       finish_failure_safely(ErrorCode::ResourceExhausted,
@@ -1069,6 +1244,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   ThreadPool* cpu_pool_;
   /** @brief Optional local GPU pool with longer context lifetime. */
   ThreadPool* gpu_pool_;
+  /** @brief Shared waiting admission with longer context lifetime. */
+  WaitingAdmission* waiting_admission_;
   /** @brief Shared local byte ledger with longer context lifetime. */
   ResourceLedger* ledger_;
   /** @brief Frozen operation registry retained through every callback. */
@@ -1150,8 +1327,9 @@ Result<ExecutionResult> ExecutionContext::execute(
                                         : options.maximum_parallelism;
   try {
     auto coordinator = std::make_shared<ExecutionRun>(
-        &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->ledger,
-        impl_->operation_registry, &plan, cancellation, parallelism);
+        &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->waiting_admission,
+        &impl_->ledger, impl_->operation_registry, &plan, cancellation,
+        parallelism);
     return coordinator->run();
   } catch (const std::invalid_argument& error) {
     return Result<ExecutionResult>(

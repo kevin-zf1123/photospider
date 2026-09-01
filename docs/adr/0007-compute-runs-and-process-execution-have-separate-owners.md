@@ -16,8 +16,10 @@ therefore remain distinct.
 revision, and snapshot-currentness state. It owns no worker, device queue,
 result registry, or execution lifetime.
 
-`ExecutionContext` owns the fixed local pools, bounded queues, frozen operation
-set, and modeled-byte ledger described by ADR 0003.
+`ExecutionContext` owns the fixed local pools, deterministic per-lane FIFOs,
+their single context-wide waiting-callback admission, frozen operation set, and
+modeled-byte ledger described by ADR 0003. A running callback is no longer
+waiting and therefore does not consume that shared queue bound.
 
 Each `ExecutionContext::execute` call creates one source-private
 `ExecutionRun`. The Run owns:
