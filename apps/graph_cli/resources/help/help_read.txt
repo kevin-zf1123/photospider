@@ -1,4 +1,0 @@
-read <file>
-
-Load YAML from <file> into the current graph session.
-

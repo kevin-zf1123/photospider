@@ -1,4 +1,0 @@
-help [command]
-
-Shows REPL help. With a command, prints that command's detailed usage.
-

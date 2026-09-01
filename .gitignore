@@ -1,133 +1,84 @@
-# ============================
-# 1. 默认忽略一切 (Block Everything)
-# ============================
+# Default-ignore repository. The active product surface is explicitly allowed.
 **
 
-# ============================
-# 2. 根目录配置文件 (Root Configs)
-# ============================
-# Personal overlay files are intentionally owned by the local
-# .git-personal repository, not by the primary GitHub project repo.
-# Keep them ignored here; add them to the overlay with:
-# git --git-dir=.git-personal --work-tree=. add -f <path>
+# Primary repository metadata and build configuration.
+!.gitignore
+!.gitattributes
+!.github/
+!.github/workflows/
+!.github/workflows/ci.yml
+!.clang-format
+!CPPLINT.cfg
+!CMakeLists.txt
+!CMakePresets.json
+!CONTEXT.md
+!LICENSE
+!readme.md
+!cmake/
+!cmake/**/
+!cmake/**/*.cmake
+!cmake/**/*.cmake.in
+
+# Installed public headers.
+!include/
+!include/**/
+!include/**/*.h
+!include/**/*.hpp
+
+# Private kernel implementation.
+!src/
+!src/**/
+!src/**/*.c
+!src/**/*.cpp
+!src/**/*.h
+!src/**/*.hpp
+!src/**/*.mm
+
+# Maintained unit, integration, fixture, support, and consumer sources.
+!tests/
+!tests/**/
+!tests/**/*.c
+!tests/**/*.cpp
+!tests/**/*.h
+!tests/**/*.hpp
+!tests/**/CMakeLists.txt
+
+# Public documentation and faithful primary-repository mirrors.
+!docs/
+!docs/**/
+!docs/**/*.md
+!docs/**/*.png
+!docs/**/*.jpg
+
+# Personal overlay ownership. These paths remain ignored by primary Git even
+# after the broad docs allowance above.
 .git-personal/
 AGENTS.md
 CLAUDE.md
 GEMINI.md
 .claude/
 .codex/
-openspec/
-feedback/
-
-# git & github
-!.gitignore
-!.dockerignore
-!.gitattributes
-!.gitmodules
-!.github/
-!.github/workflows/
-!.github/workflows/*.yml
 .github/skills/
 .github/prompts/
 .github/copilot-instructions.md
-
-# Project configs
-!.clang-format
-!CPPLINT.cfg
-!CMakeLists.txt
-!CMakePresets.json
-!CONTEXT.md
-!cmake/
-!cmake/**/
-!cmake/*.cmake.in
-!cmake/**/*.cmake.in
-!Dockerfile.ci
-!manual.md
-!readme.md
-!LICENSE
-
-# CI entrypoints
-!ci/
-!ci/**/
-!ci/scripts/*.sh
-!ci/scripts/*.py
-
-# ============================
-# 3. 头文件 (Headers)
-# ============================
-!include/
-!include/**/
-!include/**/*.hpp
-!include/**/*.h
-
-# ============================
-# 4. 源代码 (Source Code)
-# ============================
-# Application source trees
-!apps/
-!apps/**/
-!apps/**/*.cpp
-!apps/**/*.hpp
-!apps/**/*.h
-!apps/**/*.txt
-
-# Core implementation (C++, Obj-C++)
-!src/
-!src/**/
-!src/**/*.cpp
-!src/**/*.mm
-!src/**/*.hpp
-!src/**/*.txt
-
-# Repository-owned plugins
-!plugins/
-!plugins/**/
-!plugins/data/*.cpp
-!plugins/ops/**/*.cpp
-!plugins/ops/**/*.hpp
-!plugins/ops/**/*.mm
-!plugins/policies/*.c
-
-# External libraries (FTXUI etc.)
-!extern/
-!extern/**/
-!extern/**/*.cpp
-!extern/**/*.hpp
-!extern/**/*.h
-!extern/**/CMakeLists.txt
-
-# ============================
-# 5. 测试 (Tests)
-# ============================
-# Unit tests
-!tests/
-!tests/**/
-!tests/**/*.cpp
-!tests/**/*.c
-!tests/**/*.hpp
-!tests/**/*.h
-!tests/**/*.py
-!tests/fixtures/graphs/*.yaml
-tests/results/
-
-# ============================
-# 6. 文档 (Documentation)
-# ============================
-!docs/
-!docs/**/
-!docs/**/*.md
-!docs/**/*.png
-!docs/**/*.jpg
+openspec/
 docs/openspec-zh/
-docs/openspec-zh/*.md
-docs/openspec-zh/**/
-docs/openspec-zh/**/*.md
 docs/agents/
-docs/agents/*.md
-docs/agents/**/
-docs/agents/**/*.md
-# ============================
-# 7. 特例 (Exceptions)
-# ============================
-# 如果有特定的默认 session 配置需要追踪，可以在这里加
-# !sessions/default/config.yaml
+feedback/
+
+# Generated local state.
+build/
+build-*/
+cache/
+out/
+CI-results/
+tests/results/
+.DS_Store
+**/.DS_Store
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.pyc
+__pycache__/
