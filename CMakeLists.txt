@@ -137,9 +137,14 @@ install(
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Photospider)
 
 if(BUILD_TESTING)
-  target_sources(photospider PRIVATE src/lib/plugin/library_test_hooks.cpp)
-  target_compile_definitions(photospider
-                             PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+  target_sources(
+    photospider
+    PRIVATE src/lib/benchmark/raw_benchmark_test_hooks.cpp
+            src/lib/plugin/library_test_hooks.cpp)
+  target_compile_definitions(
+    photospider
+    PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS
+            PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS)
 
   function(photospider_add_test target)
     add_executable(${target} ${ARGN})
@@ -234,6 +239,7 @@ if(BUILD_TESTING)
     PRIVATE PS_OPERATION_VALID_SEED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/operation_contract_ir/valid-source"
             PS_OPERATION_DUPLICATE_SEED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/operation_contract_ir/malformed-schema")
   photospider_add_test(test_execution tests/integration/test_execution.cpp)
+  target_include_directories(test_execution PRIVATE src/lib)
   photospider_add_test(test_plugin_registry tests/integration/test_plugin_registry.cpp)
   target_include_directories(test_plugin_registry PRIVATE src/lib)
   target_compile_definitions(test_plugin_registry

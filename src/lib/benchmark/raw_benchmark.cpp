@@ -4,6 +4,10 @@
 #include <string>
 #include <utility>
 
+#ifdef PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS
+#include "benchmark/raw_benchmark_test_hooks.hpp"
+#endif
+
 namespace ps {
 namespace {
 
@@ -87,6 +91,9 @@ RawBenchmarkRunner::RawBenchmarkRunner(Compiler* compiler,
 /**
  * @brief Implements repeated compile-plan-execute observation.
  * @copydetails RawBenchmarkRunner::run
+ * @note Test-enabled builds may replace completed compiler and executor
+ * diagnostics through a private non-installed seam before sample copying;
+ * production builds contain neither the seam implementation nor these calls.
  */
 Result<RawBenchmarkReport> RawBenchmarkRunner::run(
     const GraphContext& graph, const RawBenchmarkOptions& options,
@@ -135,6 +142,9 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
       continue;
     }
     CompiledWorkflow workflow = compiled.take_value();
+#ifdef PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS
+    benchmark_testing::apply_completed_compilation_hook(workflow.diagnostics);
+#endif
     sample.compilation = workflow.diagnostics;
 
     auto executed =
@@ -146,6 +156,10 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
       continue;
     }
     ExecutionResult execution_result = executed.take_value();
+#ifdef PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS
+    benchmark_testing::apply_completed_execution_hook(
+        execution_result.diagnostics);
+#endif
     sample.execution = execution_result.diagnostics;
 
     if (options.correctness_oracle) {
