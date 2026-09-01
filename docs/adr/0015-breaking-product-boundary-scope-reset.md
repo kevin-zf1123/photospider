@@ -141,6 +141,8 @@ following remain required:
 - stale handle, stale completion, and post-cancellation publication rejection;
 - exception fencing and exact resource cleanup;
 - CPU fallback when an optional GPU path is unavailable or rejects work;
+- one ExecutionContext-wide waiting-callback bound shared by deterministic CPU
+  and optional GPU FIFOs, with running callbacks excluded from that count;
 - ordinary negative, concurrency, ASAN, TSAN, and fuzz coverage where the
   platform and toolchain support them.
 
@@ -162,11 +164,12 @@ The active products do not contain or advertise:
 - durable artifact authority, durable Value identity, output commits,
   receipts, or manifest-last publication.
 
-Ordinary bounded local concurrency and backpressure remain. `ExecutionRun`, the
-ready queue, CPU workers, an optional local GPU lane, `ResourceLedger`,
-transfer/residency tracking, deterministic scheduling, cancellation, fallback,
-and stale-completion rejection remain kernel mechanisms and must not be
-renamed into daemon or service authority.
+Ordinary bounded local concurrency and backpressure remain. `ExecutionRun`,
+the per-lane deterministic FIFOs, their single shared waiting admission, CPU
+workers, an optional local GPU lane, `ResourceLedger`, transfer/residency
+tracking, deterministic scheduling, cancellation, fallback, and stale-
+completion rejection remain kernel mechanisms and must not be renamed into
+daemon or service authority.
 
 ### Benchmarks
 

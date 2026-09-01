@@ -13,8 +13,9 @@ work、cancellation 与 shutdown 需要一个可见 owner。
 
 每个 `ExecutionContext` 拥有一套固定的 local execution composition：
 
-- bounded FIFO callback queue 与固定 CPU worker pool；
-- 可选的单 worker local GPU lane，拥有独立 bounded queue；
+- deterministic FIFO 与固定 CPU worker pool；
+- 可选的单 worker local GPU lane，拥有自己的 deterministic FIFO；
+- 跨两个 FIFO 的一个 nonblocking shared waiting-callback admission limit；
 - 被全部 invocation 共享的 frozen `OperationRegistry`；
 - 对 configured modeled-byte limit 进行 exact release 的 `ResourceLedger`。
 
@@ -27,8 +28,12 @@ CPU execution 始终存在。Queue 或 byte limit 为零属于非法配置。Emb
 每次 `execute` 调用创建一个 private `ExecutionRun`。Run 拥有 dependency counter、
 deterministic ready-step ordering、staged Value、per-step backend residency、in-flight
 accounting、cancellation observation 与 raw diagnostics。
-`ExecutionOptions::maximum_parallelism` 限制该 Run 的 in-flight plan step；backend queue
-与 byte ledger 提供共享的 nonblocking backpressure。
+`ExecutionOptions::maximum_parallelism` 限制该 Run 的 in-flight plan step。
+`maximum_queued_tasks` 是一个 ExecutionContext-wide limit，统计任一 backend FIFO 已接受但
+尚未开始的 callback；它不会按 lane 重复计算。Worker pop callback 时释放 move-only waiting
+token，因此 running callback 不占 waiting limit。Enqueue rejection、allocation failure、
+shutdown drop 与 exception unwinding 都会把 token 恰好回滚一次。该 shared admission 与
+byte ledger 提供 nonblocking backpressure。
 
 调用 operation 前，Run 获取该 step 的完整 planned-byte charge。Move-only lease 在 attempt
 后恰好释放一次，包括 fallback、exception、cancellation 与 stale-completion 路径。
@@ -49,8 +54,8 @@ manager。
 currentness 会在 admission 前、completion 期间和 final result assembly 前检查。Late work
 可以完成 cleanup，但不能在 cancellation 或 staleness 后发布 caller result。
 
-析构会停止 queue admission、拒绝 queued callback、唤醒 worker 并 join 自有线程。调用者
-不得让 `execute` 与 context 析构并发。
+析构会停止 queue admission、拒绝 queued callback、释放每个 dropped waiting token、唤醒
+worker 并 join 自有线程。调用者不得让 `execute` 与 context 析构并发。
 
 ## 边界
 

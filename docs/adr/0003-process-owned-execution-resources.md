@@ -14,8 +14,9 @@ one visible owner.
 
 Each `ExecutionContext` owns one fixed local execution composition:
 
-- a bounded FIFO callback queue and fixed CPU worker pool;
-- an optional one-worker local GPU lane with its own bounded queue;
+- a deterministic FIFO and fixed CPU worker pool;
+- an optional one-worker local GPU lane with its own deterministic FIFO;
+- one nonblocking shared waiting-callback admission limit across both FIFOs;
 - a frozen `OperationRegistry` shared by every invocation;
 - one exact-release `ResourceLedger` for the configured modeled-byte limit.
 
@@ -30,7 +31,12 @@ Each `execute` call creates one private `ExecutionRun`. The Run owns dependency
 counters, deterministic ready-step ordering, staged Values, per-step backend
 residency, in-flight accounting, cancellation observation, and raw diagnostics.
 `ExecutionOptions::maximum_parallelism` bounds in-flight plan steps for that
-Run; the backend queues and byte ledger provide shared nonblocking
+Run. `maximum_queued_tasks` is one ExecutionContext-wide limit for callbacks
+accepted by either backend FIFO but not yet started; it is not duplicated per
+lane. A move-only waiting token is released when a worker pops the callback,
+so running callbacks do not consume the waiting limit. Enqueue rejection,
+allocation failure, shutdown drop, and exception unwinding roll the token back
+exactly once. This shared admission and the byte ledger provide nonblocking
 backpressure.
 
 Before invoking an operation, the Run acquires the step's complete planned
@@ -56,9 +62,9 @@ currentness are checked before admission, during completion, and before final
 result assembly. Late work may finish cleanup but cannot publish a caller
 result after cancellation or staleness.
 
-Destruction stops queue admission, rejects queued callbacks, wakes workers,
-and joins owned threads. Callers must not race `execute` with context
-destruction.
+Destruction stops queue admission, rejects queued callbacks, releases every
+dropped waiting token, wakes workers, and joins owned threads. Callers must not
+race `execute` with context destruction.
 
 ## Boundary
 

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <limits>
 #include <memory>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include "benchmark/raw_benchmark_test_hooks.hpp"
+#include "execution/execution_test_hooks.hpp"
 #include "photospider/execution/execution.hpp"
 #include "support/test_support.hpp"
 
@@ -81,6 +83,83 @@ bool region_equals(const ps::Region& region, std::uint64_t offset,
                    std::uint64_t extent) noexcept {
   return region.rank() == 1U && region.dimensions().front().offset == offset &&
          region.dimensions().front().extent == extent;
+}
+
+/**
+ * @brief Deterministically holds the first CPU callback inside its queue.
+ *
+ * @note The test hook calls `hold` while the CPU pool mutex remains locked, so
+ * no worker can pop the waiting callback until `release` is called.
+ */
+class QueueAdmissionGate final {
+ public:
+  /**
+   * @brief Blocks the first observed CPU enqueue until explicitly released.
+   * @param backend Queue lane reported by the private test hook.
+   * @return No value.
+   * @throws std::system_error If a test synchronization primitive fails.
+   */
+  void hold(ps::Backend backend) {
+    if (backend != ps::Backend::Cpu) {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (entered_) {
+      return;
+    }
+    entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return released_; });
+  }
+
+  /**
+   * @brief Waits for the callback to own one CPU waiting-queue position.
+   * @param timeout Maximum bounded test wait.
+   * @return True when the hook entered before the deadline.
+   * @throws std::system_error If a test synchronization primitive fails.
+   */
+  bool wait_until_entered(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] { return entered_; });
+  }
+
+  /**
+   * @brief Releases the held CPU enqueue boundary.
+   * @return No value.
+   * @throws std::system_error If mutex locking fails.
+   */
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes gate state. */
+  std::mutex mutex_;
+  /** @brief Wakes the test or held submitter after a state change. */
+  std::condition_variable changed_;
+  /** @brief Whether the first CPU enqueue reached the hook. */
+  bool entered_ = false;
+  /** @brief Whether the held enqueue may return. */
+  bool released_ = false;
+};
+
+/** @brief Borrowed active deterministic queue gate for one scoped test. */
+QueueAdmissionGate* g_queue_admission_gate = nullptr;
+
+/**
+ * @brief Bridges the private callback-waiting hook into the scoped gate.
+ * @param backend Exact lane whose queue accepted a callback.
+ * @return No value.
+ * @throws std::system_error If test synchronization fails; the hook fences it.
+ */
+void hold_queued_callback(ps::Backend backend) {
+  if (g_queue_admission_gate) {
+    g_queue_admission_gate->hold(backend);
+  }
 }
 
 /**
@@ -469,6 +548,54 @@ int main() {
   PS_CHECK(ps::test::named_scalar(left_result.value(), "sum") == 3.0);
   PS_CHECK(ps::test::named_scalar(right_result.value(), "sum") == 30.0);
 
+  ExecutionContext queue_bound_execution(
+      operations, ExecutionContextConfig{1U, true, 1U, 1024U});
+  GraphContext waiting_cpu_graph(ps::test::addition_document(3.0, 4.0));
+  GraphContext competing_gpu_graph(ps::test::addition_document(5.0, 6.0));
+  CompiledWorkflow waiting_cpu_workflow =
+      compile_or_throw(&compiler, waiting_cpu_graph, false);
+  CompiledWorkflow competing_gpu_workflow =
+      compile_or_throw(&compiler, competing_gpu_graph, true);
+  QueueAdmissionGate queue_gate;
+  g_queue_admission_gate = &queue_gate;
+  const ps::execution_testing::ExecutionTestHooks execution_test_hooks{
+      &hold_queued_callback};
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto waiting_cpu_future = std::async(std::launch::async, [&] {
+    return queue_bound_execution.execute(waiting_cpu_workflow.plan);
+  });
+  const bool cpu_callback_is_waiting =
+      queue_gate.wait_until_entered(std::chrono::seconds(2));
+  auto competing_gpu_result =
+      queue_bound_execution.execute(competing_gpu_workflow.plan);
+  queue_gate.release();
+  auto waiting_cpu_result = waiting_cpu_future.get();
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_queue_admission_gate = nullptr;
+  PS_CHECK(cpu_callback_is_waiting);
+  PS_CHECK(!competing_gpu_result.ok());
+  PS_CHECK(competing_gpu_result.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(waiting_cpu_result.ok());
+  PS_CHECK(ps::test::named_scalar(waiting_cpu_result.value(), "sum") == 7.0);
+  auto recovered_gpu_result =
+      queue_bound_execution.execute(competing_gpu_workflow.plan);
+  PS_CHECK(recovered_gpu_result.ok());
+  PS_CHECK(ps::test::named_scalar(recovered_gpu_result.value(), "sum") == 11.0);
+  ExecutionContext concurrent_lane_execution(
+      operations, ExecutionContextConfig{2U, true, 8U, 1024U});
+  auto cpu_lane_future = std::async(std::launch::async, [&] {
+    return concurrent_lane_execution.execute(waiting_cpu_workflow.plan);
+  });
+  auto gpu_lane_future = std::async(std::launch::async, [&] {
+    return concurrent_lane_execution.execute(competing_gpu_workflow.plan);
+  });
+  auto cpu_lane_result = cpu_lane_future.get();
+  auto gpu_lane_result = gpu_lane_future.get();
+  PS_CHECK(cpu_lane_result.ok());
+  PS_CHECK(gpu_lane_result.ok());
+  PS_CHECK(ps::test::named_scalar(cpu_lane_result.value(), "sum") == 7.0);
+  PS_CHECK(ps::test::named_scalar(gpu_lane_result.value(), "sum") == 11.0);
+
   GraphContext cancellable(ps::test::delayed_document(250));
   CompiledWorkflow cancellable_workflow =
       compile_or_throw(&compiler, cancellable);
@@ -531,7 +658,7 @@ int main() {
   PS_CHECK(dso_operations->freeze().ok());
   Compiler dso_compiler(dso_operations);
   ExecutionContext dso_execution(dso_operations,
-                                 ExecutionContextConfig{1U, true, 8U, 1024U});
+                                 ExecutionContextConfig{1U, true, 1U, 1024U});
   WorkflowDocument dso_fallback_document;
   dso_fallback_document.nodes = {
       WorkflowNode{1U, "test.dso_source", {}, {}},

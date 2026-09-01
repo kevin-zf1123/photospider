@@ -27,9 +27,12 @@ runtime-only weak identity；它不进入 digest/serialization。
 
 ## Execution
 
-`ExecutionContext` 拥有固定 CPU pool、optional single-worker GPU callback lane、bounded
-queue、frozen operation registry 与 modeled-byte ledger。`execute` 创建一个 private
-`ExecutionRun`，采用 deterministic ready-step ordering 与 caller-selected maximum
+`ExecutionContext` 拥有固定 CPU pool、optional single-worker GPU callback lane、每个 lane
+一个 deterministic FIFO、frozen operation registry 与 modeled-byte ledger。两个 FIFO 对尚未
+开始的 callback 共享 single nonblocking `maximum_queued_tasks` admission。Worker 在进入
+callback 前释放 move-only admission token，因此 running callback 不占 waiting bound；
+rejection、exception 与 shutdown drop path 会把 token 恰好释放一次。`execute` 创建一个
+private `ExecutionRun`，采用 deterministic ready-step ordering 与 caller-selected maximum
 parallelism。
 
 当 dependency 与 consumer 的 backend label 不同时，Run 复制 immutable bytes，创建一个

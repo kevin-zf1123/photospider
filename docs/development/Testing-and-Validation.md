@@ -20,6 +20,9 @@ Kernel tests cover:
 - cross-registry IR/plan rejection even for equal operation keys;
 - CPU compile-plan-execute and optional GPU selection/fallback;
 - multiple independent graph/execution contexts;
+- one ExecutionContext-wide waiting-callback bound shared across deterministic
+  CPU/GPU FIFOs, recovery after a worker pop, and ordinary mixed-lane
+  concurrent Runs;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences;
@@ -59,6 +62,12 @@ configures an external C++17 consumer using only
 
 Daemon validation must use that isolated prefix, never a sibling checkout or
 private include directory.
+
+The deterministic cross-lane waiting test uses a private callback-enqueue hook
+compiled only into the noninstalled `photospider_test_kernel`. With
+`BUILD_TESTING=ON`, the product archive, installed kernel, exports, and ordinary
+consumer remain hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel
+target nor its execution-hook object exists.
 
 ## Sanitizers and malformed-input validation
 
