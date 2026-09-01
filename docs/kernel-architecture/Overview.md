@@ -26,7 +26,7 @@ semantic, optimized, plan, runtime Value, and daemon identities are separate.
 | execution | bounded CPU pool, optional GPU callback lane, private Run, cancellation, byte ledger, raw diagnostics |
 | data | dense immutable `Value`, rank-general `Region`, `StridedLayout` |
 | plugin | exact operation ABI v2/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
-| benchmark | raw compile/plan/execute observations plus named correctness-oracle or explicit unchecked status |
+| benchmark | raw compile/plan/execute observations plus named correctness-oracle or explicit unchecked status; execution cancellation aborts the complete run without a report |
 
 CPU execution is required. Optional GPU support is a configured local callback
 lane selected only for operations that declare it. Cross-backend inputs are

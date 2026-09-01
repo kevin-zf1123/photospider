@@ -883,6 +883,92 @@ int main() {
     PS_CHECK(!sample.execution.plan_digest.empty());
   }
 
+  auto benchmark_cancellation_operations =
+      std::make_shared<OperationRegistry>();
+  CancellationSource* active_benchmark_cancellation = nullptr;
+  std::uint32_t benchmark_callback_count = 0U;
+  std::uint32_t cancel_on_callback = 0U;
+  PS_CHECK(benchmark_cancellation_operations
+               ->register_operation(OperationDefinition{
+                   "test.benchmark_cancel", OperationTraits{},
+                   [&active_benchmark_cancellation, &benchmark_callback_count,
+                    &cancel_on_callback](
+                       const OperationInvocation&) -> Result<Value> {
+                     ++benchmark_callback_count;
+                     if (active_benchmark_cancellation != nullptr &&
+                         benchmark_callback_count == cancel_on_callback) {
+                       static_cast<void>(
+                           active_benchmark_cancellation->cancel());
+                     }
+                     return Result<Value>(Value::from_float64(1.0));
+                   }})
+               .ok());
+  benchmark_cancellation_operations->freeze();
+  Compiler benchmark_cancellation_compiler(benchmark_cancellation_operations);
+  ExecutionContext benchmark_cancellation_execution(
+      benchmark_cancellation_operations,
+      ExecutionContextConfig{1U, false, 4U, 1024U});
+  GraphContext benchmark_cancellation_graph(
+      single_operation_document("test.benchmark_cancel"));
+  RawBenchmarkRunner cancellation_benchmark(&benchmark_cancellation_compiler,
+                                            &benchmark_cancellation_execution);
+
+  for (const auto& cancellation_case :
+       std::vector<std::pair<std::uint32_t, std::uint32_t>>{{1U, 1U},
+                                                            {2U, 2U},
+                                                            {2U, 1U}}) {
+    CancellationSource callback_cancellation;
+    active_benchmark_cancellation = &callback_cancellation;
+    benchmark_callback_count = 0U;
+    cancel_on_callback = cancellation_case.second;
+    RawBenchmarkOptions cancellation_options;
+    cancellation_options.iterations = cancellation_case.first;
+    auto cancelled_report = cancellation_benchmark.run(
+        benchmark_cancellation_graph, cancellation_options,
+        callback_cancellation.token());
+    PS_CHECK(!cancelled_report.ok());
+    PS_CHECK(cancelled_report.status().code == ErrorCode::Cancelled);
+    PS_CHECK(benchmark_callback_count == cancellation_case.second);
+  }
+  active_benchmark_cancellation = nullptr;
+
+  auto benchmark_failure_operations = std::make_shared<OperationRegistry>();
+  std::uint32_t benchmark_failure_callback_count = 0U;
+  PS_CHECK(benchmark_failure_operations
+               ->register_operation(OperationDefinition{
+                   "test.benchmark_failure", OperationTraits{},
+                   [&benchmark_failure_callback_count](
+                       const OperationInvocation&) -> Result<Value> {
+                     ++benchmark_failure_callback_count;
+                     if (benchmark_failure_callback_count == 1U) {
+                       return Result<Value>(ps::Status::failure(
+                           ErrorCode::OperationFailed,
+                           "intentional ordinary benchmark failure"));
+                     }
+                     return Result<Value>(Value::from_float64(2.0));
+                   }})
+               .ok());
+  benchmark_failure_operations->freeze();
+  Compiler benchmark_failure_compiler(benchmark_failure_operations);
+  ExecutionContext benchmark_failure_execution(
+      benchmark_failure_operations,
+      ExecutionContextConfig{1U, false, 4U, 1024U});
+  GraphContext benchmark_failure_graph(
+      single_operation_document("test.benchmark_failure"));
+  RawBenchmarkRunner failure_benchmark(&benchmark_failure_compiler,
+                                       &benchmark_failure_execution);
+  RawBenchmarkOptions failure_options;
+  failure_options.iterations = 2U;
+  auto ordinary_failure_report =
+      failure_benchmark.run(benchmark_failure_graph, failure_options);
+  PS_CHECK(ordinary_failure_report.ok());
+  PS_CHECK(ordinary_failure_report.value().samples.size() == 2U);
+  PS_CHECK(ordinary_failure_report.value().samples[0U].outcome ==
+           ErrorCode::OperationFailed);
+  PS_CHECK(ordinary_failure_report.value().samples[1U].outcome ==
+           ErrorCode::Ok);
+  PS_CHECK(benchmark_failure_callback_count == 2U);
+
   RawBenchmarkOptions rejected_oracle_options;
   rejected_oracle_options.execution.maximum_parallelism = 1U;
   rejected_oracle_options.correctness_oracle =

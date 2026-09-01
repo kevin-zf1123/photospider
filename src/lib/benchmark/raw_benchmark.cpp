@@ -150,6 +150,9 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
     auto executed =
         execution_->execute(workflow.plan, cancellation, options.execution);
     if (!executed.ok()) {
+      if (executed.status().code == ErrorCode::Cancelled) {
+        return Result<RawBenchmarkReport>(executed.status());
+      }
       sample.outcome = executed.status().code;
       sample.reason = executed.status().message;
       report.samples.push_back(std::move(sample));
