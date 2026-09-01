@@ -7,12 +7,13 @@
 | `GraphSnapshot` | Coherent source/revision capture；replace/destruction 后 currentness 变为 false。 |
 | `SemanticGraphIR` | 带 copied trait 与 inferred output descriptor 的 deterministic topological node。 |
 | `OptimizedGraphIR` | 独立的 semantics-equivalent stage；当前为 conservative no-op。 |
-| `ExecutionPlan` | Dependency-ordered local step、backend label、estimated bytes 与 output mapping。 |
+| `ExecutionPlan` | Dependency-ordered local step、backend label、estimated bytes、named output demand 与 derived per-input demand。 |
 | `ExecutionContext` | Bounded CPU/GPU callback pool、frozen operation 与 byte ledger 的 owner。 |
 | `ExecutionRun` | 一次同步 execute 调用的 private state；绝不是 daemon Job 或 public identity。 |
 | `Value` | Immutable dense descriptor、Region、strided layout、bounded facet 与 owned shared bytes。 |
 | `Region` | Value shape 的 rank-general logical subset；绝不是 buffer/storage object。 |
-| operation trait | Copied compiler-visible input count、effect、backend/fallback、type/shape/Region rule 与 estimated bytes。 |
+| operation trait | Copied compiler-visible input count、effect、backend/fallback、type/shape/Region rule、fixed shape、typed parameter schema 与 estimated bytes。 |
+| operation parameter schema | Semantic IR 前发布的 closed canonical key、exact source variant type 与 required flag。 |
 | operation/data-definition DSO | Startup-configured trusted in-process extension。 |
 | digest/cache key | Non-security reproducibility 或 disposable lookup identity。 |
 | cancellation | 防止 late result publication 的 cooperative observation。 |

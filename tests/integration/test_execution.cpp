@@ -1,5 +1,6 @@
 #include <chrono>
 #include <future>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -22,7 +23,9 @@ namespace {
 ps::CompiledWorkflow compile_or_throw(ps::Compiler* compiler,
                                       const ps::GraphContext& graph,
                                       bool allow_gpu = false) {
-  auto compiled = compiler->compile(graph, ps::PlanningOptions{allow_gpu});
+  ps::PlanningOptions options;
+  options.allow_gpu = allow_gpu;
+  auto compiled = compiler->compile(graph, options);
   if (!compiled.ok()) {
     throw std::runtime_error(compiled.status().message);
   }
@@ -39,6 +42,110 @@ ps::WorkflowDocument single_operation_document(const std::string& operation) {
   ps::WorkflowDocument document;
   document.nodes = {ps::WorkflowNode{1U, operation, {}, {}}};
   document.outputs = {ps::WorkflowOutput{"value", 1U, "value"}};
+  return document;
+}
+
+/**
+ * @brief Builds one dense rank-one Float64 Value of the requested extent.
+ * @param extent Positive logical element count.
+ * @return Whole-Region immutable zero-filled Value.
+ * @throws std::bad_alloc If Value storage allocation fails.
+ * @throws std::invalid_argument If extent is zero.
+ */
+ps::Value vector_value(std::uint64_t extent) {
+  if (extent == 0U) {
+    throw std::invalid_argument("vector fixture extent must be positive");
+  }
+  auto value = ps::Value::create(
+      ps::ValueDescriptor{ps::ElementType::Float64, {extent}},
+      ps::Region::whole({extent}), ps::StridedLayout{0U, {8}},
+      std::vector<std::uint8_t>(
+          static_cast<std::size_t>(extent) * sizeof(double), 0U));
+  if (!value.ok()) {
+    throw std::runtime_error(value.status().message);
+  }
+  return value.take_value();
+}
+
+/**
+ * @brief Compares one rank-one Region with expected offset and extent.
+ * @param region Candidate logical Region.
+ * @param offset Expected zero-based offset.
+ * @param extent Expected logical element count.
+ * @return True only for the exact rank-one interval.
+ * @throws Nothing.
+ */
+bool region_equals(const ps::Region& region, std::uint64_t offset,
+                   std::uint64_t extent) noexcept {
+  return region.rank() == 1U && region.dimensions().front().offset == offset &&
+         region.dimensions().front().extent == extent;
+}
+
+/**
+ * @brief Builds one frozen registry whose shared test operation uses a rule.
+ * @param rule Whole, elementwise-exact, or halo input-demand behavior.
+ * @param halo_radius Positive only for `Halo`.
+ * @param observed Callback-owned location receiving the executed input demand.
+ * @return Frozen registry with fixed-shape source and `test.region` consumer.
+ * @throws std::bad_alloc If registry/callback storage allocation fails.
+ * @throws std::logic_error If fixture registration unexpectedly fails.
+ * @note Each returned registry is independent but uses identical operation
+ * keys so plan differences originate in semantic traits and demands.
+ */
+std::shared_ptr<ps::OperationRegistry> make_region_registry(
+    ps::OperationRegionRule rule, std::uint32_t halo_radius,
+    std::shared_ptr<ps::Region> observed) {
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  ps::OperationTraits source_traits;
+  source_traits.output_element_type = ps::ElementType::Float64;
+  source_traits.shape_rule = ps::OperationShapeRule::Fixed;
+  source_traits.fixed_output_shape = {10U};
+  source_traits.region_rule = ps::OperationRegionRule::Whole;
+  ps::Status status = registry->register_operation(ps::OperationDefinition{
+      "test.region_source", source_traits,
+      [](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
+        return ps::Result<ps::Value>(vector_value(10U));
+      }});
+  if (!status.ok()) {
+    throw std::logic_error(status.message);
+  }
+  ps::OperationTraits consumer_traits;
+  consumer_traits.input_count = 1U;
+  consumer_traits.output_element_type = ps::ElementType::Float64;
+  consumer_traits.shape_rule = ps::OperationShapeRule::PreserveFirstInput;
+  consumer_traits.region_rule = rule;
+  consumer_traits.halo_radius = halo_radius;
+  status = registry->register_operation(ps::OperationDefinition{
+      "test.region", consumer_traits,
+      [observed](
+          const ps::OperationInvocation& invocation) -> ps::Result<ps::Value> {
+        if (!observed || invocation.input_demands.size() != 1U) {
+          return ps::Result<ps::Value>(ps::Status::failure(
+              ps::ErrorCode::InvalidArgument,
+              "region fixture did not receive one input demand"));
+        }
+        *observed = invocation.input_demands.front();
+        return ps::Result<ps::Value>(invocation.inputs.front());
+      }});
+  if (!status.ok()) {
+    throw std::logic_error(status.message);
+  }
+  registry->freeze();
+  return registry;
+}
+
+/**
+ * @brief Builds the common fixed-vector source and Region consumer workflow.
+ * @return Two-node document with named output `value`.
+ * @throws std::bad_alloc If source storage allocation fails.
+ */
+ps::WorkflowDocument region_document() {
+  ps::WorkflowDocument document;
+  document.nodes = {
+      ps::WorkflowNode{1U, "test.region_source", {}, {}},
+      ps::WorkflowNode{2U, "test.region", {ps::WorkflowInput{1U, "value"}}, {}},
+  };
+  document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
   return document;
 }
 
@@ -205,19 +312,90 @@ int main() {
   PS_CHECK(faceted.facets().front().payload ==
            std::vector<std::uint8_t>({4U, 5U}));
 
+  auto whole_observed = std::make_shared<Region>();
+  auto exact_observed = std::make_shared<Region>();
+  auto halo_observed = std::make_shared<Region>();
+  auto whole_operations =
+      make_region_registry(OperationRegionRule::Whole, 0U, whole_observed);
+  auto exact_operations = make_region_registry(OperationRegionRule::Elementwise,
+                                               0U, exact_observed);
+  auto halo_operations =
+      make_region_registry(OperationRegionRule::Halo, 2U, halo_observed);
+  Compiler whole_compiler(whole_operations);
+  Compiler exact_compiler(exact_operations);
+  Compiler halo_compiler(halo_operations);
+  GraphContext whole_graph(region_document());
+  GraphContext exact_graph(region_document());
+  GraphContext halo_graph(region_document());
+  PlanningOptions region_options;
+  region_options.output_regions.emplace("value",
+                                        Region({RegionDimension{4U, 2U}}));
+  auto whole_workflow = whole_compiler.compile(whole_graph, region_options);
+  auto exact_workflow = exact_compiler.compile(exact_graph, region_options);
+  auto halo_workflow = halo_compiler.compile(halo_graph, region_options);
+  PS_CHECK(whole_workflow.ok());
+  PS_CHECK(exact_workflow.ok());
+  PS_CHECK(halo_workflow.ok());
+  PS_CHECK(region_equals(
+      whole_workflow.value().plan.steps().back().input_demands.front(), 0U,
+      10U));
+  PS_CHECK(region_equals(
+      exact_workflow.value().plan.steps().back().input_demands.front(), 4U,
+      2U));
+  PS_CHECK(region_equals(
+      halo_workflow.value().plan.steps().back().input_demands.front(), 2U, 6U));
+  PS_CHECK(whole_workflow.value().plan.digest().value !=
+           exact_workflow.value().plan.digest().value);
+  PS_CHECK(exact_workflow.value().plan.digest().value !=
+           halo_workflow.value().plan.digest().value);
+  ExecutionContext whole_execution(whole_operations);
+  ExecutionContext exact_execution(exact_operations);
+  ExecutionContext halo_execution(halo_operations);
+  PS_CHECK(whole_execution.execute(whole_workflow.value().plan).ok());
+  PS_CHECK(exact_execution.execute(exact_workflow.value().plan).ok());
+  PS_CHECK(halo_execution.execute(halo_workflow.value().plan).ok());
+  PS_CHECK(region_equals(*whole_observed, 0U, 10U));
+  PS_CHECK(region_equals(*exact_observed, 4U, 2U));
+  PS_CHECK(region_equals(*halo_observed, 2U, 6U));
+
+  auto clipped_observed = std::make_shared<Region>();
+  auto clipped_operations = make_region_registry(
+      OperationRegionRule::Halo, std::numeric_limits<std::uint32_t>::max(),
+      clipped_observed);
+  Compiler clipped_compiler(clipped_operations);
+  GraphContext clipped_graph(region_document());
+  auto clipped_workflow =
+      clipped_compiler.compile(clipped_graph, region_options);
+  PS_CHECK(clipped_workflow.ok());
+  PS_CHECK(region_equals(
+      clipped_workflow.value().plan.steps().back().input_demands.front(), 0U,
+      10U));
+  ExecutionContext clipped_execution(clipped_operations);
+  PS_CHECK(clipped_execution.execute(clipped_workflow.value().plan).ok());
+  PS_CHECK(region_equals(*clipped_observed, 0U, 10U));
+
+  PlanningOptions unknown_region_options;
+  unknown_region_options.output_regions.emplace(
+      "missing", Region({RegionDimension{0U, 1U}}));
+  PS_CHECK(!exact_compiler.compile(exact_graph, unknown_region_options).ok());
+
   auto resource_operations = std::make_shared<OperationRegistry>();
+  OperationTraits large_traits;
+  large_traits.supports_gpu = false;
+  large_traits.allows_cpu_fallback = false;
+  large_traits.estimated_bytes = 16U;
   PS_CHECK(resource_operations
                ->register_operation(OperationDefinition{
-                   "test.large",
-                   OperationTraits{0U, true, true, true, false, false, 16U},
+                   "test.large", large_traits,
                    [](const OperationInvocation&) -> Result<Value> {
                      return Result<Value>(Value::from_float64(1.0));
                    }})
                .ok());
+  OperationTraits small_traits = large_traits;
+  small_traits.estimated_bytes = 8U;
   PS_CHECK(resource_operations
                ->register_operation(OperationDefinition{
-                   "test.small",
-                   OperationTraits{0U, true, true, true, false, false, 8U},
+                   "test.small", small_traits,
                    [](const OperationInvocation&) -> Result<Value> {
                      return Result<Value>(Value::from_float64(2.0));
                    }})
@@ -246,14 +424,61 @@ int main() {
     return CorrectnessObservation{accepted,
                                   accepted ? std::string() : "wrong sum"};
   };
+  benchmark_options.oracle_name = "sum-equals-6.5";
   auto report = benchmark.run(graph, benchmark_options);
   PS_CHECK(report.ok());
+  PS_CHECK(report.value().oracle_name == "sum-equals-6.5");
   PS_CHECK(report.value().samples.size() == 2U);
   for (const RawBenchmarkSample& sample : report.value().samples) {
     PS_CHECK(sample.outcome == ErrorCode::Ok);
     PS_CHECK(sample.correctness_checked);
     PS_CHECK(sample.correctness_accepted);
+    PS_CHECK(sample.oracle_name == "sum-equals-6.5");
     PS_CHECK(!sample.execution.plan_digest.empty());
   }
+
+  RawBenchmarkOptions unchecked_options;
+  auto unchecked_report = benchmark.run(graph, unchecked_options);
+  PS_CHECK(unchecked_report.ok());
+  PS_CHECK(unchecked_report.value().oracle_name == "unchecked");
+  PS_CHECK(unchecked_report.value().samples.size() == 1U);
+  PS_CHECK(!unchecked_report.value().samples.front().correctness_checked);
+  PS_CHECK(!unchecked_report.value().samples.front().correctness_accepted);
+  PS_CHECK(unchecked_report.value().samples.front().oracle_name == "unchecked");
+
+  RawBenchmarkOptions missing_oracle_name = benchmark_options;
+  missing_oracle_name.oracle_name.clear();
+  auto missing_oracle_name_result = benchmark.run(graph, missing_oracle_name);
+  PS_CHECK(!missing_oracle_name_result.ok());
+  PS_CHECK(missing_oracle_name_result.status().code ==
+           ErrorCode::InvalidArgument);
+
+  RawBenchmarkOptions reserved_oracle_name = benchmark_options;
+  reserved_oracle_name.oracle_name = "unchecked";
+  auto reserved_oracle_name_result = benchmark.run(graph, reserved_oracle_name);
+  PS_CHECK(!reserved_oracle_name_result.ok());
+  PS_CHECK(reserved_oracle_name_result.status().code ==
+           ErrorCode::InvalidArgument);
+
+  RawBenchmarkOptions conflicting_oracle_name;
+  conflicting_oracle_name.oracle_name = "named-but-unchecked";
+  auto conflicting_oracle_name_result =
+      benchmark.run(graph, conflicting_oracle_name);
+  PS_CHECK(!conflicting_oracle_name_result.ok());
+  PS_CHECK(conflicting_oracle_name_result.status().code ==
+           ErrorCode::InvalidArgument);
+
+  RawBenchmarkOptions invalid_utf8_oracle = benchmark_options;
+  invalid_utf8_oracle.oracle_name = std::string("bad\xc3\x28", 5U);
+  auto invalid_utf8_oracle_result = benchmark.run(graph, invalid_utf8_oracle);
+  PS_CHECK(!invalid_utf8_oracle_result.ok());
+  PS_CHECK(invalid_utf8_oracle_result.status().code ==
+           ErrorCode::InvalidArgument);
+
+  RawBenchmarkOptions oversized_oracle = benchmark_options;
+  oversized_oracle.oracle_name.assign(129U, 'x');
+  auto oversized_oracle_result = benchmark.run(graph, oversized_oracle);
+  PS_CHECK(!oversized_oracle_result.ok());
+  PS_CHECK(oversized_oracle_result.status().code == ErrorCode::InvalidArgument);
   return 0;
 }

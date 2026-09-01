@@ -11,13 +11,15 @@ The installed `Photospider::kernel` target provides:
 
 - `WorkflowDocument` source graphs;
 - typed semantic IR and optimized IR;
-- operation semantic traits, optimization, and local physical planning;
+- operation ABI v2 semantic traits with closed typed parameter schemas,
+  optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - explicit dense `Value`, bounded semantic facets, rank-general `Region`,
   strided layout, immutable bytes, and Run-local cross-backend copies;
 - cooperative cancellation, local resource accounting, fallback, and stale
   completion rejection;
-- raw compile/plan/execute diagnostics and non-security digests.
+- raw compile/plan/execute diagnostics, named correctness oracle or explicit
+  `unchecked` status, and non-security digests.
 
 Independent `GraphContext` and `ExecutionContext` instances may run
 concurrently. The kernel defines no daemon Session, Job queue, network service,
@@ -27,7 +29,8 @@ durable result object, or release-evidence profile.
 Operation and data-provider DSOs are trusted in-process extensions configured
 at startup. Their exact ABI version/size, alignment, pointer/count, bounded
 text/count/rank, closed trait vocabulary, output type/shape/bytes, overflow,
-exception, and cleanup validation remains a correctness boundary.
+required/exact parameter type, planned input demand, exception, and cleanup
+validation remains a correctness boundary.
 
 ## Build
 

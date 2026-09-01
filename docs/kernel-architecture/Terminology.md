@@ -7,12 +7,13 @@
 | `GraphSnapshot` | Coherent source/revision capture whose currentness becomes false after replace/destruction. |
 | `SemanticGraphIR` | Deterministic topological nodes with copied traits and inferred output descriptors. |
 | `OptimizedGraphIR` | Distinct semantics-equivalent stage; currently a conservative no-op. |
-| `ExecutionPlan` | Dependency-ordered local steps, backend labels, estimated bytes, output mapping. |
+| `ExecutionPlan` | Dependency-ordered local steps, backend labels, estimated bytes, named output demands, and derived per-input demands. |
 | `ExecutionContext` | Owner of bounded CPU/GPU callback pools, frozen operations, and byte ledger. |
 | `ExecutionRun` | Private state of one synchronous execute call; never a daemon Job or public identity. |
 | `Value` | Immutable dense descriptor, Region, strided layout, bounded facets, and owned shared bytes. |
 | `Region` | Rank-general logical subset of a Value shape; never a buffer or storage object. |
-| operation traits | Copied compiler-visible input count, effects, backend/fallback, type/shape/Region rule, and estimated bytes. |
+| operation traits | Copied compiler-visible input count, effects, backend/fallback, type/shape/Region rule, fixed shape, typed parameter schema, and estimated bytes. |
+| operation parameter schema | Closed canonical key, exact source variant type, and required flag published before semantic IR. |
 | operation/data-definition DSO | Startup-configured trusted in-process extension. |
 | digest/cache key | Non-security reproducibility or disposable lookup identity. |
 | cancellation | Cooperative observation that prevents late result publication. |

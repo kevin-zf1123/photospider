@@ -14,6 +14,8 @@ std::atomic<std::uint32_t> destroy_count{0U};
  * @param user_data Unused fixture state.
  * @param inputs Exact one-element input array.
  * @param input_count Must equal one.
+ * @param parameters Exact required `scale` Float64 parameter.
+ * @param parameter_count Must equal one.
  * @param backend Must name CPU for this fixture.
  * @param cancelled Host cancellation observer.
  * @param cancellation_context Host cancellation state.
@@ -21,22 +23,31 @@ std::atomic<std::uint32_t> destroy_count{0U};
  * @param diagnostic Writable failure diagnostic.
  * @param diagnostic_capacity Diagnostic buffer capacity.
  * @return Zero after accepted publication; nonzero on validation/cancellation.
+ * @throws Nothing.
  * @note No pointer is retained after return.
  */
-int execute_double(void* user_data, const ps_operation_value_view_v1* inputs,
-                   std::uint32_t input_count, std::uint32_t backend,
-                   ps_operation_cancelled_v1 cancelled,
+int execute_double(void* user_data, const ps_operation_value_view_v2* inputs,
+                   std::uint32_t input_count,
+                   const ps_operation_parameter_value_v2* parameters,
+                   std::uint32_t parameter_count, std::uint32_t backend,
+                   ps_operation_cancelled_v2 cancelled,
                    void* cancellation_context,
-                   const ps_operation_output_sink_v1* sink, char* diagnostic,
+                   const ps_operation_output_sink_v2* sink, char* diagnostic,
                    std::size_t diagnostic_capacity) {
   static_cast<void>(user_data);
-  if (!inputs || input_count != 1U || backend != 1U || !sink ||
-      !sink->publish ||
-      inputs[0].element_type != PS_OPERATION_ELEMENT_FLOAT64_V1 ||
+  if (!inputs || input_count != 1U || !parameters || parameter_count != 1U ||
+      parameters[0].struct_size != sizeof(ps_operation_parameter_value_v2) ||
+      parameters[0].key_size != 5U ||
+      std::memcmp(parameters[0].key, "scale", 5U) != 0 ||
+      parameters[0].type != PS_OPERATION_PARAMETER_FLOAT64_V2 ||
+      backend != 1U || !sink || !sink->publish ||
+      inputs[0].element_type != PS_OPERATION_ELEMENT_FLOAT64_V2 ||
       inputs[0].rank != 1U || inputs[0].byte_size != sizeof(double) ||
-      !inputs[0].shape || inputs[0].shape[0] != 1U || !inputs[0].data ||
-      inputs[0].facet_count != 1U || !inputs[0].facets ||
-      inputs[0].facets[0].struct_size != sizeof(ps_operation_facet_view_v1) ||
+      !inputs[0].shape || inputs[0].shape[0] != 1U ||
+      !inputs[0].demand_offsets || inputs[0].demand_offsets[0] != 0U ||
+      !inputs[0].demand_extents || inputs[0].demand_extents[0] != 1U ||
+      !inputs[0].data || inputs[0].facet_count != 1U || !inputs[0].facets ||
+      inputs[0].facets[0].struct_size != sizeof(ps_operation_facet_view_v2) ||
       inputs[0].facets[0].key_size != 13U ||
       std::memcmp(inputs[0].facets[0].key, "test.semantic", 13U) != 0 ||
       (cancelled && cancelled(cancellation_context))) {
@@ -47,9 +58,9 @@ int execute_double(void* user_data, const ps_operation_value_view_v1* inputs,
   }
   double value = 0.0;
   std::memcpy(&value, inputs[0].data, sizeof(value));
-  value *= 2.0;
+  value *= parameters[0].float64_value;
   const std::uint64_t shape[] = {1U};
-  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT64_V1, shape,
+  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT64_V2, shape,
                        1U, inputs[0].facets, inputs[0].facet_count,
                        reinterpret_cast<const std::uint8_t*>(&value),
                        sizeof(value))
@@ -62,6 +73,8 @@ int execute_double(void* user_data, const ps_operation_value_view_v1* inputs,
  * @param user_data Unused fixture state.
  * @param inputs Exact one-element input array.
  * @param input_count Must equal one.
+ * @param parameters Empty parameter array.
+ * @param parameter_count Must equal zero.
  * @param backend Must name CPU for this fixture.
  * @param cancelled Host cancellation observer.
  * @param cancellation_context Host cancellation state.
@@ -69,27 +82,31 @@ int execute_double(void* user_data, const ps_operation_value_view_v1* inputs,
  * @param diagnostic Writable failure diagnostic.
  * @param diagnostic_capacity Diagnostic buffer capacity.
  * @return Zero after the sink rejects the malformed facet.
+ * @throws Nothing.
  * @note This fixture proves host-side facet validation, not plugin behavior.
  */
-int execute_bad_facet(void* user_data, const ps_operation_value_view_v1* inputs,
-                      std::uint32_t input_count, std::uint32_t backend,
-                      ps_operation_cancelled_v1 cancelled,
+int execute_bad_facet(void* user_data, const ps_operation_value_view_v2* inputs,
+                      std::uint32_t input_count,
+                      const ps_operation_parameter_value_v2* parameters,
+                      std::uint32_t parameter_count, std::uint32_t backend,
+                      ps_operation_cancelled_v2 cancelled,
                       void* cancellation_context,
-                      const ps_operation_output_sink_v1* sink, char* diagnostic,
+                      const ps_operation_output_sink_v2* sink, char* diagnostic,
                       std::size_t diagnostic_capacity) {
   static_cast<void>(user_data);
+  static_cast<void>(parameters);
   static_cast<void>(cancelled);
   static_cast<void>(cancellation_context);
-  if (!inputs || input_count != 1U || backend != 1U || !sink ||
-      !sink->publish) {
+  if (!inputs || input_count != 1U || parameter_count != 0U || backend != 1U ||
+      !sink || !sink->publish) {
     return 1;
   }
   if (diagnostic && diagnostic_capacity > 0U) {
     diagnostic[0] = '\0';
   }
   const char key[] = "bad.facet";
-  const ps_operation_facet_view_v1 facet = {
-      sizeof(ps_operation_facet_view_v1),
+  const ps_operation_facet_view_v2 facet = {
+      sizeof(ps_operation_facet_view_v2),
       key,
       static_cast<std::uint32_t>(sizeof(key) - 1U),
       0U,
@@ -108,44 +125,49 @@ int execute_bad_facet(void* user_data, const ps_operation_value_view_v1* inputs,
  * @throws Nothing.
  * @note The records are static and require no allocation release.
  */
-void destroy_fixture(const ps_operation_descriptor_v1* operations,
+void destroy_fixture(const ps_operation_descriptor_v2* operations,
                      std::uint32_t operation_count) {
   if (operations && operation_count == 2U) {
     destroy_count.fetch_add(1U, std::memory_order_relaxed);
   }
 }
 
+/** @brief Required Float64 `scale` schema for `fixture.double`. */
+const ps_operation_parameter_descriptor_v2 double_parameters[] = {
+    {sizeof(ps_operation_parameter_descriptor_v2), "scale", 5U,
+     PS_OPERATION_PARAMETER_FLOAT64_V2, 1U}};
+
 /** @brief Static operation descriptor table with valid and bad-output cases. */
-const ps_operation_descriptor_v1 descriptors[] = {
-    {sizeof(ps_operation_descriptor_v1), "fixture.double", 14U, 1U,
+const ps_operation_descriptor_v2 descriptors[] = {
+    {sizeof(ps_operation_descriptor_v2), "fixture.double", 14U, 1U,
      PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
          PS_OPERATION_FLAG_CPU,
-     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V1,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V1, PS_OPERATION_REGION_ELEMENTWISE_V1,
-     0U, 1U, execute_double, nullptr},
-    {sizeof(ps_operation_descriptor_v1), "fixture.bad_facet", 17U, 1U,
+     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V2, PS_OPERATION_REGION_ELEMENTWISE_V2,
+     0U, 1U, 1U, double_parameters, execute_double, nullptr},
+    {sizeof(ps_operation_descriptor_v2), "fixture.bad_facet", 17U, 1U,
      PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
          PS_OPERATION_FLAG_CPU,
-     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V1,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V1, PS_OPERATION_REGION_ELEMENTWISE_V1,
-     0U, 1U, execute_bad_facet, nullptr},
+     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V2, PS_OPERATION_REGION_ELEMENTWISE_V2,
+     0U, 1U, 0U, nullptr, execute_bad_facet, nullptr},
 };
 
 /** @brief Static valid plugin API table. */
-const ps_operation_plugin_api_v1 api = {sizeof(ps_operation_plugin_api_v1), 2U,
+const ps_operation_plugin_api_v2 api = {sizeof(ps_operation_plugin_api_v2), 2U,
                                         descriptors, destroy_fixture};
 
 }  // namespace
 
 /**
  * @brief Returns the valid fixture operation ABI version.
- * @return `PS_OPERATION_ABI_VERSION_1`.
+ * @return `PS_OPERATION_ABI_VERSION_2`.
  * @throws Nothing.
  * @note The function has no side effect.
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_1;
+  return PS_OPERATION_ABI_VERSION_2;
 }
 
 /**
@@ -154,8 +176,8 @@ ps_operation_plugin_get_abi_version(void) {
  * @throws Nothing.
  * @note The host must invoke its destroy callback exactly once.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v1*
-ps_operation_plugin_get_api_v1(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v2*
+ps_operation_plugin_get_api_v2(void) {
   return &api;
 }
 

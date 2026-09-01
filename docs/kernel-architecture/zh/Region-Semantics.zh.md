@@ -10,10 +10,16 @@ Compiler-visible `OperationTraits` 带一个 closed rule：
 - `Elementwise`：input/output coordinate 直接对应；
 - `Halo`：elementwise input demand 加 nonzero symmetric radius。
 
-Compiler 验证 rule combination，并将其复制到 IR/plan identity。当前 executor 仍计算
-完整 Value，不 materialize partial Region plan。Operation callback 必须返回 descriptor
-与 plan 匹配、Region 覆盖完整 descriptor，且 layout 已通过普通 Value validation 的
-Value。
+Planning 接受 named workflow output 的 optional bounded demand，并反向遍历 plan。
+`Whole` 要求每个完整 input；`Elementwise` 把 exact output interval 映射到每个 shape-
+compatible input；`Halo` 对 exact demand 做对称扩张，并以不会溢出
+`offset + extent + radius` 的方式 clip 到 input shape。多个 downstream demand 保守合并为
+bounding Region。每个 output/input demand 都进入 physical plan/cache identity。
 
-Incremental dirty propagation 位于 active package 边界之外。Region trait 不能创建
+当前 executor 仍计算完整 Value，不 crop/materialize partial Value。Transfer/callback
+entry 前，它验证 available Value Region 覆盖 plan-derived input demand，并把 demand 传给
+C++ callback/operation ABI v2 view。Operation callback 必须返回 descriptor 与 plan 匹配、
+Region 覆盖完整 descriptor，且 layout 已通过普通 Value validation 的 Value。
+
+Incremental dirty propagation 位于 active package 边界之外。Demand legality 不能创建
 worker、storage、daemon state，也不能宣称 partial execution 已存在。

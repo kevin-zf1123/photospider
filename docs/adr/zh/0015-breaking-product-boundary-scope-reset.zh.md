@@ -112,6 +112,12 @@ overflow、type/shape/`Region`/layout/facet validation、exception fencing 和
 exact cleanup 都是 correctness contract，而不是 sandbox 或 plugin security
 product。
 
+破坏性的 operation ABI 为 version two。每个 operation 发布带 required 标志的 closed
+typed parameter schema；compiler 在 semantic IR 形成前拒绝 unknown、missing、
+wrong-type、duplicate/conflicting 或其他非法参数。Operation callback 接收已验证参数值与
+plan-derived input Region。因此 Whole、Elementwise 与 overflow-safe clipped Halo rule
+会真实改变 physical input demand 和 plan identity，而不是只作为 digest metadata。
+
 ### 保留的 correctness validation
 
 本次重置删除安全产品声明，而不是 defensive correctness。以下仍为必需：
@@ -152,7 +158,9 @@ rejection 都是 kernel mechanism，不得改名为 daemon 或 service authority
 
 维护的 benchmark 可报告原始 compile/plan/execute/operation timing、selected
 backend、transfer count/bytes、peak live bytes、fallback/error reason、plan
-digest、result digest 和 correctness oracle。它们不生成 execution-profile
+digest、result digest 和 correctness oracle。提供 oracle 时必须给出 bounded canonical
+`oracle_name`，并记录在每个 sample 与 report；没有 oracle 的 run 会显式标记为
+`unchecked`。它们不生成 execution-profile
 identity、applicability/startability verdict、evidence envelope、attestation、
 release evidence 或 durable artifact reference。
 

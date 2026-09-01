@@ -56,9 +56,19 @@ authorization token、durable object identity 或 receipt。Plan cache 总能删
 ### Correctness gate
 
 每个 stage 按需检查 duplicate node id、missing reference、cycle、operation
-availability、parameter bound、type/shape/`Region` rule、integer overflow、backend
-capability 与 plan dependency order。Embedding-provided cache hit 使用前必须重新
+availability、operation 发布的 closed parameter vocabulary、required item、exact
+parameter type、parameter bound、type/shape/`Region` rule、integer overflow、backend
+capability 与 plan dependency order。unknown、missing、wrong-type 或 conflicting
+parameter declaration 会在 semantic IR publication 前失败，builtin callback 不提供隐藏
+default。Embedding-provided cache hit 使用前必须重新
 验证。Malformed 或 stale entry 变成 miss，不能绕过 compiler validation。
+
+Physical planning 接受 named workflow output 的 optional bounded demand。它把 demand
+按 whole-input、elementwise-exact 或 overflow-safe clipped halo Region 反向传播，保守合并
+多个 consumer，保存每个 step 的 output/input demand，并把这些值纳入 physical
+plan/cache identity。Execution 在 transfer/callback entry 前验证每个 produced Value 覆盖
+planned input demand。当前 materialization boundary 仍是 complete Value；demand contract
+不宣称已有 dirty 或 incremental executor。
 
 ### Closed source vocabulary
 

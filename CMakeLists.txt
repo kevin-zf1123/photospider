@@ -12,6 +12,10 @@ include(GNUInstallDirs)
 
 option(PHOTOSPIDER_ENABLE_ASAN "Enable AddressSanitizer for local validation" OFF)
 option(PHOTOSPIDER_ENABLE_TSAN "Enable ThreadSanitizer for local validation" OFF)
+option(
+  PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS
+  "Build explicit long-lived libFuzzer harnesses outside default build/CTest"
+  OFF)
 
 if(PHOTOSPIDER_ENABLE_ASAN AND PHOTOSPIDER_ENABLE_TSAN)
   message(FATAL_ERROR "ASAN and TSAN cannot be enabled together")
@@ -76,6 +80,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   endif()
 endif()
 
+if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "manual fuzz targets require a Clang libFuzzer runtime")
+  endif()
+  if(PHOTOSPIDER_ENABLE_TSAN)
+    message(FATAL_ERROR "manual libFuzzer targets cannot be combined with TSAN")
+  endif()
+  target_compile_options(
+    photospider PRIVATE -fsanitize=fuzzer-no-link -fno-omit-frame-pointer)
+  target_link_options(photospider INTERFACE -fsanitize=fuzzer-no-link)
+  add_executable(
+    photospider_operation_contract_ir_fuzz EXCLUDE_FROM_ALL
+    tests/fuzz/operation_contract_ir_fuzz.cpp)
+  target_link_libraries(
+    photospider_operation_contract_ir_fuzz PRIVATE Photospider::kernel)
+  target_compile_features(photospider_operation_contract_ir_fuzz
+                          PRIVATE cxx_std_17)
+  target_compile_options(
+    photospider_operation_contract_ir_fuzz
+    PRIVATE -fsanitize=fuzzer -fno-omit-frame-pointer -Wall -Wextra -Wpedantic
+            -Werror)
+  target_link_options(photospider_operation_contract_ir_fuzz
+                      PRIVATE -fsanitize=fuzzer)
+endif()
+
 install(
   TARGETS photospider photospider_operation_sdk photospider_data_provider_sdk
   EXPORT PhotospiderTargets
@@ -125,6 +154,23 @@ if(BUILD_TESTING)
   target_compile_definitions(operation_bad_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(operation_bad_fixture PROPERTIES PREFIX "")
 
+  function(photospider_add_bad_parameter_fixture target case_number)
+    add_library(
+      ${target} MODULE
+      tests/fixtures/operation_bad_parameter_fixture.cpp)
+    target_link_libraries(${target} PRIVATE Photospider::operation_sdk)
+    target_compile_definitions(
+      ${target}
+      PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD
+              PS_BAD_PARAMETER_CASE=${case_number})
+    set_target_properties(${target} PROPERTIES PREFIX "")
+  endfunction()
+  photospider_add_bad_parameter_fixture(operation_bad_parameter_pointer_fixture 1)
+  photospider_add_bad_parameter_fixture(operation_bad_parameter_size_fixture 2)
+  photospider_add_bad_parameter_fixture(operation_bad_parameter_count_fixture 3)
+  photospider_add_bad_parameter_fixture(operation_bad_parameter_bounds_fixture 4)
+  photospider_add_bad_parameter_fixture(operation_bad_parameter_alignment_fixture 5)
+
   add_library(data_provider_fixture MODULE tests/fixtures/data_provider_fixture.cpp)
   target_link_libraries(data_provider_fixture PRIVATE Photospider::data_provider_sdk)
   target_compile_definitions(data_provider_fixture PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD)
@@ -143,12 +189,22 @@ if(BUILD_TESTING)
     test_plugin_registry
     operation_fixture
     operation_bad_fixture
+    operation_bad_parameter_pointer_fixture
+    operation_bad_parameter_size_fixture
+    operation_bad_parameter_count_fixture
+    operation_bad_parameter_bounds_fixture
+    operation_bad_parameter_alignment_fixture
     data_provider_fixture
     data_provider_bad_fixture)
   target_compile_definitions(
     test_plugin_registry
     PRIVATE PS_OPERATION_FIXTURE_PATH="$<TARGET_FILE:operation_fixture>"
             PS_OPERATION_BAD_FIXTURE_PATH="$<TARGET_FILE:operation_bad_fixture>"
+            PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_pointer_fixture>"
+            PS_OPERATION_BAD_PARAMETER_SIZE_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_size_fixture>"
+            PS_OPERATION_BAD_PARAMETER_COUNT_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_count_fixture>"
+            PS_OPERATION_BAD_PARAMETER_BOUNDS_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_bounds_fixture>"
+            PS_OPERATION_BAD_PARAMETER_ALIGNMENT_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_alignment_fixture>"
             PS_DATA_PROVIDER_FIXTURE_PATH="$<TARGET_FILE:data_provider_fixture>"
             PS_DATA_PROVIDER_BAD_FIXTURE_PATH="$<TARGET_FILE:data_provider_bad_fixture>")
 

@@ -24,8 +24,12 @@ Kernel tests cover:
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences;
 - Value/Region/strided-layout/facet/buffer negative contracts;
-- operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime;
-- raw benchmark diagnostics without verdict/evidence output.
+- operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
+  including operation-v2 typed parameter schemas and demand views;
+- parameter unknown/missing/wrong-type/conflict rejection before semantic IR;
+- Whole/Elementwise/Halo demand propagation and execution-time coverage;
+- raw benchmark diagnostics with a named oracle or explicit `unchecked`
+  identity and without verdict/evidence output.
 
 Daemon tests live in `photospider-daemon` and cover local frame validation,
 nine-method routing, ephemeral Session/Job lifecycle, restart loss,
@@ -54,9 +58,33 @@ private include directory.
 ASAN and TSAN are scoped CMake modes where the toolchain supports them. The
 ordinary tests exercise malformed Value/Region/layout, graph documents,
 operation/provider records, and callback outputs. Malformed local IPC frames
-belong to the daemon repository. No fuzz executable is currently maintained;
-adding one requires an ordinary long-lived correctness target and corpus
-policy rather than migration-specific wiring.
+belong to the daemon repository.
+
+The long-lived manual target `photospider_operation_contract_ir_fuzz` exercises
+operation-v2 trait/parameter vocabulary and compiler validation. It is
+`EXCLUDE_FROM_ALL`, is never registered with CTest, and is enabled explicitly
+with `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` under Clang. Seed inputs are
+maintained in `tests/fuzz/corpus/operation_contract_ir/`; caller-selected crash
+or artifact directories remain untracked. A bounded smoke run is:
+
+```bash
+cmake -S . -B <fuzz-build> -DCMAKE_CXX_COMPILER=clang++ \
+  -DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON -DBUILD_TESTING=OFF
+cmake --build <fuzz-build> --target photospider_operation_contract_ir_fuzz -j
+ps_operation_fuzz_corpus=$(mktemp -d)
+cp -R tests/fuzz/corpus/operation_contract_ir/. \
+  "$ps_operation_fuzz_corpus"/
+<fuzz-build>/photospider_operation_contract_ir_fuzz \
+  "$ps_operation_fuzz_corpus" -runs=1000 -max_len=256
+```
+
+The fixed negative DSO fixtures remain authoritative for raw ABI
+pointer/size/alignment/count/bounds cases that a byte-only in-process harness
+cannot construct safely.
+Use a Clang distribution that actually ships its libFuzzer runtime; a compiler
+identifying as Clang is insufficient when that archive is absent. The temporary
+working corpus prevents generated mutations from entering the maintained seed
+directory.
 
 ## CTest ownership
 

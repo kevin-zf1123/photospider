@@ -243,6 +243,13 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
 struct PHOTOSPIDER_API PlanningOptions final {
   /** @brief Whether the optional local GPU lane may be selected. */
   bool allow_gpu = false;
+  /**
+   * @brief Optional bounded logical demand per named workflow output.
+   *
+   * Missing names default to whole-output demand. Unknown names, rank/shape
+   * mismatch, and out-of-bounds Regions fail before plan publication.
+   */
+  std::map<std::string, Region> output_regions;
 };
 
 /**
@@ -267,6 +274,11 @@ struct PHOTOSPIDER_API PlanStep final {
   Backend backend = Backend::Cpu;
   /** @brief Estimated peak bytes reserved before invocation. */
   std::uint64_t planned_bytes = 0;
+  /** @brief Logical result coverage demanded by downstream plan consumers. */
+  Region output_demand;
+  /** @brief Per-input logical demands derived from the operation Region rule.
+   */
+  std::vector<Region> input_demands;
 };
 
 /**

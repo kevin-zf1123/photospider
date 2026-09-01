@@ -4,8 +4,11 @@
 
 `Compiler::analyze` checks a current `GraphSnapshot`, bounded document counts
 and text, unique node/output ids, references, ports, operation availability,
-input counts, deterministic acyclic topology, and static output descriptor
-inference. It publishes immutable `SemanticGraphIR` in node-id-tiebroken
+input counts, each operation's closed required typed parameter schema,
+deterministic acyclic topology, and static scalar/preserve/match/fixed output
+descriptor inference. Unknown, missing, or wrong-type parameters fail before
+IR publication; built-ins do not synthesize defaults. Analysis publishes
+immutable `SemanticGraphIR` in node-id-tiebroken
 topological order plus `SemanticGraphDigest`.
 
 `Compiler::optimize` is an explicit conservative no-op in this baseline. It
@@ -13,7 +16,9 @@ copies the semantic nodes into a distinct `OptimizedGraphIR` and produces a
 domain-separated `OptimizedGraphDigest`.
 
 `Compiler::plan` copies dependency-ordered steps, selects CPU or a declared
-optional local GPU backend, records estimated bytes, and produces
+optional local GPU backend, records estimated bytes, and propagates optional
+named output Regions backward into per-step output/input demands using Whole,
+elementwise-exact, or clipped Halo rules. It produces
 `ExecutionPlan`, `ExecutionPlanDigest`, and `PlanCacheKey`. No stage contains a
 callback pointer, DSO handle, allocation, native device, or daemon object.
 Each stage also carries a private runtime-only weak identity for the exact
@@ -32,6 +37,9 @@ transfer count/bytes. Backend labels are Run-local derived state; the kernel
 does not expose a native GPU handle or persistent residency registry.
 
 Every operation result is checked against the planned element type and shape.
+Each producer Value must cover the consumer's planned input demand before
+transfer or callback entry; callbacks and ABI v2 input views receive that exact
+demand. The executor still materializes complete Values.
 The execution context must use the same frozen registry that produced the
 plan. Cancellation and plan currentness are checked before work, during
 completion, and before result assembly. A late cancelled/stale result releases
