@@ -22,7 +22,8 @@ Kernel test 覆盖：
 - cross-backend copy/backend label、cancellation、stale completion 与 exception fence；
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
-  operation-v2 typed parameter schema 与 demand view；
+  operation-v2 typed parameter schema、demand view，以及带精确 destroy/close count 的
+  deterministic owner-allocation failure；
 - semantic IR 前的 unknown/missing/wrong-type/conflict parameter rejection；
 - Whole/Elementwise/Halo demand propagation 与 execution-time coverage；
 - 带 named oracle 或显式 `unchecked` identity，且不生成 verdict/evidence output 的
@@ -76,6 +77,11 @@ cp -R tests/fuzz/corpus/operation_contract_ir/. \
 使用确实提供 libFuzzer runtime 的 Clang distribution；只报告 Clang identity 但缺少该
 archive 仍不满足条件。Temporary working corpus 防止 generated mutation 进入 maintained
 seed directory。
+
+普通 CTest `test_operation_contract_ir_seeds` 只读两个 committed seed，不生成 mutation。
+它证明 `valid-source` 到达并通过 compiler path，同时 `malformed-schema` 构造 duplicate
+parameter schema 并到达命名的 registry rejection。该 deterministic stage seam 补充但不
+注册 manual libFuzzer target。
 
 ## CTest 所有权
 

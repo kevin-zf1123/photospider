@@ -143,9 +143,10 @@ struct PHOTOSPIDER_API OperationInvocation final {
   CancellationToken cancellation;
 };
 
-/** @brief C++ callback type for one synchronous operation invocation. */
-using OperationCallback =
-    std::function<Result<Value>(const OperationInvocation&)>;
+/** @brief Function signature for one synchronous operation invocation. */
+using CallbackSignature = Result<Value>(const OperationInvocation&);
+/** @brief Type-erased callable implementing `CallbackSignature`. */
+using OperationCallback = std::function<CallbackSignature>;
 
 /**
  * @brief One complete operation definition before registry publication.

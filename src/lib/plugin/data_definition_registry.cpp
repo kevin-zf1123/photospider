@@ -11,6 +11,10 @@
 
 #include "photospider/plugin/data_provider_api.h"
 
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+#include "plugin/library_test_hooks.hpp"
+#endif
+
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -63,14 +67,23 @@ Result<ElementType> provider_element_type(std::uint32_t value) {
 class ProviderLibrary final {
  public:
   /**
-   * @brief Takes ownership of one handle and validated API table.
+   * @brief Takes immediate stack ownership of one opened provider library.
    * @param handle Platform library handle.
-   * @param api Mapped provider API table.
    * @throws Nothing.
-   * @note Both values must be nonnull.
+   * @note Destroy ownership is attached after the API structure prefix is
+   * proven readable; until then destruction closes only the native handle.
    */
-  ProviderLibrary(void* handle, const ps_data_provider_api_v1* api) noexcept
-      : handle_(handle), api_(api) {}
+  explicit ProviderLibrary(void* handle) noexcept : handle_(handle) {}
+
+  /**
+   * @brief Transfers pending ownership into its published heap lease.
+   * @param other Source owner left empty.
+   * @throws Nothing.
+   * @note Handle and destroy responsibility move together exactly once.
+   */
+  ProviderLibrary(ProviderLibrary&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)),
+        api_(std::exchange(other.api_, nullptr)) {}
 
   /**
    * @brief Calls provider destroy and unloads the library exactly once.
@@ -94,10 +107,53 @@ class ProviderLibrary final {
       dlclose(handle_);
     }
 #endif
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+    if (handle_) {
+      plugin_testing::notify_native_close(
+          plugin_testing::LibraryKind::Provider);
+    }
+#endif
   }
 
-  ProviderLibrary(const ProviderLibrary&) = delete;
-  ProviderLibrary& operator=(const ProviderLibrary&) = delete;
+  /**
+   * @brief Forbids duplicating native-library/destroy-hook ownership.
+   * @param other Source owner that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Shared ownership is established only after heap allocation succeeds.
+   */
+  ProviderLibrary(const ProviderLibrary& other) = delete;
+  /**
+   * @brief Forbids assigning native-library/destroy-hook ownership.
+   * @param other Source owner that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Exactly-one destroy-before-unload ownership never changes.
+   */
+  ProviderLibrary& operator=(const ProviderLibrary& other) = delete;
+  /**
+   * @brief Forbids replacing an established provider lease by move.
+   * @param other Source owner that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Publication uses move construction exactly once.
+   */
+  ProviderLibrary& operator=(ProviderLibrary&& other) = delete;
+
+  /**
+   * @brief Returns the borrowed native handle for symbol lookup.
+   * @return Nonnull handle while ownership is active.
+   * @throws Nothing.
+   * @note The caller never closes or transfers the borrowed value.
+   */
+  [[nodiscard]] void* handle() const noexcept { return handle_; }
+
+  /**
+   * @brief Attaches an API table whose exact structure prefix is readable.
+   * @param api Mapped API table, possibly carrying malformed later fields.
+   * @throws Nothing.
+   * @note A nonnull destroy callback becomes part of rollback immediately.
+   */
+  void attach_api(const ps_data_provider_api_v1* api) noexcept { api_ = api; }
 
  private:
   /** @brief Platform library handle. */
@@ -151,24 +207,6 @@ void* provider_symbol(void* handle, const char* name) noexcept {
       GetProcAddress(static_cast<HMODULE>(handle), name));
 #else
   return dlsym(handle, name);
-#endif
-}
-
-/**
- * @brief Closes a provider handle before ownership publication.
- * @param handle Native handle, possibly null.
- * @throws Nothing.
- * @note Provider records are destroyed separately once an API table is known.
- */
-void close_provider_library(void* handle) noexcept {
-#if defined(_WIN32)
-  if (handle) {
-    FreeLibrary(static_cast<HMODULE>(handle));
-  }
-#else
-  if (handle) {
-    dlclose(handle);
-  }
 #endif
 }
 
@@ -248,36 +286,33 @@ Status DataDefinitionRegistry::load_provider(const std::string& path) {
   if (!opened.ok()) {
     return opened.status();
   }
-  void* handle = opened.value();
+  ProviderLibrary pending_provider(opened.value());
   using VersionFunction = std::uint32_t (*)();
   using ApiFunction = const ps_data_provider_api_v1* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
-  void* version_address =
-      provider_symbol(handle, "ps_data_provider_get_abi_version");
-  void* api_address = provider_symbol(handle, "ps_data_provider_get_api_v1");
+  void* version_address = provider_symbol(pending_provider.handle(),
+                                          "ps_data_provider_get_abi_version");
+  void* api_address =
+      provider_symbol(pending_provider.handle(), "ps_data_provider_get_api_v1");
   static_assert(sizeof(version) == sizeof(version_address),
                 "supported targets require equal function/data pointer size");
   std::memcpy(&version, &version_address, sizeof(version));
   std::memcpy(&get_api, &api_address, sizeof(get_api));
   if (!version || !get_api) {
-    close_provider_library(handle);
     return Status::failure(ErrorCode::InvalidArgument,
                            "data provider ABI version is unsupported");
   }
   const ps_data_provider_api_v1* api = nullptr;
   try {
     if (version() != PS_DATA_PROVIDER_ABI_VERSION_1) {
-      close_provider_library(handle);
       return Status::failure(ErrorCode::InvalidArgument,
                              "data provider ABI version is unsupported");
     }
     api = get_api();
   } catch (const std::bad_alloc&) {
-    close_provider_library(handle);
     throw;
   } catch (...) {
-    close_provider_library(handle);
     return Status::failure(ErrorCode::OperationFailed,
                            "data provider ABI entry point raised an exception");
   }
@@ -285,20 +320,27 @@ Status DataDefinitionRegistry::load_provider(const std::string& path) {
       reinterpret_cast<std::uintptr_t>(api) %
               alignof(ps_data_provider_api_v1) !=
           0U ||
-      api->struct_size != sizeof(ps_data_provider_api_v1) ||
-      api->schema_count == 0U || api->schema_count > 1024U || !api->schemas ||
+      api->struct_size != sizeof(ps_data_provider_api_v1)) {
+    return Status::failure(ErrorCode::InvalidArgument,
+                           "data provider API table is malformed");
+  }
+  pending_provider.attach_api(api);
+  if (api->schema_count == 0U || api->schema_count > 1024U || !api->schemas ||
       reinterpret_cast<std::uintptr_t>(api->schemas) %
               alignof(ps_data_schema_v1) !=
           0U ||
       !api->destroy) {
-    close_provider_library(handle);
     return Status::failure(ErrorCode::InvalidArgument,
                            "data provider API table is malformed");
   }
-  // Establish exact destroy-before-unload rollback before allocating or
-  // validating copied schema definitions.
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+  plugin_testing::invoke_before_owner_allocation(
+      plugin_testing::LibraryKind::Provider);
+#endif
+  // Transfer destroy-before-unload ownership only after the heap lease exists.
+  // Allocation failure leaves the stack owner intact for exact rollback.
   auto provider =
-      std::shared_ptr<ProviderLibrary>(new ProviderLibrary(handle, api));
+      std::make_shared<ProviderLibrary>(std::move(pending_provider));
 
   std::vector<DataSchemaDefinition> staged;
   staged.reserve(api->schema_count);

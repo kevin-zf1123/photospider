@@ -13,7 +13,14 @@
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
  */
 int main() {
-  using namespace ps;
+  using ps::ElementType;
+  using ps::ErrorCode;
+  using ps::Region;
+  using ps::RegionDimension;
+  using ps::StridedLayout;
+  using ps::Value;
+  using ps::ValueDescriptor;
+  using ps::ValueFacet;
 
   const Region whole = Region::whole({2U, 3U});
   PS_CHECK(whole.rank() == 2U);

@@ -160,8 +160,39 @@ ps::WorkflowDocument region_document() {
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
  */
 int main() {
-  using namespace ps;
-  using namespace std::chrono_literals;
+  using ps::Backend;
+  using ps::CancellationSource;
+  using ps::CompiledWorkflow;
+  using ps::Compiler;
+  using ps::CorrectnessObservation;
+  using ps::ElementType;
+  using ps::ErrorCode;
+  using ps::ExecutionContext;
+  using ps::ExecutionContextConfig;
+  using ps::ExecutionResult;
+  using ps::GraphContext;
+  using ps::make_default_operation_registry;
+  using ps::OperationDefinition;
+  using ps::OperationInvocation;
+  using ps::OperationRegionRule;
+  using ps::OperationRegistry;
+  using ps::OperationShapeRule;
+  using ps::OperationTraits;
+  using ps::PlanningOptions;
+  using ps::RawBenchmarkOptions;
+  using ps::RawBenchmarkRunner;
+  using ps::RawBenchmarkSample;
+  using ps::Region;
+  using ps::RegionDimension;
+  using ps::Result;
+  using ps::StridedLayout;
+  using ps::Value;
+  using ps::ValueDescriptor;
+  using ps::ValueFacet;
+  using ps::WorkflowDocument;
+  using ps::WorkflowInput;
+  using ps::WorkflowNode;
+  using ps::WorkflowOutput;
 
   auto operations = make_default_operation_registry();
   Compiler compiler(operations);
@@ -221,7 +252,7 @@ int main() {
   auto cancelled_future = std::async(std::launch::async, [&] {
     return execution.execute(cancellable_workflow.plan, cancellation.token());
   });
-  std::this_thread::sleep_for(20ms);
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   PS_CHECK(cancellation.cancel());
   auto cancelled_result = cancelled_future.get();
   PS_CHECK(!cancelled_result.ok());
@@ -232,7 +263,7 @@ int main() {
   auto stale_future = std::async(std::launch::async, [&] {
     return execution.execute(stale_workflow.plan);
   });
-  std::this_thread::sleep_for(20ms);
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
   replaceable.replace(ps::test::delayed_document(0));
   auto stale_result = stale_future.get();
   PS_CHECK(!stale_result.ok());

@@ -25,7 +25,8 @@ Kernel tests cover:
   exception fences;
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
-  including operation-v2 typed parameter schemas and demand views;
+  including operation-v2 typed parameter schemas, demand views, and
+  deterministic owner-allocation failure with exact destroy/close counts;
 - parameter unknown/missing/wrong-type/conflict rejection before semantic IR;
 - Whole/Elementwise/Halo demand propagation and execution-time coverage;
 - raw benchmark diagnostics with a named oracle or explicit `unchecked`
@@ -85,6 +86,12 @@ Use a Clang distribution that actually ships its libFuzzer runtime; a compiler
 identifying as Clang is insufficient when that archive is absent. The temporary
 working corpus prevents generated mutations from entering the maintained seed
 directory.
+
+The ordinary `test_operation_contract_ir_seeds` CTest reads the two committed
+seeds without generating mutations. It proves that `valid-source` reaches and
+passes the compiler path while `malformed-schema` constructs a duplicate
+parameter schema and reaches the named registry rejection. This deterministic
+stage seam complements, but does not register, the manual libFuzzer target.
 
 ## CTest ownership
 

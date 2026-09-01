@@ -34,6 +34,12 @@ Malformed registration 不发布任何内容。Multi-record registry publication
 copy-then-swap，allocation failure 不能暴露 prefix。Operation exception 被隔离；output 在
 callback 返回前复制。Plugin-owned descriptor table 在 library unload 前 destroy。
 
+Native open 后，每个 operation/provider handle 都立即由 move-only stack owner 持有。
+当 exact API structure prefix 可安全读取后，该 owner 也接管已经取得的 destroy callback。
+因此 symbol、table、schema、heap-owner 或后续 staging failure 会对每个已取得的 destroy
+callback 与 native close 各调用恰好一次。成功 loading 会把同一个 owner 显式 move 到
+published heap lease。
+
 ## Lifecycle 与边界
 
 Path 只来自 embedding-process startup configuration。Registry 在 compiler/executor 使用前
