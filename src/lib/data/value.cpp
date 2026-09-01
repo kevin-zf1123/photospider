@@ -206,8 +206,12 @@ Value Value::from_float64(double value) {
  * @copydetails Value::as_float64
  */
 Result<double> Value::as_float64() const {
+  const bool exact_scalar_region = region_.rank() == 1U &&
+                                   region_.dimensions()[0U].offset == 0U &&
+                                   region_.dimensions()[0U].extent == 1U;
   if (!valid() || descriptor_.element_type != ElementType::Float64 ||
       descriptor_.shape != std::vector<std::uint64_t>{1U} ||
+      !exact_scalar_region ||
       layout_.byte_strides != std::vector<std::int64_t>{8} ||
       layout_.byte_offset + sizeof(double) > bytes_->size()) {
     return Result<double>(Status::failure(

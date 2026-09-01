@@ -105,9 +105,12 @@ class PHOTOSPIDER_API Value final {
 
   /**
    * @brief Reads a rank-one Float64 scalar.
-   * @return Scalar or `TypeMismatch` for another descriptor/layout.
+   * @return Scalar or `TypeMismatch` for another descriptor/layout/storage or
+   * any Region other than exact scalar coverage `{offset=0, extent=1}`.
    * @throws std::bad_alloc If a diagnostic allocation fails.
-   * @note The method copies bytes and never exposes writable storage.
+   * @note The method copies bytes and never exposes writable storage. Empty,
+   * partial, and offset Regions remain valid general Value coverage but cannot
+   * be read through this scalar accessor.
    */
   [[nodiscard]] Result<double> as_float64() const;
 

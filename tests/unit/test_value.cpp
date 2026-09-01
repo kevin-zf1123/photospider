@@ -90,8 +90,37 @@ int main() {
 
   const Value scalar = Value::from_float64(42.5);
   PS_CHECK(scalar.valid());
+  PS_CHECK(scalar.region().rank() == 1U);
+  PS_CHECK(scalar.region().dimensions().front().offset == 0U);
+  PS_CHECK(scalar.region().dimensions().front().extent == 1U);
   PS_CHECK(scalar.as_float64().ok());
   PS_CHECK(scalar.as_float64().value() == 42.5);
+
+  auto empty_scalar = Value::create(ValueDescriptor{ElementType::Float64, {1U}},
+                                    Region({RegionDimension{0U, 0U}}),
+                                    StridedLayout{0U, {8}}, scalar.bytes());
+  PS_CHECK(empty_scalar.ok());
+  PS_CHECK(!empty_scalar.value().as_float64().ok());
+  PS_CHECK(empty_scalar.value().as_float64().status().code ==
+           ErrorCode::TypeMismatch);
+
+  auto offset_scalar =
+      Value::create(ValueDescriptor{ElementType::Float64, {1U}},
+                    Region({RegionDimension{1U, 0U}}), StridedLayout{0U, {8}},
+                    scalar.bytes());
+  PS_CHECK(offset_scalar.ok());
+  PS_CHECK(!offset_scalar.value().as_float64().ok());
+  PS_CHECK(offset_scalar.value().as_float64().status().code ==
+           ErrorCode::TypeMismatch);
+
+  auto partial_vector =
+      Value::create(ValueDescriptor{ElementType::Float64, {2U}},
+                    Region({RegionDimension{0U, 1U}}), StridedLayout{0U, {8}},
+                    std::vector<std::uint8_t>(2U * sizeof(double)));
+  PS_CHECK(partial_vector.ok());
+  PS_CHECK(!partial_vector.value().as_float64().ok());
+  PS_CHECK(partial_vector.value().as_float64().status().code ==
+           ErrorCode::TypeMismatch);
   PS_CHECK(!value.value().as_float64().ok());
   return 0;
 }
