@@ -12,9 +12,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
+      - uses: actions/checkout@v7
+      - name: Verify Ninja
+        run: ninja --version
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
@@ -34,9 +34,9 @@ jobs:
         sanitizer: [ASAN, TSAN]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
+      - uses: actions/checkout@v7
+      - name: Verify Ninja
+        run: ninja --version
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
