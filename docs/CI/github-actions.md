@@ -8,9 +8,12 @@ aggregation.
 
 The maintained kernel workflow performs:
 
-1. CMake/Ninja configure on current Ubuntu and macOS runners;
-2. full build of the dependency-neutral kernel and maintained tests;
-3. complete CTest including the isolated install/package consumer;
+1. CMake/Ninja configure on current Ubuntu and macOS runners for both the
+   default static kernel and the supported shared kernel;
+2. full build of the dependency-neutral kernel and maintained tests in each
+   library mode;
+3. complete CTest in each mode, including the isolated install/package
+   consumer that builds and runs linked C and C++ code;
 4. separate Linux ASAN and TSAN configure/build/test jobs.
 
 Optional GPU compilation/runtime runs only on a compatible runner. CPU tests
