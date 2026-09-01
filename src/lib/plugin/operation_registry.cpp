@@ -15,6 +15,10 @@
 
 #include "photospider/plugin/operation_plugin_api.h"
 
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+#include "plugin/library_test_hooks.hpp"
+#endif
+
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -48,14 +52,23 @@ bool valid_key(const std::string& key) noexcept {
 class OperationLibrary final {
  public:
   /**
-   * @brief Takes ownership of one opened library and validated API table.
+   * @brief Takes immediate stack ownership of one opened native library.
    * @param handle Platform library handle.
-   * @param api Validated plugin table whose records remain mapped.
    * @throws Nothing.
-   * @note Handle and API must be nonnull.
+   * @note The API destroy callback is attached only after its table prefix is
+   * safe to read; until then destruction closes only the native handle.
    */
-  OperationLibrary(void* handle, const ps_operation_plugin_api_v2* api) noexcept
-      : handle_(handle), api_(api) {}
+  explicit OperationLibrary(void* handle) noexcept : handle_(handle) {}
+
+  /**
+   * @brief Transfers pending ownership into its published heap lease.
+   * @param other Source owner left empty.
+   * @throws Nothing.
+   * @note Handle and destroy responsibility move together exactly once.
+   */
+  OperationLibrary(OperationLibrary&& other) noexcept
+      : handle_(std::exchange(other.handle_, nullptr)),
+        api_(std::exchange(other.api_, nullptr)) {}
 
   /**
    * @brief Releases records and unloads the native library.
@@ -79,6 +92,12 @@ class OperationLibrary final {
       dlclose(handle_);
     }
 #endif
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+    if (handle_) {
+      plugin_testing::notify_native_close(
+          plugin_testing::LibraryKind::Operation);
+    }
+#endif
   }
 
   /**
@@ -96,6 +115,32 @@ class OperationLibrary final {
    * @note Exactly-one destroy-before-unload ownership never changes.
    */
   OperationLibrary& operator=(const OperationLibrary& other) = delete;
+  /**
+   * @brief Forbids replacing an established native-library lease by move.
+   * @param other Source owner that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Publication uses move construction exactly once.
+   */
+  OperationLibrary& operator=(OperationLibrary&& other) = delete;
+
+  /**
+   * @brief Returns the borrowed native handle for symbol lookup.
+   * @return Nonnull handle while ownership is active.
+   * @throws Nothing.
+   * @note The caller never closes or transfers the borrowed value.
+   */
+  [[nodiscard]] void* handle() const noexcept { return handle_; }
+
+  /**
+   * @brief Attaches an API table whose exact structure prefix is readable.
+   * @param api Mapped API table, possibly carrying malformed later fields.
+   * @throws Nothing.
+   * @note A nonnull destroy callback becomes part of rollback immediately.
+   */
+  void attach_api(const ps_operation_plugin_api_v2* api) noexcept {
+    api_ = api;
+  }
 
  private:
   /** @brief Platform native library handle. */
@@ -150,24 +195,6 @@ void* find_symbol(void* handle, const char* name) noexcept {
       GetProcAddress(static_cast<HMODULE>(handle), name));
 #else
   return dlsym(handle, name);
-#endif
-}
-
-/**
- * @brief Closes a library handle whose ownership was not published.
- * @param handle Native handle, possibly null.
- * @throws Nothing.
- * @note Used only during pre-publication rollback.
- */
-void close_unpublished_library(void* handle) noexcept {
-#if defined(_WIN32)
-  if (handle) {
-    FreeLibrary(static_cast<HMODULE>(handle));
-  }
-#else
-  if (handle) {
-    dlclose(handle);
-  }
 #endif
 }
 
@@ -793,37 +820,34 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   if (!opened.ok()) {
     return opened.status();
   }
-  void* handle = opened.value();
+  OperationLibrary pending_library(opened.value());
 
   using VersionFunction = std::uint32_t (*)();
   using ApiFunction = const ps_operation_plugin_api_v2* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
-  void* version_symbol =
-      find_symbol(handle, "ps_operation_plugin_get_abi_version");
-  void* api_symbol = find_symbol(handle, "ps_operation_plugin_get_api_v2");
+  void* version_symbol = find_symbol(pending_library.handle(),
+                                     "ps_operation_plugin_get_abi_version");
+  void* api_symbol =
+      find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v2");
   static_assert(sizeof(version) == sizeof(version_symbol),
                 "function/data pointer sizes must match on supported targets");
   std::memcpy(&version, &version_symbol, sizeof(version));
   std::memcpy(&get_api, &api_symbol, sizeof(get_api));
   if (!version || !get_api) {
-    close_unpublished_library(handle);
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin ABI version is unsupported");
   }
   const ps_operation_plugin_api_v2* api = nullptr;
   try {
     if (version() != PS_OPERATION_ABI_VERSION_2) {
-      close_unpublished_library(handle);
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin ABI version is unsupported");
     }
     api = get_api();
   } catch (const std::bad_alloc&) {
-    close_unpublished_library(handle);
     throw;
   } catch (...) {
-    close_unpublished_library(handle);
     return Status::failure(
         ErrorCode::OperationFailed,
         "operation plugin ABI entry point raised an exception");
@@ -832,22 +856,27 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       reinterpret_cast<std::uintptr_t>(api) %
               alignof(ps_operation_plugin_api_v2) !=
           0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v2) ||
-      api->operation_count == 0U || api->operation_count > 1024U ||
+      api->struct_size != sizeof(ps_operation_plugin_api_v2)) {
+    return Status::failure(ErrorCode::InvalidArgument,
+                           "operation plugin API table is malformed");
+  }
+  pending_library.attach_api(api);
+  if (api->operation_count == 0U || api->operation_count > 1024U ||
       !api->operations ||
       reinterpret_cast<std::uintptr_t>(api->operations) %
               alignof(ps_operation_descriptor_v2) !=
           0U ||
       !api->destroy) {
-    close_unpublished_library(handle);
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin API table is malformed");
   }
-  // Establish destroy-before-unload ownership before any allocating
-  // descriptor validation. A later return or exception now performs exact
-  // rollback through OperationLibrary.
-  auto library =
-      std::shared_ptr<OperationLibrary>(new OperationLibrary(handle, api));
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+  plugin_testing::invoke_before_owner_allocation(
+      plugin_testing::LibraryKind::Operation);
+#endif
+  // Transfer destroy-before-unload ownership only after the heap lease exists.
+  // Allocation failure leaves the stack owner intact for exact rollback.
+  auto library = std::make_shared<OperationLibrary>(std::move(pending_library));
 
   std::vector<OperationDefinition> staged;
   staged.reserve(api->operation_count);

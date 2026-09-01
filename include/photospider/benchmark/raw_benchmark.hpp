@@ -28,8 +28,9 @@ struct PHOTOSPIDER_API CorrectnessObservation final {
  * @note The callback receives immutable Values and should avoid modifying
  * external state when reproducible measurements are required.
  */
-using CorrectnessOracle =
-    std::function<CorrectnessObservation(const ExecutionResult&)>;
+using OracleSignature = CorrectnessObservation(const ExecutionResult&);
+/** @brief Type-erased callable implementing `OracleSignature`. */
+using CorrectnessOracle = std::function<OracleSignature>;
 
 /**
  * @brief Controls one local raw benchmark run.

@@ -2,6 +2,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -10,6 +11,7 @@
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/library_test_hooks.hpp"
 #include "support/test_support.hpp"
 
 #if defined(_WIN32)
@@ -48,6 +50,123 @@
 #endif
 
 namespace {
+
+using ps::plugin_testing::LibraryKind;
+
+/** @brief Library kind expected by the currently installed test callback. */
+LibraryKind g_expected_library_kind = LibraryKind::Operation;
+/** @brief Exact owner-allocation callback invocation count. */
+std::uint32_t g_owner_allocation_count = 0U;
+/** @brief Exact native close callback invocation count. */
+std::uint32_t g_native_close_count = 0U;
+
+/**
+ * @brief Raises deterministic allocation failure at one expected owner seam.
+ * @param kind Library kind approaching owner allocation.
+ * @throws std::bad_alloc For the exact expected library kind.
+ * @note Unexpected kinds expose a test-ordering error through no exception.
+ */
+void fail_owner_allocation(ps::plugin_testing::LibraryKind kind) {
+  if (kind == g_expected_library_kind) {
+    ++g_owner_allocation_count;
+    throw std::bad_alloc();
+  }
+}
+
+/**
+ * @brief Counts one native close call for the expected library kind.
+ * @param kind Closed library kind.
+ * @throws Nothing.
+ * @note Unexpected kinds are ignored so each scoped assertion stays exact.
+ */
+void count_native_close(ps::plugin_testing::LibraryKind kind) noexcept {
+  if (kind == g_expected_library_kind) {
+    ++g_native_close_count;
+  }
+}
+
+/**
+ * @brief Installs one deterministic owner-allocation failure scope.
+ *
+ * @note The scope is single-threaded and clears callbacks before fixture
+ * observers or later lifecycle cases are destroyed.
+ */
+class LibraryFailureScope final {
+ public:
+  /**
+   * @brief Installs callbacks for one exact library kind.
+   * @param kind Operation or provider owner boundary to fail.
+   * @throws Nothing.
+   */
+  explicit LibraryFailureScope(ps::plugin_testing::LibraryKind kind) noexcept {
+    g_expected_library_kind = kind;
+    g_owner_allocation_count = 0U;
+    g_native_close_count = 0U;
+    hooks_.before_owner_allocation = fail_owner_allocation;
+    hooks_.native_close = count_native_close;
+    ps::plugin_testing::install_library_test_hooks(&hooks_);
+  }
+
+  /**
+   * @brief Clears borrowed callbacks before scope storage retires.
+   * @throws Nothing.
+   */
+  ~LibraryFailureScope() noexcept {
+    ps::plugin_testing::install_library_test_hooks(nullptr);
+  }
+
+  /**
+   * @brief Forbids duplicating one process-global callback installation.
+   * @param other Source scope that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Exactly one scope owns callback installation at a time.
+   */
+  LibraryFailureScope(const LibraryFailureScope& other) = delete;
+  /**
+   * @brief Forbids assigning process-global callback installation.
+   * @param other Source scope that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   */
+  LibraryFailureScope& operator=(const LibraryFailureScope& other) = delete;
+  /**
+   * @brief Forbids moving the address-stable borrowed callback table.
+   * @param other Source scope that cannot be moved.
+   * @throws Nothing; the operation is deleted.
+   * @note The installed pointer must remain stable until scope destruction.
+   */
+  LibraryFailureScope(LibraryFailureScope&& other) = delete;
+  /**
+   * @brief Forbids move assignment of process-global callback installation.
+   * @param other Source scope that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Callback storage and installation always retire together.
+   */
+  LibraryFailureScope& operator=(LibraryFailureScope&& other) = delete;
+
+  /**
+   * @brief Returns exact injected owner-allocation callback count.
+   * @return Current scoped count.
+   * @throws Nothing.
+   */
+  [[nodiscard]] std::uint32_t owner_allocation_count() const noexcept {
+    return g_owner_allocation_count;
+  }
+
+  /**
+   * @brief Returns exact observed native close-call count.
+   * @return Current scoped count.
+   * @throws Nothing.
+   */
+  [[nodiscard]] std::uint32_t native_close_count() const noexcept {
+    return g_native_close_count;
+  }
+
+ private:
+  /** @brief Borrowed callback table installed for this scope. */
+  ps::plugin_testing::LibraryTestHooks hooks_;
+};
 
 /**
  * @brief Keeps one test DSO image mapped while registry ownership is released.
@@ -148,11 +267,51 @@ class LibraryObserver final {
  * @note Failures otherwise return nonzero through `PS_CHECK`.
  */
 int main() {
-  using namespace ps;
+  using ps::Backend;
+  using ps::CancellationToken;
+  using ps::Compiler;
+  using ps::DataDefinitionRegistry;
+  using ps::ElementType;
+  using ps::ErrorCode;
+  using ps::GraphContext;
+  using ps::OperationDefinition;
+  using ps::OperationInvocation;
+  using ps::OperationParameterSpec;
+  using ps::OperationParameterType;
+  using ps::OperationRegistry;
+  using ps::OperationShapeRule;
+  using ps::OperationTraits;
+  using ps::ParameterValue;
+  using ps::Region;
+  using ps::RegionDimension;
+  using ps::Result;
+  using ps::StridedLayout;
+  using ps::Value;
+  using ps::ValueDescriptor;
+  using ps::ValueFacet;
+  using ps::WorkflowDocument;
+  using ps::WorkflowInput;
+  using ps::WorkflowNode;
+  using ps::WorkflowOutput;
 
   LibraryObserver operation_observer(PS_OPERATION_FIXTURE_PATH);
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
            0U);
+  {
+    LibraryFailureScope failure(ps::plugin_testing::LibraryKind::Operation);
+    bool allocation_failed = false;
+    try {
+      OperationRegistry registry;
+      static_cast<void>(registry.load_plugin(PS_OPERATION_FIXTURE_PATH));
+    } catch (const std::bad_alloc&) {
+      allocation_failed = true;
+    }
+    PS_CHECK(allocation_failed);
+    PS_CHECK(failure.owner_allocation_count() == 1U);
+    PS_CHECK(failure.native_close_count() == 1U);
+    PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
+             1U);
+  }
   {
     OperationRegistry registry;
     PS_CHECK(registry.load_plugin(PS_OPERATION_FIXTURE_PATH).ok());
@@ -277,11 +436,26 @@ int main() {
     PS_CHECK(bad_facet.status().code == ErrorCode::InvalidArgument);
   }
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
-           1U);
+           2U);
 
   LibraryObserver provider_observer(PS_DATA_PROVIDER_FIXTURE_PATH);
   PS_CHECK(provider_observer.counter(
                "ps_data_provider_fixture_destroy_count") == 0U);
+  {
+    LibraryFailureScope failure(ps::plugin_testing::LibraryKind::Provider);
+    bool allocation_failed = false;
+    try {
+      DataDefinitionRegistry registry;
+      static_cast<void>(registry.load_provider(PS_DATA_PROVIDER_FIXTURE_PATH));
+    } catch (const std::bad_alloc&) {
+      allocation_failed = true;
+    }
+    PS_CHECK(allocation_failed);
+    PS_CHECK(failure.owner_allocation_count() == 1U);
+    PS_CHECK(failure.native_close_count() == 1U);
+    PS_CHECK(provider_observer.counter(
+                 "ps_data_provider_fixture_destroy_count") == 1U);
+  }
   {
     DataDefinitionRegistry registry;
     PS_CHECK(registry.load_provider(PS_DATA_PROVIDER_FIXTURE_PATH).ok());
@@ -294,7 +468,7 @@ int main() {
     PS_CHECK(schema.value().maximum_rank == 4U);
   }
   PS_CHECK(provider_observer.counter(
-               "ps_data_provider_fixture_destroy_count") == 1U);
+               "ps_data_provider_fixture_destroy_count") == 2U);
 
   OperationRegistry fencing;
   OperationTraits conflicting_schema;

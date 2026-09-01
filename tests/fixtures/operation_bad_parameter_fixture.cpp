@@ -62,26 +62,45 @@ void destroy_fixture(const ps_operation_descriptor_v2* operations,
 }
 
 #if PS_BAD_PARAMETER_CASE == 2
-/** @brief Parameter record with an intentionally wrong exact structure size. */
-const ps_operation_parameter_descriptor_v2 parameter = {
-    sizeof(ps_operation_parameter_descriptor_v2) - 1U, "value", 5U,
-    PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+/**
+ * @brief Builds a parameter with an intentionally wrong structure size.
+ * @return Case-specific malformed parameter descriptor.
+ * @throws Nothing.
+ */
+ps_operation_parameter_descriptor_v2 make_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v2) - 1U, "value", 5U,
+          PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+}
 #elif PS_BAD_PARAMETER_CASE == 4
-/** @brief Parameter record whose declared key length exceeds the ABI bound. */
-const ps_operation_parameter_descriptor_v2 parameter = {
-    sizeof(ps_operation_parameter_descriptor_v2), "x", 1025U,
-    PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+/**
+ * @brief Builds a parameter whose key length exceeds the ABI bound.
+ * @return Case-specific malformed parameter descriptor.
+ * @throws Nothing.
+ */
+ps_operation_parameter_descriptor_v2 make_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v2), "x", 1025U,
+          PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+}
 #else
-/** @brief Structurally valid record used to isolate another malformed field. */
-const ps_operation_parameter_descriptor_v2 parameter = {
-    sizeof(ps_operation_parameter_descriptor_v2), "value", 5U,
-    PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+/**
+ * @brief Builds a valid parameter used to isolate another malformed field.
+ * @return Structurally valid parameter descriptor.
+ * @throws Nothing.
+ */
+ps_operation_parameter_descriptor_v2 make_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v2), "value", 5U,
+          PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+}
 #endif
 
+/** @brief Case-specific parameter record. */
+const ps_operation_parameter_descriptor_v2 parameter = make_parameter();
+
 #if PS_BAD_PARAMETER_CASE == 5
+/** @brief Exact byte count required for one deliberately misaligned record. */
+constexpr auto kStorageSize = sizeof(ps_operation_parameter_descriptor_v2) + 1U;
 /** @brief Byte storage used to provide a deliberately misaligned pointer. */
-unsigned char
-    misaligned_storage[sizeof(ps_operation_parameter_descriptor_v2) + 1U]{};
+unsigned char misaligned_storage[kStorageSize]{};
 #endif
 
 /**
@@ -114,18 +133,47 @@ std::uint32_t parameter_count() noexcept {
 #endif
 }
 
+/**
+ * @brief Builds the case-specific malformed operation descriptor.
+ * @return Descriptor selecting the configured parameter defect.
+ * @throws Nothing.
+ * @note No execution callback may be reached for the returned record.
+ */
+ps_operation_descriptor_v2 make_descriptor() noexcept {
+  return {sizeof(ps_operation_descriptor_v2),
+          "fixture.bad.parameter",
+          21U,
+          0U,
+          PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+              PS_OPERATION_FLAG_CPU,
+          sizeof(double),
+          PS_OPERATION_ELEMENT_FLOAT64_V2,
+          0U,
+          nullptr,
+          PS_OPERATION_SHAPE_SCALAR_V2,
+          PS_OPERATION_REGION_WHOLE_V2,
+          0U,
+          1U,
+          parameter_count(),
+          parameter_pointer(),
+          execute_never,
+          nullptr};
+}
+
 /** @brief Malformed operation descriptor selected by the compile definition. */
-const ps_operation_descriptor_v2 descriptors[] = {
-    {sizeof(ps_operation_descriptor_v2), "fixture.bad.parameter", 21U, 0U,
-     PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
-         PS_OPERATION_FLAG_CPU,
-     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-     PS_OPERATION_SHAPE_SCALAR_V2, PS_OPERATION_REGION_WHOLE_V2, 0U, 1U,
-     parameter_count(), parameter_pointer(), execute_never, nullptr}};
+const ps_operation_descriptor_v2 descriptor = make_descriptor();
+
+/**
+ * @brief Builds the complete API table for one malformed descriptor.
+ * @return API table referencing `descriptor` and the lifecycle callback.
+ * @throws Nothing.
+ */
+ps_operation_plugin_api_v2 make_api() noexcept {
+  return {sizeof(ps_operation_plugin_api_v2), 1U, &descriptor, destroy_fixture};
+}
 
 /** @brief Complete API table whose descriptor must fail atomically. */
-const ps_operation_plugin_api_v2 api = {sizeof(ps_operation_plugin_api_v2), 1U,
-                                        descriptors, destroy_fixture};
+const ps_operation_plugin_api_v2 api = make_api();
 
 }  // namespace
 

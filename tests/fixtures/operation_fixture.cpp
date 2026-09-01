@@ -1,3 +1,4 @@
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -132,30 +133,57 @@ void destroy_fixture(const ps_operation_descriptor_v2* operations,
   }
 }
 
+/**
+ * @brief Builds the required Float64 `scale` declaration.
+ * @return Valid required parameter descriptor.
+ * @throws Nothing.
+ */
+ps_operation_parameter_descriptor_v2 make_double_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v2), "scale", 5U,
+          PS_OPERATION_PARAMETER_FLOAT64_V2, 1U};
+}
+
 /** @brief Required Float64 `scale` schema for `fixture.double`. */
-const ps_operation_parameter_descriptor_v2 double_parameters[] = {
-    {sizeof(ps_operation_parameter_descriptor_v2), "scale", 5U,
-     PS_OPERATION_PARAMETER_FLOAT64_V2, 1U}};
+const auto double_parameter = make_double_parameter();
+
+/**
+ * @brief Builds both valid fixture operation descriptors.
+ * @return Contiguous double/bad-facet descriptor table.
+ * @throws Nothing.
+ * @note Every referenced callback and parameter record has static lifetime.
+ */
+std::array<ps_operation_descriptor_v2, 2U> make_descriptors() noexcept {
+  return {{{sizeof(ps_operation_descriptor_v2), "fixture.double", 14U, 1U,
+            PS_OPERATION_FLAG_DETERMINISTIC |
+                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU,
+            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 1U, &double_parameter,
+            execute_double, nullptr},
+           {sizeof(ps_operation_descriptor_v2), "fixture.bad_facet", 17U, 1U,
+            PS_OPERATION_FLAG_DETERMINISTIC |
+                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU,
+            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+            execute_bad_facet, nullptr}}};
+}
 
 /** @brief Static operation descriptor table with valid and bad-output cases. */
-const ps_operation_descriptor_v2 descriptors[] = {
-    {sizeof(ps_operation_descriptor_v2), "fixture.double", 14U, 1U,
-     PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
-         PS_OPERATION_FLAG_CPU,
-     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V2, PS_OPERATION_REGION_ELEMENTWISE_V2,
-     0U, 1U, 1U, double_parameters, execute_double, nullptr},
-    {sizeof(ps_operation_descriptor_v2), "fixture.bad_facet", 17U, 1U,
-     PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
-         PS_OPERATION_FLAG_CPU,
-     sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V2, PS_OPERATION_REGION_ELEMENTWISE_V2,
-     0U, 1U, 0U, nullptr, execute_bad_facet, nullptr},
-};
+const auto descriptors = make_descriptors();
+
+/**
+ * @brief Builds the valid operation fixture API table.
+ * @return API table referencing `descriptors` and lifecycle callback.
+ * @throws Nothing.
+ */
+ps_operation_plugin_api_v2 make_api() noexcept {
+  return {sizeof(ps_operation_plugin_api_v2), 2U, descriptors.data(),
+          destroy_fixture};
+}
 
 /** @brief Static valid plugin API table. */
-const ps_operation_plugin_api_v2 api = {sizeof(ps_operation_plugin_api_v2), 2U,
-                                        descriptors, destroy_fixture};
+const ps_operation_plugin_api_v2 api = make_api();
 
 }  // namespace
 

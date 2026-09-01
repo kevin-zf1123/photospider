@@ -44,8 +44,22 @@ class PHOTOSPIDER_API DataDefinitionRegistry final {
    */
   ~DataDefinitionRegistry() noexcept;
 
-  DataDefinitionRegistry(const DataDefinitionRegistry&) = delete;
-  DataDefinitionRegistry& operator=(const DataDefinitionRegistry&) = delete;
+  /**
+   * @brief Forbids copying synchronized provider/library ownership.
+   * @param other Source registry that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Share one frozen registry instead of duplicating native leases.
+   */
+  DataDefinitionRegistry(const DataDefinitionRegistry& other) = delete;
+  /**
+   * @brief Forbids assigning synchronized provider/library ownership.
+   * @param other Source registry that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Existing destroy-before-unload ownership never transfers.
+   */
+  DataDefinitionRegistry& operator=(const DataDefinitionRegistry& other) =
+      delete;
 
   /**
    * @brief Registers one copied schema.

@@ -11,7 +11,17 @@
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
  */
 int main() {
-  using namespace ps;
+  using ps::Backend;
+  using ps::Compiler;
+  using ps::ErrorCode;
+  using ps::GraphContext;
+  using ps::GraphSnapshot;
+  using ps::make_default_operation_registry;
+  using ps::PlanningOptions;
+  using ps::WorkflowDocument;
+  using ps::WorkflowInput;
+  using ps::WorkflowNode;
+  using ps::WorkflowOutput;
 
   auto operations = make_default_operation_registry();
   Compiler compiler(operations);

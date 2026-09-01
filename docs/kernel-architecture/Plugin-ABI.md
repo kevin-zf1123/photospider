@@ -40,6 +40,13 @@ uses copy-then-swap, so allocation failure cannot expose a prefix. Operation
 exceptions are fenced; output is copied before callback return. Plugin-owned
 descriptor tables are destroyed before library unload.
 
+Immediately after native open, a move-only stack owner holds each operation or
+provider handle. Once an exact API structure prefix is readable, that owner
+also assumes its available destroy callback. Symbol, table, schema, heap-owner,
+or later staging failure therefore calls every acquired destroy callback and
+native close exactly once. Successful loading explicitly moves the same owner
+into the published heap lease.
+
 ## Lifecycle and boundary
 
 Paths come only from embedding-process startup configuration. Registries are

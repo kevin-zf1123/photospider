@@ -101,6 +101,8 @@ if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
     photospider_operation_contract_ir_fuzz
     PRIVATE -fsanitize=fuzzer -fno-omit-frame-pointer -Wall -Wextra -Wpedantic
             -Werror)
+  target_include_directories(photospider_operation_contract_ir_fuzz
+                             PRIVATE tests)
   target_link_options(photospider_operation_contract_ir_fuzz
                       PRIVATE -fsanitize=fuzzer)
 endif()
@@ -133,8 +135,13 @@ install(
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Photospider)
 
 if(BUILD_TESTING)
-  function(photospider_add_test target source)
-    add_executable(${target} ${source})
+  target_sources(photospider PRIVATE src/lib/plugin/library_test_hooks.cpp)
+  target_compile_definitions(photospider
+                             PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+  target_include_directories(photospider PRIVATE src/lib)
+
+  function(photospider_add_test target)
+    add_executable(${target} ${ARGN})
     target_link_libraries(${target} PRIVATE Photospider::kernel)
     target_include_directories(${target} PRIVATE tests)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -183,8 +190,19 @@ if(BUILD_TESTING)
 
   photospider_add_test(test_value tests/unit/test_value.cpp)
   photospider_add_test(test_compiler tests/unit/test_compiler.cpp)
+  photospider_add_test(
+    test_operation_contract_ir_seeds
+    tests/unit/test_operation_contract_ir_seeds.cpp
+    tests/fuzz/operation_contract_ir_fuzz.cpp)
+  target_compile_definitions(
+    test_operation_contract_ir_seeds
+    PRIVATE PS_OPERATION_VALID_SEED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/operation_contract_ir/valid-source"
+            PS_OPERATION_DUPLICATE_SEED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/operation_contract_ir/malformed-schema")
   photospider_add_test(test_execution tests/integration/test_execution.cpp)
   photospider_add_test(test_plugin_registry tests/integration/test_plugin_registry.cpp)
+  target_include_directories(test_plugin_registry PRIVATE src/lib)
+  target_compile_definitions(test_plugin_registry
+                             PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
   add_dependencies(
     test_plugin_registry
     operation_fixture

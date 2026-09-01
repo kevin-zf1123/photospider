@@ -24,9 +24,9 @@ struct GraphSnapshot::State final {
  */
 GraphSnapshot::GraphSnapshot(std::shared_ptr<const WorkflowDocument> document,
                              std::uint64_t revision, std::weak_ptr<State> state)
-    : document_(std::move(document)),
-      revision_(revision),
-      state_(std::move(state)) {}
+    : document_(std::move(document)), revision_(revision) {
+  state_ = std::move(state);
+}
 
 /**
  * @brief Implements captured source-document access.

@@ -1,3 +1,5 @@
+#include "fuzz/operation_contract_ir_fuzz.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -67,6 +69,79 @@ ps::ParameterValue parameter_value(ByteReader* reader, std::uint8_t selector) {
 
 }  // namespace
 
+namespace ps::fuzz_testing {
+
+/**
+ * @brief Implements bounded operation/schema/compiler stage exercise.
+ * @copydetails exercise_operation_contract_ir_input
+ */
+OperationContractIrStage exercise_operation_contract_ir_input(
+    const std::uint8_t* data, std::size_t size) {
+  ByteReader reader(data, size);
+  auto operations = std::make_shared<ps::OperationRegistry>();
+  ps::OperationTraits traits;
+  traits.version = reader.next() % 4U;
+  traits.output_element_type = static_cast<ps::ElementType>(
+      (reader.next() % 5U) + PS_OPERATION_ELEMENT_UINT8_V2);
+  traits.shape_rule =
+      static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
+  traits.region_rule =
+      static_cast<ps::OperationRegionRule>((reader.next() % 5U) + 1U);
+  traits.halo_radius = reader.next();
+  if (traits.shape_rule == ps::OperationShapeRule::Fixed) {
+    traits.fixed_output_shape = {
+        static_cast<std::uint64_t>(reader.next() % 16U)};
+  }
+  bool duplicate_schema = false;
+  const std::uint8_t schema_count = reader.next() % 5U;
+  for (std::uint8_t index = 0U; index < schema_count; ++index) {
+    const std::uint8_t key_selector = reader.next() % 4U;
+    const std::string key =
+        key_selector == 0U
+            ? "value"
+            : (key_selector == 1U
+                   ? "duplicate"
+                   : (key_selector == 2U ? std::string("bad\x01", 4U)
+                                         : "parameter"));
+    for (const ps::OperationParameterSpec& existing : traits.parameter_schema) {
+      duplicate_schema = duplicate_schema || existing.key == key;
+    }
+    traits.parameter_schema.push_back(ps::OperationParameterSpec{
+        key, static_cast<ps::OperationParameterType>((reader.next() % 6U) + 1U),
+        reader.next() % 2U != 0U});
+  }
+  const ps::Status registered =
+      operations->register_operation(ps::OperationDefinition{
+          "fuzz.operation", std::move(traits),
+          [](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
+            return ps::Result<ps::Value>(ps::Value::from_float64(0.0));
+          }});
+  if (!registered.ok()) {
+    return duplicate_schema ? OperationContractIrStage::DuplicateSchemaRejected
+                            : OperationContractIrStage::RegistrationRejected;
+  }
+  operations->freeze();
+  ps::WorkflowDocument document;
+  ps::WorkflowNode node;
+  node.id = reader.next() % 2U == 0U ? 1U : 0U;
+  node.operation = reader.next() % 3U == 0U ? "unknown" : "fuzz.operation";
+  const std::uint8_t parameter_count = reader.next() % 5U;
+  for (std::uint8_t index = 0U; index < parameter_count; ++index) {
+    const std::string key = reader.next() % 2U == 0U ? "value" : "unknown";
+    node.parameters.insert_or_assign(key,
+                                     parameter_value(&reader, reader.next()));
+  }
+  document.nodes.push_back(std::move(node));
+  document.outputs = {ps::WorkflowOutput{"value", 1U, "value"}};
+  ps::GraphContext graph(std::move(document));
+  ps::Compiler compiler(std::move(operations));
+  return compiler.compile(graph).ok()
+             ? OperationContractIrStage::CompilerAccepted
+             : OperationContractIrStage::CompilerRejected;
+}
+
+}  // namespace ps::fuzz_testing
+
 /**
  * @brief Fuzzes operation-v2 vocabulary, parameter schema, and typed IR gates.
  * @param data Arbitrary libFuzzer bytes.
@@ -79,61 +154,8 @@ ps::ParameterValue parameter_value(ByteReader* reader, std::uint8_t selector) {
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
                                       std::size_t size) noexcept {
   try {
-    ByteReader reader(data, size);
-    auto operations = std::make_shared<ps::OperationRegistry>();
-    ps::OperationTraits traits;
-    traits.version = reader.next() % 4U;
-    traits.output_element_type = static_cast<ps::ElementType>(
-        (reader.next() % 5U) + PS_OPERATION_ELEMENT_UINT8_V2);
-    traits.shape_rule =
-        static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
-    traits.region_rule =
-        static_cast<ps::OperationRegionRule>((reader.next() % 5U) + 1U);
-    traits.halo_radius = reader.next();
-    if (traits.shape_rule == ps::OperationShapeRule::Fixed) {
-      traits.fixed_output_shape = {
-          static_cast<std::uint64_t>(reader.next() % 16U)};
-    }
-    const std::uint8_t schema_count = reader.next() % 5U;
-    for (std::uint8_t index = 0U; index < schema_count; ++index) {
-      const std::uint8_t key_selector = reader.next() % 4U;
-      const std::string key =
-          key_selector == 0U
-              ? "value"
-              : (key_selector == 1U
-                     ? "duplicate"
-                     : (key_selector == 2U ? std::string("bad\x01", 4U)
-                                           : "parameter"));
-      traits.parameter_schema.push_back(ps::OperationParameterSpec{
-          key,
-          static_cast<ps::OperationParameterType>((reader.next() % 6U) + 1U),
-          reader.next() % 2U != 0U});
-    }
-    const ps::Status registered =
-        operations->register_operation(ps::OperationDefinition{
-            "fuzz.operation", std::move(traits),
-            [](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
-              return ps::Result<ps::Value>(ps::Value::from_float64(0.0));
-            }});
-    if (!registered.ok()) {
-      return 0;
-    }
-    operations->freeze();
-    ps::WorkflowDocument document;
-    ps::WorkflowNode node;
-    node.id = reader.next() % 2U == 0U ? 1U : 0U;
-    node.operation = reader.next() % 3U == 0U ? "unknown" : "fuzz.operation";
-    const std::uint8_t parameter_count = reader.next() % 5U;
-    for (std::uint8_t index = 0U; index < parameter_count; ++index) {
-      const std::string key = reader.next() % 2U == 0U ? "value" : "unknown";
-      node.parameters.insert_or_assign(key,
-                                       parameter_value(&reader, reader.next()));
-    }
-    document.nodes.push_back(std::move(node));
-    document.outputs = {ps::WorkflowOutput{"value", 1U, "value"}};
-    ps::GraphContext graph(std::move(document));
-    ps::Compiler compiler(std::move(operations));
-    static_cast<void>(compiler.compile(graph));
+    static_cast<void>(
+        ps::fuzz_testing::exercise_operation_contract_ir_input(data, size));
   } catch (...) {
     return 0;
   }

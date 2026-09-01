@@ -22,13 +22,31 @@ void destroy_fixture(const ps_data_schema_v1* schemas,
   }
 }
 
+/**
+ * @brief Builds the valid schema without namespace-scope continuation.
+ * @return Float64 rank-four fixture schema.
+ * @throws Nothing.
+ * @note The returned string pointer has process-lifetime storage.
+ */
+ps_data_schema_v1 make_schema() noexcept {
+  return {sizeof(ps_data_schema_v1), "fixture.float64", 15U, 3U, 4U};
+}
+
 /** @brief Static valid provider schema. */
-const ps_data_schema_v1 schema = {sizeof(ps_data_schema_v1), "fixture.float64",
-                                  15U, 3U, 4U};
+const ps_data_schema_v1 schema = make_schema();
+
+/**
+ * @brief Builds the valid provider API table.
+ * @return API table referencing `schema` and its lifecycle callback.
+ * @throws Nothing.
+ * @note The table itself remains process-lifetime static storage.
+ */
+ps_data_provider_api_v1 make_api() noexcept {
+  return {sizeof(ps_data_provider_api_v1), 1U, &schema, destroy_fixture};
+}
 
 /** @brief Static valid provider API table. */
-const ps_data_provider_api_v1 api = {sizeof(ps_data_provider_api_v1), 1U,
-                                     &schema, destroy_fixture};
+const ps_data_provider_api_v1 api = make_api();
 
 }  // namespace
 
