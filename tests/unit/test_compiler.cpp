@@ -31,6 +31,31 @@ int main() {
            compiled.value().plan.cache_key().value);
   PS_CHECK(compiled.value().plan.steps().back().backend == Backend::Cpu);
 
+  WorkflowDocument unknown_parameter = ps::test::addition_document(2.0, 3.0);
+  unknown_parameter.nodes.front().parameters = {{"vlaue", 2.0}};
+  GraphContext unknown_parameter_context(std::move(unknown_parameter));
+  auto unknown_parameter_result = compiler.compile(unknown_parameter_context);
+  PS_CHECK(!unknown_parameter_result.ok());
+  PS_CHECK(unknown_parameter_result.status().code ==
+           ErrorCode::InvalidArgument);
+
+  WorkflowDocument missing_parameter = ps::test::addition_document(2.0, 3.0);
+  missing_parameter.nodes.front().parameters.clear();
+  GraphContext missing_parameter_context(std::move(missing_parameter));
+  auto missing_parameter_result = compiler.compile(missing_parameter_context);
+  PS_CHECK(!missing_parameter_result.ok());
+  PS_CHECK(missing_parameter_result.status().code ==
+           ErrorCode::InvalidArgument);
+
+  WorkflowDocument wrong_parameter_type = ps::test::addition_document(2.0, 3.0);
+  wrong_parameter_type.nodes.front().parameters = {{"value", true}};
+  GraphContext wrong_parameter_type_context(std::move(wrong_parameter_type));
+  auto wrong_parameter_type_result =
+      compiler.compile(wrong_parameter_type_context);
+  PS_CHECK(!wrong_parameter_type_result.ok());
+  PS_CHECK(wrong_parameter_type_result.status().code ==
+           ErrorCode::InvalidArgument);
+
   GraphContext equivalent(ps::test::addition_document(2.0, 3.0));
   auto equivalent_compiled = compiler.compile(equivalent);
   PS_CHECK(equivalent_compiled.ok());
@@ -69,7 +94,9 @@ int main() {
   PS_CHECK(!stale_result.ok());
   PS_CHECK(stale_result.status().code == ErrorCode::Stale);
 
-  auto gpu_compiled = compiler.compile(first, PlanningOptions{true});
+  PlanningOptions gpu_options;
+  gpu_options.allow_gpu = true;
+  auto gpu_compiled = compiler.compile(first, gpu_options);
   PS_CHECK(gpu_compiled.ok());
   PS_CHECK(gpu_compiled.value().plan.steps().front().backend == Backend::Gpu);
   PS_CHECK(gpu_compiled.value().plan.digest().value !=

@@ -2,15 +2,23 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v1: copied semantic traits plus one synchronous Value callback;
+- operation ABI v2: copied semantic traits, closed typed parameter schema,
+  plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
 ## Operation records
 
 An operation descriptor has a length-framed key, input count, flags, estimated
-bytes, output element type, closed shape/Region rules, halo radius,
-cacheability, callback, and opaque plugin state. The callback receives bounded
-dense whole-Region input views, bounded facet arrays, backend enum, cooperative
+bytes, output element type, closed scalar/preserve/match/fixed shape and
+Whole/Elementwise/Halo Region rules, halo radius, cacheability, a bounded
+parameter-schema pointer/count, callback, and opaque plugin state. Parameter
+records publish unique keys, exact Int64/Float64/Bool/String types, and required
+presence. The compiler rejects unknown, missing, wrong-type, and conflicting
+parameters before semantic IR; callbacks receive only validated canonical
+values and there is no hidden default fallback.
+
+The callback receives bounded dense whole-Region input views, per-input planned
+demand offsets/extents, bounded facet arrays, backend enum, cooperative
 cancellation callback, and a host-owned output sink. It may publish at most one
 output with bounded facets, which the host copies and validates as a dense
 whole-Region Value. A DSO input view covers exactly its logical contiguous
@@ -20,10 +28,12 @@ plugin state.
 ## Validation
 
 Loading validates exact ABI version/structure sizes, pointer and array
-alignment, pointer/count pairs, bounded key/count/rank values, text bytes,
-closed enum/flag combinations, required callbacks, output element/shape/byte
-count, facet arrays/key/version/payload, arithmetic overflow, and exactly-once
-destroy ownership. This ABI version rejects trailing structure bytes.
+alignment, pointer/count pairs, bounded key/count/rank/parameter values, text
+bytes, duplicate parameter declarations, closed enum/flag/type combinations,
+required callbacks, output element/shape/byte count, facet arrays/key/version/
+payload, arithmetic overflow, and exactly-once destroy ownership. This ABI
+version rejects trailing structure bytes and publishes no v1 compatibility
+entry point.
 
 Malformed registration publishes nothing. Multi-record registry publication
 uses copy-then-swap, so allocation failure cannot expose a prefix. Operation

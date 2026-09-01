@@ -32,6 +32,8 @@ enum class OperationShapeRule : std::uint32_t {
   PreserveFirstInput = 2U,
   /** @brief All input descriptors must match and output preserves them. */
   MatchAllInputs = 3U,
+  /** @brief Output uses the descriptor's explicit bounded fixed shape. */
+  Fixed = 4U,
 };
 
 /** @brief Closed compiler-visible Region propagation rule. */
@@ -42,6 +44,33 @@ enum class OperationRegionRule : std::uint32_t {
   Elementwise = 2U,
   /** @brief Output Region reads an explicit symmetric input halo. */
   Halo = 3U,
+};
+
+/** @brief Closed source-parameter type vocabulary published by an operation. */
+enum class OperationParameterType : std::uint32_t {
+  /** @brief Exact signed 64-bit integer parameter. */
+  Int64 = 1U,
+  /** @brief Exact IEEE binary64 parameter without integer coercion. */
+  Float64 = 2U,
+  /** @brief Exact Boolean parameter. */
+  Bool = 3U,
+  /** @brief Bounded source string parameter. */
+  String = 4U,
+};
+
+/**
+ * @brief One canonical compiler-visible operation parameter declaration.
+ *
+ * @note Registry publication sorts declarations by key and rejects duplicate,
+ * unknown-type, or malformed declarations before compiler visibility.
+ */
+struct PHOTOSPIDER_API OperationParameterSpec final {
+  /** @brief Nonempty bounded parameter key. */
+  std::string key;
+  /** @brief Exact required `ParameterValue` alternative. */
+  OperationParameterType type = OperationParameterType::Int64;
+  /** @brief Whether semantic lowering requires the key to be present. */
+  bool required = true;
 };
 
 /**
@@ -65,7 +94,7 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief Estimated peak invocation bytes for resource admission. */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 1U;
+  std::uint32_t version = 2U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -76,7 +105,25 @@ struct PHOTOSPIDER_API OperationTraits final {
   OperationRegionRule region_rule = OperationRegionRule::Whole;
   /** @brief Symmetric element halo, nonzero only for `Halo`. */
   std::uint32_t halo_radius = 0U;
+  /** @brief Sorted closed parameter vocabulary for semantic validation. */
+  std::vector<OperationParameterSpec> parameter_schema;
+  /** @brief Explicit nonzero rank-1..8 shape used only by `Fixed`. */
+  std::vector<std::uint64_t> fixed_output_shape;
 };
+
+/**
+ * @brief Validates source parameters against one published operation schema.
+ * @param traits Canonical registry-copied semantic traits.
+ * @param parameters Canonically ordered source parameter map.
+ * @return Success, or `InvalidArgument` for unknown, missing, or wrong-type
+ * parameters and malformed/conflicting schema declarations.
+ * @throws std::bad_alloc If a diagnostic allocation fails.
+ * @note Validation performs no defaulting or numeric coercion and publishes no
+ * source/IR state.
+ */
+[[nodiscard]] PHOTOSPIDER_API Status validate_operation_parameters(
+    const OperationTraits& traits,
+    const std::map<std::string, ParameterValue>& parameters);
 
 /**
  * @brief Immutable invocation passed to a registered operation callback.
@@ -86,6 +133,8 @@ struct PHOTOSPIDER_API OperationTraits final {
 struct PHOTOSPIDER_API OperationInvocation final {
   /** @brief Ordered immutable input Values. */
   const std::vector<Value>& inputs;
+  /** @brief Planned logical demand for each corresponding input Value. */
+  const std::vector<Region>& input_demands;
   /** @brief Canonically ordered source parameters. */
   const std::map<std::string, ParameterValue>& parameters;
   /** @brief Physical backend selected by the validated plan. */
@@ -133,10 +182,36 @@ class PHOTOSPIDER_API OperationRegistry final {
    */
   ~OperationRegistry() noexcept;
 
-  OperationRegistry(const OperationRegistry&) = delete;
-  OperationRegistry& operator=(const OperationRegistry&) = delete;
-  OperationRegistry(OperationRegistry&&) = delete;
-  OperationRegistry& operator=(OperationRegistry&&) = delete;
+  /**
+   * @brief Forbids copying synchronized registry/DSO ownership.
+   * @param other Source registry that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Use shared ownership of one frozen registry instead.
+   */
+  OperationRegistry(const OperationRegistry& other) = delete;
+  /**
+   * @brief Forbids copy assignment of synchronized registry/DSO ownership.
+   * @param other Source registry that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Existing callbacks and native-library leases never transfer.
+   */
+  OperationRegistry& operator=(const OperationRegistry& other) = delete;
+  /**
+   * @brief Forbids moving registry state after callback addresses are bound.
+   * @param other Source registry that cannot be moved.
+   * @throws Nothing; the operation is deleted.
+   * @note Shared ownership preserves stable registry identity instead.
+   */
+  OperationRegistry(OperationRegistry&& other) = delete;
+  /**
+   * @brief Forbids move assignment of registry and native-library state.
+   * @param other Source registry that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Frozen identity and callback lifetimes therefore remain stable.
+   */
+  OperationRegistry& operator=(OperationRegistry&& other) = delete;
 
   /**
    * @brief Registers one built-in or embedding-supplied operation.

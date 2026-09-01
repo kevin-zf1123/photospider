@@ -21,8 +21,12 @@ Kernel test 覆盖：
 - bounded ready work 与 `ResourceLedger` settlement；
 - cross-backend copy/backend label、cancellation、stale completion 与 exception fence；
 - Value/Region/strided-layout/facet/buffer 负向契约；
-- operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime；
-- 不生成 verdict/evidence output 的 raw benchmark diagnostic。
+- operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
+  operation-v2 typed parameter schema 与 demand view；
+- semantic IR 前的 unknown/missing/wrong-type/conflict parameter rejection；
+- Whole/Elementwise/Halo demand propagation 与 execution-time coverage；
+- 带 named oracle 或显式 `unchecked` identity，且不生成 verdict/evidence output 的
+  raw benchmark diagnostic。
 
 Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、九方法 routing、
 临时 Session/Job lifecycle、restart loss、multi-Session behavior、cancellation、
@@ -48,8 +52,30 @@ include directory。
 
 Toolchain 支持时，ASAN 与 TSAN 是 scoped CMake mode。普通 test 覆盖 malformed
 Value/Region/layout、graph document、operation/provider record 与 callback output。
-Malformed local IPC frame 属于 daemon repository。当前没有维护 fuzz executable；
-新增 fuzz target 必须具备长期 correctness 价值与 corpus policy，不能是 migration wiring。
+Malformed local IPC frame 属于 daemon repository。
+
+长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 operation-v2
+trait/parameter vocabulary 与 compiler validation。它使用 `EXCLUDE_FROM_ALL`，绝不注册到
+CTest；Clang 下通过 `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` 显式启用。Seed input
+维护在 `tests/fuzz/corpus/operation_contract_ir/`；调用者选择的 crash/artifact directory
+保持 untracked。Bounded smoke run 为：
+
+```bash
+cmake -S . -B <fuzz-build> -DCMAKE_CXX_COMPILER=clang++ \
+  -DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON -DBUILD_TESTING=OFF
+cmake --build <fuzz-build> --target photospider_operation_contract_ir_fuzz -j
+ps_operation_fuzz_corpus=$(mktemp -d)
+cp -R tests/fuzz/corpus/operation_contract_ir/. \
+  "$ps_operation_fuzz_corpus"/
+<fuzz-build>/photospider_operation_contract_ir_fuzz \
+  "$ps_operation_fuzz_corpus" -runs=1000 -max_len=256
+```
+
+固定负向 DSO fixture 继续作为 raw ABI pointer/size/alignment/count/bounds case 的权威
+测试，因为 byte-only in-process harness 无法安全构造这些 case。
+使用确实提供 libFuzzer runtime 的 Clang distribution；只报告 Clang identity 但缺少该
+archive 仍不满足条件。Temporary working corpus 防止 generated mutation 进入 maintained
+seed directory。
 
 ## CTest 所有权
 

@@ -121,10 +121,36 @@ class PHOTOSPIDER_API ExecutionContext final {
    */
   ~ExecutionContext() noexcept;
 
-  ExecutionContext(const ExecutionContext&) = delete;
-  ExecutionContext& operator=(const ExecutionContext&) = delete;
-  ExecutionContext(ExecutionContext&&) = delete;
-  ExecutionContext& operator=(ExecutionContext&&) = delete;
+  /**
+   * @brief Forbids copying owned worker pools and resource accounting.
+   * @param other Source context that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Construct a separate context for independent resource ownership.
+   */
+  ExecutionContext(const ExecutionContext& other) = delete;
+  /**
+   * @brief Forbids copy assignment of active local execution resources.
+   * @param other Source context that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note In-flight Runs and queue ownership are never rebound.
+   */
+  ExecutionContext& operator=(const ExecutionContext& other) = delete;
+  /**
+   * @brief Forbids moving worker/resource ownership after construction.
+   * @param other Source context that cannot be moved.
+   * @throws Nothing; the operation is deleted.
+   * @note Stable context lifetime bounds every private ExecutionRun.
+   */
+  ExecutionContext(ExecutionContext&& other) = delete;
+  /**
+   * @brief Forbids move assignment of worker pools and registry identity.
+   * @param other Source context that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Destruction remains the only worker-ownership teardown path.
+   */
+  ExecutionContext& operator=(ExecutionContext&& other) = delete;
 
   /**
    * @brief Executes one validated plan through bounded local resources.

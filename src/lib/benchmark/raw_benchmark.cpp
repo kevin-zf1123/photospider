@@ -1,9 +1,75 @@
 #include "photospider/benchmark/raw_benchmark.hpp"
 
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ps {
+namespace {
+
+/**
+ * @brief Validates one bounded canonical UTF-8 correctness-oracle identity.
+ * @param value Candidate identity bytes.
+ * @return True for 1..128 bytes of valid non-control UTF-8 excluding the
+ * reserved `unchecked` marker and leading/trailing ASCII space.
+ * @throws Nothing.
+ * @note Validation rejects overlong sequences, surrogates, and code points
+ * beyond U+10FFFF; normalization is not performed.
+ */
+bool valid_oracle_name(const std::string& value) noexcept {
+  if (value.empty() || value.size() > 128U || value == "unchecked" ||
+      value.front() == ' ' || value.back() == ' ') {
+    return false;
+  }
+  std::size_t index = 0U;
+  while (index < value.size()) {
+    const auto first = static_cast<unsigned char>(value[index]);
+    if (first <= 0x7fU) {
+      if (first < 0x20U || first == 0x7fU) {
+        return false;
+      }
+      ++index;
+      continue;
+    }
+    std::size_t width = 0U;
+    std::uint32_t code_point = 0U;
+    std::uint32_t minimum = 0U;
+    if ((first & 0xe0U) == 0xc0U) {
+      width = 2U;
+      code_point = first & 0x1fU;
+      minimum = 0x80U;
+    } else if ((first & 0xf0U) == 0xe0U) {
+      width = 3U;
+      code_point = first & 0x0fU;
+      minimum = 0x800U;
+    } else if ((first & 0xf8U) == 0xf0U) {
+      width = 4U;
+      code_point = first & 0x07U;
+      minimum = 0x10000U;
+    } else {
+      return false;
+    }
+    if (width > value.size() - index) {
+      return false;
+    }
+    for (std::size_t offset = 1U; offset < width; ++offset) {
+      const auto continuation =
+          static_cast<unsigned char>(value[index + offset]);
+      if ((continuation & 0xc0U) != 0x80U) {
+        return false;
+      }
+      code_point = (code_point << 6U) | (continuation & 0x3fU);
+    }
+    if (code_point < minimum || code_point > 0x10ffffU ||
+        (code_point >= 0xd800U && code_point <= 0xdfffU)) {
+      return false;
+    }
+    index += width;
+  }
+  return true;
+}
+
+}  // namespace
 
 /**
  * @brief Implements validated raw-benchmark dependency binding.
@@ -34,8 +100,21 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
     return Result<RawBenchmarkReport>(Status::failure(
         ErrorCode::Cancelled, "raw benchmark was cancelled before start"));
   }
+  if (options.correctness_oracle) {
+    if (!valid_oracle_name(options.oracle_name)) {
+      return Result<RawBenchmarkReport>(Status::failure(
+          ErrorCode::InvalidArgument,
+          "correctness oracle requires a canonical UTF-8 name"));
+    }
+  } else if (!options.oracle_name.empty()) {
+    return Result<RawBenchmarkReport>(
+        Status::failure(ErrorCode::InvalidArgument,
+                        "oracle name conflicts with an unchecked benchmark"));
+  }
 
   RawBenchmarkReport report;
+  report.oracle_name =
+      options.correctness_oracle ? options.oracle_name : "unchecked";
   report.samples.reserve(options.iterations);
   for (std::uint32_t iteration = 0U; iteration < options.iterations;
        ++iteration) {
@@ -47,6 +126,7 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
 
     RawBenchmarkSample sample;
     sample.iteration = iteration;
+    sample.oracle_name = report.oracle_name;
     auto compiled = compiler_->compile(graph, options.planning);
     if (!compiled.ok()) {
       sample.outcome = compiled.status().code;

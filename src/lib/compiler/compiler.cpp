@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <optional>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -75,7 +76,8 @@ class DigestBuilder final {
    * @brief Returns fixed lowercase hexadecimal text.
    * @return Sixteen-character digest.
    * @throws std::bad_alloc If stream/string allocation fails.
-   * @note This representation is stable for compiler version one.
+   * @note Stage domain/version text, not hexadecimal formatting, separates
+   * intentionally incompatible compiler identities.
    */
   [[nodiscard]] std::string finish() const {
     std::ostringstream stream;
@@ -154,6 +156,31 @@ void append_traits(DigestBuilder* digest,
   digest->integer(static_cast<std::uint32_t>(traits.shape_rule));
   digest->integer(static_cast<std::uint32_t>(traits.region_rule));
   digest->integer(traits.halo_radius);
+  digest->integer(traits.parameter_schema.size());
+  for (const OperationParameterSpec& parameter : traits.parameter_schema) {
+    digest->text(parameter.key);
+    digest->integer(static_cast<std::uint32_t>(parameter.type));
+    digest->integer(parameter.required ? 1U : 0U);
+  }
+  digest->integer(traits.fixed_output_shape.size());
+  for (std::uint64_t extent : traits.fixed_output_shape) {
+    digest->integer(extent);
+  }
+}
+
+/**
+ * @brief Appends one rank-general logical Region to stage identity.
+ * @param digest Destination builder.
+ * @param region Valid bounded logical Region.
+ * @throws Nothing.
+ * @note Logical offsets/extents are independent from storage layout.
+ */
+void append_region(DigestBuilder* digest, const Region& region) noexcept {
+  digest->integer(region.rank());
+  for (const RegionDimension& dimension : region.dimensions()) {
+    digest->integer(dimension.offset);
+    digest->integer(dimension.extent);
+  }
 }
 
 /**
@@ -173,14 +200,14 @@ void append_descriptor(DigestBuilder* digest,
 
 /**
  * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-one semantic traits.
+ * @param traits Complete version-two semantic traits.
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 1U || inputs.size() != traits.input_count ||
+  if (traits.version != 2U || inputs.size() != traits.input_count ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.region_rule == OperationRegionRule::Halo &&
@@ -226,6 +253,18 @@ Result<ValueDescriptor> infer_output_descriptor(
         }
       }
       return Result<ValueDescriptor>(inputs.front());
+    case OperationShapeRule::Fixed:
+      if (traits.fixed_output_shape.empty() ||
+          traits.fixed_output_shape.size() > 8U ||
+          std::any_of(traits.fixed_output_shape.begin(),
+                      traits.fixed_output_shape.end(),
+                      [](std::uint64_t extent) { return extent == 0U; })) {
+        return Result<ValueDescriptor>(Status::failure(
+            ErrorCode::TypeMismatch,
+            "fixed-shape operation has an invalid output descriptor"));
+      }
+      return Result<ValueDescriptor>(ValueDescriptor{
+          traits.output_element_type, traits.fixed_output_shape});
   }
   return Result<ValueDescriptor>(Status::failure(
       ErrorCode::InvalidArgument, "operation shape rule is unknown"));
@@ -243,7 +282,7 @@ Result<ValueDescriptor> infer_output_descriptor(
 std::string semantic_digest(const std::vector<SemanticNode>& nodes,
                             const std::vector<WorkflowOutput>& outputs) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v1");
+  digest.text("semantic-graph-ir-v2");
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
     digest.integer(node.id);
@@ -282,7 +321,7 @@ std::string optimized_digest(const std::string& semantic,
                              const std::vector<SemanticNode>& nodes,
                              const std::vector<WorkflowOutput>& outputs) {
   DigestBuilder digest;
-  digest.text("optimizer-v1-canonical-noop");
+  digest.text("optimizer-v2-canonical-noop");
   digest.text(semantic);
   digest.text(semantic_digest(nodes, outputs));
   return digest.finish();
@@ -301,7 +340,7 @@ std::string physical_digest(const std::string& optimized,
                             const std::vector<PlanStep>& steps,
                             const std::map<std::string, std::size_t>& outputs) {
   DigestBuilder digest;
-  digest.text("physical-plan-v1");
+  digest.text("physical-plan-v2");
   digest.text(optimized);
   digest.integer(steps.size());
   for (const PlanStep& step : steps) {
@@ -315,6 +354,11 @@ std::string physical_digest(const std::string& optimized,
     digest.integer(step.planned_bytes);
     append_traits(&digest, step.traits);
     append_descriptor(&digest, step.output_descriptor);
+    append_region(&digest, step.output_demand);
+    digest.integer(step.input_demands.size());
+    for (const Region& demand : step.input_demands) {
+      append_region(&digest, demand);
+    }
     digest.integer(step.parameters.size());
     for (const auto& parameter : step.parameters) {
       digest.text(parameter.first);
@@ -338,9 +382,95 @@ std::string physical_digest(const std::string& optimized,
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v1");
+  digest.text("plan-cache-key-v2");
   digest.text(plan);
   return digest.finish();
+}
+
+/**
+ * @brief Merges two valid demands into their conservative bounding Region.
+ * @param left First logical demand.
+ * @param right Second logical demand.
+ * @param shape Common descriptor shape.
+ * @return Bounding Region or a typed containment/rank failure.
+ * @throws std::bad_alloc If result or diagnostic allocation fails.
+ * @note The result may contain extra coordinates but never escapes `shape`.
+ */
+Result<Region> merge_regions(const Region& left, const Region& right,
+                             const std::vector<std::uint64_t>& shape) {
+  const Status left_status = left.validate(shape);
+  const Status right_status = right.validate(shape);
+  if (!left_status.ok()) {
+    return Result<Region>(left_status);
+  }
+  if (!right_status.ok()) {
+    return Result<Region>(right_status);
+  }
+  std::vector<RegionDimension> dimensions;
+  dimensions.reserve(shape.size());
+  for (std::size_t axis = 0U; axis < shape.size(); ++axis) {
+    const RegionDimension& left_axis = left.dimensions()[axis];
+    const RegionDimension& right_axis = right.dimensions()[axis];
+    const std::uint64_t start = std::min(left_axis.offset, right_axis.offset);
+    const std::uint64_t left_end = left_axis.offset + left_axis.extent;
+    const std::uint64_t right_end = right_axis.offset + right_axis.extent;
+    const std::uint64_t end = std::max(left_end, right_end);
+    dimensions.push_back(RegionDimension{start, end - start});
+  }
+  return Result<Region>(Region(std::move(dimensions)));
+}
+
+/**
+ * @brief Derives one legal input demand from an operation Region rule.
+ * @param traits Canonical compiler-visible operation traits.
+ * @param output_demand Valid demanded coverage of the operation output.
+ * @param output_shape Statically inferred output shape.
+ * @param input_shape Producer descriptor shape for this input.
+ * @return Whole, exact, or overflow-safe clipped-halo input demand.
+ * @throws std::bad_alloc If result or diagnostic allocation fails.
+ * @note Halo expansion clips without evaluating overflowing addition.
+ */
+Result<Region> derive_input_demand(
+    const OperationTraits& traits, const Region& output_demand,
+    const std::vector<std::uint64_t>& output_shape,
+    const std::vector<std::uint64_t>& input_shape) {
+  const Status output_status = output_demand.validate(output_shape);
+  if (!output_status.ok() || output_demand.empty()) {
+    return Result<Region>(Status::failure(
+        ErrorCode::InvalidArgument,
+        "physical planning output demand is empty or out of bounds"));
+  }
+  switch (traits.region_rule) {
+    case OperationRegionRule::Whole:
+      return Result<Region>(Region::whole(input_shape));
+    case OperationRegionRule::Elementwise:
+      if (input_shape != output_shape) {
+        return Result<Region>(Status::failure(
+            ErrorCode::TypeMismatch,
+            "elementwise Region rule requires matching input/output shapes"));
+      }
+      return Result<Region>(output_demand);
+    case OperationRegionRule::Halo:
+      if (input_shape != output_shape || traits.halo_radius == 0U) {
+        return Result<Region>(Status::failure(
+            ErrorCode::TypeMismatch,
+            "halo Region rule requires matching shapes and positive radius"));
+      }
+      break;
+  }
+  std::vector<RegionDimension> dimensions;
+  dimensions.reserve(input_shape.size());
+  const std::uint64_t radius = traits.halo_radius;
+  for (std::size_t axis = 0U; axis < input_shape.size(); ++axis) {
+    const RegionDimension& requested = output_demand.dimensions()[axis];
+    const std::uint64_t start =
+        requested.offset > radius ? requested.offset - radius : 0U;
+    const std::uint64_t requested_end = requested.offset + requested.extent;
+    const std::uint64_t right_room = input_shape[axis] - requested_end;
+    const std::uint64_t end = requested_end + std::min(radius, right_room);
+    dimensions.push_back(RegionDimension{start, end - start});
+  }
+  return Result<Region>(Region(std::move(dimensions)));
 }
 
 /**
@@ -419,6 +549,11 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (traits.value().input_count != node.inputs.size()) {
       return Result<SemanticGraphIR>(Status::failure(
           ErrorCode::TypeMismatch, "workflow operation input count mismatch"));
+    }
+    const Status parameter_status =
+        validate_operation_parameters(traits.value(), node.parameters);
+    if (!parameter_status.ok()) {
+      return Result<SemanticGraphIR>(parameter_status);
     }
     indegree.emplace(node.id, node.inputs.size());
   }
@@ -609,6 +744,76 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         !plan.outputs_.emplace(output.name, iterator->second).second) {
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::Internal, "optimized output mapping is invalid"));
+    }
+  }
+  if (options.output_regions.size() > plan.outputs_.size()) {
+    return Result<ExecutionPlan>(Status::failure(
+        ErrorCode::InvalidArgument,
+        "planning options contain too many named output Regions"));
+  }
+  std::vector<std::optional<Region>> demand_by_step(plan.steps_.size());
+  for (const auto& requested : options.output_regions) {
+    if (plan.outputs_.count(requested.first) == 0U) {
+      return Result<ExecutionPlan>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "planning options name an unknown workflow output"));
+    }
+  }
+  for (const auto& output : plan.outputs_) {
+    const PlanStep& step = plan.steps_[output.second];
+    Region demand = Region::whole(step.output_descriptor.shape);
+    const auto requested = options.output_regions.find(output.first);
+    if (requested != options.output_regions.end()) {
+      const Status status =
+          requested->second.validate(step.output_descriptor.shape);
+      if (!status.ok() || requested->second.empty()) {
+        return Result<ExecutionPlan>(Status::failure(
+            ErrorCode::InvalidArgument,
+            "planned workflow output Region is empty or out of bounds"));
+      }
+      demand = requested->second;
+    }
+    if (demand_by_step[output.second].has_value()) {
+      auto merged = merge_regions(demand_by_step[output.second].value(), demand,
+                                  step.output_descriptor.shape);
+      if (!merged.ok()) {
+        return Result<ExecutionPlan>(merged.status());
+      }
+      demand_by_step[output.second] = merged.take_value();
+    } else {
+      demand_by_step[output.second] = std::move(demand);
+    }
+  }
+  for (std::size_t reverse = plan.steps_.size(); reverse > 0U; --reverse) {
+    const std::size_t step_index = reverse - 1U;
+    PlanStep& step = plan.steps_[step_index];
+    if (!demand_by_step[step_index].has_value()) {
+      demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
+    }
+    step.output_demand = demand_by_step[step_index].value();
+    step.input_demands.reserve(step.input_steps.size());
+    for (std::size_t input_position = 0U;
+         input_position < step.input_steps.size(); ++input_position) {
+      const std::size_t producer_index = step.input_steps[input_position];
+      const PlanStep& producer = plan.steps_[producer_index];
+      auto input_demand = derive_input_demand(step.traits, step.output_demand,
+                                              step.output_descriptor.shape,
+                                              producer.output_descriptor.shape);
+      if (!input_demand.ok()) {
+        return Result<ExecutionPlan>(input_demand.status());
+      }
+      step.input_demands.push_back(input_demand.value());
+      if (demand_by_step[producer_index].has_value()) {
+        auto merged = merge_regions(demand_by_step[producer_index].value(),
+                                    input_demand.value(),
+                                    producer.output_descriptor.shape);
+        if (!merged.ok()) {
+          return Result<ExecutionPlan>(merged.status());
+        }
+        demand_by_step[producer_index] = merged.take_value();
+      } else {
+        demand_by_step[producer_index] = input_demand.take_value();
+      }
     }
   }
   plan.optimized_digest_ = optimized.digest();

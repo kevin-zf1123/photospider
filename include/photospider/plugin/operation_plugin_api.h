@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 /** @brief Numeric version of the operation DSO ABI. */
-#define PS_OPERATION_ABI_VERSION_1 1U
+#define PS_OPERATION_ABI_VERSION_2 2U
 /** @brief Operation has deterministic output for equal inputs/parameters. */
 #define PS_OPERATION_FLAG_DETERMINISTIC (1U << 0U)
 /** @brief Operation has no externally visible side effect. */
@@ -32,32 +32,87 @@ extern "C" {
 #define PS_OPERATION_FLAG_CPU_FALLBACK (1U << 4U)
 
 /** @brief Output shape is one scalar element. */
-#define PS_OPERATION_SHAPE_SCALAR_V1 1U
+#define PS_OPERATION_SHAPE_SCALAR_V2 1U
 /** @brief Output descriptor preserves the first input descriptor. */
-#define PS_OPERATION_SHAPE_PRESERVE_FIRST_V1 2U
+#define PS_OPERATION_SHAPE_PRESERVE_FIRST_V2 2U
 /** @brief All input descriptors match and output preserves them. */
-#define PS_OPERATION_SHAPE_MATCH_INPUTS_V1 3U
+#define PS_OPERATION_SHAPE_MATCH_INPUTS_V2 3U
+/** @brief Output uses an explicit descriptor-owned fixed shape. */
+#define PS_OPERATION_SHAPE_FIXED_V2 4U
 
 /** @brief Operation consumes and produces whole logical coverage. */
-#define PS_OPERATION_REGION_WHOLE_V1 1U
+#define PS_OPERATION_REGION_WHOLE_V2 1U
 /** @brief Region propagation is elementwise. */
-#define PS_OPERATION_REGION_ELEMENTWISE_V1 2U
+#define PS_OPERATION_REGION_ELEMENTWISE_V2 2U
 /** @brief Region propagation uses a symmetric nonzero halo. */
-#define PS_OPERATION_REGION_HALO_V1 3U
+#define PS_OPERATION_REGION_HALO_V2 3U
 
 /** @brief C ABI scalar representation values matching the public C++ model. */
-typedef enum ps_operation_element_type_v1 {
-  PS_OPERATION_ELEMENT_UINT8_V1 = 1,
-  PS_OPERATION_ELEMENT_INT64_V1 = 2,
-  PS_OPERATION_ELEMENT_FLOAT64_V1 = 3
-} ps_operation_element_type_v1;
+typedef enum ps_operation_element_type_v2 {
+  PS_OPERATION_ELEMENT_UINT8_V2 = 1,
+  PS_OPERATION_ELEMENT_INT64_V2 = 2,
+  PS_OPERATION_ELEMENT_FLOAT64_V2 = 3
+} ps_operation_element_type_v2;
+
+/** @brief Closed source-parameter type values for operation ABI v2. */
+typedef enum ps_operation_parameter_type_v2 {
+  PS_OPERATION_PARAMETER_INT64_V2 = 1,
+  PS_OPERATION_PARAMETER_FLOAT64_V2 = 2,
+  PS_OPERATION_PARAMETER_BOOL_V2 = 3,
+  PS_OPERATION_PARAMETER_STRING_V2 = 4
+} ps_operation_parameter_type_v2;
+
+/**
+ * @brief One immutable parameter declaration published by an operation.
+ *
+ * @note Key bytes remain plugin-owned until the API destroy callback.
+ */
+typedef struct ps_operation_parameter_descriptor_v2 {
+  /** @brief Exact structure byte size. */
+  uint32_t struct_size;
+  /** @brief Nonempty bounded parameter key. */
+  const char* key;
+  /** @brief Exact key byte count excluding any terminator. */
+  uint32_t key_size;
+  /** @brief One `ps_operation_parameter_type_v2` value. */
+  uint32_t type;
+  /** @brief Zero for optional or one for required. */
+  uint32_t required;
+} ps_operation_parameter_descriptor_v2;
+
+/**
+ * @brief One canonical source parameter supplied to a callback.
+ *
+ * @note Exactly the field selected by `type` is meaningful; every pointer is
+ * callback-local and must not be retained.
+ */
+typedef struct ps_operation_parameter_value_v2 {
+  /** @brief Exact structure byte size supplied by the host. */
+  uint32_t struct_size;
+  /** @brief Nonempty schema-declared parameter key. */
+  const char* key;
+  /** @brief Exact key byte count excluding any terminator. */
+  uint32_t key_size;
+  /** @brief One `ps_operation_parameter_type_v2` value. */
+  uint32_t type;
+  /** @brief Value when type is `INT64`. */
+  int64_t int64_value;
+  /** @brief Value when type is `FLOAT64`. */
+  double float64_value;
+  /** @brief Zero or one when type is `BOOL`. */
+  uint32_t bool_value;
+  /** @brief UTF-8-like bytes when type is `STRING`, otherwise null. */
+  const char* string_value;
+  /** @brief Exact string byte count, otherwise zero. */
+  uint32_t string_size;
+} ps_operation_parameter_value_v2;
 
 /**
  * @brief One bounded immutable semantic facet visible to an operation.
  *
  * @note Key and payload pointers remain valid only for the callback duration.
  */
-typedef struct ps_operation_facet_view_v1 {
+typedef struct ps_operation_facet_view_v2 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Nonempty printable-ASCII facet key. */
@@ -70,17 +125,17 @@ typedef struct ps_operation_facet_view_v1 {
   const uint8_t* payload;
   /** @brief Bounded opaque payload byte count. */
   uint32_t payload_size;
-} ps_operation_facet_view_v1;
+} ps_operation_facet_view_v2;
 
 /**
  * @brief Immutable validated input Value view for one callback invocation.
  *
  * @note Every pointer remains valid only for the duration of the callback.
  */
-typedef struct ps_operation_value_view_v1 {
+typedef struct ps_operation_value_view_v2 {
   /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
-  /** @brief One `ps_operation_element_type_v1` value. */
+  /** @brief One `ps_operation_element_type_v2` value. */
   uint32_t element_type;
   /** @brief Rank in the inclusive range 1..8. */
   uint32_t rank;
@@ -88,20 +143,24 @@ typedef struct ps_operation_value_view_v1 {
   uint64_t byte_size;
   /** @brief Rank-sized nonzero shape array. */
   const uint64_t* shape;
+  /** @brief Rank-sized planned input-demand offsets. */
+  const uint64_t* demand_offsets;
+  /** @brief Rank-sized planned input-demand extents. */
+  const uint64_t* demand_extents;
   /** @brief Immutable payload or null only when byte_size is zero. */
   const uint8_t* data;
   /** @brief Number of bounded records in `facets`. */
   uint32_t facet_count;
   /** @brief Immutable facet array or null only when facet_count is zero. */
-  const ps_operation_facet_view_v1* facets;
-} ps_operation_value_view_v1;
+  const ps_operation_facet_view_v2* facets;
+} ps_operation_value_view_v2;
 
 /**
  * @brief Host-owned sink used to publish one complete output Value.
  *
  * @note The callback copies data synchronously and returns nonzero on success.
  */
-typedef struct ps_operation_output_sink_v1 {
+typedef struct ps_operation_output_sink_v2 {
   /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
   /** @brief Opaque host state returned unchanged to `publish`. */
@@ -109,7 +168,7 @@ typedef struct ps_operation_output_sink_v1 {
   /**
    * @brief Copies and validates one complete output.
    * @param context Opaque host state.
-   * @param element_type One `ps_operation_element_type_v1` value.
+   * @param element_type One `ps_operation_element_type_v2` value.
    * @param shape Rank-sized nonzero shape array.
    * @param rank Rank in 1..8.
    * @param facets Bounded facet array, null only when facet_count is zero.
@@ -122,9 +181,9 @@ typedef struct ps_operation_output_sink_v1 {
    * once.
    */
   int (*publish)(void* context, uint32_t element_type, const uint64_t* shape,
-                 uint32_t rank, const ps_operation_facet_view_v1* facets,
+                 uint32_t rank, const ps_operation_facet_view_v2* facets,
                  uint32_t facet_count, const uint8_t* data, uint64_t byte_size);
-} ps_operation_output_sink_v1;
+} ps_operation_output_sink_v2;
 
 /**
  * @brief Callback that reports whether cooperative cancellation was requested.
@@ -132,13 +191,15 @@ typedef struct ps_operation_output_sink_v1 {
  * @return Nonzero after cancellation is requested; zero otherwise.
  * @note The plugin must not retain the context or throw across the C boundary.
  */
-typedef int (*ps_operation_cancelled_v1)(void* context);
+typedef int (*ps_operation_cancelled_v2)(void* context);
 
 /**
  * @brief Synchronous operation execution callback.
  * @param user_data Descriptor-owned opaque state.
  * @param inputs Array of `input_count` immutable Value views.
  * @param input_count Exact descriptor input count.
+ * @param parameters Canonically key-ordered validated parameter array.
+ * @param parameter_count Exact number of supplied source parameters.
  * @param backend 1 for CPU or 2 for optional local GPU.
  * @param cancelled Host cancellation callback.
  * @param cancellation_context Opaque cancellation state.
@@ -148,18 +209,20 @@ typedef int (*ps_operation_cancelled_v1)(void* context);
  * @return Zero on success; nonzero on operation failure/cancellation.
  * @note The callback must not throw across the C boundary or retain pointers.
  */
-typedef int (*ps_operation_execute_v1)(
-    void* user_data, const ps_operation_value_view_v1* inputs,
-    uint32_t input_count, uint32_t backend, ps_operation_cancelled_v1 cancelled,
-    void* cancellation_context, const ps_operation_output_sink_v1* sink,
-    char* diagnostic, size_t diagnostic_capacity);
+typedef int (*ps_operation_execute_v2)(
+    void* user_data, const ps_operation_value_view_v2* inputs,
+    uint32_t input_count, const ps_operation_parameter_value_v2* parameters,
+    uint32_t parameter_count, uint32_t backend,
+    ps_operation_cancelled_v2 cancelled, void* cancellation_context,
+    const ps_operation_output_sink_v2* sink, char* diagnostic,
+    size_t diagnostic_capacity);
 
 /**
  * @brief One immutable operation descriptor published by a plugin.
  *
  * @note `key` and user_data remain valid until the plugin API destroy callback.
  */
-typedef struct ps_operation_descriptor_v1 {
+typedef struct ps_operation_descriptor_v2 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Nonempty UTF-8 operation key. */
@@ -174,56 +237,64 @@ typedef struct ps_operation_descriptor_v1 {
   uint64_t estimated_bytes;
   /** @brief Scalar element type used by static output inference. */
   uint32_t output_element_type;
-  /** @brief One `PS_OPERATION_SHAPE_*_V1` inference rule. */
+  /** @brief Rank in 1..8 for FIXED and zero for every other shape rule. */
+  uint32_t output_rank;
+  /** @brief Rank-sized fixed shape, null exactly when output_rank is zero. */
+  const uint64_t* output_shape;
+  /** @brief One `PS_OPERATION_SHAPE_*_V2` inference rule. */
   uint32_t shape_rule;
-  /** @brief One `PS_OPERATION_REGION_*_V1` propagation rule. */
+  /** @brief One `PS_OPERATION_REGION_*_V2` propagation rule. */
   uint32_t region_rule;
   /** @brief Symmetric halo, nonzero only for REGION_HALO. */
   uint32_t halo_radius;
   /** @brief Nonzero when derived local result caching is semantically legal. */
   uint32_t cacheable;
+  /** @brief Number of records in `parameters`, bounded by 128. */
+  uint32_t parameter_count;
+  /** @brief Parameter declarations, null only when count is zero. */
+  const ps_operation_parameter_descriptor_v2* parameters;
   /** @brief Required synchronous callback. */
-  ps_operation_execute_v1 execute;
+  ps_operation_execute_v2 execute;
   /** @brief Descriptor-owned opaque callback state, possibly null. */
   void* user_data;
-} ps_operation_descriptor_v1;
+} ps_operation_descriptor_v2;
 
 /**
- * @brief Complete version-one plugin table.
+ * @brief Complete version-two plugin table.
  *
  * @note The host validates and copies all descriptors before publication.
  */
-typedef struct ps_operation_plugin_api_v1 {
+typedef struct ps_operation_plugin_api_v2 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Number of descriptors in `operations`. */
   uint32_t operation_count;
   /** @brief Immutable descriptor array. */
-  const ps_operation_descriptor_v1* operations;
+  const ps_operation_descriptor_v2* operations;
   /**
    * @brief Releases plugin-owned descriptor/user state exactly once.
    * @param operations Original descriptor array.
    * @param operation_count Original count.
    * @note The host calls this only after every invocation lease is released.
    */
-  void (*destroy)(const ps_operation_descriptor_v1* operations,
+  void (*destroy)(const ps_operation_descriptor_v2* operations,
                   uint32_t operation_count);
-} ps_operation_plugin_api_v1;
+} ps_operation_plugin_api_v2;
 
 /**
  * @brief Returns the plugin ABI version without side effects.
- * @return `PS_OPERATION_ABI_VERSION_1` for this header.
+ * @return `PS_OPERATION_ABI_VERSION_2` for this header.
  * @note The function must not throw across the C boundary.
  */
 PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void);
 
 /**
- * @brief Returns the immutable version-one plugin table.
+ * @brief Returns the immutable version-two plugin table.
  * @return Nonnull table whose `struct_size` is exact.
  * @note The table remains valid until the host invokes its destroy callback.
  */
-PS_OPERATION_EXPORT const ps_operation_plugin_api_v1*
-ps_operation_plugin_get_api_v1(void);
+PS_OPERATION_EXPORT const ps_operation_plugin_api_v2*
+ps_operation_plugin_get_api_v2(void);
 
 #ifdef __cplusplus
 }

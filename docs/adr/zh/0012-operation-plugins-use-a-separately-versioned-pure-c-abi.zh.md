@@ -11,19 +11,23 @@ Kernel 需要 operation extension point 和与其直接相关的 data-definition
 
 ## 决策
 
-Operation ABI 与 data-provider ABI 是相互独立的 version-one C contract。其 C++ helper 不
-增加第二套 binary contract。
+Operation ABI 是精确的 version-two C contract；data-provider ABI 仍是独立的
+version-one contract。其 C++ helper 不增加第二套 binary contract。不会保留 operation
+ABI v1 adapter 或 decoder。
 
 ### Operation ABI
 
 Operation descriptor 包含一个 length-framed key、exact input count、flag、estimated bytes、
-output element type、一个 closed shape rule、一个 closed Region rule、optional halo radius、
-cacheability、一个 synchronous execute callback 与 descriptor-owned opaque state。
+output element type、一个 closed shape rule（包括显式有界 fixed shape）、一个 closed
+Region rule、optional halo radius、cacheability、bounded parameter-schema pointer/count、
+一个 synchronous execute callback 与 descriptor-owned opaque state。每个 parameter schema
+record 发布 unique key、精确 closed type 与 required/optional bit。
 
 Host 将这些 value 复制到 `OperationTraits` 和 semantic IR。Callback、DSO 或 opaque-state
-identity 不会复制进 IR/digest。Callback 接收 bounded dense whole-Region input
-view、bounded facet record、selected local backend、cooperative cancellation observation 与
-host-owned single-publication output sink。Host 在 callback 返回前复制 output
+identity 不会复制进 IR/digest。Callback 接收 bounded dense whole-Region input view、
+plan-derived input-demand offset/extent、canonical 且已通过 schema validation 的 parameter
+value array、bounded facet record、selected local backend、cooperative cancellation
+observation 与 host-owned single-publication output sink。Host 在 callback 返回前复制 output
 facet/bytes，并重建 validated Value。
 
 ### Data-definition ABI
@@ -38,9 +42,10 @@ Load/registration 在 publication 前验证：
 
 - exact ABI version 与 exact structure size；
 - 自然 pointer/array alignment；
-- pointer/count pair、maximum record/key/rank bound 与 checked arithmetic；
+- pointer/count pair、maximum record/key/rank/parameter bound 与 checked arithmetic；
 - 不含 embedded NUL/control byte 的 length-framed key；
-- closed enum/flag/rule vocabulary 与合法 trait combination；
+- closed enum/flag/rule/parameter-type vocabulary、unique parameter key、required item
+  presence、exact source type 与合法 trait combination；
 - required callback、single output publication、exact output element/shape、bounded facet
   array/key/version/payload 与 byte count；
 - callback exception fence 与 exactly-once destroy ownership。

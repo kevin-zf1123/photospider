@@ -67,8 +67,21 @@ class ThreadPool final {
    */
   ~ThreadPool() noexcept { stop_and_join(); }
 
-  ThreadPool(const ThreadPool&) = delete;
-  ThreadPool& operator=(const ThreadPool&) = delete;
+  /**
+   * @brief Forbids duplicating worker and callback-queue ownership.
+   * @param other Source pool that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note One pool joins exactly its own fixed worker set.
+   */
+  ThreadPool(const ThreadPool& other) = delete;
+  /**
+   * @brief Forbids assigning active worker/queue ownership.
+   * @param other Source pool that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Shutdown remains bound to the constructing pool.
+   */
+  ThreadPool& operator=(const ThreadPool& other) = delete;
 
   /**
    * @brief Attempts to enqueue one callback without blocking.
@@ -206,8 +219,21 @@ class ResourceLedger final {
      */
     ~Lease() noexcept { release(); }
 
-    Lease(const Lease&) = delete;
-    Lease& operator=(const Lease&) = delete;
+    /**
+     * @brief Forbids duplicating exact byte-release ownership.
+     * @param other Source lease that cannot be copied.
+     * @throws Nothing; the operation is deleted.
+     * @note Move operations preserve exactly-once release.
+     */
+    Lease(const Lease& other) = delete;
+    /**
+     * @brief Forbids copy assignment of exact byte-release ownership.
+     * @param other Source lease that cannot be assigned.
+     * @return No value; the operation is deleted.
+     * @throws Nothing; the operation is deleted.
+     * @note A ledger admission can have only one releasing lease.
+     */
+    Lease& operator=(const Lease& other) = delete;
 
     /**
      * @brief Returns shared live bytes immediately after this acquisition.
@@ -466,6 +492,36 @@ Result<Value> transfer_value(const Value& source) {
                        source.bytes(), source.facets());
 }
 
+/**
+ * @brief Validates that one published Value covers a planned logical demand.
+ * @param value Complete immutable producer Value.
+ * @param demand Validated plan demand for one consumer input.
+ * @return Success or typed rank/containment failure.
+ * @throws std::bad_alloc If a diagnostic allocation fails.
+ * @note Validation occurs before transfer/accounting/callback entry.
+ */
+Status validate_input_demand(const Value& value, const Region& demand) {
+  const Status value_status = value.region().validate(value.descriptor().shape);
+  const Status demand_status = demand.validate(value.descriptor().shape);
+  if (!value_status.ok() || !demand_status.ok() || demand.empty()) {
+    return Status::failure(
+        ErrorCode::TypeMismatch,
+        "execution input Region or planned demand is invalid");
+  }
+  for (std::size_t axis = 0U; axis < demand.rank(); ++axis) {
+    const RegionDimension& available = value.region().dimensions()[axis];
+    const RegionDimension& requested = demand.dimensions()[axis];
+    const std::uint64_t available_end = available.offset + available.extent;
+    const std::uint64_t requested_end = requested.offset + requested.extent;
+    if (requested.offset < available.offset || requested_end > available_end) {
+      return Status::failure(
+          ErrorCode::TypeMismatch,
+          "execution input Value does not cover its planned demand");
+    }
+  }
+  return Status::success();
+}
+
 }  // namespace
 
 /**
@@ -564,11 +620,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     for (std::size_t step_index = 0; step_index < plan_->steps().size();
          ++step_index) {
       const PlanStep& step = plan_->steps()[step_index];
+      if (step.input_demands.size() != step.input_steps.size() ||
+          step.output_demand.empty() ||
+          !step.output_demand.validate(step.output_descriptor.shape).ok()) {
+        throw std::invalid_argument(
+            "execution plan Region demand metadata is invalid");
+      }
       remaining_dependencies_[step_index] = step.input_steps.size();
-      for (std::size_t input_index : step.input_steps) {
+      for (std::size_t input_position = 0U;
+           input_position < step.input_steps.size(); ++input_position) {
+        const std::size_t input_index = step.input_steps[input_position];
         if (input_index >= step_index) {
           throw std::invalid_argument(
               "execution plan input must name an earlier step");
+        }
+        if (step.input_demands[input_position].empty() ||
+            !step.input_demands[input_position]
+                 .validate(plan_->steps()[input_index].output_descriptor.shape)
+                 .ok()) {
+          throw std::invalid_argument(
+              "execution plan input Region demand is invalid");
         }
         dependents_[input_index].push_back(step_index);
       }
@@ -754,11 +825,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           finish_abandoned_attempt_locked();
           return;
         }
-        for (std::size_t input_index : step.input_steps) {
+        for (std::size_t input_position = 0U;
+             input_position < step.input_steps.size(); ++input_position) {
+          const std::size_t input_index = step.input_steps[input_position];
           if (!completed_[input_index]) {
             finish_failure_locked(Status::failure(
                 ErrorCode::Internal,
                 "ready step observed an incomplete dependency"));
+            return;
+          }
+          const Status demand_status = validate_input_demand(
+              values_[input_index], step.input_demands[input_position]);
+          if (!demand_status.ok()) {
+            finish_failure_locked(demand_status);
             return;
           }
           inputs.push_back(values_[input_index]);
@@ -806,7 +885,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const auto started = std::chrono::steady_clock::now();
       Result<Value> invocation_result = operations_->invoke(
           step.operation,
-          OperationInvocation{inputs, step.parameters, backend, cancellation_});
+          OperationInvocation{inputs, step.input_demands, step.parameters,
+                              backend, cancellation_});
       const std::uint64_t elapsed = duration_us(started);
 
       bool should_fallback = false;

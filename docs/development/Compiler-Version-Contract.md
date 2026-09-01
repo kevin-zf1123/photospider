@@ -21,7 +21,9 @@ can be decoded or executed. The daemon never places internal IR on local IPC.
 `PlanCacheKey` use canonical domain-separated inputs. They exclude runtime
 allocation, timing, cancellation, ready-queue state, and daemon identity.
 They are non-security reproducibility/cache identities, not signatures,
-attestations, durable object ids, or receipts.
+attestations, durable object ids, or receipts. Operation-v2 parameter schemas
+and validated values affect semantic identity; plan-derived output/input
+Regions affect physical plan identity.
 
 ## Cache compatibility
 

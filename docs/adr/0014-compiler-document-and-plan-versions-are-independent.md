@@ -61,10 +61,23 @@ current operation traits and compiler.
 ### Correctness gates
 
 Every stage checks duplicate node ids, missing references, cycles, operation
-availability, parameter bounds, type/shape/`Region` rules, integer overflow,
-backend capability, and plan dependency ordering as applicable. An
+availability, the operation-published closed parameter vocabulary, required
+items, exact parameter types, parameter bounds, type/shape/`Region` rules,
+integer overflow, backend capability, and plan dependency ordering as
+applicable. Unknown, missing, wrong-type, or conflicting parameter declarations
+fail before semantic IR publication and no built-in callback supplies a hidden
+default. An
 embedding-provided cache hit must be revalidated before use. A malformed or
 stale entry becomes a miss; it cannot bypass compiler validation.
+
+Physical planning accepts optional bounded demands for named workflow outputs.
+It propagates those demands backward as whole-input, elementwise-exact, or
+overflow-safe clipped halo Regions, merges multiple consumers conservatively,
+stores per-step output/input demands, and includes those values in physical
+plan/cache identity. Execution verifies each produced Value covers the planned
+input demand before transfer or callback entry. Complete Values remain the
+current materialization boundary; the demand contract does not claim a dirty
+or incremental executor.
 
 ### Closed source vocabulary
 

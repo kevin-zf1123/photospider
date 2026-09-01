@@ -10,12 +10,21 @@ Compiler-visible `OperationTraits` carry one closed rule:
 - `Elementwise`: input and output coordinates correspond directly;
 - `Halo`: elementwise input demand plus a nonzero symmetric radius.
 
-The compiler validates rule combinations and copies them into IR/plan identity.
-The current executor still evaluates complete Values; it does not materialize a
-partial Region plan. An operation callback must return a Value whose descriptor
-matches the plan, whose Region covers the complete descriptor, and whose layout
-passes ordinary Value validation.
+Planning accepts optional bounded demands for named workflow outputs and walks
+the plan backward. `Whole` demands every complete input. `Elementwise` maps the
+exact output interval to each shape-compatible input. `Halo` expands that exact
+demand symmetrically and clips it to the input shape without overflowing
+`offset + extent + radius`. Multiple downstream demands merge to a conservative
+bounding Region. Every output/input demand participates in physical plan and
+cache identity.
 
-Incremental dirty propagation is outside the active package boundary. Region
-traits cannot create workers, storage, daemon state, or a claim that partial
-execution exists.
+The current executor still evaluates complete Values; it does not crop or
+materialize a partial Value. Before transfer or callback entry it verifies the
+available Value Region covers the plan-derived input demand and passes that
+demand to the C++ callback/operation ABI v2 view. An operation callback must
+return a Value whose descriptor matches the plan, whose Region covers the
+complete descriptor, and whose layout passes ordinary Value validation.
+
+Incremental dirty propagation is outside the active package boundary. Demand
+legality does not create workers, storage, daemon state, or a claim that
+partial execution exists.

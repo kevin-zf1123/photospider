@@ -54,7 +54,7 @@ class OperationLibrary final {
    * @throws Nothing.
    * @note Handle and API must be nonnull.
    */
-  OperationLibrary(void* handle, const ps_operation_plugin_api_v1* api) noexcept
+  OperationLibrary(void* handle, const ps_operation_plugin_api_v2* api) noexcept
       : handle_(handle), api_(api) {}
 
   /**
@@ -81,14 +81,27 @@ class OperationLibrary final {
 #endif
   }
 
-  OperationLibrary(const OperationLibrary&) = delete;
-  OperationLibrary& operator=(const OperationLibrary&) = delete;
+  /**
+   * @brief Forbids duplicating native-library/destroy-hook ownership.
+   * @param other Source owner that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Shared ownership is established outside this lifetime object.
+   */
+  OperationLibrary(const OperationLibrary& other) = delete;
+  /**
+   * @brief Forbids assigning native-library/destroy-hook ownership.
+   * @param other Source owner that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Exactly-one destroy-before-unload ownership never changes.
+   */
+  OperationLibrary& operator=(const OperationLibrary& other) = delete;
 
  private:
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_operation_plugin_api_v1* api_ = nullptr;
+  const ps_operation_plugin_api_v2* api_ = nullptr;
 };
 
 /**
@@ -167,11 +180,11 @@ void close_unpublished_library(void* handle) noexcept {
  */
 Result<ElementType> decode_element_type(std::uint32_t type) {
   switch (type) {
-    case PS_OPERATION_ELEMENT_UINT8_V1:
+    case PS_OPERATION_ELEMENT_UINT8_V2:
       return Result<ElementType>(ElementType::UInt8);
-    case PS_OPERATION_ELEMENT_INT64_V1:
+    case PS_OPERATION_ELEMENT_INT64_V2:
       return Result<ElementType>(ElementType::Int64);
-    case PS_OPERATION_ELEMENT_FLOAT64_V1:
+    case PS_OPERATION_ELEMENT_FLOAT64_V2:
       return Result<ElementType>(ElementType::Float64);
     default:
       return Result<ElementType>(Status::failure(
@@ -181,19 +194,21 @@ Result<ElementType> decode_element_type(std::uint32_t type) {
 
 /**
  * @brief Decodes one closed C ABI output-shape inference rule.
- * @param value Numeric version-one rule.
+ * @param value Numeric version-two rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_SHAPE_SCALAR_V1:
+    case PS_OPERATION_SHAPE_SCALAR_V2:
       return Result<OperationShapeRule>(OperationShapeRule::Scalar);
-    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V1:
+    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V2:
       return Result<OperationShapeRule>(OperationShapeRule::PreserveFirstInput);
-    case PS_OPERATION_SHAPE_MATCH_INPUTS_V1:
+    case PS_OPERATION_SHAPE_MATCH_INPUTS_V2:
       return Result<OperationShapeRule>(OperationShapeRule::MatchAllInputs);
+    case PS_OPERATION_SHAPE_FIXED_V2:
+      return Result<OperationShapeRule>(OperationShapeRule::Fixed);
     default:
       return Result<OperationShapeRule>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -203,18 +218,18 @@ Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI Region propagation rule.
- * @param value Numeric version-one rule.
+ * @param value Numeric version-two rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_REGION_WHOLE_V1:
+    case PS_OPERATION_REGION_WHOLE_V2:
       return Result<OperationRegionRule>(OperationRegionRule::Whole);
-    case PS_OPERATION_REGION_ELEMENTWISE_V1:
+    case PS_OPERATION_REGION_ELEMENTWISE_V2:
       return Result<OperationRegionRule>(OperationRegionRule::Elementwise);
-    case PS_OPERATION_REGION_HALO_V1:
+    case PS_OPERATION_REGION_HALO_V2:
       return Result<OperationRegionRule>(OperationRegionRule::Halo);
     default:
       return Result<OperationRegionRule>(
@@ -224,7 +239,89 @@ Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
 }
 
 /**
- * @brief Validates one complete version-one semantic trait record.
+ * @brief Decodes one closed C ABI source-parameter type.
+ * @param value Numeric operation ABI v2 parameter type.
+ * @return Typed parameter kind or invalid-argument failure.
+ * @throws std::bad_alloc If a failure diagnostic allocation fails.
+ * @note Unknown numeric values fail before registry publication.
+ */
+Result<OperationParameterType> decode_parameter_type(std::uint32_t value) {
+  switch (value) {
+    case PS_OPERATION_PARAMETER_INT64_V2:
+      return Result<OperationParameterType>(OperationParameterType::Int64);
+    case PS_OPERATION_PARAMETER_FLOAT64_V2:
+      return Result<OperationParameterType>(OperationParameterType::Float64);
+    case PS_OPERATION_PARAMETER_BOOL_V2:
+      return Result<OperationParameterType>(OperationParameterType::Bool);
+    case PS_OPERATION_PARAMETER_STRING_V2:
+      return Result<OperationParameterType>(OperationParameterType::String);
+    default:
+      return Result<OperationParameterType>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "operation plugin parameter type is unknown"));
+  }
+}
+
+/**
+ * @brief Validates a canonical sorted parameter-schema vocabulary.
+ * @param schema Candidate operation parameter declarations.
+ * @return Success or malformed/duplicate declaration failure.
+ * @throws std::bad_alloc If a failure diagnostic allocation fails.
+ * @note Callers sort copied records before invoking this validator.
+ */
+Status validate_parameter_schema(
+    const std::vector<OperationParameterSpec>& schema) {
+  if (schema.size() > 128U) {
+    return Status::failure(ErrorCode::InvalidArgument,
+                           "operation parameter schema exceeds 128 records");
+  }
+  std::string previous;
+  for (const OperationParameterSpec& parameter : schema) {
+    bool known_type = false;
+    switch (parameter.type) {
+      case OperationParameterType::Int64:
+      case OperationParameterType::Float64:
+      case OperationParameterType::Bool:
+      case OperationParameterType::String:
+        known_type = true;
+        break;
+    }
+    if (!known_type || !valid_key(parameter.key) ||
+        (!previous.empty() && parameter.key <= previous)) {
+      return Status::failure(
+          ErrorCode::InvalidArgument,
+          "operation parameter schema is malformed or conflicting");
+    }
+    previous = parameter.key;
+  }
+  return Status::success();
+}
+
+/**
+ * @brief Reports whether one source value has the schema-declared exact type.
+ * @param value Closed source parameter variant.
+ * @param type Declared exact parameter type.
+ * @return True only for the matching variant alternative.
+ * @throws Nothing.
+ * @note Numeric alternatives are never coerced.
+ */
+bool parameter_type_matches(const ParameterValue& value,
+                            OperationParameterType type) noexcept {
+  switch (type) {
+    case OperationParameterType::Int64:
+      return std::holds_alternative<std::int64_t>(value);
+    case OperationParameterType::Float64:
+      return std::holds_alternative<double>(value);
+    case OperationParameterType::Bool:
+      return std::holds_alternative<bool>(value);
+    case OperationParameterType::String:
+      return std::holds_alternative<std::string>(value);
+  }
+  return false;
+}
+
+/**
+ * @brief Validates one complete version-two semantic trait record.
  * @param traits Candidate copied record.
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
@@ -237,6 +334,7 @@ Status validate_traits(const OperationTraits& traits) {
     case OperationShapeRule::Scalar:
     case OperationShapeRule::PreserveFirstInput:
     case OperationShapeRule::MatchAllInputs:
+    case OperationShapeRule::Fixed:
       known_shape = true;
       break;
   }
@@ -254,16 +352,39 @@ Status validate_traits(const OperationTraits& traits) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation output element type is unknown");
   }
-  if (traits.version != 1U || !traits.supports_cpu || !known_shape ||
+  const Status schema_status =
+      validate_parameter_schema(traits.parameter_schema);
+  const bool fixed_shape_valid =
+      traits.shape_rule == OperationShapeRule::Fixed
+          ? (!traits.fixed_output_shape.empty() &&
+             traits.fixed_output_shape.size() <= 8U &&
+             std::none_of(traits.fixed_output_shape.begin(),
+                          traits.fixed_output_shape.end(),
+                          [](std::uint64_t extent) { return extent == 0U; }))
+          : traits.fixed_output_shape.empty();
+  bool fixed_byte_size_valid = true;
+  if (fixed_shape_valid && traits.shape_rule == OperationShapeRule::Fixed) {
+    std::uint64_t bytes = Value::element_size(traits.output_element_type);
+    for (std::uint64_t extent : traits.fixed_output_shape) {
+      if (bytes > std::numeric_limits<std::uint64_t>::max() / extent) {
+        fixed_byte_size_valid = false;
+        break;
+      }
+      bytes *= extent;
+    }
+  }
+  if (traits.version != 2U || !traits.supports_cpu || !known_shape ||
       !known_region || (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
-      (traits.shape_rule != OperationShapeRule::Scalar &&
+      ((traits.shape_rule == OperationShapeRule::PreserveFirstInput ||
+        traits.shape_rule == OperationShapeRule::MatchAllInputs) &&
        traits.input_count == 0U) ||
       (traits.region_rule == OperationRegionRule::Halo &&
        traits.halo_radius == 0U) ||
       (traits.region_rule != OperationRegionRule::Halo &&
-       traits.halo_radius != 0U)) {
+       traits.halo_radius != 0U) ||
+      !schema_status.ok() || !fixed_shape_valid || !fixed_byte_size_valid) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation semantic traits are inconsistent");
   }
@@ -284,6 +405,9 @@ Status validate_callback_output(const OperationTraits& traits,
                                 const std::vector<Value>& inputs,
                                 const Value& output) {
   ValueDescriptor expected{traits.output_element_type, {1U}};
+  if (traits.shape_rule == OperationShapeRule::Fixed) {
+    expected.shape = traits.fixed_output_shape;
+  }
   if (traits.shape_rule == OperationShapeRule::PreserveFirstInput ||
       traits.shape_rule == OperationShapeRule::MatchAllInputs) {
     if (inputs.empty()) {
@@ -385,7 +509,7 @@ struct OutputSinkState final {
  */
 int publish_plugin_output(void* context, std::uint32_t element_type,
                           const std::uint64_t* shape, std::uint32_t rank,
-                          const ps_operation_facet_view_v1* facets,
+                          const ps_operation_facet_view_v2* facets,
                           std::uint32_t facet_count, const std::uint8_t* data,
                           std::uint64_t byte_size) noexcept {
   auto* state = static_cast<OutputSinkState*>(context);
@@ -400,7 +524,7 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
         rank == 0U || rank > 8U || facet_count > 64U ||
         (facet_count != 0U &&
          (!facets || reinterpret_cast<std::uintptr_t>(facets) %
-                             alignof(ps_operation_facet_view_v1) !=
+                             alignof(ps_operation_facet_view_v2) !=
                          0U)) ||
         (byte_size != 0U && !data) ||
         byte_size > static_cast<std::uint64_t>(
@@ -445,8 +569,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     std::vector<ValueFacet> owned_facets;
     owned_facets.reserve(facet_count);
     for (std::uint32_t index = 0U; index < facet_count; ++index) {
-      const ps_operation_facet_view_v1& facet = facets[index];
-      if (facet.struct_size != sizeof(ps_operation_facet_view_v1) ||
+      const ps_operation_facet_view_v2& facet = facets[index];
+      if (facet.struct_size != sizeof(ps_operation_facet_view_v2) ||
           !facet.key || facet.key_size == 0U || facet.key_size > 256U ||
           facet.version == 0U || facet.payload_size > 64U * 1024U ||
           (facet.payload_size != 0U && !facet.payload)) {
@@ -497,20 +621,20 @@ int plugin_cancelled(void* context) noexcept {
 }
 
 /**
- * @brief Reads an integer parameter with one default.
+ * @brief Reads one required integer parameter after schema validation.
  * @param parameters Canonical parameter map.
  * @param key Parameter name.
- * @param fallback Returned when the key is absent.
- * @return Integer value or `InvalidArgument` for another parameter type.
+ * @return Integer value or `InvalidArgument` when absent/wrong-type.
  * @throws std::bad_alloc If a diagnostic allocation fails.
- * @note The map is never modified.
+ * @note The map is never modified and no default value is synthesized.
  */
 Result<std::int64_t> integer_parameter(
     const std::map<std::string, ParameterValue>& parameters,
-    const std::string& key, std::int64_t fallback) {
+    const std::string& key) {
   const auto iterator = parameters.find(key);
   if (iterator == parameters.end()) {
-    return Result<std::int64_t>(fallback);
+    return Result<std::int64_t>(Status::failure(
+        ErrorCode::InvalidArgument, "required operation parameter is missing"));
   }
   if (const auto* value = std::get_if<std::int64_t>(&iterator->second)) {
     return Result<std::int64_t>(*value);
@@ -520,32 +644,83 @@ Result<std::int64_t> integer_parameter(
 }
 
 /**
- * @brief Reads a floating parameter with one default.
+ * @brief Reads one required Float64 parameter after schema validation.
  * @param parameters Canonical parameter map.
  * @param key Parameter name.
- * @param fallback Returned when the key is absent.
- * @return Float64 value or `InvalidArgument` for another parameter type.
+ * @return Float64 value or `InvalidArgument` when absent/wrong-type.
  * @throws std::bad_alloc If a diagnostic allocation fails.
- * @note Int64 values are exactly converted when representable by double.
+ * @note Numeric alternatives are not coerced and no default is synthesized.
  */
 Result<double> floating_parameter(
     const std::map<std::string, ParameterValue>& parameters,
-    const std::string& key, double fallback) {
+    const std::string& key) {
   const auto iterator = parameters.find(key);
   if (iterator == parameters.end()) {
-    return Result<double>(fallback);
+    return Result<double>(Status::failure(
+        ErrorCode::InvalidArgument, "required operation parameter is missing"));
   }
   if (const auto* value = std::get_if<double>(&iterator->second)) {
     return Result<double>(*value);
   }
-  if (const auto* value = std::get_if<std::int64_t>(&iterator->second)) {
-    return Result<double>(static_cast<double>(*value));
-  }
   return Result<double>(Status::failure(ErrorCode::InvalidArgument,
-                                        "operation parameter is not numeric"));
+                                        "operation parameter is not Float64"));
 }
 
 }  // namespace
+
+/**
+ * @brief Implements exact fail-closed operation parameter validation.
+ * @copydetails validate_operation_parameters
+ */
+Status validate_operation_parameters(
+    const OperationTraits& traits,
+    const std::map<std::string, ParameterValue>& parameters) {
+  const Status schema_status =
+      validate_parameter_schema(traits.parameter_schema);
+  if (!schema_status.ok() ||
+      parameters.size() > traits.parameter_schema.size()) {
+    return Status::failure(
+        ErrorCode::InvalidArgument,
+        "operation parameters exceed or contradict the published schema");
+  }
+  for (const OperationParameterSpec& declaration : traits.parameter_schema) {
+    const auto parameter = parameters.find(declaration.key);
+    if (parameter == parameters.end()) {
+      if (declaration.required) {
+        return Status::failure(
+            ErrorCode::InvalidArgument,
+            "required operation parameter is missing: " + declaration.key);
+      }
+      continue;
+    }
+    if (!parameter_type_matches(parameter->second, declaration.type)) {
+      return Status::failure(
+          ErrorCode::InvalidArgument,
+          "operation parameter has the wrong type: " + declaration.key);
+    }
+    if (declaration.type == OperationParameterType::String &&
+        std::get<std::string>(parameter->second).size() > 8192U) {
+      return Status::failure(
+          ErrorCode::InvalidArgument,
+          "operation string parameter exceeds bounds: " + declaration.key);
+    }
+  }
+  for (const auto& parameter : parameters) {
+    const auto declaration = std::lower_bound(
+        traits.parameter_schema.begin(), traits.parameter_schema.end(),
+        parameter.first,
+        [](const OperationParameterSpec& candidate, const std::string& key) {
+          return candidate.key < key;
+        });
+    if (declaration == traits.parameter_schema.end() ||
+        declaration->key != parameter.first) {
+      return Status::failure(
+          ErrorCode::InvalidArgument,
+          "operation parameter key is unknown: " + parameter.first);
+    }
+  }
+  return Status::success();
+}
 
 /**
  * @brief Private synchronized implementation of OperationRegistry.
@@ -578,6 +753,11 @@ OperationRegistry::~OperationRegistry() noexcept = default;
  * @copydetails OperationRegistry::register_operation
  */
 Status OperationRegistry::register_operation(OperationDefinition definition) {
+  std::sort(
+      definition.traits.parameter_schema.begin(),
+      definition.traits.parameter_schema.end(),
+      [](const OperationParameterSpec& left,
+         const OperationParameterSpec& right) { return left.key < right.key; });
   const Status traits_status = validate_traits(definition.traits);
   if (!valid_key(definition.key) || !definition.callback ||
       !traits_status.ok()) {
@@ -616,12 +796,12 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   void* handle = opened.value();
 
   using VersionFunction = std::uint32_t (*)();
-  using ApiFunction = const ps_operation_plugin_api_v1* (*)();
+  using ApiFunction = const ps_operation_plugin_api_v2* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
   void* version_symbol =
       find_symbol(handle, "ps_operation_plugin_get_abi_version");
-  void* api_symbol = find_symbol(handle, "ps_operation_plugin_get_api_v1");
+  void* api_symbol = find_symbol(handle, "ps_operation_plugin_get_api_v2");
   static_assert(sizeof(version) == sizeof(version_symbol),
                 "function/data pointer sizes must match on supported targets");
   std::memcpy(&version, &version_symbol, sizeof(version));
@@ -631,9 +811,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin ABI version is unsupported");
   }
-  const ps_operation_plugin_api_v1* api = nullptr;
+  const ps_operation_plugin_api_v2* api = nullptr;
   try {
-    if (version() != PS_OPERATION_ABI_VERSION_1) {
+    if (version() != PS_OPERATION_ABI_VERSION_2) {
       close_unpublished_library(handle);
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin ABI version is unsupported");
@@ -650,13 +830,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-              alignof(ps_operation_plugin_api_v1) !=
+              alignof(ps_operation_plugin_api_v2) !=
           0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v1) ||
+      api->struct_size != sizeof(ps_operation_plugin_api_v2) ||
       api->operation_count == 0U || api->operation_count > 1024U ||
       !api->operations ||
       reinterpret_cast<std::uintptr_t>(api->operations) %
-              alignof(ps_operation_descriptor_v1) !=
+              alignof(ps_operation_descriptor_v2) !=
           0U ||
       !api->destroy) {
     close_unpublished_library(handle);
@@ -672,11 +852,25 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   std::vector<OperationDefinition> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v1& descriptor = api->operations[index];
-    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v1) ||
+    const ps_operation_descriptor_v2& descriptor = api->operations[index];
+    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v2) ||
         !descriptor.key || descriptor.key_size == 0U ||
         descriptor.key_size > 1024U || !descriptor.execute ||
         descriptor.input_count > 1024U || descriptor.cacheable > 1U ||
+        descriptor.output_rank > 8U ||
+        ((descriptor.output_rank == 0U) !=
+         (descriptor.output_shape == nullptr)) ||
+        (descriptor.output_shape &&
+         reinterpret_cast<std::uintptr_t>(descriptor.output_shape) %
+                 alignof(std::uint64_t) !=
+             0U) ||
+        descriptor.parameter_count > 128U ||
+        ((descriptor.parameter_count == 0U) !=
+         (descriptor.parameters == nullptr)) ||
+        (descriptor.parameters &&
+         reinterpret_cast<std::uintptr_t>(descriptor.parameters) %
+                 alignof(ps_operation_parameter_descriptor_v2) !=
+             0U) ||
         (descriptor.flags &
          ~(PS_OPERATION_FLAG_DETERMINISTIC |
            PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU |
@@ -713,10 +907,44 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                              "operation plugin backend traits are malformed");
     }
     definition.traits.output_element_type = output_type.value();
+    if (descriptor.output_rank != 0U) {
+      definition.traits.fixed_output_shape.assign(
+          descriptor.output_shape,
+          descriptor.output_shape + descriptor.output_rank);
+    }
     definition.traits.shape_rule = shape_rule.value();
     definition.traits.region_rule = region_rule.value();
     definition.traits.halo_radius = descriptor.halo_radius;
     definition.traits.cacheable = descriptor.cacheable != 0U;
+    definition.traits.parameter_schema.reserve(descriptor.parameter_count);
+    for (std::uint32_t parameter_index = 0U;
+         parameter_index < descriptor.parameter_count; ++parameter_index) {
+      const ps_operation_parameter_descriptor_v2& parameter =
+          descriptor.parameters[parameter_index];
+      if (parameter.struct_size !=
+              sizeof(ps_operation_parameter_descriptor_v2) ||
+          !parameter.key || parameter.key_size == 0U ||
+          parameter.key_size > 1024U || parameter.required > 1U) {
+        return Status::failure(
+            ErrorCode::InvalidArgument,
+            "operation plugin parameter descriptor is malformed");
+      }
+      auto parameter_type = decode_parameter_type(parameter.type);
+      if (!parameter_type.ok()) {
+        return parameter_type.status();
+      }
+      OperationParameterSpec copied;
+      copied.key.assign(parameter.key, parameter.key_size);
+      copied.type = parameter_type.value();
+      copied.required = parameter.required != 0U;
+      definition.traits.parameter_schema.push_back(std::move(copied));
+    }
+    std::sort(definition.traits.parameter_schema.begin(),
+              definition.traits.parameter_schema.end(),
+              [](const OperationParameterSpec& left,
+                 const OperationParameterSpec& right) {
+                return left.key < right.key;
+              });
     const Status traits_status = validate_traits(definition.traits);
     if (!traits_status.ok()) {
       return traits_status;
@@ -725,25 +953,35 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v1* descriptor = &api->operations[index];
+    const ps_operation_descriptor_v2* descriptor = &api->operations[index];
     staged[index].callback =
         [library,
          descriptor](const OperationInvocation& invocation) -> Result<Value> {
-      if (invocation.inputs.size() != descriptor->input_count) {
+      if (invocation.inputs.size() != descriptor->input_count ||
+          invocation.input_demands.size() != invocation.inputs.size()) {
         return Result<Value>(
             Status::failure(ErrorCode::InvalidArgument,
-                            "plugin invocation input count mismatch"));
+                            "plugin invocation input/demand count mismatch"));
       }
-      std::vector<ps_operation_value_view_v1> views;
-      std::vector<std::vector<ps_operation_facet_view_v1>> facet_views;
+      std::vector<ps_operation_value_view_v2> views;
+      std::vector<std::vector<ps_operation_facet_view_v2>> facet_views;
+      std::vector<std::vector<std::uint64_t>> demand_offsets;
+      std::vector<std::vector<std::uint64_t>> demand_extents;
       views.reserve(invocation.inputs.size());
       facet_views.reserve(invocation.inputs.size());
-      for (const Value& input : invocation.inputs) {
+      demand_offsets.reserve(invocation.inputs.size());
+      demand_extents.reserve(invocation.inputs.size());
+      for (std::size_t input_index = 0U; input_index < invocation.inputs.size();
+           ++input_index) {
+        const Value& input = invocation.inputs[input_index];
+        const Region& demand = invocation.input_demands[input_index];
         auto strides = contiguous_strides(
             input.descriptor().shape,
             Value::element_size(input.descriptor().element_type));
         if (!strides.ok() ||
             input.region().rank() != input.descriptor().shape.size() ||
+            demand.rank() != input.descriptor().shape.size() ||
+            !demand.validate(input.descriptor().shape).ok() ||
             input.layout().byte_offset > input.bytes().size() ||
             input.layout().byte_strides != strides.value()) {
           return Result<Value>(Status::failure(
@@ -780,26 +1018,61 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         auto& input_facets = facet_views.emplace_back();
         input_facets.reserve(input.facets().size());
         for (const ValueFacet& facet : input.facets()) {
-          input_facets.push_back(ps_operation_facet_view_v1{
-              sizeof(ps_operation_facet_view_v1), facet.key.data(),
+          input_facets.push_back(ps_operation_facet_view_v2{
+              sizeof(ps_operation_facet_view_v2), facet.key.data(),
               static_cast<std::uint32_t>(facet.key.size()), facet.version,
               facet.payload.empty() ? nullptr : facet.payload.data(),
               static_cast<std::uint32_t>(facet.payload.size())});
         }
-        ps_operation_value_view_v1 view{};
+        ps_operation_value_view_v2 view{};
         view.struct_size = sizeof(view);
         view.element_type =
             static_cast<std::uint32_t>(input.descriptor().element_type);
         view.rank = static_cast<std::uint32_t>(input.descriptor().shape.size());
         view.byte_size = logical_bytes;
         view.shape = input.descriptor().shape.data();
+        auto& offsets = demand_offsets.emplace_back();
+        auto& extents = demand_extents.emplace_back();
+        offsets.reserve(demand.rank());
+        extents.reserve(demand.rank());
+        for (const RegionDimension& dimension : demand.dimensions()) {
+          offsets.push_back(dimension.offset);
+          extents.push_back(dimension.extent);
+        }
+        view.demand_offsets = offsets.data();
+        view.demand_extents = extents.data();
         view.data = input.bytes().data() + input.layout().byte_offset;
         view.facet_count = static_cast<std::uint32_t>(input_facets.size());
         view.facets = input_facets.empty() ? nullptr : input_facets.data();
         views.push_back(view);
       }
+      std::vector<ps_operation_parameter_value_v2> parameter_views;
+      parameter_views.reserve(invocation.parameters.size());
+      for (const auto& parameter : invocation.parameters) {
+        ps_operation_parameter_value_v2 view{};
+        view.struct_size = sizeof(view);
+        view.key = parameter.first.data();
+        view.key_size = static_cast<std::uint32_t>(parameter.first.size());
+        if (const auto* value = std::get_if<std::int64_t>(&parameter.second)) {
+          view.type = PS_OPERATION_PARAMETER_INT64_V2;
+          view.int64_value = *value;
+        } else if (const auto* value = std::get_if<double>(&parameter.second)) {
+          view.type = PS_OPERATION_PARAMETER_FLOAT64_V2;
+          view.float64_value = *value;
+        } else if (const auto* value = std::get_if<bool>(&parameter.second)) {
+          view.type = PS_OPERATION_PARAMETER_BOOL_V2;
+          view.bool_value = *value ? 1U : 0U;
+        } else {
+          const std::string& string_value =
+              std::get<std::string>(parameter.second);
+          view.type = PS_OPERATION_PARAMETER_STRING_V2;
+          view.string_value = string_value.data();
+          view.string_size = static_cast<std::uint32_t>(string_value.size());
+        }
+        parameter_views.push_back(view);
+      }
       OutputSinkState output;
-      ps_operation_output_sink_v1 sink{};
+      ps_operation_output_sink_v2 sink{};
       sink.struct_size = sizeof(sink);
       sink.context = &output;
       sink.publish = publish_plugin_output;
@@ -807,6 +1080,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       const int code = descriptor->execute(
           descriptor->user_data, views.data(),
           static_cast<std::uint32_t>(views.size()),
+          parameter_views.empty() ? nullptr : parameter_views.data(),
+          static_cast<std::uint32_t>(parameter_views.size()),
           invocation.backend == Backend::Cpu ? 1U : 2U, plugin_cancelled,
           const_cast<CancellationToken*>(&invocation.cancellation), &sink,
           diagnostic, sizeof(diagnostic));
@@ -903,6 +1178,23 @@ Result<Value> OperationRegistry::invoke(
     return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                          "operation input count mismatch"));
   }
+  if (invocation.input_demands.size() != invocation.inputs.size()) {
+    return Result<Value>(
+        Status::failure(ErrorCode::InvalidArgument,
+                        "operation input demand count does not match inputs"));
+  }
+  for (std::size_t index = 0U; index < invocation.inputs.size(); ++index) {
+    const Status demand_status = invocation.input_demands[index].validate(
+        invocation.inputs[index].descriptor().shape);
+    if (!demand_status.ok()) {
+      return Result<Value>(demand_status);
+    }
+  }
+  const Status parameter_status =
+      validate_operation_parameters(definition.traits, invocation.parameters);
+  if (!parameter_status.ok()) {
+    return Result<Value>(parameter_status);
+  }
   if (invocation.cancellation.cancelled()) {
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
@@ -955,11 +1247,24 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   Status status = registry->register_operation(OperationDefinition{
       "core.constant",
-      OperationTraits{0U, true, true, true, true, true, sizeof(double), 1U,
-                      true, ElementType::Float64, OperationShapeRule::Scalar,
-                      OperationRegionRule::Whole, 0U},
+      OperationTraits{0U,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      sizeof(double),
+                      2U,
+                      true,
+                      ElementType::Float64,
+                      OperationShapeRule::Scalar,
+                      OperationRegionRule::Whole,
+                      0U,
+                      {OperationParameterSpec{
+                          "value", OperationParameterType::Float64, true}},
+                      {}},
       [](const OperationInvocation& invocation) -> Result<Value> {
-        auto value = floating_parameter(invocation.parameters, "value", 0.0);
+        auto value = floating_parameter(invocation.parameters, "value");
         if (!value.ok()) {
           return Result<Value>(value.status());
         }
@@ -971,10 +1276,21 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "core.identity",
-      OperationTraits{1U, true, true, true, true, true, 0U, 1U, true,
+      OperationTraits{1U,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      0U,
+                      2U,
+                      true,
                       ElementType::Float64,
                       OperationShapeRule::PreserveFirstInput,
-                      OperationRegionRule::Elementwise, 0U},
+                      OperationRegionRule::Elementwise,
+                      0U,
+                      {},
+                      {}},
       [](const OperationInvocation& invocation) -> Result<Value> {
         return Result<Value>(invocation.inputs.front());
       }});
@@ -984,10 +1300,21 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "math.add",
-      OperationTraits{2U, true, true, true, true, true, sizeof(double), 1U,
-                      true, ElementType::Float64,
+      OperationTraits{2U,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      sizeof(double),
+                      2U,
+                      true,
+                      ElementType::Float64,
                       OperationShapeRule::MatchAllInputs,
-                      OperationRegionRule::Elementwise, 0U},
+                      OperationRegionRule::Elementwise,
+                      0U,
+                      {},
+                      {}},
       [](const OperationInvocation& invocation) -> Result<Value> {
         auto left = invocation.inputs[0].as_float64();
         auto right = invocation.inputs[1].as_float64();
@@ -1005,13 +1332,25 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "core.delay",
-      OperationTraits{1U, true, true, true, false, false, 0U, 1U, false,
+      OperationTraits{1U,
+                      true,
+                      true,
+                      true,
+                      false,
+                      false,
+                      0U,
+                      2U,
+                      false,
                       ElementType::Float64,
                       OperationShapeRule::PreserveFirstInput,
-                      OperationRegionRule::Whole, 0U},
+                      OperationRegionRule::Whole,
+                      0U,
+                      {OperationParameterSpec{
+                          "milliseconds", OperationParameterType::Int64, true}},
+                      {}},
       [](const OperationInvocation& invocation) -> Result<Value> {
         auto milliseconds =
-            integer_parameter(invocation.parameters, "milliseconds", 0);
+            integer_parameter(invocation.parameters, "milliseconds");
         if (!milliseconds.ok() || milliseconds.value() < 0 ||
             milliseconds.value() > 5000) {
           return Result<Value>(Status::failure(
@@ -1034,10 +1373,21 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "core.gpu_fallback_probe",
-      OperationTraits{1U, true, true, true, true, true, 0U, 1U, true,
+      OperationTraits{1U,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      0U,
+                      2U,
+                      true,
                       ElementType::Float64,
                       OperationShapeRule::PreserveFirstInput,
-                      OperationRegionRule::Elementwise, 0U},
+                      OperationRegionRule::Elementwise,
+                      0U,
+                      {},
+                      {}},
       [](const OperationInvocation& invocation) -> Result<Value> {
         if (invocation.backend == Backend::Gpu) {
           return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,

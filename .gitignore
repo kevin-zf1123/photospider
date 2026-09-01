@@ -42,6 +42,9 @@
 !tests/**/*.h
 !tests/**/*.hpp
 !tests/**/CMakeLists.txt
+# Exact long-lived manual-fuzz seeds; generated corpus mutations stay ignored.
+!tests/fuzz/corpus/operation_contract_ir/malformed-schema
+!tests/fuzz/corpus/operation_contract_ir/valid-source
 
 # Public documentation and faithful primary-repository mirrors.
 !docs/

@@ -165,10 +165,36 @@ class PHOTOSPIDER_API GraphContext final {
    */
   ~GraphContext() noexcept;
 
-  GraphContext(const GraphContext&) = delete;
-  GraphContext& operator=(const GraphContext&) = delete;
-  GraphContext(GraphContext&&) = delete;
-  GraphContext& operator=(GraphContext&&) = delete;
+  /**
+   * @brief Forbids copying graph revision/currentness ownership.
+   * @param other Source context that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   * @note Construct a new context from an explicit document snapshot instead.
+   */
+  GraphContext(const GraphContext& other) = delete;
+  /**
+   * @brief Forbids copy assignment across independent graph identities.
+   * @param other Source context that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Existing snapshot currentness is never rebound.
+   */
+  GraphContext& operator=(const GraphContext& other) = delete;
+  /**
+   * @brief Forbids moving a context whose address-independent state is shared.
+   * @param other Source context that cannot be moved.
+   * @throws Nothing; the operation is deleted.
+   * @note Stable lifetime keeps outstanding snapshot checks deterministic.
+   */
+  GraphContext(GraphContext&& other) = delete;
+  /**
+   * @brief Forbids move assignment of graph identity and revision state.
+   * @param other Source context that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   * @note Replace the document explicitly through `replace()` instead.
+   */
+  GraphContext& operator=(GraphContext&& other) = delete;
 
   /**
    * @brief Captures a coherent immutable source/revision pair.

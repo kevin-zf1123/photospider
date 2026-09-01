@@ -121,6 +121,14 @@ overflow, type/shape/`Region`/layout/facet validation, exception fencing, and
 exact cleanup are correctness contracts. They are not a sandbox or a plugin
 security product.
 
+The breaking operation ABI is version two. Every operation publishes a closed
+typed parameter schema with required flags; compilation rejects unknown,
+missing, wrong-type, duplicate/conflicting, or otherwise invalid parameters
+before semantic IR exists. Operation callbacks receive the validated values
+and plan-derived input Regions. Whole, Elementwise, and overflow-safe clipped
+Halo rules therefore change physical input demand and plan identity rather
+than serving as digest-only metadata.
+
 ### Retained correctness validation
 
 The reset removes security-product claims, not defensive correctness. The
@@ -164,7 +172,9 @@ renamed into daemon or service authority.
 
 Maintained benchmarks may report raw compile/plan/execute/operation timings,
 selected backend, transfer count/bytes, peak live bytes, fallback/error
-reason, plan digest, result digest, and a correctness oracle. They do not emit
+reason, plan digest, result digest, and a correctness oracle. A supplied oracle
+has a required bounded canonical `oracle_name` recorded on every sample and
+report; a run without an oracle is explicitly `unchecked`. They do not emit
 execution-profile identities, applicability/startability verdicts, evidence
 envelopes, attestations, release evidence, or durable artifact references.
 

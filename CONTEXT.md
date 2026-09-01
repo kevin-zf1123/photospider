@@ -25,8 +25,9 @@ WorkflowDocument
 - `ExecutionContext` owns bounded local CPU/GPU execution resources.
 - `Value`, bounded facets, `Region`, strided layout, immutable bytes, and
   Run-local cross-backend copies are explicit runtime contracts.
-- Operation semantic traits drive typed validation, optimization, and physical
-  planning.
+- Operation ABI v2 semantic traits publish required/exact parameter schemas and
+  Whole/Elementwise/Halo Region rules that drive typed validation,
+  optimization, physical plan demands, and callback input legality.
 
 ## Non-negotiable distinctions
 

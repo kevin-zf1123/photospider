@@ -7,5 +7,5 @@
  * @note The object is compile-only and does not resolve plugin entry points.
  */
 unsigned int photospider_sdk_version_sum(void) {
-  return PS_OPERATION_ABI_VERSION_1 + PS_DATA_PROVIDER_ABI_VERSION_1;
+  return PS_OPERATION_ABI_VERSION_2 + PS_DATA_PROVIDER_ABI_VERSION_1;
 }

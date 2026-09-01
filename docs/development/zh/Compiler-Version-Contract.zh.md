@@ -20,7 +20,8 @@ IPC。
 `PlanCacheKey` 使用 canonical domain-separated input。它们排除 runtime allocation、
 timing、cancellation、ready-queue state 与 daemon identity；是非安全
 reproducibility/cache identity，不是 signature、attestation、durable object id 或
-receipt。
+receipt。Operation-v2 parameter schema 与已验证 value 影响 semantic identity；
+plan-derived output/input Region 影响 physical plan identity。
 
 ## Cache 兼容性
 

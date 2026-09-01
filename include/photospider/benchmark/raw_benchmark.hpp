@@ -45,6 +45,13 @@ struct PHOTOSPIDER_API RawBenchmarkOptions final {
   ExecutionOptions execution;
   /** @brief Optional correctness observation run after successful execution. */
   CorrectnessOracle correctness_oracle;
+  /**
+   * @brief Bounded canonical UTF-8 identity required with an oracle.
+   *
+   * Leave empty only when `correctness_oracle` is absent; such a run is
+   * reported explicitly as `unchecked`.
+   */
+  std::string oracle_name;
 };
 
 /**
@@ -68,6 +75,8 @@ struct PHOTOSPIDER_API RawBenchmarkSample final {
   bool correctness_checked = false;
   /** @brief Oracle observation when checked. */
   bool correctness_accepted = false;
+  /** @brief Canonical oracle identity or the explicit value `unchecked`. */
+  std::string oracle_name;
 };
 
 /**
@@ -76,6 +85,9 @@ struct PHOTOSPIDER_API RawBenchmarkSample final {
  * @note Reports are ordinary in-memory diagnostics with no durable identity.
  */
 struct PHOTOSPIDER_API RawBenchmarkReport final {
+  /** @brief Canonical oracle identity or `unchecked`, shared by every sample.
+   */
+  std::string oracle_name;
   /** @brief Samples in increasing iteration order. */
   std::vector<RawBenchmarkSample> samples;
 };
