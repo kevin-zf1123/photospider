@@ -28,12 +28,16 @@ plugin state.
 ## Validation
 
 Loading validates exact ABI version/structure sizes, pointer and array
-alignment, pointer/count pairs, bounded key/count/rank/parameter values, text
-bytes, duplicate parameter declarations, closed enum/flag/type combinations,
-required callbacks, output element/shape/byte count, facet arrays/key/version/
-payload, arithmetic overflow, and exactly-once destroy ownership. This ABI
-version rejects trailing structure bytes and publishes no v1 compatibility
-entry point.
+alignment, pointer/count pairs, bounded key/count/rank/parameter values,
+strict UTF-8 operation/parameter-schema/provider-schema keys, duplicate
+parameter declarations, closed enum/flag/type combinations, required
+callbacks, output element/shape/byte count, facet arrays/key/version/payload,
+arithmetic overflow, and exactly-once destroy ownership. Key validation rejects
+invalid continuation bytes, truncation, overlong encodings, UTF-16 surrogates,
+values above U+10FFFF, embedded nulls, and ASCII controls before publication;
+it does not normalize Unicode. Ordinary facet payload and Value bytes remain
+opaque binary data. This ABI version rejects trailing structure bytes and
+publishes no v1 compatibility entry point.
 
 Malformed registration publishes nothing. Multi-record registry publication
 uses copy-then-swap, so allocation failure cannot expose a prefix. Operation
@@ -46,6 +50,12 @@ also assumes its available destroy callback. Symbol, table, schema, heap-owner,
 or later staging failure therefore calls every acquired destroy callback and
 native close exactly once. Successful loading explicitly moves the same owner
 into the published heap lease.
+
+The provider registry declares native leases before copied schema records so
+reverse destruction retires every registry-owned schema before the final
+provider destroy callback and native unload. A `find()` result owns its copied
+key and contains no DSO pointer, so it may outlive registry teardown without
+borrowing mapped provider memory.
 
 ## Lifecycle and boundary
 

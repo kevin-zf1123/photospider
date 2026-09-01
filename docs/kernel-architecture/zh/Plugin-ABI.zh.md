@@ -25,10 +25,14 @@ backing bytes 会被拒绝，不能成为不可见的 plugin state。
 ## Validation
 
 Loading 验证 exact ABI version/structure size、pointer/array alignment、pointer/count pair、
-bounded key/count/rank/parameter value、text byte、duplicate parameter declaration、closed
-enum/flag/type combination、required callback、output element/shape/byte count、facet
-array/key/version/payload、arithmetic overflow 与 exactly-once destroy ownership。该 ABI
-version 拒绝 trailing structure bytes，也不发布 v1 compatibility entry point。
+bounded key/count/rank/parameter value、严格 UTF-8 operation/parameter-schema/
+provider-schema key、duplicate parameter declaration、closed enum/flag/type combination、
+required callback、output element/shape/byte count、facet array/key/version/payload、
+arithmetic overflow 与 exactly-once destroy ownership。Key validation 会在 publication
+前拒绝 invalid continuation byte、truncation、overlong encoding、UTF-16 surrogate、
+大于 U+10FFFF 的值、embedded null 与 ASCII control，但不执行 Unicode normalization。
+普通 facet payload 与 Value byte 仍是 opaque binary data。该 ABI version 拒绝 trailing
+structure bytes，也不发布 v1 compatibility entry point。
 
 Malformed registration 不发布任何内容。Multi-record registry publication 使用
 copy-then-swap，allocation failure 不能暴露 prefix。Operation exception 被隔离；output 在
@@ -39,6 +43,11 @@ Native open 后，每个 operation/provider handle 都立即由 move-only stack 
 因此 symbol、table、schema、heap-owner 或后续 staging failure 会对每个已取得的 destroy
 callback 与 native close 各调用恰好一次。成功 loading 会把同一个 owner 显式 move 到
 published heap lease。
+
+Provider registry 在 copied schema record 之前声明 native lease，因此逆序析构会在
+最终 provider destroy callback 与 native unload 前退役所有 registry-owned schema。
+`find()` 结果自行拥有复制后的 key，也不包含 DSO pointer，因此可在 registry teardown
+后继续存在而不借用 mapped provider memory。
 
 ## Lifecycle 与边界
 

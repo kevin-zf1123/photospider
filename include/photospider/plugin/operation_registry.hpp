@@ -65,7 +65,7 @@ enum class OperationParameterType : std::uint32_t {
  * unknown-type, or malformed declarations before compiler visibility.
  */
 struct PHOTOSPIDER_API OperationParameterSpec final {
-  /** @brief Nonempty bounded parameter key. */
+  /** @brief Nonempty bounded strict UTF-8 parameter key. */
   std::string key;
   /** @brief Exact required `ParameterValue` alternative. */
   OperationParameterType type = OperationParameterType::Int64;
@@ -154,7 +154,7 @@ using OperationCallback = std::function<CallbackSignature>;
  * @note Registration deep-copies key/traits/callback into registry ownership.
  */
 struct PHOTOSPIDER_API OperationDefinition final {
-  /** @brief Nonempty unique operation key. */
+  /** @brief Nonempty unique strict UTF-8 operation key. */
   std::string key;
   /** @brief Immutable compiler-visible semantic traits. */
   OperationTraits traits;

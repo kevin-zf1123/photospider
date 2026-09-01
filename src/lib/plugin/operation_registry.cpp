@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/plugin/operation_plugin_api.h"
+#include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
 #include "plugin/library_test_hooks.hpp"
@@ -29,19 +30,15 @@ namespace ps {
 namespace {
 
 /**
- * @brief Returns whether a public key is bounded canonical UTF-8-like text.
+ * @brief Returns whether a public key is bounded canonical strict UTF-8.
  * @param key Candidate operation/schema key.
- * @return True for a nonempty 1..1024-byte key without ASCII control bytes.
+ * @return True for a nonempty 1..1024-byte well-formed key without ASCII
+ * control bytes.
  * @throws Nothing.
- * @note Full Unicode normalization is intentionally outside operation identity.
+ * @note Unicode normalization is intentionally outside operation identity.
  */
 bool valid_key(const std::string& key) noexcept {
-  if (key.empty() || key.size() > 1024U) {
-    return false;
-  }
-  return std::none_of(key.begin(), key.end(), [](unsigned char byte) {
-    return byte < 0x20U || byte == 0x7fU;
-  });
+  return plugin_internal::valid_utf8_key(key);
 }
 
 /**

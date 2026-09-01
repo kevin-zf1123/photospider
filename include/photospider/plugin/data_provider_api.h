@@ -55,7 +55,9 @@ typedef struct ps_data_provider_api_v1 {
    * @brief Releases provider-owned records exactly once.
    * @param schemas Original schema array.
    * @param schema_count Original count.
-   * @note Called after all copied definitions and provider leases retire.
+   * @note Called after registry-owned schema copies retire, while the final
+   * provider lease still owns the mapped table; native unload follows this
+   * callback. Caller-held value copies borrow no provider memory.
    */
   void (*destroy)(const ps_data_schema_v1* schemas, uint32_t schema_count);
 } ps_data_provider_api_v1;

@@ -40,4 +40,15 @@ void notify_native_close(LibraryKind kind) noexcept {
   }
 }
 
+/**
+ * @brief Implements copied-provider-schema retirement observation.
+ * @copydetails notify_provider_schemas_retired
+ */
+void notify_provider_schemas_retired(std::size_t count) noexcept {
+  const LibraryTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->provider_schemas_retired) {
+    hooks->provider_schemas_retired(count);
+  }
+}
+
 }  // namespace ps::plugin_testing

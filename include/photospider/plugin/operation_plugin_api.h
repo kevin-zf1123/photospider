@@ -70,7 +70,7 @@ typedef enum ps_operation_parameter_type_v2 {
 typedef struct ps_operation_parameter_descriptor_v2 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
-  /** @brief Nonempty bounded parameter key. */
+  /** @brief Nonempty bounded UTF-8 parameter key. */
   const char* key;
   /** @brief Exact key byte count excluding any terminator. */
   uint32_t key_size;
@@ -89,7 +89,7 @@ typedef struct ps_operation_parameter_descriptor_v2 {
 typedef struct ps_operation_parameter_value_v2 {
   /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
-  /** @brief Nonempty schema-declared parameter key. */
+  /** @brief Nonempty schema-declared UTF-8 parameter key. */
   const char* key;
   /** @brief Exact key byte count excluding any terminator. */
   uint32_t key_size;
