@@ -1,43 +1,45 @@
-# ADR 0002：外部库是内核 Adapter
+# ADR 0002：外库不进入 Kernel 语义
 
 ## 状态
 
-已接受，并已在当前内核与 embedded-product 边界实现。
+已接受，并由 ADR 0015 针对当前可嵌入 kernel 边界收窄。
 
 ## 背景
 
-历史上，私有 Graph、ROI、dirty propagation、planning、cache 和 runtime 代码使用 OpenCV
-geometry 与 image object。YAML 也同时承担图文件格式和内部 runtime value model。这些依赖使
-图像处理库与序列化库成为内核语义的一部分。
+Reset 之前的产品在 core、adapter、CLI、persistence、service 或产品安全路径中
+嵌入 OpenCV、yaml-cpp、FTXUI、CURL 和 OpenSSL。这种耦合使 optional library 成为
+kernel build 的一部分，并让它们的类型和 lifecycle 假设影响 kernel 语义。
 
-该耦合阻塞了独立 geometry 优化、可替换 operation provider、in-memory graph definition、
-通用数据类型，以及不依赖 OpenCV/yaml-cpp 的内核构建。
+Scope Reset 保留一个可嵌入 graph compiler/executor，必需 platform dependency 只有
+C++ runtime 与 thread library。第三方算法仍可供 operation implementation 使用，但不属于
+kernel package contract。
 
 ## 决策
 
-内核拥有自己的语义类型和最小原语：
+Kernel 使用 public contract 和 standard-library representation 拥有
+`WorkflowDocument`、typed IR、operation trait、`Value`、`Region`、layout、execution 与
+diagnostic 类型。
 
-- checked geometry、ROI、extent、grid、scale 和 tile 数学；
-- planning/execution 所需的 stride-aware buffer view 以及最小 copy/fill/validation operation；
-- format-neutral parameter value、graph definition 和 error contract。
+本仓库不提供 OpenCV/yaml-cpp adapter、CLI library、codec 或 dependency-toggle
+compatibility profile。Canonical kernel target 与 installed package 不会 find、link、export
+或 advertise 这些库。
 
-OpenCV 是可选 adapter/provider。OpenCV image view、算法、初始化、exception translation 和
-codec 保持在 operation、buffer adapter 或 codec interface 后方。Graph、propagation、planning、
-cache 或 runtime interface 不出现 OpenCV 类型。
+受信任的进程内 operation 或 data-provider DSO 可以在私有实现中链接第三方库。
+它必须在 operation/provider ABI 边界转换所有 input、output、exception 和 lifecycle
+behavior。任何第三方 type、allocator owner、exception、path 或 configuration object 都不得
+跨越 public ABI。ABI validation 是 correctness validation，不是 sandboxing 或 native-code
+security。
 
-Graph persistence 通过 format-neutral reader/writer contract 注入。YAML 继续作为一种受支持的
-filesystem adapter，但 `YAML::Node` 不再作为 runtime parameter、output、cache metadata 或
-graph-state value model。
-
-所有权迁移必须完整完成：新旧语义类型不会通过永久 forwarding wrapper 共存。
+`WorkflowDocument` 是 in-memory compiler input。File format 与 storage service 属于 consumer
+关切，不是 kernel adapter 或 authority。
 
 ## 结果
 
-- 无外部依赖的内核构建成为架构验收项。
-- 内核原语刻意保持很小；Photospider 不会重新实现通用图像处理库。
-- 算法质量与 codec policy 在编排之外保持可替换。
-- Graph load/reload/save 需要显式 transaction 和 error matrix。
-- Operation provider 必须声明并发与资源行为，不能用隐藏的进程级库锁表达。
-- 默认 profile 保留 OpenCV/YAML 行为；`PHOTOSPIDER_ENABLE_OPENCV=OFF` 与
-  `PHOTOSPIDER_ENABLE_YAML=OFF` 则选择标准库或显式 unavailable adapter。
-- Clean dependency-disabled producer、install 与外部 Host consumer 是本决策的长期验收证据。
+- Clean kernel configure/build/install 和 isolated consumer 不需要 optional third-party
+  package。
+- Kernel 原语刻意保持最小；Photospider 不重建通用图像处理、serialization、UI、
+  network 或 crypto library。
+- Operation DSO 在 process-global startup-configured operation set 内部，拥有所需的
+  library initialization、thread setting 和 exception translation。
+- 新增本仓库拥有的 library integration 需要聚焦的 operation/provider 决策；它不得重新
+  引入 core dependency、compatibility option 或 filesystem authority。

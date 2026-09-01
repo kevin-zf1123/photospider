@@ -14,12 +14,17 @@
 对应的中文读者副本保存在 `kernel-architecture/zh/`。没有中文源副本的历史文档继续只作为
 历史材料，不会被追溯认定为维护中文档。
 
-## 当前事实来源
+## Archive-only 边界
 
-- 产品使用：`readme.md` 与 `manual.md`；
-- 当前内核行为：`docs/kernel-architecture/zh/README.zh.md`；
-- 已接受的长期决策：`docs/adr/zh/`；
-- 已接受的未来架构：`docs/roadmap/zh/Kernel-Evolution.zh.md`；
-- 维护中的开发验证指南：`docs/development/zh/Testing-and-Validation.zh.md`。
+本目录中的文件只提供历史背景。Active index 不会把它们链接成产品权威，也不得
+使用它们恢复已删除领域。当前事实来源是：
 
-使用归档陈述前，必须对照当前代码与上述维护中文档核验。
+- 产品 surface：`readme.md`；
+- 当前 kernel 行为：`docs/kernel-architecture/zh/README.zh.md`；
+- 最高产品边界决策：
+  `docs/adr/zh/0015-breaking-product-boundary-scope-reset.zh.md`；
+- 维护中的验证指南：`docs/development/zh/Testing-and-Validation.zh.md`。
+
+引用归档陈述前，必须对照当前代码与这些维护文档核验。本目录中的 Job/service、
+worker-process、policy、trust、isolation、durable-result 与 evidence material 始终
+属于 archive-only。

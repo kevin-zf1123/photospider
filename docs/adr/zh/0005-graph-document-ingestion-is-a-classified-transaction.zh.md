@@ -1,90 +1,46 @@
-# ADR 0005：图文档摄取是有分类的事务
+# ADR 0005：Workflow Source Publication 与 Compilation 是分离的原子步骤
 
-## 状态
-
-已接受，并已为初次图装载和已有会话重载实现。
+- 状态：已接受，由 ADR 0015 修订
+- 日期：2026-09-01 边界修订
 
 ## 背景
 
-图文档摄取会跨越公开 `ps::Host`、嵌入式转换层、`InteractionService`、`Kernel`、
-`GraphIOService` 和 `GraphModel`。这些层过去对缺失路径、解析器失败、节点模式失败和
-拓扑校验的处理不一致。初次装载会把完整文档失败捕获为空 optional，因此 Host 只报告
-笼统的 `InvalidParameter`。显式提供的缺失路径还可能让旧的会话本地
-`content.yaml` 留在原处并被装载；本地文件也不存在时，则会发布空会话。重载暴露了
-更多细节，但并未与初次装载共享一套冻结矩阵。
-
-公开 `GraphErrc` 数值、Host 签名、精确 IPC 状态序列化、图表所有权、调度器预留事务
-以及 `GraphModel::replace_nodes()` 的“准备后交换”机制已经存在。缺失的决策是如何把
-这些部分组合成一项统一的文档契约。
+Kernel 接收 caller-owned、format-neutral 的 `WorkflowDocument`。替换 source state 与
+验证 compiler semantics 具有不同 failure boundary：source replacement 必须原子完成，
+invalid graph 必须失败且不能发布 partial IR 或 plan。
 
 ## 决策
 
-图文档摄取使用以下稳定分类：
+`GraphContext` 复制完整 source document，并拥有 nonzero monotonic revision。
+`snapshot()` 捕获一对 coherent document/revision。`replace()` 在 publication 前准备新
+副本，再在同一锁下推进 revision。Allocation failure 保持 source/revision 不变；revision
+overflow 在 publication 前失败。成功 replacement 会立即使旧 snapshot、IR 与 plan stale。
 
-| 条件 | 公开结果 |
-| --- | --- |
-| 显式来源缺失、不可读或无法复制 | `GraphErrc::Io` |
-| YAML 语法或表示失败 | `GraphErrc::InvalidYaml` |
-| 非序列根节点、重复节点 id 或节点模式失败 | `GraphErrc::InvalidYaml` |
-| 未解析的图输入 | `GraphErrc::MissingDependency` |
-| 循环图拓扑 | `GraphErrc::Cycle` |
-| 意外的非资源失败 | `GraphErrc::Unknown` |
-| 资源耗尽 | 原样传播 `std::bad_alloc` |
+Source publication 不声明 semantic validity。`Compiler::analyze` 把 captured snapshot 作为
+一个 fail-before-publication transaction 验证：
 
-操作生命周期校验继续优先。初次装载重复会话时返回 `InvalidParameter`。重载会先解析
-会话，因此会话缺失时返回 `NotFound`；对已有会话，空重载路径返回
-`InvalidParameter`。
+- document version、nonzero unique node id、unique nonempty output name；
+- source reference、port、operation availability 与 parameter vocabulary；
+- cycle-free deterministic topology；
+- operation input count 与静态推导的 type/shape/Region rule；
+- 返回完整 `SemanticGraphIR` 前的 graph currentness。
 
-初次装载的空路径是省略标记，不是显式文件。若
-`<root>/<session>/content.yaml` 存在，Kernel 会装载它；否则 Kernel 会有意发布空图。
-所有非空路径都是显式路径，绝不回退到本地内容。Kernel 把来源/会话文件系统检查和复制
-失败映射为 `Io`。
+Recoverable failure 使用 public `ErrorCode` 类别，例如 `InvalidArgument`、`NotFound`、
+`Cycle`、`TypeMismatch` 与 `Stale`。`std::bad_alloc` 仍表示 process resource exhaustion，
+不能被转换为成功的 empty graph。
 
-`GraphIOService` 拥有文档分类，因为它能区分文件访问、YAML 表示、definition 转换和拓扑
-校验。它会把 GraphDefinition translator/adapter 的 schema 细节失败转换为文档模式
-`InvalidYaml`，同时保留拓扑 `GraphError` 值。`InteractionService` 是防御性的最终嵌入式边界：它保留
-`GraphError`，映射残余文件/YAML 异常，把其他标准和非标准失败转换为 `Unknown`，并始终
-重新抛出 `std::bad_alloc`。
+后续 optimizer/planner stage 都会先构造完整 immutable value 再返回，并重复 currentness
+检查。Failure 不会泄漏 partial IR/plan。
 
-初次装载是“准备后发布”事务。Kernel 会在把会话插入图表之前准备运行时和调度器，并校验
-完整文档。失败会销毁未发布所有权并归还调度器预留。目录和已复制文件的暂存副作用可能保留，
-因为它们不是已发布会话所有权。
+## 边界
 
-重载会把脱离运行态的 `GraphDefinition` 解析到临时所有权中。In-memory adapter 会在单次调用
-`GraphModel::replace_nodes()` 之前 stage 每个私有节点；该调用会先校验依赖/环并构造替换邻接，
-再交换节点和拓扑。因此失败会保留节点、邻接、拓扑代次、运行时图状态和会话标识。只有成功
-替换这一提交会重置运行时图状态并推进拓扑代次。
-
-IPC 不添加第二套分类。它会序列化精确的 Host 状态，并在 Host 装载失败时回滚已预留的
-会话名称。
+`WorkflowDocument` 是 in-memory compiler input。Kernel 不拥有 file discovery、parser、
+YAML adapter、document persistence、storage service 或 daemon wire error mapping。
+Consumer 可以先把文件或 local IPC payload 转换为 document，再调用 kernel。
 
 ## 结果
 
-- 初次装载和重载现在对所有文档类别保持一致，同时保留各自不同的会话生命周期结果。
-- 提供缺失显式路径的调用方现在收到 `Io`，而不是陈旧内容或空会话成功。
-- 把全部初次文档拒绝视为 `InvalidParameter` 的调用方必须改为按精确稳定图错误码分支。
-- 资源耗尽继续与可恢复的图领域失败区分开来。
-- 公开 API 和 `GraphErrc` 数值不变。
-- 文件系统暂存清理继续是尽力而为，不属于图表原子性。
-- `test_graph_document_errors` 是错误矩阵和事务不变量的长期公开 Host/直接模型 CTest
-  所有者。已有调度器预算和 IPC 协议测试继续覆盖预留及注册表回滚。
-
-## 未采用的方案
-
-### 把所有空路径都视为错误
-
-不采用，因为初次装载已经用省略语义创建新空会话或消费会话本地内容。重载没有对应的创建
-语义，因此其空路径继续无效。
-
-### 为兼容性保留显式来源回退
-
-不采用，因为调用方选择的来源不得静默消费无关的陈旧内容，也不得在没有消费请求时报告成功。
-
-### 只在公开 Host 适配器中规范化
-
-不采用，因为直接内部调用方和重载 LastError 仍会观察到不同的异常类与类别。
-
-### 把 `std::bad_alloc` 转换为 `Unknown`
-
-不采用，因为内存耗尽需要进程级策略，而且状态构造本身也可能分配内存。语言异常仍是可靠的
-资源耗尽通道。
+- 即使 replacement 之后被判定语义非法，source replacement 仍保持原子性。
+- Compiler validation 不会部分修改 graph context。
+- Revision check 拒绝由已替换 source 编译出的 plan。
+- File-format policy 位于 kernel package 之外。

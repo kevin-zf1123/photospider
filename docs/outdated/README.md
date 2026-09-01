@@ -19,14 +19,18 @@ Their Chinese reader copies are preserved under
 `kernel-architecture/zh/`. Historical documents without a Chinese source copy
 remain historical-only and are not retroactively treated as maintained docs.
 
-## Current Sources of Truth
+## Archive-only boundary
 
-- `readme.md` and `manual.md` for product use;
+Files below this directory are historical context only. Active indexes do not
+link them as product authority, and they must not be used to restore a removed
+domain. The current sources of truth are:
+
+- `readme.md` for the product surface;
 - `docs/kernel-architecture/README.md` for current kernel behavior;
-- `docs/adr/` for accepted long-lived decisions;
-- `docs/roadmap/Kernel-Evolution.md` for accepted future architecture;
-- `docs/development/Testing-and-Validation.md` for maintained development
-  validation guidance.
+- `docs/adr/0015-breaking-product-boundary-scope-reset.md` for the highest
+  product-boundary decision; and
+- `docs/development/Testing-and-Validation.md` for maintained validation.
 
-Before using an archived statement, verify it against current code and the
-maintained documents above.
+Before quoting an archived statement, verify it against current code and those
+maintained documents. Job/service, worker-process, policy, trust, isolation,
+durable-result, and evidence material here remains archive-only.

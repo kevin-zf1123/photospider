@@ -6,20 +6,19 @@ issue/project tracking 维护。
 
 | ADR | 决策 |
 | --- | --- |
-| [0001](0001-graph-state-access-is-not-scheduler-dispatch.zh.md) | 图状态访问不是 scheduler dispatch。 |
-| [0002](0002-external-libraries-are-kernel-adapters.zh.md) | 外部库是 kernel adapter。 |
-| [0003](0003-process-owned-execution-resources.zh.md) | 执行资源由进程拥有。 |
-| [0004](0004-opencv-cpu-operations-are-reentrant-provider-work.zh.md) | OpenCV CPU operation 是可重入 provider 工作。 |
-| [0005](0005-graph-document-ingestion-is-a-classified-transaction.zh.md) | Graph 文档摄取是有分类的事务。 |
-| [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md) | Kernel 文档拆分事实、决策、目标与交付状态。 |
-| [0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md) | Compute Run 与进程执行具有不同所有者。 |
-| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md) | 通用 Value、内存 binding 与 Region 是显式版本化契约。 |
-| [0009](0009-compute-io-durability-and-completion-semantics.zh.md) | Compute I/O durability 与完成语义是不同契约。 |
-| [0010](0010-execution-profile-slos-are-six-independent-benchmark-verdicts.zh.md) | 执行画像 SLO 是六项独立 benchmark 判定。 |
-| [0011](0011-server-control-plane-workers-and-plugin-runtimes-are-separate-security-domains.zh.md) | Server control plane、worker、artifact authority 与 plugin runtime 属于不同安全域。 |
-| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | Operation plugin 使用独立版本化 pure-C ABI。 |
-| [0013](0013-ordinary-dense-image-coordinates-samples-colors-and-statistics-are-separate-contracts.zh.md) | 普通 DenseImage 坐标、样本、颜色与统计是分离契约。 |
-| [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | Compiler、document、plan、digest、cache 与 extension 版本是相互独立的契约。 |
+| [0002](0002-external-libraries-are-kernel-adapters.zh.md) | 外库不进入 kernel 语义。 |
+| [0003](0003-process-owned-execution-resources.zh.md) | 本地执行资源具有显式所有者。 |
+| [0005](0005-graph-document-ingestion-is-a-classified-transaction.zh.md) | Workflow 文档摄取是分类事务。 |
+| [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md) | 文档分离事实、决策与交付状态。 |
+| [0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md) | Compute Run 与本地执行资源具有不同所有者。 |
+| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md) | Value、facet、layout 与 Region 是显式验证契约。 |
+| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | Operation 与 data provider 使用版本化进程内 ABI。 |
+| [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | Compiler document、IR、plan 与 digest 具有独立 identity。 |
+| [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 产品边界是可嵌入 kernel 与临时 local daemon。 |
 
-新 ADR 使用下一个四位编号。被取代的 ADR 仍保留在序列中并链接到替代项，不能被
-静默改写或删除。
+ADR 0015 是最高 active 产品边界权威。重置前 ADR 0001、0004、0009、0010、0011 与 0013 已由该
+breaking decision 有意从 active 集合退役。其历史文本只能从 Git 历史和
+`pre-breaking-scope-reset-2026-09-01` tag 取得，不得作为 roadmap 或恢复来源。
+
+新 ADR 使用下一个四位编号。普通 supersession 会链接替代项；当保留旧决策会错误
+宣传已删产品领域时，breaking scope reset 可以直接将 active decision 退役。
