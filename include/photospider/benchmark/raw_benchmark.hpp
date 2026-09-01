@@ -58,8 +58,9 @@ struct PHOTOSPIDER_API RawBenchmarkOptions final {
 /**
  * @brief Raw measurement and outcome for one benchmark iteration.
  *
- * @note Failure preserves completed compiler timing and a typed error reason;
- * it never fabricates execution measurements.
+ * @note A non-cancellation failure preserves completed compiler timing and a
+ * typed error reason; cancellation aborts the complete run instead of
+ * publishing a sample.
  */
 struct PHOTOSPIDER_API RawBenchmarkSample final {
   /** @brief Zero-based iteration index. */
@@ -89,7 +90,10 @@ struct PHOTOSPIDER_API RawBenchmarkReport final {
   /** @brief Canonical oracle identity or `unchecked`, shared by every sample.
    */
   std::string oracle_name;
-  /** @brief Samples in increasing iteration order. */
+  /**
+   * @brief Samples in increasing iteration order.
+   * @note No report is published when any iteration execution is cancelled.
+   */
   std::vector<RawBenchmarkSample> samples;
 };
 
@@ -115,10 +119,12 @@ class PHOTOSPIDER_API RawBenchmarkRunner final {
    * @param graph Independently owned source graph context.
    * @param options Positive iteration and local execution controls.
    * @param cancellation Cooperative cancellation shared by all iterations.
-   * @return Complete raw report or invalid/cancelled setup failure.
+   * @return Complete raw report, invalid setup failure, or top-level
+   * `Cancelled` when cancellation is observed before/during any iteration.
    * @throws std::bad_alloc If report or pipeline allocation fails.
-   * @note Compiler/execution failures become sample outcomes; later iterations
-   * continue unless cancellation is observed.
+   * @note Compiler and non-cancellation execution failures become sample
+   * outcomes and later iterations continue. An execution `Cancelled` result
+   * aborts immediately and publishes no partial or successful report.
    */
   [[nodiscard]] Result<RawBenchmarkReport> run(
       const GraphContext& graph, const RawBenchmarkOptions& options,

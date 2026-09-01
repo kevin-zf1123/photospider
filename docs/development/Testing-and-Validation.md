@@ -38,8 +38,11 @@ Kernel tests cover:
 - raw benchmark diagnostics with a named oracle or explicit `unchecked`
   identity and without verdict/evidence output, including rejected/throwing
   oracles that retain completed compile/plan/execute/operation/backend/digest
-  observations while reporting correctness separately. Duration assertions
-  permit zero because the monotonic clock may have microsecond resolution.
+  observations while reporting correctness separately. An execution
+  `Cancelled` result at any iteration aborts the whole run without publishing
+  a partial/success report; other execution failures remain samples and later
+  iterations continue. Duration assertions permit zero because the monotonic
+  clock may have microsecond resolution.
 
 Daemon tests live in `photospider-daemon` and cover local frame validation,
 nine-method routing, ephemeral Session/Job lifecycle, restart loss,

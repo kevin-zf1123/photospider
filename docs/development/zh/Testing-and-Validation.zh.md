@@ -33,6 +33,8 @@ Kernel test 覆盖：
 - 带 named oracle 或显式 `unchecked` identity，且不生成 verdict/evidence output 的
   raw benchmark diagnostic；当 oracle 返回拒绝或抛出异常时，仍保留已完成的
   compile/plan/execute/operation/backend/digest observation，并独立报告 correctness。
+  任一 iteration 的 execution 返回 `Cancelled` 时会中止整个 run，不发布 partial/
+  success report；其他 execution failure 保留为 sample，后续 iteration 继续。
   由于 monotonic clock 可能只有微秒分辨率，duration 允许为零。
 
 Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、九方法 routing、
