@@ -1,4 +1,3 @@
-#include <array>
 #include <chrono>
 #include <future>
 #include <limits>
@@ -9,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "benchmark/raw_benchmark_test_hooks.hpp"
 #include "photospider/execution/execution.hpp"
 #include "support/test_support.hpp"
 
@@ -149,6 +149,91 @@ ps::WorkflowDocument region_document() {
   };
   document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
   return document;
+}
+
+/** @brief Number of completed-compilation hook invocations in this test. */
+std::uint32_t g_compilation_diagnostics_hook_calls = 0U;
+
+/** @brief Number of completed-execution hook invocations in this test. */
+std::uint32_t g_execution_diagnostics_hook_calls = 0U;
+
+/**
+ * @brief Returns legal deterministic compiler timing sentinels.
+ * @return Immutable diagnostics with one legitimate zero-microsecond stage.
+ * @throws Nothing.
+ * @note Zero is valid because a stage may complete within clock resolution.
+ */
+const ps::CompilationDiagnostics& sentinel_compilation_diagnostics() noexcept {
+  static const ps::CompilationDiagnostics diagnostics{0U, 11U, 13U};
+  return diagnostics;
+}
+
+/**
+ * @brief Builds internally coherent successful execution sentinels.
+ * @return Diagnostics containing fallback, transfer, backend, timing, and
+ * digest observations distinct from defaults.
+ * @throws std::bad_alloc If sentinel container allocation fails.
+ * @note The unavailable GPU attempt legitimately has zero duration and the
+ * later CPU attempt is the selected backend for that node.
+ */
+ps::ExecutionDiagnostics make_sentinel_execution_diagnostics() {
+  ps::ExecutionDiagnostics diagnostics;
+  diagnostics.execute_us = 29U;
+  diagnostics.selected_backends = {
+      {1U, ps::Backend::Cpu},
+      {2U, ps::Backend::Gpu},
+      {3U, ps::Backend::Cpu},
+  };
+  diagnostics.transfer_count = 1U;
+  diagnostics.transfer_bytes = sizeof(double);
+  diagnostics.peak_live_bytes = 24U;
+  diagnostics.fallback_reasons = {"node 1 sentinel GPU fallback"};
+  diagnostics.operation_timings = {
+      {1U, ps::Backend::Gpu, 0U, ps::ErrorCode::BackendUnavailable},
+      {1U, ps::Backend::Cpu, 3U, ps::ErrorCode::Ok},
+      {2U, ps::Backend::Gpu, 5U, ps::ErrorCode::Ok},
+      {3U, ps::Backend::Cpu, 7U, ps::ErrorCode::Ok},
+  };
+  diagnostics.plan_digest = std::string(64U, 'a');
+  diagnostics.result_digest = std::string(64U, 'b');
+  return diagnostics;
+}
+
+/**
+ * @brief Returns legal deterministic execution diagnostic sentinels.
+ * @return Immutable diagnostics shared by both oracle-failure paths.
+ * @throws std::bad_alloc On first-call sentinel construction failure.
+ * @note The returned object remains alive until process shutdown.
+ */
+const ps::ExecutionDiagnostics& sentinel_execution_diagnostics() {
+  static const ps::ExecutionDiagnostics diagnostics =
+      make_sentinel_execution_diagnostics();
+  return diagnostics;
+}
+
+/**
+ * @brief Replaces completed compiler diagnostics with deterministic sentinels.
+ * @param diagnostics Mutable successful compiler output.
+ * @return No value.
+ * @throws Nothing.
+ * @note The call count proves that the test seam executed before sample copy.
+ */
+void inject_compilation_diagnostics(
+    ps::CompilationDiagnostics& diagnostics) noexcept {
+  ++g_compilation_diagnostics_hook_calls;
+  diagnostics = sentinel_compilation_diagnostics();
+}
+
+/**
+ * @brief Replaces completed executor diagnostics with deterministic sentinels.
+ * @param diagnostics Mutable successful executor output.
+ * @return No value.
+ * @throws std::bad_alloc If copying sentinel containers fails.
+ * @note The call count proves that the test seam executed before sample copy.
+ */
+void inject_execution_diagnostics(ps::ExecutionDiagnostics& diagnostics) {
+  ++g_execution_diagnostics_hook_calls;
+  diagnostics = sentinel_execution_diagnostics();
 }
 
 }  // namespace
@@ -614,8 +699,18 @@ int main() {
     return CorrectnessObservation{false, "intentional mismatch"};
   };
   rejected_oracle_options.oracle_name = "always-rejects";
+  const auto& expected_compilation = sentinel_compilation_diagnostics();
+  const auto& expected_execution = sentinel_execution_diagnostics();
+  const ps::benchmark_testing::RawBenchmarkTestHooks benchmark_test_hooks{
+      &inject_compilation_diagnostics,
+      &inject_execution_diagnostics,
+  };
+  ps::benchmark_testing::install_raw_benchmark_test_hooks(
+      &benchmark_test_hooks);
   auto rejected_oracle_report = benchmark.run(graph, rejected_oracle_options);
   PS_CHECK(rejected_oracle_report.ok());
+  PS_CHECK(g_compilation_diagnostics_hook_calls == 1U);
+  PS_CHECK(g_execution_diagnostics_hook_calls == 1U);
   PS_CHECK(rejected_oracle_report.value().oracle_name == "always-rejects");
   PS_CHECK(rejected_oracle_report.value().samples.size() == 1U);
   const RawBenchmarkSample& rejected_sample =
@@ -626,26 +721,37 @@ int main() {
   PS_CHECK(!rejected_sample.correctness_accepted);
   PS_CHECK(rejected_sample.outcome == ErrorCode::OperationFailed);
   PS_CHECK(rejected_sample.reason == "intentional mismatch");
-  const std::array<std::uint64_t, 3U> rejected_compile_durations{
-      rejected_sample.compilation.analyze_us,
-      rejected_sample.compilation.optimize_us,
-      rejected_sample.compilation.plan_us,
-  };
-  PS_CHECK(rejected_compile_durations.size() == 3U);
+  PS_CHECK(rejected_sample.compilation.analyze_us ==
+           expected_compilation.analyze_us);
+  PS_CHECK(rejected_sample.compilation.optimize_us ==
+           expected_compilation.optimize_us);
+  PS_CHECK(rejected_sample.compilation.plan_us == expected_compilation.plan_us);
+  PS_CHECK(rejected_sample.execution.execute_us ==
+           expected_execution.execute_us);
+  PS_CHECK(rejected_sample.execution.selected_backends ==
+           expected_execution.selected_backends);
+  PS_CHECK(rejected_sample.execution.transfer_count ==
+           expected_execution.transfer_count);
+  PS_CHECK(rejected_sample.execution.transfer_bytes ==
+           expected_execution.transfer_bytes);
+  PS_CHECK(rejected_sample.execution.peak_live_bytes ==
+           expected_execution.peak_live_bytes);
+  PS_CHECK(rejected_sample.execution.fallback_reasons ==
+           expected_execution.fallback_reasons);
   PS_CHECK(rejected_sample.execution.plan_digest ==
-           workflow.plan.digest().value);
-  PS_CHECK(!rejected_sample.execution.result_digest.empty());
-  PS_CHECK(rejected_sample.execution.selected_backends.size() == 3U);
-  PS_CHECK(rejected_sample.execution.operation_timings.size() == 3U);
+           expected_execution.plan_digest);
+  PS_CHECK(rejected_sample.execution.result_digest ==
+           expected_execution.result_digest);
+  PS_CHECK(rejected_sample.execution.operation_timings.size() ==
+           expected_execution.operation_timings.size());
   for (std::size_t index = 0U;
        index < rejected_sample.execution.operation_timings.size(); ++index) {
-    const auto& timing = rejected_sample.execution.operation_timings[index];
-    const std::uint64_t expected_node = index + 1U;
-    PS_CHECK(timing.node_id == expected_node);
-    PS_CHECK(timing.outcome == ErrorCode::Ok);
-    PS_CHECK(timing.duration_us <= rejected_sample.execution.execute_us);
-    PS_CHECK(rejected_sample.execution.selected_backends.at(expected_node) ==
-             timing.backend);
+    const auto& actual = rejected_sample.execution.operation_timings[index];
+    const auto& expected = expected_execution.operation_timings[index];
+    PS_CHECK(actual.node_id == expected.node_id);
+    PS_CHECK(actual.backend == expected.backend);
+    PS_CHECK(actual.duration_us == expected.duration_us);
+    PS_CHECK(actual.outcome == expected.outcome);
   }
 
   RawBenchmarkOptions throwing_oracle_options = rejected_oracle_options;
@@ -656,32 +762,51 @@ int main() {
   throwing_oracle_options.oracle_name = "always-throws";
   auto throwing_oracle_report = benchmark.run(graph, throwing_oracle_options);
   PS_CHECK(throwing_oracle_report.ok());
+  PS_CHECK(g_compilation_diagnostics_hook_calls == 2U);
+  PS_CHECK(g_execution_diagnostics_hook_calls == 2U);
   PS_CHECK(throwing_oracle_report.value().oracle_name == "always-throws");
   PS_CHECK(throwing_oracle_report.value().samples.size() == 1U);
   const RawBenchmarkSample& throwing_sample =
       throwing_oracle_report.value().samples.front();
+  PS_CHECK(throwing_sample.iteration == 0U);
   PS_CHECK(throwing_sample.oracle_name == "always-throws");
   PS_CHECK(throwing_sample.correctness_checked);
   PS_CHECK(!throwing_sample.correctness_accepted);
   PS_CHECK(throwing_sample.outcome == ErrorCode::OperationFailed);
   PS_CHECK(throwing_sample.reason == "intentional oracle exception");
-  const std::array<std::uint64_t, 3U> throwing_compile_durations{
-      throwing_sample.compilation.analyze_us,
-      throwing_sample.compilation.optimize_us,
-      throwing_sample.compilation.plan_us,
-  };
-  PS_CHECK(throwing_compile_durations.size() == 3U);
+  PS_CHECK(throwing_sample.compilation.analyze_us ==
+           expected_compilation.analyze_us);
+  PS_CHECK(throwing_sample.compilation.optimize_us ==
+           expected_compilation.optimize_us);
+  PS_CHECK(throwing_sample.compilation.plan_us == expected_compilation.plan_us);
+  PS_CHECK(throwing_sample.execution.execute_us ==
+           expected_execution.execute_us);
+  PS_CHECK(throwing_sample.execution.selected_backends ==
+           expected_execution.selected_backends);
+  PS_CHECK(throwing_sample.execution.transfer_count ==
+           expected_execution.transfer_count);
+  PS_CHECK(throwing_sample.execution.transfer_bytes ==
+           expected_execution.transfer_bytes);
+  PS_CHECK(throwing_sample.execution.peak_live_bytes ==
+           expected_execution.peak_live_bytes);
+  PS_CHECK(throwing_sample.execution.fallback_reasons ==
+           expected_execution.fallback_reasons);
   PS_CHECK(throwing_sample.execution.plan_digest ==
-           workflow.plan.digest().value);
-  PS_CHECK(!throwing_sample.execution.result_digest.empty());
-  PS_CHECK(throwing_sample.execution.selected_backends.size() == 3U);
-  PS_CHECK(throwing_sample.execution.operation_timings.size() == 3U);
-  for (const auto& timing : throwing_sample.execution.operation_timings) {
-    PS_CHECK(timing.outcome == ErrorCode::Ok);
-    PS_CHECK(timing.duration_us <= throwing_sample.execution.execute_us);
-    PS_CHECK(throwing_sample.execution.selected_backends.at(timing.node_id) ==
-             timing.backend);
+           expected_execution.plan_digest);
+  PS_CHECK(throwing_sample.execution.result_digest ==
+           expected_execution.result_digest);
+  PS_CHECK(throwing_sample.execution.operation_timings.size() ==
+           expected_execution.operation_timings.size());
+  for (std::size_t index = 0U;
+       index < throwing_sample.execution.operation_timings.size(); ++index) {
+    const auto& actual = throwing_sample.execution.operation_timings[index];
+    const auto& expected = expected_execution.operation_timings[index];
+    PS_CHECK(actual.node_id == expected.node_id);
+    PS_CHECK(actual.backend == expected.backend);
+    PS_CHECK(actual.duration_us == expected.duration_us);
+    PS_CHECK(actual.outcome == expected.outcome);
   }
+  ps::benchmark_testing::install_raw_benchmark_test_hooks(nullptr);
 
   RawBenchmarkOptions unchecked_options;
   auto unchecked_report = benchmark.run(graph, unchecked_options);
