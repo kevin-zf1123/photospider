@@ -49,12 +49,14 @@ and the isolated installed-kernel boundary.
 ## Installed boundary
 
 The package gate configures and installs Photospider to a fresh prefix, then
-configures an external C++17 consumer using only
-`find_package(Photospider CONFIG REQUIRED)`. It verifies:
+configures an external C/C++17 consumer using only
+`find_package(Photospider CONFIG REQUIRED)`. CI runs this gate for both the
+default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
 
 - installed headers match the declared public inventory;
 - exports contain no source/private paths;
-- the embedded compile/execute facade links and runs;
+- the linked C SDK compilation unit and C++ embedded compile/execute facade
+  both run;
 - `kernel`, `operation_sdk`, and `data_provider_sdk` component discovery
   exports exactly `Photospider::kernel`, `Photospider::operation_sdk`, and
   `Photospider::data_provider_sdk`; the SDK targets are header-only;

@@ -10,7 +10,10 @@ target_link_libraries(
   photospider_sdk_consumer
   PRIVATE Photospider::operation_sdk Photospider::data_provider_sdk)
 
-add_executable(photospider_consumer main.cpp)
+add_executable(
+  photospider_consumer
+  main.cpp
+  $<TARGET_OBJECTS:photospider_sdk_consumer>)
 target_compile_features(photospider_consumer PRIVATE cxx_std_17)
 target_link_libraries(
   photospider_consumer

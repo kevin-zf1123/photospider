@@ -42,11 +42,12 @@ Session close、result release、shutdown 与隔离 installed-kernel boundary。
 ## Installed boundary
 
 Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
-`find_package(Photospider CONFIG REQUIRED)` 配置 external C++17 consumer。它验证：
+`find_package(Photospider CONFIG REQUIRED)` 配置 external C/C++17 consumer。CI 会为
+默认 static kernel 与 `BUILD_SHARED_LIBS=ON` 都运行该 gate。它验证：
 
 - installed header 与声明 public inventory 完全一致；
 - export 不含 source/private path；
-- embedded compile/execute facade 可链接并运行；
+- linked C SDK compilation unit 与 C++ embedded compile/execute facade 都会实际运行；
 - `kernel`、`operation_sdk` 与 `data_provider_sdk` component discovery 精确导出
   `Photospider::kernel`、`Photospider::operation_sdk` 与
   `Photospider::data_provider_sdk`；两个 SDK target 都只包含 header；

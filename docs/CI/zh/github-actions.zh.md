@@ -7,9 +7,11 @@ migration-provenance 或 evidence aggregation。
 
 维护的 kernel workflow 执行：
 
-1. 在当前 Ubuntu/macOS runner 上执行 CMake/Ninja configure；
-2. full build dependency-neutral kernel 与维护的 test；
-3. complete CTest，其中包含 isolated install/package consumer；
+1. 在当前 Ubuntu/macOS runner 上分别为默认 static kernel 与受支持 shared kernel
+   执行 CMake/Ninja configure；
+2. 在每种 library mode 下 full build dependency-neutral kernel 与维护的 test；
+3. 在每种 mode 下执行 complete CTest，其中包含会 build 并运行 linked C/C++ code 的
+   isolated install/package consumer；
 4. 独立 Linux ASAN 与 TSAN configure/build/test job。
 
 可选 GPU compile/runtime 只在兼容 runner 运行。CPU test 保持必需，GPU 不可用 path
