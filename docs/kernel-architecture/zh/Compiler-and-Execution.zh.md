@@ -1,0 +1,39 @@
+# Compiler 与本地 Execution
+
+## Compile stage
+
+`Compiler::analyze` 检查 current `GraphSnapshot`、bounded document count/text、unique
+node/output id、reference、port、operation availability、input count、deterministic acyclic
+topology 与 static output descriptor inference。它按 node-id tie-break 的 topological order
+发布 immutable `SemanticGraphIR` 与 `SemanticGraphDigest`。
+
+`Compiler::optimize` 在当前 baseline 中是显式 conservative no-op。它把 semantic node
+复制进独立 `OptimizedGraphIR`，并产生 domain-separated `OptimizedGraphDigest`。
+
+`Compiler::plan` 复制 dependency-ordered step，选择 CPU 或声明支持的 optional local GPU
+backend，记录 estimated bytes，并产生 `ExecutionPlan`、`ExecutionPlanDigest` 与
+`PlanCacheKey`。任何 stage 都不包含 callback pointer、DSO handle、allocation、native
+device 或 daemon object。每个 stage 还携带 exact frozen operation registry 的 private
+runtime-only weak identity；它不进入 digest/serialization。
+
+## Execution
+
+`ExecutionContext` 拥有固定 CPU pool、optional single-worker GPU callback lane、bounded
+queue、frozen operation registry 与 modeled-byte ledger。`execute` 创建一个 private
+`ExecutionRun`，采用 deterministic ready-step ordering 与 caller-selected maximum
+parallelism。
+
+当 dependency 与 consumer 的 backend label 不同时，Run 复制 immutable bytes，创建一个
+不同的 validated Value。该 copy 显式计入 transfer count/bytes。Backend label 是 Run-local
+derived state；kernel 不暴露 native GPU handle 或 persistent residency registry。
+
+每个 operation result 都会按 planned element type/shape 检查。Execution context 必须使用
+产生 plan 的同一 frozen registry。Work 前、completion 期间和 result assembly 前都
+会检查 cancellation 与 plan currentness。Late cancelled/stale result 会释放资源，不能
+进入 caller-visible `ExecutionResult`。
+
+## Diagnostic
+
+Raw diagnostic 包含 compile-stage duration、execute duration、operation attempt
+timing/outcome、selected backend、transfer count/bytes、peak modeled bytes、fallback reason、
+plan digest 与 result digest。它们是 observation，不是 verdict 或 release evidence。

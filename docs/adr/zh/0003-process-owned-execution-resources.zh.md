@@ -1,220 +1,65 @@
-# ADR 0003：执行资源由进程拥有
+# ADR 0003：本地执行资源具有显式所有者
 
-## 状态
-
-已接受。Issue #70 至 #76 已实现现行执行/资源、policy 与私有 route 切片：每个
-embedded composition root 显式创建并注入一个固定的 `ExecutionService`；内建 CPU 的 HP 与 RT
-工作（包括 connected-parameter preflight，以及 dirty source/downstream 阶段）只以已 ready 且由
-lease 支撑的 submission 进入该 service。来自多个 Graph 的独立 Run 可以在该 pool 上重叠。
-`GraphRuntime` 只存储复制的 HP/RT route id 与 nonzero generation；它不拥有物理 worker、queue、
-policy context 或 plugin DSO lifetime。Service 独占一个 Host 与逐设备权威 ledger，以及按
-entry/byte 有界的 ready store；完整 CPU/retained/scratch/ready Run vector 共享其中的 Host vector。
-恰好一个 Interactive 与
-一个 Throughput policy binding 会在 Host 编写的 class、frontier、fairness 与 fallback 规则之后
-排列工作。Issue #72 把强类型 Graph identity、authoritative revision、request-owned staging 与
-revision-safe publication 保持在 execution service 之外。Issue #73 为每个当前 Run 提供私有弱
-生命周期 cancellation source、read-only lease/deadline observation、唯一 terminal/commit arbiter、
-精确 Run queued purge、running drainage、dependent rejection 与 RT-denies-HP cancellation。Issue
-#74 增加 request-level realtime `RunGroup`、checked per-Graph latest-wins generation、在现有
-compute-lane worker 上运行的有界 ticket-backed coalescing，以及 current-generation commit
-authority。Issue #75 移除拥有 worker 的 scheduler SDK/ABI，并增加纯 C policy ABI v1、原子
-binding replacement、generation-local sticky fault、reserved start 与封闭的私有 execution route，
-其中包含一个固定 CPU pool 和一个私有 Metal lane。Issue #76 已实现 lifecycle registry、单调
-Graph close、显式 process execution shutdown、精确 settlement 与 source-private telemetry。
-Issue #84 移除了 per-Graph native Metal ownership，并在 `ExecutionService` 中安装固定的
-`DeviceExecutorRegistry`；其中的 Metal executor 拥有一个 device、command queue、
-invocation allocator 与持久 pipeline cache，并且只在 reserved start 后进入选中的 operation。
-Issue #85 新增显式且保留 revision 的 CPU/Metal transfer、精确 completion identity、唯一共享的
-进程级 `ResidencyManager` 与 Run-bound pending-Value continuation，且不创建另一套 ready store
-或 capacity authority。Issue #86 在这套唯一的 service ledger 中增加相互隔离的已配置非 CPU
-`DeviceId` memory/scratch 账户、原生 plan/actual 校准，以及绑定到持久 owner/completion 的 lease。
-Issue #88 在同一 process service 中新增唯一 source-private `ComputeIoExecutor`。其独立 worker
-会按 task 数与 estimated retained bytes 原子准入，保留显式 transaction lifetime token，返回
-typed completion，对 cancellation 与 shutdown 执行恰好一次 settlement，并拒绝 CPU compute
-worker 同步等待 completion。首条迁移的垂直路径是 staged HP cache save：graph-state policy
-仍选择 cache operation，并在既有 visible publication point 之前等待。
-Issue #106 为这条进程级执行路径增加固定且只用于观察的 task identity。Task-backed trace 会复制
-已经校验的非零 Graph revision、非零 Run id 与 Run-local task id；runtime-wide event 会让该
-identity 保持缺省，Host 则在每个返回 page 上只绑定一次已解析的 session。这些标量不能取得 Run
-lease、选择 live task、取消工作、预留资源、发布 cache/artifact 状态或改变 retry policy。
-Issue #106 还围绕生产 worker-assignment decoder 与 isolated-CPU invocation decoder 维护两个
-手工 opt-in 的 Clang/libFuzzer target。它们不属于默认 build、CTest、CI、install 或 export
-ownership，也不建立 process、plugin、filesystem、network、quota 或 artifact authority。
-Public Host/CLI/IPC cancellation control 仍是未来行为。ADR 0007 只在详细所有权与生命周期契约上
-取代本 ADR；进程级所有权的高层决策及其历史背景继续有效。
+- 状态：已接受，由 ADR 0015 收窄
+- 日期：2026-09-01 边界修订
 
 ## 背景
 
-当前每个 `GraphRuntime` 都为 HP 与 RT intent 存储复制的 route binding。Route vocabulary 封闭为
-`cpu`、`serial_debug` 与 `gpu_pipeline`；其物理 worker、queue、device routing、completion
-与 exception 都保持为 Host execution module 的私有实现。Policy binding 是 process/service state，
-绝不属于 Graph state。Service 根据 composition-root configuration 冻结一个 CPU worker 数量，
-拥有一个固定 Metal worker lane 与一个共享 residency manager 的不可变 device-executor
-registry，并为每个 Run 保持隔离的 completion/failure/trace state，并允许来自多个 Graph 的独立
-HP 与 RT Run 重叠。
-
-规范 device inventory 感知 route。`cpu` 与 `serial_debug` 只暴露 CPU；固定 registry 包含可用
-Metal executor 时，`gpu_pipeline` 依次暴露 Metal、CPU，否则只暴露 CPU。Full、dirty HP/RT 与
-connected-preflight planning 会在准入前冻结选中的 implementation 与 device。CPU 与 Metal work
-使用彼此独立的固定 lane，但共用 ready store、Run parallelism ceiling、ledger grant、
-cancellation、completion、exception、reuse 与 drainage state。Reserved start 后，非 CPU work
-会同步进入匹配的 registry executor；Graph 与 policy object 都不会取得 native handle。
-
-当前软件使用每个 Host ledger 默认的 32-slot CPU 维度作为 Run execution grant。固定 service
-worker 与 route machinery 属于基础设施。Retained Host memory、scratch、ready entry 与 ready byte
-也会被准入。当前 service
-执行 Issue #71 的 CPU 公平性与 headroom 契约。在 Issue #72 的交付快照中，exact revision
-validation 仍是 service 之外的 Kernel/graph-state commit concern，cancellation 与 supersession
-则仍不属于那个历史切片。当前软件已把 Issue #73 cooperative cancellation 实现为 Run-owned
-terminal correctness：service 只观察并 purge/drain 匹配的 Run，graph-state transaction 则仲裁
-cancellation 与 commit。Latest-wins supersession 与 request-level realtime grouping 现在已是
-Issue #74 当前行为；lifecycle-driven Graph-close/process-shutdown cancellation 已是 Issue #76 当前
-行为。
-Issue #75 把 policy comparison 与 execution ownership 分离：Host 构造 frontier 并验证 decision，
-纯 C callback 只能选择一个 immutable candidate 或 abstain。
-
-如果没有稳定 Run 生命周期和 Host-owned 资源账本，只把物理 executor 移入全局对象仅仅是搬移问题。
+可嵌入 kernel 必须运行独立 graph，不能创建隐藏的 process singleton，也不能让
+physical worker 数量随 graph 数量增长。Queue capacity、modeled memory、optional GPU
+work、cancellation 与 shutdown 需要一个可见 owner。
 
 ## 决策
 
-一个显式 process-owned `ExecutionService` 拥有物理 CPU worker、device executor、compute I/O
-worker、ready-store capacity、admission 和资源账本。它由产品组合根创建并注入，不是静态 singleton。
+每个 `ExecutionContext` 拥有一套固定的 local execution composition：
 
-`ComputeRun` 是 request-owned 的计算身份、取消、临时输出、终态、graph revision、supersession、
-resource reservation 和 commit policy 单元。
+- bounded FIFO callback queue 与固定 CPU worker pool；
+- 可选的单 worker local GPU lane，拥有独立 bounded queue；
+- 被全部 invocation 共享的 frozen `OperationRegistry`；
+- 对 configured modeled-byte limit 进行 exact release 的 `ResourceLedger`。
 
-`ComputeTaskDispatcher` 继续拥有任务依赖和 ready detection。只有 `ReadyTaskSubmission` 值进入
-`ExecutionService`，从而保留 ADR 0001。
+Context configuration 在构造后不可变。CPU worker 为零时选择有上限、基于硬件的数量；
+CPU execution 始终存在。Queue 或 byte limit 为零属于非法配置。Embedder 可以创建多个
+独立 execution context，也可以让多个 graph 显式共享一个 context。
 
-Policy binding 是 `ExecutionService` 的内部比较 seam。恰好一个 Interactive 与一个 Throughput
-binding 通过同一条 Host 编写的 frontier 与 validation path 排列已经准入的 ready work。它们不拥有
-thread、物理 ready store、resource token、budget、Graph state、native device handle、completion
-route 或 lifecycle authority。Service 拥有 binding state 与 store，而 service-owned
-`ResourceLedger` 验证所有 reservation，并保证其恰好释放一次。`PolicyRegistry` 拥有 immutable
-built-in 与 DSO policy type record；DSO callback 使用自包含的 C11 policy ABI v1，并且只接收
-scalar candidate snapshot。
+### Admission 与 work ownership
 
-物理执行划分为 resource executor：
+每次 `execute` 调用创建一个 private `ExecutionRun`。Run 拥有 dependency counter、
+deterministic ready-step ordering、staged Value、per-step backend residency、in-flight
+accounting、cancellation observation 与 raw diagnostics。
+`ExecutionOptions::maximum_parallelism` 限制该 Run 的 in-flight plan step；backend queue
+与 byte ledger 提供共享的 nonblocking backpressure。
 
-- 进程 CPU executor；
-- 每个物理 GPU/device 一个 executor，拥有 native queue 和 fence；
-- 有界 compute I/O executor；
-- plugin invocation adapter，由独立 `PluginRuntimeSupervisor` 负责 process、IPC、安全和故障隔离。
+调用 operation 前，Run 获取该 step 的完整 planned-byte charge。Move-only lease 在 attempt
+后恰好释放一次，包括 fallback、exception、cancellation 与 stale-completion 路径。
 
-当前 #84 至 #86 切片实现 CPU executor、一个由 service 拥有的 Metal lane、source-private 的固定
-device-executor registry、显式 CPU/Metal transfer、精确进程级 residency，以及权威的
-per-`DeviceId` memory/scratch 核算。在仓库 Metal provider 已启用的 profile 中，Apple entry 会拥有并
-复用 native device/queue 与经过校验的 pipeline cache，而每次 entry 都获得 invocation-scoped
-native allocator。在进行 native allocation 前，Perlin 与 CPU-to-Metal upload 只把 Metal heap
-size/alignment query 用作对齐后的最小 `MTLHeapDescriptor` request；该 query 不是 dedicated heap
-backing 的上界。Executor 会在一次 `ResourceLedger` root-mutex transaction 中校验该 persistent
-minimum 与精确 scratch plan，然后预留该确切 `DeviceId` 当前全部可用的 persistent-memory
-capacity。分配后，dedicated heap 的正值 `currentAllocatedSize` 是唯一 persistent actual；不会再把
-heap-backed texture 的 `allocatedSize` 重复计入，而每项 scratch resource 都贡献自身的正值
-`allocatedSize`。适配 plan 的 actual commit 会在同一套唯一 ledger mutex 下立即归还每个未使用的
-planned byte，并把精确 persistent/scratch lease 分别交给 native `Value` 与 command-completion
-owner。无效或超过 plan 的 actual observation 会在 command commit 或所有权逸出前以 typed
-resource error 失败，随后局部 native owner 与尚未 commit 的 reservation 各自准确 unwind 一次。
-Perlin 会发布 pending native Value、
-编码 texture-to-buffer readback，并且不等待 command buffer 就返回。Completion freshness、
-适用的 producer Ready publication、destination Ready publication 与 resident insertion 是一个
-由 manager lock 保护的事务。Kernel 会先在可失败的 coordinator submission 前预跟踪 lineage，
-但不指派 managed current identity。Accepted current publication 随后会在 coordinator 仍排除
-currentness observation 时无 allocation 地指派精确 generation；accepted-coordinate 顺序可以授权
-数值更低的 generation。被拒绝和 born-stale 的 candidate 不会指派任何 identity，之后的 stale
-Run observation 也不能替换 exact managed identity。Standalone lineage 另行保持
-numeric-maximum ordering。由于 prepared candidate 会在可失败 pretrack 前拥有
-compute-request-lane admission，Graph close 会先 join 该 lane，再退役精确 Graph 的 generation
-row；无需永久 closed-identity tombstone。Pending-Value continuation 复用既有
-Run 与 ready store。该切片不增加 public device-executor API、Graph/cache authority 或第二套
-device-capacity ledger。由 service 拥有的 `ResourceLedger` 仍是唯一权威：Host dimension
-保持既有含义，而每个已配置的非 CPU `DeviceId` 都拥有隔离且 immutable 的 memory/scratch
-limit，以及复制出的 limits/reserved/available diagnostic。
+### Local transfer 与 fallback
 
-拥有 worker 的 scheduler plugin ABI、SDK target、`IScheduler` hierarchy 与 per-Graph 物理 owner
-已经通过一次完整的破坏性迁移被移除。没有留下 compatibility adapter 或 forwarding layer。
+CPU backend 是必需能力。GPU lane 启用时，是另一个 local in-process callback lane。若
+dependency Value 由不同 backend 产生，execution 会执行显式 immutable byte copy，并记录
+transfer count/bytes。Residency 是 Run-local derived state，不会持久化，也不是 global
+manager。
+
+只有 copied operation trait 允许时，unavailable GPU capability 与 recoverable GPU failure
+才可 fallback 到 CPU；原因只作为普通 diagnostic。
+
+### Cancellation、exception 与 shutdown
+
+每个 callback 都有 exception fence。Cooperative cancellation 与 graph-revision
+currentness 会在 admission 前、completion 期间和 final result assembly 前检查。Late work
+可以完成 cleanup，但不能在 cancellation 或 staleness 后发布 caller result。
+
+析构会停止 queue admission、拒绝 queued callback、唤醒 worker 并 join 自有线程。调用者
+不得让 `execute` 与 context 析构并发。
+
+## 边界
+
+全部资源都在进程内。本 ADR 不创建 daemon Session/Job、external scheduler、remote
+worker、process supervisor、plugin sandbox、durable state 或 security domain。
 
 ## 结果
 
-- Thread 和 device-queue 数量由进程配置控制，不再由 Graph 数量决定。
-- Interactive 和 throughput Run 可以在显式公平性、deadline 和 headroom policy 下共享资源。
-- Graph revision、取消和 stale-result rejection 成为 Run-level 正确性规则，而不是 policy-binding
-  或 route-generation hint。
-- GPU completion 和 I/O continuation 可能超过 caller stack 生命周期，因此 task handle 需要稳定
-  Run lease，而不是借用 executor pointer。
-- 该 service 必须保持为深模块；Graph planning、persistence、cache authority 和 commit 语义在其外部。
-- Plugin process supervision 保持独立，避免执行资源所有权变成巨型安全子系统。
-
-## 与当前文档的关系
-
-ADR 0001 完全有效。Issue #69 至 #76 已取代
-`docs/kernel-architecture/Policy-and-Execution-Architecture.md` 历史版本中描述的 per-Graph 物理
-所有权与拥有 worker 的 scheduler model：HP、RT、preflight 与 dirty ready work 都会经过注入的
-固定 service。`GraphRuntime` 只拥有复制的 route id/generation；serial-debug、shared-CPU 与
-GPU-pipeline execution 都保持在私有 Host route 之后。ready-task-only 边界继续完全有效。Issue #72 还会把 request-owned staged
-Graph/proxy state、精确 identity/revision validation 与 visible publication 保持在该边界的
-compute/graph-state 一侧。Issue #73 会在同一侧增加 private request cancellation coordinator、
-彼此独立的 HP/RT child source、cooperative monotonic deadline expiry 与 Run-owned terminal/commit
-contention。`ExecutionService` 会注册 read-only cancellation notification，只清除匹配 Run 的
-queued entry、抑制 dependent re-entry，并等待 non-preemptible running callback 排空；它不会成为
-cancellation authority 或 visible-commit owner。
-
-Composition-root execution configuration 会解析并冻结 service CPU worker count；单一 Metal lane
-是固定基础设施，而不是 policy-plugin grant。每个 Host ledger 都拥有不可变 composition limit。
-Run admission 会在 queue publication 前
-提交一个完整 vector；initial 与 dependent submission 会进入同一个 policy-aware 有界 store，并在
-临时为空时保留同一 Run fairness row。Ready cost 为 `work_units + ceil(bytes / 4096)`；Graph 在每个
-已选 service class 中独立按原始 cost 计费，Run 在自己的不可变 class 中按
-`ceil(cost / weight)` 计费。Host 会选择 class、构造有界 frontier、在 Throughput 仍可 start 时最多
-允许三个连续 Interactive start，并针对 original snapshot 与当前 state 验证每个 built-in 或 DSO
-decision。首个无效 DSO decision 对其精确 binding generation 保持 sticky。Reserved start 会在任何
-executor callback 开始前，原子移除精确 ready entry、把 ready authority 交换为 execution grant、
-更新 fairness/burst state，并把 callback ownership 转移给私有 route。
-
-配置的 interactive headroom 只把 active Throughput root reservation 限制在 general ceiling。
-Interactive Run 不会扣减该 class quota，而 ledger 仍是全部共享物理容量的最终 authority。
-Throughput check、reservation 与 class charge 是原子的；该 charge 会一直保留到全部 child grant
-结束后的精确 root release。在 graph-state commit contender 之前被接受的 cancellation 不会发布
-Graph、proxy 或 deferred cache state。Contender 一旦获胜，后续 cancellation 就是 no-op；
-predicate/persistence failure 或 visible success 会解析同一个 Run arbiter。Proxy commit 之前的 RT
-cancellation 会拒绝并取消 HP，而 HP cancellation 不能回滚已经提交的 RT proxy。
-
-Graph load 与 route replacement 只复制经过验证的 route id 与 nonzero generation，不预留或构造
-Graph-owned 物理 owner。Service-level policy replacement 会在 publication 之前准备新 context、原子
-发布一个新 generation、排空旧 generation 的 active invocation，并恰好一次 retire 其 context/DSO
-lease。原 worker-only budget 与 scheduler SDK 已经完整删除，不保留 wrapper、alias 或第二
-authority。
-
-## 与 ADR 0007 的关系
-
-[ADR 0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md)
-保留本决策的进程级执行方向与 ADR 0001 边界，同时取代原先隐含的细节。Run 身份与 lease、
-单调终态、completion routing、目标 `GraphRuntime` 的非所有权、账本 token 权威、提交竞争、
-Graph/进程 shutdown 范围，以及 issue #66–#76 的依赖契约，均以 ADR 0007 为权威。
-
-## 与 ADR 0008 的关系
-
-[ADR 0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md)
-扩展而不是推翻本决策。注入的进程执行域拥有目标 Schema、Facet、Layout、access、
-conversion、query、inference、digest 与 execution-provider registry；不可变的已发布
-generation 及其 lease 遵守其他进程级执行资源所采用的 prepare、publish、retire 与 unload
-规则。`Value`、`StorageBinding`、`ReadyFence` 或 residency replica 都不拥有 worker、
-admission、ready queue、policy authority 或 ResourceLedger token。
-
-ADR 0008 是通用 Value 与 provider-generation 契约的权威来源。ADR 0007 继续作为 Run
-identity、execution admission、ready-work release、resource grant、cancellation、commit
-arbitration、Graph close 与 process shutdown 的权威来源。实现通用 Value 时不得恢复 Graph
-拥有的物理 executor，也不得创建第二个 execution-resource authority。
-
-## 与 ADR 0009 的关系
-
-[ADR 0009](0009-compute-io-durability-and-completion-semantics.zh.md) 冻结本决策所预期
-I/O continuation 的边界。Issue #88 现已提供 process-owned `ComputeIoExecutor` mechanism，
-其准入受 task 数与 estimated retained bytes 限制。首条生产路径在保留 prepared transaction
-lifetime 的同时，执行 staged HP cache-save codec/filesystem callback。它不拥有 cache
-eligibility 或 path、Graph 文档事务、daemon transport、output commit identity、重试/覆盖
-策略或 durability。同步 cache administration 与 load 仍由既有 owner 负责。
-
-`ComputeRun` 成功、cache 持久化、Graph 文档保存、daemon 结果可用与 durable 输出
-提交保持为不同结果。增加 I/O worker 不得把进程 execution service 扩展成持久化权威，
-也不得创建第二个 visible-commit owner。
+- Physical resource 数量跟随显式 context configuration，而不是 graph 数量。
+- Queue/byte backpressure 有界且可测试。
+- Transfer、fallback、stale rejection 与 cleanup 具有唯一 Run-local 路径。
+- 多个 context 可并发执行，不需要 kernel-global registry。
