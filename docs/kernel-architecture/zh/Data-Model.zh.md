@@ -29,6 +29,11 @@ immutable bytes，且不暴露 writable pointer。
 绝不是 byte range。Interval addition 与 element-count multiplication 都经过 checked
 arithmetic。
 
+`Value::as_float64()` 是严格 scalar accessor：除了精确 Float64 descriptor、contiguous
+layout 与 storage bound，Value Region 还必须为 rank one 且精确覆盖
+`{offset=0, extent=1}`。Empty、partial 与 offset Region 仍是合法的通用 Value
+coverage，但通过该 accessor 读取时返回 `TypeMismatch`。
+
 ## Result 与 data definition
 
 `ExecutionResult` 是 caller-owned named Value map 加 raw diagnostic。它没有 durable

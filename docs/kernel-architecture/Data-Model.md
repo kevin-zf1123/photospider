@@ -32,6 +32,12 @@ copies share immutable bytes and expose no writable pointer.
 logical subset, never a byte range. Interval addition and element-count
 multiplication are checked.
 
+`Value::as_float64()` is a strict scalar accessor: in addition to the exact
+Float64 descriptor, contiguous layout, and storage bounds, the Value Region
+must be rank one and exactly `{offset=0, extent=1}`. Empty, partial, and offset
+Regions remain legal general Value coverage but return `TypeMismatch` through
+this accessor.
+
 ## Results and data definitions
 
 `ExecutionResult` is a caller-owned map of named Values plus raw diagnostics.
