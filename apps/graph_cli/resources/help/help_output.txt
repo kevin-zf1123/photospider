@@ -1,4 +1,0 @@
-output <file>
-
-Save the current graph to YAML file at <file>.
-

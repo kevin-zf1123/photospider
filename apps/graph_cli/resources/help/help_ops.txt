@@ -1,4 +1,0 @@
-ops [all|builtin|plugins]
-
-List registered operations. Shows type:subtype and plugin source when applicable.
-

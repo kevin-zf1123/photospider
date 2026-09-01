@@ -1,4 +1,0 @@
-clear | cls
-
-Clears the terminal screen.
-

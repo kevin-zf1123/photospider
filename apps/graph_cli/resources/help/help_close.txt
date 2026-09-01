@@ -1,4 +1,0 @@
-close <name>
-
-Close a loaded graph session by name.
-
