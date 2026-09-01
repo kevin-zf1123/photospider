@@ -33,6 +33,14 @@ values, bounded facet records, selected local backend, cooperative cancellation
 observation, and a host-owned single-publication output sink. The host copies
 output facets/bytes before callback return and rebuilds a validated Value.
 
+The unchanged `int` callback result has a closed version-two vocabulary:
+success, ordinary failure, cooperative cancellation, and backend unavailable.
+An explicit backend-unavailable result becomes `BackendUnavailable`; only a
+GPU attempt whose copied traits permit CPU fallback may retry on CPU. Ordinary
+failure and every unknown nonzero integer remain `OperationFailed` and never
+trigger fallback. A backend-unavailable callback publishes no output; callback
+signature and descriptor layout remain unchanged.
+
 ### Data-definition ABI
 
 A data provider publishes only bounded schema records: key, element type, and

@@ -25,6 +25,14 @@ whole-Region Value. A DSO input view covers exactly its logical contiguous
 bytes; trailing backing bytes are rejected instead of becoming invisible
 plugin state.
 
+The synchronous callback retains its `int` signature but returns one closed
+version-two result: success, ordinary failure, cancellation, or backend
+unavailable. Backend unavailable is distinct from ordinary failure and may
+request CPU fallback only from a GPU attempt whose copied traits allow it.
+Unknown nonzero integers are ordinary `OperationFailed` results. A callback
+reporting backend unavailable publishes no output, so fallback cannot reuse a
+partial GPU Value.
+
 ## Validation
 
 Loading validates exact ABI version/structure sizes, pointer and array

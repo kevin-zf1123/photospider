@@ -255,6 +255,10 @@ if(BUILD_TESTING)
     test_execution photospider_test_kernel
     tests/integration/test_execution.cpp)
   target_include_directories(test_execution PRIVATE src/lib)
+  add_dependencies(test_execution operation_fixture)
+  target_compile_definitions(
+    test_execution
+    PRIVATE PS_OPERATION_FIXTURE_PATH="$<TARGET_FILE:operation_fixture>")
   photospider_add_test(
     test_plugin_registry photospider_test_kernel
     tests/integration/test_plugin_registry.cpp)

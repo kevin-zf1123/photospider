@@ -1116,11 +1116,19 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         return Result<Value>(
             Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
       }
-      if (code != 0) {
-        return Result<Value>(Status::failure(
-            ErrorCode::OperationFailed,
-            diagnostic[0] ? std::string(diagnostic)
-                          : "operation plugin callback failed"));
+      if (code != PS_OPERATION_RESULT_SUCCESS_V2) {
+        ErrorCode error_code = ErrorCode::OperationFailed;
+        const char* default_diagnostic = "operation plugin callback failed";
+        if (code == PS_OPERATION_RESULT_CANCELLED_V2) {
+          error_code = ErrorCode::Cancelled;
+          default_diagnostic = "operation plugin callback was cancelled";
+        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2) {
+          error_code = ErrorCode::BackendUnavailable;
+          default_diagnostic = "operation plugin backend is unavailable";
+        }
+        return Result<Value>(
+            Status::failure(error_code, diagnostic[0] ? std::string(diagnostic)
+                                                      : default_diagnostic));
       }
       return output.result;
     };

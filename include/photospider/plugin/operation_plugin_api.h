@@ -63,6 +63,23 @@ typedef enum ps_operation_parameter_type_v2 {
 } ps_operation_parameter_type_v2;
 
 /**
+ * @brief Closed synchronous callback result values for operation ABI v2.
+ *
+ * @note Unknown nonzero integers fail closed as ordinary operation failures.
+ * This enum does not change the `int` callback signature or descriptor layout.
+ */
+typedef enum ps_operation_result_v2 {
+  /** @brief Callback completed and the output sink accepted one Value. */
+  PS_OPERATION_RESULT_SUCCESS_V2 = 0,
+  /** @brief Ordinary nonrecoverable operation failure. */
+  PS_OPERATION_RESULT_FAILURE_V2 = 1,
+  /** @brief Cooperative cancellation was observed by the callback. */
+  PS_OPERATION_RESULT_CANCELLED_V2 = 2,
+  /** @brief Selected local backend cannot execute this invocation. */
+  PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2 = 3
+} ps_operation_result_v2;
+
+/**
  * @brief One immutable parameter declaration published by an operation.
  *
  * @note Key bytes remain plugin-owned until the API destroy callback.
@@ -206,8 +223,12 @@ typedef int (*ps_operation_cancelled_v2)(void* context);
  * @param sink Host-owned single-output sink.
  * @param diagnostic Writable diagnostic buffer.
  * @param diagnostic_capacity Writable buffer size including terminator.
- * @return Zero on success; nonzero on operation failure/cancellation.
+ * @return One closed `ps_operation_result_v2` value. Unknown nonzero values
+ * are treated as `PS_OPERATION_RESULT_FAILURE_V2` by the host.
  * @note The callback must not throw across the C boundary or retain pointers.
+ * `PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2` requests CPU fallback only for
+ * a GPU attempt whose copied traits permit it; no output may be published for
+ * that result.
  */
 typedef int (*ps_operation_execute_v2)(
     void* user_data, const ps_operation_value_view_v2* inputs,
