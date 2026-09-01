@@ -20,8 +20,11 @@ IPC。
 `PlanCacheKey` 使用 canonical domain-separated input。它们排除 runtime allocation、
 timing、cancellation、ready-queue state 与 daemon identity；是非安全
 reproducibility/cache identity，不是 signature、attestation、durable object id 或
-receipt。Operation-v2 parameter schema 与已验证 value 影响 semantic identity；
-plan-derived output/input Region 影响 physical plan identity。
+receipt。Operation-v2 parameter schema 与已验证 value 影响 semantic identity。Float64
+parameter 会按 fixed little-endian order 编码 copied IEEE-754 binary64 的精确 bit，因此
+`+0.0` 与 `-0.0` 具有不同的 semantic、optimized、plan 与 cache-key identity。不会执行
+NaN-payload、infinity 或 signed-zero normalization，这份 digest contract 也不增加
+finite-only validation。plan-derived output/input Region 影响 physical plan identity。
 
 ## Cache 兼容性
 

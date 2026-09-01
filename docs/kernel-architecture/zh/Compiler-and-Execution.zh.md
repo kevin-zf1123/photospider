@@ -9,6 +9,11 @@ scalar/preserve/match/fixed output descriptor inference。unknown、missing 或 
 parameter 会在 IR publication 前失败；builtin 不合成 default。它按 node-id tie-break 的 topological order
 发布 immutable `SemanticGraphIR` 与 `SemanticGraphDigest`。
 
+每个通过 schema validation 的 Float64 parameter 都以 copied IEEE-754 binary64 的精确
+bit、按 fixed little-endian order 进入 canonical stage identity。signed zero 会被保留，
+因此 sign-sensitive callback 不能共享 semantic、optimized、plan 或 cache-key identity。
+Compiler 不引入 finite-only rule，也不规范化 NaN payload 或 infinity。
+
 `Compiler::optimize` 在当前 baseline 中是显式 conservative no-op。它把 semantic node
 复制进独立 `OptimizedGraphIR`，并产生 domain-separated `OptimizedGraphDigest`。
 

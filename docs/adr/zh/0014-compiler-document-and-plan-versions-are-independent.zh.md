@@ -44,9 +44,12 @@ Compiler 可以暴露：
 - physical plan content 加 target capability 的 `ExecutionPlanDigest`；
 - 用于派生 lookup 的 `PlanCacheKey`。
 
-Canonical hashing 使用显式 field order、width、enum spelling 和 floating-point
-normalization。Digest 排除 runtime allocation id、address、timing、cancellation
-observation、queue state 与 daemon id。
+Canonical hashing 使用显式 field order、width、enum spelling，以及每个 copied Float64
+parameter 中存在的精确 IEEE-754 binary64 bit。positive zero 与 negative zero 因而在
+semantic、optimized、plan 与 cache-key stage 保持不同。Compiler 不会规范化 NaN payload
+或 infinity，这条 identity 规则也不增加 finite-only validation；每个通过 schema validation
+的 copied bit pattern 都按 fixed little-endian order 编码。Digest 排除 runtime allocation
+id、address、timing、cancellation observation、queue state 与 daemon id。
 
 这些 digest 是用于 reproducibility、diagnostic、benchmark comparison 和可丢弃
 derived cache 的非安全 identity。它们不是 signature、certificate、attestation、

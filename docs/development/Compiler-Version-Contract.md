@@ -22,7 +22,11 @@ can be decoded or executed. The daemon never places internal IR on local IPC.
 allocation, timing, cancellation, ready-queue state, and daemon identity.
 They are non-security reproducibility/cache identities, not signatures,
 attestations, durable object ids, or receipts. Operation-v2 parameter schemas
-and validated values affect semantic identity; plan-derived output/input
+and validated values affect semantic identity. Float64 parameters encode the
+exact copied IEEE-754 binary64 bits in fixed little-endian order, so `+0.0`
+and `-0.0` have different semantic, optimized, plan, and cache-key identities.
+No NaN-payload, infinity, or signed-zero normalization is performed, and this
+digest contract adds no finite-only validation. Plan-derived output/input
 Regions affect physical plan identity.
 
 ## Cache compatibility

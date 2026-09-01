@@ -121,9 +121,6 @@ void append_parameter(DigestBuilder* digest,
     digest->integer(2U);
     std::uint64_t bits = 0U;
     std::memcpy(&bits, floating, sizeof(bits));
-    if ((bits << 1U) == 0U) {
-      bits = 0U;
-    }
     digest->integer(bits);
   } else if (const auto* boolean = std::get_if<bool>(&value)) {
     digest->integer(3U);

@@ -49,8 +49,13 @@ The compiler may expose:
 - `PlanCacheKey` for derived lookup.
 
 Canonical hashing uses explicit field ordering, widths, enum spellings, and
-floating-point normalization. A digest excludes runtime allocation ids,
-addresses, timings, cancellation observations, queue state, and daemon ids.
+the exact IEEE-754 binary64 bits present in each copied Float64 parameter.
+Positive and negative zero therefore remain distinct at semantic, optimized,
+plan, and cache-key stages. The compiler does not normalize NaN payloads or
+infinities and this identity rule adds no finite-only validation; every
+schema-valid copied bit pattern is encoded in fixed little-endian order. A
+digest excludes runtime allocation ids, addresses, timings, cancellation
+observations, queue state, and daemon ids.
 
 These digests are non-security identities for reproducibility, diagnostics,
 benchmark comparison, and disposable derived caches. They are not signatures,
