@@ -1,7 +1,9 @@
+#include <array>
 #include <chrono>
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -169,6 +171,7 @@ int main() {
   using ps::ErrorCode;
   using ps::ExecutionContext;
   using ps::ExecutionContextConfig;
+  using ps::ExecutionOptions;
   using ps::ExecutionResult;
   using ps::GraphContext;
   using ps::make_default_operation_registry;
@@ -215,6 +218,142 @@ int main() {
   auto mismatched_result = mismatched_execution.execute(workflow.plan);
   PS_CHECK(!mismatched_result.ok());
   PS_CHECK(mismatched_result.status().code == ErrorCode::Stale);
+
+  std::mutex effect_mutex;
+  std::uint64_t source_calls = 0U;
+  std::uint64_t sink_calls = 0U;
+  std::vector<std::uint64_t> effect_order;
+  auto effect_operations = std::make_shared<OperationRegistry>();
+  OperationTraits effect_source_traits;
+  effect_source_traits.deterministic = true;
+  effect_source_traits.side_effect_free = false;
+  effect_source_traits.cacheable = false;
+  PS_CHECK(effect_operations
+               ->register_operation(OperationDefinition{
+                   "test.effect_source", effect_source_traits,
+                   [&effect_mutex, &source_calls, &effect_order](
+                       const OperationInvocation&) -> Result<Value> {
+                     double value = 0.0;
+                     {
+                       std::lock_guard<std::mutex> lock(effect_mutex);
+                       ++source_calls;
+                       effect_order.push_back(1U);
+                       value = static_cast<double>(source_calls);
+                     }
+                     return Result<Value>(Value::from_float64(value));
+                   }})
+               .ok());
+  OperationTraits effect_sink_traits;
+  effect_sink_traits.input_count = 1U;
+  effect_sink_traits.deterministic = true;
+  effect_sink_traits.side_effect_free = false;
+  effect_sink_traits.cacheable = false;
+  effect_sink_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  PS_CHECK(effect_operations
+               ->register_operation(OperationDefinition{
+                   "test.effect_sink", effect_sink_traits,
+                   [&effect_mutex, &sink_calls, &effect_order](
+                       const OperationInvocation& invocation) -> Result<Value> {
+                     if (invocation.inputs.size() != 1U) {
+                       return Result<Value>(ps::Status::failure(
+                           ErrorCode::InvalidArgument,
+                           "effect sink requires one input"));
+                     }
+                     {
+                       std::lock_guard<std::mutex> lock(effect_mutex);
+                       ++sink_calls;
+                       effect_order.push_back(2U);
+                     }
+                     return Result<Value>(invocation.inputs.front());
+                   }})
+               .ok());
+  effect_operations->freeze();
+  Compiler effect_compiler(effect_operations);
+  ExecutionContext effect_execution(
+      effect_operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+  WorkflowDocument effect_document;
+  effect_document.nodes = {
+      WorkflowNode{1U, "test.effect_source", {}, {}},
+      WorkflowNode{2U, "test.effect_sink", {WorkflowInput{1U, "value"}}, {}},
+  };
+  effect_document.outputs = {WorkflowOutput{"effect", 2U, "value"}};
+  GraphContext effect_graph(std::move(effect_document));
+  CompiledWorkflow effect_workflow =
+      compile_or_throw(&effect_compiler, effect_graph);
+  CompiledWorkflow repeated_effect_workflow =
+      compile_or_throw(&effect_compiler, effect_graph);
+  PS_CHECK(effect_workflow.semantic.nodes().size() == 2U);
+  PS_CHECK(effect_workflow.optimized.nodes().size() == 2U);
+  PS_CHECK(effect_workflow.plan.steps().size() == 2U);
+  PS_CHECK(effect_workflow.semantic.nodes()[0U].operation ==
+           "test.effect_source");
+  PS_CHECK(effect_workflow.semantic.nodes()[1U].operation ==
+           "test.effect_sink");
+  for (std::size_t index = 0U; index < 2U; ++index) {
+    const auto& semantic_node = effect_workflow.semantic.nodes()[index];
+    const auto& optimized_node = effect_workflow.optimized.nodes()[index];
+    const auto& plan_step = effect_workflow.plan.steps()[index];
+    PS_CHECK(semantic_node.id == index + 1U);
+    PS_CHECK(optimized_node.id == semantic_node.id);
+    PS_CHECK(plan_step.node_id == semantic_node.id);
+    PS_CHECK(optimized_node.operation == semantic_node.operation);
+    PS_CHECK(plan_step.operation == semantic_node.operation);
+    PS_CHECK(semantic_node.traits.deterministic);
+    PS_CHECK(!semantic_node.traits.side_effect_free);
+    PS_CHECK(!semantic_node.traits.cacheable);
+    PS_CHECK(!optimized_node.traits.side_effect_free);
+    PS_CHECK(!optimized_node.traits.cacheable);
+    PS_CHECK(!plan_step.traits.side_effect_free);
+    PS_CHECK(!plan_step.traits.cacheable);
+  }
+  PS_CHECK(effect_workflow.semantic.nodes()[1U].inputs ==
+           std::vector<std::uint64_t>({1U}));
+  PS_CHECK(effect_workflow.optimized.nodes()[1U].inputs ==
+           std::vector<std::uint64_t>({1U}));
+  PS_CHECK(effect_workflow.plan.steps()[1U].input_steps ==
+           std::vector<std::size_t>({0U}));
+  PS_CHECK(effect_workflow.optimized.semantic_digest().value ==
+           effect_workflow.semantic.digest().value);
+  PS_CHECK(effect_workflow.plan.optimized_digest().value ==
+           effect_workflow.optimized.digest().value);
+  PS_CHECK(!effect_workflow.plan.digest().value.empty());
+  PS_CHECK(!effect_workflow.plan.cache_key().value.empty());
+  PS_CHECK(effect_workflow.plan.digest().value !=
+           effect_workflow.plan.cache_key().value);
+  PS_CHECK(repeated_effect_workflow.semantic.digest().value ==
+           effect_workflow.semantic.digest().value);
+  PS_CHECK(repeated_effect_workflow.optimized.digest().value ==
+           effect_workflow.optimized.digest().value);
+  PS_CHECK(repeated_effect_workflow.plan.digest().value ==
+           effect_workflow.plan.digest().value);
+  PS_CHECK(repeated_effect_workflow.plan.cache_key().value ==
+           effect_workflow.plan.cache_key().value);
+  ExecutionOptions serial_execution;
+  serial_execution.maximum_parallelism = 1U;
+  auto first_effect_result =
+      effect_execution.execute(effect_workflow.plan, {}, serial_execution);
+  auto second_effect_result =
+      effect_execution.execute(effect_workflow.plan, {}, serial_execution);
+  PS_CHECK(first_effect_result.ok());
+  PS_CHECK(second_effect_result.ok());
+  PS_CHECK(ps::test::named_scalar(first_effect_result.value(), "effect") ==
+           1.0);
+  PS_CHECK(ps::test::named_scalar(second_effect_result.value(), "effect") ==
+           2.0);
+  PS_CHECK(first_effect_result.value().diagnostics.operation_timings.size() ==
+           2U);
+  PS_CHECK(second_effect_result.value().diagnostics.operation_timings.size() ==
+           2U);
+  PS_CHECK(first_effect_result.value().diagnostics.plan_digest ==
+           effect_workflow.plan.digest().value);
+  PS_CHECK(second_effect_result.value().diagnostics.plan_digest ==
+           effect_workflow.plan.digest().value);
+  {
+    std::lock_guard<std::mutex> lock(effect_mutex);
+    PS_CHECK(source_calls == 2U);
+    PS_CHECK(sink_calls == 2U);
+    PS_CHECK(effect_order == std::vector<std::uint64_t>({1U, 2U, 1U, 2U}));
+  }
 
   CompiledWorkflow unavailable_gpu_workflow =
       compile_or_throw(&compiler, graph, true);
@@ -466,6 +605,82 @@ int main() {
     PS_CHECK(sample.correctness_accepted);
     PS_CHECK(sample.oracle_name == "sum-equals-6.5");
     PS_CHECK(!sample.execution.plan_digest.empty());
+  }
+
+  RawBenchmarkOptions rejected_oracle_options;
+  rejected_oracle_options.execution.maximum_parallelism = 1U;
+  rejected_oracle_options.correctness_oracle =
+      [](const ExecutionResult&) -> CorrectnessObservation {
+    return CorrectnessObservation{false, "intentional mismatch"};
+  };
+  rejected_oracle_options.oracle_name = "always-rejects";
+  auto rejected_oracle_report = benchmark.run(graph, rejected_oracle_options);
+  PS_CHECK(rejected_oracle_report.ok());
+  PS_CHECK(rejected_oracle_report.value().oracle_name == "always-rejects");
+  PS_CHECK(rejected_oracle_report.value().samples.size() == 1U);
+  const RawBenchmarkSample& rejected_sample =
+      rejected_oracle_report.value().samples.front();
+  PS_CHECK(rejected_sample.iteration == 0U);
+  PS_CHECK(rejected_sample.oracle_name == "always-rejects");
+  PS_CHECK(rejected_sample.correctness_checked);
+  PS_CHECK(!rejected_sample.correctness_accepted);
+  PS_CHECK(rejected_sample.outcome == ErrorCode::OperationFailed);
+  PS_CHECK(rejected_sample.reason == "intentional mismatch");
+  const std::array<std::uint64_t, 3U> rejected_compile_durations{
+      rejected_sample.compilation.analyze_us,
+      rejected_sample.compilation.optimize_us,
+      rejected_sample.compilation.plan_us,
+  };
+  PS_CHECK(rejected_compile_durations.size() == 3U);
+  PS_CHECK(rejected_sample.execution.plan_digest ==
+           workflow.plan.digest().value);
+  PS_CHECK(!rejected_sample.execution.result_digest.empty());
+  PS_CHECK(rejected_sample.execution.selected_backends.size() == 3U);
+  PS_CHECK(rejected_sample.execution.operation_timings.size() == 3U);
+  for (std::size_t index = 0U;
+       index < rejected_sample.execution.operation_timings.size(); ++index) {
+    const auto& timing = rejected_sample.execution.operation_timings[index];
+    const std::uint64_t expected_node = index + 1U;
+    PS_CHECK(timing.node_id == expected_node);
+    PS_CHECK(timing.outcome == ErrorCode::Ok);
+    PS_CHECK(timing.duration_us <= rejected_sample.execution.execute_us);
+    PS_CHECK(rejected_sample.execution.selected_backends.at(expected_node) ==
+             timing.backend);
+  }
+
+  RawBenchmarkOptions throwing_oracle_options = rejected_oracle_options;
+  throwing_oracle_options.correctness_oracle =
+      [](const ExecutionResult&) -> CorrectnessObservation {
+    throw std::runtime_error("intentional oracle exception");
+  };
+  throwing_oracle_options.oracle_name = "always-throws";
+  auto throwing_oracle_report = benchmark.run(graph, throwing_oracle_options);
+  PS_CHECK(throwing_oracle_report.ok());
+  PS_CHECK(throwing_oracle_report.value().oracle_name == "always-throws");
+  PS_CHECK(throwing_oracle_report.value().samples.size() == 1U);
+  const RawBenchmarkSample& throwing_sample =
+      throwing_oracle_report.value().samples.front();
+  PS_CHECK(throwing_sample.oracle_name == "always-throws");
+  PS_CHECK(throwing_sample.correctness_checked);
+  PS_CHECK(!throwing_sample.correctness_accepted);
+  PS_CHECK(throwing_sample.outcome == ErrorCode::OperationFailed);
+  PS_CHECK(throwing_sample.reason == "intentional oracle exception");
+  const std::array<std::uint64_t, 3U> throwing_compile_durations{
+      throwing_sample.compilation.analyze_us,
+      throwing_sample.compilation.optimize_us,
+      throwing_sample.compilation.plan_us,
+  };
+  PS_CHECK(throwing_compile_durations.size() == 3U);
+  PS_CHECK(throwing_sample.execution.plan_digest ==
+           workflow.plan.digest().value);
+  PS_CHECK(!throwing_sample.execution.result_digest.empty());
+  PS_CHECK(throwing_sample.execution.selected_backends.size() == 3U);
+  PS_CHECK(throwing_sample.execution.operation_timings.size() == 3U);
+  for (const auto& timing : throwing_sample.execution.operation_timings) {
+    PS_CHECK(timing.outcome == ErrorCode::Ok);
+    PS_CHECK(timing.duration_us <= throwing_sample.execution.execute_us);
+    PS_CHECK(throwing_sample.execution.selected_backends.at(timing.node_id) ==
+             timing.backend);
   }
 
   RawBenchmarkOptions unchecked_options;
