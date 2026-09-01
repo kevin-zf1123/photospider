@@ -3,8 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "photospider/core/export.hpp"
-
 namespace ps::plugin_testing {
 
 /** @brief Closed native-library kind vocabulary for private lifecycle tests. */
@@ -15,20 +13,39 @@ enum class LibraryKind : std::uint32_t {
   Provider = 2U,
 };
 
-/** @brief Callback invoked immediately before heap owner allocation. */
+/**
+ * @brief Callback invoked immediately before heap owner allocation.
+ * @param kind Exact library kind approaching heap owner allocation.
+ * @return No value.
+ * @throws Any exception deliberately raised by the installed test callback.
+ * @note The callback runs only in the noninstalled test-kernel variant.
+ */
 using BeforeOwnerAllocationHook = void (*)(LibraryKind kind);
 
-/** @brief Nonthrowing callback invoked after one native close call. */
+/**
+ * @brief Nonthrowing callback invoked after one native close call.
+ * @param kind Exact closed library kind.
+ * @return No value.
+ * @throws Nothing.
+ * @note The callback observes cleanup and never owns the native handle.
+ */
 using NativeCloseHook = void (*)(LibraryKind kind) noexcept;
 
-/** @brief Callback invoked after registry-owned provider schemas retire. */
+/**
+ * @brief Callback invoked after registry-owned provider schemas retire.
+ * @param count Exact number of retired copied schemas.
+ * @return No value.
+ * @throws Nothing.
+ * @note Provider leases remain alive while the callback runs.
+ */
 using ProviderSchemasRetiredHook = void (*)(std::size_t count) noexcept;
 
 /**
  * @brief Private deterministic callbacks for native-library lifecycle tests.
  *
- * @note This structure is not installed and has no effect unless a test
- * explicitly installs one process-global callback set.
+ * @note This structure is private to the noninstalled test-kernel variant and
+ * has no effect unless a test explicitly installs one process-global callback
+ * set.
  */
 struct LibraryTestHooks final {
   /** @brief Optional owner-allocation boundary callback. */
@@ -42,36 +59,38 @@ struct LibraryTestHooks final {
 /**
  * @brief Installs or clears the private process-global lifecycle callbacks.
  * @param hooks Borrowed callback set, or null to clear.
+ * @return No value.
  * @throws Nothing.
  * @note The caller keeps a nonnull set alive and immutable until clearing it;
  * tests must not install competing sets concurrently.
  */
-PHOTOSPIDER_API void install_library_test_hooks(
-    const LibraryTestHooks* hooks) noexcept;
+void install_library_test_hooks(const LibraryTestHooks* hooks) noexcept;
 
 /**
  * @brief Invokes the installed owner-allocation boundary callback.
  * @param kind Exact library kind approaching heap owner allocation.
+ * @return No value.
  * @throws Any exception deliberately raised by the installed test callback.
- * @note Production builds without `BUILD_TESTING` never call this function.
+ * @note Only the noninstalled test-kernel variant calls this function.
  */
-PHOTOSPIDER_API void invoke_before_owner_allocation(LibraryKind kind);
+void invoke_before_owner_allocation(LibraryKind kind);
 
 /**
  * @brief Notifies the installed observer after one native close call.
  * @param kind Exact closed library kind.
+ * @return No value.
  * @throws Nothing.
  * @note The observer counts close calls, not operating-system return codes.
  */
-PHOTOSPIDER_API void notify_native_close(LibraryKind kind) noexcept;
+void notify_native_close(LibraryKind kind) noexcept;
 
 /**
  * @brief Notifies the installed observer after copied provider schemas retire.
  * @param count Exact number of registry-owned schemas cleared by destruction.
+ * @return No value.
  * @throws Nothing.
  * @note Provider leases remain alive until after this callback returns.
  */
-PHOTOSPIDER_API void notify_provider_schemas_retired(
-    std::size_t count) noexcept;
+void notify_provider_schemas_retired(std::size_t count) noexcept;
 
 }  // namespace ps::plugin_testing

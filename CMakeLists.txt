@@ -23,8 +23,8 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_library(
-  photospider
+set(
+  PHOTOSPIDER_KERNEL_SOURCES
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
@@ -34,6 +34,7 @@ add_library(
   src/lib/plugin/data_definition_registry.cpp
   src/lib/plugin/operation_registry.cpp
   src/lib/plugin/utf8_validation.cpp)
+add_library(photospider ${PHOTOSPIDER_KERNEL_SOURCES})
 add_library(Photospider::kernel ALIAS photospider)
 
 add_library(photospider_operation_sdk INTERFACE)
@@ -53,33 +54,40 @@ target_include_directories(
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-set_target_properties(
-  photospider
-  PROPERTIES CXX_EXTENSIONS OFF
-             CXX_VISIBILITY_PRESET hidden
-             VISIBILITY_INLINES_HIDDEN YES
-             EXPORT_NAME kernel)
-target_compile_features(photospider PUBLIC cxx_std_17)
-target_include_directories(
-  photospider
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib)
-target_link_libraries(photospider PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
-target_compile_definitions(photospider PRIVATE PHOTOSPIDER_BUILD)
+function(photospider_configure_kernel_target target)
+  set_target_properties(
+    ${target}
+    PROPERTIES CXX_EXTENSIONS OFF
+               CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN YES)
+  target_compile_features(${target} PUBLIC cxx_std_17)
+  target_include_directories(
+    ${target}
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib)
+  target_link_libraries(
+    ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_definitions(${target} PRIVATE PHOTOSPIDER_BUILD)
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    if(PHOTOSPIDER_ENABLE_ASAN)
+      target_compile_options(
+        ${target} PUBLIC -fsanitize=address -fno-omit-frame-pointer)
+      target_link_options(${target} PUBLIC -fsanitize=address)
+    elseif(PHOTOSPIDER_ENABLE_TSAN)
+      target_compile_options(
+        ${target} PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
+      target_link_options(${target} PUBLIC -fsanitize=thread)
+    endif()
+  endif()
+endfunction()
+
+photospider_configure_kernel_target(photospider)
+set_target_properties(photospider PROPERTIES EXPORT_NAME kernel)
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
-endif()
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(photospider PRIVATE -Wall -Wextra -Wpedantic -Werror)
-  if(PHOTOSPIDER_ENABLE_ASAN)
-    target_compile_options(photospider PUBLIC -fsanitize=address -fno-omit-frame-pointer)
-    target_link_options(photospider PUBLIC -fsanitize=address)
-  elseif(PHOTOSPIDER_ENABLE_TSAN)
-    target_compile_options(photospider PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
-    target_link_options(photospider PUBLIC -fsanitize=thread)
-  endif()
 endif()
 
 if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
@@ -137,18 +145,21 @@ install(
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Photospider)
 
 if(BUILD_TESTING)
-  target_sources(
-    photospider
-    PRIVATE src/lib/benchmark/raw_benchmark_test_hooks.cpp
-            src/lib/plugin/library_test_hooks.cpp)
+  add_library(
+    photospider_test_kernel STATIC EXCLUDE_FROM_ALL
+    ${PHOTOSPIDER_KERNEL_SOURCES}
+    src/lib/benchmark/raw_benchmark_test_hooks.cpp
+    src/lib/plugin/library_test_hooks.cpp)
+  photospider_configure_kernel_target(photospider_test_kernel)
   target_compile_definitions(
-    photospider
+    photospider_test_kernel
+    PUBLIC PHOTOSPIDER_STATIC
     PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS
             PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS)
 
-  function(photospider_add_test target)
+  function(photospider_add_test target kernel_target)
     add_executable(${target} ${ARGN})
-    target_link_libraries(${target} PRIVATE Photospider::kernel)
+    target_link_libraries(${target} PRIVATE ${kernel_target})
     target_include_directories(${target} PRIVATE tests)
     target_compile_features(${target} PRIVATE cxx_std_17)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -228,19 +239,25 @@ if(BUILD_TESTING)
     data_provider_invalid_utf8_overlong_fixture 1)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
 
-  photospider_add_test(test_value tests/unit/test_value.cpp)
-  photospider_add_test(test_compiler tests/unit/test_compiler.cpp)
+  photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
+  photospider_add_test(
+    test_compiler Photospider::kernel tests/unit/test_compiler.cpp)
   photospider_add_test(
     test_operation_contract_ir_seeds
+    Photospider::kernel
     tests/unit/test_operation_contract_ir_seeds.cpp
     tests/fuzz/operation_contract_ir_fuzz.cpp)
   target_compile_definitions(
     test_operation_contract_ir_seeds
     PRIVATE PS_OPERATION_VALID_SEED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/operation_contract_ir/valid-source"
             PS_OPERATION_DUPLICATE_SEED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/operation_contract_ir/malformed-schema")
-  photospider_add_test(test_execution tests/integration/test_execution.cpp)
+  photospider_add_test(
+    test_execution photospider_test_kernel
+    tests/integration/test_execution.cpp)
   target_include_directories(test_execution PRIVATE src/lib)
-  photospider_add_test(test_plugin_registry tests/integration/test_plugin_registry.cpp)
+  photospider_add_test(
+    test_plugin_registry photospider_test_kernel
+    tests/integration/test_plugin_registry.cpp)
   target_include_directories(test_plugin_registry PRIVATE src/lib)
   target_compile_definitions(test_plugin_registry
                              PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
