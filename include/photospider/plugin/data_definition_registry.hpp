@@ -16,7 +16,7 @@ namespace ps {
  * @note Definitions grant no execution, storage, or registry mutation access.
  */
 struct PHOTOSPIDER_API DataSchemaDefinition final {
-  /** @brief Nonempty unique schema key. */
+  /** @brief Nonempty unique strict UTF-8 schema key. */
   std::string key;
   /** @brief Physical scalar representation. */
   ElementType element_type = ElementType::UInt8;
@@ -38,9 +38,10 @@ class PHOTOSPIDER_API DataDefinitionRegistry final {
    */
   DataDefinitionRegistry();
   /**
-   * @brief Releases copied records and unloads provider DSOs.
+   * @brief Releases copied records, then destroys and unloads provider DSOs.
    * @throws Nothing.
-   * @note Callers must ensure no registry read remains in flight.
+   * @note Callers must ensure no registry read remains in flight. Returned
+   * copied definitions retain no pointer into a provider DSO.
    */
   ~DataDefinitionRegistry() noexcept;
 

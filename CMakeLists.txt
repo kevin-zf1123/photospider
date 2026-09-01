@@ -32,7 +32,8 @@ add_library(
   src/lib/execution/execution.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
-  src/lib/plugin/operation_registry.cpp)
+  src/lib/plugin/operation_registry.cpp
+  src/lib/plugin/utf8_validation.cpp)
 add_library(Photospider::kernel ALIAS photospider)
 
 add_library(photospider_operation_sdk INTERFACE)
@@ -62,7 +63,8 @@ target_compile_features(photospider PUBLIC cxx_std_17)
 target_include_directories(
   photospider
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib)
 target_link_libraries(photospider PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
 target_compile_definitions(photospider PRIVATE PHOTOSPIDER_BUILD)
 if(NOT BUILD_SHARED_LIBS)
@@ -138,7 +140,6 @@ if(BUILD_TESTING)
   target_sources(photospider PRIVATE src/lib/plugin/library_test_hooks.cpp)
   target_compile_definitions(photospider
                              PRIVATE PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
-  target_include_directories(photospider PRIVATE src/lib)
 
   function(photospider_add_test target)
     add_executable(${target} ${ARGN})
@@ -178,6 +179,27 @@ if(BUILD_TESTING)
   photospider_add_bad_parameter_fixture(operation_bad_parameter_bounds_fixture 4)
   photospider_add_bad_parameter_fixture(operation_bad_parameter_alignment_fixture 5)
 
+  function(photospider_add_operation_utf8_fixture target case_number)
+    add_library(${target} MODULE tests/fixtures/operation_utf8_fixture.cpp)
+    target_link_libraries(${target} PRIVATE Photospider::operation_sdk)
+    target_compile_definitions(
+      ${target}
+      PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD
+              PS_OPERATION_UTF8_CASE=${case_number})
+    set_target_properties(${target} PROPERTIES PREFIX "")
+  endfunction()
+  photospider_add_operation_utf8_fixture(
+    operation_invalid_utf8_overlong_fixture 1)
+  photospider_add_operation_utf8_fixture(
+    operation_invalid_utf8_truncated_fixture 2)
+  photospider_add_operation_utf8_fixture(
+    operation_invalid_utf8_surrogate_fixture 3)
+  photospider_add_operation_utf8_fixture(
+    operation_invalid_utf8_too_large_fixture 4)
+  photospider_add_operation_utf8_fixture(
+    operation_invalid_utf8_continuation_fixture 5)
+  photospider_add_operation_utf8_fixture(operation_unicode_fixture 6)
+
   add_library(data_provider_fixture MODULE tests/fixtures/data_provider_fixture.cpp)
   target_link_libraries(data_provider_fixture PRIVATE Photospider::data_provider_sdk)
   target_compile_definitions(data_provider_fixture PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD)
@@ -187,6 +209,19 @@ if(BUILD_TESTING)
   target_link_libraries(data_provider_bad_fixture PRIVATE Photospider::data_provider_sdk)
   target_compile_definitions(data_provider_bad_fixture PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD)
   set_target_properties(data_provider_bad_fixture PROPERTIES PREFIX "")
+
+  function(photospider_add_provider_utf8_fixture target case_number)
+    add_library(${target} MODULE tests/fixtures/data_provider_utf8_fixture.cpp)
+    target_link_libraries(${target} PRIVATE Photospider::data_provider_sdk)
+    target_compile_definitions(
+      ${target}
+      PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD
+              PS_PROVIDER_UTF8_CASE=${case_number})
+    set_target_properties(${target} PROPERTIES PREFIX "")
+  endfunction()
+  photospider_add_provider_utf8_fixture(
+    data_provider_invalid_utf8_overlong_fixture 1)
+  photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
 
   photospider_add_test(test_value tests/unit/test_value.cpp)
   photospider_add_test(test_compiler tests/unit/test_compiler.cpp)
@@ -212,8 +247,16 @@ if(BUILD_TESTING)
     operation_bad_parameter_count_fixture
     operation_bad_parameter_bounds_fixture
     operation_bad_parameter_alignment_fixture
+    operation_invalid_utf8_overlong_fixture
+    operation_invalid_utf8_truncated_fixture
+    operation_invalid_utf8_surrogate_fixture
+    operation_invalid_utf8_too_large_fixture
+    operation_invalid_utf8_continuation_fixture
+    operation_unicode_fixture
     data_provider_fixture
-    data_provider_bad_fixture)
+    data_provider_bad_fixture
+    data_provider_invalid_utf8_overlong_fixture
+    data_provider_unicode_fixture)
   target_compile_definitions(
     test_plugin_registry
     PRIVATE PS_OPERATION_FIXTURE_PATH="$<TARGET_FILE:operation_fixture>"
@@ -223,8 +266,16 @@ if(BUILD_TESTING)
             PS_OPERATION_BAD_PARAMETER_COUNT_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_count_fixture>"
             PS_OPERATION_BAD_PARAMETER_BOUNDS_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_bounds_fixture>"
             PS_OPERATION_BAD_PARAMETER_ALIGNMENT_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_alignment_fixture>"
+            PS_OPERATION_INVALID_UTF8_OVERLONG_FIXTURE_PATH="$<TARGET_FILE:operation_invalid_utf8_overlong_fixture>"
+            PS_OPERATION_INVALID_UTF8_TRUNCATED_FIXTURE_PATH="$<TARGET_FILE:operation_invalid_utf8_truncated_fixture>"
+            PS_OPERATION_INVALID_UTF8_SURROGATE_FIXTURE_PATH="$<TARGET_FILE:operation_invalid_utf8_surrogate_fixture>"
+            PS_OPERATION_INVALID_UTF8_TOO_LARGE_FIXTURE_PATH="$<TARGET_FILE:operation_invalid_utf8_too_large_fixture>"
+            PS_OPERATION_INVALID_UTF8_CONTINUATION_FIXTURE_PATH="$<TARGET_FILE:operation_invalid_utf8_continuation_fixture>"
+            PS_OPERATION_UNICODE_FIXTURE_PATH="$<TARGET_FILE:operation_unicode_fixture>"
             PS_DATA_PROVIDER_FIXTURE_PATH="$<TARGET_FILE:data_provider_fixture>"
-            PS_DATA_PROVIDER_BAD_FIXTURE_PATH="$<TARGET_FILE:data_provider_bad_fixture>")
+            PS_DATA_PROVIDER_BAD_FIXTURE_PATH="$<TARGET_FILE:data_provider_bad_fixture>"
+            PS_DATA_PROVIDER_INVALID_UTF8_OVERLONG_FIXTURE_PATH="$<TARGET_FILE:data_provider_invalid_utf8_overlong_fixture>"
+            PS_DATA_PROVIDER_UNICODE_FIXTURE_PATH="$<TARGET_FILE:data_provider_unicode_fixture>")
 
   add_test(
     NAME test_installed_consumer

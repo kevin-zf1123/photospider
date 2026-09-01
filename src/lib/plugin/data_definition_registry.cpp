@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "photospider/plugin/data_provider_api.h"
+#include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
 #include "plugin/library_test_hooks.hpp"
@@ -26,16 +27,14 @@ namespace {
 
 /**
  * @brief Validates one bounded schema key.
- * @param key Candidate UTF-8-like key.
- * @return True for 1..1024 bytes without ASCII control characters.
+ * @param key Candidate strict UTF-8 key.
+ * @return True for 1..1024 well-formed bytes without ASCII control
+ * characters.
  * @throws Nothing.
  * @note Key normalization remains provider/application policy.
  */
 bool valid_schema_key(const std::string& key) noexcept {
-  return !key.empty() && key.size() <= 1024U &&
-         std::none_of(key.begin(), key.end(), [](unsigned char byte) {
-           return byte < 0x20U || byte == 0x7fU;
-         });
+  return plugin_internal::valid_utf8_key(key);
 }
 
 /**
@@ -214,15 +213,32 @@ void* provider_symbol(void* handle, const char* name) noexcept {
 
 /**
  * @brief Private synchronized implementation of DataDefinitionRegistry.
- * @note Provider leases outlive copied schema records and unload last.
+ * @note Provider leases are declared before copied schemas so reverse member
+ * destruction retires every copied record before provider destroy/unload.
  */
 struct DataDefinitionRegistry::Impl final {
+  /**
+   * @brief Retires copied schemas before automatic provider-lease destruction.
+   * @throws Nothing.
+   * @note The explicit clear supplies a deterministic test observation point;
+   * member declaration order independently preserves the same sequence.
+   */
+  ~Impl() noexcept {
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+    const std::size_t retired_schema_count = schemas.size();
+#endif
+    schemas.clear();
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+    plugin_testing::notify_provider_schemas_retired(retired_schema_count);
+#endif
+  }
+
   /** @brief Serializes registry mutation and lookup. */
   mutable std::mutex mutex;
-  /** @brief Sorted copied schema definitions. */
-  std::map<std::string, DataSchemaDefinition> schemas;
-  /** @brief Provider leases retained until registry destruction. */
+  /** @brief Provider leases that must outlive every copied schema record. */
   std::vector<std::shared_ptr<ProviderLibrary>> providers;
+  /** @brief Sorted copied schemas destroyed before the provider leases. */
+  std::map<std::string, DataSchemaDefinition> schemas;
   /** @brief Monotonic mutation fence. */
   bool frozen = false;
 };
@@ -235,7 +251,7 @@ DataDefinitionRegistry::DataDefinitionRegistry()
     : impl_(std::make_unique<Impl>()) {}
 
 /**
- * @brief Implements provider-record release before DSO unload.
+ * @brief Implements copied-record retirement before provider destroy/unload.
  * @copydetails DataDefinitionRegistry::~DataDefinitionRegistry
  */
 DataDefinitionRegistry::~DataDefinitionRegistry() noexcept = default;

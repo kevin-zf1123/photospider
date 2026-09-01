@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "photospider/core/export.hpp"
@@ -20,6 +21,9 @@ using BeforeOwnerAllocationHook = void (*)(LibraryKind kind);
 /** @brief Nonthrowing callback invoked after one native close call. */
 using NativeCloseHook = void (*)(LibraryKind kind) noexcept;
 
+/** @brief Callback invoked after registry-owned provider schemas retire. */
+using ProviderSchemasRetiredHook = void (*)(std::size_t count) noexcept;
+
 /**
  * @brief Private deterministic callbacks for native-library lifecycle tests.
  *
@@ -31,6 +35,8 @@ struct LibraryTestHooks final {
   BeforeOwnerAllocationHook before_owner_allocation = nullptr;
   /** @brief Optional native close-call observer. */
   NativeCloseHook native_close = nullptr;
+  /** @brief Optional copied-provider-schema retirement observer. */
+  ProviderSchemasRetiredHook provider_schemas_retired = nullptr;
 };
 
 /**
@@ -58,5 +64,14 @@ PHOTOSPIDER_API void invoke_before_owner_allocation(LibraryKind kind);
  * @note The observer counts close calls, not operating-system return codes.
  */
 PHOTOSPIDER_API void notify_native_close(LibraryKind kind) noexcept;
+
+/**
+ * @brief Notifies the installed observer after copied provider schemas retire.
+ * @param count Exact number of registry-owned schemas cleared by destruction.
+ * @throws Nothing.
+ * @note Provider leases remain alive until after this callback returns.
+ */
+PHOTOSPIDER_API void notify_provider_schemas_retired(
+    std::size_t count) noexcept;
 
 }  // namespace ps::plugin_testing
