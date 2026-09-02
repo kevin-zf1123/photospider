@@ -66,12 +66,21 @@ default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
 
 - installed headers match the declared public inventory;
 - exports contain no source/private paths;
-- the linked C SDK compilation unit and C++ embedded compile/execute facade
-  both run;
+- the linked C SDK compilation unit runs, and a downstream shared bridge links
+  `Photospider::kernel`, executes the C++ compile/execute pipeline, and is
+  called by the consumer executable; the default static archive is therefore
+  exercised as position-independent input to a real shared library;
 - `kernel`, `operation_sdk`, and `data_provider_sdk` component discovery
   exports exactly `Photospider::kernel`, `Photospider::operation_sdk`, and
   `Photospider::data_provider_sdk`; the SDK targets are header-only;
 - removed targets, headers, components, and executables are absent.
+
+The nested consumer project exposes a generator-aware
+`run_photospider_consumer` target whose command uses its executable target-file
+expression. The outer gate passes its exact generator, platform/toolset when
+present, and active configuration, then builds that run target. Single-config
+and multi-config layouts therefore require no guessed build root, configuration
+directory, executable suffix, or bundle path.
 
 Daemon validation must use that isolated prefix, never a sibling checkout or
 private include directory.
