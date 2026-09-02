@@ -201,6 +201,9 @@ void append_descriptor(DigestBuilder* digest,
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
+ * @note Fixed inference validates only logical rank/extents. Dense byte count
+ * is not evaluated because a C++ callback may publish a valid broadcast or
+ * otherwise strided Value for that descriptor.
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {

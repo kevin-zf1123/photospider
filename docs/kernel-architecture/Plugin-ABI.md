@@ -36,19 +36,31 @@ rejected output retains the sink's exact typed failure. Neither path exposes
 `BackendUnavailable` or triggers CPU fallback, while host cancellation remains
 the highest-priority result.
 
+A C++ `OperationTraits::Fixed` record describes only the logical output
+descriptor. Registration validates a nonzero rank-1..8 shape, closed element
+type/rules, and the ordinary trait combinations without evaluating a dense
+element or byte product. The callback may return any Value layout that passes
+normal publication validation, including an eight-byte zero-stride broadcast
+over a huge logical shape. `estimated_bytes` is an independent modeled
+admission estimate. A C DSO Fixed descriptor is stricter because ABI v2 carries
+no output strides: loading separately requires representable contiguous
+signed strides and uint64 byte count. This distinction adds no ABI field and
+does not change Preserve or Match inference.
+
 ## Validation
 
 Loading validates exact ABI version/structure sizes, pointer and array
 alignment, pointer/count pairs, bounded key/count/rank/parameter values,
 strict UTF-8 operation/parameter-schema/provider-schema keys, duplicate
 parameter declarations, closed enum/flag/type combinations, required
-callbacks, output element/shape/byte count, facet arrays/key/version/payload,
-arithmetic overflow, and exactly-once destroy ownership. Key validation rejects
-invalid continuation bytes, truncation, overlong encodings, UTF-16 surrogates,
-values above U+10FFFF, embedded nulls, and ASCII controls before publication;
-it does not normalize Unicode. Ordinary facet payload and Value bytes remain
-opaque binary data. This ABI version rejects trailing structure bytes and
-publishes no v1 compatibility entry point.
+callbacks, logical C++ fixed descriptors, dense C DSO fixed stride/byte
+representability, output element/shape/byte count, facet arrays/key/version/
+payload, arithmetic overflow, and exactly-once destroy ownership. Key
+validation rejects invalid continuation bytes, truncation, overlong encodings,
+UTF-16 surrogates, values above U+10FFFF, embedded nulls, and ASCII controls
+before publication; it does not normalize Unicode. Ordinary facet payload and
+Value bytes remain opaque binary data. This ABI version rejects trailing
+structure bytes and publishes no v1 compatibility entry point.
 
 Malformed registration publishes nothing. Multi-record registry publication
 uses copy-then-swap, so allocation failure cannot expose a prefix. Operation

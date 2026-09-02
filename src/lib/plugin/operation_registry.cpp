@@ -350,7 +350,8 @@ bool parameter_type_matches(const ParameterValue& value,
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note CPU support is mandatory and cacheability requires deterministic,
- * side-effect-free behavior.
+ * side-effect-free behavior. Fixed shapes validate only rank/extents here;
+ * actual C++ callback Value layout and storage are validated at publication.
  */
 Status validate_traits(const OperationTraits& traits) {
   bool known_shape = false;
@@ -386,17 +387,6 @@ Status validate_traits(const OperationTraits& traits) {
                           traits.fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.fixed_output_shape.empty();
-  bool fixed_byte_size_valid = true;
-  if (fixed_shape_valid && traits.shape_rule == OperationShapeRule::Fixed) {
-    std::uint64_t bytes = Value::element_size(traits.output_element_type);
-    for (std::uint64_t extent : traits.fixed_output_shape) {
-      if (bytes > std::numeric_limits<std::uint64_t>::max() / extent) {
-        fixed_byte_size_valid = false;
-        break;
-      }
-      bytes *= extent;
-    }
-  }
   if (traits.version != 2U || !traits.supports_cpu || !known_shape ||
       !known_region || (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
@@ -408,7 +398,7 @@ Status validate_traits(const OperationTraits& traits) {
        traits.halo_radius == 0U) ||
       (traits.region_rule != OperationRegionRule::Halo &&
        traits.halo_radius != 0U) ||
-      !schema_status.ok() || !fixed_shape_valid || !fixed_byte_size_valid) {
+      !schema_status.ok() || !fixed_shape_valid) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation semantic traits are inconsistent");
   }
@@ -474,34 +464,47 @@ Status validate_callback_output(const OperationTraits& traits,
 }
 
 /**
- * @brief Builds canonical contiguous strides for one shape.
+ * @brief Canonical dense layout derived from one logical shape.
+ * @note The byte count and signed strides are checked before publication.
+ */
+struct DenseLayout final {
+  /** @brief Row-major signed byte stride for every axis. */
+  std::vector<std::int64_t> byte_strides;
+  /** @brief Complete dense logical byte count. */
+  std::uint64_t byte_size = 0U;
+};
+
+/**
+ * @brief Builds canonical contiguous strides and byte count for one shape.
  * @param shape Nonzero rank-general extents.
  * @param element_size Physical scalar width.
- * @return Strides or overflow failure.
+ * @return Dense layout or signed-stride/uint64-byte overflow failure.
  * @throws std::bad_alloc If result allocation fails.
  * @note Axis order is row-major with the final axis contiguous.
  */
-Result<std::vector<std::int64_t>> contiguous_strides(
-    const std::vector<std::uint64_t>& shape, std::size_t element_size) {
-  std::vector<std::int64_t> strides(shape.size(), 0);
+Result<DenseLayout> dense_layout(const std::vector<std::uint64_t>& shape,
+                                 std::size_t element_size) {
+  DenseLayout layout;
+  layout.byte_strides.resize(shape.size(), 0);
   std::uint64_t stride = element_size;
   for (std::size_t reverse = shape.size(); reverse > 0U; --reverse) {
     const std::size_t axis = reverse - 1U;
     if (stride >
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-      return Result<std::vector<std::int64_t>>(Status::failure(
+      return Result<DenseLayout>(Status::failure(
           ErrorCode::ResourceExhausted, "contiguous stride exceeds int64"));
     }
-    strides[axis] = static_cast<std::int64_t>(stride);
+    layout.byte_strides[axis] = static_cast<std::int64_t>(stride);
     if (shape[axis] != 0U &&
         stride > std::numeric_limits<std::uint64_t>::max() / shape[axis]) {
-      return Result<std::vector<std::int64_t>>(
+      return Result<DenseLayout>(
           Status::failure(ErrorCode::ResourceExhausted,
                           "contiguous byte size overflows uint64"));
     }
     stride *= shape[axis];
   }
-  return Result<std::vector<std::int64_t>>(std::move(strides));
+  layout.byte_size = stride;
+  return Result<DenseLayout>(std::move(layout));
 }
 
 /**
@@ -570,22 +573,14 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
           ErrorCode::InvalidArgument, "plugin output shape contains zero"));
       return 0;
     }
-    auto strides = contiguous_strides(
-        owned_shape, Value::element_size(decoded_type.value()));
-    if (!strides.ok()) {
-      state->result = Result<Value>(strides.status());
+    auto layout =
+        dense_layout(owned_shape, Value::element_size(decoded_type.value()));
+    if (!layout.ok()) {
+      state->result = Result<Value>(layout.status());
       return 0;
     }
-    std::uint64_t expected = Value::element_size(decoded_type.value());
-    for (std::uint64_t extent : owned_shape) {
-      if (expected > std::numeric_limits<std::uint64_t>::max() / extent) {
-        state->result = Result<Value>(Status::failure(
-            ErrorCode::ResourceExhausted, "plugin output byte size overflows"));
-        return 0;
-      }
-      expected *= extent;
-    }
-    if (expected != byte_size) {
+    DenseLayout owned_layout = layout.take_value();
+    if (owned_layout.byte_size != byte_size) {
       state->result = Result<Value>(Status::failure(
           ErrorCode::TypeMismatch, "plugin output byte size mismatches shape"));
       return 0;
@@ -614,10 +609,11 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     if (byte_size != 0U) {
       std::memcpy(bytes.data(), data, bytes.size());
     }
-    state->result = Value::create(
-        ValueDescriptor{decoded_type.value(), owned_shape},
-        Region::whole(owned_shape), StridedLayout{0U, strides.take_value()},
-        std::move(bytes), std::move(owned_facets));
+    state->result =
+        Value::create(ValueDescriptor{decoded_type.value(), owned_shape},
+                      Region::whole(owned_shape),
+                      StridedLayout{0U, std::move(owned_layout.byte_strides)},
+                      std::move(bytes), std::move(owned_facets));
     return state->result.ok() ? 1 : 0;
   } catch (const std::bad_alloc&) {
     Status failure;
@@ -975,6 +971,16 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     if (!traits_status.ok()) {
       return traits_status;
     }
+    if (definition.traits.shape_rule == OperationShapeRule::Fixed) {
+      auto fixed_layout = dense_layout(
+          definition.traits.fixed_output_shape,
+          Value::element_size(definition.traits.output_element_type));
+      if (!fixed_layout.ok()) {
+        return Status::failure(
+            ErrorCode::InvalidArgument,
+            "operation plugin fixed output is not densely representable");
+      }
+    }
     staged.push_back(std::move(definition));
   }
 
@@ -1001,15 +1007,15 @@ Status OperationRegistry::load_plugin(const std::string& path) {
            ++input_index) {
         const Value& input = invocation.inputs[input_index];
         const Region& demand = invocation.input_demands[input_index];
-        auto strides = contiguous_strides(
-            input.descriptor().shape,
-            Value::element_size(input.descriptor().element_type));
-        if (!strides.ok() ||
+        auto layout =
+            dense_layout(input.descriptor().shape,
+                         Value::element_size(input.descriptor().element_type));
+        if (!layout.ok() ||
             input.region().rank() != input.descriptor().shape.size() ||
             demand.rank() != input.descriptor().shape.size() ||
             !demand.validate(input.descriptor().shape).ok() ||
             input.layout().byte_offset > input.bytes().size() ||
-            input.layout().byte_strides != strides.value()) {
+            input.layout().byte_strides != layout.value().byte_strides) {
           return Result<Value>(Status::failure(
               ErrorCode::TypeMismatch,
               "operation plugin requires contiguous input Values"));
@@ -1024,17 +1030,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                 "operation plugin requires whole input Regions"));
           }
         }
-        std::uint64_t logical_bytes =
-            Value::element_size(input.descriptor().element_type);
-        for (std::uint64_t extent : input.descriptor().shape) {
-          if (logical_bytes >
-              std::numeric_limits<std::uint64_t>::max() / extent) {
-            return Result<Value>(
-                Status::failure(ErrorCode::ResourceExhausted,
-                                "operation plugin input byte size overflows"));
-          }
-          logical_bytes *= extent;
-        }
+        const std::uint64_t logical_bytes = layout.value().byte_size;
         if (logical_bytes !=
             input.bytes().size() - input.layout().byte_offset) {
           return Result<Value>(

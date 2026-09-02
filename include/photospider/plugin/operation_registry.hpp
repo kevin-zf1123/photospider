@@ -32,7 +32,11 @@ enum class OperationShapeRule : std::uint32_t {
   PreserveFirstInput = 2U,
   /** @brief All input descriptors must match and output preserves them. */
   MatchAllInputs = 3U,
-  /** @brief Output uses the descriptor's explicit bounded fixed shape. */
+  /**
+   * @brief Output uses the descriptor's explicit bounded logical fixed shape.
+   * @note The rule does not require a dense byte product; C++ callbacks may
+   * publish a valid strided or zero-stride broadcast Value.
+   */
   Fixed = 4U,
 };
 
@@ -91,7 +95,11 @@ struct PHOTOSPIDER_API OperationTraits final {
   bool supports_gpu = false;
   /** @brief Recoverable GPU failure may execute the CPU implementation. */
   bool allows_cpu_fallback = false;
-  /** @brief Estimated peak invocation bytes for resource admission. */
+  /**
+   * @brief Estimated peak invocation bytes for resource admission.
+   * @note This modeled bound is independent of a fixed shape's dense logical
+   * byte product and must describe the callback's actual materialization.
+   */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
   std::uint32_t version = 2U;
@@ -107,7 +115,11 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::uint32_t halo_radius = 0U;
   /** @brief Sorted closed parameter vocabulary for semantic validation. */
   std::vector<OperationParameterSpec> parameter_schema;
-  /** @brief Explicit nonzero rank-1..8 shape used only by `Fixed`. */
+  /**
+   * @brief Explicit nonzero rank-1..8 logical shape used only by `Fixed`.
+   * @note C++ embedding callbacks may materialize it through any valid Value
+   * layout, including a zero-stride broadcast whose dense product overflows.
+   */
   std::vector<std::uint64_t> fixed_output_shape;
 };
 
@@ -219,7 +231,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @param definition Complete owned definition.
    * @return Success or validation/duplicate/frozen failure.
    * @throws std::bad_alloc If registry allocation fails without mutation.
-   * @note CPU support and a nonempty callback are mandatory.
+   * @note CPU support and a nonempty callback are mandatory. Fixed traits
+   * validate only the logical descriptor; callback output validation applies
+   * the published Value's actual layout and backing bytes.
    */
   [[nodiscard]] Status register_operation(OperationDefinition definition);
 
@@ -228,7 +242,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @param path Explicit startup-configured library path.
    * @return Success or complete load/ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
-   * @note No signature, trust-store, sandbox, or process isolation is applied.
+   * @note Fixed C descriptors must be densely representable because ABI v2
+   * carries no output strides. No signature, trust-store, sandbox, or process
+   * isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);
 

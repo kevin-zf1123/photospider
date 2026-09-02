@@ -30,6 +30,14 @@ value array、bounded facet record、selected local backend、cooperative cancel
 observation 与 host-owned single-publication output sink。Host 在 callback 返回前复制 output
 facet/bytes，并重建 validated Value。
 
+C++ registry 把 Fixed rule 视为 logical descriptor contract：rank 为 1..8，每个 extent
+非零，element type 与 rule 属于闭合 vocabulary。Trait publication 不会相乘 logical
+extent。因此，即使对应 dense element/byte product 溢出，embedding callback 仍可发布合法
+zero-stride broadcast Value。`estimated_bytes` 继续是 callback 独立的 modeled resource-
+admission value，并复制进 physical plan。C DSO descriptor 则有意保持更窄，因为 ABI v2
+不发布 stride：Fixed DSO output 必须具有可表示的 contiguous signed stride 与完整 uint64
+byte count，否则 loader 会 transactional rejection。Preserve 与 Match semantics 不变。
+
 保持不变的 `int` callback result 具有闭合的 version-two vocabulary：success、ordinary
 failure、cooperative cancellation 与 backend unavailable。显式 backend-unavailable result
 会映射为 `BackendUnavailable`；只有 copied trait 允许 CPU fallback 的 GPU attempt 才能在
@@ -56,6 +64,8 @@ Load/registration 在 publication 前验证：
 - 不含 embedded NUL/control byte 的 length-framed key；
 - closed enum/flag/rule/parameter-type vocabulary、unique parameter key、required item
   presence、exact source type 与合法 trait combination；
+- descriptor-only C++ fixed-shape validation，以及对不携带 stride 的 C DSO fixed
+  descriptor 独立执行 dense stride/byte representability validation；
 - required callback、single output publication、exact output element/shape、bounded facet
   array/key/version/payload 与 byte count；
 - callback exception fence 与 exactly-once destroy ownership。

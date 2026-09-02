@@ -37,7 +37,11 @@ extern "C" {
 #define PS_OPERATION_SHAPE_PRESERVE_FIRST_V2 2U
 /** @brief All input descriptors match and output preserves them. */
 #define PS_OPERATION_SHAPE_MATCH_INPUTS_V2 3U
-/** @brief Output uses an explicit descriptor-owned fixed shape. */
+/**
+ * @brief Output uses an explicit descriptor-owned fixed dense shape.
+ * @note ABI v2 carries no output strides, so the host rejects fixed shapes
+ * whose contiguous strides or byte count are not representable.
+ */
 #define PS_OPERATION_SHAPE_FIXED_V2 4U
 
 /** @brief Operation consumes and produces whole logical coverage. */
@@ -260,13 +264,21 @@ typedef struct ps_operation_descriptor_v2 {
   uint32_t input_count;
   /** @brief Bitwise `PS_OPERATION_FLAG_*` semantic traits. */
   uint32_t flags;
-  /** @brief Estimated peak invocation bytes for local resource admission. */
+  /**
+   * @brief Estimated peak invocation bytes for local resource admission.
+   * @note This modeled estimate does not replace fixed dense representability
+   * validation at DSO load.
+   */
   uint64_t estimated_bytes;
   /** @brief Scalar element type used by static output inference. */
   uint32_t output_element_type;
   /** @brief Rank in 1..8 for FIXED and zero for every other shape rule. */
   uint32_t output_rank;
-  /** @brief Rank-sized fixed shape, null exactly when output_rank is zero. */
+  /**
+   * @brief Rank-sized dense fixed shape, null when output_rank is zero.
+   * @note Since ABI v2 carries no strides, the contiguous stride chain and
+   * complete byte count must fit the host's exact integer contracts.
+   */
   const uint64_t* output_shape;
   /** @brief One `PS_OPERATION_SHAPE_*_V2` inference rule. */
   uint32_t shape_rule;

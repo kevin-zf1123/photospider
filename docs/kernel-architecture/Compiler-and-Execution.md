@@ -11,6 +11,16 @@ IR publication; built-ins do not synthesize defaults. Analysis publishes
 immutable `SemanticGraphIR` in node-id-tiebroken
 topological order plus `SemanticGraphDigest`.
 
+Fixed inference validates a logical nonzero rank-1..8 descriptor and does not
+require its dense element or byte product to fit. A C++ embedding operation may
+materialize that descriptor as a valid strided or zero-stride broadcast Value;
+the plan records the independently declared `estimated_bytes`, so modeled
+admission and peak diagnostics reflect actual callback materialization rather
+than an implicit dense allocation. Explicit `Region::element_count()` remains
+checked and may still return overflow for the same multi-dimensional logical
+shape. A stride-free C DSO Fixed descriptor is separately required to be
+densely representable at load.
+
 Each schema-valid Float64 parameter enters canonical stage identity using the
 exact copied IEEE-754 binary64 bits in fixed little-endian order. Signed zero
 is preserved, so sign-sensitive callbacks cannot share semantic, optimized,

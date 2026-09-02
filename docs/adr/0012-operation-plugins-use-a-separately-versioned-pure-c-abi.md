@@ -33,6 +33,18 @@ values, bounded facet records, selected local backend, cooperative cancellation
 observation, and a host-owned single-publication output sink. The host copies
 output facets/bytes before callback return and rebuilds a validated Value.
 
+The C++ registry treats a Fixed rule as a logical descriptor contract: rank is
+1..8, every extent is nonzero, and the element type and rule are closed. It
+does not multiply the logical extents during trait publication. An embedding
+callback may therefore publish a valid zero-stride broadcast Value even when
+the corresponding dense element or byte product overflows. `estimated_bytes`
+remains the callback's independent modeled resource-admission value and is
+copied into the physical plan. The C DSO descriptor remains deliberately
+narrower because ABI v2 publishes no strides: a Fixed DSO output must have
+representable contiguous signed strides and a complete uint64 byte count, and
+the loader rejects it transactionally otherwise. Preserve and Match semantics
+are unchanged.
+
 The unchanged `int` callback result has a closed version-two vocabulary:
 success, ordinary failure, cooperative cancellation, and backend unavailable.
 An explicit backend-unavailable result becomes `BackendUnavailable`; only a
@@ -63,6 +75,8 @@ Load and registration validate before publication:
 - length-framed keys without embedded NUL/control bytes;
 - closed enum/flag/rule/parameter-type vocabulary, unique parameter keys,
   required-item presence, exact source type, and legal trait combinations;
+- descriptor-only C++ fixed-shape validation, plus independent dense
+  stride/byte representability for stride-free C DSO fixed descriptors;
 - required callbacks, single output publication, exact output element/shape,
   bounded facet array/key/version/payload, and byte count;
 - callback exception fencing and exactly-once destroy ownership.
