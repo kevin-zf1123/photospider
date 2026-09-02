@@ -38,8 +38,12 @@ success, ordinary failure, cooperative cancellation, and backend unavailable.
 An explicit backend-unavailable result becomes `BackendUnavailable`; only a
 GPU attempt whose copied traits permit CPU fallback may retry on CPU. Ordinary
 failure and every unknown nonzero integer remain `OperationFailed` and never
-trigger fallback. A backend-unavailable callback publishes no output; callback
-signature and descriptor layout remain unchanged.
+trigger fallback. A backend-unavailable callback must not invoke the output
+sink. If it does, an accepted output becomes a terminal `OperationFailed`
+contract violation and a rejected output preserves the sink's exact typed
+failure; neither path exposes `BackendUnavailable` or retries on CPU. Host
+cancellation remains authoritative. Callback signature and descriptor layout
+remain unchanged.
 
 ### Data-definition ABI
 

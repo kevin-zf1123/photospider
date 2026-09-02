@@ -48,8 +48,10 @@ view 会接收该精确 demand。Executor 仍 materialize complete Value。Execu
 
 Operation ABI v2 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
-result 且 copied trait 允许 fallback 时，executor 才会在 CPU 上重试。ordinary failure 与
-unknown nonzero callback result 会让 Run 失败，不产生 CPU attempt。
+result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
+上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
+是 contract failure，rejected output 保留 sink failure。ordinary failure 与 unknown
+nonzero callback result 会让 Run 失败，不产生 CPU attempt。
 
 ## Diagnostic
 

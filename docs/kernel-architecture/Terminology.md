@@ -17,7 +17,7 @@
 | operation/data-definition DSO | Startup-configured trusted in-process extension. |
 | digest/cache key | Non-security reproducibility or disposable lookup identity. |
 | cancellation | Cooperative observation that prevents late result publication. |
-| fallback | Trait-permitted CPU attempt after optional GPU unavailability/failure. |
+| fallback | Trait-permitted CPU attempt after an output-free optional GPU callback returns explicit backend unavailability. |
 
 `SessionId`, `JobId`, Job status/result release, and daemon process lifecycle
 belong only to `photospider-daemon`. Network service, tenant isolation, durable

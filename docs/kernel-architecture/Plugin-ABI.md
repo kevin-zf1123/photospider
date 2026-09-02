@@ -30,8 +30,11 @@ version-two result: success, ordinary failure, cancellation, or backend
 unavailable. Backend unavailable is distinct from ordinary failure and may
 request CPU fallback only from a GPU attempt whose copied traits allow it.
 Unknown nonzero integers are ordinary `OperationFailed` results. A callback
-reporting backend unavailable publishes no output, so fallback cannot reuse a
-partial GPU Value.
+reporting backend unavailable must not invoke the output sink. If it does, an
+accepted output is a terminal `OperationFailed` contract violation and a
+rejected output retains the sink's exact typed failure. Neither path exposes
+`BackendUnavailable` or triggers CPU fallback, while host cancellation remains
+the highest-priority result.
 
 ## Validation
 

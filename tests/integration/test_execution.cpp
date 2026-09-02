@@ -1,9 +1,12 @@
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -14,7 +17,111 @@
 #include "photospider/execution/execution.hpp"
 #include "support/test_support.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 namespace {
+
+/** @brief Fixture mode for ordinary no-output backend unavailability. */
+constexpr std::uint32_t kFixtureGpuBackendUnavailable = 1U;
+/** @brief Fixture mode for ordinary nonrecoverable GPU failure. */
+constexpr std::uint32_t kFixtureGpuOrdinaryFailure = 2U;
+/** @brief Fixture mode for an unknown nonzero GPU callback result. */
+constexpr std::uint32_t kFixtureGpuUnknownResult = 3U;
+/** @brief Fixture mode for valid output followed by backend unavailability. */
+constexpr std::uint32_t kFixtureGpuOutputThenUnavailable = 4U;
+/** @brief Fixture mode for invalid output followed by backend unavailability.
+ */
+constexpr std::uint32_t kFixtureGpuBadOutputThenUnavailable = 5U;
+
+/**
+ * @brief Keeps the real operation fixture mapped for invocation observation.
+ *
+ * @note The independent mapping shares the fixture image used by the registry
+ * and exists only to read test-only exported counters.
+ */
+class FixtureInvocationObserver final {
+ public:
+  /**
+   * @brief Opens one exact build-generated operation fixture.
+   * @param path Native fixture path.
+   * @throws std::runtime_error If the fixture cannot be mapped.
+   */
+  explicit FixtureInvocationObserver(const char* path) {
+#if defined(_WIN32)
+    handle_ = static_cast<void*>(LoadLibraryA(path));
+#else
+    handle_ = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!handle_) {
+      throw std::runtime_error("could not open operation fixture observer");
+    }
+  }
+
+  /**
+   * @brief Releases the observer's independent native mapping reference.
+   * @throws Nothing.
+   */
+  ~FixtureInvocationObserver() noexcept {
+#if defined(_WIN32)
+    if (handle_) {
+      FreeLibrary(static_cast<HMODULE>(handle_));
+    }
+#else
+    if (handle_) {
+      dlclose(handle_);
+    }
+#endif
+  }
+
+  /**
+   * @brief Forbids duplicating native fixture mapping ownership.
+   * @param other Source observer that cannot be copied.
+   * @throws Nothing; the operation is deleted.
+   */
+  FixtureInvocationObserver(const FixtureInvocationObserver& other) = delete;
+  /**
+   * @brief Forbids assigning native fixture mapping ownership.
+   * @param other Source observer that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   */
+  FixtureInvocationObserver& operator=(const FixtureInvocationObserver& other) =
+      delete;
+
+  /**
+   * @brief Reads one mode-indexed exported fixture counter.
+   * @param name Exact counter symbol name.
+   * @param mode Closed fixture mode in 1..5.
+   * @return Current monotonic counter value.
+   * @throws std::runtime_error If the symbol is missing.
+   */
+  [[nodiscard]] std::uint32_t counter(const char* name,
+                                      std::uint32_t mode) const {
+#if defined(_WIN32)
+    void* address = reinterpret_cast<void*>(
+        GetProcAddress(static_cast<HMODULE>(handle_), name));
+#else
+    void* address = dlsym(handle_, name);
+#endif
+    using Function = std::uint32_t (*)(std::uint32_t);
+    Function function = nullptr;
+    static_assert(sizeof(function) == sizeof(address),
+                  "fixture target requires equal pointer sizes");
+    std::memcpy(&function, &address, sizeof(function));
+    if (!function) {
+      throw std::runtime_error("fixture invocation counter is missing");
+    }
+    return function(mode);
+  }
+
+ private:
+  /** @brief Native fixture mapping handle owned by this observer. */
+  void* handle_ = nullptr;
+};
 
 /**
  * @brief Compiles one document with explicit local GPU planning choice.
@@ -727,6 +834,7 @@ int main() {
   PS_CHECK(fallback_result.value().diagnostics.selected_backends.at(2U) ==
            Backend::Cpu);
 
+  FixtureInvocationObserver dso_invocations(PS_OPERATION_FIXTURE_PATH);
   auto dso_operations = std::make_shared<OperationRegistry>();
   OperationTraits dso_source_traits;
   PS_CHECK(dso_operations
@@ -770,6 +878,10 @@ int main() {
   PS_CHECK(dso_diagnostics.operation_timings[2U].backend == Backend::Cpu);
   PS_CHECK(dso_diagnostics.operation_timings[2U].outcome == ErrorCode::Ok);
   PS_CHECK(dso_diagnostics.selected_backends.at(2U) == Backend::Cpu);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kFixtureGpuBackendUnavailable) == 1U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kFixtureGpuBackendUnavailable) == 1U);
 
   WorkflowDocument dso_failure_document;
   dso_failure_document.nodes = {
@@ -783,13 +895,80 @@ int main() {
   auto dso_failure_result = dso_execution.execute(dso_failure_workflow.plan);
   PS_CHECK(!dso_failure_result.ok());
   PS_CHECK(dso_failure_result.status().code == ErrorCode::OperationFailed);
-  const std::vector<Value> dso_inputs{Value::from_float64(12.0)};
-  const std::vector<Region> dso_demands{Region::whole({1U})};
-  auto dso_unknown_result = dso_operations->invoke(
-      "fixture.gpu_unknown",
-      OperationInvocation{dso_inputs, dso_demands, {}, Backend::Gpu, {}});
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kFixtureGpuOrdinaryFailure) == 1U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kFixtureGpuOrdinaryFailure) == 0U);
+
+  WorkflowDocument dso_unknown_document;
+  dso_unknown_document.nodes = {
+      WorkflowNode{1U, "test.dso_source", {}, {}},
+      WorkflowNode{2U, "fixture.gpu_unknown", {WorkflowInput{1U, "value"}}, {}},
+  };
+  dso_unknown_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
+  GraphContext dso_unknown_graph(std::move(dso_unknown_document));
+  CompiledWorkflow dso_unknown_workflow =
+      compile_or_throw(&dso_compiler, dso_unknown_graph, true);
+  auto dso_unknown_result = dso_execution.execute(dso_unknown_workflow.plan);
   PS_CHECK(!dso_unknown_result.ok());
   PS_CHECK(dso_unknown_result.status().code == ErrorCode::OperationFailed);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kFixtureGpuUnknownResult) == 1U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kFixtureGpuUnknownResult) == 0U);
+
+  WorkflowDocument dso_output_unavailable_document;
+  dso_output_unavailable_document.nodes = {
+      WorkflowNode{1U, "test.dso_source", {}, {}},
+      WorkflowNode{2U,
+                   "fixture.gpu_output_unavailable",
+                   {WorkflowInput{1U, "value"}},
+                   {}},
+  };
+  dso_output_unavailable_document.outputs = {
+      WorkflowOutput{"value", 2U, "value"}};
+  GraphContext dso_output_unavailable_graph(
+      std::move(dso_output_unavailable_document));
+  CompiledWorkflow dso_output_unavailable_workflow =
+      compile_or_throw(&dso_compiler, dso_output_unavailable_graph, true);
+  auto dso_output_unavailable_result =
+      dso_execution.execute(dso_output_unavailable_workflow.plan);
+  PS_CHECK(!dso_output_unavailable_result.ok());
+  PS_CHECK(dso_output_unavailable_result.status().code ==
+           ErrorCode::OperationFailed);
+  PS_CHECK(dso_output_unavailable_result.status().message ==
+           "operation plugin published output before reporting backend "
+           "unavailable");
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kFixtureGpuOutputThenUnavailable) == 1U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kFixtureGpuOutputThenUnavailable) == 0U);
+
+  WorkflowDocument dso_bad_output_unavailable_document;
+  dso_bad_output_unavailable_document.nodes = {
+      WorkflowNode{1U, "test.dso_source", {}, {}},
+      WorkflowNode{2U,
+                   "fixture.gpu_bad_output_unavailable",
+                   {WorkflowInput{1U, "value"}},
+                   {}},
+  };
+  dso_bad_output_unavailable_document.outputs = {
+      WorkflowOutput{"value", 2U, "value"}};
+  GraphContext dso_bad_output_unavailable_graph(
+      std::move(dso_bad_output_unavailable_document));
+  CompiledWorkflow dso_bad_output_unavailable_workflow =
+      compile_or_throw(&dso_compiler, dso_bad_output_unavailable_graph, true);
+  auto dso_bad_output_unavailable_result =
+      dso_execution.execute(dso_bad_output_unavailable_workflow.plan);
+  PS_CHECK(!dso_bad_output_unavailable_result.ok());
+  PS_CHECK(dso_bad_output_unavailable_result.status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(dso_bad_output_unavailable_result.status().message ==
+           "plugin output facet is malformed");
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kFixtureGpuBadOutputThenUnavailable) == 1U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kFixtureGpuBadOutputThenUnavailable) == 0U);
 
   auto facet_operations = std::make_shared<OperationRegistry>();
   OperationTraits facet_source_traits;
