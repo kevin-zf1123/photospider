@@ -51,10 +51,14 @@ Kernel test 覆盖：
   report-publication 线性化点再次观察。Oracle 不接收 token，不能被抢占；若它返回
   false 或抛出普通异常后观察到 cancellation，则 cancellation 优先于 oracle outcome；
   最终 publication 观察之后到达的 cancellation 不会撤销已返回 report。其他 execution
-  failure 保留为 sample，后续 iteration 继续。由于 monotonic clock 可能只有微秒
-  分辨率，duration 允许为零。Deterministic regression 覆盖另一线程在 oracle barrier
-  中取消、self-cancelling true/false/throwing oracle，以及通过 noninstalled test-kernel
-  seam 暴露的无 oracle post-execute window。
+  failure 保留为 sample，后续 iteration 继续。若普通 oracle exception 的 `what()` 为
+  null，则它会成为 reason 为空的 `OperationFailed` sample；已完成的 raw compilation/
+  execution diagnostics 保持不变，后续 iteration 仍可成功。独立的 null-diagnostic
+  cancellation case 证明 post-oracle cancellation fence 仍是顶层权威。由于 monotonic
+  clock 可能只有微秒分辨率，duration 允许为零。Deterministic regression 覆盖另一线程
+  在 oracle barrier 中取消、self-cancelling true/false/throwing oracle、逐字段检查的
+  两次 iteration null-diagnostic-then-success sequence，以及通过 noninstalled
+  test-kernel seam 暴露的无 oracle post-execute window。
 
 Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、九方法 routing、
 临时 Session/Job lifecycle、restart loss、multi-Session behavior、cancellation、
