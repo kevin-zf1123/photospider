@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "photospider/plugin/operation_plugin_api.h"
 
 namespace ps::plugin {
