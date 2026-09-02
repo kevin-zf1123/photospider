@@ -521,11 +521,69 @@ class BenchmarkOracleGate final {
   bool released_ = false;
 };
 
+/**
+ * @brief Holds one fully assembled ExecutionResult before success publication.
+ *
+ * @note The execution thread signals entry and waits on a condition variable;
+ * the test thread can therefore cancel or replace the graph without sleeps.
+ */
+class FinalResultReadyGate final {
+ public:
+  /**
+   * @brief Signals complete result assembly and waits for explicit release.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void hold() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return released_; });
+  }
+
+  /**
+   * @brief Waits for the execution thread to reach the final result boundary.
+   * @param timeout Maximum bounded wait.
+   * @return True when complete assembly is observed before the deadline.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_entered(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] { return entered_; });
+  }
+
+  /**
+   * @brief Releases the held execution thread for its final stop recheck.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes one-shot gate state. */
+  std::mutex mutex_;
+  /** @brief Wakes the execution or test thread after a state change. */
+  std::condition_variable changed_;
+  /** @brief Whether complete result assembly reached the hook. */
+  bool entered_ = false;
+  /** @brief Whether the execution thread may attempt publication. */
+  bool released_ = false;
+};
+
 /** @brief Borrowed active deterministic queue gate for one scoped test. */
 QueueAdmissionGate* g_queue_admission_gate = nullptr;
 
 /** @brief Borrowed active scheduler-failure controller for one scoped test. */
 SchedulerFailureController* g_scheduler_failure_controller = nullptr;
+
+/** @brief Borrowed final-result gate for one scoped execution test. */
+FinalResultReadyGate* g_final_result_ready_gate = nullptr;
 
 /**
  * @brief Bridges the private callback-waiting hook into the scoped gate.
@@ -573,6 +631,20 @@ ps::execution_testing::CallbackSubmitAction select_callback_submit_action(
 bool fail_failure_status_construction() noexcept {
   return g_scheduler_failure_controller &&
          g_scheduler_failure_controller->fail_status_construction();
+}
+
+/**
+ * @brief Bridges the no-throw complete-result hook into its scoped gate.
+ * @return No value.
+ * @throws Nothing; synchronization failures are fenced inside the test hook.
+ */
+void hold_final_result_ready() noexcept {
+  try {
+    if (g_final_result_ready_gate) {
+      g_final_result_ready_gate->hold();
+    }
+  } catch (...) {
+  }
 }
 
 /**
@@ -997,7 +1069,8 @@ int main() {
   g_queue_admission_gate = &queue_gate;
   const ps::execution_testing::ExecutionTestHooks execution_test_hooks{
       &hold_queued_callback, &before_scheduler_failure,
-      &select_callback_submit_action, &fail_failure_status_construction};
+      &select_callback_submit_action, &fail_failure_status_construction,
+      &hold_final_result_ready};
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto waiting_cpu_future = std::async(std::launch::async, [&] {
     return queue_bound_execution.execute(waiting_cpu_workflow.plan);
@@ -1031,6 +1104,104 @@ int main() {
       queue_bound_execution.execute(competing_gpu_workflow.plan);
   PS_CHECK(recovered_gpu_result.ok());
   PS_CHECK(ps::test::named_scalar(recovered_gpu_result.value(), "sum") == 11.0);
+
+  auto final_result_operations = make_region_registry(
+      OperationRegionRule::Whole, 0U, std::make_shared<Region>());
+  Compiler final_result_compiler(final_result_operations);
+  ExecutionContext final_result_execution(
+      final_result_operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+
+  GraphContext final_cancel_graph(region_document());
+  CompiledWorkflow final_cancel_workflow =
+      compile_or_throw(&final_result_compiler, final_cancel_graph);
+  CancellationSource final_cancel_source;
+  FinalResultReadyGate final_cancel_gate;
+  g_final_result_ready_gate = &final_cancel_gate;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto final_cancel_future = std::async(std::launch::async, [&] {
+    return final_result_execution.execute(final_cancel_workflow.plan,
+                                          final_cancel_source.token());
+  });
+  const bool final_cancel_ready =
+      final_cancel_gate.wait_until_entered(std::chrono::seconds(2));
+  const bool final_cancel_requested = final_cancel_source.cancel();
+  final_cancel_gate.release();
+  auto final_cancel_result = final_cancel_future.get();
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_final_result_ready_gate = nullptr;
+  PS_CHECK(final_cancel_ready);
+  PS_CHECK(final_cancel_requested);
+  PS_CHECK(!final_cancel_result.ok());
+  PS_CHECK(final_cancel_result.status().code == ErrorCode::Cancelled);
+  auto final_cancel_recovered =
+      final_result_execution.execute(final_cancel_workflow.plan);
+  PS_CHECK(final_cancel_recovered.ok());
+  PS_CHECK(final_cancel_recovered.value().values.at("value").bytes().size() ==
+           10U * sizeof(double));
+  PS_CHECK(!final_cancel_recovered.value().diagnostics.result_digest.empty());
+
+  GraphContext final_stale_graph(region_document());
+  CompiledWorkflow final_stale_workflow =
+      compile_or_throw(&final_result_compiler, final_stale_graph);
+  FinalResultReadyGate final_stale_gate;
+  g_final_result_ready_gate = &final_stale_gate;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto final_stale_future = std::async(std::launch::async, [&] {
+    return final_result_execution.execute(final_stale_workflow.plan);
+  });
+  const bool final_stale_ready =
+      final_stale_gate.wait_until_entered(std::chrono::seconds(2));
+  const std::uint64_t final_stale_revision =
+      final_stale_graph.replace(region_document());
+  final_stale_gate.release();
+  auto final_stale_result = final_stale_future.get();
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_final_result_ready_gate = nullptr;
+  PS_CHECK(final_stale_ready);
+  PS_CHECK(final_stale_revision != 0U);
+  PS_CHECK(!final_stale_result.ok());
+  PS_CHECK(final_stale_result.status().code == ErrorCode::Stale);
+  CompiledWorkflow final_stale_recovery_workflow =
+      compile_or_throw(&final_result_compiler, final_stale_graph);
+  auto final_stale_recovered =
+      final_result_execution.execute(final_stale_recovery_workflow.plan);
+  PS_CHECK(final_stale_recovered.ok());
+  PS_CHECK(final_stale_recovered.value().values.at("value").bytes().size() ==
+           10U * sizeof(double));
+
+  GraphContext final_both_graph(region_document());
+  CompiledWorkflow final_both_workflow =
+      compile_or_throw(&final_result_compiler, final_both_graph);
+  CancellationSource final_both_source;
+  FinalResultReadyGate final_both_gate;
+  g_final_result_ready_gate = &final_both_gate;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto final_both_future = std::async(std::launch::async, [&] {
+    return final_result_execution.execute(final_both_workflow.plan,
+                                          final_both_source.token());
+  });
+  const bool final_both_ready =
+      final_both_gate.wait_until_entered(std::chrono::seconds(2));
+  const bool final_both_cancelled = final_both_source.cancel();
+  const std::uint64_t final_both_revision =
+      final_both_graph.replace(region_document());
+  final_both_gate.release();
+  auto final_both_result = final_both_future.get();
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_final_result_ready_gate = nullptr;
+  PS_CHECK(final_both_ready);
+  PS_CHECK(final_both_cancelled);
+  PS_CHECK(final_both_revision != 0U);
+  PS_CHECK(!final_both_result.ok());
+  PS_CHECK(final_both_result.status().code == ErrorCode::Cancelled);
+  CompiledWorkflow final_both_recovery_workflow =
+      compile_or_throw(&final_result_compiler, final_both_graph);
+  auto final_both_recovered =
+      final_result_execution.execute(final_both_recovery_workflow.plan);
+  PS_CHECK(final_both_recovered.ok());
+  PS_CHECK(final_both_recovered.value().values.at("value").bytes().size() ==
+           10U * sizeof(double));
+
   ExecutionContext concurrent_lane_execution(
       operations, ExecutionContextConfig{2U, true, 8U, 1024U});
   auto cpu_lane_future = std::async(std::launch::async, [&] {

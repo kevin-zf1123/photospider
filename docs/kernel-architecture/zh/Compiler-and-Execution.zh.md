@@ -60,9 +60,12 @@ derived state；kernel 不暴露 native GPU handle 或 persistent residency regi
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
 transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v2 input
 view 会接收该精确 demand。Executor 仍 materialize complete Value。Execution context 必须使用
-产生 plan 的同一 frozen registry。Work 前、completion 期间和 result assembly 前都
-会检查 cancellation 与 plan currentness。Late cancelled/stale result 会释放资源，不能
-进入 caller-visible `ExecutionResult`。
+产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
+全部 named Value、diagnostic、plan/result digest 与 execute timing 组装完毕后，都会检查
+cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness recheck 期间
+保持其 mutex；紧邻唯一 success return 通过该检查，构成 success-publication
+linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
+与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
 Operation ABI v2 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable

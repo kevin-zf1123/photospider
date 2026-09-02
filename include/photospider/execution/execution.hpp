@@ -166,8 +166,10 @@ class PHOTOSPIDER_API ExecutionContext final {
    * @return Named result or typed cancellation/stale/backend/resource failure.
    * @throws std::bad_alloc If staging/result allocation fails before a
    * recoverable status can be built.
-   * @note Publication rechecks plan currentness after every completion and at
-   * final result assembly; stale output is discarded.
+   * @note After every completion and after complete final result/digest/timing
+   * assembly, publication rechecks cancellation before plan currentness under
+   * the Run mutex. Passing that last check is the sole success-publication
+   * linearization point; rejected local output is discarded.
    */
   [[nodiscard]] Result<ExecutionResult> execute(
       const ExecutionPlan& plan,

@@ -77,7 +77,17 @@ using CallbackSubmitActionHook = CallbackSubmitAction (*)(Backend backend);
 using FailFailureStatusConstructionHook = bool (*)();
 
 /**
- * @brief Private callback set for execution queue-admission regressions.
+ * @brief Callback invoked after complete result assembly and before the final
+ * success-publication stop check.
+ * @return No value.
+ * @throws Nothing.
+ * @note Tests may hold this otherwise unobservable boundary with external
+ * synchronization. The callback must not re-enter the executing Run.
+ */
+using FinalResultReadyHook = void (*)() noexcept;
+
+/**
+ * @brief Private callback set for deterministic execution regressions.
  *
  * @note This type exists only in the noninstalled test-kernel variant and has
  * no public ABI, product archive, export, or package-consumer effect.
@@ -91,6 +101,8 @@ struct ExecutionTestHooks final {
   CallbackSubmitActionHook callback_submit_action = nullptr;
   /** @brief Optional protected diagnostic/Status construction controller. */
   FailFailureStatusConstructionHook fail_failure_status_construction = nullptr;
+  /** @brief Optional final result-publication boundary observer. */
+  FinalResultReadyHook final_result_ready = nullptr;
 };
 
 /**
@@ -138,5 +150,15 @@ CallbackSubmitAction callback_submit_action(Backend backend) noexcept;
  * @note Only the noninstalled test-kernel variant invokes this function.
  */
 bool fail_failure_status_construction() noexcept;
+
+/**
+ * @brief Notifies the installed complete-result publication observer.
+ * @return No value.
+ * @throws Nothing.
+ * @note The caller has fully assembled local Values and diagnostics but has
+ * not passed the final cancellation/currentness linearization point. Only the
+ * noninstalled test-kernel variant invokes this function.
+ */
+void notify_final_result_ready() noexcept;
 
 }  // namespace ps::execution_testing
