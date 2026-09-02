@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -37,6 +38,24 @@ constexpr std::uint32_t kFixtureGpuOutputThenUnavailable = 4U;
 /** @brief Fixture mode for invalid output followed by backend unavailability.
  */
 constexpr std::uint32_t kFixtureGpuBadOutputThenUnavailable = 5U;
+/** @brief Fixture mode for duplicate output then backend unavailability. */
+constexpr std::uint32_t kFixtureDuplicateThenUnavailable = 8U;
+/** @brief Fixture mode for duplicate output then ordinary failure. */
+constexpr std::uint32_t kFixtureDuplicateThenFailure = 9U;
+/** @brief Fixture mode for duplicate output then an unknown result. */
+constexpr std::uint32_t kFixtureDuplicateThenUnknown = 10U;
+/** @brief Fixture mode for duplicate output followed by host cancellation. */
+constexpr std::uint32_t kFixtureDuplicateThenCancellation = 12U;
+/** @brief Fixture mode for duplicate output then callback cancellation. */
+constexpr std::uint32_t kFixtureDuplicateThenCallbackCancelled = 13U;
+/**
+ * @brief Returns the stable adapter diagnostic for a second sink invocation.
+ * @return Process-lifetime null-terminated diagnostic bytes.
+ * @throws Nothing.
+ */
+const char* duplicate_publish_diagnostic() noexcept {
+  return "operation plugin violated output sink at-most-once contract";
+}
 
 /**
  * @brief Standard exception whose borrowed diagnostic pointer is null.
@@ -135,6 +154,29 @@ class FixtureInvocationObserver final {
     return function(mode);
   }
 
+  /**
+   * @brief Waits until one exported fixture counter reaches a minimum value.
+   * @param name Exact mode-indexed counter symbol name.
+   * @param mode Closed fixture mode.
+   * @param minimum Required inclusive counter value.
+   * @param timeout Maximum bounded observation interval.
+   * @return True when the counter reaches `minimum` before the deadline.
+   * @throws std::runtime_error If the counter symbol is missing.
+   * @note Yield-based polling is used only for the real-DSO cancellation seam.
+   */
+  [[nodiscard]] bool wait_until_counter_at_least(
+      const char* name, std::uint32_t mode, std::uint32_t minimum,
+      std::chrono::milliseconds timeout) const {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (counter(name, mode) < minimum) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        return false;
+      }
+      std::this_thread::yield();
+    }
+    return true;
+  }
+
  private:
   /** @brief Native fixture mapping handle owned by this observer. */
   void* handle_ = nullptr;
@@ -170,6 +212,23 @@ ps::WorkflowDocument single_operation_document(const std::string& operation) {
   ps::WorkflowDocument document;
   document.nodes = {ps::WorkflowNode{1U, operation, {}, {}}};
   document.outputs = {ps::WorkflowOutput{"value", 1U, "value"}};
+  return document;
+}
+
+/**
+ * @brief Builds one real-DSO workflow over the common Float64 test source.
+ * @param operation Exact one-input DSO operation key.
+ * @return Two-node document selecting the DSO output as `value`.
+ * @throws std::bad_alloc If source storage allocation fails.
+ * @note The caller must register `test.dso_source` before compilation.
+ */
+ps::WorkflowDocument dso_operation_document(const std::string& operation) {
+  ps::WorkflowDocument document;
+  document.nodes = {
+      ps::WorkflowNode{1U, "test.dso_source", {}, {}},
+      ps::WorkflowNode{2U, operation, {ps::WorkflowInput{1U, "value"}}, {}},
+  };
+  document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
   return document;
 }
 
@@ -1407,6 +1466,80 @@ int main() {
                                    kFixtureGpuBadOutputThenUnavailable) == 1U);
   PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
                                    kFixtureGpuBadOutputThenUnavailable) == 0U);
+
+  const std::array<std::pair<const char*, std::uint32_t>, 4U>
+      duplicate_result_cases{{
+          {"fixture.gpu_duplicate_unavailable",
+           kFixtureDuplicateThenUnavailable},
+          {"fixture.gpu_duplicate_failure", kFixtureDuplicateThenFailure},
+          {"fixture.gpu_duplicate_unknown", kFixtureDuplicateThenUnknown},
+          {"fixture.gpu_duplicate_callback_cancelled",
+           kFixtureDuplicateThenCallbackCancelled},
+      }};
+  for (const auto& duplicate_case : duplicate_result_cases) {
+    const std::uint32_t gpu_before = dso_invocations.counter(
+        "ps_operation_fixture_gpu_invocation_count", duplicate_case.second);
+    const std::uint32_t cpu_before = dso_invocations.counter(
+        "ps_operation_fixture_cpu_invocation_count", duplicate_case.second);
+    GraphContext duplicate_graph(dso_operation_document(duplicate_case.first));
+    CompiledWorkflow duplicate_workflow =
+        compile_or_throw(&dso_compiler, duplicate_graph, true);
+    auto duplicate_result = dso_execution.execute(duplicate_workflow.plan);
+    PS_CHECK(!duplicate_result.ok());
+    PS_CHECK(duplicate_result.status().code == ErrorCode::OperationFailed);
+    PS_CHECK(duplicate_result.status().message ==
+             duplicate_publish_diagnostic());
+    PS_CHECK(dso_invocations.counter("ps_operation_fixture_publish_result_bits",
+                                     duplicate_case.second) == 2U);
+    PS_CHECK(
+        dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                duplicate_case.second) == gpu_before + 1U);
+    PS_CHECK(
+        dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                duplicate_case.second) == cpu_before);
+  }
+
+  const std::uint32_t duplicate_cancel_gpu_before =
+      dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                              kFixtureDuplicateThenCancellation);
+  const std::uint32_t duplicate_cancel_cpu_before =
+      dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                              kFixtureDuplicateThenCancellation);
+  GraphContext duplicate_cancel_graph(
+      dso_operation_document("fixture.duplicate_cancelled"));
+  CompiledWorkflow duplicate_cancel_workflow =
+      compile_or_throw(&dso_compiler, duplicate_cancel_graph, true);
+  CancellationSource duplicate_cancellation;
+  auto duplicate_cancel_future = std::async(std::launch::async, [&] {
+    return dso_execution.execute(duplicate_cancel_workflow.plan,
+                                 duplicate_cancellation.token());
+  });
+  const bool duplicate_callback_waiting =
+      dso_invocations.wait_until_counter_at_least(
+          "ps_operation_fixture_awaiting_cancellation",
+          kFixtureDuplicateThenCancellation, 1U, std::chrono::seconds(2));
+  const bool duplicate_cancellation_requested = duplicate_cancellation.cancel();
+  auto duplicate_cancel_result = duplicate_cancel_future.get();
+  PS_CHECK(duplicate_callback_waiting);
+  PS_CHECK(duplicate_cancellation_requested);
+  PS_CHECK(!duplicate_cancel_result.ok());
+  PS_CHECK(duplicate_cancel_result.status().code == ErrorCode::Cancelled);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_publish_result_bits",
+                                   kFixtureDuplicateThenCancellation) == 2U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_awaiting_cancellation",
+                                   kFixtureDuplicateThenCancellation) == 0U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kFixtureDuplicateThenCancellation) ==
+           duplicate_cancel_gpu_before + 1U);
+  PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kFixtureDuplicateThenCancellation) ==
+           duplicate_cancel_cpu_before);
+
+  auto post_duplicate_fallback =
+      dso_execution.execute(dso_fallback_workflow.plan);
+  PS_CHECK(post_duplicate_fallback.ok());
+  PS_CHECK(ps::test::named_scalar(post_duplicate_fallback.value(), "value") ==
+           12.0);
 
   auto facet_operations = std::make_shared<OperationRegistry>();
   OperationTraits facet_source_traits;

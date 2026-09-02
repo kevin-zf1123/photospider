@@ -47,6 +47,16 @@ Kernel tests cover:
   standard exception with null `what()` is fenced as `OperationFailed` with the
   exact or empty message, while `std::bad_alloc` remains observable by the
   embedding caller and input/parameter/output classification stays unchanged;
+- real-DSO output-sink at-most-once enforcement: accepted-then-duplicate and
+  rejected-then-duplicate callbacks record exact sink returns `(1,0)` and
+  `(0,0)`, while success, backend unavailable, ordinary failure, and unknown
+  callback results plus callback-reported cancellation all become the same
+  stable terminal `OperationFailed`.
+  Duplicate backend unavailability performs zero CPU invocations and publishes
+  no output; a deterministic callback-held cancellation case proves host
+  cancellation remains higher priority. A null sink context has no side effect,
+  the following valid publication succeeds, and registry retirement still
+  destroys descriptors and closes the native lease exactly once;
 - real-DSO dense fixed-shape boundaries at `INT64_MAX + 1` bytes and rank-two
   `{2, 2^62}`, rejection immediately above both limits, 32-bit host-size
   representability through a compile-safe helper, and transactional

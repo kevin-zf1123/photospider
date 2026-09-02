@@ -21,9 +21,15 @@ The callback receives bounded dense whole-Region input views, per-input planned
 demand offsets/extents, bounded facet arrays, backend enum, cooperative
 cancellation callback, and a host-owned output sink. It may publish at most one
 output with bounded facets, which the host copies and validates as a dense
-whole-Region Value. A DSO input view covers exactly its logical contiguous
-bytes; trailing backing bytes are rejected instead of becoming invisible
-plugin state.
+whole-Region Value. The first sink call claims publication even when validation
+rejects it. Any second call sets an invocation-local sticky violation without
+allocating, throwing, or replacing the first accepted/rejected `Result`; after
+the callback returns, the adapter reports the stable terminal
+`OperationFailed` diagnostic
+`operation plugin violated output sink at-most-once contract`. A null sink
+context returns zero without changing invocation state. A DSO input view covers
+exactly its logical contiguous bytes; trailing backing bytes are rejected
+instead of becoming invisible plugin state.
 
 The synchronous callback retains its `int` signature but returns one closed
 version-two result: success, ordinary failure, cancellation, or backend
@@ -34,7 +40,10 @@ reporting backend unavailable must not invoke the output sink. If it does, an
 accepted output is a terminal `OperationFailed` contract violation and a
 rejected output retains the sink's exact typed failure. Neither path exposes
 `BackendUnavailable` or triggers CPU fallback, while host cancellation remains
-the highest-priority result.
+the highest-priority result. After that cancellation check, a duplicate sink
+violation outranks success, backend unavailability, ordinary failure,
+callback-reported cancellation, and unknown results. It therefore never
+publishes the first Value or requests CPU fallback.
 
 A C++ `OperationTraits::Fixed` record describes only the logical output
 descriptor. Registration validates a nonzero rank-1..8 shape, closed element

@@ -19,7 +19,12 @@ fallback。
 Callback 接收 bounded dense whole-Region input view、每个 input 的 planned demand
 offset/extent、bounded facet array、backend enum、cooperative cancellation callback 与
 host-owned output sink。它最多发布一个带 bounded facet 的 output；host 复制并验证为
-dense whole-Region Value。DSO input view 精确覆盖其 logical contiguous bytes；trailing
+dense whole-Region Value。第一次 sink 调用即占用 publication，即使 validation 拒绝也不
+例外。任何第二次调用都会设置 invocation-local sticky violation，且不分配、不抛异常、
+不替换第一次 accepted/rejected `Result`；callback 返回后，adapter 会报告稳定的 terminal
+`OperationFailed` diagnostic：
+`operation plugin violated output sink at-most-once contract`。Null sink context 返回零，
+且不改变 invocation state。DSO input view 精确覆盖其 logical contiguous bytes；trailing
 backing bytes 会被拒绝，不能成为不可见的 plugin state。
 
 Synchronous callback 保持 `int` signature，但返回一个闭合的 version-two result：success、
@@ -29,6 +34,9 @@ nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailab
 不得调用 output sink。若已调用，accepted output 是 terminal `OperationFailed` contract
 violation；rejected output 保留 sink 的精确 typed failure。两种路径都不暴露
 `BackendUnavailable` 或触发 CPU fallback；host cancellation 继续是最高优先级 result。
+在该 cancellation check 之后，duplicate sink violation 优先于 success、backend
+unavailable、ordinary failure、callback-reported cancellation 与 unknown result；因此它
+绝不会发布第一次 Value，也绝不会请求 CPU fallback。
 
 C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会
 验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算
