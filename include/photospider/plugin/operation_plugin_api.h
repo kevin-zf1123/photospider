@@ -201,6 +201,7 @@ typedef struct ps_operation_output_sink_v2 {
    * @param byte_size Exact payload byte count.
    * @return Nonzero when the first output was accepted; zero for null context,
    * first-call validation/allocation failure, or any second invocation.
+   * @throws Nothing; exceptions never cross this pure-C ABI callback boundary.
    * @note The host copies all bytes before return. The first invocation claims
    * the sink even when validation rejects it. Any second invocation violates
    * the callback contract and makes the complete operation fail closed; it
@@ -234,6 +235,8 @@ typedef int (*ps_operation_cancelled_v2)(void* context);
  * @param diagnostic_capacity Writable buffer size including terminator.
  * @return One closed `ps_operation_result_v2` value. Unknown nonzero values
  * are treated as `PS_OPERATION_RESULT_FAILURE_V2` by the host.
+ * @throws Nothing; plugins must not let exceptions cross this pure-C ABI
+ * callback boundary.
  * @note The callback must not throw across the C boundary or retain pointers.
  * `PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2` requests CPU fallback only for
  * a GPU attempt whose copied traits permit it; the output sink must not be

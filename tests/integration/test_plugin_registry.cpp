@@ -489,12 +489,14 @@ class LibraryObserver final {
   }
 
   /**
-   * @brief Reads one exported mode-indexed uint32 counter function.
-   * @param name Exact fixture symbol.
+   * @brief Reads one exported mode-indexed uint32 observation function.
+   * @param name Exact fixture observation symbol.
    * @param mode Closed callback-result fixture mode.
-   * @return Current counter value for `mode`.
+   * @return Current exported observation value for `mode`; depending on
+   * `name`, it may encode a bit field, instantaneous state, or counter.
    * @throws std::runtime_error If the symbol is missing.
-   * @note The mapped fixture remains alive for this observer's lifetime.
+   * @note The observation is not necessarily monotonic. The mapped fixture
+   * remains alive for this observer's lifetime.
    */
   [[nodiscard]] std::uint32_t counter(const char* name,
                                       std::uint32_t mode) const {

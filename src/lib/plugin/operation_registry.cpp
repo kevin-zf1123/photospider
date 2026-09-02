@@ -545,6 +545,7 @@ struct OutputSinkState final {
  * @param byte_size Exact payload size.
  * @return One on first-call success and zero for null state, validation/
  * allocation failure, or every duplicate call.
+ * @throws Nothing; this C ABI sink is `noexcept`.
  * @note Null state has no side effect. A duplicate only sets the sticky flag
  * and never replaces the first `Result`; every allocating/throwing operation
  * remains inside the first-call exception fence.
