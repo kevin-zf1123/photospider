@@ -65,6 +65,20 @@ an unavailable GPU whose copied traits explicitly deny fallback remains
 `BackendUnavailable`; ordinary admission and queue rejection retain their
 original category.
 
+At the operation-registry boundary, invocation validation preserves the order
+of operation lookup, input/demand counts, per-input validity and demand bounds,
+parameters, cancellation, closed CPU/GPU backend vocabulary, backend
+capability, and static descriptor compatibility. No input descriptor is read
+before its `Value` is valid. Unknown backend representations are
+`InvalidArgument` and enter neither C++ nor DSO code; known unsupported
+backends remain `BackendUnavailable`. After capability succeeds, the registry
+precomputes one expected Scalar/Fixed/Preserve/Match output descriptor.
+Preserve first-input type conflicts and Match type/shape conflicts return
+`TypeMismatch` before callback entry. The same descriptor is reused after the
+callback to validate output type, shape, and whole Region, including a
+default-invalid output. This does not duplicate the Run's plan-derived demand
+coverage checks or the DSO adapter's contiguous-layout/facet views.
+
 When a dependency and consumer have different backend labels, the Run creates
 a distinct validated Value by copying immutable bytes. The copy is explicit in
 transfer count/bytes. Backend labels are Run-local derived state; the kernel

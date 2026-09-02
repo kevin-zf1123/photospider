@@ -53,6 +53,18 @@ diagnostic-construction fallback 复用。若两种 stop 均不存在，且 copi
 fallback，则 unavailable GPU 仍保持 `BackendUnavailable`；普通 admission/queue rejection
 也保持原 category。
 
+在 operation-registry boundary，invocation validation 保持如下顺序：operation lookup、
+input/demand count、逐 input validity 与 demand bound、parameter、cancellation、闭合的
+CPU/GPU backend vocabulary、backend capability 与 static descriptor compatibility。
+读取任何 input descriptor 前都必须先确认其 `Value` 合法。未知 backend representation
+返回 `InvalidArgument`，不进入 C++ 或 DSO code；已知但不支持的 backend 仍返回
+`BackendUnavailable`。Capability 通过后，registry 预计算唯一一份预期
+Scalar/Fixed/Preserve/Match output descriptor。Preserve 的首 input type 冲突以及 Match
+的 type/shape 冲突会在 callback entry 前返回 `TypeMismatch`。Callback 返回后复用同一
+descriptor 验证 output type、shape 与 whole Region，包括 default-invalid output。这不会
+重复 Run 的 plan-derived demand coverage check，也不会重复 DSO adapter 的 contiguous-
+layout/facet view validation。
+
 当 dependency 与 consumer 的 backend label 不同时，Run 复制 immutable bytes，创建一个
 不同的 validated Value。该 copy 显式计入 transfer count/bytes。Backend label 是 Run-local
 derived state；kernel 不暴露 native GPU handle 或 persistent residency registry。

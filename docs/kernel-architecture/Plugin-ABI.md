@@ -50,6 +50,22 @@ violation outranks success, backend unavailability, ordinary failure,
 callback-reported cancellation, and unknown results. It therefore never
 publishes the first Value or requests CPU fallback.
 
+Before any C++ or DSO callback entry, `OperationRegistry::invoke` validates
+the operation/input/demand counts, checks each input `Value::valid()` before
+reading its descriptor, validates every demand and parameter, observes host
+cancellation, rejects any backend value other than CPU or GPU, and then checks
+backend capability. A known but unsupported backend remains
+`BackendUnavailable`; an unknown numeric backend is `InvalidArgument` and is
+never translated to GPU by the DSO adapter. After those higher-priority
+checks, the registry computes the expected Scalar/Fixed/Preserve/Match output
+descriptor exactly once. Preserve rejects a first-input element type that
+contradicts the declared output type, while Match rejects any valid input type
+or shape disagreement. Both are pre-callback `TypeMismatch` results, so even a
+side-effecting or failing callback is not entered. Callback output validation
+reuses the precomputed descriptor; a successful callback that returns a
+default-invalid `Value` remains a safe `TypeMismatch`. Plan-derived demand
+coverage remains an `ExecutionRun` responsibility and is not re-derived here.
+
 A C++ `OperationTraits::Fixed` record describes only the logical output
 descriptor. Registration validates a nonzero rank-1..8 shape, closed element
 type/rules, and the ordinary trait combinations without evaluating a dense

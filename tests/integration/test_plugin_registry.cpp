@@ -102,6 +102,8 @@ namespace {
 
 using ps::plugin_testing::LibraryKind;
 
+/** @brief Fixture mode for output-free GPU backend unavailability. */
+constexpr std::uint32_t kGpuBackendUnavailable = 1U;
 /** @brief Fixture mode for accepted output followed by duplicate success. */
 constexpr std::uint32_t kDuplicateValidThenSuccess = 6U;
 /** @brief Fixture mode for rejected output followed by duplicate success. */
@@ -900,6 +902,227 @@ int verify_null_sink_context(ps::OperationRegistry& registry,
   return 0;
 }
 
+/**
+ * @brief Verifies fail-closed C++ invocation validation before callback entry.
+ *
+ * The helper registers callbacks whose entry mutates a counter and, for the
+ * descriptor-compatibility cases, deliberately returns an ordinary failure.
+ * It then proves default Values, closed-backend violations, and
+ * Preserve/Match descriptor contradictions settle before those side effects.
+ * A separate callback returns a default Value to retain post-callback output
+ * classification as `TypeMismatch`.
+ *
+ * @return Zero when every status, non-throwing boundary, and callback count
+ * matches the invocation contract; one on the first failed check.
+ * @throws std::bad_alloc If registry or Value construction cannot allocate.
+ * @note Input Regions and demands remain valid in every descriptor case so
+ * the regression isolates Value validity and shape-rule prevalidation.
+ */
+int verify_cpp_invocation_prevalidation() {
+  using ps::Backend;
+  using ps::CancellationToken;
+  using ps::ElementType;
+  using ps::ErrorCode;
+  using ps::OperationDefinition;
+  using ps::OperationInvocation;
+  using ps::OperationRegistry;
+  using ps::OperationShapeRule;
+  using ps::OperationTraits;
+  using ps::ParameterValue;
+  using ps::Region;
+  using ps::Result;
+  using ps::StridedLayout;
+  using ps::Value;
+  using ps::ValueDescriptor;
+
+  std::uint32_t preserve_callback_count = 0U;
+  std::uint32_t match_callback_count = 0U;
+  std::uint32_t backend_callback_count = 0U;
+  std::uint32_t default_output_callback_count = 0U;
+  OperationRegistry registry;
+
+  OperationTraits preserve_traits;
+  preserve_traits.input_count = 1U;
+  preserve_traits.output_element_type = ElementType::Float64;
+  preserve_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  PS_CHECK(
+      registry
+          .register_operation(OperationDefinition{
+              "fixture.preserve_prevalidation", preserve_traits,
+              [&preserve_callback_count](
+                  const OperationInvocation&) -> Result<Value> {
+                ++preserve_callback_count;
+                return Result<Value>(ps::Status::failure(
+                    ErrorCode::OperationFailed,
+                    "preserve callback must not run for incompatible input"));
+              }})
+          .ok());
+
+  OperationTraits match_traits;
+  match_traits.input_count = 2U;
+  match_traits.output_element_type = ElementType::Float64;
+  match_traits.shape_rule = OperationShapeRule::MatchAllInputs;
+  PS_CHECK(
+      registry
+          .register_operation(OperationDefinition{
+              "fixture.match_prevalidation", match_traits,
+              [&match_callback_count](
+                  const OperationInvocation&) -> Result<Value> {
+                ++match_callback_count;
+                return Result<Value>(ps::Status::failure(
+                    ErrorCode::OperationFailed,
+                    "match callback must not run for incompatible inputs"));
+              }})
+          .ok());
+
+  PS_CHECK(registry
+               .register_operation(OperationDefinition{
+                   "fixture.backend_prevalidation", OperationTraits{},
+                   [&backend_callback_count](
+                       const OperationInvocation&) -> Result<Value> {
+                     ++backend_callback_count;
+                     return Result<Value>(Value::from_float64(17.0));
+                   }})
+               .ok());
+  PS_CHECK(registry
+               .register_operation(OperationDefinition{
+                   "fixture.default_output", OperationTraits{},
+                   [&default_output_callback_count](
+                       const OperationInvocation&) -> Result<Value> {
+                     ++default_output_callback_count;
+                     return Result<Value>(Value{});
+                   }})
+               .ok());
+  PS_CHECK(registry.freeze().ok());
+
+  const Value float_scalar = Value::from_float64(3.0);
+  auto uint8_scalar_result = Value::create(
+      ValueDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
+      StridedLayout{0U, {1}}, std::vector<std::uint8_t>{3U});
+  PS_CHECK(uint8_scalar_result.ok());
+  const Value uint8_scalar = uint8_scalar_result.take_value();
+  auto float_vector_result =
+      Value::create(ValueDescriptor{ElementType::Float64, {2U}},
+                    Region::whole({2U}), StridedLayout{0U, {8}},
+                    std::vector<std::uint8_t>(2U * sizeof(double), 0U));
+  PS_CHECK(float_vector_result.ok());
+  const Value float_vector = float_vector_result.take_value();
+  const std::map<std::string, ParameterValue> no_parameters;
+  const std::vector<Region> one_demand{Region::whole({1U})};
+  const std::vector<Region> two_scalar_demands{Region::whole({1U}),
+                                               Region::whole({1U})};
+
+  const std::vector<Value> preserve_inputs{uint8_scalar};
+  auto unsupported_preserve_gpu = registry.invoke(
+      "fixture.preserve_prevalidation",
+      OperationInvocation{preserve_inputs, one_demand, no_parameters,
+                          Backend::Gpu, CancellationToken()});
+  PS_CHECK(!unsupported_preserve_gpu.ok());
+  PS_CHECK(unsupported_preserve_gpu.status().code ==
+           ErrorCode::BackendUnavailable);
+  PS_CHECK(preserve_callback_count == 0U);
+
+  auto preserve_mismatch = registry.invoke(
+      "fixture.preserve_prevalidation",
+      OperationInvocation{preserve_inputs, one_demand, no_parameters,
+                          Backend::Cpu, CancellationToken()});
+  PS_CHECK(!preserve_mismatch.ok());
+  PS_CHECK(preserve_mismatch.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(preserve_callback_count == 0U);
+
+  const std::vector<Value> type_mismatch_inputs{float_scalar, uint8_scalar};
+  auto type_mismatch = registry.invoke(
+      "fixture.match_prevalidation",
+      OperationInvocation{type_mismatch_inputs, two_scalar_demands,
+                          no_parameters, Backend::Cpu, CancellationToken()});
+  PS_CHECK(!type_mismatch.ok());
+  PS_CHECK(type_mismatch.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(match_callback_count == 0U);
+
+  const std::vector<Value> shape_mismatch_inputs{float_scalar, float_vector};
+  const std::vector<Region> shape_mismatch_demands{Region::whole({1U}),
+                                                   Region::whole({2U})};
+  auto shape_mismatch = registry.invoke(
+      "fixture.match_prevalidation",
+      OperationInvocation{shape_mismatch_inputs, shape_mismatch_demands,
+                          no_parameters, Backend::Cpu, CancellationToken()});
+  PS_CHECK(!shape_mismatch.ok());
+  PS_CHECK(shape_mismatch.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(match_callback_count == 0U);
+
+  const std::vector<Value> invalid_first_inputs{Value{}, float_scalar};
+  bool invalid_first_escaped = false;
+  bool invalid_first_ok = true;
+  ErrorCode invalid_first_code = ErrorCode::Ok;
+  try {
+    auto invalid_first = registry.invoke(
+        "fixture.match_prevalidation",
+        OperationInvocation{invalid_first_inputs, two_scalar_demands,
+                            no_parameters, Backend::Cpu, CancellationToken()});
+    invalid_first_ok = invalid_first.ok();
+    invalid_first_code = invalid_first.status().code;
+  } catch (...) {
+    invalid_first_escaped = true;
+  }
+  PS_CHECK(!invalid_first_escaped);
+  PS_CHECK(!invalid_first_ok);
+  PS_CHECK(invalid_first_code == ErrorCode::InvalidArgument);
+  PS_CHECK(match_callback_count == 0U);
+
+  const std::vector<Value> invalid_last_inputs{float_scalar, Value{}};
+  bool invalid_last_escaped = false;
+  bool invalid_last_ok = true;
+  ErrorCode invalid_last_code = ErrorCode::Ok;
+  try {
+    auto invalid_last = registry.invoke(
+        "fixture.match_prevalidation",
+        OperationInvocation{invalid_last_inputs, two_scalar_demands,
+                            no_parameters, Backend::Cpu, CancellationToken()});
+    invalid_last_ok = invalid_last.ok();
+    invalid_last_code = invalid_last.status().code;
+  } catch (...) {
+    invalid_last_escaped = true;
+  }
+  PS_CHECK(!invalid_last_escaped);
+  PS_CHECK(!invalid_last_ok);
+  PS_CHECK(invalid_last_code == ErrorCode::InvalidArgument);
+  PS_CHECK(match_callback_count == 0U);
+
+  const std::vector<Value> no_inputs;
+  const std::vector<Region> no_demands;
+  auto unknown_backend = registry.invoke(
+      "fixture.backend_prevalidation",
+      OperationInvocation{no_inputs, no_demands, no_parameters,
+                          static_cast<Backend>(99U), CancellationToken()});
+  PS_CHECK(!unknown_backend.ok());
+  PS_CHECK(unknown_backend.status().code == ErrorCode::InvalidArgument);
+  PS_CHECK(backend_callback_count == 0U);
+
+  auto unsupported_gpu =
+      registry.invoke("fixture.backend_prevalidation",
+                      OperationInvocation{no_inputs, no_demands, no_parameters,
+                                          Backend::Gpu, CancellationToken()});
+  PS_CHECK(!unsupported_gpu.ok());
+  PS_CHECK(unsupported_gpu.status().code == ErrorCode::BackendUnavailable);
+  PS_CHECK(backend_callback_count == 0U);
+
+  auto valid_cpu =
+      registry.invoke("fixture.backend_prevalidation",
+                      OperationInvocation{no_inputs, no_demands, no_parameters,
+                                          Backend::Cpu, CancellationToken()});
+  PS_CHECK(valid_cpu.ok());
+  PS_CHECK(backend_callback_count == 1U);
+
+  auto default_output =
+      registry.invoke("fixture.default_output",
+                      OperationInvocation{no_inputs, no_demands, no_parameters,
+                                          Backend::Cpu, CancellationToken()});
+  PS_CHECK(!default_output.ok());
+  PS_CHECK(default_output.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(default_output_callback_count == 1U);
+  return 0;
+}
+
 }  // namespace
 
 /**
@@ -940,6 +1163,7 @@ int main() {
   using ps::WorkflowOutput;
 
   PS_CHECK(verify_immutable_callback_handles() == 0);
+  PS_CHECK(verify_cpp_invocation_prevalidation() == 0);
 
   std::string nul_operation_path(PS_OPERATION_FIXTURE_PATH,
                                  std::strlen(PS_OPERATION_FIXTURE_PATH));
@@ -1229,6 +1453,61 @@ int main() {
     PS_CHECK(!trailing_rejected.ok());
     PS_CHECK(trailing_rejected.status().code == ErrorCode::TypeMismatch);
     const std::map<std::string, ParameterValue> no_parameters;
+    const std::uint32_t invalid_dso_gpu_before = operation_observer.counter(
+        "ps_operation_fixture_gpu_invocation_count", kGpuBackendUnavailable);
+    const std::uint32_t invalid_dso_cpu_before = operation_observer.counter(
+        "ps_operation_fixture_cpu_invocation_count", kGpuBackendUnavailable);
+    PS_CHECK(invalid_dso_gpu_before == 0U);
+    PS_CHECK(invalid_dso_cpu_before == 0U);
+    const std::vector<Value> invalid_plugin_inputs{Value{}};
+    bool invalid_plugin_input_escaped = false;
+    bool invalid_plugin_input_ok = true;
+    ErrorCode invalid_plugin_input_code = ErrorCode::Ok;
+    try {
+      auto invalid_plugin_input = registry.invoke(
+          "fixture.gpu_fallback",
+          OperationInvocation{invalid_plugin_inputs, demands, no_parameters,
+                              Backend::Gpu, CancellationToken()});
+      invalid_plugin_input_ok = invalid_plugin_input.ok();
+      invalid_plugin_input_code = invalid_plugin_input.status().code;
+    } catch (...) {
+      invalid_plugin_input_escaped = true;
+    }
+    PS_CHECK(!invalid_plugin_input_escaped);
+    PS_CHECK(!invalid_plugin_input_ok);
+    PS_CHECK(invalid_plugin_input_code == ErrorCode::InvalidArgument);
+    PS_CHECK(operation_observer.counter(
+                 "ps_operation_fixture_gpu_invocation_count",
+                 kGpuBackendUnavailable) == invalid_dso_gpu_before);
+    PS_CHECK(operation_observer.counter(
+                 "ps_operation_fixture_cpu_invocation_count",
+                 kGpuBackendUnavailable) == invalid_dso_cpu_before);
+
+    const std::uint32_t unknown_dso_gpu_before = operation_observer.counter(
+        "ps_operation_fixture_gpu_invocation_count", kGpuBackendUnavailable);
+    const std::uint32_t unknown_dso_cpu_before = operation_observer.counter(
+        "ps_operation_fixture_cpu_invocation_count", kGpuBackendUnavailable);
+    auto unknown_plugin_backend = registry.invoke(
+        "fixture.gpu_fallback",
+        OperationInvocation{inputs, demands, no_parameters,
+                            static_cast<Backend>(99U), CancellationToken()});
+    PS_CHECK(!unknown_plugin_backend.ok());
+    PS_CHECK(unknown_plugin_backend.status().code ==
+             ErrorCode::InvalidArgument);
+    PS_CHECK(operation_observer.counter(
+                 "ps_operation_fixture_gpu_invocation_count",
+                 kGpuBackendUnavailable) == unknown_dso_gpu_before);
+    PS_CHECK(operation_observer.counter(
+                 "ps_operation_fixture_cpu_invocation_count",
+                 kGpuBackendUnavailable) == unknown_dso_cpu_before);
+
+    auto known_unsupported_gpu =
+        registry.invoke("fixture.double",
+                        OperationInvocation{inputs, demands, parameters,
+                                            Backend::Gpu, CancellationToken()});
+    PS_CHECK(!known_unsupported_gpu.ok());
+    PS_CHECK(known_unsupported_gpu.status().code ==
+             ErrorCode::BackendUnavailable);
     auto missing_parameter =
         registry.invoke("fixture.double",
                         OperationInvocation{inputs, demands, no_parameters,

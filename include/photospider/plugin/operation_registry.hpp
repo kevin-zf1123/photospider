@@ -18,6 +18,8 @@ namespace ps {
  * @brief Local physical backend selected for one plan step.
  *
  * @note GPU names one optional in-process lane, never a remote device.
+ * `OperationRegistry::invoke` rejects every unknown numeric representation
+ * before capability selection or callback entry.
  */
 enum class Backend : std::uint32_t {
   Cpu = 1,
@@ -149,7 +151,10 @@ struct PHOTOSPIDER_API OperationInvocation final {
   const std::vector<Region>& input_demands;
   /** @brief Canonically ordered source parameters. */
   const std::map<std::string, ParameterValue>& parameters;
-  /** @brief Physical backend selected by the validated plan. */
+  /**
+   * @brief Physical backend selected by the validated plan.
+   * @note Only `Cpu` and `Gpu` are accepted at invocation.
+   */
   Backend backend = Backend::Cpu;
   /** @brief Cooperative cancellation observation. */
   CancellationToken cancellation;
@@ -285,14 +290,23 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @brief Invokes one operation through its exception fence.
    * @param key Exact registered operation key.
    * @param invocation Immutable validated invocation.
-   * @return Complete Value or typed callback failure.
+   * @return Complete Value; `InvalidArgument` for a default input Value,
+   * unknown backend, or malformed counts/demands/parameters;
+   * `BackendUnavailable` for a known unsupported backend; `TypeMismatch` for
+   * Preserve/Match input incompatibility or invalid callback output; or the
+   * callback's typed failure.
    * @throws std::bad_alloc Only for process resource exhaustion before a
    * recoverable result can be constructed.
-   * @note Callback exceptions other than bad_alloc become `OperationFailed`.
-   * A standard exception with a null diagnostic is normalized to an empty
-   * message before status construction. Lookup copies only an immutable owning
-   * handle under the registry mutex; callback copy code and callback execution
-   * never run there, and a DSO lease remains alive through callback completion.
+   * @note Validation preserves lookup, count, demand, parameter, cancellation,
+   * backend-vocabulary, capability, and descriptor order. Every input is
+   * checked for validity before descriptor access. The expected output
+   * descriptor is computed before callback entry and reused afterward, so an
+   * incompatible Preserve/Match invocation cannot run user or DSO code.
+   * Callback exceptions other than bad_alloc become `OperationFailed`; a
+   * standard exception with a null diagnostic becomes an empty message.
+   * Lookup copies only an immutable owning handle under the registry mutex;
+   * callback copy/execution never runs there, and a DSO lease remains alive
+   * through callback completion.
    */
   [[nodiscard]] Result<Value> invoke(
       const std::string& key, const OperationInvocation& invocation) const;

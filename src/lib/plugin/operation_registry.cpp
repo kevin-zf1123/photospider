@@ -414,43 +414,78 @@ Status validate_traits(const OperationTraits& traits) {
 }
 
 /**
- * @brief Validates a callback output against compiler-visible static traits.
+ * @brief Precomputes one callback's statically expected output descriptor.
  * @param traits Frozen operation traits.
  * @param inputs Exact invocation inputs.
- * @param output Published callback output.
- * @return Success or type/shape mismatch.
- * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note The current executor publishes complete Values only, so output Region
- * must cover the complete inferred descriptor.
+ * @return Expected descriptor, `InvalidArgument` for a default input Value,
+ * `TypeMismatch` for Preserve/Match incompatibility, or `Internal` for an
+ * impossible published trait invariant.
+ * @throws std::bad_alloc If descriptor or diagnostic storage cannot allocate.
+ * @note The result is computed before callback entry and reused for output
+ * validation. Preserve/Match registration already forbids zero inputs; this
+ * helper still fails closed if that private invariant is violated.
  */
-Status validate_callback_output(const OperationTraits& traits,
-                                const std::vector<Value>& inputs,
-                                const Value& output) {
-  ValueDescriptor expected{traits.output_element_type, {1U}};
-  if (traits.shape_rule == OperationShapeRule::Fixed) {
-    expected.shape = traits.fixed_output_shape;
+Result<ValueDescriptor> expected_callback_output_descriptor(
+    const OperationTraits& traits, const std::vector<Value>& inputs) {
+  switch (traits.shape_rule) {
+    case OperationShapeRule::Scalar:
+      return Result<ValueDescriptor>(
+          ValueDescriptor{traits.output_element_type, {1U}});
+    case OperationShapeRule::Fixed:
+      return Result<ValueDescriptor>(ValueDescriptor{
+          traits.output_element_type, traits.fixed_output_shape});
+    case OperationShapeRule::PreserveFirstInput:
+    case OperationShapeRule::MatchAllInputs:
+      break;
   }
-  if (traits.shape_rule == OperationShapeRule::PreserveFirstInput ||
-      traits.shape_rule == OperationShapeRule::MatchAllInputs) {
-    if (inputs.empty()) {
-      return Status::failure(ErrorCode::Internal,
-                             "typed operation has no inferred input");
-    }
-    expected = inputs.front().descriptor();
-    if (expected.element_type != traits.output_element_type) {
-      return Status::failure(ErrorCode::TypeMismatch,
-                             "operation input type contradicts traits");
-    }
+  if (traits.shape_rule != OperationShapeRule::PreserveFirstInput &&
+      traits.shape_rule != OperationShapeRule::MatchAllInputs) {
+    return Result<ValueDescriptor>(Status::failure(
+        ErrorCode::Internal, "registered operation shape rule is unknown"));
+  }
+  if (inputs.empty()) {
+    return Result<ValueDescriptor>(Status::failure(
+        ErrorCode::Internal, "typed operation has no inferred input"));
+  }
+  if (!inputs.front().valid()) {
+    return Result<ValueDescriptor>(Status::failure(
+        ErrorCode::InvalidArgument, "operation input Value is invalid"));
+  }
+  const ValueDescriptor expected = inputs.front().descriptor();
+  if (expected.element_type != traits.output_element_type) {
+    return Result<ValueDescriptor>(Status::failure(
+        ErrorCode::TypeMismatch, "operation input type contradicts traits"));
   }
   if (traits.shape_rule == OperationShapeRule::MatchAllInputs) {
     for (const Value& input : inputs) {
-      if (input.descriptor().element_type != expected.element_type ||
-          input.descriptor().shape != expected.shape) {
-        return Status::failure(ErrorCode::TypeMismatch,
-                               "operation input descriptors do not match");
+      if (!input.valid()) {
+        return Result<ValueDescriptor>(Status::failure(
+            ErrorCode::InvalidArgument, "operation input Value is invalid"));
+      }
+      const ValueDescriptor& descriptor = input.descriptor();
+      if (descriptor.element_type != expected.element_type ||
+          descriptor.shape != expected.shape) {
+        return Result<ValueDescriptor>(
+            Status::failure(ErrorCode::TypeMismatch,
+                            "operation input descriptors do not match"));
       }
     }
   }
+  return Result<ValueDescriptor>(expected);
+}
+
+/**
+ * @brief Validates a callback output against a precomputed descriptor.
+ * @param expected Descriptor validated before callback entry.
+ * @param output Published callback output, possibly default-invalid.
+ * @return Success or type/shape/whole-Region mismatch.
+ * @throws std::bad_alloc If a failure diagnostic allocation fails.
+ * @note The current executor publishes complete Values only, so output Region
+ * must cover the complete descriptor. A default output remains a safe
+ * `TypeMismatch` rather than an accessor exception.
+ */
+Status validate_callback_output(const ValueDescriptor& expected,
+                                const Value& output) {
   if (!output.valid() ||
       output.descriptor().element_type != expected.element_type ||
       output.descriptor().shape != expected.shape) {
@@ -1030,6 +1065,19 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             Status::failure(ErrorCode::InvalidArgument,
                             "plugin invocation input/demand count mismatch"));
       }
+      std::uint32_t plugin_backend = 0U;
+      switch (invocation.backend) {
+        case Backend::Cpu:
+          plugin_backend = 1U;
+          break;
+        case Backend::Gpu:
+          plugin_backend = 2U;
+          break;
+        default:
+          return Result<Value>(
+              Status::failure(ErrorCode::InvalidArgument,
+                              "plugin invocation backend is unknown"));
+      }
       std::vector<ps_operation_value_view_v2> views;
       std::vector<std::vector<ps_operation_facet_view_v2>> facet_views;
       std::vector<std::vector<std::uint64_t>> demand_offsets;
@@ -1042,24 +1090,30 @@ Status OperationRegistry::load_plugin(const std::string& path) {
            ++input_index) {
         const Value& input = invocation.inputs[input_index];
         const Region& demand = invocation.input_demands[input_index];
+        if (!input.valid()) {
+          return Result<Value>(
+              Status::failure(ErrorCode::InvalidArgument,
+                              "plugin invocation input Value is invalid"));
+        }
+        const ValueDescriptor& input_descriptor = input.descriptor();
         auto layout =
-            dense_layout(input.descriptor().shape,
-                         Value::element_size(input.descriptor().element_type));
+            dense_layout(input_descriptor.shape,
+                         Value::element_size(input_descriptor.element_type));
         if (!layout.ok() ||
-            input.region().rank() != input.descriptor().shape.size() ||
-            demand.rank() != input.descriptor().shape.size() ||
-            !demand.validate(input.descriptor().shape).ok() ||
+            input.region().rank() != input_descriptor.shape.size() ||
+            demand.rank() != input_descriptor.shape.size() ||
+            !demand.validate(input_descriptor.shape).ok() ||
             input.layout().byte_offset > input.bytes().size() ||
             input.layout().byte_strides != layout.value().byte_strides) {
           return Result<Value>(Status::failure(
               ErrorCode::TypeMismatch,
               "operation plugin requires contiguous input Values"));
         }
-        for (std::size_t axis = 0U; axis < input.descriptor().shape.size();
+        for (std::size_t axis = 0U; axis < input_descriptor.shape.size();
              ++axis) {
           const RegionDimension& dimension = input.region().dimensions()[axis];
           if (dimension.offset != 0U ||
-              dimension.extent != input.descriptor().shape[axis]) {
+              dimension.extent != input_descriptor.shape[axis]) {
             return Result<Value>(Status::failure(
                 ErrorCode::TypeMismatch,
                 "operation plugin requires whole input Regions"));
@@ -1084,10 +1138,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         ps_operation_value_view_v2 view{};
         view.struct_size = sizeof(view);
         view.element_type =
-            static_cast<std::uint32_t>(input.descriptor().element_type);
-        view.rank = static_cast<std::uint32_t>(input.descriptor().shape.size());
+            static_cast<std::uint32_t>(input_descriptor.element_type);
+        view.rank = static_cast<std::uint32_t>(input_descriptor.shape.size());
         view.byte_size = logical_bytes;
-        view.shape = input.descriptor().shape.data();
+        view.shape = input_descriptor.shape.data();
         auto& offsets = demand_offsets.emplace_back();
         auto& extents = demand_extents.emplace_back();
         offsets.reserve(demand.rank());
@@ -1138,8 +1192,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
           descriptor->user_data, views.data(),
           static_cast<std::uint32_t>(views.size()),
           parameter_views.empty() ? nullptr : parameter_views.data(),
-          static_cast<std::uint32_t>(parameter_views.size()),
-          invocation.backend == Backend::Cpu ? 1U : 2U, plugin_cancelled,
+          static_cast<std::uint32_t>(parameter_views.size()), plugin_backend,
+          plugin_cancelled,
           const_cast<CancellationToken*>(&invocation.cancellation), &sink,
           diagnostic, sizeof(diagnostic));
       diagnostic[sizeof(diagnostic) - 1U] = '\0';
@@ -1272,6 +1326,10 @@ Result<Value> OperationRegistry::invoke(
                         "operation input demand count does not match inputs"));
   }
   for (std::size_t index = 0U; index < invocation.inputs.size(); ++index) {
+    if (!invocation.inputs[index].valid()) {
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "operation input Value is invalid"));
+    }
     const Status demand_status = invocation.input_demands[index].validate(
         invocation.inputs[index].descriptor().shape);
     if (!demand_status.ok()) {
@@ -1287,6 +1345,14 @@ Result<Value> OperationRegistry::invoke(
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
   }
+  switch (invocation.backend) {
+    case Backend::Cpu:
+    case Backend::Gpu:
+      break;
+    default:
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "operation backend is unknown"));
+  }
   if ((invocation.backend == Backend::Cpu &&
        !definition->traits.supports_cpu) ||
       (invocation.backend == Backend::Gpu &&
@@ -1294,13 +1360,18 @@ Result<Value> OperationRegistry::invoke(
     return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
                                          "operation backend is unavailable"));
   }
+  auto expected_output = expected_callback_output_descriptor(definition->traits,
+                                                             invocation.inputs);
+  if (!expected_output.ok()) {
+    return Result<Value>(expected_output.status());
+  }
   try {
     auto result = definition->callback(invocation);
     if (!result.ok()) {
       return result;
     }
-    const Status output_status = validate_callback_output(
-        definition->traits, invocation.inputs, result.value());
+    const Status output_status =
+        validate_callback_output(expected_output.value(), result.value());
     return output_status.ok() ? result : Result<Value>(output_status);
   } catch (const std::bad_alloc&) {
     throw;

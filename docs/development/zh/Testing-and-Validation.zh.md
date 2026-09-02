@@ -43,6 +43,13 @@ Kernel test 覆盖：
   `std::runtime_error` 或 `what()` 为 null 的标准异常时，会分别以原 diagnostic 或空
   message 隔离为 `OperationFailed`；`std::bad_alloc` 仍可由 embedding caller 观察，且
   input/parameter/output classification 保持不变；
+- operation invocation prevalidation 覆盖 default-invalid Value 位于首个与最后一个 input、
+  successful callback 返回 default-invalid output，以及 unknown backend 分别作用于 C++
+  与真实 GPU-capable DSO。Invalid input 与 unknown backend 都返回 `InvalidArgument`，不
+  进入 callback，也不增加 DSO CPU/GPU counter；已知但不支持的 GPU 保持
+  `BackendUnavailable`。Preserve output-type 冲突与 Match input type/shape 冲突会在原本
+  deliberate failure 且有 side effect 的 callback 能运行之前返回 `TypeMismatch`；callback
+  output `Value{}` 则继续在 entry 后返回 `TypeMismatch`；
 - native loading 前的精确 operation/provider library path validation：显式长度的合法
   fixture path 后接 embedded NUL 与 suffix 时返回 `InvalidArgument`，不发布 operation
   key/provider schema，且 owner-allocation、native-load 与 native-close test hook 均为零；

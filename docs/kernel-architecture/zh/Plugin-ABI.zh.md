@@ -42,6 +42,18 @@ violation；rejected output 保留 sink 的精确 typed failure。两种路径�
 unavailable、ordinary failure、callback-reported cancellation 与 unknown result；因此它
 绝不会发布第一次 Value，也绝不会请求 CPU fallback。
 
+在任何 C++ 或 DSO callback entry 之前，`OperationRegistry::invoke` 会验证 operation/
+input/demand count，先检查每个 input 的 `Value::valid()` 再读取 descriptor，验证每个
+demand 与 parameter，观察 host cancellation，拒绝 CPU/GPU 之外的 backend value，随后
+检查 backend capability。已知但不支持的 backend 仍为 `BackendUnavailable`；未知数字
+backend 返回 `InvalidArgument`，且 DSO adapter 绝不会把它转换为 GPU。完成这些更高
+优先级检查后，registry 只计算一次预期的 Scalar/Fixed/Preserve/Match output descriptor。
+Preserve 会拒绝与声明 output type 冲突的首个 input element type；Match 会拒绝任一合法
+input 的 type 或 shape 不一致。两者都在 callback 前返回 `TypeMismatch`，因此即使 callback
+带副作用或原本会失败，也不会进入 callback。Callback output validation 复用该预计算
+descriptor；成功 callback 返回 default-invalid `Value` 时仍安全地得到 `TypeMismatch`。
+Plan-derived demand coverage 继续由 `ExecutionRun` 负责，registry 不在此重新推导。
+
 C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会
 验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算
 dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
