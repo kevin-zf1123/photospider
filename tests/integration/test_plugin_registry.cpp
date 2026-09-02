@@ -102,6 +102,21 @@ namespace {
 
 using ps::plugin_testing::LibraryKind;
 
+/** @brief Fixture mode for accepted output followed by duplicate success. */
+constexpr std::uint32_t kDuplicateValidThenSuccess = 6U;
+/** @brief Fixture mode for rejected output followed by duplicate success. */
+constexpr std::uint32_t kDuplicateInvalidThenSuccess = 7U;
+/** @brief Fixture mode for null-context rejection followed by valid output. */
+constexpr std::uint32_t kNullContextThenValid = 11U;
+/**
+ * @brief Returns the stable adapter diagnostic for a second sink invocation.
+ * @return Process-lifetime null-terminated diagnostic bytes.
+ * @throws Nothing.
+ */
+const char* duplicate_publish_diagnostic() noexcept {
+  return "operation plugin violated output sink at-most-once contract";
+}
+
 /**
  * @brief Standard exception whose borrowed diagnostic pointer is null.
  *
@@ -473,6 +488,33 @@ class LibraryObserver final {
     return function();
   }
 
+  /**
+   * @brief Reads one exported mode-indexed uint32 counter function.
+   * @param name Exact fixture symbol.
+   * @param mode Closed callback-result fixture mode.
+   * @return Current counter value for `mode`.
+   * @throws std::runtime_error If the symbol is missing.
+   * @note The mapped fixture remains alive for this observer's lifetime.
+   */
+  [[nodiscard]] std::uint32_t counter(const char* name,
+                                      std::uint32_t mode) const {
+#if defined(_WIN32)
+    void* address = reinterpret_cast<void*>(
+        GetProcAddress(static_cast<HMODULE>(handle_), name));
+#else
+    void* address = dlsym(handle_, name);
+#endif
+    using Function = std::uint32_t (*)(std::uint32_t);
+    Function function = nullptr;
+    static_assert(sizeof(function) == sizeof(address),
+                  "fixture target requires equal pointer sizes");
+    std::memcpy(&function, &address, sizeof(function));
+    if (!function) {
+      throw std::runtime_error("fixture indexed counter symbol is missing");
+    }
+    return function(mode);
+  }
+
  private:
   /** @brief Native fixture mapping handle. */
   void* handle_ = nullptr;
@@ -744,6 +786,77 @@ int verify_immutable_callback_handles() {
   return 0;
 }
 
+/**
+ * @brief Verifies one direct CPU DSO duplicate-publication invocation.
+ * @param registry Loaded mutable or frozen registry owning the fixture.
+ * @param observer Independent fixture mapping for counters and sink results.
+ * @param key Exact duplicate-publication operation key.
+ * @param mode Closed duplicate fixture mode.
+ * @param expected_publish_bits Expected first/second sink return encoding.
+ * @return Zero when fail-closed status and exact observations match.
+ * @throws std::bad_alloc If invocation staging allocates unsuccessfully.
+ * @throws std::runtime_error If an exported observation symbol is missing.
+ * @note The helper proves the callback ignored its second zero return while the
+ * adapter rejected the complete invocation without exposing the first Value.
+ */
+int verify_duplicate_sink_invocation(ps::OperationRegistry& registry,
+                                     const LibraryObserver& observer,
+                                     const char* key, std::uint32_t mode,
+                                     std::uint32_t expected_publish_bits) {
+  const ps::Value input = ps::Value::from_float64(3.0);
+  const std::vector<ps::Value> inputs{input};
+  const std::vector<ps::Region> demands{ps::Region::whole({1U})};
+  const std::map<std::string, ps::ParameterValue> parameters;
+  const std::uint32_t cpu_before =
+      observer.counter("ps_operation_fixture_cpu_invocation_count", mode);
+  const std::uint32_t gpu_before =
+      observer.counter("ps_operation_fixture_gpu_invocation_count", mode);
+  auto result = registry.invoke(
+      key, ps::OperationInvocation{inputs, demands, parameters,
+                                   ps::Backend::Cpu, ps::CancellationToken()});
+  PS_CHECK(!result.ok());
+  PS_CHECK(result.status().code == ps::ErrorCode::OperationFailed);
+  PS_CHECK(result.status().message == duplicate_publish_diagnostic());
+  PS_CHECK(observer.counter("ps_operation_fixture_publish_result_bits", mode) ==
+           expected_publish_bits);
+  PS_CHECK(observer.counter("ps_operation_fixture_cpu_invocation_count",
+                            mode) == cpu_before + 1U);
+  PS_CHECK(observer.counter("ps_operation_fixture_gpu_invocation_count",
+                            mode) == gpu_before);
+  return 0;
+}
+
+/**
+ * @brief Proves a null output-sink context does not claim publication state.
+ * @param registry Loaded mutable or frozen registry owning the fixture.
+ * @param observer Independent fixture mapping for counters and sink results.
+ * @return Zero when null returns zero and the following valid publish succeeds.
+ * @throws std::bad_alloc If invocation or Value staging allocation fails.
+ * @throws std::runtime_error If an exported observation symbol is missing.
+ * @note Encoded bits `01` mean null-context rejection followed by acceptance.
+ */
+int verify_null_sink_context(ps::OperationRegistry& registry,
+                             const LibraryObserver& observer) {
+  const ps::Value input = ps::Value::from_float64(3.0);
+  const std::vector<ps::Value> inputs{input};
+  const std::vector<ps::Region> demands{ps::Region::whole({1U})};
+  const std::map<std::string, ps::ParameterValue> parameters;
+  const std::uint32_t cpu_before = observer.counter(
+      "ps_operation_fixture_cpu_invocation_count", kNullContextThenValid);
+  auto result = registry.invoke(
+      "fixture.null_context_then_valid",
+      ps::OperationInvocation{inputs, demands, parameters, ps::Backend::Cpu,
+                              ps::CancellationToken()});
+  PS_CHECK(result.ok());
+  PS_CHECK(result.value().as_float64().ok());
+  PS_CHECK(result.value().as_float64().value() == 3.0);
+  PS_CHECK(observer.counter("ps_operation_fixture_publish_result_bits",
+                            kNullContextThenValid) == 1U);
+  PS_CHECK(observer.counter("ps_operation_fixture_cpu_invocation_count",
+                            kNullContextThenValid) == cpu_before + 1U);
+  return 0;
+}
+
 }  // namespace
 
 /**
@@ -1004,9 +1117,30 @@ int main() {
                                             Backend::Cpu, CancellationToken()});
     PS_CHECK(!bad_facet.ok());
     PS_CHECK(bad_facet.status().code == ErrorCode::InvalidArgument);
+    PS_CHECK(verify_duplicate_sink_invocation(
+                 registry, operation_observer, "fixture.duplicate_success",
+                 kDuplicateValidThenSuccess, 2U) == 0);
+    PS_CHECK(verify_duplicate_sink_invocation(
+                 registry, operation_observer,
+                 "fixture.duplicate_invalid_success",
+                 kDuplicateInvalidThenSuccess, 0U) == 0);
+    PS_CHECK(verify_null_sink_context(registry, operation_observer) == 0);
   }
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
            2U);
+  const std::uint32_t destroy_before_retirement =
+      operation_observer.counter("ps_operation_fixture_destroy_count");
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                               false);
+    {
+      OperationRegistry retirement_registry;
+      PS_CHECK(retirement_registry.load_plugin(PS_OPERATION_FIXTURE_PATH).ok());
+    }
+    PS_CHECK(lifecycle.native_close_count() == 1U);
+  }
+  PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
+           destroy_before_retirement + 1U);
 
   auto unicode_provider_registry = std::make_unique<DataDefinitionRegistry>();
   const std::string invalid_provider_key("\xc0\xaf", 2U);

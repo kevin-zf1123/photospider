@@ -199,10 +199,12 @@ typedef struct ps_operation_output_sink_v2 {
    * @param facet_count Number of facet records in 0..64.
    * @param data Payload pointer, nonnull when byte_size is nonzero.
    * @param byte_size Exact payload byte count.
-   * @return Nonzero when output was accepted; zero on validation/allocation
-   * failure.
-   * @note The host copies all bytes before return. The callback may invoke
-   * this function at most once.
+   * @return Nonzero when the first output was accepted; zero for null context,
+   * first-call validation/allocation failure, or any second invocation.
+   * @note The host copies all bytes before return. The first invocation claims
+   * the sink even when validation rejects it. Any second invocation violates
+   * the callback contract and makes the complete operation fail closed; it
+   * never replaces the first copied or rejected result.
    */
   int (*publish)(void* context, uint32_t element_type, const uint64_t* shape,
                  uint32_t rank, const ps_operation_facet_view_v2* facets,
@@ -237,8 +239,10 @@ typedef int (*ps_operation_cancelled_v2)(void* context);
  * a GPU attempt whose copied traits permit it; the output sink must not be
  * invoked for that result. If it was invoked, a rejected output keeps its
  * exact sink failure and an accepted output becomes a terminal ordinary
- * contract failure, so neither case can request fallback. Host cancellation
- * remains authoritative over the callback result and sink state.
+ * contract failure, so neither case can request fallback. Invoking the sink
+ * more than once is always a terminal ordinary contract failure regardless of
+ * the callback result and never requests fallback. Host cancellation remains
+ * authoritative over the callback result and sink state.
  */
 typedef int (*ps_operation_execute_v2)(
     void* user_data, const ps_operation_value_view_v2* inputs,

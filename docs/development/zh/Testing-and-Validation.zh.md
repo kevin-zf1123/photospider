@@ -39,6 +39,14 @@ Kernel test 覆盖：
   `std::runtime_error` 或 `what()` 为 null 的标准异常时，会分别以原 diagnostic 或空
   message 隔离为 `OperationFailed`；`std::bad_alloc` 仍可由 embedding caller 观察，且
   input/parameter/output classification 保持不变；
+- 真实 DSO output-sink at-most-once enforcement：accepted-then-duplicate 与
+  rejected-then-duplicate callback 分别记录精确 sink return `(1,0)` 与 `(0,0)`；success、
+  backend unavailable、ordinary failure、unknown callback result 与 callback-reported
+  cancellation 都成为相同且稳定的 terminal `OperationFailed`。Duplicate backend
+  unavailable 的 CPU invocation 为零，且不发布 output；deterministic callback-held
+  cancellation case 证明 host cancellation 仍有更高优先级。Null sink context 没有副作用，
+  随后的合法 publication 成功；registry retirement 仍对 descriptor destroy 与 native
+  lease close 各执行恰好一次；
 - 真实 DSO dense fixed-shape 在 `INT64_MAX + 1` bytes 与 rank-two `{2, 2^62}` 的边界、
   紧邻两者上界的 rejection、通过 compile-safe helper 验证的 32-bit host-size
   representability，以及带精确 destroy/close count 的 transactional multi-descriptor

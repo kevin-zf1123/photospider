@@ -520,7 +520,8 @@ Result<DenseLayout> dense_layout(const std::vector<std::uint64_t>& shape,
  * @brief State used by one C ABI output sink invocation.
  *
  * @note The sink records the first publication attempt before validation,
- * accepts at most one complete output, and retains no DSO pointer.
+ * accepts at most one complete output, records every later call as a sticky
+ * invocation-local contract violation, and retains no DSO pointer.
  */
 struct OutputSinkState final {
   /** @brief Published output when validation succeeds. */
@@ -528,6 +529,8 @@ struct OutputSinkState final {
                                        "operation did not publish output")};
   /** @brief True after the first sink call, whether accepted or rejected. */
   bool published = false;
+  /** @brief True after any second or later call with this invocation state. */
+  bool duplicate_publish_attempted = false;
 };
 
 /**
@@ -540,8 +543,11 @@ struct OutputSinkState final {
  * @param facet_count Number of candidate facet records.
  * @param data Complete contiguous payload bytes.
  * @param byte_size Exact payload size.
- * @return One on success and zero on failure/duplicate publication.
- * @note Every exception is fenced and translated into the sink result.
+ * @return One on first-call success and zero for null state, validation/
+ * allocation failure, or every duplicate call.
+ * @note Null state has no side effect. A duplicate only sets the sticky flag
+ * and never replaces the first `Result`; every allocating/throwing operation
+ * remains inside the first-call exception fence.
  */
 int publish_plugin_output(void* context, std::uint32_t element_type,
                           const std::uint64_t* shape, std::uint32_t rank,
@@ -549,7 +555,11 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
                           std::uint32_t facet_count, const std::uint8_t* data,
                           std::uint64_t byte_size) noexcept {
   auto* state = static_cast<OutputSinkState*>(context);
-  if (!state || state->published) {
+  if (!state) {
+    return 0;
+  }
+  if (state->published) {
+    state->duplicate_publish_attempted = true;
     return 0;
   }
   state->published = true;
@@ -1128,6 +1138,11 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       if (invocation.cancellation.cancelled()) {
         return Result<Value>(
             Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
+      }
+      if (output.duplicate_publish_attempted) {
+        return Result<Value>(Status::failure(
+            ErrorCode::OperationFailed,
+            "operation plugin violated output sink at-most-once contract"));
       }
       if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2 &&
           output.published) {
