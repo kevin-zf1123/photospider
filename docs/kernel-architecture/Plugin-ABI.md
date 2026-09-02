@@ -44,8 +44,12 @@ normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
 admission estimate. A C DSO Fixed descriptor is stricter because ABI v2 carries
 no output strides: loading separately requires representable contiguous
-signed strides and uint64 byte count. This distinction adds no ABI field and
-does not change Preserve or Match inference.
+signed strides and uint64 byte count. For total dense bytes `B`, the loader
+also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
+`B <= SIZE_MAX`. Thus a UInt8 `{INT64_MAX + 1}` descriptor and
+`{2, 2^62}` are representable on a 64-bit host, while adding one element to
+either boundary is rejected. This distinction adds no ABI field and does not
+change Preserve or Match inference.
 
 ## Validation
 
@@ -54,8 +58,9 @@ alignment, pointer/count pairs, bounded key/count/rank/parameter values,
 strict UTF-8 operation/parameter-schema/provider-schema keys, duplicate
 parameter declarations, closed enum/flag/type combinations, required
 callbacks, logical C++ fixed descriptors, dense C DSO fixed stride/byte
-representability, output element/shape/byte count, facet arrays/key/version/
-payload, arithmetic overflow, and exactly-once destroy ownership. Key
+representability including signed last-byte and host allocation-size bounds,
+output element/shape/byte count, facet arrays/key/version/payload, arithmetic
+overflow, and exactly-once destroy ownership. Key
 validation rejects invalid continuation bytes, truncation, overlong encodings,
 UTF-16 surrogates, values above U+10FFFF, embedded nulls, and ASCII controls
 before publication; it does not normalize Unicode. Ordinary facet payload and
@@ -66,6 +71,12 @@ Malformed registration publishes nothing. Multi-record registry publication
 uses copy-then-swap, so allocation failure cannot expose a prefix. Operation
 exceptions are fenced; output is copied before callback return. Plugin-owned
 descriptor tables are destroyed before library unload.
+
+Dense layout products use checked uint64 division before multiplication, then
+validate the complete byte range. Boundary fixtures load real DSOs and require
+transactional rejection when a later descriptor is unrepresentable, with one
+destroy and one native close. A compile-time-width helper instantiates the
+32-bit allocation-size path even on a 64-bit test builder.
 
 Immediately after native open, a move-only stack owner holds each operation or
 provider handle. Once an exact API structure prefix is readable, that owner

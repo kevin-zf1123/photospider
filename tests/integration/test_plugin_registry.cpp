@@ -16,6 +16,7 @@
 #include "photospider/execution/execution.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/dense_layout_validation.hpp"
 #include "plugin/library_test_hooks.hpp"
 #include "support/test_support.hpp"
 
@@ -33,6 +34,21 @@
 #endif
 #ifndef PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH
 #error "missing dense-overflow operation fixture path"
+#endif
+#ifndef PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH
+#error "missing legal rank-one dense-limit fixture path"
+#endif
+#ifndef PS_OPERATION_DENSE_RANK1_OVERFLOW_FIXTURE_PATH
+#error "missing invalid rank-one dense-limit fixture path"
+#endif
+#ifndef PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH
+#error "missing legal rank-two dense-limit fixture path"
+#endif
+#ifndef PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH
+#error "missing invalid rank-two dense-limit fixture path"
+#endif
+#ifndef PS_OPERATION_DENSE_MULTI_OVERFLOW_FIXTURE_PATH
+#error "missing transactional dense-limit fixture path"
 #endif
 #ifndef PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH
 #error "missing parameter-pointer ABI fixture path"
@@ -350,6 +366,76 @@ class LibraryObserver final {
 };
 
 /**
+ * @brief Verifies dense byte-size arithmetic for 32-bit and native hosts.
+ * @return Zero when every exact inclusive/exclusive boundary is preserved.
+ * @throws Nothing.
+ * @note The explicit `uint32_t` instantiation compiles and executes the 32-bit
+ * `size_t` branch even when this test process uses 64-bit `size_t`.
+ */
+int verify_dense_byte_size_contract() noexcept {
+  constexpr std::uint64_t kUint32Maximum = UINT64_C(4294967295);
+  constexpr std::uint64_t kMaximumLegalSignedRange = UINT64_C(1) << 63U;
+  static_assert(
+      ps::plugin_internal::dense_byte_size_representable<std::uint32_t>(
+          kUint32Maximum),
+      "32-bit size maximum must remain inclusive");
+  static_assert(
+      !ps::plugin_internal::dense_byte_size_representable<std::uint32_t>(
+          kUint32Maximum + UINT64_C(1)),
+      "32-bit size overflow must be rejected");
+  PS_CHECK(ps::plugin_internal::dense_byte_size_representable<std::uint64_t>(
+      kMaximumLegalSignedRange));
+  PS_CHECK(!ps::plugin_internal::dense_byte_size_representable<std::uint64_t>(
+      kMaximumLegalSignedRange + UINT64_C(1)));
+  PS_CHECK(!ps::plugin_internal::dense_byte_size_representable<std::uint32_t>(
+      UINT64_C(0)));
+  return 0;
+}
+
+/**
+ * @brief Loads one real dense-boundary DSO and verifies exact lifecycle.
+ * @param path Build-generated fixture path.
+ * @param should_load Whether descriptor validation must accept the table.
+ * @param expected_key Accepted operation key, empty for rejected tables.
+ * @param expected_shape Accepted fixed shape, empty for rejected tables.
+ * @return Zero when registration, transactionality, destroy, and close match.
+ * @throws std::bad_alloc If registry staging allocation fails.
+ * @throws std::runtime_error If the fixture cannot be mapped or inspected.
+ * @note Rejected multi-descriptor tables must leave the registry completely
+ * empty even when the first descriptor was legal.
+ */
+int verify_dense_dso_fixture(const char* path, bool should_load,
+                             const std::string& expected_key,
+                             const std::vector<std::uint64_t>& expected_shape) {
+  LibraryObserver observer(path);
+  PS_CHECK(observer.counter("ps_operation_dense_limit_fixture_destroy_count") ==
+           0U);
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                               false);
+    {
+      ps::OperationRegistry registry;
+      const ps::Status loaded = registry.load_plugin(path);
+      PS_CHECK(loaded.ok() == should_load);
+      if (should_load) {
+        PS_CHECK(registry.keys() == std::vector<std::string>({expected_key}));
+        auto traits = registry.find_traits(expected_key);
+        PS_CHECK(traits.ok());
+        PS_CHECK(traits.value().output_element_type == ps::ElementType::UInt8);
+        PS_CHECK(traits.value().shape_rule == ps::OperationShapeRule::Fixed);
+        PS_CHECK(traits.value().fixed_output_shape == expected_shape);
+      } else {
+        PS_CHECK(registry.keys().empty());
+      }
+    }
+    PS_CHECK(lifecycle.native_close_count() == 1U);
+  }
+  PS_CHECK(observer.counter("ps_operation_dense_limit_fixture_destroy_count") ==
+           1U);
+  return 0;
+}
+
+/**
  * @brief Verifies one C++ fixed descriptor with a broadcast-only huge shape.
  *
  * The helper registers and freezes an embedding callback, compiles the same
@@ -547,6 +633,24 @@ int main() {
   }
   PS_CHECK(dense_overflow_observer.counter(
                "ps_operation_dense_overflow_fixture_destroy_count") == 1U);
+
+  PS_CHECK(verify_dense_byte_size_contract() == 0);
+  const std::uint64_t maximum_legal_dense_bytes = UINT64_C(1) << 63U;
+  PS_CHECK(verify_dense_dso_fixture(PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH,
+                                    true, "fixture.dense_rank1_limit",
+                                    {maximum_legal_dense_bytes}) == 0);
+  PS_CHECK(verify_dense_dso_fixture(
+               PS_OPERATION_DENSE_RANK1_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
+           0);
+  PS_CHECK(verify_dense_dso_fixture(PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH,
+                                    true, "fixture.dense_rank2_limit",
+                                    {UINT64_C(2), UINT64_C(1) << 62U}) == 0);
+  PS_CHECK(verify_dense_dso_fixture(
+               PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
+           0);
+  PS_CHECK(verify_dense_dso_fixture(
+               PS_OPERATION_DENSE_MULTI_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
+           0);
 
   LibraryObserver operation_observer(PS_OPERATION_FIXTURE_PATH);
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==

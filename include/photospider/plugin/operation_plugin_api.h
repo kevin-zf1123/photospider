@@ -276,8 +276,10 @@ typedef struct ps_operation_descriptor_v2 {
   uint32_t output_rank;
   /**
    * @brief Rank-sized dense fixed shape, null when output_rank is zero.
-   * @note Since ABI v2 carries no strides, the contiguous stride chain and
-   * complete byte count must fit the host's exact integer contracts.
+   * @note Since ABI v2 carries no strides, the loader derives a contiguous
+   * stride chain with checked uint64 products. Every stored stride must fit
+   * int64, and complete byte count B must satisfy `B > 0`,
+   * `B - 1 <= INT64_MAX`, and `B <= SIZE_MAX` before publication.
    */
   const uint64_t* output_shape;
   /** @brief One `PS_OPERATION_SHAPE_*_V2` inference rule. */
