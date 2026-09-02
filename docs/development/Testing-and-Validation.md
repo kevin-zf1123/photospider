@@ -52,6 +52,15 @@ Kernel tests cover:
   standard exception with null `what()` is fenced as `OperationFailed` with the
   exact or empty message, while `std::bad_alloc` remains observable by the
   embedding caller and input/parameter/output classification stays unchanged;
+- operation-invocation prevalidation with a default-invalid Value in the first
+  and final input position, a successful callback returning a default-invalid
+  output, and an unknown backend against both C++ and a real GPU-capable DSO.
+  Invalid inputs and unknown backends return `InvalidArgument` without a
+  callback or CPU/GPU DSO counter increment; a known unsupported GPU remains
+  `BackendUnavailable`. Preserve output-type conflicts and Match input
+  type/shape conflicts return `TypeMismatch` before deliberately failing,
+  side-effecting callbacks can run, while callback output `Value{}` remains
+  post-entry `TypeMismatch`;
 - exact operation/provider library path validation before native loading: an
   explicit-length valid fixture path followed by embedded NUL and suffix is
   `InvalidArgument`, publishes no operation key/provider schema, and reaches
