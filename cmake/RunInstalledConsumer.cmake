@@ -12,6 +12,9 @@ endif()
 if(NOT PHOTOSPIDER_GENERATOR)
   message(FATAL_ERROR "Photospider consumer generator was not provided")
 endif()
+if(NOT PHOTOSPIDER_CONSUMER_SANITIZER MATCHES "^(none|address|thread)$")
+  message(FATAL_ERROR "Photospider consumer sanitizer mode is invalid")
+endif()
 set(_generator_args -G "${PHOTOSPIDER_GENERATOR}")
 if(PHOTOSPIDER_GENERATOR_PLATFORM)
   list(APPEND _generator_args -A "${PHOTOSPIDER_GENERATOR_PLATFORM}")
@@ -35,6 +38,7 @@ execute_process(
           -B "${_consumer_binary}"
           "-DCMAKE_PREFIX_PATH:PATH=${_install_prefix}"
           "-DCMAKE_BUILD_TYPE:STRING=${PHOTOSPIDER_BUILD_CONFIG}"
+          "-DPHOTOSPIDER_CONSUMER_SANITIZER:STRING=${PHOTOSPIDER_CONSUMER_SANITIZER}"
   RESULT_VARIABLE _configure_result)
 if(NOT _configure_result EQUAL 0)
   message(FATAL_ERROR "Photospider consumer configure failed")
