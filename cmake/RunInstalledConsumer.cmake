@@ -9,6 +9,17 @@ if(PHOTOSPIDER_BUILD_CONFIG)
   list(APPEND _config_args --config "${PHOTOSPIDER_BUILD_CONFIG}")
 endif()
 
+if(NOT PHOTOSPIDER_GENERATOR)
+  message(FATAL_ERROR "Photospider consumer generator was not provided")
+endif()
+set(_generator_args -G "${PHOTOSPIDER_GENERATOR}")
+if(PHOTOSPIDER_GENERATOR_PLATFORM)
+  list(APPEND _generator_args -A "${PHOTOSPIDER_GENERATOR_PLATFORM}")
+endif()
+if(PHOTOSPIDER_GENERATOR_TOOLSET)
+  list(APPEND _generator_args -T "${PHOTOSPIDER_GENERATOR_TOOLSET}")
+endif()
+
 execute_process(
   COMMAND "${CMAKE_COMMAND}" --install "${PHOTOSPIDER_BINARY_DIR}"
           --prefix "${_install_prefix}" ${_config_args}
@@ -19,24 +30,20 @@ endif()
 
 execute_process(
   COMMAND "${CMAKE_COMMAND}"
+          ${_generator_args}
           -S "${PHOTOSPIDER_SOURCE_DIR}/tests/consumer"
           -B "${_consumer_binary}"
-          -DCMAKE_PREFIX_PATH=${_install_prefix}
+          "-DCMAKE_PREFIX_PATH:PATH=${_install_prefix}"
+          "-DCMAKE_BUILD_TYPE:STRING=${PHOTOSPIDER_BUILD_CONFIG}"
   RESULT_VARIABLE _configure_result)
 if(NOT _configure_result EQUAL 0)
   message(FATAL_ERROR "Photospider consumer configure failed")
 endif()
 
 execute_process(
-  COMMAND "${CMAKE_COMMAND}" --build "${_consumer_binary}" ${_config_args}
+  COMMAND "${CMAKE_COMMAND}" --build "${_consumer_binary}"
+          --target run_photospider_consumer ${_config_args}
   RESULT_VARIABLE _build_result)
 if(NOT _build_result EQUAL 0)
-  message(FATAL_ERROR "Photospider consumer build failed")
-endif()
-
-execute_process(
-  COMMAND "${_consumer_binary}/photospider_consumer"
-  RESULT_VARIABLE _run_result)
-if(NOT _run_result EQUAL 0)
-  message(FATAL_ERROR "Photospider consumer runtime failed")
+  message(FATAL_ERROR "Photospider consumer build or runtime failed")
 endif()

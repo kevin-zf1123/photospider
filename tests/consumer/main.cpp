@@ -1,7 +1,5 @@
-#include <utility>
-
-#include "photospider/photospider.hpp"
 #include "photospider/plugin/data_provider_api.h"
+#include "photospider/plugin/operation_plugin_api.h"
 
 /**
  * @brief Returns the ABI-version sum computed by the installed C SDK unit.
@@ -12,41 +10,25 @@
 extern "C" unsigned int photospider_sdk_version_sum(void);
 
 /**
- * @brief Compiles and executes one graph through only installed public headers.
- * @return Zero when the installed package produces the expected scalar.
- * @throws std::bad_alloc If consumer setup allocation fails.
- * @note Non-exception pipeline failures return distinct nonzero codes.
+ * @brief Runs the installed kernel pipeline through the downstream shared
+ * bridge.
+ * @return Zero when the bridge produces the expected scalar.
+ * @throws Nothing across the C linkage boundary.
+ * @note The bridge owns all C++ exception fencing and links the installed
+ * static or shared kernel product directly.
+ */
+extern "C" int photospider_consumer_run_pipeline(void);
+
+/**
+ * @brief Verifies the installed C SDKs and invokes the shared bridge.
+ * @return Zero when the SDK versions and shared-bridge pipeline both pass.
+ * @throws Nothing.
+ * @note Distinct nonzero results identify SDK mismatch or bridge failure.
  */
 int main() {
   if (photospider_sdk_version_sum() !=
       PS_OPERATION_ABI_VERSION_2 + PS_DATA_PROVIDER_ABI_VERSION_1) {
     return 4;
   }
-
-  ps::WorkflowDocument document;
-  document.nodes = {
-      ps::WorkflowNode{1U, "core.constant", {}, {{"value", 20.0}}},
-      ps::WorkflowNode{2U, "core.constant", {}, {{"value", 22.0}}},
-      ps::WorkflowNode{
-          3U,
-          "math.add",
-          {ps::WorkflowInput{1U, "value"}, ps::WorkflowInput{2U, "value"}},
-          {}},
-  };
-  document.outputs = {ps::WorkflowOutput{"answer", 3U, "value"}};
-
-  auto operations = ps::make_default_operation_registry();
-  ps::Compiler compiler(operations);
-  ps::GraphContext graph(std::move(document));
-  auto compiled = compiler.compile(graph);
-  if (!compiled.ok()) {
-    return 1;
-  }
-  ps::ExecutionContext execution(operations);
-  auto result = execution.execute(compiled.value().plan);
-  if (!result.ok()) {
-    return 2;
-  }
-  const auto value = result.value().values.at("answer").as_float64();
-  return value.ok() && value.value() == 42.0 ? 0 : 3;
+  return photospider_consumer_run_pipeline();
 }
