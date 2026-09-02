@@ -34,6 +34,10 @@ Kernel tests cover:
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
   including operation-v2 typed parameter schemas, demand views, and
   deterministic owner-allocation failure with exact destroy/close counts;
+- real-DSO dense fixed-shape boundaries at `INT64_MAX + 1` bytes and rank-two
+  `{2, 2^62}`, rejection immediately above both limits, 32-bit host-size
+  representability through a compile-safe helper, and transactional
+  multi-descriptor rejection with exact destroy/close counts;
 - parameter unknown/missing/wrong-type/conflict rejection before semantic IR;
 - side-effecting/non-cacheable operation preservation across semantic,
   optimized, and plan stages, plus serial repeated-execution callback order,

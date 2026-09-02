@@ -235,6 +235,23 @@ if(BUILD_TESTING)
     operation_dense_overflow_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(operation_dense_overflow_fixture PROPERTIES PREFIX "")
 
+  function(photospider_add_dense_limit_fixture target case_number)
+    add_library(
+      ${target} MODULE
+      tests/fixtures/operation_dense_limit_fixture.cpp)
+    target_link_libraries(${target} PRIVATE Photospider::operation_sdk)
+    target_compile_definitions(
+      ${target}
+      PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD
+              PS_DENSE_LIMIT_CASE=${case_number})
+    set_target_properties(${target} PROPERTIES PREFIX "")
+  endfunction()
+  photospider_add_dense_limit_fixture(operation_dense_rank1_limit_fixture 1)
+  photospider_add_dense_limit_fixture(operation_dense_rank1_overflow_fixture 2)
+  photospider_add_dense_limit_fixture(operation_dense_rank2_limit_fixture 3)
+  photospider_add_dense_limit_fixture(operation_dense_rank2_overflow_fixture 4)
+  photospider_add_dense_limit_fixture(operation_dense_multi_overflow_fixture 5)
+
   function(photospider_add_bad_parameter_fixture target case_number)
     add_library(
       ${target} MODULE
@@ -327,6 +344,11 @@ if(BUILD_TESTING)
     operation_fixture
     operation_bad_fixture
     operation_dense_overflow_fixture
+    operation_dense_rank1_limit_fixture
+    operation_dense_rank1_overflow_fixture
+    operation_dense_rank2_limit_fixture
+    operation_dense_rank2_overflow_fixture
+    operation_dense_multi_overflow_fixture
     operation_bad_parameter_pointer_fixture
     operation_bad_parameter_size_fixture
     operation_bad_parameter_count_fixture
@@ -347,6 +369,11 @@ if(BUILD_TESTING)
     PRIVATE PS_OPERATION_FIXTURE_PATH="$<TARGET_FILE:operation_fixture>"
             PS_OPERATION_BAD_FIXTURE_PATH="$<TARGET_FILE:operation_bad_fixture>"
             PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_overflow_fixture>"
+            PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank1_limit_fixture>"
+            PS_OPERATION_DENSE_RANK1_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank1_overflow_fixture>"
+            PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank2_limit_fixture>"
+            PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_rank2_overflow_fixture>"
+            PS_OPERATION_DENSE_MULTI_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_multi_overflow_fixture>"
             PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_pointer_fixture>"
             PS_OPERATION_BAD_PARAMETER_SIZE_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_size_fixture>"
             PS_OPERATION_BAD_PARAMETER_COUNT_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_count_fixture>"

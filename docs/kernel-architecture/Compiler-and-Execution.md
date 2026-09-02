@@ -19,7 +19,10 @@ admission and peak diagnostics reflect actual callback materialization rather
 than an implicit dense allocation. Explicit `Region::element_count()` remains
 checked and may still return overflow for the same multi-dimensional logical
 shape. A stride-free C DSO Fixed descriptor is separately required to be
-densely representable at load.
+densely representable at load: its checked uint64 contiguous products must
+produce total bytes `B > 0`, with `B - 1 <= INT64_MAX` and `B <= SIZE_MAX`.
+This DSO-only address/allocation boundary does not constrain a C++ broadcast
+descriptor.
 
 Each schema-valid Float64 parameter enters canonical stage identity using the
 exact copied IEEE-754 binary64 bits in fixed little-endian order. Signed zero

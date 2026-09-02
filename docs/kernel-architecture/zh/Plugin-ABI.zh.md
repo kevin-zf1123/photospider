@@ -36,7 +36,10 @@ dense element/byte product。Callback 可返回任何通过普通 publication va
 layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
 `estimated_bytes` 是独立的 modeled admission estimate。C DSO Fixed descriptor 更严格，
 因为 ABI v2 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
-byte count 可表示。这个区别不增加 ABI field，也不改变 Preserve 或 Match inference。
+byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last
+byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上，UInt8
+`{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被
+拒绝。这个区别不增加 ABI field，也不改变 Preserve 或 Match inference。
 
 ## Validation
 
@@ -44,8 +47,9 @@ Loading 验证 exact ABI version/structure size、pointer/array alignment、poin
 bounded key/count/rank/parameter value、严格 UTF-8 operation/parameter-schema/
 provider-schema key、duplicate parameter declaration、closed enum/flag/type combination、
 required callback、logical C++ fixed descriptor、dense C DSO fixed stride/byte
-representability、output element/shape/byte count、facet array/key/version/payload、
-arithmetic overflow 与 exactly-once destroy ownership。Key validation 会在 publication
+representability（包括 signed last-byte 与 host allocation-size bound）、output
+element/shape/byte count、facet array/key/version/payload、arithmetic overflow 与
+exactly-once destroy ownership。Key validation 会在 publication
 前拒绝 invalid continuation byte、truncation、overlong encoding、UTF-16 surrogate、
 大于 U+10FFFF 的值、embedded null 与 ASCII control，但不执行 Unicode normalization。
 普通 facet payload 与 Value byte 仍是 opaque binary data。该 ABI version 拒绝 trailing
@@ -54,6 +58,11 @@ structure bytes，也不发布 v1 compatibility entry point。
 Malformed registration 不发布任何内容。Multi-record registry publication 使用
 copy-then-swap，allocation failure 不能暴露 prefix。Operation exception 被隔离；output 在
 callback 返回前复制。Plugin-owned descriptor table 在 library unload 前 destroy。
+
+Dense layout product 在 multiplication 前使用 checked uint64 division，随后验证 complete
+byte range。Boundary fixture 会加载真实 DSO，并要求后续 descriptor 不可表示时进行
+transactional rejection，同时 destroy 与 native close 各恰好一次。Compile-time-width
+helper 即使在 64-bit test builder 上也会实例化 32-bit allocation-size path。
 
 Native open 后，每个 operation/provider handle 都立即由 move-only stack owner 持有。
 当 exact API structure prefix 可安全读取后，该 owner 也接管已经取得的 destroy callback。

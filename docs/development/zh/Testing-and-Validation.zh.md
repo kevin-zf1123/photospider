@@ -30,6 +30,10 @@ Kernel test 覆盖：
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
   operation-v2 typed parameter schema、demand view，以及带精确 destroy/close count 的
   deterministic owner-allocation failure；
+- 真实 DSO dense fixed-shape 在 `INT64_MAX + 1` bytes 与 rank-two `{2, 2^62}` 的边界、
+  紧邻两者上界的 rejection、通过 compile-safe helper 验证的 32-bit host-size
+  representability，以及带精确 destroy/close count 的 transactional multi-descriptor
+  rejection；
 - semantic IR 前的 unknown/missing/wrong-type/conflict parameter rejection；
 - side-effecting/non-cacheable operation 在 semantic、optimized 与 plan stage 中保持，
   并覆盖串行重复执行时的 callback 顺序、调用次数与不复用旧 result；

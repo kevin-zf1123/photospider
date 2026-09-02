@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/plugin/operation_plugin_api.h"
+#include "plugin/dense_layout_validation.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -478,9 +479,12 @@ struct DenseLayout final {
  * @brief Builds canonical contiguous strides and byte count for one shape.
  * @param shape Nonzero rank-general extents.
  * @param element_size Physical scalar width.
- * @return Dense layout or signed-stride/uint64-byte overflow failure.
+ * @return Dense layout or signed-stride, uint64 product, signed final-offset,
+ * or host allocation-size representability failure.
  * @throws std::bad_alloc If result allocation fails.
- * @note Axis order is row-major with the final axis contiguous.
+ * @note Axis order is row-major with the final axis contiguous. Every product
+ * uses division-guarded uint64 arithmetic; the complete byte count must be
+ * positive, have `byte_size - 1 <= INT64_MAX`, and fit host `size_t`.
  */
 Result<DenseLayout> dense_layout(const std::vector<std::uint64_t>& shape,
                                  std::size_t element_size) {
@@ -502,6 +506,11 @@ Result<DenseLayout> dense_layout(const std::vector<std::uint64_t>& shape,
                           "contiguous byte size overflows uint64"));
     }
     stride *= shape[axis];
+  }
+  if (!plugin_internal::dense_byte_size_representable<std::size_t>(stride)) {
+    return Result<DenseLayout>(
+        Status::failure(ErrorCode::ResourceExhausted,
+                        "contiguous byte range is not host-addressable"));
   }
   layout.byte_size = stride;
   return Result<DenseLayout>(std::move(layout));

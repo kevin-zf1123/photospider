@@ -15,7 +15,9 @@ zero-stride broadcast Value；plan 记录独立声明的 `estimated_bytes`，因
 与 peak diagnostic 反映 callback 的实际 materialization，而不是隐含 dense allocation。
 显式调用 `Region::element_count()` 时仍执行 checked arithmetic，对同一个 multi-dimensional
 logical shape 仍可返回 overflow。不携带 stride 的 C DSO Fixed descriptor 会在 load 时被
-独立要求 dense representability。
+独立要求 dense representability：其 checked uint64 contiguous product 必须产生 total
+bytes `B > 0`，并满足 `B - 1 <= INT64_MAX` 与 `B <= SIZE_MAX`。这个仅属于 DSO 的
+address/allocation boundary 不约束 C++ broadcast descriptor。
 
 每个通过 schema validation 的 Float64 parameter 都以 copied IEEE-754 binary64 的精确
 bit、按 fixed little-endian order 进入 canonical stage identity。signed zero 会被保留，
