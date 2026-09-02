@@ -129,11 +129,13 @@ class FixtureInvocationObserver final {
       delete;
 
   /**
-   * @brief Reads one mode-indexed exported fixture counter.
-   * @param name Exact counter symbol name.
-   * @param mode Closed fixture mode in 1..5.
-   * @return Current monotonic counter value.
+   * @brief Reads one mode-indexed exported fixture observation.
+   * @param name Exact observation symbol name.
+   * @param mode Closed fixture mode in 1..13.
+   * @return Current exported observation value for `mode`; depending on
+   * `name`, it may encode a bit field, instantaneous state, or counter.
    * @throws std::runtime_error If the symbol is missing.
+   * @note The selected observation is not necessarily monotonic.
    */
   [[nodiscard]] std::uint32_t counter(const char* name,
                                       std::uint32_t mode) const {
