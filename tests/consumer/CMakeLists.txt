@@ -31,4 +31,5 @@ add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_consumer>"
   DEPENDS photospider_consumer
+  USES_TERMINAL
   VERBATIM)
