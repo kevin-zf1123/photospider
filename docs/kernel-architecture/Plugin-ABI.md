@@ -6,6 +6,11 @@ Photospider installs two narrow same-trust extension headers:
   plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
+The installed C++ convenience wrapper `operation_plugin.hpp` is a direct,
+self-contained header: it includes its own `<cstdint>` dependency and the
+operation C ABI before exposing `element_type_value`. It does not depend on a
+consumer including another Photospider header first.
+
 ## Operation records
 
 An operation descriptor has a length-framed key, input count, flags, estimated
@@ -62,6 +67,13 @@ change Preserve or Match inference.
 
 ## Validation
 
+Before any Windows, Linux, or Darwin native-loader call, operation and provider
+loading validates the exact `std::string` path as nonempty, at most 4096 bytes,
+and free of embedded NUL. A malformed path is `InvalidArgument`; a legal exact
+path that the platform cannot load remains `NotFound`. No truncated prefix is
+opened, no registry key/schema is published, and no native-owner lifecycle is
+started for a rejected path.
+
 Loading validates exact ABI version/structure sizes, pointer and array
 alignment, pointer/count pairs, bounded key/count/rank/parameter values,
 strict UTF-8 operation/parameter-schema/provider-schema keys, duplicate
@@ -112,11 +124,11 @@ borrowing mapped provider memory.
 
 ## Lifecycle and boundary
 
-Paths come only from embedding-process startup configuration. Registries are
-assembled and then frozen before compiler/executor use. DSOs execute in process
-with the same trust as the host. ABI checks are correctness validation, not a
-sandbox, signature, certificate, package-admission, or process-isolation
-system.
+Paths come only from embedding-process startup configuration and are consumed
+as exact NUL-free byte sequences. Registries are assembled and then frozen
+before compiler/executor use. DSOs execute in process with the same trust as
+the host. ABI checks are correctness validation, not a sandbox, signature,
+certificate, package-admission, or process-isolation system.
 
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.

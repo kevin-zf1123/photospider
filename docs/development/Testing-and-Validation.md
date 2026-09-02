@@ -34,7 +34,12 @@ Kernel tests cover:
   CPU queue-rejection case retains independent CPU coverage;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
-  exception fences;
+  exception fences. A private condition-variable barrier holds a nontrivial
+  vector result only after named Values, diagnostics, digests, and execute
+  timing are complete; post-hook cancellation, graph replacement, and both
+  return respectively `Cancelled`, `Stale`, and `Cancelled`, publish no
+  `ExecutionResult`, and each is followed by a healthy execute proving exact
+  cleanup;
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
   including operation-v2 typed parameter schemas, demand views, and
@@ -47,6 +52,10 @@ Kernel tests cover:
   standard exception with null `what()` is fenced as `OperationFailed` with the
   exact or empty message, while `std::bad_alloc` remains observable by the
   embedding caller and input/parameter/output classification stays unchanged;
+- exact operation/provider library path validation before native loading: an
+  explicit-length valid fixture path followed by embedded NUL and suffix is
+  `InvalidArgument`, publishes no operation key/provider schema, and reaches
+  none of the owner-allocation, native-load, or native-close test hooks;
 - real-DSO output-sink at-most-once enforcement: accepted-then-duplicate and
   rejected-then-duplicate callbacks record exact sink returns `(1,0)` and
   `(0,0)`, while success, backend unavailable, ordinary failure, and unknown
@@ -102,7 +111,10 @@ configures an external C/C++17 consumer using only
 `find_package(Photospider CONFIG REQUIRED)`. CI runs this gate for both the
 default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
 
-- installed headers match the declared public inventory;
+- installed headers match the declared public inventory; all 15 headers
+  compile directly in isolation, and `operation_plugin.hpp` is the consumer's
+  first include with compile-time `element_type_value` and `noexcept`
+  assertions;
 - exports contain no source/private paths;
 - the linked C SDK compilation unit runs, and a downstream shared bridge links
   `Photospider::kernel`, executes the C++ compile/execute pipeline, and is
@@ -143,6 +155,14 @@ and the empty-message fallback remains usable. With
 consumer remain hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel
 target nor its execution-hook object exists.
 
+The same noninstalled execution-hook object exposes one no-throw
+`final_result_ready` observer after complete local result assembly and before
+the final stop check. It exists only to hold the success-publication
+linearization window; the product archive and package contain no observer
+symbol or test string. Native-library path regressions similarly count loader,
+owner, and close boundaries only through the noninstalled test-kernel hook
+object.
+
 ## Sanitizers and malformed-input validation
 
 ASAN and TSAN are mutually exclusive scoped CMake modes where the C++ compiler
@@ -154,8 +174,9 @@ closed over the runtime. The complete sanitizer CTest inventory retains the
 installed-consumer gate, whose explicitly matching nested mode tests the
 installed static/shared-bridge/final-executable topology without leaking
 instrumentation into the installed package export. The ordinary tests exercise
-malformed Value/Region/layout, graph documents, operation/provider records, and
-callback outputs. Malformed local IPC frames belong to the daemon repository.
+malformed Value/Region/layout, graph documents, operation/provider records and
+exact library paths, and callback outputs. Malformed local IPC frames belong to
+the daemon repository.
 
 The long-lived manual target `photospider_operation_contract_ir_fuzz` exercises
 operation-v2 trait/parameter vocabulary and compiler validation. It is
@@ -196,7 +217,9 @@ multithreading, error handling, package consumption, compilation, and runtime
 boundaries. Do not register stale-term searches, source-layout audits,
 migration checklists, Doxygen audits, Issue replay, or result/provenance
 orchestration. Manual source-quality tools require maintained English and
-Chinese documentation and remain outside CTest/CI.
+Chinese documentation and remain outside CTest/CI. Direct source-tree and
+installed-tree header self-containment scans with Clang and GCC are such manual
+checks; they are not registered with CTest or CI.
 
 ## Final commands
 

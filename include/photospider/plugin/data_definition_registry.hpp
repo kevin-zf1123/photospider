@@ -73,10 +73,14 @@ class PHOTOSPIDER_API DataDefinitionRegistry final {
 
   /**
    * @brief Loads and validates one trusted in-process provider DSO.
-   * @param path Explicit startup-configured path.
-   * @return Success or complete load/ABI/schema failure.
+   * @param path Exact startup-configured provider path: 1..4096 bytes with no
+   * embedded NUL.
+   * @return Success, `InvalidArgument` for a malformed path or record,
+   * `NotFound` when the exact valid path cannot be loaded, or another complete
+   * ABI/schema failure.
    * @throws std::bad_alloc If staging allocation fails.
-   * @note ABI validation is correctness validation, not sandboxing.
+   * @note Path rejection precedes the platform loader. ABI validation is
+   * correctness validation, not sandboxing.
    */
   [[nodiscard]] Status load_provider(const std::string& path);
 

@@ -149,17 +149,24 @@ class OperationLibrary final {
 
 /**
  * @brief Opens one explicit native library path.
- * @param path Caller-provided startup path.
- * @return Native handle or a typed load failure.
+ * @param path Exact caller-provided 1..4096-byte path with no embedded NUL.
+ * @return Native handle, `InvalidArgument` for a malformed path, or `NotFound`
+ * when the exact valid path cannot be loaded.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note The function performs no path trust/signature/admission operation.
+ * @note Path validation completes before any platform loader call. The
+ * function performs no path trust/signature/admission operation.
  */
 Result<void*> open_library(const std::string& path) {
-  if (path.empty() || path.size() > 4096U) {
+  if (path.empty() || path.size() > 4096U ||
+      path.find('\0') != std::string::npos) {
     return Result<void*>(
         Status::failure(ErrorCode::InvalidArgument,
-                        "operation plugin path is empty or too long"));
+                        "operation plugin path is empty, too long, or contains "
+                        "an embedded NUL"));
   }
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+  plugin_testing::notify_native_load(plugin_testing::LibraryKind::Operation);
+#endif
 #if defined(_WIN32)
   HMODULE handle = LoadLibraryA(path.c_str());
   if (!handle) {

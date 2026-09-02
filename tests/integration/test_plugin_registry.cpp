@@ -233,6 +233,8 @@ class CopyAwareCallback final {
 LibraryKind g_expected_library_kind = LibraryKind::Operation;
 /** @brief Exact owner-allocation callback invocation count. */
 std::uint32_t g_owner_allocation_count = 0U;
+/** @brief Exact native-load attempt callback invocation count. */
+std::uint32_t g_native_load_count = 0U;
 /** @brief Exact native close callback invocation count. */
 std::uint32_t g_native_close_count = 0U;
 /** @brief Exact copied-provider-schema retirement callback count. */
@@ -256,6 +258,30 @@ void fail_owner_allocation(ps::plugin_testing::LibraryKind kind) {
   if (kind == g_expected_library_kind) {
     ++g_owner_allocation_count;
     throw std::bad_alloc();
+  }
+}
+
+/**
+ * @brief Counts one owner-allocation boundary without injecting failure.
+ * @param kind Library kind approaching heap owner allocation.
+ * @return No value.
+ * @throws Nothing.
+ */
+void count_owner_allocation(ps::plugin_testing::LibraryKind kind) noexcept {
+  if (kind == g_expected_library_kind) {
+    ++g_owner_allocation_count;
+  }
+}
+
+/**
+ * @brief Counts one platform native-load attempt for the expected kind.
+ * @param kind Library kind about to reach the platform loader.
+ * @return No value.
+ * @throws Nothing.
+ */
+void count_native_load(ps::plugin_testing::LibraryKind kind) noexcept {
+  if (kind == g_expected_library_kind) {
+    ++g_native_load_count;
   }
 }
 
@@ -296,12 +322,15 @@ class LibraryHookScope final {
    * @brief Installs callbacks for one exact library kind and behavior.
    * @param kind Operation or provider lifecycle to observe.
    * @param fail_allocation Whether to throw at the owner-allocation boundary.
+   * @param observe_path_boundaries Whether to count native load and owner
+   * allocation boundaries without injecting failure.
    * @throws Nothing.
    */
-  LibraryHookScope(ps::plugin_testing::LibraryKind kind,
-                   bool fail_allocation) noexcept {
+  LibraryHookScope(ps::plugin_testing::LibraryKind kind, bool fail_allocation,
+                   bool observe_path_boundaries = false) noexcept {
     g_expected_library_kind = kind;
     g_owner_allocation_count = 0U;
+    g_native_load_count = 0U;
     g_native_close_count = 0U;
     g_provider_schema_retirement_count = 0U;
     g_retired_provider_schema_count = 0U;
@@ -309,7 +338,10 @@ class LibraryHookScope final {
     g_provider_schema_retirement_sequence = 0U;
     g_native_close_sequence = 0U;
     hooks_.before_owner_allocation =
-        fail_allocation ? fail_owner_allocation : nullptr;
+        fail_allocation
+            ? fail_owner_allocation
+            : (observe_path_boundaries ? count_owner_allocation : nullptr);
+    hooks_.native_load = observe_path_boundaries ? count_native_load : nullptr;
     hooks_.native_close = count_native_close;
     hooks_.provider_schemas_retired = count_provider_schemas_retired;
     ps::plugin_testing::install_library_test_hooks(&hooks_);
@@ -360,6 +392,15 @@ class LibraryHookScope final {
    */
   [[nodiscard]] std::uint32_t owner_allocation_count() const noexcept {
     return g_owner_allocation_count;
+  }
+
+  /**
+   * @brief Returns exact observed native-load attempt count.
+   * @return Current scoped count.
+   * @throws Nothing.
+   */
+  [[nodiscard]] std::uint32_t native_load_count() const noexcept {
+    return g_native_load_count;
   }
 
   /**
@@ -899,6 +940,103 @@ int main() {
   using ps::WorkflowOutput;
 
   PS_CHECK(verify_immutable_callback_handles() == 0);
+
+  std::string nul_operation_path(PS_OPERATION_FIXTURE_PATH,
+                                 std::strlen(PS_OPERATION_FIXTURE_PATH));
+  nul_operation_path.append("\0suffix", 7U);
+  ps::Status nul_operation_status;
+  bool nul_operation_registry_empty = false;
+  std::uint32_t nul_operation_owner_count = 0U;
+  std::uint32_t nul_operation_load_count = 0U;
+  std::uint32_t nul_operation_close_count = 0U;
+  LibraryObserver nul_operation_observer(PS_OPERATION_FIXTURE_PATH);
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                               false, true);
+    {
+      OperationRegistry registry;
+      nul_operation_status = registry.load_plugin(nul_operation_path);
+      nul_operation_registry_empty = registry.keys().empty();
+    }
+    nul_operation_owner_count = lifecycle.owner_allocation_count();
+    nul_operation_load_count = lifecycle.native_load_count();
+    nul_operation_close_count = lifecycle.native_close_count();
+  }
+
+  std::string nul_provider_path(PS_DATA_PROVIDER_FIXTURE_PATH,
+                                std::strlen(PS_DATA_PROVIDER_FIXTURE_PATH));
+  nul_provider_path.append("\0suffix", 7U);
+  ps::Status nul_provider_status;
+  bool nul_provider_schema_absent = false;
+  std::uint32_t nul_provider_owner_count = 0U;
+  std::uint32_t nul_provider_load_count = 0U;
+  std::uint32_t nul_provider_close_count = 0U;
+  std::size_t nul_provider_retired_schema_count = 0U;
+  LibraryObserver nul_provider_observer(PS_DATA_PROVIDER_FIXTURE_PATH);
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider, false,
+                               true);
+    {
+      DataDefinitionRegistry registry;
+      nul_provider_status = registry.load_provider(nul_provider_path);
+      nul_provider_schema_absent = !registry.find("fixture.float64").ok();
+    }
+    nul_provider_owner_count = lifecycle.owner_allocation_count();
+    nul_provider_load_count = lifecycle.native_load_count();
+    nul_provider_close_count = lifecycle.native_close_count();
+    nul_provider_retired_schema_count =
+        lifecycle.retired_provider_schema_count();
+  }
+
+  PS_CHECK(!nul_operation_status.ok());
+  PS_CHECK(nul_operation_status.code == ErrorCode::InvalidArgument);
+  PS_CHECK(nul_operation_registry_empty);
+  PS_CHECK(nul_operation_owner_count == 0U);
+  PS_CHECK(nul_operation_load_count == 0U);
+  PS_CHECK(nul_operation_close_count == 0U);
+  PS_CHECK(nul_operation_observer.counter(
+               "ps_operation_fixture_destroy_count") == 0U);
+  PS_CHECK(!nul_provider_status.ok());
+  PS_CHECK(nul_provider_status.code == ErrorCode::InvalidArgument);
+  PS_CHECK(nul_provider_schema_absent);
+  PS_CHECK(nul_provider_owner_count == 0U);
+  PS_CHECK(nul_provider_load_count == 0U);
+  PS_CHECK(nul_provider_close_count == 0U);
+  PS_CHECK(nul_provider_retired_schema_count == 0U);
+  PS_CHECK(nul_provider_observer.counter(
+               "ps_data_provider_fixture_destroy_count") == 0U);
+
+  std::string missing_operation_path(PS_OPERATION_FIXTURE_PATH,
+                                     std::strlen(PS_OPERATION_FIXTURE_PATH));
+  missing_operation_path += ".photospider-missing";
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                               false, true);
+    OperationRegistry registry;
+    const ps::Status missing = registry.load_plugin(missing_operation_path);
+    PS_CHECK(!missing.ok());
+    PS_CHECK(missing.code == ErrorCode::NotFound);
+    PS_CHECK(registry.keys().empty());
+    PS_CHECK(lifecycle.owner_allocation_count() == 0U);
+    PS_CHECK(lifecycle.native_load_count() == 1U);
+    PS_CHECK(lifecycle.native_close_count() == 0U);
+  }
+
+  std::string missing_provider_path(PS_DATA_PROVIDER_FIXTURE_PATH,
+                                    std::strlen(PS_DATA_PROVIDER_FIXTURE_PATH));
+  missing_provider_path += ".photospider-missing";
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider, false,
+                               true);
+    DataDefinitionRegistry registry;
+    const ps::Status missing = registry.load_provider(missing_provider_path);
+    PS_CHECK(!missing.ok());
+    PS_CHECK(missing.code == ErrorCode::NotFound);
+    PS_CHECK(!registry.find("fixture.float64").ok());
+    PS_CHECK(lifecycle.owner_allocation_count() == 0U);
+    PS_CHECK(lifecycle.native_load_count() == 1U);
+    PS_CHECK(lifecycle.native_close_count() == 0U);
+  }
 
   const std::array<const char*, 5U> invalid_operation_utf8_fixtures{
       PS_OPERATION_INVALID_UTF8_OVERLONG_FIXTURE_PATH,

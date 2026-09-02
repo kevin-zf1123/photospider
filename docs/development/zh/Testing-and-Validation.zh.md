@@ -28,7 +28,11 @@ Kernel test 覆盖：
   `Backend::Gpu` hook consumption；它们证明 CPU callback 不会冒充 GPU path，且清除
   hook 后 GPU execution 恢复成功。另有独立 CPU queue-rejection case 保留 CPU 覆盖；
 - bounded ready work 与 `ResourceLedger` settlement；
-- cross-backend copy/backend label、cancellation、stale completion 与 exception fence；
+- cross-backend copy/backend label、cancellation、stale completion 与 exception fence。
+  Private condition-variable barrier 只在 named Value、diagnostic、digest 与 execute timing
+  全部完成后阻塞 nontrivial vector result；hook 后分别 cancellation、graph replacement 与
+  两者同时发生时，依次返回 `Cancelled`、`Stale`、`Cancelled`，不发布
+  `ExecutionResult`，并各自以一次健康 execute 证明精确 cleanup；
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
   operation-v2 typed parameter schema、demand view，以及带精确 destroy/close count 的
@@ -39,6 +43,9 @@ Kernel test 覆盖：
   `std::runtime_error` 或 `what()` 为 null 的标准异常时，会分别以原 diagnostic 或空
   message 隔离为 `OperationFailed`；`std::bad_alloc` 仍可由 embedding caller 观察，且
   input/parameter/output classification 保持不变；
+- native loading 前的精确 operation/provider library path validation：显式长度的合法
+  fixture path 后接 embedded NUL 与 suffix 时返回 `InvalidArgument`，不发布 operation
+  key/provider schema，且 owner-allocation、native-load 与 native-close test hook 均为零；
 - 真实 DSO output-sink at-most-once enforcement：accepted-then-duplicate 与
   rejected-then-duplicate callback 分别记录精确 sink return `(1,0)` 与 `(0,0)`；success、
   backend unavailable、ordinary failure、unknown callback result 与 callback-reported
@@ -82,7 +89,9 @@ Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
 `find_package(Photospider CONFIG REQUIRED)` 配置 external C/C++17 consumer。CI 会为
 默认 static kernel 与 `BUILD_SHARED_LIBS=ON` 都运行该 gate。它验证：
 
-- installed header 与声明 public inventory 完全一致；
+- installed header 与声明 public inventory 完全一致；全部 15 份 header 都可直接独立
+  编译，且 `operation_plugin.hpp` 是 consumer 的第一个 include，并带有
+  `element_type_value` 与 `noexcept` compile-time assertion；
 - export 不含 source/private path；
 - linked C SDK compilation unit 会实际运行；downstream shared bridge 会链接
   `Photospider::kernel`、执行 C++ compile/execute pipeline，并由 consumer executable
@@ -117,6 +126,12 @@ count 完成 drain，且 empty-message fallback 仍可用。`BUILD_TESTING=ON` �
 archive、installed kernel、export 与普通 consumer 仍不含 hook；`BUILD_TESTING=OFF`
 时，test-kernel target 与其 execution-hook object 都不存在。
 
+同一个不安装的 execution-hook object 还在 complete local result assembly 后、final stop
+check 前暴露一个 no-throw `final_result_ready` observer。它只用于阻塞
+success-publication linearization window；product archive/package 不包含 observer symbol
+或 test string。Native-library path regression 同样只通过不安装的 test-kernel hook object
+统计 loader、owner 与 close boundary。
+
 ## Sanitizer 与 malformed-input validation
 
 当 C++ compiler 与 linker 支持请求的 instrumentation 时，ASAN 与 TSAN 是互斥的
@@ -125,8 +140,8 @@ compile/link option 对 kernel product 为 private，仅通过其 build-tree int
 从而让每个 in-tree executable 对 runtime 闭合。完整 sanitizer CTest inventory 继续保留
 installed-consumer gate；该 gate 使用显式 matching nested mode 验证 installed static/
 shared-bridge/final-executable 拓扑，同时不向 installed package export 泄漏 instrumentation。
-普通 test 覆盖 malformed Value/Region/layout、graph document、operation/provider record
-与 callback output。Malformed local IPC frame 属于 daemon repository。
+普通 test 覆盖 malformed Value/Region/layout、graph document、operation/provider record、
+精确 library path 与 callback output。Malformed local IPC frame 属于 daemon repository。
 
 长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 operation-v2
 trait/parameter vocabulary 与 compiler validation。它使用 `EXCLUDE_FROM_ALL`，绝不注册到
@@ -162,7 +177,8 @@ CTest/CI entry 只用于 correctness、performance、stability、multithreading�
 handling、package consumption、compilation 与 runtime boundary。不得注册 stale-term
 search、source-layout audit、migration checklist、Doxygen audit、Issue replay 或
 result/provenance orchestration。Manual source-quality tool 需要维护的中英文文档，并
-保持在 CTest/CI 之外。
+保持在 CTest/CI 之外。使用 Clang/GCC 对 source-tree 与 installed-tree header 做 direct
+self-containment scan 属于这种 manual check；不得注册到 CTest 或 CI。
 
 ## Final command
 
