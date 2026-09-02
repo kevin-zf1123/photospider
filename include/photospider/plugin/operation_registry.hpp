@@ -282,6 +282,8 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @throws std::bad_alloc Only for process resource exhaustion before a
    * recoverable result can be constructed.
    * @note Callback exceptions other than bad_alloc become `OperationFailed`.
+   * A standard exception with a null diagnostic is normalized to an empty
+   * message before status construction.
    */
   [[nodiscard]] Result<Value> invoke(
       const std::string& key, const OperationInvocation& invocation) const;

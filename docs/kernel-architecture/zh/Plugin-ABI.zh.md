@@ -56,8 +56,12 @@ exactly-once destroy ownership。Key validation 会在 publication
 structure bytes，也不发布 v1 compatibility entry point。
 
 Malformed registration 不发布任何内容。Multi-record registry publication 使用
-copy-then-swap，allocation failure 不能暴露 prefix。Operation exception 被隔离；output 在
-callback 返回前复制。Plugin-owned descriptor table 在 library unload 前 destroy。
+copy-then-swap，allocation failure 不能暴露 prefix。Embedding C++ operation callback 的
+`std::bad_alloc` 会继续传播，使 caller 能够保留 resource-exhaustion policy；其他每个
+`std::exception` 都映射为 `OperationFailed`。若 `what()` 返回 null，则在不从 null
+构造 string 的前提下规范化为空 diagnostic。Nonstandard exception 获得稳定的通用
+`OperationFailed` diagnostic。Output 在 callback 返回前复制。Plugin-owned descriptor
+table 在 library unload 前 destroy。
 
 Dense layout product 在 multiplication 前使用 checked uint64 division，随后验证 complete
 byte range。Boundary fixture 会加载真实 DSO，并要求后续 descriptor 不可表示时进行
