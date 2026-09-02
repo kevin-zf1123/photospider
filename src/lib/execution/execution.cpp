@@ -777,9 +777,10 @@ namespace {
 /**
  * @brief Coordinates one dependency-ordered execution through shared pools.
  *
- * The coordinator owns all per-execution mutable state, publishes values only
- * after cancellation/currentness checks, drains every started callback before
- * returning, and never stores itself in global state.
+ * The coordinator owns all per-execution mutable state, drains every started
+ * callback, assembles the complete local result under its mutex, and publishes
+ * success only after a final cancellation-then-currentness recheck. It never
+ * stores itself in global state.
  */
 class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
  public:
@@ -862,6 +863,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @return Complete result or first typed failure.
    * @throws std::bad_alloc If final publication allocation fails.
    * @note Failure stops new admission while already started callbacks drain.
+   * Complete result assembly and its final stop recheck both occur under the
+   * Run mutex; passing that recheck is the sole success-publication
+   * linearization point.
    */
   [[nodiscard]] Result<ExecutionResult> run() {
     const auto started = std::chrono::steady_clock::now();
@@ -911,6 +915,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     result.diagnostics.plan_digest = plan_->digest().value;
     result.diagnostics.result_digest = result_digest(result.values);
     result.diagnostics.execute_us = duration_us(started);
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    execution_testing::notify_final_result_ready();
+#endif
+    if (cancellation_.cancelled()) {
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::Cancelled,
+          "execution was cancelled before final result publication"));
+    }
+    if (!plan_->current()) {
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::Stale,
+          "execution plan became stale before final result publication"));
+    }
     return Result<ExecutionResult>(std::move(result));
   }
 

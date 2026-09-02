@@ -76,8 +76,13 @@ transfer or callback entry; callbacks and ABI v2 input views receive that exact
 demand. The executor still materializes complete Values.
 The execution context must use the same frozen registry that produced the
 plan. Cancellation and plan currentness are checked before work, during
-completion, and before result assembly. A late cancelled/stale result releases
-resources without entering the caller-visible `ExecutionResult`.
+completion, before result assembly, and once more after all named Values,
+diagnostics, plan/result digests, and execute timing have been assembled. The
+Run holds its mutex for this final cancellation-then-currentness recheck;
+passing it immediately before the sole success return is the success-
+publication linearization point. A late cancelled/stale local result and its
+diagnostics are discarded, and all Values and resource owners retire without
+entering the caller-visible `ExecutionResult`.
 
 An operation ABI v2 callback can distinguish ordinary failure from backend
 unavailability without changing its C signature or descriptor layout. The

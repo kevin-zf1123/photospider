@@ -80,4 +80,15 @@ bool fail_failure_status_construction() noexcept {
   }
 }
 
+/**
+ * @brief Implements final result-publication boundary notification.
+ * @copydetails notify_final_result_ready
+ */
+void notify_final_result_ready() noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->final_result_ready) {
+    hooks->final_result_ready();
+  }
+}
+
 }  // namespace ps::execution_testing
