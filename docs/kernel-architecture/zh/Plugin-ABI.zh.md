@@ -6,6 +6,10 @@ Photospider 安装两份 narrow same-trust extension header：
   plan-derived input demand 与一个 synchronous Value callback；
 - data-provider ABI v1：copied schema key、element type 与 maximum rank。
 
+已安装的 C++ convenience wrapper `operation_plugin.hpp` 是可直接包含且 self-contained
+的 header：它在暴露 `element_type_value` 前自行包含 `<cstdint>` dependency 与 operation
+C ABI，不依赖 consumer 先包含另一份 Photospider header。
+
 ## Operation record
 
 Operation descriptor 包含 length-framed key、input count、flag、estimated bytes、output
@@ -51,6 +55,11 @@ byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上�
 
 ## Validation
 
+在任何 Windows、Linux 或 Darwin native-loader 调用前，operation/provider loading 会把
+精确 `std::string` path 验证为非空、最多 4096 bytes 且不含 embedded NUL。Malformed path
+返回 `InvalidArgument`；平台无法加载的合法精确 path 仍返回 `NotFound`。被拒 path 不会
+打开 truncated prefix，不发布 registry key/schema，也不会启动 native-owner lifecycle。
+
 Loading 验证 exact ABI version/structure size、pointer/array alignment、pointer/count pair、
 bounded key/count/rank/parameter value、严格 UTF-8 operation/parameter-schema/
 provider-schema key、duplicate parameter declaration、closed enum/flag/type combination、
@@ -93,9 +102,10 @@ Provider registry 在 copied schema record 之前声明 native lease，因此逆
 
 ## Lifecycle 与边界
 
-Path 只来自 embedding-process startup configuration。Registry 在 compiler/executor 使用前
-完成 assembly 并 freeze。DSO 与 host 在同一 trust domain 内执行。ABI check 是 correctness
-validation，不是 sandbox、signature、certificate、package admission 或 process isolation。
+Path 只来自 embedding-process startup configuration，并作为精确且 NUL-free 的 byte
+sequence 消费。Registry 在 compiler/executor 使用前完成 assembly 并 freeze。DSO 与 host
+在同一 trust domain 内执行。ABI check 是 correctness validation，不是 sandbox、signature、
+certificate、package admission 或 process isolation。
 
 不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
 ABI 不构造 Value，也不提供 storage。

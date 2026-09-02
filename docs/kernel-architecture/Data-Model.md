@@ -45,5 +45,8 @@ It has no durable identity, retention, receipt, serialization, or recovery
 contract.
 
 The data-definition registry copies a schema key, element type, and maximum
-rank from startup configuration or a trusted DSO, then freezes. It does not
-construct Values or provide storage.
+rank from startup configuration or a trusted DSO, then freezes. Provider load
+accepts only an exact nonempty 1..4096-byte path without embedded NUL before
+the platform loader; malformed paths are `InvalidArgument`, while a valid path
+that cannot be loaded is `NotFound`. It does not construct Values or provide
+storage.

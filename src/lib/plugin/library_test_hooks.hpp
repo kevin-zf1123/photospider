@@ -23,6 +23,16 @@ enum class LibraryKind : std::uint32_t {
 using BeforeOwnerAllocationHook = void (*)(LibraryKind kind);
 
 /**
+ * @brief Nonthrowing callback invoked immediately before native loading.
+ * @param kind Exact operation or provider library kind.
+ * @return No value.
+ * @throws Nothing.
+ * @note The callback observes whether exact path validation reached the
+ * platform loader and never receives or owns the path.
+ */
+using NativeLoadHook = void (*)(LibraryKind kind) noexcept;
+
+/**
  * @brief Nonthrowing callback invoked after one native close call.
  * @param kind Exact closed library kind.
  * @return No value.
@@ -50,6 +60,8 @@ using ProviderSchemasRetiredHook = void (*)(std::size_t count) noexcept;
 struct LibraryTestHooks final {
   /** @brief Optional owner-allocation boundary callback. */
   BeforeOwnerAllocationHook before_owner_allocation = nullptr;
+  /** @brief Optional native-load attempt observer. */
+  NativeLoadHook native_load = nullptr;
   /** @brief Optional native close-call observer. */
   NativeCloseHook native_close = nullptr;
   /** @brief Optional copied-provider-schema retirement observer. */
@@ -74,6 +86,15 @@ void install_library_test_hooks(const LibraryTestHooks* hooks) noexcept;
  * @note Only the noninstalled test-kernel variant calls this function.
  */
 void invoke_before_owner_allocation(LibraryKind kind);
+
+/**
+ * @brief Notifies the installed observer before one platform load call.
+ * @param kind Exact library kind about to reach the platform loader.
+ * @return No value.
+ * @throws Nothing.
+ * @note Exact path validation has succeeded, but no native handle exists yet.
+ */
+void notify_native_load(LibraryKind kind) noexcept;
 
 /**
  * @brief Notifies the installed observer after one native close call.

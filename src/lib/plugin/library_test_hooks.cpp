@@ -30,6 +30,17 @@ void invoke_before_owner_allocation(LibraryKind kind) {
 }
 
 /**
+ * @brief Implements exact native-load attempt observation.
+ * @copydetails notify_native_load
+ */
+void notify_native_load(LibraryKind kind) noexcept {
+  const LibraryTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->native_load) {
+    hooks->native_load(kind);
+  }
+}
+
+/**
  * @brief Implements exact native close-call observation.
  * @copydetails notify_native_close
  */

@@ -40,4 +40,7 @@ coverage，但通过该 accessor 读取时返回 `TypeMismatch`。
 identity、retention、receipt、serialization 或 recovery contract。
 
 Data-definition registry 从 startup configuration 或 trusted DSO 复制 schema key、element
-type 与 maximum rank，然后 freeze。它不构造 Value，也不提供 storage。
+type 与 maximum rank，然后 freeze。Provider load 只接受 platform loader 前已验证的精确、
+非空、1..4096-byte 且不含 embedded NUL 的 path；malformed path 返回
+`InvalidArgument`，无法加载的合法 path 返回 `NotFound`。它不构造 Value，也不提供
+storage。

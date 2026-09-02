@@ -243,12 +243,15 @@ class PHOTOSPIDER_API OperationRegistry final {
 
   /**
    * @brief Loads and validates one trusted in-process operation DSO.
-   * @param path Explicit startup-configured library path.
-   * @return Success or complete load/ABI/descriptor validation failure.
+   * @param path Exact startup-configured library path: 1..4096 bytes with no
+   * embedded NUL.
+   * @return Success, `InvalidArgument` for a malformed path or record,
+   * `NotFound` when the exact valid path cannot be loaded, or another complete
+   * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
-   * @note Fixed C descriptors must be densely representable because ABI v2
-   * carries no output strides. No signature, trust-store, sandbox, or process
-   * isolation is applied.
+   * @note Path rejection precedes the platform loader. Fixed C descriptors
+   * must be densely representable because ABI v2 carries no output strides.
+   * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);
 
