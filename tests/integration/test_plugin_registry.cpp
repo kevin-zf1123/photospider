@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <map>
 #include <memory>
@@ -100,6 +101,22 @@
 namespace {
 
 using ps::plugin_testing::LibraryKind;
+
+/**
+ * @brief Standard exception whose borrowed diagnostic pointer is null.
+ *
+ * @note The type deterministically exercises the C++ embedding callback
+ * exception fence without allocating while the exception is raised.
+ */
+class NullDiagnosticException final : public std::exception {
+ public:
+  /**
+   * @brief Returns no diagnostic bytes for the injected callback failure.
+   * @return Null, intentionally.
+   * @throws Nothing.
+   */
+  [[nodiscard]] const char* what() const noexcept override { return nullptr; }
+};
 
 /** @brief Library kind expected by the currently installed test callback. */
 LibraryKind g_expected_library_kind = LibraryKind::Operation;
@@ -927,6 +944,13 @@ int main() {
                .ok());
   PS_CHECK(fencing
                .register_operation(OperationDefinition{
+                   "fixture.null_diagnostic", OperationTraits{},
+                   [](const OperationInvocation&) -> Result<Value> {
+                     throw NullDiagnosticException();
+                   }})
+               .ok());
+  PS_CHECK(fencing
+               .register_operation(OperationDefinition{
                    "fixture.wrong_output", OperationTraits{},
                    [](const OperationInvocation&) -> Result<Value> {
                      auto output = Value::create(
@@ -956,6 +980,25 @@ int main() {
                                            Backend::Cpu, CancellationToken()});
   PS_CHECK(!exception.ok());
   PS_CHECK(exception.status().code == ErrorCode::OperationFailed);
+  bool null_diagnostic_escaped = false;
+  bool null_diagnostic_ok = true;
+  ErrorCode null_diagnostic_code = ErrorCode::Ok;
+  std::string null_diagnostic_message = "unobserved";
+  try {
+    auto null_diagnostic =
+        fencing.invoke("fixture.null_diagnostic",
+                       OperationInvocation{no_inputs, no_demands, no_parameters,
+                                           Backend::Cpu, CancellationToken()});
+    null_diagnostic_ok = null_diagnostic.ok();
+    null_diagnostic_code = null_diagnostic.status().code;
+    null_diagnostic_message = null_diagnostic.status().message;
+  } catch (...) {
+    null_diagnostic_escaped = true;
+  }
+  PS_CHECK(!null_diagnostic_escaped);
+  PS_CHECK(!null_diagnostic_ok);
+  PS_CHECK(null_diagnostic_code == ErrorCode::OperationFailed);
+  PS_CHECK(null_diagnostic_message.empty());
   auto wrong_output =
       fencing.invoke("fixture.wrong_output",
                      OperationInvocation{no_inputs, no_demands, no_parameters,

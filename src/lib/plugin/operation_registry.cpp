@@ -1264,8 +1264,9 @@ Result<Value> OperationRegistry::invoke(
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
-    return Result<Value>(
-        Status::failure(ErrorCode::OperationFailed, error.what()));
+    const char* diagnostic = error.what();
+    return Result<Value>(Status::failure(ErrorCode::OperationFailed,
+                                         diagnostic ? diagnostic : ""));
   } catch (...) {
     return Result<Value>(
         Status::failure(ErrorCode::OperationFailed,

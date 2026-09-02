@@ -32,7 +32,9 @@ Kernel test 覆盖：
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
   operation-v2 typed parameter schema、demand view，以及带精确 destroy/close count 的
-  deterministic owner-allocation failure；
+  deterministic owner-allocation failure。若 C++ embedding callback 抛出 `what()` 为
+  null 的标准异常，则它会被隔离为带空 message 的 `OperationFailed`；
+  `std::bad_alloc` 仍可由 embedding caller 观察；
 - 真实 DSO dense fixed-shape 在 `INT64_MAX + 1` bytes 与 rank-two `{2, 2^62}` 的边界、
   紧邻两者上界的 rejection、通过 compile-safe helper 验证的 32-bit host-size
   representability，以及带精确 destroy/close count 的 transactional multi-descriptor

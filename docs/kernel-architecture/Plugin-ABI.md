@@ -68,9 +68,13 @@ Value bytes remain opaque binary data. This ABI version rejects trailing
 structure bytes and publishes no v1 compatibility entry point.
 
 Malformed registration publishes nothing. Multi-record registry publication
-uses copy-then-swap, so allocation failure cannot expose a prefix. Operation
-exceptions are fenced; output is copied before callback return. Plugin-owned
-descriptor tables are destroyed before library unload.
+uses copy-then-swap, so allocation failure cannot expose a prefix. An embedding
+C++ operation callback's `std::bad_alloc` propagates so the caller can preserve
+resource-exhaustion policy. Every other `std::exception` becomes
+`OperationFailed`; a null `what()` pointer is normalized to an empty diagnostic
+without constructing a string from null. Nonstandard exceptions receive a
+stable generic `OperationFailed` diagnostic. Output is copied before callback
+return. Plugin-owned descriptor tables are destroyed before library unload.
 
 Dense layout products use checked uint64 division before multiplication, then
 validate the complete byte range. Boundary fixtures load real DSOs and require

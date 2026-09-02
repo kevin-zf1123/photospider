@@ -38,7 +38,10 @@ Kernel tests cover:
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
   including operation-v2 typed parameter schemas, demand views, and
-  deterministic owner-allocation failure with exact destroy/close counts;
+  deterministic owner-allocation failure with exact destroy/close counts. A
+  C++ embedding callback that throws a standard exception with null `what()`
+  is fenced as `OperationFailed` with an empty message, while `std::bad_alloc`
+  remains observable by the embedding caller;
 - real-DSO dense fixed-shape boundaries at `INT64_MAX + 1` bytes and rank-two
   `{2, 2^62}`, rejection immediately above both limits, 32-bit host-size
   representability through a compile-safe helper, and transactional
