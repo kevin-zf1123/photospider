@@ -26,7 +26,9 @@ struct PHOTOSPIDER_API CorrectnessObservation final {
  * @brief Caller-supplied pure observation over one successful execution.
  *
  * @note The callback receives immutable Values and should avoid modifying
- * external state when reproducible measurements are required.
+ * external state when reproducible measurements are required. It does not
+ * receive a CancellationToken and cannot be preempted; the runner observes
+ * cancellation immediately before and after the callback.
  */
 using OracleSignature = CorrectnessObservation(const ExecutionResult&);
 /** @brief Type-erased callable implementing `OracleSignature`. */
@@ -59,8 +61,8 @@ struct PHOTOSPIDER_API RawBenchmarkOptions final {
  * @brief Raw measurement and outcome for one benchmark iteration.
  *
  * @note A non-cancellation failure preserves completed compiler timing and a
- * typed error reason; cancellation aborts the complete run instead of
- * publishing a sample.
+ * typed error reason. Cancellation observed before final report publication
+ * aborts the complete run instead of publishing any sample sequence.
  */
 struct PHOTOSPIDER_API RawBenchmarkSample final {
   /** @brief Zero-based iteration index. */
@@ -92,7 +94,8 @@ struct PHOTOSPIDER_API RawBenchmarkReport final {
   std::string oracle_name;
   /**
    * @brief Samples in increasing iteration order.
-   * @note No report is published when any iteration execution is cancelled.
+   * @note No report is published when cancellation is observed before the
+   * runner's final publication decision.
    */
   std::vector<RawBenchmarkSample> samples;
 };
@@ -120,11 +123,16 @@ class PHOTOSPIDER_API RawBenchmarkRunner final {
    * @param options Positive iteration and local execution controls.
    * @param cancellation Cooperative cancellation shared by all iterations.
    * @return Complete raw report, invalid setup failure, or top-level
-   * `Cancelled` when cancellation is observed before/during any iteration.
+   * `Cancelled` when cancellation is observed before the final report
+   * publication decision.
    * @throws std::bad_alloc If report or pipeline allocation fails.
    * @note Compiler and non-cancellation execution failures become sample
    * outcomes and later iterations continue. An execution `Cancelled` result
-   * aborts immediately and publishes no partial or successful report.
+   * aborts immediately. The caller oracle receives no token and may drain, but
+   * cancellation observed before it starts or after it returns/raises an
+   * ordinary exception takes precedence over its outcome. The final token
+   * observation is the report-publication linearization point; cancellation
+   * after that observation does not retroactively revoke the returned report.
    */
   [[nodiscard]] Result<RawBenchmarkReport> run(
       const GraphContext& graph, const RawBenchmarkOptions& options,

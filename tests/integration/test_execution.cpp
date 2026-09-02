@@ -147,6 +147,64 @@ class QueueAdmissionGate final {
   bool released_ = false;
 };
 
+/**
+ * @brief Deterministically holds a successful raw-benchmark oracle.
+ *
+ * @note The oracle owns no cancellation source. A separate test thread wins
+ * cancellation while the callback is held, matching the non-preemptible
+ * caller-oracle boundary.
+ */
+class BenchmarkOracleGate final {
+ public:
+  /**
+   * @brief Blocks the oracle until the test explicitly releases it.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   * @note The gate signals entry before waiting so cancellation can occur
+   * while the oracle is executing.
+   */
+  void hold() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return released_; });
+  }
+
+  /**
+   * @brief Waits for the oracle to enter the held callback boundary.
+   * @param timeout Maximum bounded wait.
+   * @return True when entry was observed before the deadline.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_entered(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] { return entered_; });
+  }
+
+  /**
+   * @brief Releases the held oracle callback.
+   * @return No value.
+   * @throws std::system_error If mutex locking fails.
+   */
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+ private:
+  /** @brief Serializes gate state. */
+  std::mutex mutex_;
+  /** @brief Wakes the test and held oracle after state changes. */
+  std::condition_variable changed_;
+  /** @brief Whether the oracle entered the held boundary. */
+  bool entered_ = false;
+  /** @brief Whether the held oracle may return. */
+  bool released_ = false;
+};
+
 /** @brief Borrowed active deterministic queue gate for one scoped test. */
 QueueAdmissionGate* g_queue_admission_gate = nullptr;
 
@@ -237,6 +295,14 @@ std::uint32_t g_compilation_diagnostics_hook_calls = 0U;
 std::uint32_t g_execution_diagnostics_hook_calls = 0U;
 
 /**
+ * @brief Borrowed cancellation source used by one completed-execution hook.
+ *
+ * @note The source remains alive until the scoped test clears the installed
+ * hook and this pointer; no competing benchmark test runs concurrently.
+ */
+ps::CancellationSource* g_completed_execution_cancellation = nullptr;
+
+/**
  * @brief Returns legal deterministic compiler timing sentinels.
  * @return Immutable diagnostics with one legitimate zero-microsecond stage.
  * @throws Nothing.
@@ -313,6 +379,22 @@ void inject_compilation_diagnostics(
 void inject_execution_diagnostics(ps::ExecutionDiagnostics& diagnostics) {
   ++g_execution_diagnostics_hook_calls;
   diagnostics = sentinel_execution_diagnostics();
+}
+
+/**
+ * @brief Cancels one benchmark after execution but before sample publication.
+ * @param diagnostics Completed diagnostics left unchanged.
+ * @return No value.
+ * @throws Nothing.
+ * @note This hook exists only in the noninstalled test-kernel variant and
+ * creates the otherwise unobservable no-oracle post-execute window.
+ */
+void cancel_after_completed_execution(
+    ps::ExecutionDiagnostics& diagnostics) noexcept {
+  static_cast<void>(diagnostics);
+  if (g_completed_execution_cancellation) {
+    static_cast<void>(g_completed_execution_cancellation->cancel());
+  }
 }
 
 }  // namespace
@@ -931,6 +1013,66 @@ int main() {
     PS_CHECK(benchmark_callback_count == cancellation_case.second);
   }
   active_benchmark_cancellation = nullptr;
+
+  BenchmarkOracleGate benchmark_oracle_gate;
+  CancellationSource barrier_cancellation;
+  RawBenchmarkOptions barrier_oracle_options;
+  barrier_oracle_options.correctness_oracle =
+      [&benchmark_oracle_gate](
+          const ExecutionResult&) -> CorrectnessObservation {
+    benchmark_oracle_gate.hold();
+    return CorrectnessObservation{true, {}};
+  };
+  barrier_oracle_options.oracle_name = "barrier-accepts";
+  auto barrier_oracle_future = std::async(std::launch::async, [&] {
+    return benchmark.run(graph, barrier_oracle_options,
+                         barrier_cancellation.token());
+  });
+  const bool oracle_was_running =
+      benchmark_oracle_gate.wait_until_entered(std::chrono::seconds(2));
+  const bool barrier_cancel_won = barrier_cancellation.cancel();
+  benchmark_oracle_gate.release();
+  auto barrier_oracle_report = barrier_oracle_future.get();
+  PS_CHECK(oracle_was_running);
+  PS_CHECK(barrier_cancel_won);
+  PS_CHECK(!barrier_oracle_report.ok());
+  PS_CHECK(barrier_oracle_report.status().code == ErrorCode::Cancelled);
+
+  for (const std::uint32_t oracle_outcome : {0U, 1U, 2U}) {
+    CancellationSource oracle_cancellation;
+    RawBenchmarkOptions cancelled_oracle_options;
+    cancelled_oracle_options.correctness_oracle =
+        [&oracle_cancellation,
+         oracle_outcome](const ExecutionResult&) -> CorrectnessObservation {
+      static_cast<void>(oracle_cancellation.cancel());
+      if (oracle_outcome == 2U) {
+        throw std::runtime_error("cancelled oracle exception");
+      }
+      return CorrectnessObservation{oracle_outcome == 0U,
+                                    "cancelled oracle result"};
+    };
+    cancelled_oracle_options.oracle_name = "self-cancelling-oracle";
+    auto cancelled_oracle_report = benchmark.run(
+        graph, cancelled_oracle_options, oracle_cancellation.token());
+    PS_CHECK(!cancelled_oracle_report.ok());
+    PS_CHECK(cancelled_oracle_report.status().code == ErrorCode::Cancelled);
+  }
+
+  CancellationSource post_execute_cancellation;
+  g_completed_execution_cancellation = &post_execute_cancellation;
+  const ps::benchmark_testing::RawBenchmarkTestHooks cancellation_test_hooks{
+      nullptr,
+      &cancel_after_completed_execution,
+  };
+  ps::benchmark_testing::install_raw_benchmark_test_hooks(
+      &cancellation_test_hooks);
+  RawBenchmarkOptions post_execute_options;
+  auto post_execute_report = benchmark.run(graph, post_execute_options,
+                                           post_execute_cancellation.token());
+  ps::benchmark_testing::install_raw_benchmark_test_hooks(nullptr);
+  g_completed_execution_cancellation = nullptr;
+  PS_CHECK(!post_execute_report.ok());
+  PS_CHECK(post_execute_report.status().code == ErrorCode::Cancelled);
 
   auto benchmark_failure_operations = std::make_shared<OperationRegistry>();
   std::uint32_t benchmark_failure_callback_count = 0U;

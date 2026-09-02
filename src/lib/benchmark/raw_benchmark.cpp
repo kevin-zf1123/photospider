@@ -94,6 +94,8 @@ RawBenchmarkRunner::RawBenchmarkRunner(Compiler* compiler,
  * @note Test-enabled builds may replace completed compiler and executor
  * diagnostics through a private non-installed seam before sample copying;
  * production builds contain neither the seam implementation nor these calls.
+ * The last cancellation observation immediately before returning the report
+ * is its publication linearization point.
  */
 Result<RawBenchmarkReport> RawBenchmarkRunner::run(
     const GraphContext& graph, const RawBenchmarkOptions& options,
@@ -165,6 +167,12 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
 #endif
     sample.execution = execution_result.diagnostics;
 
+    if (cancellation.cancelled()) {
+      return Result<RawBenchmarkReport>(Status::failure(
+          ErrorCode::Cancelled,
+          "raw benchmark was cancelled before correctness observation"));
+    }
+
     if (options.correctness_oracle) {
       sample.correctness_checked = true;
       try {
@@ -185,7 +193,17 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
         sample.reason = "correctness oracle raised a nonstandard exception";
       }
     }
+    if (cancellation.cancelled()) {
+      return Result<RawBenchmarkReport>(Status::failure(
+          ErrorCode::Cancelled,
+          "raw benchmark was cancelled after correctness observation"));
+    }
     report.samples.push_back(std::move(sample));
+  }
+  if (cancellation.cancelled()) {
+    return Result<RawBenchmarkReport>(Status::failure(
+        ErrorCode::Cancelled,
+        "raw benchmark was cancelled before report publication"));
   }
   return Result<RawBenchmarkReport>(std::move(report));
 }
