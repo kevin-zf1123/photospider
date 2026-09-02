@@ -34,8 +34,14 @@ Kernel test 覆盖：
   raw benchmark diagnostic；当 oracle 返回拒绝或抛出异常时，仍保留已完成的
   compile/plan/execute/operation/backend/digest observation，并独立报告 correctness。
   任一 iteration 的 execution 返回 `Cancelled` 时会中止整个 run，不发布 partial/
-  success report；其他 execution failure 保留为 sample，后续 iteration 继续。
-  由于 monotonic clock 可能只有微秒分辨率，duration 允许为零。
+  success report。Runner 还会在 caller oracle 前后立即观察 cancellation，并在最终
+  report-publication 线性化点再次观察。Oracle 不接收 token，不能被抢占；若它返回
+  false 或抛出普通异常后观察到 cancellation，则 cancellation 优先于 oracle outcome；
+  最终 publication 观察之后到达的 cancellation 不会撤销已返回 report。其他 execution
+  failure 保留为 sample，后续 iteration 继续。由于 monotonic clock 可能只有微秒
+  分辨率，duration 允许为零。Deterministic regression 覆盖另一线程在 oracle barrier
+  中取消、self-cancelling true/false/throwing oracle，以及通过 noninstalled test-kernel
+  seam 暴露的无 oracle post-execute window。
 
 Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、九方法 routing、
 临时 Session/Job lifecycle、restart loss、multi-Session behavior、cancellation、

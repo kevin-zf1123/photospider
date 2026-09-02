@@ -40,9 +40,17 @@ Kernel tests cover:
   oracles that retain completed compile/plan/execute/operation/backend/digest
   observations while reporting correctness separately. An execution
   `Cancelled` result at any iteration aborts the whole run without publishing
-  a partial/success report; other execution failures remain samples and later
-  iterations continue. Duration assertions permit zero because the monotonic
-  clock may have microsecond resolution.
+  a partial/success report. The runner also observes cancellation immediately
+  before and after a caller oracle and again at the final report-publication
+  linearization point. The oracle receives no token and cannot be preempted;
+  cancellation observed after it returns false or raises an ordinary exception
+  takes precedence over that oracle outcome, while cancellation after the
+  final publication observation does not revoke the returned report. Other
+  execution failures remain samples and later iterations continue. Duration
+  assertions permit zero because the monotonic clock may have microsecond
+  resolution. Deterministic regressions cover an oracle barrier cancelled by
+  another thread, self-cancelling true/false/throwing oracles, and the
+  no-oracle post-execute window through the noninstalled test-kernel seam.
 
 Daemon tests live in `photospider-daemon` and cover local frame validation,
 nine-method routing, ephemeral Session/Job lifecycle, restart loss,

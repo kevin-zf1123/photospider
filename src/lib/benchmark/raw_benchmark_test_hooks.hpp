@@ -15,11 +15,13 @@ namespace ps::benchmark_testing {
 using CompilationDiagnosticsHook = void (*)(CompilationDiagnostics&);
 
 /**
- * @brief Callback that replaces one completed execution diagnostic record.
+ * @brief Callback that observes or replaces a completed execution record.
  * @param diagnostics Mutable successful executor output owned by the runner.
  * @return No value.
  * @throws Any exception deliberately raised by the installed test callback.
- * @note The callback runs before the runner copies the record into a sample.
+ * @note The callback runs before the runner copies the record and observes
+ * cancellation before optional oracle invocation. Tests may therefore use it
+ * to expose the otherwise private post-execute publication window.
  */
 using ExecutionDiagnosticsHook = void (*)(ExecutionDiagnostics&);
 
@@ -33,7 +35,7 @@ using ExecutionDiagnosticsHook = void (*)(ExecutionDiagnostics&);
 struct RawBenchmarkTestHooks final {
   /** @brief Optional completed-compilation diagnostic replacement. */
   CompilationDiagnosticsHook completed_compilation = nullptr;
-  /** @brief Optional completed-execution diagnostic replacement. */
+  /** @brief Optional completed-execution observation or replacement. */
   ExecutionDiagnosticsHook completed_execution = nullptr;
 };
 
@@ -58,7 +60,7 @@ void install_raw_benchmark_test_hooks(
 void apply_completed_compilation_hook(CompilationDiagnostics& diagnostics);
 
 /**
- * @brief Applies the installed completed-execution diagnostic callback.
+ * @brief Applies the installed completed-execution observation callback.
  * @param diagnostics Mutable successful executor output owned by the runner.
  * @return No value.
  * @throws Any exception deliberately raised by the installed test callback.
