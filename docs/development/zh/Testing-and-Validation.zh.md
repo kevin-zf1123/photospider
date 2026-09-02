@@ -23,7 +23,10 @@ Kernel test 覆盖：
 - no-GPU fallback denial、waiting-admission rejection、backend queue rejection 与
   submission exception fallback 上的 first-failure priority：cancellation 先于 graph
   `Stale`，graph `Stale` 先于 original failure，同时不产生 stale result，并精确恢复
-  waiting/in-flight/resource；
+  waiting/in-flight/resource。Backend submit rejection 与 exception-fallback case
+  使用 GPU-enabled context、显式 GPU physical plan、存在的 GPU lane 以及精确的
+  `Backend::Gpu` hook consumption；它们证明 CPU callback 不会冒充 GPU path，且清除
+  hook 后 GPU execution 恢复成功。另有独立 CPU queue-rejection case 保留 CPU 覆盖；
 - bounded ready work 与 `ResourceLedger` settlement；
 - cross-backend copy/backend label、cancellation、stale completion 与 exception fence；
 - Value/Region/strided-layout/facet/buffer 负向契约；
@@ -89,9 +92,12 @@ include directory。
 Deterministic scheduler test 使用只编入 noninstalled `photospider_test_kernel` 的 private
 callback-enqueue、pre-failure、queue-rejection 与 diagnostic-construction hook。它们暴露
 otherwise unobservable 的 no-GPU/admission/submit linearization window 与 allocation-free
-exception fallback。`BUILD_TESTING=ON` 时，product archive、installed kernel、export 与
-普通 consumer 仍不含 hook；`BUILD_TESTING=OFF` 时，test-kernel target 与其
-execution-hook object 都不存在。
+exception fallback。Construction hook 在 no-throw helper 内部、owned diagnostic 与
+`Status` materialization 之前立即触发。Regression 还让 null standard-exception
+diagnostic 经过只接收 pointer 的调用边界；正常完成证明 failure 被 fence、in-flight
+count 完成 drain，且 empty-message fallback 仍可用。`BUILD_TESTING=ON` 时，product
+archive、installed kernel、export 与普通 consumer 仍不含 hook；`BUILD_TESTING=OFF`
+时，test-kernel target 与其 execution-hook object 都不存在。
 
 ## Sanitizer 与 malformed-input validation
 

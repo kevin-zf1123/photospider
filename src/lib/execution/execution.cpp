@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -27,6 +28,25 @@
 
 namespace ps {
 namespace {
+
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+/**
+ * @brief Allocation-free test exception exposing a null diagnostic pointer.
+ *
+ * @note This type exists only in the noninstalled test-kernel variant and
+ * exercises defensive `std::exception::what()` handling at the scheduler
+ * exception fence.
+ */
+class NullDiagnosticException final : public std::exception {
+ public:
+  /**
+   * @brief Returns the deliberately absent test diagnostic.
+   * @return Null by design.
+   * @throws Nothing.
+   */
+  [[nodiscard]] const char* what() const noexcept override { return nullptr; }
+};
+#endif
 
 /**
  * @brief ExecutionContext-wide nonblocking waiting-callback admission owner.
@@ -244,6 +264,8 @@ class ThreadPool final {
    * @param callback Complete callback and shared waiting-admission ownership.
    * @return True when queued; false when stopped.
    * @throws std::bad_alloc If queue allocation fails before mutation.
+   * @throws std::exception In the noninstalled test variant when a
+   * deterministic null-diagnostic standard exception is selected.
    * @note A true return transfers callback/token ownership to exactly one
    * worker; false or exception destroys the parameter and rolls admission back.
    */
@@ -257,6 +279,10 @@ class ThreadPool final {
     }
     if (test_action == execution_testing::CallbackSubmitAction::ThrowBadAlloc) {
       throw std::bad_alloc();
+    }
+    if (test_action ==
+        execution_testing::CallbackSubmitAction::ThrowNullDiagnostic) {
+      throw NullDiagnosticException();
     }
 #endif
     if (stopping_) {
@@ -1225,21 +1251,25 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   /**
    * @brief Best-effort no-throw failure publication for exception fences.
    * @param code Stable failure category.
-   * @param diagnostic Bounded diagnostic source.
+   * @param diagnostic Borrowed null-terminated diagnostic source, or null for
+   * an empty diagnostic.
    * @throws Nothing.
-   * @note Its allocation-free fallback uses the same cancellation/stale/error
-   * code priority as the ordinary first-failure path and clears diagnostics
-   * rather than allocating a replacement message.
+   * @note The call boundary accepts only a pointer, so string and `Status`
+   * materialization occur inside the protected block. Its allocation-free
+   * fallback uses the same cancellation/stale/error code priority as the
+   * ordinary first-failure path and clears diagnostics rather than allocating
+   * a replacement message.
    */
-  void finish_failure_safely(ErrorCode code,
-                             const std::string& diagnostic) noexcept {
+  void finish_failure_safely(ErrorCode code, const char* diagnostic) noexcept {
     try {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
       if (execution_testing::fail_failure_status_construction()) {
         throw std::bad_alloc();
       }
 #endif
-      finish_failure(Status::failure(code, diagnostic));
+      Status failure = Status::failure(
+          code, std::string(diagnostic == nullptr ? "" : diagnostic));
+      finish_failure(std::move(failure));
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!failure_.has_value()) {

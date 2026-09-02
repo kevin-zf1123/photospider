@@ -65,7 +65,7 @@ CallbackSubmitAction callback_submit_action(Backend backend) noexcept {
 }
 
 /**
- * @brief Implements exception-status construction failure selection.
+ * @brief Implements protected diagnostic/Status construction failure selection.
  * @copydetails fail_failure_status_construction
  */
 bool fail_failure_status_construction() noexcept {

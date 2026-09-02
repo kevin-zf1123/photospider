@@ -26,7 +26,12 @@ Kernel tests cover:
 - first-failure priority across no-GPU fallback denial, waiting-admission
   rejection, backend queue rejection, and submission exception fallback:
   cancellation precedes graph `Stale`, which precedes the original failure,
-  with no stale result and exact waiting/in-flight/resource recovery;
+  with no stale result and exact waiting/in-flight/resource recovery. Backend
+  submit rejection and exception-fallback cases use a GPU-enabled context, an
+  explicitly GPU physical plan, a present GPU lane, and exact `Backend::Gpu`
+  hook consumption; they prove no CPU callback substitutes for the GPU path
+  and that clearing the hook restores successful GPU execution. A separate
+  CPU queue-rejection case retains independent CPU coverage;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences;
@@ -104,7 +109,11 @@ The deterministic scheduler tests use private callback-enqueue, pre-failure,
 queue-rejection, and diagnostic-construction hooks compiled only into the
 noninstalled `photospider_test_kernel`. They expose the otherwise unobservable
 no-GPU/admission/submit linearization windows and the allocation-free exception
-fallback. With
+fallback. The construction hook fires immediately before owned diagnostic and
+`Status` materialization inside the no-throw helper. The regression also feeds
+a null standard-exception diagnostic through the pointer-only call boundary;
+normal completion proves the failure is fenced, the in-flight count drains,
+and the empty-message fallback remains usable. With
 `BUILD_TESTING=ON`, the product archive, installed kernel, exports, and ordinary
 consumer remain hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel
 target nor its execution-hook object exists.

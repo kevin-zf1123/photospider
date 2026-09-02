@@ -45,6 +45,8 @@ enum class CallbackSubmitAction : std::uint8_t {
   Reject,
   /** @brief Raise `std::bad_alloc` before backend queue mutation. */
   ThrowBadAlloc,
+  /** @brief Raise a standard exception whose diagnostic pointer is null. */
+  ThrowNullDiagnostic,
 };
 
 /**
@@ -60,14 +62,16 @@ using BeforeSchedulerFailureHook = void (*)(SchedulerFailurePoint point);
 /**
  * @brief Selects one deterministic backend queue-submission test action.
  * @param backend Exact CPU or optional GPU queue being submitted.
- * @return Proceed, reject, or raise allocation failure before queue mutation.
+ * @return Proceed, reject, or raise one selected exception before queue
+ * mutation.
  * @throws Any test exception, which is fenced and treated as Proceed.
  */
 using CallbackSubmitActionHook = CallbackSubmitAction (*)(Backend backend);
 
 /**
- * @brief Selects deterministic failure of exception-status construction.
- * @return True to enter the allocation-free `finish_failure_safely` fallback.
+ * @brief Selects failure at protected diagnostic/Status materialization.
+ * @return True to enter the allocation-free `finish_failure_safely` fallback
+ * immediately before it creates the owned diagnostic and failure Status.
  * @throws Any test exception, which is fenced and treated as false.
  */
 using FailFailureStatusConstructionHook = bool (*)();
@@ -85,7 +89,7 @@ struct ExecutionTestHooks final {
   BeforeSchedulerFailureHook before_scheduler_failure = nullptr;
   /** @brief Optional deterministic queue submission controller. */
   CallbackSubmitActionHook callback_submit_action = nullptr;
-  /** @brief Optional exception-fallback construction controller. */
+  /** @brief Optional protected diagnostic/Status construction controller. */
   FailFailureStatusConstructionHook fail_failure_status_construction = nullptr;
 };
 
@@ -127,8 +131,9 @@ void notify_before_scheduler_failure(SchedulerFailurePoint point) noexcept;
 CallbackSubmitAction callback_submit_action(Backend backend) noexcept;
 
 /**
- * @brief Reports whether failure-status construction must fail in this test.
- * @return True only when the installed hook requests the allocation fallback.
+ * @brief Reports whether protected diagnostic/Status creation must fail.
+ * @return True only when the installed hook requests the allocation fallback
+ * at the owned diagnostic materialization point.
  * @throws Nothing.
  * @note Only the noninstalled test-kernel variant invokes this function.
  */
