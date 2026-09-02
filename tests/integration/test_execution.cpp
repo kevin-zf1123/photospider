@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -36,6 +37,22 @@ constexpr std::uint32_t kFixtureGpuOutputThenUnavailable = 4U;
 /** @brief Fixture mode for invalid output followed by backend unavailability.
  */
 constexpr std::uint32_t kFixtureGpuBadOutputThenUnavailable = 5U;
+
+/**
+ * @brief Standard exception whose borrowed diagnostic pointer is null.
+ *
+ * @note Benchmark oracle regressions use this allocation-free exception to
+ * prove that an absent diagnostic cannot escape or outrank cancellation.
+ */
+class NullDiagnosticException final : public std::exception {
+ public:
+  /**
+   * @brief Returns no diagnostic bytes for the injected oracle failure.
+   * @return Null, intentionally.
+   * @throws Nothing.
+   */
+  [[nodiscard]] const char* what() const noexcept override { return nullptr; }
+};
 
 /**
  * @brief Keeps the real operation fixture mapped for invocation observation.
@@ -1825,6 +1842,108 @@ int main() {
     PS_CHECK(actual.duration_us == expected.duration_us);
     PS_CHECK(actual.outcome == expected.outcome);
   }
+
+  std::uint32_t null_oracle_calls = 0U;
+  RawBenchmarkOptions null_oracle_options = rejected_oracle_options;
+  null_oracle_options.iterations = 2U;
+  null_oracle_options.correctness_oracle =
+      [&null_oracle_calls](const ExecutionResult&) -> CorrectnessObservation {
+    ++null_oracle_calls;
+    if (null_oracle_calls == 1U) {
+      throw NullDiagnosticException();
+    }
+    return CorrectnessObservation{true, "accepted after null diagnostic"};
+  };
+  null_oracle_options.oracle_name = "null-then-accepts";
+  bool null_oracle_escaped = false;
+  std::optional<ps::Result<ps::RawBenchmarkReport>> null_oracle_report;
+  try {
+    null_oracle_report.emplace(benchmark.run(graph, null_oracle_options));
+  } catch (...) {
+    null_oracle_escaped = true;
+  }
+  PS_CHECK(!null_oracle_escaped);
+  PS_CHECK(null_oracle_report.has_value());
+  PS_CHECK(null_oracle_report->ok());
+  PS_CHECK(null_oracle_calls == 2U);
+  PS_CHECK(g_compilation_diagnostics_hook_calls == 4U);
+  PS_CHECK(g_execution_diagnostics_hook_calls == 4U);
+  PS_CHECK(null_oracle_report->value().oracle_name == "null-then-accepts");
+  PS_CHECK(null_oracle_report->value().samples.size() == 2U);
+  const RawBenchmarkSample& null_diagnostic_sample =
+      null_oracle_report->value().samples[0U];
+  const RawBenchmarkSample& recovered_oracle_sample =
+      null_oracle_report->value().samples[1U];
+  PS_CHECK(null_diagnostic_sample.iteration == 0U);
+  PS_CHECK(null_diagnostic_sample.oracle_name == "null-then-accepts");
+  PS_CHECK(null_diagnostic_sample.correctness_checked);
+  PS_CHECK(!null_diagnostic_sample.correctness_accepted);
+  PS_CHECK(null_diagnostic_sample.outcome == ErrorCode::OperationFailed);
+  PS_CHECK(null_diagnostic_sample.reason.empty());
+  PS_CHECK(recovered_oracle_sample.iteration == 1U);
+  PS_CHECK(recovered_oracle_sample.oracle_name == "null-then-accepts");
+  PS_CHECK(recovered_oracle_sample.correctness_checked);
+  PS_CHECK(recovered_oracle_sample.correctness_accepted);
+  PS_CHECK(recovered_oracle_sample.outcome == ErrorCode::Ok);
+  PS_CHECK(recovered_oracle_sample.reason == "accepted after null diagnostic");
+  for (const RawBenchmarkSample* sample :
+       {&null_diagnostic_sample, &recovered_oracle_sample}) {
+    PS_CHECK(sample->compilation.analyze_us == expected_compilation.analyze_us);
+    PS_CHECK(sample->compilation.optimize_us ==
+             expected_compilation.optimize_us);
+    PS_CHECK(sample->compilation.plan_us == expected_compilation.plan_us);
+    PS_CHECK(sample->execution.execute_us == expected_execution.execute_us);
+    PS_CHECK(sample->execution.selected_backends ==
+             expected_execution.selected_backends);
+    PS_CHECK(sample->execution.transfer_count ==
+             expected_execution.transfer_count);
+    PS_CHECK(sample->execution.transfer_bytes ==
+             expected_execution.transfer_bytes);
+    PS_CHECK(sample->execution.peak_live_bytes ==
+             expected_execution.peak_live_bytes);
+    PS_CHECK(sample->execution.fallback_reasons ==
+             expected_execution.fallback_reasons);
+    PS_CHECK(sample->execution.plan_digest == expected_execution.plan_digest);
+    PS_CHECK(sample->execution.result_digest ==
+             expected_execution.result_digest);
+    PS_CHECK(sample->execution.operation_timings.size() ==
+             expected_execution.operation_timings.size());
+    for (std::size_t index = 0U;
+         index < sample->execution.operation_timings.size(); ++index) {
+      const auto& actual = sample->execution.operation_timings[index];
+      const auto& expected = expected_execution.operation_timings[index];
+      PS_CHECK(actual.node_id == expected.node_id);
+      PS_CHECK(actual.backend == expected.backend);
+      PS_CHECK(actual.duration_us == expected.duration_us);
+      PS_CHECK(actual.outcome == expected.outcome);
+    }
+  }
+
+  CancellationSource null_oracle_cancellation;
+  RawBenchmarkOptions cancelled_null_oracle_options = rejected_oracle_options;
+  cancelled_null_oracle_options.correctness_oracle =
+      [&null_oracle_cancellation](
+          const ExecutionResult&) -> CorrectnessObservation {
+    static_cast<void>(null_oracle_cancellation.cancel());
+    throw NullDiagnosticException();
+  };
+  cancelled_null_oracle_options.oracle_name = "cancelled-null-oracle";
+  bool cancelled_null_oracle_escaped = false;
+  std::optional<ps::Result<ps::RawBenchmarkReport>>
+      cancelled_null_oracle_report;
+  try {
+    cancelled_null_oracle_report.emplace(
+        benchmark.run(graph, cancelled_null_oracle_options,
+                      null_oracle_cancellation.token()));
+  } catch (...) {
+    cancelled_null_oracle_escaped = true;
+  }
+  PS_CHECK(!cancelled_null_oracle_escaped);
+  PS_CHECK(cancelled_null_oracle_report.has_value());
+  PS_CHECK(!cancelled_null_oracle_report->ok());
+  PS_CHECK(cancelled_null_oracle_report->status().code == ErrorCode::Cancelled);
+  PS_CHECK(g_compilation_diagnostics_hook_calls == 5U);
+  PS_CHECK(g_execution_diagnostics_hook_calls == 5U);
   ps::benchmark_testing::install_raw_benchmark_test_hooks(nullptr);
 
   RawBenchmarkOptions unchecked_options;

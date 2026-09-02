@@ -62,11 +62,18 @@ Kernel tests cover:
   cancellation observed after it returns false or raises an ordinary exception
   takes precedence over that oracle outcome, while cancellation after the
   final publication observation does not revoke the returned report. Other
-  execution failures remain samples and later iterations continue. Duration
+  execution failures remain samples and later iterations continue. An
+  ordinary oracle exception with null `what()` becomes an `OperationFailed`
+  sample with an empty reason: its completed raw compilation/execution
+  diagnostics stay intact and a later iteration can still succeed. A separate
+  null-diagnostic cancellation case proves the post-oracle cancellation fence
+  remains top-level authoritative. Duration
   assertions permit zero because the monotonic clock may have microsecond
   resolution. Deterministic regressions cover an oracle barrier cancelled by
-  another thread, self-cancelling true/false/throwing oracles, and the
-  no-oracle post-execute window through the noninstalled test-kernel seam.
+  another thread, self-cancelling true/false/throwing oracles, a two-iteration
+  null-diagnostic-then-success sequence with exact diagnostic-field checks,
+  and the no-oracle post-execute window through the noninstalled test-kernel
+  seam.
 
 Daemon tests live in `photospider-daemon` and cover local frame validation,
 nine-method routing, ephemeral Session/Job lifecycle, restart loss,

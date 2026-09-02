@@ -73,7 +73,11 @@ struct PHOTOSPIDER_API RawBenchmarkSample final {
   ExecutionDiagnostics execution;
   /** @brief Success or first compiler/execution/oracle exception category. */
   ErrorCode outcome = ErrorCode::Ok;
-  /** @brief Human-readable failure or oracle detail. */
+  /**
+   * @brief Human-readable failure or oracle detail.
+   * @note A standard oracle exception with a null diagnostic produces an
+   * empty reason while retaining the typed `OperationFailed` sample.
+   */
   std::string reason;
   /** @brief Whether a correctness oracle was invoked. */
   bool correctness_checked = false;
@@ -130,9 +134,12 @@ class PHOTOSPIDER_API RawBenchmarkRunner final {
    * outcomes and later iterations continue. An execution `Cancelled` result
    * aborts immediately. The caller oracle receives no token and may drain, but
    * cancellation observed before it starts or after it returns/raises an
-   * ordinary exception takes precedence over its outcome. The final token
-   * observation is the report-publication linearization point; cancellation
-   * after that observation does not retroactively revoke the returned report.
+   * ordinary exception takes precedence over its outcome. A standard oracle
+   * exception otherwise becomes an `OperationFailed` sample; a null
+   * diagnostic is normalized to an empty reason and later iterations
+   * continue. The final token observation is the report-publication
+   * linearization point; cancellation after that observation does not
+   * retroactively revoke the returned report.
    */
   [[nodiscard]] Result<RawBenchmarkReport> run(
       const GraphContext& graph, const RawBenchmarkOptions& options,

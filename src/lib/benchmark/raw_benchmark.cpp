@@ -187,7 +187,12 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
         throw;
       } catch (const std::exception& error) {
         sample.outcome = ErrorCode::OperationFailed;
-        sample.reason = error.what();
+        const char* diagnostic = error.what();
+        if (diagnostic) {
+          sample.reason = diagnostic;
+        } else {
+          sample.reason.clear();
+        }
       } catch (...) {
         sample.outcome = ErrorCode::OperationFailed;
         sample.reason = "correctness oracle raised a nonstandard exception";
