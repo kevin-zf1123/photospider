@@ -344,6 +344,24 @@ class SchedulerFailureController final {
     return failure_observed_;
   }
 
+  /**
+   * @brief Reports whether the configured backend consumed the queue action.
+   * @return True after submission reached the exact configured backend once.
+   * @throws Nothing.
+   */
+  [[nodiscard]] bool submit_action_observed() const noexcept {
+    return submit_action_observed_;
+  }
+
+  /**
+   * @brief Reports whether protected failure materialization was faulted.
+   * @return True after the one-shot construction failure was consumed.
+   * @throws Nothing.
+   */
+  [[nodiscard]] bool status_failure_observed() const noexcept {
+    return status_failure_observed_;
+  }
+
  private:
   /** @brief Exact scheduler boundary that applies the stop action. */
   ps::execution_testing::SchedulerFailurePoint expected_;
@@ -950,21 +968,26 @@ int main() {
   PS_CHECK(ps::test::named_scalar(cpu_lane_result.value(), "sum") == 7.0);
   PS_CHECK(ps::test::named_scalar(gpu_lane_result.value(), "sum") == 11.0);
 
-  std::uint32_t gpu_only_calls = 0U;
+  std::uint32_t gpu_only_gpu_calls = 0U;
+  std::uint32_t gpu_only_cpu_calls = 0U;
   auto gpu_only_operations = std::make_shared<OperationRegistry>();
   OperationTraits gpu_only_traits;
   gpu_only_traits.supports_gpu = true;
   gpu_only_traits.allows_cpu_fallback = false;
   gpu_only_traits.estimated_bytes = sizeof(double);
-  PS_CHECK(
-      gpu_only_operations
-          ->register_operation(OperationDefinition{
-              "test.gpu_only", gpu_only_traits,
-              [&gpu_only_calls](const OperationInvocation&) -> Result<Value> {
-                ++gpu_only_calls;
-                return Result<Value>(Value::from_float64(1.0));
-              }})
-          .ok());
+  PS_CHECK(gpu_only_operations
+               ->register_operation(OperationDefinition{
+                   "test.gpu_only", gpu_only_traits,
+                   [&gpu_only_gpu_calls, &gpu_only_cpu_calls](
+                       const OperationInvocation& invocation) -> Result<Value> {
+                     if (invocation.backend == Backend::Gpu) {
+                       ++gpu_only_gpu_calls;
+                     } else {
+                       ++gpu_only_cpu_calls;
+                     }
+                     return Result<Value>(Value::from_float64(1.0));
+                   }})
+               .ok());
   gpu_only_operations->freeze();
   Compiler gpu_only_compiler(gpu_only_operations);
   ExecutionContext no_gpu_execution(
@@ -1012,91 +1035,176 @@ int main() {
   PS_CHECK(unavailable_stale_control.failure_observed());
   PS_CHECK(!stale_unavailable.ok());
   PS_CHECK(stale_unavailable.status().code == ErrorCode::Stale);
-  PS_CHECK(gpu_only_calls == 0U);
+  PS_CHECK(gpu_only_gpu_calls == 0U);
+  PS_CHECK(gpu_only_cpu_calls == 0U);
 
-  ExecutionContext submission_execution(
+  ExecutionContext cpu_submission_execution(
       operations, ExecutionContextConfig{1U, false, 4U, 1024U});
-  SchedulerFailureController submission_rejection_control(
+  SchedulerFailureController cpu_submission_rejection_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
       ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
       nullptr, nullptr, nullptr, false);
-  g_scheduler_failure_controller = &submission_rejection_control;
+  g_scheduler_failure_controller = &cpu_submission_rejection_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
-  auto submission_rejection = submission_execution.execute(workflow.plan);
+  auto cpu_submission_rejection =
+      cpu_submission_execution.execute(workflow.plan);
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
-  PS_CHECK(submission_rejection_control.failure_observed());
-  PS_CHECK(!submission_rejection.ok());
-  PS_CHECK(submission_rejection.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(cpu_submission_rejection_control.failure_observed());
+  PS_CHECK(cpu_submission_rejection_control.submit_action_observed());
+  PS_CHECK(!cpu_submission_rejection.ok());
+  PS_CHECK(cpu_submission_rejection.status().code ==
+           ErrorCode::ResourceExhausted);
+  auto cpu_submission_recovered =
+      cpu_submission_execution.execute(workflow.plan);
+  PS_CHECK(cpu_submission_recovered.ok());
+  PS_CHECK(ps::test::named_scalar(cpu_submission_recovered.value(), "sum") ==
+           6.5);
+
+  ExecutionContext gpu_submission_execution(
+      gpu_only_operations, ExecutionContextConfig{1U, true, 4U, 1024U});
+  PS_CHECK(unavailable_workflow.plan.steps().size() == 1U);
+  PS_CHECK(unavailable_workflow.plan.steps().front().backend == Backend::Gpu);
+  SchedulerFailureController gpu_submission_rejection_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
+      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Gpu,
+      nullptr, nullptr, nullptr, false);
+  g_scheduler_failure_controller = &gpu_submission_rejection_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto gpu_submission_rejection =
+      gpu_submission_execution.execute(unavailable_workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(gpu_submission_rejection_control.failure_observed());
+  PS_CHECK(gpu_submission_rejection_control.submit_action_observed());
+  PS_CHECK(!gpu_submission_rejection.ok());
+  PS_CHECK(gpu_submission_rejection.status().code ==
+           ErrorCode::ResourceExhausted);
 
   CancellationSource submission_cancellation;
   SchedulerFailureController submission_cancel_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
-      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
+      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Gpu,
       &submission_cancellation, nullptr, nullptr, false);
   g_scheduler_failure_controller = &submission_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
-  auto cancelled_submission = submission_execution.execute(
-      workflow.plan, submission_cancellation.token());
+  auto cancelled_submission = gpu_submission_execution.execute(
+      unavailable_workflow.plan, submission_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(submission_cancel_control.failure_observed());
+  PS_CHECK(submission_cancel_control.submit_action_observed());
   PS_CHECK(!cancelled_submission.ok());
   PS_CHECK(cancelled_submission.status().code == ErrorCode::Cancelled);
 
-  GraphContext rejected_stale_graph(ps::test::addition_document(8.0, 9.0));
+  GraphContext rejected_stale_graph(single_operation_document("test.gpu_only"));
   CompiledWorkflow rejected_stale_workflow =
-      compile_or_throw(&compiler, rejected_stale_graph);
-  WorkflowDocument rejected_replacement = ps::test::addition_document(1.0, 1.0);
+      compile_or_throw(&gpu_only_compiler, rejected_stale_graph, true);
+  WorkflowDocument rejected_replacement =
+      single_operation_document("test.gpu_only");
+  PS_CHECK(rejected_stale_workflow.plan.steps().size() == 1U);
+  PS_CHECK(rejected_stale_workflow.plan.steps().front().backend ==
+           Backend::Gpu);
   SchedulerFailureController submission_stale_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
-      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
+      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Gpu,
       nullptr, &rejected_stale_graph, &rejected_replacement, false);
   g_scheduler_failure_controller = &submission_stale_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto stale_submission =
-      submission_execution.execute(rejected_stale_workflow.plan);
+      gpu_submission_execution.execute(rejected_stale_workflow.plan);
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(submission_stale_control.failure_observed());
+  PS_CHECK(submission_stale_control.submit_action_observed());
   PS_CHECK(!stale_submission.ok());
   PS_CHECK(stale_submission.status().code == ErrorCode::Stale);
+
+  SchedulerFailureController safe_original_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
+      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Gpu,
+      nullptr, nullptr, nullptr, true);
+  g_scheduler_failure_controller = &safe_original_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto safe_original_submission =
+      gpu_submission_execution.execute(unavailable_workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(safe_original_control.failure_observed());
+  PS_CHECK(safe_original_control.submit_action_observed());
+  PS_CHECK(safe_original_control.status_failure_observed());
+  PS_CHECK(!safe_original_submission.ok());
+  PS_CHECK(safe_original_submission.status().code ==
+           ErrorCode::ResourceExhausted);
+  PS_CHECK(safe_original_submission.status().message.empty());
+
+  SchedulerFailureController null_diagnostic_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
+      ps::execution_testing::CallbackSubmitAction::ThrowNullDiagnostic,
+      Backend::Gpu, nullptr, nullptr, nullptr, false);
+  g_scheduler_failure_controller = &null_diagnostic_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto null_diagnostic_submission =
+      gpu_submission_execution.execute(unavailable_workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(null_diagnostic_control.submit_action_observed());
+  PS_CHECK(!null_diagnostic_submission.ok());
+  PS_CHECK(null_diagnostic_submission.status().code == ErrorCode::Internal);
+  PS_CHECK(null_diagnostic_submission.status().message.empty());
 
   CancellationSource safe_fallback_cancellation;
   SchedulerFailureController safe_cancel_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
-      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Cpu,
+      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Gpu,
       &safe_fallback_cancellation, nullptr, nullptr, true);
   g_scheduler_failure_controller = &safe_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
-  auto safe_cancelled_submission = submission_execution.execute(
-      workflow.plan, safe_fallback_cancellation.token());
+  auto safe_cancelled_submission = gpu_submission_execution.execute(
+      unavailable_workflow.plan, safe_fallback_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(safe_cancel_control.failure_observed());
+  PS_CHECK(safe_cancel_control.submit_action_observed());
+  PS_CHECK(safe_cancel_control.status_failure_observed());
   PS_CHECK(!safe_cancelled_submission.ok());
   PS_CHECK(safe_cancelled_submission.status().code == ErrorCode::Cancelled);
+  PS_CHECK(safe_cancelled_submission.status().message.empty());
 
-  GraphContext safe_stale_graph(ps::test::addition_document(4.0, 5.0));
+  GraphContext safe_stale_graph(single_operation_document("test.gpu_only"));
   CompiledWorkflow safe_stale_workflow =
-      compile_or_throw(&compiler, safe_stale_graph);
-  WorkflowDocument safe_replacement = ps::test::addition_document(2.0, 3.0);
+      compile_or_throw(&gpu_only_compiler, safe_stale_graph, true);
+  WorkflowDocument safe_replacement =
+      single_operation_document("test.gpu_only");
+  PS_CHECK(safe_stale_workflow.plan.steps().size() == 1U);
+  PS_CHECK(safe_stale_workflow.plan.steps().front().backend == Backend::Gpu);
   SchedulerFailureController safe_stale_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
-      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Cpu,
+      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Gpu,
       nullptr, &safe_stale_graph, &safe_replacement, true);
   g_scheduler_failure_controller = &safe_stale_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto safe_stale_submission =
-      submission_execution.execute(safe_stale_workflow.plan);
+      gpu_submission_execution.execute(safe_stale_workflow.plan);
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(safe_stale_control.failure_observed());
+  PS_CHECK(safe_stale_control.submit_action_observed());
+  PS_CHECK(safe_stale_control.status_failure_observed());
   PS_CHECK(!safe_stale_submission.ok());
   PS_CHECK(safe_stale_submission.status().code == ErrorCode::Stale);
-  auto submission_recovered = submission_execution.execute(workflow.plan);
-  PS_CHECK(submission_recovered.ok());
-  PS_CHECK(ps::test::named_scalar(submission_recovered.value(), "sum") == 6.5);
+  PS_CHECK(safe_stale_submission.status().message.empty());
+  PS_CHECK(gpu_only_gpu_calls == 0U);
+  PS_CHECK(gpu_only_cpu_calls == 0U);
+  auto gpu_submission_recovered =
+      gpu_submission_execution.execute(unavailable_workflow.plan);
+  PS_CHECK(gpu_submission_recovered.ok());
+  PS_CHECK(ps::test::named_scalar(gpu_submission_recovered.value(), "value") ==
+           1.0);
+  PS_CHECK(gpu_submission_recovered.value().diagnostics.selected_backends.at(
+               1U) == Backend::Gpu);
+  PS_CHECK(gpu_only_gpu_calls == 1U);
+  PS_CHECK(gpu_only_cpu_calls == 0U);
 
   GraphContext cancellable(ps::test::delayed_document(250));
   CompiledWorkflow cancellable_workflow =
