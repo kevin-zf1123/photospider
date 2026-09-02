@@ -20,7 +20,9 @@ namespace {
  * @param element_size Physical scalar width.
  * @return Pair of signed minimum and maximum byte offsets, or a failure.
  * @throws std::bad_alloc If a diagnostic allocation fails.
- * @note Arithmetic is checked before every signed addition/multiplication.
+ * @note Zero-stride and singleton axes contribute no address span and are
+ * skipped before any extent conversion or stride-magnitude arithmetic. Every
+ * contributing axis is checked before signed addition/multiplication.
  */
 Result<std::pair<std::int64_t, std::int64_t>> addressed_range(
     const ValueDescriptor& descriptor, const StridedLayout& layout,
@@ -35,15 +37,11 @@ Result<std::pair<std::int64_t, std::int64_t>> addressed_range(
   for (std::size_t axis = 0; axis < descriptor.shape.size(); ++axis) {
     const std::uint64_t steps = descriptor.shape[axis] - 1U;
     const std::int64_t stride = layout.byte_strides[axis];
-    if (steps != 0U &&
-        (steps > static_cast<std::uint64_t>(
-                     std::numeric_limits<std::int64_t>::max()) ||
-         (stride != 0 &&
-          steps > static_cast<std::uint64_t>(
-                      std::numeric_limits<std::int64_t>::max() /
-                      (stride == std::numeric_limits<std::int64_t>::min()
-                           ? std::numeric_limits<std::int64_t>::max()
-                           : (stride < 0 ? -stride : stride)))))) {
+    if (steps == 0U || stride == 0) {
+      continue;
+    }
+    if (steps >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
       return Result<std::pair<std::int64_t, std::int64_t>>(Status::failure(
           ErrorCode::InvalidArgument, "Value stride span overflows int64"));
     }
@@ -53,6 +51,11 @@ Result<std::pair<std::int64_t, std::int64_t>> addressed_range(
                           "Value stride uses unsupported INT64_MIN"));
     }
     const std::int64_t magnitude = stride < 0 ? -stride : stride;
+    if (steps > static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max() / magnitude)) {
+      return Result<std::pair<std::int64_t, std::int64_t>>(Status::failure(
+          ErrorCode::InvalidArgument, "Value stride span overflows int64"));
+    }
     const std::int64_t span = static_cast<std::int64_t>(steps) * magnitude;
     if (stride < 0) {
       if (span > minimum) {

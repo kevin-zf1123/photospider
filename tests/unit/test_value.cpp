@@ -88,6 +88,56 @@ int main() {
                                std::vector<std::uint8_t>{1U, 2U, 3U});
   PS_CHECK(reverse.ok());
 
+  const std::uint64_t huge_extent =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 2U;
+  auto huge_broadcast =
+      Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent}},
+                    Region::whole({huge_extent}), StridedLayout{0U, {0}}, {7U});
+  PS_CHECK(huge_broadcast.ok());
+  auto maximum_broadcast = Value::create(
+      ValueDescriptor{ElementType::UInt8,
+                      {std::numeric_limits<std::uint64_t>::max()}},
+      Region::whole({std::numeric_limits<std::uint64_t>::max()}),
+      StridedLayout{0U, {0}}, {8U});
+  PS_CHECK(maximum_broadcast.ok());
+
+  for (const std::int64_t nonzero_stride : {1, -1}) {
+    auto huge_nonbroadcast =
+        Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent}},
+                      Region::whole({huge_extent}),
+                      StridedLayout{0U, {nonzero_stride}}, {9U});
+    PS_CHECK(!huge_nonbroadcast.ok());
+    PS_CHECK(huge_nonbroadcast.status().code == ErrorCode::InvalidArgument);
+  }
+
+  auto mixed_positive =
+      Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent, 3U}},
+                    Region::whole({huge_extent, 3U}), StridedLayout{0U, {0, 1}},
+                    {1U, 2U, 3U});
+  PS_CHECK(mixed_positive.ok());
+  auto mixed_negative =
+      Value::create(ValueDescriptor{ElementType::UInt8, {huge_extent, 3U}},
+                    Region::whole({huge_extent, 3U}),
+                    StridedLayout{2U, {0, -1}}, {1U, 2U, 3U});
+  PS_CHECK(mixed_negative.ok());
+
+  auto singleton_minimum_stride = Value::create(
+      ValueDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
+      StridedLayout{0U, {std::numeric_limits<std::int64_t>::min()}}, {10U});
+  PS_CHECK(singleton_minimum_stride.ok());
+  auto repeated_minimum_stride = Value::create(
+      ValueDescriptor{ElementType::UInt8, {2U}}, Region::whole({2U}),
+      StridedLayout{0U, {std::numeric_limits<std::int64_t>::min()}}, {10U});
+  PS_CHECK(!repeated_minimum_stride.ok());
+  PS_CHECK(repeated_minimum_stride.status().code == ErrorCode::InvalidArgument);
+
+  auto overflowing_element_count =
+      Region::whole({std::numeric_limits<std::uint64_t>::max(), 2U})
+          .element_count();
+  PS_CHECK(!overflowing_element_count.ok());
+  PS_CHECK(overflowing_element_count.status().code ==
+           ErrorCode::ResourceExhausted);
+
   const Value scalar = Value::from_float64(42.5);
   PS_CHECK(scalar.valid());
   PS_CHECK(scalar.region().rank() == 1U);

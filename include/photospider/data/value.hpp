@@ -39,7 +39,9 @@ struct PHOTOSPIDER_API ValueDescriptor final {
  * @brief Explicit byte layout for one dense runtime Value.
  *
  * @note Signed strides permit reversed/broadcast views when bounds validation
- * proves every addressed element remains inside the retained buffer.
+ * proves every addressed element remains inside the retained buffer. A
+ * zero-stride axis contributes no address span regardless of logical extent;
+ * a singleton axis likewise does not use its stride value.
  */
 struct PHOTOSPIDER_API StridedLayout final {
   /** @brief Byte offset of logical coordinate zero from buffer start. */
@@ -88,7 +90,9 @@ class PHOTOSPIDER_API Value final {
    * @param facets Bounded unique semantic refinements copied into the Value.
    * @return Complete Value or a typed validation failure.
    * @throws std::bad_alloc If owned storage cannot be allocated.
-   * @note Publication is atomic; failure retains no partial Value.
+   * @note Publication is atomic; failure retains no partial Value. Layout
+   * span validation ignores zero-stride and singleton axes before converting
+   * logical extents into signed address arithmetic.
    */
   [[nodiscard]] static Result<Value> create(
       ValueDescriptor descriptor, Region region, StridedLayout layout,
