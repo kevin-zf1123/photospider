@@ -67,10 +67,16 @@ before publication; it does not normalize Unicode. Ordinary facet payload and
 Value bytes remain opaque binary data. This ABI version rejects trailing
 structure bytes and publishes no v1 compatibility entry point.
 
-Malformed registration publishes nothing. Multi-record registry publication
-uses copy-then-swap, so allocation failure cannot expose a prefix. An embedding
-C++ operation callback's `std::bad_alloc` propagates so the caller can preserve
-resource-exhaustion policy. Every other `std::exception` becomes
+Malformed registration publishes nothing. A built-in/embedding definition and
+every DSO definition are fully constructed before publication, then retained by
+a private immutable owning handle. The registry map, DSO transaction staging,
+and invocation snapshot copy only that handle: no embedding callable copy or
+execution occurs while the registry mutex is held. Multi-record publication
+uses copy-then-swap over the handle map, so allocation failure cannot expose a
+prefix; the replaced map retires after unlock. An invocation's handle keeps its
+callback and any captured DSO lease alive until callback completion. An
+embedding C++ operation callback's `std::bad_alloc` propagates so the caller can
+preserve resource-exhaustion policy. Every other `std::exception` becomes
 `OperationFailed`; a null `what()` pointer is normalized to an empty diagnostic
 without constructing a string from null. Nonstandard exceptions receive a
 stable generic `OperationFailed` diagnostic. Output is copied before callback

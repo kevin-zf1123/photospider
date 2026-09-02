@@ -163,7 +163,10 @@ using OperationCallback = std::function<CallbackSignature>;
 /**
  * @brief One complete operation definition before registry publication.
  *
- * @note Registration deep-copies key/traits/callback into registry ownership.
+ * @note Registration moves or copies the by-value input into one immutable
+ * private owning record before publication. Later registry snapshots copy only
+ * that record's owning handle and never recopy the callback under registry
+ * synchronization.
  */
 struct PHOTOSPIDER_API OperationDefinition final {
   /** @brief Nonempty unique strict UTF-8 operation key. */
@@ -233,7 +236,8 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @throws std::bad_alloc If registry allocation fails without mutation.
    * @note CPU support and a nonempty callback are mandatory. Fixed traits
    * validate only the logical descriptor; callback output validation applies
-   * the published Value's actual layout and backing bytes.
+   * the published Value's actual layout and backing bytes. Passing an rvalue
+   * transfers the callable into immutable registry ownership before locking.
    */
   [[nodiscard]] Status register_operation(OperationDefinition definition);
 
@@ -283,7 +287,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * recoverable result can be constructed.
    * @note Callback exceptions other than bad_alloc become `OperationFailed`.
    * A standard exception with a null diagnostic is normalized to an empty
-   * message before status construction.
+   * message before status construction. Lookup copies only an immutable owning
+   * handle under the registry mutex; callback copy code and callback execution
+   * never run there, and a DSO lease remains alive through callback completion.
    */
   [[nodiscard]] Result<Value> invoke(
       const std::string& key, const OperationInvocation& invocation) const;

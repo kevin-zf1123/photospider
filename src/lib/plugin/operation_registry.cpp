@@ -753,14 +753,18 @@ Status validate_operation_parameters(
 
 /**
  * @brief Private synchronized implementation of OperationRegistry.
- * @note Stored callbacks retain DSO leases until every copied definition
- * retires during registry destruction.
+ * @note Immutable definition handles retain callbacks and any captured DSO
+ * lease. Registry snapshots copy only handles, so user callable copy/destructor
+ * code and final native-library release stay outside the registry mutex.
  */
 struct OperationRegistry::Impl final {
-  /** @brief Serializes mutation and definition lookup/copy. */
+  /** @brief Immutable owning handle for one published complete definition. */
+  using DefinitionHandle = std::shared_ptr<const OperationDefinition>;
+
+  /** @brief Serializes mutation and definition-handle lookup/copy. */
   mutable std::mutex mutex;
-  /** @brief Sorted published operation definitions. */
-  std::map<std::string, OperationDefinition> definitions;
+  /** @brief Sorted published immutable operation-definition handles. */
+  std::map<std::string, DefinitionHandle> definitions;
   /** @brief Monotonic mutation fence. */
   bool frozen = false;
 };
@@ -793,16 +797,19 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
   }
+  auto immutable_definition =
+      std::make_shared<const OperationDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (impl_->frozen) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation registry is frozen");
   }
-  if (impl_->definitions.count(definition.key) != 0U) {
+  if (impl_->definitions.count(immutable_definition->key) != 0U) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation key is already registered");
   }
-  impl_->definitions.emplace(definition.key, std::move(definition));
+  const std::string& immutable_key = immutable_definition->key;
+  impl_->definitions.emplace(immutable_key, immutable_definition);
   return Status::success();
 }
 
@@ -880,7 +887,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   // Allocation failure leaves the stack owner intact for exact rollback.
   auto library = std::make_shared<OperationLibrary>(std::move(pending_library));
 
-  std::vector<OperationDefinition> staged;
+  std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
     const ps_operation_descriptor_v2& descriptor = api->operations[index];
@@ -913,7 +920,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     definition.key.assign(descriptor.key, descriptor.key_size);
     if (!valid_key(definition.key) ||
         std::any_of(staged.begin(), staged.end(), [&](const auto& candidate) {
-          return candidate.key == definition.key;
+          return candidate->key == definition.key;
         })) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin key is invalid or duplicated");
@@ -990,12 +997,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             "operation plugin fixed output is not densely representable");
       }
     }
-    staged.push_back(std::move(definition));
+    staged.push_back(
+        std::make_shared<OperationDefinition>(std::move(definition)));
   }
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
     const ps_operation_descriptor_v2* descriptor = &api->operations[index];
-    staged[index].callback =
+    staged[index]->callback =
         [library,
          descriptor](const OperationInvocation& invocation) -> Result<Value> {
       if (invocation.inputs.size() != descriptor->input_count ||
@@ -1149,27 +1157,35 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     };
   }
 
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->frozen) {
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "operation registry froze during plugin load");
+  std::vector<Impl::DefinitionHandle> immutable_staged;
+  immutable_staged.reserve(staged.size());
+  for (auto& definition : staged) {
+    immutable_staged.emplace_back(std::move(definition));
   }
-  for (const OperationDefinition& definition : staged) {
-    if (impl_->definitions.count(definition.key) != 0U) {
+
+  std::map<std::string, Impl::DefinitionHandle> replacement;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->frozen) {
       return Status::failure(ErrorCode::InvalidArgument,
-                             "operation plugin collides with registered key");
+                             "operation registry froze during plugin load");
     }
-  }
-  auto replacement = impl_->definitions;
-  for (OperationDefinition& definition : staged) {
-    const auto inserted =
-        replacement.emplace(definition.key, std::move(definition));
-    if (!inserted.second) {
-      return Status::failure(ErrorCode::Internal,
-                             "operation plugin staging duplicated a key");
+    for (const Impl::DefinitionHandle& definition : immutable_staged) {
+      if (impl_->definitions.count(definition->key) != 0U) {
+        return Status::failure(ErrorCode::InvalidArgument,
+                               "operation plugin collides with registered key");
+      }
     }
+    replacement = impl_->definitions;
+    for (const Impl::DefinitionHandle& definition : immutable_staged) {
+      const auto inserted = replacement.emplace(definition->key, definition);
+      if (!inserted.second) {
+        return Status::failure(ErrorCode::Internal,
+                               "operation plugin staging duplicated a key");
+      }
+    }
+    impl_->definitions.swap(replacement);
   }
-  impl_->definitions.swap(replacement);
   return Status::success();
 }
 
@@ -1204,7 +1220,7 @@ Result<OperationTraits> OperationRegistry::find_traits(
     return Result<OperationTraits>(Status::failure(
         ErrorCode::NotFound, "operation key is not registered"));
   }
-  return Result<OperationTraits>(iterator->second.traits);
+  return Result<OperationTraits>(iterator->second->traits);
 }
 
 /**
@@ -1213,7 +1229,7 @@ Result<OperationTraits> OperationRegistry::find_traits(
  */
 Result<Value> OperationRegistry::invoke(
     const std::string& key, const OperationInvocation& invocation) const {
-  OperationDefinition definition;
+  Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     const auto iterator = impl_->definitions.find(key);
@@ -1223,7 +1239,7 @@ Result<Value> OperationRegistry::invoke(
     }
     definition = iterator->second;
   }
-  if (invocation.inputs.size() != definition.traits.input_count) {
+  if (invocation.inputs.size() != definition->traits.input_count) {
     return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                          "operation input count mismatch"));
   }
@@ -1240,7 +1256,7 @@ Result<Value> OperationRegistry::invoke(
     }
   }
   const Status parameter_status =
-      validate_operation_parameters(definition.traits, invocation.parameters);
+      validate_operation_parameters(definition->traits, invocation.parameters);
   if (!parameter_status.ok()) {
     return Result<Value>(parameter_status);
   }
@@ -1248,18 +1264,20 @@ Result<Value> OperationRegistry::invoke(
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
   }
-  if ((invocation.backend == Backend::Cpu && !definition.traits.supports_cpu) ||
-      (invocation.backend == Backend::Gpu && !definition.traits.supports_gpu)) {
+  if ((invocation.backend == Backend::Cpu &&
+       !definition->traits.supports_cpu) ||
+      (invocation.backend == Backend::Gpu &&
+       !definition->traits.supports_gpu)) {
     return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
                                          "operation backend is unavailable"));
   }
   try {
-    auto result = definition.callback(invocation);
+    auto result = definition->callback(invocation);
     if (!result.ok()) {
       return result;
     }
     const Status output_status = validate_callback_output(
-        definition.traits, invocation.inputs, result.value());
+        definition->traits, invocation.inputs, result.value());
     return output_status.ok() ? result : Result<Value>(output_status);
   } catch (const std::bad_alloc&) {
     throw;
