@@ -11,11 +11,73 @@ namespace {
 std::atomic<std::uint32_t> destroy_count{0U};
 
 /** @brief Fixture mode that requests recoverable GPU backend fallback. */
-std::uint32_t gpu_backend_unavailable = 1U;
+constexpr std::uint32_t kGpuBackendUnavailable = 1U;
 /** @brief Fixture mode that reports an ordinary nonrecoverable GPU failure. */
-std::uint32_t gpu_ordinary_failure = 2U;
+constexpr std::uint32_t kGpuOrdinaryFailure = 2U;
 /** @brief Fixture mode that reports an unknown nonzero callback result. */
-std::uint32_t gpu_unknown_result = 3U;
+constexpr std::uint32_t kGpuUnknownResult = 3U;
+/** @brief Fixture mode that publishes valid output before unavailability. */
+constexpr std::uint32_t kGpuOutputThenUnavailable = 4U;
+/** @brief Fixture mode that publishes malformed output before unavailability.
+ */
+constexpr std::uint32_t kGpuBadOutputThenUnavailable = 5U;
+
+/**
+ * @brief Owns one GPU-result fixture mode and exact invocation counters.
+ *
+ * @note The descriptor borrows this process-lifetime state. Atomic counters
+ * permit the host's CPU and GPU lanes to update independently.
+ */
+struct GpuResultState final {
+  /**
+   * @brief Constructs zeroed counters for one immutable fixture mode.
+   * @param mode_value Closed test mode in 1..5.
+   * @throws Nothing.
+   */
+  explicit GpuResultState(std::uint32_t mode_value) noexcept
+      : mode(mode_value) {}
+
+  /** @brief Immutable callback behavior selector. */
+  std::uint32_t mode;
+  /** @brief Number of GPU callback entries. */
+  std::atomic<std::uint32_t> gpu_invocations{0U};
+  /** @brief Number of CPU callback entries. */
+  std::atomic<std::uint32_t> cpu_invocations{0U};
+};
+
+/** @brief State for ordinary no-output backend unavailability. */
+GpuResultState gpu_backend_unavailable{kGpuBackendUnavailable};
+/** @brief State for ordinary GPU failure. */
+GpuResultState gpu_ordinary_failure{kGpuOrdinaryFailure};
+/** @brief State for an unknown GPU callback result. */
+GpuResultState gpu_unknown_result{kGpuUnknownResult};
+/** @brief State for valid output followed by backend unavailability. */
+GpuResultState gpu_output_then_unavailable{kGpuOutputThenUnavailable};
+/** @brief State for invalid output followed by backend unavailability. */
+GpuResultState gpu_bad_output_then_unavailable{kGpuBadOutputThenUnavailable};
+
+/**
+ * @brief Looks up process-lifetime GPU fixture state by exported mode.
+ * @param mode Closed test mode in 1..5.
+ * @return Matching state or null for an unknown mode.
+ * @throws Nothing.
+ */
+GpuResultState* find_gpu_result_state(std::uint32_t mode) noexcept {
+  switch (mode) {
+    case kGpuBackendUnavailable:
+      return &gpu_backend_unavailable;
+    case kGpuOrdinaryFailure:
+      return &gpu_ordinary_failure;
+    case kGpuUnknownResult:
+      return &gpu_unknown_result;
+    case kGpuOutputThenUnavailable:
+      return &gpu_output_then_unavailable;
+    case kGpuBadOutputThenUnavailable:
+      return &gpu_bad_output_then_unavailable;
+    default:
+      return nullptr;
+  }
+}
 
 /**
  * @brief Doubles one contiguous Float64 scalar input.
@@ -150,7 +212,7 @@ void write_diagnostic(const char* message, char* diagnostic,
 
 /**
  * @brief Exercises recoverable and ordinary GPU callback result categories.
- * @param user_data Pointer to one static fixture mode.
+ * @param user_data Pointer to one static fixture state.
  * @param inputs Exact one-element Float64 input array.
  * @param input_count Must equal one.
  * @param parameters Empty parameter array.
@@ -164,7 +226,8 @@ void write_diagnostic(const char* message, char* diagnostic,
  * @return One closed `ps_operation_result_v2` value, or intentional `99` for
  * the host's unknown-result fail-closed regression.
  * @throws Nothing.
- * @note GPU failures publish no output; CPU always publishes the copied input.
+ * @note Modes four and five intentionally violate the no-output backend-
+ * unavailable contract; CPU always publishes the copied input if reached.
  */
 int execute_gpu_result(void* user_data,
                        const ps_operation_value_view_v2* inputs,
@@ -177,8 +240,8 @@ int execute_gpu_result(void* user_data,
                        char* diagnostic,
                        std::size_t diagnostic_capacity) noexcept {
   static_cast<void>(parameters);
-  const auto* mode = static_cast<const std::uint32_t*>(user_data);
-  if (!mode || !inputs || input_count != 1U || parameter_count != 0U ||
+  auto* state = static_cast<GpuResultState*>(user_data);
+  if (!state || !inputs || input_count != 1U || parameter_count != 0U ||
       (backend != 1U && backend != 2U) || !sink || !sink->publish ||
       inputs[0].element_type != PS_OPERATION_ELEMENT_FLOAT64_V2 ||
       inputs[0].rank != 1U || inputs[0].byte_size != sizeof(double) ||
@@ -193,20 +256,47 @@ int execute_gpu_result(void* user_data,
     return PS_OPERATION_RESULT_CANCELLED_V2;
   }
   if (backend == 2U) {
-    if (*mode == gpu_backend_unavailable) {
+    state->gpu_invocations.fetch_add(1U, std::memory_order_relaxed);
+    if (state->mode == kGpuBackendUnavailable) {
       write_diagnostic("fixture GPU backend is unavailable", diagnostic,
                        diagnostic_capacity);
       return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2;
     }
-    if (*mode == gpu_ordinary_failure) {
+    if (state->mode == kGpuOrdinaryFailure) {
       write_diagnostic("fixture GPU operation failed", diagnostic,
                        diagnostic_capacity);
       return PS_OPERATION_RESULT_FAILURE_V2;
+    }
+    if (state->mode == kGpuOutputThenUnavailable) {
+      static_cast<void>(sink->publish(sink->context, inputs[0].element_type,
+                                      inputs[0].shape, inputs[0].rank,
+                                      inputs[0].facets, inputs[0].facet_count,
+                                      inputs[0].data, inputs[0].byte_size));
+      write_diagnostic("fixture published output before unavailability",
+                       diagnostic, diagnostic_capacity);
+      return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2;
+    }
+    if (state->mode == kGpuBadOutputThenUnavailable) {
+      const char key[] = "bad.facet";
+      const ps_operation_facet_view_v2 facet = {
+          sizeof(ps_operation_facet_view_v2),
+          key,
+          static_cast<std::uint32_t>(sizeof(key) - 1U),
+          0U,
+          nullptr,
+          0U};
+      static_cast<void>(sink->publish(sink->context, inputs[0].element_type,
+                                      inputs[0].shape, inputs[0].rank, &facet,
+                                      1U, inputs[0].data, inputs[0].byte_size));
+      write_diagnostic("fixture published invalid output before unavailability",
+                       diagnostic, diagnostic_capacity);
+      return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2;
     }
     write_diagnostic("fixture GPU returned an unknown result", diagnostic,
                      diagnostic_capacity);
     return 99;
   }
+  state->cpu_invocations.fetch_add(1U, std::memory_order_relaxed);
   return sink->publish(sink->context, inputs[0].element_type, inputs[0].shape,
                        inputs[0].rank, inputs[0].facets, inputs[0].facet_count,
                        inputs[0].data, inputs[0].byte_size)
@@ -223,7 +313,7 @@ int execute_gpu_result(void* user_data,
  */
 void destroy_fixture(const ps_operation_descriptor_v2* operations,
                      std::uint32_t operation_count) {
-  if (operations && operation_count == 5U) {
+  if (operations && operation_count == 7U) {
     destroy_count.fetch_add(1U, std::memory_order_relaxed);
   }
 }
@@ -247,45 +337,65 @@ const auto double_parameter = make_double_parameter();
  * @throws Nothing.
  * @note Every referenced callback and parameter record has static lifetime.
  */
-std::array<ps_operation_descriptor_v2, 5U> make_descriptors() noexcept {
-  return {{{sizeof(ps_operation_descriptor_v2), "fixture.double", 14U, 1U,
-            PS_OPERATION_FLAG_DETERMINISTIC |
-                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU,
-            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
-            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 1U, &double_parameter,
-            execute_double, nullptr},
-           {sizeof(ps_operation_descriptor_v2), "fixture.bad_facet", 17U, 1U,
-            PS_OPERATION_FLAG_DETERMINISTIC |
-                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU,
-            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
-            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
-            execute_bad_facet, nullptr},
-           {sizeof(ps_operation_descriptor_v2), "fixture.gpu_fallback", 20U, 1U,
-            PS_OPERATION_FLAG_DETERMINISTIC |
-                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU |
-                PS_OPERATION_FLAG_GPU | PS_OPERATION_FLAG_CPU_FALLBACK,
-            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
-            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
-            execute_gpu_result, &gpu_backend_unavailable},
-           {sizeof(ps_operation_descriptor_v2), "fixture.gpu_failure", 19U, 1U,
-            PS_OPERATION_FLAG_DETERMINISTIC |
-                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU |
-                PS_OPERATION_FLAG_GPU | PS_OPERATION_FLAG_CPU_FALLBACK,
-            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
-            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
-            execute_gpu_result, &gpu_ordinary_failure},
-           {sizeof(ps_operation_descriptor_v2), "fixture.gpu_unknown", 19U, 1U,
-            PS_OPERATION_FLAG_DETERMINISTIC |
-                PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU |
-                PS_OPERATION_FLAG_GPU | PS_OPERATION_FLAG_CPU_FALLBACK,
-            sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
-            PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
-            PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
-            execute_gpu_result, &gpu_unknown_result}}};
+std::array<ps_operation_descriptor_v2, 7U> make_descriptors() noexcept {
+  return {
+      {{sizeof(ps_operation_descriptor_v2), "fixture.double", 14U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 1U, &double_parameter,
+        execute_double, nullptr},
+       {sizeof(ps_operation_descriptor_v2), "fixture.bad_facet", 17U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+        execute_bad_facet, nullptr},
+       {sizeof(ps_operation_descriptor_v2), "fixture.gpu_fallback", 20U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+            PS_OPERATION_FLAG_CPU_FALLBACK,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+        execute_gpu_result, &gpu_backend_unavailable},
+       {sizeof(ps_operation_descriptor_v2), "fixture.gpu_failure", 19U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+            PS_OPERATION_FLAG_CPU_FALLBACK,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+        execute_gpu_result, &gpu_ordinary_failure},
+       {sizeof(ps_operation_descriptor_v2), "fixture.gpu_unknown", 19U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+            PS_OPERATION_FLAG_CPU_FALLBACK,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+        execute_gpu_result, &gpu_unknown_result},
+       {sizeof(ps_operation_descriptor_v2), "fixture.gpu_output_unavailable",
+        sizeof("fixture.gpu_output_unavailable") - 1U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+            PS_OPERATION_FLAG_CPU_FALLBACK,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+        execute_gpu_result, &gpu_output_then_unavailable},
+       {sizeof(ps_operation_descriptor_v2),
+        "fixture.gpu_bad_output_unavailable",
+        sizeof("fixture.gpu_bad_output_unavailable") - 1U, 1U,
+        PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
+            PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+            PS_OPERATION_FLAG_CPU_FALLBACK,
+        sizeof(double), PS_OPERATION_ELEMENT_FLOAT64_V2, 0U, nullptr,
+        PS_OPERATION_SHAPE_PRESERVE_FIRST_V2,
+        PS_OPERATION_REGION_ELEMENTWISE_V2, 0U, 1U, 0U, nullptr,
+        execute_gpu_result, &gpu_bad_output_then_unavailable}}};
 }
 
 /** @brief Static operation descriptor table with valid and bad-output cases. */
@@ -297,7 +407,7 @@ const auto descriptors = make_descriptors();
  * @throws Nothing.
  */
 ps_operation_plugin_api_v2 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v2), 5U, descriptors.data(),
+  return {sizeof(ps_operation_plugin_api_v2), 7U, descriptors.data(),
           destroy_fixture};
 }
 
@@ -337,4 +447,30 @@ ps_operation_plugin_get_api_v2(void) {
 extern "C" PS_OPERATION_EXPORT std::uint32_t ps_operation_fixture_destroy_count(
     void) {
   return destroy_count.load(std::memory_order_relaxed);
+}
+
+/**
+ * @brief Returns the exact GPU callback count for one fixture mode.
+ * @param mode Closed fixture mode in 1..5.
+ * @return Monotonic invocation count, or zero for an unknown mode.
+ * @throws Nothing.
+ * @note The symbol is test-only and is not part of the operation ABI table.
+ */
+extern "C" PS_OPERATION_EXPORT std::uint32_t
+ps_operation_fixture_gpu_invocation_count(std::uint32_t mode) {
+  const GpuResultState* state = find_gpu_result_state(mode);
+  return state ? state->gpu_invocations.load(std::memory_order_relaxed) : 0U;
+}
+
+/**
+ * @brief Returns the exact CPU callback count for one fixture mode.
+ * @param mode Closed fixture mode in 1..5.
+ * @return Monotonic invocation count, or zero for an unknown mode.
+ * @throws Nothing.
+ * @note The symbol is test-only and is not part of the operation ABI table.
+ */
+extern "C" PS_OPERATION_EXPORT std::uint32_t
+ps_operation_fixture_cpu_invocation_count(std::uint32_t mode) {
+  const GpuResultState* state = find_gpu_result_state(mode);
+  return state ? state->cpu_invocations.load(std::memory_order_relaxed) : 0U;
 }

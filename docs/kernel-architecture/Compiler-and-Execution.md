@@ -59,8 +59,11 @@ resources without entering the caller-visible `ExecutionResult`.
 An operation ABI v2 callback can distinguish ordinary failure from backend
 unavailability without changing its C signature or descriptor layout. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
-backend-unavailable result and copied traits allow fallback. Ordinary failure
-and unknown nonzero callback results fail the Run without a CPU attempt.
+backend-unavailable result without invoking its output sink and copied traits
+allow fallback. An output-publication attempt makes backend unavailability
+terminal: accepted output is a contract failure and rejected output retains
+the sink failure. Ordinary failure and unknown nonzero callback results fail
+the Run without a CPU attempt.
 
 ## Diagnostics
 

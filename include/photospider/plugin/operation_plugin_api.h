@@ -28,7 +28,7 @@ extern "C" {
 #define PS_OPERATION_FLAG_CPU (1U << 2U)
 /** @brief Operation can execute on the optional local GPU lane. */
 #define PS_OPERATION_FLAG_GPU (1U << 3U)
-/** @brief GPU failure may use a semantically equivalent CPU implementation. */
+/** @brief Output-free GPU unavailability may use an equivalent CPU path. */
 #define PS_OPERATION_FLAG_CPU_FALLBACK (1U << 4U)
 
 /** @brief Output shape is one scalar element. */
@@ -75,7 +75,10 @@ typedef enum ps_operation_result_v2 {
   PS_OPERATION_RESULT_FAILURE_V2 = 1,
   /** @brief Cooperative cancellation was observed by the callback. */
   PS_OPERATION_RESULT_CANCELLED_V2 = 2,
-  /** @brief Selected local backend cannot execute this invocation. */
+  /**
+   * @brief Selected local backend cannot execute this invocation.
+   * @note Valid only when the callback has not invoked the output sink.
+   */
   PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2 = 3
 } ps_operation_result_v2;
 
@@ -194,8 +197,8 @@ typedef struct ps_operation_output_sink_v2 {
    * @param byte_size Exact payload byte count.
    * @return Nonzero when output was accepted; zero on validation/allocation
    * failure.
-   * @note The host copies all bytes before return and invokes this at most
-   * once.
+   * @note The host copies all bytes before return. The callback may invoke
+   * this function at most once.
    */
   int (*publish)(void* context, uint32_t element_type, const uint64_t* shape,
                  uint32_t rank, const ps_operation_facet_view_v2* facets,
@@ -227,8 +230,11 @@ typedef int (*ps_operation_cancelled_v2)(void* context);
  * are treated as `PS_OPERATION_RESULT_FAILURE_V2` by the host.
  * @note The callback must not throw across the C boundary or retain pointers.
  * `PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2` requests CPU fallback only for
- * a GPU attempt whose copied traits permit it; no output may be published for
- * that result.
+ * a GPU attempt whose copied traits permit it; the output sink must not be
+ * invoked for that result. If it was invoked, a rejected output keeps its
+ * exact sink failure and an accepted output becomes a terminal ordinary
+ * contract failure, so neither case can request fallback. Host cancellation
+ * remains authoritative over the callback result and sink state.
  */
 typedef int (*ps_operation_execute_v2)(
     void* user_data, const ps_operation_value_view_v2* inputs,

@@ -507,14 +507,14 @@ Result<std::vector<std::int64_t>> contiguous_strides(
 /**
  * @brief State used by one C ABI output sink invocation.
  *
- * @note The sink accepts at most one complete output and retains no DSO
- * pointer.
+ * @note The sink records the first publication attempt before validation,
+ * accepts at most one complete output, and retains no DSO pointer.
  */
 struct OutputSinkState final {
   /** @brief Published output when validation succeeds. */
   Result<Value> result{Status::failure(ErrorCode::OperationFailed,
                                        "operation did not publish output")};
-  /** @brief Monotonic single-publication guard. */
+  /** @brief True after the first sink call, whether accepted or rejected. */
   bool published = false;
 };
 
@@ -1115,6 +1115,16 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       if (invocation.cancellation.cancelled()) {
         return Result<Value>(
             Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
+      }
+      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V2 &&
+          output.published) {
+        if (!output.result.ok()) {
+          return output.result;
+        }
+        return Result<Value>(Status::failure(
+            ErrorCode::OperationFailed,
+            "operation plugin published output before reporting backend "
+            "unavailable"));
       }
       if (code != PS_OPERATION_RESULT_SUCCESS_V2) {
         ErrorCode error_code = ErrorCode::OperationFailed;

@@ -34,8 +34,11 @@ facet/bytes，并重建 validated Value。
 failure、cooperative cancellation 与 backend unavailable。显式 backend-unavailable result
 会映射为 `BackendUnavailable`；只有 copied trait 允许 CPU fallback 的 GPU attempt 才能在
 CPU 上重试。ordinary failure 与所有 unknown nonzero integer 仍映射为 `OperationFailed`，
-绝不触发 fallback。backend-unavailable callback 不发布 output；callback signature 与
-descriptor layout 均保持不变。
+绝不触发 fallback。backend-unavailable callback 不得调用 output sink。若已经调用，
+accepted output 会成为 terminal `OperationFailed` contract violation；rejected output
+保留 sink 的精确 typed failure。两种路径都不暴露 `BackendUnavailable`，也不在 CPU 上
+重试；host cancellation 继续拥有最高优先级。callback signature 与 descriptor layout
+均保持不变。
 
 ### Data-definition ABI
 

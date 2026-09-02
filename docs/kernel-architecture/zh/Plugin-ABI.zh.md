@@ -26,7 +26,9 @@ Synchronous callback 保持 `int` signature，但返回一个闭合的 version-t
 ordinary failure、cancellation 或 backend unavailable。backend unavailable 与 ordinary
 failure 不同，并且只有 copied trait 允许时才能从 GPU attempt 请求 CPU fallback。unknown
 nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailable 的 callback
-不发布 output，因此 fallback 不会复用 partial GPU Value。
+不得调用 output sink。若已调用，accepted output 是 terminal `OperationFailed` contract
+violation；rejected output 保留 sink 的精确 typed failure。两种路径都不暴露
+`BackendUnavailable` 或触发 CPU fallback；host cancellation 继续是最高优先级 result。
 
 ## Validation
 
