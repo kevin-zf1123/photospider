@@ -55,13 +55,17 @@ exactly-once destroy ownership。Key validation 会在 publication
 普通 facet payload 与 Value byte 仍是 opaque binary data。该 ABI version 拒绝 trailing
 structure bytes，也不发布 v1 compatibility entry point。
 
-Malformed registration 不发布任何内容。Multi-record registry publication 使用
-copy-then-swap，allocation failure 不能暴露 prefix。Embedding C++ operation callback 的
-`std::bad_alloc` 会继续传播，使 caller 能够保留 resource-exhaustion policy；其他每个
-`std::exception` 都映射为 `OperationFailed`。若 `what()` 返回 null，则在不从 null
-构造 string 的前提下规范化为空 diagnostic。Nonstandard exception 获得稳定的通用
-`OperationFailed` diagnostic。Output 在 callback 返回前复制。Plugin-owned descriptor
-table 在 library unload 前 destroy。
+Malformed registration 不发布任何内容。Builtin/embedding definition 与每个 DSO
+definition 都会在 publication 前完整构造，随后由 private immutable owning handle 保留。
+Registry map、DSO transaction staging 与 invocation snapshot 只复制该 handle：registry
+mutex 持有期间绝不复制或执行 embedding callable。Multi-record publication 对 handle map
+执行 copy-then-swap，因此 allocation failure 不能暴露 prefix；被替换的 map 在 unlock 后
+retire。Invocation 持有的 handle 会让 callback 及其捕获的 DSO lease 存活到 callback
+完成。Embedding C++ operation callback 的 `std::bad_alloc` 会继续传播，使 caller 能够
+保留 resource-exhaustion policy；其他每个 `std::exception` 都映射为
+`OperationFailed`。若 `what()` 返回 null，则在不从 null 构造 string 的前提下规范化为
+空 diagnostic。Nonstandard exception 获得稳定的通用 `OperationFailed` diagnostic。
+Output 在 callback 返回前复制。Plugin-owned descriptor table 在 library unload 前 destroy。
 
 Dense layout product 在 multiplication 前使用 checked uint64 division，随后验证 complete
 byte range。Boundary fixture 会加载真实 DSO，并要求后续 descriptor 不可表示时进行

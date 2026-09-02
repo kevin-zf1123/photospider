@@ -118,6 +118,102 @@ class NullDiagnosticException final : public std::exception {
   [[nodiscard]] const char* what() const noexcept override { return nullptr; }
 };
 
+/**
+ * @brief Shared observations for one copy-aware embedding callback.
+ *
+ * @note Tests arm copy rejection only after rvalue registration completes, so
+ * any later increment identifies a registry snapshot that copied user code.
+ */
+struct CopyAwareCallbackState final {
+  /** @brief Whether a later callable copy must raise deterministically. */
+  bool reject_copies = false;
+  /** @brief Exact number of callable copy-constructor entries. */
+  std::uint32_t copy_count = 0U;
+  /** @brief Exact number of callback invocations. */
+  std::uint32_t call_count = 0U;
+};
+
+/**
+ * @brief Legal embedding callable that can reject copies after publication.
+ *
+ * @note Moving remains non-throwing so rvalue registration can transfer the
+ * callable into immutable registry ownership without invoking its copy code.
+ */
+class CopyAwareCallback final {
+ public:
+  /**
+   * @brief Creates one callable over shared deterministic observations.
+   * @param state Nonnull observation state retained by the callable.
+   * @throws std::invalid_argument If `state` is null.
+   */
+  explicit CopyAwareCallback(std::shared_ptr<CopyAwareCallbackState> state)
+      : state_(std::move(state)) {
+    if (!state_) {
+      throw std::invalid_argument("copy-aware callback requires state");
+    }
+  }
+
+  /**
+   * @brief Copies one callable and raises when post-publication copies are
+   * armed.
+   * @param other Source callable sharing the same observation state.
+   * @throws std::runtime_error When the shared state rejects later copies.
+   * @note The counter increments before the deterministic exception.
+   */
+  CopyAwareCallback(const CopyAwareCallback& other) : state_(other.state_) {
+    ++state_->copy_count;
+    if (state_->reject_copies) {
+      throw std::runtime_error("embedding callable copied after publication");
+    }
+  }
+
+  /**
+   * @brief Moves callable ownership without entering user copy code.
+   * @param other Source callable left with unspecified shared ownership.
+   * @throws Nothing.
+   */
+  CopyAwareCallback(CopyAwareCallback&& other) noexcept = default;
+
+  /**
+   * @brief Releases shared observation ownership.
+   * @throws Nothing.
+   */
+  ~CopyAwareCallback() noexcept = default;
+
+  /**
+   * @brief Forbids copy assignment, which `std::function` does not require.
+   * @param other Source callable that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   */
+  CopyAwareCallback& operator=(const CopyAwareCallback& other) = delete;
+
+  /**
+   * @brief Forbids move assignment of an already stored callback target.
+   * @param other Source callable that cannot be assigned.
+   * @return No value; the operation is deleted.
+   * @throws Nothing; the operation is deleted.
+   */
+  CopyAwareCallback& operator=(CopyAwareCallback&& other) = delete;
+
+  /**
+   * @brief Publishes one deterministic scalar while counting callback entry.
+   * @param invocation Validated zero-input invocation.
+   * @return Float64 scalar value 41.
+   * @throws std::bad_alloc If Value construction fails.
+   */
+  ps::Result<ps::Value> operator()(
+      const ps::OperationInvocation& invocation) const {
+    static_cast<void>(invocation);
+    ++state_->call_count;
+    return ps::Result<ps::Value>(ps::Value::from_float64(41.0));
+  }
+
+ private:
+  /** @brief Shared deterministic copy/invocation observations. */
+  std::shared_ptr<CopyAwareCallbackState> state_;
+};
+
 /** @brief Library kind expected by the currently installed test callback. */
 LibraryKind g_expected_library_kind = LibraryKind::Operation;
 /** @brief Exact owner-allocation callback invocation count. */
@@ -551,6 +647,103 @@ int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
   return 0;
 }
 
+/**
+ * @brief Proves registry snapshots retain immutable callback handles.
+ *
+ * The first registry receives a copy-aware callable through rvalue
+ * registration, arms copy rejection, freezes, and invokes it. The second arms
+ * an independently registered callable before loading a valid DSO into an
+ * unfrozen registry. Both paths must copy only owning handles after arm.
+ *
+ * @return Zero when invoke/load succeed without a callable copy or exception.
+ * @throws std::bad_alloc If test or registry staging allocation fails.
+ * @note The valid DSO load also preserves transactional publication and its
+ * existing library lifetime anchor; the fixture is fully unloaded on return.
+ */
+int verify_immutable_callback_handles() {
+  using ps::Backend;
+  using ps::CancellationToken;
+  using ps::ElementType;
+  using ps::ErrorCode;
+  using ps::OperationDefinition;
+  using ps::OperationInvocation;
+  using ps::OperationRegistry;
+  using ps::OperationTraits;
+  using ps::ParameterValue;
+  using ps::Region;
+  using ps::Value;
+
+  const std::vector<Value> no_inputs;
+  const std::vector<Region> no_demands;
+  const std::map<std::string, ParameterValue> no_parameters;
+
+  auto invoke_state = std::make_shared<CopyAwareCallbackState>();
+  OperationRegistry invoke_registry;
+  PS_CHECK(invoke_registry
+               .register_operation(OperationDefinition{
+                   "fixture.copy_aware_invoke", OperationTraits{},
+                   CopyAwareCallback(invoke_state)})
+               .ok());
+  invoke_state->reject_copies = true;
+  const std::uint32_t invoke_copies_before_arm = invoke_state->copy_count;
+  PS_CHECK(invoke_registry.freeze().ok());
+  bool invoke_escaped = false;
+  bool invoke_succeeded = false;
+  double invoked_value = 0.0;
+  try {
+    auto invoked = invoke_registry.invoke(
+        "fixture.copy_aware_invoke",
+        OperationInvocation{no_inputs, no_demands, no_parameters, Backend::Cpu,
+                            CancellationToken()});
+    invoke_succeeded = invoked.ok() && invoked.value().as_float64().ok();
+    if (invoke_succeeded) {
+      invoked_value = invoked.value().as_float64().value();
+    }
+  } catch (...) {
+    invoke_escaped = true;
+  }
+  PS_CHECK(!invoke_escaped);
+  PS_CHECK(invoke_succeeded);
+  PS_CHECK(invoked_value == 41.0);
+  PS_CHECK(invoke_state->call_count == 1U);
+  PS_CHECK(invoke_state->copy_count == invoke_copies_before_arm);
+
+  const Value unexpected_input = Value::from_float64(1.0);
+  const std::vector<Value> invalid_inputs{unexpected_input};
+  const std::vector<Region> invalid_demands{Region::whole({1U})};
+  auto invalid_input = invoke_registry.invoke(
+      "fixture.copy_aware_invoke",
+      OperationInvocation{invalid_inputs, invalid_demands, no_parameters,
+                          Backend::Cpu, CancellationToken()});
+  PS_CHECK(!invalid_input.ok());
+  PS_CHECK(invalid_input.status().code == ErrorCode::InvalidArgument);
+  PS_CHECK(invoke_state->call_count == 1U);
+  PS_CHECK(invoke_state->copy_count == invoke_copies_before_arm);
+
+  auto load_state = std::make_shared<CopyAwareCallbackState>();
+  OperationRegistry load_registry;
+  PS_CHECK(load_registry
+               .register_operation(OperationDefinition{
+                   "fixture.copy_aware_load", OperationTraits{},
+                   CopyAwareCallback(load_state)})
+               .ok());
+  load_state->reject_copies = true;
+  const std::uint32_t load_copies_before_arm = load_state->copy_count;
+  bool load_escaped = false;
+  bool load_succeeded = false;
+  try {
+    load_succeeded = load_registry.load_plugin(PS_OPERATION_FIXTURE_PATH).ok();
+  } catch (...) {
+    load_escaped = true;
+  }
+  PS_CHECK(!load_escaped);
+  PS_CHECK(load_succeeded);
+  PS_CHECK(load_registry.find_traits("fixture.double").ok());
+  PS_CHECK(load_state->call_count == 0U);
+  PS_CHECK(load_state->copy_count == load_copies_before_arm);
+  return 0;
+}
+
 }  // namespace
 
 /**
@@ -589,6 +782,8 @@ int main() {
   using ps::WorkflowInput;
   using ps::WorkflowNode;
   using ps::WorkflowOutput;
+
+  PS_CHECK(verify_immutable_callback_handles() == 0);
 
   const std::array<const char*, 5U> invalid_operation_utf8_fixtures{
       PS_OPERATION_INVALID_UTF8_OVERLONG_FIXTURE_PATH,
@@ -951,6 +1146,13 @@ int main() {
                .ok());
   PS_CHECK(fencing
                .register_operation(OperationDefinition{
+                   "fixture.bad_alloc", OperationTraits{},
+                   [](const OperationInvocation&) -> Result<Value> {
+                     throw std::bad_alloc();
+                   }})
+               .ok());
+  PS_CHECK(fencing
+               .register_operation(OperationDefinition{
                    "fixture.wrong_output", OperationTraits{},
                    [](const OperationInvocation&) -> Result<Value> {
                      auto output = Value::create(
@@ -999,6 +1201,16 @@ int main() {
   PS_CHECK(!null_diagnostic_ok);
   PS_CHECK(null_diagnostic_code == ErrorCode::OperationFailed);
   PS_CHECK(null_diagnostic_message.empty());
+  bool bad_alloc_propagated = false;
+  try {
+    static_cast<void>(
+        fencing.invoke("fixture.bad_alloc",
+                       OperationInvocation{no_inputs, no_demands, no_parameters,
+                                           Backend::Cpu, CancellationToken()}));
+  } catch (const std::bad_alloc&) {
+    bad_alloc_propagated = true;
+  }
+  PS_CHECK(bad_alloc_propagated);
   auto wrong_output =
       fencing.invoke("fixture.wrong_output",
                      OperationInvocation{no_inputs, no_demands, no_parameters,
