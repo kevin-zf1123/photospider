@@ -9,6 +9,14 @@ scalar/preserve/match/fixed output descriptor inference。unknown、missing 或 
 parameter 会在 IR publication 前失败；builtin 不合成 default。它按 node-id tie-break 的 topological order
 发布 immutable `SemanticGraphIR` 与 `SemanticGraphDigest`。
 
+Fixed inference 验证 logical nonzero rank-1..8 descriptor，不要求 dense element/byte
+product 可表示。C++ embedding operation 可把该 descriptor materialize 为合法 strided 或
+zero-stride broadcast Value；plan 记录独立声明的 `estimated_bytes`，因此 modeled admission
+与 peak diagnostic 反映 callback 的实际 materialization，而不是隐含 dense allocation。
+显式调用 `Region::element_count()` 时仍执行 checked arithmetic，对同一个 multi-dimensional
+logical shape 仍可返回 overflow。不携带 stride 的 C DSO Fixed descriptor 会在 load 时被
+独立要求 dense representability。
+
 每个通过 schema validation 的 Float64 parameter 都以 copied IEEE-754 binary64 的精确
 bit、按 fixed little-endian order 进入 canonical stage identity。signed zero 会被保留，
 因此 sign-sensitive callback 不能共享 semantic、optimized、plan 或 cache-key identity。

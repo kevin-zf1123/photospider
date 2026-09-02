@@ -30,12 +30,21 @@ nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailab
 violation；rejected output 保留 sink 的精确 typed failure。两种路径都不暴露
 `BackendUnavailable` 或触发 CPU fallback；host cancellation 继续是最高优先级 result。
 
+C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会
+验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算
+dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
+layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
+`estimated_bytes` 是独立的 modeled admission estimate。C DSO Fixed descriptor 更严格，
+因为 ABI v2 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
+byte count 可表示。这个区别不增加 ABI field，也不改变 Preserve 或 Match inference。
+
 ## Validation
 
 Loading 验证 exact ABI version/structure size、pointer/array alignment、pointer/count pair、
 bounded key/count/rank/parameter value、严格 UTF-8 operation/parameter-schema/
 provider-schema key、duplicate parameter declaration、closed enum/flag/type combination、
-required callback、output element/shape/byte count、facet array/key/version/payload、
+required callback、logical C++ fixed descriptor、dense C DSO fixed stride/byte
+representability、output element/shape/byte count、facet array/key/version/payload、
 arithmetic overflow 与 exactly-once destroy ownership。Key validation 会在 publication
 前拒绝 invalid continuation byte、truncation、overlong encoding、UTF-16 surrogate、
 大于 U+10FFFF 的值、embedded null 与 ASCII control，但不执行 Unicode normalization。

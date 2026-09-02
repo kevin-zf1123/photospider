@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
+#include "photospider/execution/execution.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/library_test_hooks.hpp"
@@ -28,6 +30,9 @@
 #endif
 #ifndef PS_OPERATION_BAD_FIXTURE_PATH
 #error "PS_OPERATION_BAD_FIXTURE_PATH must name the invalid fixture"
+#endif
+#ifndef PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH
+#error "missing dense-overflow operation fixture path"
 #endif
 #ifndef PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH
 #error "missing parameter-pointer ABI fixture path"
@@ -344,6 +349,105 @@ class LibraryObserver final {
   void* handle_ = nullptr;
 };
 
+/**
+ * @brief Verifies one C++ fixed descriptor with a broadcast-only huge shape.
+ *
+ * The helper registers and freezes an embedding callback, compiles the same
+ * graph twice, executes the same plan twice, and proves descriptor identity,
+ * admission accounting, and the eight-byte broadcast result stay stable
+ * without evaluating the dense logical element product.
+ *
+ * @param shape Rank-1..8 nonzero fixed output shape.
+ * @return Zero when registration, compilation, execution, and exact checks
+ * pass; one on the first failed check.
+ * @throws std::bad_alloc If test staging allocation fails.
+ * @note The callback publishes a zero-stride whole-Region Value backed by one
+ * Float64 scalar; this is a C++ embedding contract, not a C DSO layout.
+ */
+int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  ps::OperationTraits traits;
+  traits.estimated_bytes = sizeof(double);
+  traits.output_element_type = ps::ElementType::Float64;
+  traits.shape_rule = ps::OperationShapeRule::Fixed;
+  traits.fixed_output_shape = shape;
+  PS_CHECK(
+      registry
+          ->register_operation(ps::OperationDefinition{
+              "fixture.fixed_broadcast", traits,
+              [shape](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
+                const double scalar = 19.0;
+                std::vector<std::uint8_t> bytes(sizeof(scalar));
+                std::memcpy(bytes.data(), &scalar, sizeof(scalar));
+                return ps::Value::create(
+                    ps::ValueDescriptor{ps::ElementType::Float64, shape},
+                    ps::Region::whole(shape),
+                    ps::StridedLayout{
+                        0U, std::vector<std::int64_t>(shape.size(), 0)},
+                    std::move(bytes));
+              }})
+          .ok());
+  auto copied_traits = registry->find_traits("fixture.fixed_broadcast");
+  PS_CHECK(copied_traits.ok());
+  PS_CHECK(copied_traits.value().estimated_bytes == sizeof(double));
+  PS_CHECK(copied_traits.value().fixed_output_shape == shape);
+  PS_CHECK(registry->freeze().ok());
+
+  ps::WorkflowDocument document;
+  document.nodes = {ps::WorkflowNode{1U, "fixture.fixed_broadcast", {}, {}}};
+  document.outputs = {ps::WorkflowOutput{"value", 1U, "value"}};
+  ps::GraphContext graph(std::move(document));
+  ps::Compiler compiler(registry);
+  auto first_compilation = compiler.compile(graph);
+  auto second_compilation = compiler.compile(graph);
+  PS_CHECK(first_compilation.ok());
+  PS_CHECK(second_compilation.ok());
+  PS_CHECK(first_compilation.value().semantic.digest().value ==
+           second_compilation.value().semantic.digest().value);
+  PS_CHECK(first_compilation.value().optimized.digest().value ==
+           second_compilation.value().optimized.digest().value);
+  PS_CHECK(first_compilation.value().plan.digest().value ==
+           second_compilation.value().plan.digest().value);
+  PS_CHECK(first_compilation.value().plan.cache_key().value ==
+           second_compilation.value().plan.cache_key().value);
+  PS_CHECK(first_compilation.value().plan.steps().size() == 1U);
+  PS_CHECK(first_compilation.value().plan.steps().front().planned_bytes ==
+           sizeof(double));
+  PS_CHECK(
+      first_compilation.value().plan.steps().front().output_descriptor.shape ==
+      shape);
+
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1U;
+  config.maximum_queued_tasks = 1U;
+  config.maximum_live_bytes = sizeof(double);
+  ps::ExecutionContext execution(registry, config);
+  auto first_result = execution.execute(first_compilation.value().plan);
+  auto second_result = execution.execute(second_compilation.value().plan);
+  PS_CHECK(first_result.ok());
+  PS_CHECK(second_result.ok());
+  PS_CHECK(first_result.value().diagnostics.peak_live_bytes == sizeof(double));
+  PS_CHECK(second_result.value().diagnostics.peak_live_bytes == sizeof(double));
+  PS_CHECK(first_result.value().diagnostics.result_digest ==
+           second_result.value().diagnostics.result_digest);
+  const auto value_entry = first_result.value().values.find("value");
+  PS_CHECK(value_entry != first_result.value().values.end());
+  const ps::Value& value = value_entry->second;
+  PS_CHECK(value.valid());
+  PS_CHECK(value.descriptor().shape == shape);
+  PS_CHECK(value.bytes().size() == sizeof(double));
+  PS_CHECK(value.layout().byte_strides.size() == shape.size());
+  PS_CHECK(std::all_of(value.layout().byte_strides.begin(),
+                       value.layout().byte_strides.end(),
+                       [](std::int64_t stride) { return stride == 0; }));
+  PS_CHECK(value.region().dimensions().size() == shape.size());
+  for (std::size_t axis = 0U; axis < shape.size(); ++axis) {
+    PS_CHECK(value.region().dimensions()[axis].offset == 0U);
+    PS_CHECK(value.region().dimensions()[axis].extent == shape[axis]);
+  }
+  return 0;
+}
+
 }  // namespace
 
 /**
@@ -427,6 +531,22 @@ int main() {
   }
   PS_CHECK(unicode_operation_observer.counter(
                "ps_operation_utf8_fixture_destroy_count") == 1U);
+
+  LibraryObserver dense_overflow_observer(
+      PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH);
+  PS_CHECK(dense_overflow_observer.counter(
+               "ps_operation_dense_overflow_fixture_destroy_count") == 0U);
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                               false);
+    OperationRegistry registry;
+    PS_CHECK(
+        !registry.load_plugin(PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH).ok());
+    PS_CHECK(registry.keys().empty());
+    PS_CHECK(lifecycle.native_close_count() == 1U);
+  }
+  PS_CHECK(dense_overflow_observer.counter(
+               "ps_operation_dense_overflow_fixture_destroy_count") == 1U);
 
   LibraryObserver operation_observer(PS_OPERATION_FIXTURE_PATH);
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
@@ -675,6 +795,11 @@ int main() {
   PS_CHECK(provider_observer.counter(
                "ps_data_provider_fixture_destroy_count") == 3U);
 
+  PS_CHECK(verify_cpp_fixed_broadcast(
+               {std::numeric_limits<std::uint64_t>::max()}) == 0);
+  PS_CHECK(verify_cpp_fixed_broadcast(
+               {std::numeric_limits<std::uint64_t>::max(), 2U}) == 0);
+
   OperationRegistry fencing;
   OperationTraits conflicting_schema;
   conflicting_schema.parameter_schema = {
@@ -685,17 +810,6 @@ int main() {
   PS_CHECK(!fencing
                 .register_operation(OperationDefinition{
                     "fixture.conflicting_schema", conflicting_schema,
-                    [](const OperationInvocation&) -> Result<Value> {
-                      return Result<Value>(Value::from_float64(1.0));
-                    }})
-                .ok());
-  OperationTraits overflowing_fixed_shape;
-  overflowing_fixed_shape.shape_rule = OperationShapeRule::Fixed;
-  overflowing_fixed_shape.fixed_output_shape = {
-      std::numeric_limits<std::uint64_t>::max()};
-  PS_CHECK(!fencing
-                .register_operation(OperationDefinition{
-                    "fixture.overflowing_fixed_shape", overflowing_fixed_shape,
                     [](const OperationInvocation&) -> Result<Value> {
                       return Result<Value>(Value::from_float64(1.0));
                     }})

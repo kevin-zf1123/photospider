@@ -226,6 +226,15 @@ if(BUILD_TESTING)
   target_compile_definitions(operation_bad_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(operation_bad_fixture PROPERTIES PREFIX "")
 
+  add_library(
+    operation_dense_overflow_fixture MODULE
+    tests/fixtures/operation_dense_overflow_fixture.cpp)
+  target_link_libraries(
+    operation_dense_overflow_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(
+    operation_dense_overflow_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(operation_dense_overflow_fixture PROPERTIES PREFIX "")
+
   function(photospider_add_bad_parameter_fixture target case_number)
     add_library(
       ${target} MODULE
@@ -317,6 +326,7 @@ if(BUILD_TESTING)
     test_plugin_registry
     operation_fixture
     operation_bad_fixture
+    operation_dense_overflow_fixture
     operation_bad_parameter_pointer_fixture
     operation_bad_parameter_size_fixture
     operation_bad_parameter_count_fixture
@@ -336,6 +346,7 @@ if(BUILD_TESTING)
     test_plugin_registry
     PRIVATE PS_OPERATION_FIXTURE_PATH="$<TARGET_FILE:operation_fixture>"
             PS_OPERATION_BAD_FIXTURE_PATH="$<TARGET_FILE:operation_bad_fixture>"
+            PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH="$<TARGET_FILE:operation_dense_overflow_fixture>"
             PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_pointer_fixture>"
             PS_OPERATION_BAD_PARAMETER_SIZE_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_size_fixture>"
             PS_OPERATION_BAD_PARAMETER_COUNT_FIXTURE_PATH="$<TARGET_FILE:operation_bad_parameter_count_fixture>"
