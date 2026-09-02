@@ -1,5 +1,15 @@
+#include "photospider/plugin/operation_plugin.hpp"
+
+// Keep the self-contained C++ wrapper as this translation unit's first include.
 #include "photospider/plugin/data_provider_api.h"
-#include "photospider/plugin/operation_plugin_api.h"
+
+static_assert(
+    ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V2) ==
+        PS_OPERATION_ELEMENT_FLOAT64_V2,
+    "the installed C++ operation wrapper must preserve ABI enum values");
+static_assert(
+    noexcept(ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V2)),
+    "the installed C++ operation wrapper conversion must remain noexcept");
 
 /**
  * @brief Returns the ABI-version sum computed by the installed C SDK unit.
