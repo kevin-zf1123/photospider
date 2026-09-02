@@ -21,6 +21,47 @@ if(PHOTOSPIDER_ENABLE_ASAN AND PHOTOSPIDER_ENABLE_TSAN)
   message(FATAL_ERROR "ASAN and TSAN cannot be enabled together")
 endif()
 
+set(PHOTOSPIDER_SANITIZER_MODE none)
+set(PHOTOSPIDER_SANITIZER_FLAG "")
+if(PHOTOSPIDER_ENABLE_ASAN OR PHOTOSPIDER_ENABLE_TSAN)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    message(FATAL_ERROR "Photospider sanitizers require Clang or GNU C++")
+  endif()
+  include(CheckCXXCompilerFlag)
+  include(CheckLinkerFlag)
+  if(PHOTOSPIDER_ENABLE_ASAN)
+    set(PHOTOSPIDER_SANITIZER_MODE address)
+    set(PHOTOSPIDER_SANITIZER_FLAG -fsanitize=address)
+  else()
+    set(PHOTOSPIDER_SANITIZER_MODE thread)
+    set(PHOTOSPIDER_SANITIZER_FLAG -fsanitize=thread)
+  endif()
+  string(TOUPPER "${PHOTOSPIDER_SANITIZER_MODE}"
+         _photospider_sanitizer_mode_upper)
+  set(_photospider_cxx_sanitizer_check
+      "PHOTOSPIDER_CXX_${_photospider_sanitizer_mode_upper}_SANITIZER_SUPPORTED")
+  set(_photospider_cxx_sanitizer_link_check
+      "PHOTOSPIDER_CXX_${_photospider_sanitizer_mode_upper}_SANITIZER_LINK_SUPPORTED")
+  set(CMAKE_REQUIRED_LINK_OPTIONS "${PHOTOSPIDER_SANITIZER_FLAG}")
+  check_cxx_compiler_flag(
+    "${PHOTOSPIDER_SANITIZER_FLAG}"
+    ${_photospider_cxx_sanitizer_check})
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
+  check_cxx_compiler_flag(
+    "-fno-omit-frame-pointer"
+    PHOTOSPIDER_CXX_FRAME_POINTER_FLAG_SUPPORTED)
+  check_linker_flag(
+    CXX "${PHOTOSPIDER_SANITIZER_FLAG}"
+    ${_photospider_cxx_sanitizer_link_check})
+  if(NOT ${_photospider_cxx_sanitizer_check} OR
+     NOT PHOTOSPIDER_CXX_FRAME_POINTER_FLAG_SUPPORTED OR
+     NOT ${_photospider_cxx_sanitizer_link_check})
+    message(
+      FATAL_ERROR
+        "Requested ${PHOTOSPIDER_SANITIZER_MODE} sanitizer is unsupported")
+  endif()
+endif()
+
 find_package(Threads REQUIRED)
 
 set(
@@ -73,14 +114,17 @@ function(photospider_configure_kernel_target target)
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    if(PHOTOSPIDER_ENABLE_ASAN)
+    if(NOT PHOTOSPIDER_SANITIZER_MODE STREQUAL "none")
       target_compile_options(
-        ${target} PUBLIC -fsanitize=address -fno-omit-frame-pointer)
-      target_link_options(${target} PUBLIC -fsanitize=address)
-    elseif(PHOTOSPIDER_ENABLE_TSAN)
-      target_compile_options(
-        ${target} PUBLIC -fsanitize=thread -fno-omit-frame-pointer)
-      target_link_options(${target} PUBLIC -fsanitize=thread)
+        ${target}
+        PRIVATE ${PHOTOSPIDER_SANITIZER_FLAG} -fno-omit-frame-pointer
+        INTERFACE
+          "$<BUILD_INTERFACE:${PHOTOSPIDER_SANITIZER_FLAG}>"
+          "$<BUILD_INTERFACE:-fno-omit-frame-pointer>")
+      target_link_options(
+        ${target}
+        PRIVATE ${PHOTOSPIDER_SANITIZER_FLAG}
+        INTERFACE "$<BUILD_INTERFACE:${PHOTOSPIDER_SANITIZER_FLAG}>")
     endif()
   endif()
 endfunction()
@@ -100,7 +144,8 @@ if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
   endif()
   target_compile_options(
     photospider PRIVATE -fsanitize=fuzzer-no-link -fno-omit-frame-pointer)
-  target_link_options(photospider INTERFACE -fsanitize=fuzzer-no-link)
+  target_link_options(
+    photospider INTERFACE "$<BUILD_INTERFACE:-fsanitize=fuzzer-no-link>")
   add_executable(
     photospider_operation_contract_ir_fuzz EXCLUDE_FROM_ALL
     tests/fuzz/operation_contract_ir_fuzz.cpp)
@@ -317,5 +362,6 @@ if(BUILD_TESTING)
       "-DPHOTOSPIDER_GENERATOR:STRING=${CMAKE_GENERATOR}"
       "-DPHOTOSPIDER_GENERATOR_PLATFORM:STRING=${CMAKE_GENERATOR_PLATFORM}"
       "-DPHOTOSPIDER_GENERATOR_TOOLSET:STRING=${CMAKE_GENERATOR_TOOLSET}"
+      "-DPHOTOSPIDER_CONSUMER_SANITIZER:STRING=${PHOTOSPIDER_SANITIZER_MODE}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunInstalledConsumer.cmake")
 endif()

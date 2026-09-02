@@ -80,7 +80,14 @@ The nested consumer project exposes a generator-aware
 expression. The outer gate passes its exact generator, platform/toolset when
 present, and active configuration, then builds that run target. Single-config
 and multi-config layouts therefore require no guessed build root, configuration
-directory, executable suffix, or bundle path.
+directory, executable suffix, or bundle path. The outer gate also passes the
+closed producer sanitizer mode `none`, `address`, or `thread`. A sanitized
+nested project applies matching compile instrumentation to its C SDK object,
+shared bridge, and final executable and matching link instrumentation to both
+linked products. The final executable therefore owns the sanitizer runtime
+even though the static kernel is first embedded in a private downstream shared
+bridge. An ordinary consumer receives no sanitizer option, and installed
+`PhotospiderTargets.cmake` never contains a sanitizer flag.
 
 Daemon validation must use that isolated prefix, never a sibling checkout or
 private include directory.
@@ -93,10 +100,17 @@ target nor its execution-hook object exists.
 
 ## Sanitizers and malformed-input validation
 
-ASAN and TSAN are scoped CMake modes where the toolchain supports them. The
-ordinary tests exercise malformed Value/Region/layout, graph documents,
-operation/provider records, and callback outputs. Malformed local IPC frames
-belong to the daemon repository.
+ASAN and TSAN are mutually exclusive scoped CMake modes where the C++ compiler
+and linker support the requested instrumentation. Configuration fails instead
+of silently producing an uninstrumented target when that support is absent.
+Sanitizer compile and link options are private to the kernel product and are
+published only through its build-tree interface so every in-tree executable is
+closed over the runtime. The complete sanitizer CTest inventory retains the
+installed-consumer gate, whose explicitly matching nested mode tests the
+installed static/shared-bridge/final-executable topology without leaking
+instrumentation into the installed package export. The ordinary tests exercise
+malformed Value/Region/layout, graph documents, operation/provider records, and
+callback outputs. Malformed local IPC frames belong to the daemon repository.
 
 The long-lived manual target `photospider_operation_contract_ir_fuzz` exercises
 operation-v2 trait/parameter vocabulary and compiler validation. It is

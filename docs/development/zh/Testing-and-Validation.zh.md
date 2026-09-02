@@ -68,7 +68,12 @@ Nested consumer project 暴露 generator-aware 的 `run_photospider_consumer` ta
 其 command 使用 executable 的 target-file expression。Outer gate 会传递精确 generator、
 存在时的 platform/toolset 与 active configuration，随后 build 该 run target。因此
 single-config 与 multi-config layout 都不需要猜测 build root、configuration directory、
-executable suffix 或 bundle path。
+executable suffix 或 bundle path。Outer gate 还会传递闭合的 producer sanitizer mode：
+`none`、`address` 或 `thread`。Sanitized nested project 会给 C SDK object、shared
+bridge 与 final executable 应用 matching compile instrumentation，并给两个 linked
+product 应用 matching link instrumentation。因此，即使 static kernel 先嵌入一个 private
+downstream shared bridge，final executable 仍直接拥有 sanitizer runtime。普通 consumer
+不接收 sanitizer option，installed `PhotospiderTargets.cmake` 也绝不包含 sanitizer flag。
 
 Daemon validation 必须使用该隔离 prefix，绝不能使用 sibling checkout 或 private
 include directory。
@@ -80,9 +85,14 @@ execution-hook object 都不存在。
 
 ## Sanitizer 与 malformed-input validation
 
-Toolchain 支持时，ASAN 与 TSAN 是 scoped CMake mode。普通 test 覆盖 malformed
-Value/Region/layout、graph document、operation/provider record 与 callback output。
-Malformed local IPC frame 属于 daemon repository。
+当 C++ compiler 与 linker 支持请求的 instrumentation 时，ASAN 与 TSAN 是互斥的
+scoped CMake mode；缺少支持时 configure 会失败，不会静默生成未插桩 target。Sanitizer
+compile/link option 对 kernel product 为 private，仅通过其 build-tree interface 发布，
+从而让每个 in-tree executable 对 runtime 闭合。完整 sanitizer CTest inventory 继续保留
+installed-consumer gate；该 gate 使用显式 matching nested mode 验证 installed static/
+shared-bridge/final-executable 拓扑，同时不向 installed package export 泄漏 instrumentation。
+普通 test 覆盖 malformed Value/Region/layout、graph document、operation/provider record
+与 callback output。Malformed local IPC frame 属于 daemon repository。
 
 长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 operation-v2
 trait/parameter vocabulary 与 compiler validation。它使用 `EXCLUDE_FROM_ALL`，绝不注册到
