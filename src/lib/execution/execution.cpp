@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -248,6 +249,16 @@ class ThreadPool final {
    */
   [[nodiscard]] bool submit(QueuedCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    const execution_testing::CallbackSubmitAction test_action =
+        execution_testing::callback_submit_action(backend_);
+    if (test_action == execution_testing::CallbackSubmitAction::Reject) {
+      return false;
+    }
+    if (test_action == execution_testing::CallbackSubmitAction::ThrowBadAlloc) {
+      throw std::bad_alloc();
+    }
+#endif
     if (stopping_) {
       return false;
     }
@@ -916,7 +927,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param backend CPU or optional local GPU lane.
    * @throws Nothing across callback/scheduler boundaries.
    * @note Fallback preserves the existing in-flight count. Queue ownership
-   * releases shared admission before `execute_attempt` begins running.
+   * releases shared admission before `execute_attempt` begins running. Every
+   * scheduler rejection reaches the centralized first-failure selector after
+   * the optional noninstalled pre-commit observation hook.
    */
   void submit_attempt(std::size_t step_index, Backend backend) noexcept {
     try {
@@ -938,6 +951,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (can_fallback) {
           submit_attempt(step_index, Backend::Cpu);
         } else {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+          execution_testing::notify_before_scheduler_failure(
+              execution_testing::SchedulerFailurePoint::GpuBackendUnavailable);
+#endif
           finish_failure(
               Status::failure(ErrorCode::BackendUnavailable,
                               "optional local GPU lane is unavailable"));
@@ -950,6 +967,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       };
       auto admission = waiting_admission_->try_acquire();
       if (!admission.has_value()) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+        execution_testing::notify_before_scheduler_failure(
+            execution_testing::SchedulerFailurePoint::WaitingAdmissionRejected);
+#endif
         finish_failure(Status::failure(
             ErrorCode::ResourceExhausted,
             "ExecutionContext waiting callback limit is exhausted"));
@@ -963,11 +984,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         accepted = cpu_pool_->submit(std::move(queued));
       }
       if (!accepted) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+        execution_testing::notify_before_scheduler_failure(
+            execution_testing::SchedulerFailurePoint::CallbackSubmitRejected);
+#endif
         finish_failure(
             Status::failure(ErrorCode::ResourceExhausted,
                             "local backend callback queue is stopped"));
       }
     } catch (const std::bad_alloc&) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+      execution_testing::notify_before_scheduler_failure(
+          execution_testing::SchedulerFailurePoint::CallbackSubmitException);
+#endif
       finish_failure_safely(ErrorCode::ResourceExhausted,
                             "callback submission allocation failed");
     } catch (const std::exception& error) {
@@ -1122,6 +1151,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param result Operation result ownership.
    * @throws std::bad_alloc If a first-failure diagnostic allocation fails.
    * @note Cancellation/currentness are rechecked before Value publication.
+   * Failed callback results retain their contextual diagnostic selection and
+   * then pass through the same centralized code-priority check as scheduler
+   * failures before first-failure publication.
    */
   void finish_attempt(std::size_t step_index, Backend backend,
                       Result<Value> result) {
@@ -1181,7 +1213,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   /**
    * @brief Records an external submission/admission failure and drains a slot.
    * @param failure Non-success status.
-   * @throws Nothing except possible status copy allocation.
+   * @throws std::system_error If per-Run mutex acquisition fails.
+   * @note The owned status is moved without allocation after cancellation and
+   * plan currentness are rechecked under the first-failure lock.
    */
   void finish_failure(Status failure) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1193,16 +1227,24 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param code Stable failure category.
    * @param diagnostic Bounded diagnostic source.
    * @throws Nothing.
+   * @note Its allocation-free fallback uses the same cancellation/stale/error
+   * code priority as the ordinary first-failure path and clears diagnostics
+   * rather than allocating a replacement message.
    */
   void finish_failure_safely(ErrorCode code,
                              const std::string& diagnostic) noexcept {
     try {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+      if (execution_testing::fail_failure_status_construction()) {
+        throw std::bad_alloc();
+      }
+#endif
       finish_failure(Status::failure(code, diagnostic));
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!failure_.has_value()) {
         failure_.emplace();
-        failure_->code = code == ErrorCode::Ok ? ErrorCode::Internal : code;
+        failure_->code = prioritized_failure_code_locked(code);
         failure_->message.clear();
       }
       if (in_flight_ != 0U) {
@@ -1213,14 +1255,44 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   }
 
   /**
-   * @brief Stores the first failure and releases one in-flight slot.
-   * @param failure Non-success status.
-   * @throws std::bad_alloc If first status copy allocation fails.
-   * @note Caller holds `mutex_`.
+   * @brief Selects the terminal code at the first-failure linearization point.
+   * @param original Scheduler, admission, callback, or exception category.
+   * @return Cancellation when observed or explicit, otherwise graph Stale when
+   * observed, otherwise the original non-Ok code (`Internal` for accidental
+   * Ok input).
+   * @throws Nothing.
+   * @note Caller holds `mutex_`. The selector performs only atomic/weak-state
+   * observations and scalar comparisons, so it is allocation-free and usable
+   * by `finish_failure_safely` after diagnostic construction fails.
    */
-  void finish_failure_locked(Status failure) {
+  [[nodiscard]] ErrorCode prioritized_failure_code_locked(
+      ErrorCode original) const noexcept {
+    if (cancellation_.cancelled() || original == ErrorCode::Cancelled) {
+      return ErrorCode::Cancelled;
+    }
+    if (!plan_->current()) {
+      return ErrorCode::Stale;
+    }
+    return original == ErrorCode::Ok ? ErrorCode::Internal : original;
+  }
+
+  /**
+   * @brief Prioritizes and stores the first failure, then drains one slot.
+   * @param failure Non-success status.
+   * @throws Nothing.
+   * @note Caller holds `mutex_`. Moving the first owned status and clearing a
+   * diagnostic after code promotion allocate no storage. Existing first
+   * failure and in-flight accounting remain exact for later callbacks.
+   */
+  void finish_failure_locked(Status failure) noexcept {
     if (!failure_.has_value()) {
-      failure_ = std::move(failure);
+      const ErrorCode prioritized =
+          prioritized_failure_code_locked(failure.code);
+      if (prioritized != failure.code) {
+        failure.code = prioritized;
+        failure.message.clear();
+      }
+      failure_.emplace(std::move(failure));
     }
     if (in_flight_ != 0U) {
       --in_flight_;

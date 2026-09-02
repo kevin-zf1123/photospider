@@ -23,6 +23,10 @@ Kernel tests cover:
 - one ExecutionContext-wide waiting-callback bound shared across deterministic
   CPU/GPU FIFOs, recovery after a worker pop, and ordinary mixed-lane
   concurrent Runs;
+- first-failure priority across no-GPU fallback denial, waiting-admission
+  rejection, backend queue rejection, and submission exception fallback:
+  cancellation precedes graph `Stale`, which precedes the original failure,
+  with no stale result and exact waiting/in-flight/resource recovery;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences;
@@ -92,8 +96,11 @@ bridge. An ordinary consumer receives no sanitizer option, and installed
 Daemon validation must use that isolated prefix, never a sibling checkout or
 private include directory.
 
-The deterministic cross-lane waiting test uses a private callback-enqueue hook
-compiled only into the noninstalled `photospider_test_kernel`. With
+The deterministic scheduler tests use private callback-enqueue, pre-failure,
+queue-rejection, and diagnostic-construction hooks compiled only into the
+noninstalled `photospider_test_kernel`. They expose the otherwise unobservable
+no-GPU/admission/submit linearization windows and the allocation-free exception
+fallback. With
 `BUILD_TESTING=ON`, the product archive, installed kernel, exports, and ordinary
 consumer remain hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel
 target nor its execution-hook object exists.

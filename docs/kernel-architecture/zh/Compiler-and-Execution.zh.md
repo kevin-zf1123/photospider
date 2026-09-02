@@ -43,6 +43,14 @@ rejection、exception 与 shutdown drop path 会把 token 恰好释放一次。`
 private `ExecutionRun`，采用 deterministic ready-step ordering 与 caller-selected maximum
 parallelism。
 
+Run 在其 mutex 下只有一个 first-failure linearization。每个 scheduler、waiting-admission、
+backend-queue 与 callback failure 都会在 first storage 前立即重新检查 cooperative token 与
+plan currentness：cancellation 优先于 graph `Stale`，graph `Stale` 又优先于 original
+failure。该 selector 只执行 scalar/currentness observation，不分配内存，并被 no-throw
+diagnostic-construction fallback 复用。若两种 stop 均不存在，且 copied trait 明确拒绝
+fallback，则 unavailable GPU 仍保持 `BackendUnavailable`；普通 admission/queue rejection
+也保持原 category。
+
 当 dependency 与 consumer 的 backend label 不同时，Run 复制 immutable bytes，创建一个
 不同的 validated Value。该 copy 显式计入 transfer count/bytes。Backend label 是 Run-local
 derived state；kernel 不暴露 native GPU handle 或 persistent residency registry。
