@@ -255,6 +255,119 @@ class QueueAdmissionGate final {
 };
 
 /**
+ * @brief Drives one exact scheduler-failure race in the noninstalled kernel.
+ *
+ * @note The controller is borrowed by process-global test callbacks only while
+ * every referenced graph, replacement document, and cancellation source live.
+ */
+class SchedulerFailureController final {
+ public:
+  /**
+   * @brief Creates one single-use deterministic failure controller.
+   * @param expected Exact scheduler boundary that triggers the stop action.
+   * @param submit_action Queue action returned for the selected backend.
+   * @param submit_backend Backend on which the queue action applies.
+   * @param cancellation Optional source cancelled at the expected boundary.
+   * @param graph Optional graph replaced at the expected boundary.
+   * @param replacement Owned replacement moved into `graph` at most once.
+   * @param fail_status_construction Whether exception fallback is forced once.
+   * @throws Nothing.
+   */
+  SchedulerFailureController(
+      ps::execution_testing::SchedulerFailurePoint expected,
+      ps::execution_testing::CallbackSubmitAction submit_action,
+      ps::Backend submit_backend, ps::CancellationSource* cancellation,
+      ps::GraphContext* graph, ps::WorkflowDocument* replacement,
+      bool fail_status_construction) noexcept
+      : expected_(expected),
+        submit_action_(submit_action),
+        submit_backend_(submit_backend),
+        cancellation_(cancellation),
+        graph_(graph),
+        replacement_(replacement),
+        fail_status_construction_(fail_status_construction) {}
+
+  /**
+   * @brief Applies cancellation or replacement before the selected failure.
+   * @param point Observed scheduler boundary.
+   * @return No value.
+   * @throws Any exception raised by graph replacement; the hook fences it.
+   * @note A matching point triggers at most once.
+   */
+  void before_failure(ps::execution_testing::SchedulerFailurePoint point) {
+    if (point != expected_ || failure_observed_) {
+      return;
+    }
+    failure_observed_ = true;
+    if (cancellation_) {
+      static_cast<void>(cancellation_->cancel());
+    }
+    if (graph_ && replacement_) {
+      static_cast<void>(graph_->replace(std::move(*replacement_)));
+    }
+  }
+
+  /**
+   * @brief Returns the configured queue action once for its exact backend.
+   * @param backend Observed queue lane.
+   * @return Configured action once, then Proceed.
+   * @throws Nothing.
+   */
+  ps::execution_testing::CallbackSubmitAction submit_action(
+      ps::Backend backend) noexcept {
+    if (backend != submit_backend_ || submit_action_observed_) {
+      return ps::execution_testing::CallbackSubmitAction::Proceed;
+    }
+    submit_action_observed_ = true;
+    return submit_action_;
+  }
+
+  /**
+   * @brief Forces exception-status construction failure at most once.
+   * @return True only for the configured first observation.
+   * @throws Nothing.
+   */
+  bool fail_status_construction() noexcept {
+    if (!fail_status_construction_ || status_failure_observed_) {
+      return false;
+    }
+    status_failure_observed_ = true;
+    return true;
+  }
+
+  /**
+   * @brief Reports whether the expected failure boundary was observed.
+   * @return True after the stop action ran.
+   * @throws Nothing.
+   */
+  [[nodiscard]] bool failure_observed() const noexcept {
+    return failure_observed_;
+  }
+
+ private:
+  /** @brief Exact scheduler boundary that applies the stop action. */
+  ps::execution_testing::SchedulerFailurePoint expected_;
+  /** @brief One deterministic queue action. */
+  ps::execution_testing::CallbackSubmitAction submit_action_;
+  /** @brief Queue lane on which the deterministic action applies. */
+  ps::Backend submit_backend_;
+  /** @brief Optional borrowed cancellation source. */
+  ps::CancellationSource* cancellation_;
+  /** @brief Optional borrowed graph to invalidate. */
+  ps::GraphContext* graph_;
+  /** @brief Optional borrowed replacement moved exactly once. */
+  ps::WorkflowDocument* replacement_;
+  /** @brief Whether the no-allocation fallback must be entered once. */
+  bool fail_status_construction_;
+  /** @brief Whether the expected scheduler boundary has triggered. */
+  bool failure_observed_ = false;
+  /** @brief Whether the configured queue action has been consumed. */
+  bool submit_action_observed_ = false;
+  /** @brief Whether status-construction failure has been consumed. */
+  bool status_failure_observed_ = false;
+};
+
+/**
  * @brief Deterministically holds a successful raw-benchmark oracle.
  *
  * @note The oracle owns no cancellation source. A separate test thread wins
@@ -315,6 +428,9 @@ class BenchmarkOracleGate final {
 /** @brief Borrowed active deterministic queue gate for one scoped test. */
 QueueAdmissionGate* g_queue_admission_gate = nullptr;
 
+/** @brief Borrowed active scheduler-failure controller for one scoped test. */
+SchedulerFailureController* g_scheduler_failure_controller = nullptr;
+
 /**
  * @brief Bridges the private callback-waiting hook into the scoped gate.
  * @param backend Exact lane whose queue accepted a callback.
@@ -325,6 +441,42 @@ void hold_queued_callback(ps::Backend backend) {
   if (g_queue_admission_gate) {
     g_queue_admission_gate->hold(backend);
   }
+}
+
+/**
+ * @brief Bridges the scheduler failure hook into its scoped controller.
+ * @param point Exact scheduler-owned failure boundary.
+ * @return No value.
+ * @throws Any graph replacement exception, which the hook boundary fences.
+ */
+void before_scheduler_failure(
+    ps::execution_testing::SchedulerFailurePoint point) {
+  if (g_scheduler_failure_controller) {
+    g_scheduler_failure_controller->before_failure(point);
+  }
+}
+
+/**
+ * @brief Bridges deterministic queue action selection into the controller.
+ * @param backend Exact backend queue being submitted.
+ * @return Configured single-use action or Proceed.
+ * @throws Nothing.
+ */
+ps::execution_testing::CallbackSubmitAction select_callback_submit_action(
+    ps::Backend backend) noexcept {
+  return g_scheduler_failure_controller
+             ? g_scheduler_failure_controller->submit_action(backend)
+             : ps::execution_testing::CallbackSubmitAction::Proceed;
+}
+
+/**
+ * @brief Bridges failure-status construction injection into the controller.
+ * @return True only for one configured exception-fallback observation.
+ * @throws Nothing.
+ */
+bool fail_failure_status_construction() noexcept {
+  return g_scheduler_failure_controller &&
+         g_scheduler_failure_controller->fail_status_construction();
 }
 
 /**
@@ -748,7 +900,8 @@ int main() {
   QueueAdmissionGate queue_gate;
   g_queue_admission_gate = &queue_gate;
   const ps::execution_testing::ExecutionTestHooks execution_test_hooks{
-      &hold_queued_callback};
+      &hold_queued_callback, &before_scheduler_failure,
+      &select_callback_submit_action, &fail_failure_status_construction};
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto waiting_cpu_future = std::async(std::launch::async, [&] {
     return queue_bound_execution.execute(waiting_cpu_workflow.plan);
@@ -757,6 +910,15 @@ int main() {
       queue_gate.wait_until_entered(std::chrono::seconds(2));
   auto competing_gpu_result =
       queue_bound_execution.execute(competing_gpu_workflow.plan);
+  CancellationSource waiting_rejection_cancellation;
+  SchedulerFailureController waiting_rejection_control(
+      ps::execution_testing::SchedulerFailurePoint::WaitingAdmissionRejected,
+      ps::execution_testing::CallbackSubmitAction::Proceed, Backend::Cpu,
+      &waiting_rejection_cancellation, nullptr, nullptr, false);
+  g_scheduler_failure_controller = &waiting_rejection_control;
+  auto cancelled_waiting_rejection = queue_bound_execution.execute(
+      competing_gpu_workflow.plan, waiting_rejection_cancellation.token());
+  g_scheduler_failure_controller = nullptr;
   queue_gate.release();
   auto waiting_cpu_result = waiting_cpu_future.get();
   ps::execution_testing::install_execution_test_hooks(nullptr);
@@ -764,6 +926,9 @@ int main() {
   PS_CHECK(cpu_callback_is_waiting);
   PS_CHECK(!competing_gpu_result.ok());
   PS_CHECK(competing_gpu_result.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(waiting_rejection_control.failure_observed());
+  PS_CHECK(!cancelled_waiting_rejection.ok());
+  PS_CHECK(cancelled_waiting_rejection.status().code == ErrorCode::Cancelled);
   PS_CHECK(waiting_cpu_result.ok());
   PS_CHECK(ps::test::named_scalar(waiting_cpu_result.value(), "sum") == 7.0);
   auto recovered_gpu_result =
@@ -784,6 +949,154 @@ int main() {
   PS_CHECK(gpu_lane_result.ok());
   PS_CHECK(ps::test::named_scalar(cpu_lane_result.value(), "sum") == 7.0);
   PS_CHECK(ps::test::named_scalar(gpu_lane_result.value(), "sum") == 11.0);
+
+  std::uint32_t gpu_only_calls = 0U;
+  auto gpu_only_operations = std::make_shared<OperationRegistry>();
+  OperationTraits gpu_only_traits;
+  gpu_only_traits.supports_gpu = true;
+  gpu_only_traits.allows_cpu_fallback = false;
+  gpu_only_traits.estimated_bytes = sizeof(double);
+  PS_CHECK(
+      gpu_only_operations
+          ->register_operation(OperationDefinition{
+              "test.gpu_only", gpu_only_traits,
+              [&gpu_only_calls](const OperationInvocation&) -> Result<Value> {
+                ++gpu_only_calls;
+                return Result<Value>(Value::from_float64(1.0));
+              }})
+          .ok());
+  gpu_only_operations->freeze();
+  Compiler gpu_only_compiler(gpu_only_operations);
+  ExecutionContext no_gpu_execution(
+      gpu_only_operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+
+  GraphContext unavailable_graph(single_operation_document("test.gpu_only"));
+  CompiledWorkflow unavailable_workflow =
+      compile_or_throw(&gpu_only_compiler, unavailable_graph, true);
+  auto denied_without_stop =
+      no_gpu_execution.execute(unavailable_workflow.plan);
+  PS_CHECK(!denied_without_stop.ok());
+  PS_CHECK(denied_without_stop.status().code == ErrorCode::BackendUnavailable);
+
+  CancellationSource unavailable_cancellation;
+  SchedulerFailureController unavailable_cancel_control(
+      ps::execution_testing::SchedulerFailurePoint::GpuBackendUnavailable,
+      ps::execution_testing::CallbackSubmitAction::Proceed, Backend::Gpu,
+      &unavailable_cancellation, nullptr, nullptr, false);
+  g_scheduler_failure_controller = &unavailable_cancel_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto cancelled_unavailable = no_gpu_execution.execute(
+      unavailable_workflow.plan, unavailable_cancellation.token());
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(unavailable_cancel_control.failure_observed());
+  PS_CHECK(!cancelled_unavailable.ok());
+  PS_CHECK(cancelled_unavailable.status().code == ErrorCode::Cancelled);
+
+  GraphContext unavailable_stale_graph(
+      single_operation_document("test.gpu_only"));
+  CompiledWorkflow unavailable_stale_workflow =
+      compile_or_throw(&gpu_only_compiler, unavailable_stale_graph, true);
+  WorkflowDocument unavailable_replacement =
+      single_operation_document("test.gpu_only");
+  SchedulerFailureController unavailable_stale_control(
+      ps::execution_testing::SchedulerFailurePoint::GpuBackendUnavailable,
+      ps::execution_testing::CallbackSubmitAction::Proceed, Backend::Gpu,
+      nullptr, &unavailable_stale_graph, &unavailable_replacement, false);
+  g_scheduler_failure_controller = &unavailable_stale_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto stale_unavailable =
+      no_gpu_execution.execute(unavailable_stale_workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(unavailable_stale_control.failure_observed());
+  PS_CHECK(!stale_unavailable.ok());
+  PS_CHECK(stale_unavailable.status().code == ErrorCode::Stale);
+  PS_CHECK(gpu_only_calls == 0U);
+
+  ExecutionContext submission_execution(
+      operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+  SchedulerFailureController submission_rejection_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
+      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
+      nullptr, nullptr, nullptr, false);
+  g_scheduler_failure_controller = &submission_rejection_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto submission_rejection = submission_execution.execute(workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(submission_rejection_control.failure_observed());
+  PS_CHECK(!submission_rejection.ok());
+  PS_CHECK(submission_rejection.status().code == ErrorCode::ResourceExhausted);
+
+  CancellationSource submission_cancellation;
+  SchedulerFailureController submission_cancel_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
+      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
+      &submission_cancellation, nullptr, nullptr, false);
+  g_scheduler_failure_controller = &submission_cancel_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto cancelled_submission = submission_execution.execute(
+      workflow.plan, submission_cancellation.token());
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(submission_cancel_control.failure_observed());
+  PS_CHECK(!cancelled_submission.ok());
+  PS_CHECK(cancelled_submission.status().code == ErrorCode::Cancelled);
+
+  GraphContext rejected_stale_graph(ps::test::addition_document(8.0, 9.0));
+  CompiledWorkflow rejected_stale_workflow =
+      compile_or_throw(&compiler, rejected_stale_graph);
+  WorkflowDocument rejected_replacement = ps::test::addition_document(1.0, 1.0);
+  SchedulerFailureController submission_stale_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
+      ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
+      nullptr, &rejected_stale_graph, &rejected_replacement, false);
+  g_scheduler_failure_controller = &submission_stale_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto stale_submission =
+      submission_execution.execute(rejected_stale_workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(submission_stale_control.failure_observed());
+  PS_CHECK(!stale_submission.ok());
+  PS_CHECK(stale_submission.status().code == ErrorCode::Stale);
+
+  CancellationSource safe_fallback_cancellation;
+  SchedulerFailureController safe_cancel_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
+      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Cpu,
+      &safe_fallback_cancellation, nullptr, nullptr, true);
+  g_scheduler_failure_controller = &safe_cancel_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto safe_cancelled_submission = submission_execution.execute(
+      workflow.plan, safe_fallback_cancellation.token());
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(safe_cancel_control.failure_observed());
+  PS_CHECK(!safe_cancelled_submission.ok());
+  PS_CHECK(safe_cancelled_submission.status().code == ErrorCode::Cancelled);
+
+  GraphContext safe_stale_graph(ps::test::addition_document(4.0, 5.0));
+  CompiledWorkflow safe_stale_workflow =
+      compile_or_throw(&compiler, safe_stale_graph);
+  WorkflowDocument safe_replacement = ps::test::addition_document(2.0, 3.0);
+  SchedulerFailureController safe_stale_control(
+      ps::execution_testing::SchedulerFailurePoint::CallbackSubmitException,
+      ps::execution_testing::CallbackSubmitAction::ThrowBadAlloc, Backend::Cpu,
+      nullptr, &safe_stale_graph, &safe_replacement, true);
+  g_scheduler_failure_controller = &safe_stale_control;
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+  auto safe_stale_submission =
+      submission_execution.execute(safe_stale_workflow.plan);
+  ps::execution_testing::install_execution_test_hooks(nullptr);
+  g_scheduler_failure_controller = nullptr;
+  PS_CHECK(safe_stale_control.failure_observed());
+  PS_CHECK(!safe_stale_submission.ok());
+  PS_CHECK(safe_stale_submission.status().code == ErrorCode::Stale);
+  auto submission_recovered = submission_execution.execute(workflow.plan);
+  PS_CHECK(submission_recovered.ok());
+  PS_CHECK(ps::test::named_scalar(submission_recovered.value(), "sum") == 6.5);
 
   GraphContext cancellable(ps::test::delayed_document(250));
   CompiledWorkflow cancellable_workflow =

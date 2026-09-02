@@ -33,4 +33,51 @@ void notify_callback_queued(Backend backend) noexcept {
   }
 }
 
+/**
+ * @brief Implements the scheduler failure pre-commit notification fence.
+ * @copydetails notify_before_scheduler_failure
+ */
+void notify_before_scheduler_failure(SchedulerFailurePoint point) noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (!hooks || !hooks->before_scheduler_failure) {
+    return;
+  }
+  try {
+    hooks->before_scheduler_failure(point);
+  } catch (...) {
+  }
+}
+
+/**
+ * @brief Implements deterministic queue-submission action selection.
+ * @copydetails callback_submit_action
+ */
+CallbackSubmitAction callback_submit_action(Backend backend) noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (!hooks || !hooks->callback_submit_action) {
+    return CallbackSubmitAction::Proceed;
+  }
+  try {
+    return hooks->callback_submit_action(backend);
+  } catch (...) {
+    return CallbackSubmitAction::Proceed;
+  }
+}
+
+/**
+ * @brief Implements exception-status construction failure selection.
+ * @copydetails fail_failure_status_construction
+ */
+bool fail_failure_status_construction() noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (!hooks || !hooks->fail_failure_status_construction) {
+    return false;
+  }
+  try {
+    return hooks->fail_failure_status_construction();
+  } catch (...) {
+    return false;
+  }
+}
+
 }  // namespace ps::execution_testing

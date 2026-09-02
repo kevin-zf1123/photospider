@@ -52,6 +52,16 @@ drop paths release it exactly once. `execute` creates one private
 `ExecutionRun` with deterministic ready-step ordering and a caller-selected
 maximum parallelism.
 
+The Run has one first-failure linearization under its mutex. Every scheduler,
+waiting-admission, backend-queue, and callback failure rechecks the cooperative
+token and plan currentness immediately before first storage: cancellation
+outranks graph `Stale`, which outranks the original failure. The selector uses
+only scalar and currentness observations, allocates nothing, and is reused by
+the no-throw diagnostic-construction fallback. In the absence of either stop,
+an unavailable GPU whose copied traits explicitly deny fallback remains
+`BackendUnavailable`; ordinary admission and queue rejection retain their
+original category.
+
 When a dependency and consumer have different backend labels, the Run creates
 a distinct validated Value by copying immutable bytes. The copy is explicit in
 transfer count/bytes. Backend labels are Run-local derived state; the kernel
