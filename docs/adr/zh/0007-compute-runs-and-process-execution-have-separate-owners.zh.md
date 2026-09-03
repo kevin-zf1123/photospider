@@ -31,6 +31,19 @@ Kernel 不定义 public 或 daemon-shaped Run identifier。Run identity 是单�
 
 ### Completion 与 publication
 
+任一 backend FIFO pop 一个 queued attempt 后，worker 会取得 Run mutex，并在 dependency
+copy、transfer、modeled-byte admission 或 operation invocation 前观察同一个带优先级的
+cancellation/currentness boundary。Failure 已存在或刚被观察到时，该 callback 会被
+abandon，并精确退役自己的一个 in-flight slot；observation 本身不拥有 retirement。CPU、
+GPU 与 GPU-to-CPU fallback attempt 使用同一个 cutoff，不会在 `GraphContext` 中注册 Run，
+也不会增加 replacement notification。
+
+这一 worker-entry observation 是 queued-attempt admission cutoff，不是 global exclusion
+或 preemption guarantee。Cutoff 后发生的 cancellation/replacement 可能与 transfer、
+resource admission 或 in-process operation entry 竞争。这样的 callback 可以按
+cooperative/best-effort 语义 drain，但 stop 被观察后，其 completion 与 final result 仍不能
+publication。
+
 只有 caller token 未取消且 plan 捕获的 graph revision 仍为 current 时，operation completion
 才会被接受。被拒绝的 late completion 会回收 callback/byte lease，但不能释放 dependent
 step，也不能进入 result map。

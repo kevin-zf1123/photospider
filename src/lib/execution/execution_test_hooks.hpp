@@ -101,6 +101,16 @@ using FailureStatusConstructionHook = bool (*)(FailureStatusConstructionPoint);
 using FinalResultReadyHook = void (*)() noexcept;
 
 /**
+ * @brief Callback invoked after post-submit external-stop observation.
+ * @return No value.
+ * @throws Nothing.
+ * @note The Run mutex remains held and the coordinator has not yet entered
+ * `state_changed_` waiting. Tests may hold this otherwise unobservable
+ * boundary, but the callback must not re-enter the executing Run.
+ */
+using PostSubmitObservationHook = void (*)() noexcept;
+
+/**
  * @brief Private callback set for deterministic execution regressions.
  *
  * @note This type exists only in the noninstalled test-kernel variant and has
@@ -117,6 +127,8 @@ struct ExecutionTestHooks final {
   FailureStatusConstructionHook fail_failure_status_construction = nullptr;
   /** @brief Optional final result-publication boundary observer. */
   FinalResultReadyHook final_result_ready = nullptr;
+  /** @brief Optional post-submit external-stop observation boundary hook. */
+  PostSubmitObservationHook post_submit_observation = nullptr;
 };
 
 /**
@@ -176,5 +188,15 @@ bool fail_failure_status_construction(
  * noninstalled test-kernel variant invokes this function.
  */
 void notify_final_result_ready() noexcept;
+
+/**
+ * @brief Notifies the installed post-submit observation callback.
+ * @return No value.
+ * @throws Nothing.
+ * @note The caller holds the Run mutex after its last post-submit external-stop
+ * observation and before possible `state_changed_` waiting. Only the
+ * noninstalled test-kernel variant invokes this function.
+ */
+void notify_post_submit_observation() noexcept;
 
 }  // namespace ps::execution_testing

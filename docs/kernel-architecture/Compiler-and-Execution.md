@@ -77,6 +77,19 @@ Run as its FIFO successor. Successor completion proves the target callback has
 finished abandonment; the target future must still remain incomplete while an
 independent GPU callback is gate-held.
 
+Every callback popped from either backend FIFO enters the Run mutex and uses
+that same no-throw external-stop observation before copying dependencies,
+transferring Values, acquiring modeled bytes, or invoking the operation. An
+existing or newly selected failure makes that worker retire exactly its own
+in-flight slot through the abandonment path. Direct CPU work, GPU work, and a
+GPU-to-CPU fallback all converge on this queued-attempt admission cutoff; the
+observation itself never retires a slot and `GraphContext` does not register or
+notify Runs. Cancellation or replacement after the cutoff may still race with
+transfer, resource acquisition, or entry into a non-preemptible in-process
+operation. That later interval remains cooperative/best-effort rather than a
+global mutex or forced-preemption guarantee, while completion and final result
+publication continue to reject every observed cancelled or stale outcome.
+
 At the operation-registry boundary, invocation validation preserves the order
 of operation lookup, input/demand counts, per-input validity and demand bounds,
 parameters, cancellation, closed CPU/GPU backend vocabulary, backend

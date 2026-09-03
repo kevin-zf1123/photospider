@@ -882,6 +882,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         submit_attempt(step_index, backend);
         lock.lock();
         observe_external_stop_locked();
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+        execution_testing::notify_post_submit_observation();
+#endif
       }
 
       if ((failure_.has_value() || completed_count_ == values_.size()) &&
@@ -950,11 +953,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @brief Converts cancellation/currentness observations into first failure.
    * @return No value.
    * @throws Nothing.
-   * @note Caller holds `mutex_`. Owned diagnostic/Status construction remains
-   * inside this no-throw boundary. Its allocation-free fallback records the
-   * prioritized code with an empty message without reacquiring `mutex_` or
-   * retiring an in-flight callback, because this observation owns no callback
-   * completion.
+   * @note Caller holds `mutex_` from either coordinator or worker-entry state.
+   * Owned diagnostic/Status construction remains inside this no-throw
+   * boundary. Its allocation-free fallback records the prioritized code with
+   * an empty message without reacquiring `mutex_` or retiring an in-flight
+   * callback, because this observation owns no callback completion. A worker
+   * caller separately retires only its own abandoned slot.
    */
   void observe_external_stop_locked() noexcept {
     if (failure_.has_value()) {
@@ -1078,8 +1082,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @brief Gathers immutable inputs, accounts transfers/resources, and invokes.
    * @param step_index Valid dependency-ready step index.
    * @param backend Backend for this attempt.
+   * @return No value.
    * @throws Nothing across the worker thread boundary.
-   * @note GPU unavailability may resubmit the same step on CPU exactly once.
+   * @note The first Run-mutex critical section observes external stop before
+   * dependency copies, transfers, resource admission, or callback entry. That
+   * worker-entry observation is the admission cutoff for a queued attempt. A
+   * cancellation or graph replacement after the cutoff may still race with a
+   * non-preemptible in-process callback; completion and final publication
+   * continue to reject every observed cancelled or stale result. GPU
+   * unavailability may resubmit the same step on CPU exactly once, and the
+   * fallback reaches this same cutoff while retaining its original slot.
    */
   void execute_attempt(std::size_t step_index, Backend backend) noexcept {
     try {
@@ -1092,6 +1104,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::uint64_t transfer_bytes = 0U;
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        observe_external_stop_locked();
         if (failure_.has_value()) {
           finish_abandoned_attempt_locked();
           return;
@@ -1375,9 +1388,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   }
 
   /**
-   * @brief Releases a callback slot abandoned after another failure.
+   * @brief Releases a callback slot abandoned after an observed failure.
+   * @return No value.
    * @throws Nothing.
-   * @note Caller holds `mutex_`.
+   * @note Caller holds `mutex_`. This is the sole slot retirement paired with
+   * a worker-entry external-stop observation; the observation itself never
+   * changes `in_flight_`.
    */
   void finish_abandoned_attempt_locked() noexcept {
     if (in_flight_ != 0U) {
