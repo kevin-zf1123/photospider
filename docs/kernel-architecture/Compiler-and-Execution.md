@@ -70,7 +70,12 @@ boundary. If the Run first observes either stop while callbacks remain active
 and constructing the owned diagnostic or `Status` fails, it records the same
 prioritized code with an empty message while retaining the Run mutex. This
 fallback neither reacquires that mutex nor retires an in-flight slot: it stops
-new admission and waits until every callback has retired normally.
+new admission and waits until every callback has retired normally. The
+maintained regression proves that ownership directly: while the sole CPU
+worker is occupied, it admits the target CPU callback and then a separate CPU
+Run as its FIFO successor. Successor completion proves the target callback has
+finished abandonment; the target future must still remain incomplete while an
+independent GPU callback is gate-held.
 
 At the operation-registry boundary, invocation validation preserves the order
 of operation lookup, input/demand counts, per-input validity and demand bounds,

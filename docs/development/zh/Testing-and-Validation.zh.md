@@ -28,9 +28,12 @@ Kernel test 覆盖：
   `Backend::Gpu` hook consumption；它们证明 CPU callback 不会冒充 GPU path，且清除
   hook 后 GPU execution 恢复成功。另有独立 CPU queue-rejection case 保留 CPU 覆盖。
   独立的无 sleep cancellation 与 stale race 会占用唯一 CPU worker、阻塞目标 Run 的一个
-  GPU callback，并且只让 external-stop `Status` construction 失败。目标 future 在该
-  callback 被释放前保持未完成；释放后返回选中的 code 与空 diagnostic，所有 callback
-  完成退役，且同一个 context 可用 current snapshot 再次成功执行；
+  GPU callback，并且只让 external-stop `Status` construction 失败。目标 CPU callback
+  进入 FIFO 后，另一个独立 CPU Run 会在 worker occupant 释放前把 successor sentinel
+  排在它之后。Sentinel 完成证明目标 callback 已被 pop，并已完成 abandonment。此时 GPU
+  callback 仍被阻塞，目标 future 必须保持未完成；释放 GPU callback 后，future 返回选中的
+  code 与空 diagnostic。Cancellation 与 stale 两种 case 都会让全部 callback 完成退役，
+  且同一个 context 可用 current snapshot 再次成功执行；
 - bounded ready work 与 `ResourceLedger` settlement；
 - cross-backend copy/backend label、cancellation、stale completion 与 exception fence。
   Private condition-variable barrier 只在 named Value、diagnostic、digest 与 execute timing
@@ -144,11 +147,13 @@ otherwise unobservable 的 no-GPU/admission/submit linearization window 与 allo
 exception fallback。Construction hook 会精确选择 exception-fence 或 run-loop
 external-stop materialization point，并在 owned diagnostic 与 `Status` construction 前
 立即触发。External-stop fallback 在已经持有的 Run mutex 下运行，不减少 in-flight
-slot；exception helper 则继续拥有其 callback-retirement 责任。Regression 还让 null
+slot；exception helper 则继续拥有其 callback-retirement 责任。Callback-enqueue observer
+还会在唯一 CPU worker 被占用期间记录 target 与 successor 的 admission；等待 successor
+Run 完成，即可在 held GPU callback 释放前证明 FIFO retirement。Regression 还让 null
 standard-exception diagnostic 经过只接收 pointer 的调用边界；正常完成证明 failure 被
-fence、in-flight count 完成 drain，且 empty-message fallback 仍可用。
-`BUILD_TESTING=ON` 时，product archive、installed kernel、export 与普通 consumer 仍不含
-hook；`BUILD_TESTING=OFF` 时，test-kernel target 与其 execution-hook object 都不存在。
+fence、in-flight count 完成 drain，且 empty-message fallback 仍可用。`BUILD_TESTING=ON`
+时，product archive、installed kernel、export 与普通 consumer 仍不含 hook；
+`BUILD_TESTING=OFF` 时，test-kernel target 与其 execution-hook object 都不存在。
 
 同一个不安装的 execution-hook object 还在 complete local result assembly 后、final stop
 check 前暴露一个 no-throw `final_result_ready` observer。它只用于阻塞
