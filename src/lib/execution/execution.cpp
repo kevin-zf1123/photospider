@@ -948,19 +948,42 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 
   /**
    * @brief Converts cancellation/currentness observations into first failure.
-   * @throws std::bad_alloc If diagnostic allocation fails.
-   * @note Caller holds `mutex_`.
+   * @throws Nothing.
+   * @note Caller holds `mutex_`. Owned diagnostic/Status construction remains
+   * inside this no-throw boundary. Its allocation-free fallback records the
+   * prioritized code with an empty message without reacquiring `mutex_` or
+   * retiring an in-flight callback, because this observation owns no callback
+   * completion.
    */
-  void observe_external_stop_locked() {
+  void observe_external_stop_locked() noexcept {
     if (failure_.has_value()) {
       return;
     }
+    ErrorCode code = ErrorCode::Ok;
+    const char* diagnostic = nullptr;
     if (cancellation_.cancelled()) {
-      failure_ = Status::failure(ErrorCode::Cancelled,
-                                 "execution cancellation was requested");
+      code = ErrorCode::Cancelled;
+      diagnostic = "execution cancellation was requested";
     } else if (!plan_->current()) {
-      failure_ = Status::failure(
-          ErrorCode::Stale, "execution plan revision is no longer current");
+      code = ErrorCode::Stale;
+      diagnostic = "execution plan revision is no longer current";
+    } else {
+      return;
+    }
+
+    try {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+      if (execution_testing::fail_failure_status_construction(
+              execution_testing::FailureStatusConstructionPoint::
+                  ExternalStop)) {
+        throw std::bad_alloc();
+      }
+#endif
+      failure_ = Status::failure(code, diagnostic);
+    } catch (...) {
+      failure_.emplace();
+      failure_->code = prioritized_failure_code_locked(code);
+      failure_->message.clear();
     }
   }
 
@@ -1280,7 +1303,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   void finish_failure_safely(ErrorCode code, const char* diagnostic) noexcept {
     try {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-      if (execution_testing::fail_failure_status_construction()) {
+      if (execution_testing::fail_failure_status_construction(
+              execution_testing::FailureStatusConstructionPoint::
+                  ExceptionFence)) {
         throw std::bad_alloc();
       }
 #endif

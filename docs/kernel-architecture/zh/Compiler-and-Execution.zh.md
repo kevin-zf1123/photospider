@@ -53,6 +53,12 @@ diagnostic-construction fallback 复用。若两种 stop 均不存在，且 copi
 fallback，则 unavailable GPU 仍保持 `BackendUnavailable`；普通 admission/queue rejection
 也保持原 category。
 
+Run-loop 对 cancellation 或 staleness 的 observation 本身也是 no-throw boundary。若 Run
+首次观察到任一 stop 时仍有 active callback，而 owned diagnostic 或 `Status` 构造失败，
+它会在继续持有 Run mutex 的情况下，以空 message 记录相同的 prioritized code。该
+fallback 既不重新取得该 mutex，也不让任何 in-flight slot 退役；它停止新的 admission，
+并等待每个 callback 正常退役。
+
 在 operation-registry boundary，invocation validation 保持如下顺序：operation lookup、
 input/demand count、逐 input validity 与 demand bound、parameter、cancellation、闭合的
 CPU/GPU backend vocabulary、backend capability 与 static descriptor compatibility。

@@ -31,7 +31,12 @@ Kernel tests cover:
   explicitly GPU physical plan, a present GPU lane, and exact `Backend::Gpu`
   hook consumption; they prove no CPU callback substitutes for the GPU path
   and that clearing the hook restores successful GPU execution. A separate
-  CPU queue-rejection case retains independent CPU coverage;
+  CPU queue-rejection case retains independent CPU coverage. Separate
+  no-sleep cancellation and stale races occupy the sole CPU worker, hold a GPU
+  callback in the target Run, and fault only external-stop `Status`
+  construction. The target future remains incomplete until that callback is
+  released, then returns the selected code with an empty diagnostic; all
+  callbacks retire and the same context succeeds with the current snapshot;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences. A private condition-variable barrier holds a nontrivial
@@ -169,14 +174,17 @@ The deterministic scheduler tests use private callback-enqueue, pre-failure,
 queue-rejection, and diagnostic-construction hooks compiled only into the
 noninstalled `photospider_test_kernel`. They expose the otherwise unobservable
 no-GPU/admission/submit linearization windows and the allocation-free exception
-fallback. The construction hook fires immediately before owned diagnostic and
-`Status` materialization inside the no-throw helper. The regression also feeds
-a null standard-exception diagnostic through the pointer-only call boundary;
+fallback. The construction hook selects the exact exception-fence or run-loop
+external-stop materialization point and fires immediately before owned
+diagnostic and `Status` construction. External-stop fallback runs under the
+already-held Run mutex without decrementing an in-flight slot; the exception
+helper retains its callback-retirement ownership. The regression also feeds a
+null standard-exception diagnostic through the pointer-only call boundary;
 normal completion proves the failure is fenced, the in-flight count drains,
-and the empty-message fallback remains usable. With
-`BUILD_TESTING=ON`, the product archive, installed kernel, exports, and ordinary
-consumer remain hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel
-target nor its execution-hook object exists.
+and the empty-message fallback remains usable. With `BUILD_TESTING=ON`, the
+product archive, installed kernel, exports, and ordinary consumer remain
+hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel target nor its
+execution-hook object exists.
 
 The same noninstalled execution-hook object exposes one no-throw
 `final_result_ready` observer after complete local result assembly and before
