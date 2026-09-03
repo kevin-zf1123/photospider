@@ -113,8 +113,11 @@ Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
 - downstream bridge 与 final executable 自身只声明 `CXX_STANDARD=14`、
   `CXX_STANDARD_REQUIRED=ON` 与 `CXX_EXTENSIONS=OFF`，且都不私自请求 C++17。
   Linked imported kernel 与 operation SDK usage requirement 会把两者的实际 compilation
-  提升为 C++17，两份 translation unit 都通过 `__cplusplus` static assertion 强制验证。
-  Linked pure-C SDK probe 保持显式 C11 translation unit，且不获得 C++ standard flag；
+  提升为 C++17。两份 translation unit 都使用与 compiler 相符的 static assertion 验证
+  结果：MSVC-compatible frontend 定义 `_MSVC_LANG` 时使用该宏，否则使用
+  `__cplusplus`。Consumer 不私自添加 `/std:c++17`，也不要求
+  `/Zc:__cplusplus`；dialect elevation 仍只来自 imported usage requirement。Linked
+  pure-C SDK probe 保持显式 C11 translation unit，且不获得 C++ standard flag；
 - 被删 target、header、component 与 executable 缺失。
 
 Nested consumer project 暴露 generator-aware 的 `run_photospider_consumer` target，

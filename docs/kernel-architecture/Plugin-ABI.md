@@ -12,7 +12,11 @@ operation C ABI before exposing `element_type_value`. It does not depend on a
 consumer including another Photospider header first. The exported
 `Photospider::operation_sdk` interface target propagates `cxx_std_17`, so a
 C++ consumer receives the wrapper's actual language requirement from the
-package instead of having to restate it privately.
+package instead of having to restate it privately. The maintained consumer
+proves that propagation with a compiler-appropriate dialect assertion:
+`_MSVC_LANG` when an MSVC-compatible frontend defines it, and `__cplusplus`
+otherwise. It adds no private standard flag and does not require
+`/Zc:__cplusplus`.
 
 The provider contract remains pure C. `Photospider::data_provider_sdk`
 propagates include directories but no C++ compile feature, so a C11

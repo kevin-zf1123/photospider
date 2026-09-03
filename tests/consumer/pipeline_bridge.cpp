@@ -3,7 +3,11 @@
 
 #include "photospider/photospider.hpp"
 
+#if defined(_MSVC_LANG)
+static_assert(_MSVC_LANG >= 201703L, "the kernel target must propagate C++17");
+#else
 static_assert(__cplusplus >= 201703L, "the kernel target must propagate C++17");
+#endif
 
 /**
  * @brief Compiles and executes one graph through the installed kernel target.
