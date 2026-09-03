@@ -9,7 +9,15 @@ Photospider installs two narrow same-trust extension headers:
 The installed C++ convenience wrapper `operation_plugin.hpp` is a direct,
 self-contained header: it includes its own `<cstdint>` dependency and the
 operation C ABI before exposing `element_type_value`. It does not depend on a
-consumer including another Photospider header first.
+consumer including another Photospider header first. The exported
+`Photospider::operation_sdk` interface target propagates `cxx_std_17`, so a
+C++ consumer receives the wrapper's actual language requirement from the
+package instead of having to restate it privately.
+
+The provider contract remains pure C. `Photospider::data_provider_sdk`
+propagates include directories but no C++ compile feature, so a C11
+translation unit may consume it without acquiring a C++ language requirement.
+The package does not publish a separate `data_definition_sdk` alias.
 
 ## Operation records
 

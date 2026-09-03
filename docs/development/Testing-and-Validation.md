@@ -116,7 +116,7 @@ and the isolated installed-kernel boundary.
 ## Installed boundary
 
 The package gate configures and installs Photospider to a fresh prefix, then
-configures an external C/C++17 consumer using only
+configures an external C/C++ consumer using only
 `find_package(Photospider CONFIG REQUIRED)`. CI runs this gate for both the
 default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
 
@@ -131,7 +131,17 @@ default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
   exercised as position-independent input to a real shared library;
 - `kernel`, `operation_sdk`, and `data_provider_sdk` component discovery
   exports exactly `Photospider::kernel`, `Photospider::operation_sdk`, and
-  `Photospider::data_provider_sdk`; the SDK targets are header-only;
+  `Photospider::data_provider_sdk`; the SDK targets are header-only. Configure-
+  time property checks require both the kernel and operation SDK targets to
+  carry `cxx_std_17`, require the pure-C provider target not to carry that C++
+  feature, and reject any stray `data_definition_sdk` target;
+- the downstream bridge and final executable declare only
+  `CXX_STANDARD=14`, `CXX_STANDARD_REQUIRED=ON`, and `CXX_EXTENSIONS=OFF` on
+  themselves. Neither target privately requests C++17. The linked imported
+  kernel and operation SDK usage requirements raise their actual compilation
+  to C++17, which both translation units enforce with `__cplusplus` static
+  assertions. The linked pure-C SDK probe remains an explicit C11 translation
+  unit and receives no C++ standard flag;
 - removed targets, headers, components, and executables are absent.
 
 The nested consumer project exposes a generator-aware

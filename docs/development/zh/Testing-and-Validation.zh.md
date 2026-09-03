@@ -93,7 +93,7 @@ Session close、result release、shutdown 与隔离 installed-kernel boundary。
 ## Installed boundary
 
 Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
-`find_package(Photospider CONFIG REQUIRED)` 配置 external C/C++17 consumer。CI 会为
+`find_package(Photospider CONFIG REQUIRED)` 配置 external C/C++ consumer。CI 会为
 默认 static kernel 与 `BUILD_SHARED_LIBS=ON` 都运行该 gate。它验证：
 
 - installed header 与声明 public inventory 完全一致；全部 15 份 header 都可直接独立
@@ -106,7 +106,15 @@ Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
   library 使用；
 - `kernel`、`operation_sdk` 与 `data_provider_sdk` component discovery 精确导出
   `Photospider::kernel`、`Photospider::operation_sdk` 与
-  `Photospider::data_provider_sdk`；两个 SDK target 都只包含 header；
+  `Photospider::data_provider_sdk`；两个 SDK target 都只包含 header。Configure-time
+  property check 要求 kernel 与 operation SDK target 都携带 `cxx_std_17`，要求纯 C
+  provider target 不携带该 C++ feature，并拒绝任何意外的 `data_definition_sdk`
+  target；
+- downstream bridge 与 final executable 自身只声明 `CXX_STANDARD=14`、
+  `CXX_STANDARD_REQUIRED=ON` 与 `CXX_EXTENSIONS=OFF`，且都不私自请求 C++17。
+  Linked imported kernel 与 operation SDK usage requirement 会把两者的实际 compilation
+  提升为 C++17，两份 translation unit 都通过 `__cplusplus` static assertion 强制验证。
+  Linked pure-C SDK probe 保持显式 C11 translation unit，且不获得 C++ standard flag；
 - 被删 target、header、component 与 executable 缺失。
 
 Nested consumer project 暴露 generator-aware 的 `run_photospider_consumer` target，

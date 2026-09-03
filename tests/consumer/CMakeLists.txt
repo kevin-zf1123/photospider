@@ -59,15 +59,53 @@ find_package(
   Photospider 0.2 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
+foreach(
+  _photospider_cxx17_target
+  IN ITEMS Photospider::kernel Photospider::operation_sdk)
+  get_target_property(
+    _photospider_compile_features
+    ${_photospider_cxx17_target}
+    INTERFACE_COMPILE_FEATURES)
+  if(NOT "cxx_std_17" IN_LIST _photospider_compile_features)
+    message(
+      FATAL_ERROR
+        "${_photospider_cxx17_target} must propagate cxx_std_17; "
+        "found '${_photospider_compile_features}'")
+  endif()
+endforeach()
+
+get_target_property(
+  _photospider_provider_compile_features
+  Photospider::data_provider_sdk
+  INTERFACE_COMPILE_FEATURES)
+foreach(_photospider_provider_feature IN LISTS
+                                             _photospider_provider_compile_features)
+  if(_photospider_provider_feature MATCHES "^cxx_")
+    message(
+      FATAL_ERROR
+        "Photospider::data_provider_sdk must remain pure C; found "
+        "'${_photospider_provider_feature}'")
+  endif()
+endforeach()
+if(TARGET Photospider::data_definition_sdk)
+  message(
+    FATAL_ERROR
+      "Photospider must not export the nonexistent data_definition_sdk target")
+endif()
+
 add_library(photospider_sdk_consumer OBJECT sdk_smoke.c)
 target_link_libraries(
   photospider_sdk_consumer
   PRIVATE Photospider::operation_sdk Photospider::data_provider_sdk)
 target_compile_options(
   photospider_sdk_consumer PRIVATE ${_photospider_consumer_compile_options})
+set_target_properties(
+  photospider_sdk_consumer
+  PROPERTIES C_STANDARD 11
+             C_STANDARD_REQUIRED ON
+             C_EXTENSIONS OFF)
 
 add_library(photospider_consumer_bridge SHARED pipeline_bridge.cpp)
-target_compile_features(photospider_consumer_bridge PRIVATE cxx_std_17)
 target_link_libraries(
   photospider_consumer_bridge PRIVATE Photospider::kernel)
 target_compile_options(
@@ -75,13 +113,16 @@ target_compile_options(
 target_link_options(
   photospider_consumer_bridge PRIVATE ${_photospider_consumer_link_options})
 set_target_properties(
-  photospider_consumer_bridge PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  photospider_consumer_bridge
+  PROPERTIES CXX_STANDARD 14
+             CXX_STANDARD_REQUIRED ON
+             CXX_EXTENSIONS OFF
+             WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 add_executable(
   photospider_consumer
   main.cpp
   $<TARGET_OBJECTS:photospider_sdk_consumer>)
-target_compile_features(photospider_consumer PRIVATE cxx_std_17)
 target_link_libraries(
   photospider_consumer
   PRIVATE photospider_consumer_bridge Photospider::operation_sdk
@@ -90,6 +131,11 @@ target_compile_options(
   photospider_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(
   photospider_consumer PRIVATE ${_photospider_consumer_link_options})
+set_target_properties(
+  photospider_consumer
+  PROPERTIES CXX_STANDARD 14
+             CXX_STANDARD_REQUIRED ON
+             CXX_EXTENSIONS OFF)
 
 add_custom_target(
   run_photospider_consumer

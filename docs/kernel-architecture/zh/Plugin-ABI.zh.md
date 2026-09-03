@@ -8,7 +8,13 @@ Photospider 安装两份 narrow same-trust extension header：
 
 已安装的 C++ convenience wrapper `operation_plugin.hpp` 是可直接包含且 self-contained
 的 header：它在暴露 `element_type_value` 前自行包含 `<cstdint>` dependency 与 operation
-C ABI，不依赖 consumer 先包含另一份 Photospider header。
+C ABI，不依赖 consumer 先包含另一份 Photospider header。导出的
+`Photospider::operation_sdk` interface target 会传播 `cxx_std_17`，因此 C++ consumer
+可以从 package 获得 wrapper 的实际语言要求，无需自行重复声明。
+
+Provider contract 继续保持纯 C。`Photospider::data_provider_sdk` 只传播 include
+directory，不传播 C++ compile feature，所以 C11 translation unit 可以消费它而不会
+获得 C++ 语言要求。Package 不发布独立的 `data_definition_sdk` alias。
 
 ## Operation record
 
