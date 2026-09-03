@@ -65,6 +65,13 @@ an unavailable GPU whose copied traits explicitly deny fallback remains
 `BackendUnavailable`; ordinary admission and queue rejection retain their
 original category.
 
+Run-loop observation of cancellation or staleness is itself a no-throw
+boundary. If the Run first observes either stop while callbacks remain active
+and constructing the owned diagnostic or `Status` fails, it records the same
+prioritized code with an empty message while retaining the Run mutex. This
+fallback neither reacquires that mutex nor retires an in-flight slot: it stops
+new admission and waits until every callback has retired normally.
+
 At the operation-registry boundary, invocation validation preserves the order
 of operation lookup, input/demand counts, per-input validity and demand bounds,
 parameters, cancellation, closed CPU/GPU backend vocabulary, backend

@@ -402,11 +402,15 @@ class SchedulerFailureController final {
 
   /**
    * @brief Forces exception-status construction failure at most once.
+   * @param point Exact protected construction boundary under observation.
    * @return True only for the configured first observation.
    * @throws Nothing.
    */
-  bool fail_status_construction() noexcept {
-    if (!fail_status_construction_ || status_failure_observed_) {
+  bool fail_status_construction(
+      ps::execution_testing::FailureStatusConstructionPoint point) noexcept {
+    if (point != ps::execution_testing::FailureStatusConstructionPoint::
+                     ExceptionFence ||
+        !fail_status_construction_ || status_failure_observed_) {
       return false;
     }
     status_failure_observed_ = true;
@@ -460,6 +464,224 @@ class SchedulerFailureController final {
   /** @brief Whether the configured queue action has been consumed. */
   bool submit_action_observed_ = false;
   /** @brief Whether status-construction failure has been consumed. */
+  bool status_failure_observed_ = false;
+};
+
+/** @brief External stop selected by one active-callback regression. */
+enum class ExternalStopKind : std::uint8_t {
+  /** @brief Request cooperative cancellation. */
+  Cancellation,
+  /** @brief Replace the source graph and make the plan stale. */
+  Stale,
+};
+
+/**
+ * @brief Holds one CPU worker and one target GPU callback while the scheduler
+ * faults external-stop Status construction.
+ *
+ * @note The scheduler's CPU-submit hook and the GPU operation use distinct
+ * backend-pool mutexes. Test-owned synchronization therefore creates the
+ * active callback/second-submit ordering without sleeps or plan destruction.
+ */
+class ExternalStopRaceController final {
+ public:
+  /**
+   * @brief Holds the separate CPU-worker occupant until explicitly released.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   * @note Occupying the sole CPU worker prevents the target Run's CPU callback
+   * from racing its scheduler thread after submission.
+   */
+  void hold_cpu_operation() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cpu_active_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return cpu_released_; });
+    cpu_active_ = false;
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Waits until the separate CPU-worker occupant is active.
+   * @param timeout Maximum bounded wait.
+   * @return True when the CPU callback entered before the deadline.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_cpu_active(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] { return cpu_active_; });
+  }
+
+  /**
+   * @brief Arms interception of the target Run's one CPU submission.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void arm_cpu_submission() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cpu_submission_armed_ = true;
+  }
+
+  /**
+   * @brief Holds one entered GPU operation until the test releases it.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void hold_gpu_operation() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    gpu_active_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return gpu_released_; });
+    gpu_active_ = false;
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Holds the independent CPU submission until stop/fault are armed.
+   * @param backend Exact backend queue being submitted.
+   * @return Ordinary queue submission after explicit release.
+   * @throws std::system_error If test synchronization fails.
+   */
+  ps::execution_testing::CallbackSubmitAction hold_cpu_submission(
+      ps::Backend backend) {
+    if (backend != ps::Backend::Cpu) {
+      return ps::execution_testing::CallbackSubmitAction::Proceed;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!cpu_submission_armed_ || cpu_submission_observed_) {
+      return ps::execution_testing::CallbackSubmitAction::Proceed;
+    }
+    cpu_submission_observed_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return cpu_submission_released_; });
+    return ps::execution_testing::CallbackSubmitAction::Proceed;
+  }
+
+  /**
+   * @brief Waits until a GPU callback is active and CPU submission is held.
+   * @param timeout Maximum bounded wait.
+   * @return True only when both ordering boundaries were observed.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_race_window(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] {
+      return cpu_active_ && gpu_active_ && cpu_submission_observed_;
+    });
+  }
+
+  /**
+   * @brief Arms the exact external-stop construction fault.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void arm_status_construction_failure() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    status_failure_armed_ = true;
+  }
+
+  /**
+   * @brief Selects the one external-stop construction failure.
+   * @param point Exact protected construction boundary under observation.
+   * @return True once for an armed ExternalStop observation.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool fail_status_construction(
+      ps::execution_testing::FailureStatusConstructionPoint point) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (point != ps::execution_testing::FailureStatusConstructionPoint::
+                     ExternalStop ||
+        !status_failure_armed_ || status_failure_observed_) {
+      return false;
+    }
+    status_failure_observed_ = true;
+    changed_.notify_all();
+    return true;
+  }
+
+  /**
+   * @brief Allows the held CPU submission to enter its queue.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void release_cpu_submission() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cpu_submission_released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Allows the separate CPU-worker occupant to return.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void release_cpu_operation() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cpu_released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Waits for the exact construction-fault hook to be consumed.
+   * @param timeout Maximum bounded wait.
+   * @return True when external-stop construction was faulted.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_status_failure(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this] { return status_failure_observed_; });
+  }
+
+  /**
+   * @brief Allows the active GPU operation to return.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void release_gpu_operation() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      gpu_released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Reports whether the held GPU operation is still active.
+   * @return True between callback entry and explicit release.
+   * @throws std::system_error If test synchronization fails.
+   */
+  [[nodiscard]] bool gpu_active() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return gpu_active_;
+  }
+
+ private:
+  /** @brief Serializes every deterministic race observation. */
+  mutable std::mutex mutex_;
+  /** @brief Wakes test, submitter, and held GPU callback. */
+  std::condition_variable changed_;
+  /** @brief Whether the GPU operation currently owns its callback. */
+  bool gpu_active_ = false;
+  /** @brief Whether the test released the GPU operation. */
+  bool gpu_released_ = false;
+  /** @brief Whether the separate CPU-worker occupant is active. */
+  bool cpu_active_ = false;
+  /** @brief Whether the test released the CPU-worker occupant. */
+  bool cpu_released_ = false;
+  /** @brief Whether target CPU-submission interception is armed. */
+  bool cpu_submission_armed_ = false;
+  /** @brief Whether the one CPU submit window was reached. */
+  bool cpu_submission_observed_ = false;
+  /** @brief Whether the CPU submit hook may return. */
+  bool cpu_submission_released_ = false;
+  /** @brief Whether external-stop construction failure is armed. */
+  bool status_failure_armed_ = false;
+  /** @brief Whether the one external-stop fault was consumed. */
   bool status_failure_observed_ = false;
 };
 
@@ -582,6 +804,9 @@ QueueAdmissionGate* g_queue_admission_gate = nullptr;
 /** @brief Borrowed active scheduler-failure controller for one scoped test. */
 SchedulerFailureController* g_scheduler_failure_controller = nullptr;
 
+/** @brief Borrowed external-stop controller for one scoped regression. */
+ExternalStopRaceController* g_external_stop_race_controller = nullptr;
+
 /** @brief Borrowed final-result gate for one scoped execution test. */
 FinalResultReadyGate* g_final_result_ready_gate = nullptr;
 
@@ -614,10 +839,14 @@ void before_scheduler_failure(
  * @brief Bridges deterministic queue action selection into the controller.
  * @param backend Exact backend queue being submitted.
  * @return Configured single-use action or Proceed.
- * @throws Nothing.
+ * @throws std::system_error If an external-stop synchronization operation
+ * fails; the hook boundary fences the exception.
  */
 ps::execution_testing::CallbackSubmitAction select_callback_submit_action(
-    ps::Backend backend) noexcept {
+    ps::Backend backend) {
+  if (g_external_stop_race_controller) {
+    return g_external_stop_race_controller->hold_cpu_submission(backend);
+  }
   return g_scheduler_failure_controller
              ? g_scheduler_failure_controller->submit_action(backend)
              : ps::execution_testing::CallbackSubmitAction::Proceed;
@@ -625,12 +854,18 @@ ps::execution_testing::CallbackSubmitAction select_callback_submit_action(
 
 /**
  * @brief Bridges failure-status construction injection into the controller.
- * @return True only for one configured exception-fallback observation.
- * @throws Nothing.
+ * @param point Exact protected construction boundary under observation.
+ * @return True only for one configured construction-fallback observation.
+ * @throws std::system_error If external-stop synchronization fails; the hook
+ * boundary fences the exception.
  */
-bool fail_failure_status_construction() noexcept {
+bool fail_failure_status_construction(
+    ps::execution_testing::FailureStatusConstructionPoint point) {
+  if (g_external_stop_race_controller) {
+    return g_external_stop_race_controller->fail_status_construction(point);
+  }
   return g_scheduler_failure_controller &&
-         g_scheduler_failure_controller->fail_status_construction();
+         g_scheduler_failure_controller->fail_status_construction(point);
 }
 
 /**
@@ -712,6 +947,24 @@ ps::WorkflowDocument region_document() {
       ps::WorkflowNode{2U, "test.region", {ps::WorkflowInput{1U, "value"}}, {}},
   };
   document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
+  return document;
+}
+
+/**
+ * @brief Builds two independent target steps for an external-stop race.
+ * @return Document with GPU and CPU scalar outputs.
+ * @throws std::bad_alloc If source storage allocation fails.
+ */
+ps::WorkflowDocument external_stop_document() {
+  ps::WorkflowDocument document;
+  document.nodes = {
+      ps::WorkflowNode{1U, "test.external_stop_gpu", {}, {}},
+      ps::WorkflowNode{2U, "test.external_stop_cpu", {}, {}},
+  };
+  document.outputs = {
+      ps::WorkflowOutput{"gpu", 1U, "value"},
+      ps::WorkflowOutput{"cpu", 2U, "value"},
+  };
   return document;
 }
 
@@ -1454,6 +1707,144 @@ int main() {
                1U) == Backend::Gpu);
   PS_CHECK(gpu_only_gpu_calls == 1U);
   PS_CHECK(gpu_only_cpu_calls == 0U);
+
+  for (const ExternalStopKind stop_kind :
+       {ExternalStopKind::Cancellation, ExternalStopKind::Stale}) {
+    ExternalStopRaceController external_stop_control;
+    auto external_stop_operations = std::make_shared<OperationRegistry>();
+    OperationTraits cpu_occupant_traits;
+    cpu_occupant_traits.estimated_bytes = sizeof(double);
+    PS_CHECK(external_stop_operations
+                 ->register_operation(OperationDefinition{
+                     "test.external_stop_cpu_occupant", cpu_occupant_traits,
+                     [&external_stop_control](
+                         const OperationInvocation&) -> Result<Value> {
+                       external_stop_control.hold_cpu_operation();
+                       return Result<Value>(Value::from_float64(3.0));
+                     }})
+                 .ok());
+    OperationTraits external_gpu_traits;
+    external_gpu_traits.supports_gpu = true;
+    external_gpu_traits.estimated_bytes = sizeof(double);
+    PS_CHECK(
+        external_stop_operations
+            ->register_operation(OperationDefinition{
+                "test.external_stop_gpu", external_gpu_traits,
+                [&external_stop_control](
+                    const OperationInvocation& invocation) -> Result<Value> {
+                  if (invocation.backend != Backend::Gpu) {
+                    return Result<Value>(ps::Status::failure(
+                        ErrorCode::Internal,
+                        "external-stop GPU operation ran on the wrong lane"));
+                  }
+                  external_stop_control.hold_gpu_operation();
+                  return Result<Value>(Value::from_float64(7.0));
+                }})
+            .ok());
+    OperationTraits external_cpu_traits;
+    external_cpu_traits.estimated_bytes = sizeof(double);
+    PS_CHECK(
+        external_stop_operations
+            ->register_operation(OperationDefinition{
+                "test.external_stop_cpu", external_cpu_traits,
+                [](const OperationInvocation& invocation) -> Result<Value> {
+                  if (invocation.backend != Backend::Cpu) {
+                    return Result<Value>(ps::Status::failure(
+                        ErrorCode::Internal,
+                        "external-stop CPU operation ran on the wrong lane"));
+                  }
+                  return Result<Value>(Value::from_float64(11.0));
+                }})
+            .ok());
+    PS_CHECK(external_stop_operations->freeze().ok());
+
+    Compiler external_stop_compiler(external_stop_operations);
+    ExecutionContext external_stop_execution(
+        external_stop_operations, ExecutionContextConfig{1U, true, 8U, 1024U});
+    GraphContext cpu_occupant_graph(
+        single_operation_document("test.external_stop_cpu_occupant"));
+    CompiledWorkflow cpu_occupant_workflow =
+        compile_or_throw(&external_stop_compiler, cpu_occupant_graph);
+    GraphContext external_stop_graph(external_stop_document());
+    CompiledWorkflow external_stop_workflow =
+        compile_or_throw(&external_stop_compiler, external_stop_graph, true);
+    PS_CHECK(external_stop_workflow.plan.steps().size() == 2U);
+    PS_CHECK(external_stop_workflow.plan.steps()[0U].backend == Backend::Gpu);
+    PS_CHECK(external_stop_workflow.plan.steps()[1U].backend == Backend::Cpu);
+
+    auto cpu_occupant_future = std::async(std::launch::async, [&] {
+      return external_stop_execution.execute(cpu_occupant_workflow.plan);
+    });
+    const bool cpu_occupant_active =
+        external_stop_control.wait_until_cpu_active(std::chrono::seconds(2));
+    if (!cpu_occupant_active) {
+      external_stop_control.release_cpu_operation();
+      static_cast<void>(cpu_occupant_future.get());
+      PS_CHECK(cpu_occupant_active);
+    }
+
+    CancellationSource external_stop_cancellation;
+    external_stop_control.arm_cpu_submission();
+    g_external_stop_race_controller = &external_stop_control;
+    ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+    auto external_stop_future = std::async(std::launch::async, [&] {
+      return external_stop_execution.execute(external_stop_workflow.plan,
+                                             external_stop_cancellation.token(),
+                                             ExecutionOptions{2U});
+    });
+    const bool race_window =
+        external_stop_control.wait_until_race_window(std::chrono::seconds(2));
+    external_stop_control.arm_status_construction_failure();
+    const bool stop_requested =
+        stop_kind == ExternalStopKind::Cancellation
+            ? external_stop_cancellation.cancel()
+            : external_stop_graph.replace(external_stop_document()) != 0U;
+    external_stop_control.release_cpu_submission();
+    const bool status_failure_observed =
+        external_stop_control.wait_until_status_failure(
+            std::chrono::seconds(2));
+    external_stop_control.release_cpu_operation();
+    auto cpu_occupant_result = cpu_occupant_future.get();
+    const std::future_status completion_before_callback_release =
+        external_stop_future.wait_for(std::chrono::milliseconds(0));
+    external_stop_control.release_gpu_operation();
+    bool external_stop_exception_escaped = false;
+    std::optional<Result<ExecutionResult>> external_stop_result;
+    try {
+      external_stop_result.emplace(external_stop_future.get());
+    } catch (...) {
+      external_stop_exception_escaped = true;
+    }
+    ps::execution_testing::install_execution_test_hooks(nullptr);
+    g_external_stop_race_controller = nullptr;
+
+    PS_CHECK(race_window);
+    PS_CHECK(stop_requested);
+    PS_CHECK(status_failure_observed);
+    PS_CHECK(completion_before_callback_release == std::future_status::timeout);
+    PS_CHECK(!external_stop_exception_escaped);
+    PS_CHECK(external_stop_result.has_value());
+    PS_CHECK(!external_stop_result->ok());
+    PS_CHECK(external_stop_result->status().code ==
+             (stop_kind == ExternalStopKind::Cancellation ? ErrorCode::Cancelled
+                                                          : ErrorCode::Stale));
+    PS_CHECK(external_stop_result->status().message.empty());
+    PS_CHECK(cpu_occupant_result.ok());
+    PS_CHECK(!external_stop_control.gpu_active());
+
+    CompiledWorkflow healthy_external_stop_workflow =
+        stop_kind == ExternalStopKind::Stale
+            ? compile_or_throw(&external_stop_compiler, external_stop_graph,
+                               true)
+            : external_stop_workflow;
+    auto healthy_external_stop_result =
+        external_stop_execution.execute(healthy_external_stop_workflow.plan);
+    PS_CHECK(healthy_external_stop_result.ok());
+    PS_CHECK(ps::test::named_scalar(healthy_external_stop_result.value(),
+                                    "gpu") == 7.0);
+    PS_CHECK(ps::test::named_scalar(healthy_external_stop_result.value(),
+                                    "cpu") == 11.0);
+  }
 
   GraphContext cancellable(ps::test::delayed_document(250));
   CompiledWorkflow cancellable_workflow =

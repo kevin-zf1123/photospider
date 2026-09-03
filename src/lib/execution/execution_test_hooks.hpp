@@ -50,6 +50,19 @@ enum class CallbackSubmitAction : std::uint8_t {
 };
 
 /**
+ * @brief Protected failure-Status materialization boundaries under test.
+ *
+ * @note Values distinguish noninstalled fault-injection sites without adding
+ * a public error, ABI field, or production branch.
+ */
+enum class FailureStatusConstructionPoint : std::uint8_t {
+  /** @brief The callback/scheduler exception-fence failure helper. */
+  ExceptionFence,
+  /** @brief Run-loop observation of cancellation or graph staleness. */
+  ExternalStop,
+};
+
+/**
  * @brief Callback invoked immediately before one scheduler failure is saved.
  * @param point Exact scheduler-owned failure boundary.
  * @return No value.
@@ -69,12 +82,13 @@ using BeforeSchedulerFailureHook = void (*)(SchedulerFailurePoint point);
 using CallbackSubmitActionHook = CallbackSubmitAction (*)(Backend backend);
 
 /**
- * @brief Selects failure at protected diagnostic/Status materialization.
+ * @brief Selects failure at one protected diagnostic/Status materialization.
+ * @param point Exact noninstalled construction boundary being observed.
  * @return True to enter the allocation-free `finish_failure_safely` fallback
- * immediately before it creates the owned diagnostic and failure Status.
+ * or external-stop fallback immediately before owned materialization.
  * @throws Any test exception, which is fenced and treated as false.
  */
-using FailFailureStatusConstructionHook = bool (*)();
+using FailureStatusConstructionHook = bool (*)(FailureStatusConstructionPoint);
 
 /**
  * @brief Callback invoked after complete result assembly and before the final
@@ -100,7 +114,7 @@ struct ExecutionTestHooks final {
   /** @brief Optional deterministic queue submission controller. */
   CallbackSubmitActionHook callback_submit_action = nullptr;
   /** @brief Optional protected diagnostic/Status construction controller. */
-  FailFailureStatusConstructionHook fail_failure_status_construction = nullptr;
+  FailureStatusConstructionHook fail_failure_status_construction = nullptr;
   /** @brief Optional final result-publication boundary observer. */
   FinalResultReadyHook final_result_ready = nullptr;
 };
@@ -144,12 +158,14 @@ CallbackSubmitAction callback_submit_action(Backend backend) noexcept;
 
 /**
  * @brief Reports whether protected diagnostic/Status creation must fail.
+ * @param point Exact noninstalled construction boundary being observed.
  * @return True only when the installed hook requests the allocation fallback
  * at the owned diagnostic materialization point.
  * @throws Nothing.
  * @note Only the noninstalled test-kernel variant invokes this function.
  */
-bool fail_failure_status_construction() noexcept;
+bool fail_failure_status_construction(
+    FailureStatusConstructionPoint point) noexcept;
 
 /**
  * @brief Notifies the installed complete-result publication observer.
