@@ -63,10 +63,19 @@ scope. They are not future or default-disabled kernel features.
 ## Active documentation
 
 - Current facts: `docs/kernel-architecture/`
-- Decisions: `docs/adr/`
-- Active change: `openspec/changes/breaking-product-boundary-reset/`
-- Delivery status: narrowed GitHub Issues/Projects and the active OpenSpec
-  checklist
+- Highest kernel product-boundary authority:
+  `docs/adr/0015-breaking-product-boundary-scope-reset.md`
+- Companion daemon product-boundary authority, where daemon responsibilities
+  apply:
+  `photospider-daemon/docs/adr/0001-breaking-product-boundary-scope-reset.md`
+- Active OpenSpec authority:
+  - `openspec/specs/product-boundary-authority/spec.md`
+  - `openspec/specs/kernel-compiler-execution/spec.md`
+  - `openspec/specs/daemon-local-orchestration/spec.md`
+  - `openspec/specs/raw-benchmark-diagnostics/spec.md`
+- Delivery status: narrowed GitHub Issues and Projects
+- Historical evidence only:
+  `openspec/changes/archive/2026-09-03-breaking-product-boundary-reset/`
 
 English documents are authoritative. Official Chinese mirrors are maintained
 in the matching `zh/` paths.
