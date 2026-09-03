@@ -67,15 +67,18 @@ scope. They are not future or default-disabled kernel features.
   `docs/adr/0015-breaking-product-boundary-scope-reset.md`
 - Companion daemon product-boundary authority, where daemon responsibilities
   apply:
-  `photospider-daemon/docs/adr/0001-breaking-product-boundary-scope-reset.md`
-- Active OpenSpec authority:
-  - `openspec/specs/product-boundary-authority/spec.md`
-  - `openspec/specs/kernel-compiler-execution/spec.md`
-  - `openspec/specs/daemon-local-orchestration/spec.md`
-  - `openspec/specs/raw-benchmark-diagnostics/spec.md`
+  [daemon ADR 0001](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/adr/0001-breaking-product-boundary-scope-reset.md)
+- The private personal-overlay Git repository owns the OpenSpec authority and
+  historical delivery record below. These are overlay work-tree paths, not
+  content in the public kernel checkout or installed package surface:
+  - Active OpenSpec authority:
+    - `openspec/specs/product-boundary-authority/spec.md`
+    - `openspec/specs/kernel-compiler-execution/spec.md`
+    - `openspec/specs/daemon-local-orchestration/spec.md`
+    - `openspec/specs/raw-benchmark-diagnostics/spec.md`
+  - Historical evidence only:
+    `openspec/changes/archive/2026-09-03-breaking-product-boundary-reset/`
 - Delivery status: narrowed GitHub Issues and Projects
-- Historical evidence only:
-  `openspec/changes/archive/2026-09-03-breaking-product-boundary-reset/`
 
 English documents are authoritative. Official Chinese mirrors are maintained
 in the matching `zh/` paths.
