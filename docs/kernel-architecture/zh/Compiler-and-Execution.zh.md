@@ -62,6 +62,16 @@ CPU worker 被占用期间，先 admission 目标 CPU callback，再把另一个
 FIFO successor 排在其后。Successor 完成证明目标 callback 已完成 abandonment；此时另一个
 GPU callback 仍被 gate 阻塞，目标 future 必须继续保持未完成。
 
+从任一 backend FIFO pop 的每个 callback 都会进入 Run mutex，并在复制 dependency、
+transfer Value、取得 modeled-byte admission 或调用 operation 前，使用同一个 no-throw
+external-stop observation。若 failure 已存在或刚被选中，该 worker 会通过 abandonment
+path 精确退役自己的唯一 in-flight slot。Direct CPU work、GPU work 与 GPU-to-CPU fallback
+都会汇入这一 queued-attempt admission cutoff；observation 本身绝不退役 slot，
+`GraphContext` 也不会注册或通知 Run。Cutoff 之后发生的 cancellation/replacement 仍可能
+与 transfer、resource acquisition 或不可抢占的 in-process operation entry 竞争。该较晚
+区间继续采用 cooperative/best-effort 语义，并不承诺 global mutex 或 forced preemption；
+completion 与 final result publication 仍会严格拒绝观察到的 cancelled/stale outcome。
+
 在 operation-registry boundary，invocation validation 保持如下顺序：operation lookup、
 input/demand count、逐 input validity 与 demand bound、parameter、cancellation、闭合的
 CPU/GPU backend vocabulary、backend capability 与 static descriptor compatibility。

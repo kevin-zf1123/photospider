@@ -1,4 +1,5 @@
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -850,6 +851,175 @@ class FinalResultReadyGate final {
   bool released_ = false;
 };
 
+/**
+ * @brief External-stop combination applied at queued-attempt admission.
+ *
+ * @note The test covers graph staleness alone and cancellation plus staleness
+ * so the worker-entry priority remains cancellation before graph revision.
+ */
+enum class QueuedAttemptStopKind : std::uint8_t {
+  /** @brief Replace the graph after the coordinator's final queue check. */
+  Stale,
+  /** @brief Cancel and replace, requiring cancellation to remain primary. */
+  CancellationAndStale,
+};
+
+/**
+ * @brief Holds one CPU worker and the target Run's post-submit observation.
+ *
+ * The target is a single side-effecting/non-cacheable CPU operation. The gate
+ * proves its callback is already in the shared FIFO after the coordinator's
+ * last external-stop check, then keeps the only worker occupied until the test
+ * replaces the graph and releases the Run boundary.
+ *
+ * @note The post-submit callback runs while the target Run mutex is held and
+ * therefore never re-enters that Run.
+ */
+class QueuedAttemptAdmissionGate final {
+ public:
+  /**
+   * @brief Runs the separate operation that occupies the sole CPU worker.
+   * @param invocation Callback invocation that must select the CPU backend.
+   * @return Scalar three after explicit release, or a typed lane failure.
+   * @throws std::bad_alloc If scalar output allocation fails.
+   * @throws std::system_error If test synchronization fails.
+   */
+  ps::Result<ps::Value> run_cpu_occupant(
+      const ps::OperationInvocation& invocation) {
+    if (invocation.backend != ps::Backend::Cpu) {
+      return ps::Result<ps::Value>(ps::Status::failure(
+          ps::ErrorCode::Internal,
+          "queued-attempt occupant operation ran on the wrong lane"));
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    cpu_active_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return cpu_released_; });
+    return ps::Result<ps::Value>(ps::Value::from_float64(3.0));
+  }
+
+  /**
+   * @brief Runs the externally observable target operation.
+   * @param invocation Callback invocation that must select the CPU backend.
+   * @return Scalar five, or a typed lane failure.
+   * @throws std::bad_alloc If scalar output allocation fails.
+   * @note Entry increments the counter before any callback classification so a
+   * stale invocation is visible even though result publication is rejected.
+   */
+  ps::Result<ps::Value> run_target(const ps::OperationInvocation& invocation) {
+    target_entries_.fetch_add(1U, std::memory_order_relaxed);
+    if (invocation.backend != ps::Backend::Cpu) {
+      return ps::Result<ps::Value>(ps::Status::failure(
+          ps::ErrorCode::Internal,
+          "queued-attempt target operation ran on the wrong lane"));
+    }
+    return ps::Result<ps::Value>(ps::Value::from_float64(5.0));
+  }
+
+  /**
+   * @brief Waits until the separate CPU-worker occupant is active.
+   * @param timeout Maximum bounded test wait.
+   * @return True when the occupant entered before the deadline.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_cpu_active(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout, [this] { return cpu_active_; });
+  }
+
+  /**
+   * @brief Arms the target Run's one post-submit observation hold.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void arm_post_submit_observation() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    post_submit_armed_ = true;
+  }
+
+  /**
+   * @brief Holds the armed post-submit Run boundary until explicit release.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   * @note The caller holds the target Run mutex; this method touches only
+   * test-owned synchronization and never calls execution code.
+   */
+  void hold_post_submit_observation() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!post_submit_armed_ || post_submit_observed_) {
+      return;
+    }
+    post_submit_observed_ = true;
+    changed_.notify_all();
+    changed_.wait(lock, [this] { return post_submit_released_; });
+  }
+
+  /**
+   * @brief Waits for target FIFO admission and the last coordinator check.
+   * @param timeout Maximum bounded test wait.
+   * @return True when the post-submit boundary was held before the deadline.
+   * @throws std::system_error If test synchronization fails.
+   */
+  bool wait_until_post_submit_observed(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, timeout,
+                             [this] { return post_submit_observed_; });
+  }
+
+  /**
+   * @brief Releases the target Run toward its condition-variable wait.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void release_post_submit_observation() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      post_submit_released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Releases the sole CPU worker so it can pop the queued target.
+   * @return No value.
+   * @throws std::system_error If test synchronization fails.
+   */
+  void release_cpu_operation() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cpu_released_ = true;
+    }
+    changed_.notify_all();
+  }
+
+  /**
+   * @brief Reads the number of externally visible target callback entries.
+   * @return Exact relaxed atomic entry count.
+   * @throws Nothing.
+   */
+  [[nodiscard]] std::uint32_t target_entries() const noexcept {
+    return target_entries_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  /** @brief Serializes occupant and post-submit gate state. */
+  std::mutex mutex_;
+  /** @brief Wakes test, coordinator, and CPU occupant after state changes. */
+  std::condition_variable changed_;
+  /** @brief Externally visible target operation-entry count. */
+  std::atomic<std::uint32_t> target_entries_{0U};
+  /** @brief Whether the sole CPU worker currently runs the occupant. */
+  bool cpu_active_ = false;
+  /** @brief Whether the occupant operation may return. */
+  bool cpu_released_ = false;
+  /** @brief Whether target post-submit interception is enabled. */
+  bool post_submit_armed_ = false;
+  /** @brief Whether the target Run reached the held observation point. */
+  bool post_submit_observed_ = false;
+  /** @brief Whether the target Run may proceed toward waiting. */
+  bool post_submit_released_ = false;
+};
+
 /** @brief Borrowed active deterministic queue gate for one scoped test. */
 QueueAdmissionGate* g_queue_admission_gate = nullptr;
 
@@ -861,6 +1031,9 @@ ExternalStopRaceController* g_external_stop_race_controller = nullptr;
 
 /** @brief Borrowed final-result gate for one scoped execution test. */
 FinalResultReadyGate* g_final_result_ready_gate = nullptr;
+
+/** @brief Borrowed queued-attempt admission gate for one scoped regression. */
+QueuedAttemptAdmissionGate* g_queued_attempt_admission_gate = nullptr;
 
 /**
  * @brief Bridges the callback-waiting hook into the active scoped observers.
@@ -934,6 +1107,20 @@ void hold_final_result_ready() noexcept {
   try {
     if (g_final_result_ready_gate) {
       g_final_result_ready_gate->hold();
+    }
+  } catch (...) {
+  }
+}
+
+/**
+ * @brief Bridges the no-throw post-submit hook into its scoped test gate.
+ * @return No value.
+ * @throws Nothing; synchronization failures are fenced inside the test hook.
+ */
+void hold_post_submit_observation() noexcept {
+  try {
+    if (g_queued_attempt_admission_gate) {
+      g_queued_attempt_admission_gate->hold_post_submit_observation();
     }
   } catch (...) {
   }
@@ -1378,9 +1565,9 @@ int main() {
   QueueAdmissionGate queue_gate;
   g_queue_admission_gate = &queue_gate;
   const ps::execution_testing::ExecutionTestHooks execution_test_hooks{
-      &hold_queued_callback, &before_scheduler_failure,
+      &hold_queued_callback,          &before_scheduler_failure,
       &select_callback_submit_action, &fail_failure_status_construction,
-      &hold_final_result_ready};
+      &hold_final_result_ready,       &hold_post_submit_observation};
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto waiting_cpu_future = std::async(std::launch::async, [&] {
     return queue_bound_execution.execute(waiting_cpu_workflow.plan);
@@ -1414,6 +1601,118 @@ int main() {
       queue_bound_execution.execute(competing_gpu_workflow.plan);
   PS_CHECK(recovered_gpu_result.ok());
   PS_CHECK(ps::test::named_scalar(recovered_gpu_result.value(), "sum") == 11.0);
+
+  for (const QueuedAttemptStopKind stop_kind :
+       {QueuedAttemptStopKind::Stale,
+        QueuedAttemptStopKind::CancellationAndStale}) {
+    QueuedAttemptAdmissionGate queued_attempt_gate;
+    auto queued_attempt_operations = std::make_shared<OperationRegistry>();
+    OperationTraits queued_occupant_traits;
+    queued_occupant_traits.estimated_bytes = sizeof(double);
+    PS_CHECK(
+        queued_attempt_operations
+            ->register_operation(OperationDefinition{
+                "test.queued_attempt_occupant", queued_occupant_traits,
+                [&queued_attempt_gate](
+                    const OperationInvocation& invocation) -> Result<Value> {
+                  return queued_attempt_gate.run_cpu_occupant(invocation);
+                }})
+            .ok());
+    OperationTraits queued_target_traits;
+    queued_target_traits.side_effect_free = false;
+    queued_target_traits.cacheable = false;
+    queued_target_traits.estimated_bytes = sizeof(double);
+    PS_CHECK(
+        queued_attempt_operations
+            ->register_operation(OperationDefinition{
+                "test.queued_attempt_target", queued_target_traits,
+                [&queued_attempt_gate](
+                    const OperationInvocation& invocation) -> Result<Value> {
+                  return queued_attempt_gate.run_target(invocation);
+                }})
+            .ok());
+    PS_CHECK(queued_attempt_operations->freeze().ok());
+
+    Compiler queued_attempt_compiler(queued_attempt_operations);
+    ExecutionContext queued_attempt_execution(
+        queued_attempt_operations,
+        ExecutionContextConfig{1U, false, 4U, 1024U});
+    GraphContext queued_occupant_graph(
+        single_operation_document("test.queued_attempt_occupant"));
+    CompiledWorkflow queued_occupant_workflow =
+        compile_or_throw(&queued_attempt_compiler, queued_occupant_graph);
+    GraphContext queued_target_graph(
+        single_operation_document("test.queued_attempt_target"));
+    CompiledWorkflow queued_target_workflow =
+        compile_or_throw(&queued_attempt_compiler, queued_target_graph);
+    PS_CHECK(queued_target_workflow.semantic.nodes().size() == 1U);
+    PS_CHECK(!queued_target_workflow.semantic.nodes()
+                  .front()
+                  .traits.side_effect_free);
+    PS_CHECK(!queued_target_workflow.optimized.nodes()
+                  .front()
+                  .traits.side_effect_free);
+    PS_CHECK(
+        !queued_target_workflow.plan.steps().front().traits.side_effect_free);
+    PS_CHECK(!queued_target_workflow.plan.steps().front().traits.cacheable);
+
+    auto queued_occupant_future = std::async(std::launch::async, [&] {
+      return queued_attempt_execution.execute(queued_occupant_workflow.plan);
+    });
+    const bool queued_occupant_active =
+        queued_attempt_gate.wait_until_cpu_active(std::chrono::seconds(2));
+
+    CancellationSource queued_target_cancellation;
+    queued_attempt_gate.arm_post_submit_observation();
+    g_queued_attempt_admission_gate = &queued_attempt_gate;
+    ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
+    auto queued_target_future = std::async(std::launch::async, [&] {
+      return queued_attempt_execution.execute(
+          queued_target_workflow.plan, queued_target_cancellation.token());
+    });
+    const bool post_submit_observed =
+        queued_attempt_gate.wait_until_post_submit_observed(
+            std::chrono::seconds(2));
+    const bool cancellation_requested =
+        stop_kind == QueuedAttemptStopKind::CancellationAndStale
+            ? queued_target_cancellation.cancel()
+            : true;
+    const std::uint64_t queued_target_revision = queued_target_graph.replace(
+        single_operation_document("test.queued_attempt_target"));
+    queued_attempt_gate.release_post_submit_observation();
+    const std::future_status queued_before_worker =
+        queued_target_future.wait_for(std::chrono::milliseconds(0));
+    queued_attempt_gate.release_cpu_operation();
+    auto queued_occupant_result = queued_occupant_future.get();
+    const std::future_status queued_target_convergence =
+        queued_target_future.wait_for(std::chrono::seconds(2));
+    auto queued_target_result = queued_target_future.get();
+    ps::execution_testing::install_execution_test_hooks(nullptr);
+    g_queued_attempt_admission_gate = nullptr;
+
+    PS_CHECK(queued_occupant_active);
+    PS_CHECK(post_submit_observed);
+    PS_CHECK(cancellation_requested);
+    PS_CHECK(queued_target_revision != 0U);
+    PS_CHECK(queued_before_worker == std::future_status::timeout);
+    PS_CHECK(queued_occupant_result.ok());
+    PS_CHECK(queued_target_convergence == std::future_status::ready);
+    PS_CHECK(!queued_target_result.ok());
+    PS_CHECK(queued_target_result.status().code ==
+             (stop_kind == QueuedAttemptStopKind::CancellationAndStale
+                  ? ErrorCode::Cancelled
+                  : ErrorCode::Stale));
+    PS_CHECK(queued_attempt_gate.target_entries() == 0U);
+
+    CompiledWorkflow queued_target_recovery_workflow =
+        compile_or_throw(&queued_attempt_compiler, queued_target_graph);
+    auto queued_target_recovery =
+        queued_attempt_execution.execute(queued_target_recovery_workflow.plan);
+    PS_CHECK(queued_target_recovery.ok());
+    PS_CHECK(ps::test::named_scalar(queued_target_recovery.value(), "value") ==
+             5.0);
+    PS_CHECK(queued_attempt_gate.target_entries() == 1U);
+  }
 
   auto final_result_operations = make_region_registry(
       OperationRegionRule::Whole, 0U, std::make_shared<Region>());

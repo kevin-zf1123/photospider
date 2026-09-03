@@ -92,4 +92,15 @@ void notify_final_result_ready() noexcept {
   }
 }
 
+/**
+ * @brief Implements the post-submit external-stop observation notification.
+ * @copydetails notify_post_submit_observation
+ */
+void notify_post_submit_observation() noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->post_submit_observation) {
+    hooks->post_submit_observation();
+  }
+}
+
 }  // namespace ps::execution_testing

@@ -33,7 +33,13 @@ Kernel test 覆盖：
   排在它之后。Sentinel 完成证明目标 callback 已被 pop，并已完成 abandonment。此时 GPU
   callback 仍被阻塞，目标 future 必须保持未完成；释放 GPU callback 后，future 返回选中的
   code 与空 diagnostic。Cancellation 与 stale 两种 case 都会让全部 callback 完成退役，
-  且同一个 context 可用 current snapshot 再次成功执行；
+  且同一个 context 可用 current snapshot 再次成功执行。另一个无 sleep queued-attempt
+  regression 会占用唯一 CPU worker，并在目标 Run 完成 post-submit external-stop
+  observation 后、仍持有 Run mutex 且尚未进入 condition-variable wait 时阻塞它。这证明
+  single-node side-effecting/non-cacheable target 在 coordinator 最后一次检查后已经进入 CPU
+  FIFO。随后替换 graph，再依次释放 Run gate 与 occupant 时，必须以零次 target entry 返回
+  `Stale`；在同一 boundary 先 cancel 再替换必须以零次 entry 返回 `Cancelled`。两个 future
+  都会收敛，且同一 execution context 可以成功执行重新编译的 current plan；
 - bounded ready work 与 `ResourceLedger` settlement；
 - cross-backend copy/backend label、cancellation、stale completion 与 exception fence。
   Private condition-variable barrier 只在 named Value、diagnostic、digest 与 execute timing
@@ -156,10 +162,12 @@ fence、in-flight count 完成 drain，且 empty-message fallback 仍可用。`B
 `BUILD_TESTING=OFF` 时，test-kernel target 与其 execution-hook object 都不存在。
 
 同一个不安装的 execution-hook object 还在 complete local result assembly 后、final stop
-check 前暴露一个 no-throw `final_result_ready` observer。它只用于阻塞
-success-publication linearization window；product archive/package 不包含 observer symbol
-或 test string。Native-library path regression 同样只通过不安装的 test-kernel hook object
-统计 loader、owner 与 close boundary。
+check 前暴露一个 no-throw `final_result_ready` observer；它还在 coordinator 重新取得 Run
+mutex 并检查 external stop 后、可能进入 wait 前暴露一个 no-throw post-submit observer。
+前者只用于阻塞 success-publication linearization window，后者在不增加 production
+notification path 的情况下证明 queued worker-entry admission。Product archive/package
+不包含任一 observer symbol 或 test string。Native-library path regression 同样只通过不安装
+的 test-kernel hook object 统计 loader、owner 与 close boundary。
 
 ## Sanitizer 与 malformed-input validation
 

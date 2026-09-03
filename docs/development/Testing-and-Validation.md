@@ -40,7 +40,16 @@ Kernel tests cover:
   finished abandonment. With the GPU callback still held, the target future
   remains incomplete; releasing that callback returns the selected code with
   an empty diagnostic. Both cancellation and stale cases retire every callback,
-  and the same context succeeds with the current snapshot;
+  and the same context succeeds with the current snapshot. A separate no-sleep
+  queued-attempt regression occupies the sole CPU worker and holds the target
+  Run immediately after its post-submit external-stop observation, while the
+  Run mutex remains held and before condition-variable waiting. This proves the
+  single-node side-effecting/non-cacheable target is already in the CPU FIFO
+  after the coordinator's last check. Graph replacement followed by Run-gate
+  and occupant release must return `Stale` with zero target entries; cancelling
+  and replacing at the same boundary must return `Cancelled` with zero entries.
+  Both futures converge and the same execution context runs a newly compiled
+  current plan successfully;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences. A private condition-variable barrier holds a nontrivial
@@ -195,10 +204,13 @@ neither the test-kernel target nor its execution-hook object exists.
 The same noninstalled execution-hook object exposes one no-throw
 `final_result_ready` observer after complete local result assembly and before
 the final stop check. It exists only to hold the success-publication
-linearization window; the product archive and package contain no observer
-symbol or test string. Native-library path regressions similarly count loader,
-owner, and close boundaries only through the noninstalled test-kernel hook
-object.
+linearization window, plus one no-throw post-submit observer after the
+coordinator reacquires the Run mutex and checks external stop but before it can
+wait. The latter proves queued worker-entry admission without adding a
+production notification path. The product archive and package contain neither
+observer symbol nor test string. Native-library path regressions similarly
+count loader, owner, and close boundaries only through the noninstalled
+test-kernel hook object.
 
 ## Sanitizers and malformed-input validation
 

@@ -36,6 +36,21 @@ object ownership inside one synchronous `execute` call.
 
 ### Completion and publication
 
+After either backend FIFO pops a queued attempt, the worker takes the Run mutex
+and observes the same prioritized cancellation/currentness boundary before
+dependency copying, transfer, modeled-byte admission, or operation invocation.
+An existing or newly observed failure abandons that callback and retires its
+one in-flight slot; the observation itself owns no retirement. CPU, GPU, and
+GPU-to-CPU fallback attempts use the same cutoff without registering Runs in
+`GraphContext` or adding replacement notifications.
+
+This worker-entry observation is a queued-attempt admission cutoff, not a
+global exclusion or preemption guarantee. Cancellation or replacement after
+the cutoff may race with transfer, resource admission, or an in-process
+operation entry. Such a callback may drain under cooperative/best-effort
+semantics, but its completion and final result still cannot publish after the
+stop is observed.
+
 An operation completion is accepted only while the caller token is not
 cancelled and the plan's captured graph revision remains current. A rejected
 late completion retires its callback and byte lease but cannot release a
