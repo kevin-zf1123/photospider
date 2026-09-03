@@ -139,9 +139,13 @@ default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
   `CXX_STANDARD=14`, `CXX_STANDARD_REQUIRED=ON`, and `CXX_EXTENSIONS=OFF` on
   themselves. Neither target privately requests C++17. The linked imported
   kernel and operation SDK usage requirements raise their actual compilation
-  to C++17, which both translation units enforce with `__cplusplus` static
-  assertions. The linked pure-C SDK probe remains an explicit C11 translation
-  unit and receives no C++ standard flag;
+  to C++17. Both translation units enforce that result with a compiler-
+  appropriate static assertion: `_MSVC_LANG` when that macro is defined by an
+  MSVC-compatible frontend, and `__cplusplus` otherwise. The consumer adds no
+  private `/std:c++17` flag and does not require `/Zc:__cplusplus`; the imported
+  usage requirements remain the source of dialect elevation. The linked pure-C
+  SDK probe remains an explicit C11 translation unit and receives no C++
+  standard flag;
 - removed targets, headers, components, and executables are absent.
 
 The nested consumer project exposes a generator-aware

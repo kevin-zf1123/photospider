@@ -3,8 +3,13 @@
 // Keep the self-contained C++ wrapper as this translation unit's first include.
 #include "photospider/plugin/data_provider_api.h"
 
+#if defined(_MSVC_LANG)
+static_assert(_MSVC_LANG >= 201703L,
+              "the operation SDK target must propagate C++17");
+#else
 static_assert(__cplusplus >= 201703L,
               "the operation SDK target must propagate C++17");
+#endif
 static_assert(
     ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V2) ==
         PS_OPERATION_ELEMENT_FLOAT64_V2,

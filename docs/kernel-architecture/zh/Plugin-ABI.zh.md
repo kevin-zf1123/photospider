@@ -10,7 +10,10 @@ Photospider 安装两份 narrow same-trust extension header：
 的 header：它在暴露 `element_type_value` 前自行包含 `<cstdint>` dependency 与 operation
 C ABI，不依赖 consumer 先包含另一份 Photospider header。导出的
 `Photospider::operation_sdk` interface target 会传播 `cxx_std_17`，因此 C++ consumer
-可以从 package 获得 wrapper 的实际语言要求，无需自行重复声明。
+可以从 package 获得 wrapper 的实际语言要求，无需自行重复声明。Maintained consumer
+通过与 compiler 相符的 dialect assertion 证明这项传播：MSVC-compatible frontend 定义
+`_MSVC_LANG` 时使用该宏，否则使用 `__cplusplus`。它不私自添加 standard flag，也不
+要求 `/Zc:__cplusplus`。
 
 Provider contract 继续保持纯 C。`Photospider::data_provider_sdk` 只传播 include
 directory，不传播 C++ compile feature，所以 C11 translation unit 可以消费它而不会
