@@ -81,6 +81,7 @@ add_library(Photospider::kernel ALIAS photospider)
 add_library(photospider_operation_sdk INTERFACE)
 add_library(Photospider::operation_sdk ALIAS photospider_operation_sdk)
 set_target_properties(photospider_operation_sdk PROPERTIES EXPORT_NAME operation_sdk)
+target_compile_features(photospider_operation_sdk INTERFACE cxx_std_17)
 target_include_directories(
   photospider_operation_sdk
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

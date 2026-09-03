@@ -3,6 +3,8 @@
 
 #include "photospider/photospider.hpp"
 
+static_assert(__cplusplus >= 201703L, "the kernel target must propagate C++17");
+
 /**
  * @brief Compiles and executes one graph through the installed kernel target.
  *
