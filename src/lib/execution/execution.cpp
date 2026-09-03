@@ -948,6 +948,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 
   /**
    * @brief Converts cancellation/currentness observations into first failure.
+   * @return No value.
    * @throws Nothing.
    * @note Caller holds `mutex_`. Owned diagnostic/Status construction remains
    * inside this no-throw boundary. Its allocation-free fallback records the
@@ -1293,6 +1294,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param code Stable failure category.
    * @param diagnostic Borrowed null-terminated diagnostic source, or null for
    * an empty diagnostic.
+   * @return No value.
    * @throws Nothing.
    * @note The call boundary accepts only a pointer, so string and `Status`
    * materialization occur inside the protected block. Its allocation-free

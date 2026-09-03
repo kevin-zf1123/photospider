@@ -34,9 +34,13 @@ Kernel tests cover:
   CPU queue-rejection case retains independent CPU coverage. Separate
   no-sleep cancellation and stale races occupy the sole CPU worker, hold a GPU
   callback in the target Run, and fault only external-stop `Status`
-  construction. The target future remains incomplete until that callback is
-  released, then returns the selected code with an empty diagnostic; all
-  callbacks retire and the same context succeeds with the current snapshot;
+  construction. After the target CPU callback enters the FIFO, an independent
+  CPU Run queues a successor sentinel behind it before the worker occupant is
+  released. Sentinel completion proves that the target callback was popped and
+  finished abandonment. With the GPU callback still held, the target future
+  remains incomplete; releasing that callback returns the selected code with
+  an empty diagnostic. Both cancellation and stale cases retire every callback,
+  and the same context succeeds with the current snapshot;
 - bounded ready work and `ResourceLedger` settlement;
 - cross-backend copy/backend labels, cancellation, stale completion, and
   exception fences. A private condition-variable barrier holds a nontrivial
@@ -178,13 +182,15 @@ fallback. The construction hook selects the exact exception-fence or run-loop
 external-stop materialization point and fires immediately before owned
 diagnostic and `Status` construction. External-stop fallback runs under the
 already-held Run mutex without decrementing an in-flight slot; the exception
-helper retains its callback-retirement ownership. The regression also feeds a
-null standard-exception diagnostic through the pointer-only call boundary;
-normal completion proves the failure is fenced, the in-flight count drains,
-and the empty-message fallback remains usable. With `BUILD_TESTING=ON`, the
-product archive, installed kernel, exports, and ordinary consumer remain
-hook-free; with `BUILD_TESTING=OFF`, neither the test-kernel target nor its
-execution-hook object exists.
+helper retains its callback-retirement ownership. The callback-enqueue observer
+also records the target and successor admissions while the sole CPU worker is
+occupied; waiting for the successor Run proves FIFO retirement before the held
+GPU callback is released. The regression also feeds a null standard-exception
+diagnostic through the pointer-only call boundary; normal completion proves the
+failure is fenced, the in-flight count drains, and the empty-message fallback
+remains usable. With `BUILD_TESTING=ON`, the product archive, installed kernel,
+exports, and ordinary consumer remain hook-free; with `BUILD_TESTING=OFF`,
+neither the test-kernel target nor its execution-hook object exists.
 
 The same noninstalled execution-hook object exposes one no-throw
 `final_result_ready` observer after complete local result assembly and before

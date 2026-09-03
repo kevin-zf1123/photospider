@@ -57,7 +57,10 @@ Run-loop 对 cancellation 或 staleness 的 observation 本身也是 no-throw bo
 首次观察到任一 stop 时仍有 active callback，而 owned diagnostic 或 `Status` 构造失败，
 它会在继续持有 Run mutex 的情况下，以空 message 记录相同的 prioritized code。该
 fallback 既不重新取得该 mutex，也不让任何 in-flight slot 退役；它停止新的 admission，
-并等待每个 callback 正常退役。
+并等待每个 callback 正常退役。Maintained regression 会直接证明这一 ownership：唯一
+CPU worker 被占用期间，先 admission 目标 CPU callback，再把另一个独立 CPU Run 作为
+FIFO successor 排在其后。Successor 完成证明目标 callback 已完成 abandonment；此时另一个
+GPU callback 仍被 gate 阻塞，目标 future 必须继续保持未完成。
 
 在 operation-registry boundary，invocation validation 保持如下顺序：operation lookup、
 input/demand count、逐 input validity 与 demand bound、parameter、cancellation、闭合的
