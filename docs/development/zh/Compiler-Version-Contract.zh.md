@@ -36,6 +36,7 @@ target capability。任何 mismatch 都变成 cache miss 并重建；删除 cach
 
 - 只更新受影响的 public 或 internal version。
 - Canonical byte 有意变化时更新 canonical digest vector。
-- 更新英文 architecture/OpenSpec 与中文镜像。
+- 更新受影响的英文公开文档与中文镜像。
+- 更新 live GitHub Issue/Project state 与 checked-in delivery snapshot。
 - 运行 focused stage validation 与隔离 installed consumer。
 - 除非独立显式产品决策要求，否则不增加 compatibility shim 或第二 reader。

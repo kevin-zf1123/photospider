@@ -68,17 +68,19 @@ scope. They are not future or default-disabled kernel features.
 - Companion daemon product-boundary authority, where daemon responsibilities
   apply:
   [daemon ADR 0001](https://github.com/kevin-zf1123/photospider-daemon/blob/main/docs/adr/0001-breaking-product-boundary-scope-reset.md)
-- The private personal-overlay Git repository owns the OpenSpec authority and
-  historical delivery record below. These are overlay work-tree paths, not
-  content in the public kernel checkout or installed package surface:
-  - Active OpenSpec authority:
-    - `openspec/specs/product-boundary-authority/spec.md`
-    - `openspec/specs/kernel-compiler-execution/spec.md`
-    - `openspec/specs/daemon-local-orchestration/spec.md`
-    - `openspec/specs/raw-benchmark-diagnostics/spec.md`
-  - Historical evidence only:
-    `openspec/changes/archive/2026-09-03-breaking-product-boundary-reset/`
-- Delivery status: narrowed GitHub Issues and Projects
+- Stable development constraints: `docs/development/`
+- Public live delivery status: GitHub Issues
+- Maintainer operational views: GitHub Projects, which mirror Issues and do
+  not override them
+- Checked-in delivery snapshot:
+  `docs/development/Current-Development-Program.md`
+
+OpenSpec files in the private personal-overlay repository are maintainer
+working notes. They have no public architecture or delivery authority and do
+not gate implementation, review, or completion. A proposal becomes effective
+only after its accepted decisions and work are recorded in the applicable
+public ADR, current-fact or development document, and GitHub Issue.
+Archived OpenSpec changes remain historical working records.
 
 English documents are authoritative. Official Chinese mirrors are maintained
 in the matching `zh/` paths.

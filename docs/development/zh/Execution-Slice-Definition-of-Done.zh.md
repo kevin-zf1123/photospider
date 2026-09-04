@@ -31,5 +31,7 @@
 
 - Focused unit/integration/negative/concurrency test 通过。
 - 受影响时 installed public header/export/consumer inventory 通过。
-- 英文 docs/OpenSpec、中文镜像、task 与 tracking 一致。
+- 英文公开文档、中文镜像、GitHub Issue/Project 与 checked-in delivery snapshot
+  一致。
+- 私有 OpenSpec working note 不属于公开 completion gate。
 - 记录实际 command 与 limitation；未运行 gate 不得宣称已运行。

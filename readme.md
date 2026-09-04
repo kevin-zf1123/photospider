@@ -89,6 +89,7 @@ format, remote endpoint, or plugin path method.
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
 | Build and validation | [Testing and validation](docs/development/Testing-and-Validation.md) |
+| Current delivery sequence | [Current Development Program](docs/development/Current-Development-Program.md) |
 
 English documentation is authoritative. Official documents under `docs/`
 have maintained Chinese mirrors in their corresponding `zh/` directories.
