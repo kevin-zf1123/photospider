@@ -33,5 +33,7 @@ are true.
 
 - Focused unit/integration/negative/concurrency tests pass.
 - Installed public header/export/consumer inventory passes when affected.
-- English docs/OpenSpec, Chinese mirrors, tasks, and tracking agree.
+- English public documents, Chinese mirrors, GitHub Issues/Projects, and the
+  checked-in delivery snapshot agree.
+- Private OpenSpec working notes are outside the public completion gate.
 - Actual commands and limitations are recorded; unrun gates are not claimed.

@@ -190,7 +190,8 @@ ADR 0002、0003、0005、0007、0008、0012 与 0014 中的产品范围部分；
 保留的本地 kernel contract 会直接收窄。它也取代所有把 Job、worker process、
 policy、trust、isolation、durable artifact、evidence 或 network-service authority
 分给 kernel，或者把 IPC v2 compatible maintenance 分给 daemon 的 active
-roadmap、OpenSpec、architecture page、Issue 或 Project description。
+roadmap、私有 OpenSpec working note、architecture page、Issue 或 Project
+description。
 
 历史 archive 仅是历史证据。Active index 不得把 archive 链接成当前权威，也不得
 使用 archive 恢复已删除领域，除非先产生一个明确取代本决策的新破坏性产品决策。

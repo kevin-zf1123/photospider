@@ -7,6 +7,11 @@ boundary reset. English is authoritative; faithful Chinese mirrors are under
 [ADR 0015](../adr/0015-breaking-product-boundary-scope-reset.md) is the highest
 active product-boundary authority.
 
+Public live delivery state is maintained in GitHub Issues. GitHub Projects are
+maintainer operational views of those Issues. The checked-in
+[Current Development Program](../development/Current-Development-Program.md)
+summarizes the baseline and execution order without changing this architecture.
+
 ## Reading order
 
 1. [Overview](Overview.md)

@@ -75,7 +75,8 @@ the kernel to a fresh prefix and use only public package exports.
 
 Types use `PascalCase`; files, functions, fields, directories, and internal
 targets use `snake_case`. A complete rename updates declarations, definitions,
-includes, tests, CMake, docs, OpenSpec, and mirrors without aliases.
+includes, tests, CMake, public documents, mirrors, and tracked Issues without
+aliases. Private OpenSpec working notes have no authority over the rename.
 
 Every added or changed class, struct, enum, function, important field, and
 anonymous helper has complete Doxygen covering behavior, parameters, return,

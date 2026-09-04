@@ -6,6 +6,11 @@
 [ADR 0015](../../adr/zh/0015-breaking-product-boundary-scope-reset.zh.md) 是最高
 active 产品边界权威。
 
+公开 live delivery state 由 GitHub Issue 维护。GitHub Project 是这些 Issue 的
+maintainer operational view。Checked-in
+[当前开发计划](../../development/zh/Current-Development-Program.zh.md)汇总 baseline 与
+执行顺序，不修改本架构。
+
 ## 阅读顺序
 
 1. [概览](Overview.zh.md)

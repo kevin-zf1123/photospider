@@ -40,7 +40,8 @@ rebuild; cache deletion is always valid.
 
 - Update the affected public or internal version only.
 - Update canonical digest vectors when canonical bytes intentionally change.
-- Update English architecture/OpenSpec and Chinese mirrors.
+- Update affected English public documents and Chinese mirrors.
+- Update live GitHub Issue/Project state and the checked-in delivery snapshot.
 - Run focused stage validation plus the isolated installed consumer.
 - Do not add a compatibility shim or second reader unless a separate explicit
   product decision requires it.

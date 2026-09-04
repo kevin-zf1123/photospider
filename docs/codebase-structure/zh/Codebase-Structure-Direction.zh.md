@@ -75,7 +75,8 @@ prefix，并且只使用 public package export。
 
 Type 使用 `PascalCase`；file、function、field、directory 与 internal target 使用
 `snake_case`。完整 rename 会更新 declaration、definition、include、test、CMake、
-docs、OpenSpec 与 mirror，且不留 alias。
+公开 document、mirror 与 tracked Issue，且不留 alias。私有 OpenSpec working note
+对 rename 没有 authority。
 
 每个新增或修改 class、struct、enum、function、important field 与 anonymous helper
 都有完整 Doxygen，覆盖行为、parameter、return、exception、threading、ownership、

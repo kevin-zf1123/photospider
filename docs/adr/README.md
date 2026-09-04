@@ -2,8 +2,11 @@
 
 English ADRs are authoritative. Each accepted ADR has a reader-oriented
 Chinese mirror under [`zh/`](zh/README.zh.md). ADRs record decisions and target
-contracts; current implementation facts and live delivery status remain in the
-kernel architecture documents and issue/project tracking respectively.
+contracts; current implementation facts and public live delivery status remain
+in the kernel architecture documents and GitHub Issues respectively. GitHub
+Projects are maintainer operational views of those Issues.
+Private personal-overlay OpenSpec files are maintainer working notes and carry
+no public architecture or delivery authority.
 
 | ADR | Decision |
 | --- | --- |

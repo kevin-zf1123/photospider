@@ -1,8 +1,10 @@
 # 架构决策记录
 
 英文 ADR 是权威来源。每个已接受 ADR 都在本目录中具有面向读者的中文镜像。ADR
-记录决策与目标契约；当前实现事实与实时交付状态分别由 kernel 架构文档和
-issue/project tracking 维护。
+记录决策与目标契约；当前实现事实与公开实时交付状态分别由 kernel 架构文档和
+GitHub Issue 维护。GitHub Project 是这些 Issue 的 maintainer operational view。
+私有 personal-overlay OpenSpec 文件属于 maintainer working note，不具有公开
+architecture 或 delivery authority。
 
 | ADR | 决策 |
 | --- | --- |

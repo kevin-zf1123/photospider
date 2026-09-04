@@ -203,8 +203,9 @@ This ADR is the highest active product-boundary authority. It retires ADRs
 exact graph-state scheduler, OpenCV operation, service/evidence, or dense-image
 facet decisions are absent from the reset implementation. It supersedes the
 product-scope portions of ADRs 0002, 0003, 0005, 0007, 0008, 0012, and 0014;
-their retained local-kernel contracts are narrowed in place. It also supersedes every active roadmap,
-OpenSpec, architecture page, issue, or Project description that assigns Job,
+their retained local-kernel contracts are narrowed in place. It also supersedes
+every active roadmap, private OpenSpec working note, architecture page, issue,
+or Project description that assigns Job,
 worker-process, policy, trust, isolation, durable artifact, evidence, or
 network-service authority to the kernel, or assigns IPC v2 compatible
 maintenance to the daemon.
