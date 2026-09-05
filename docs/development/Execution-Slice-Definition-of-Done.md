@@ -37,3 +37,15 @@ are true.
   checked-in delivery snapshot agree.
 - Private OpenSpec working notes are outside the public completion gate.
 - Actual commands and limitations are recorded; unrun gates are not claimed.
+
+## Decision tasks and authorized delivery
+
+For a decision-only Issue, prepare the exact proposed public API, alternatives,
+version/ownership/error/identity impacts, named future fixtures and maintainer
+questions. Review documents and signatures; do not report future runtime
+fixtures as passing or start a dependent implementation. The decision remains
+Proposed until explicitly accepted and must reach the Issue's required delivery
+location before completion. Record outstanding gates when the authorized
+endpoint is a local draft. Implementation checks above apply when that code
+exists. Follow [Task Collaboration](Task-Collaboration.md) for status writes
+and handoff; private tracking is not a substitute for public delivery.

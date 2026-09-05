@@ -138,3 +138,11 @@ Raw diagnostics include compile-stage duration, execute duration, operation
 attempt timing/outcome, selected backend, transfer count/bytes, peak modeled
 bytes, fallback reason, plan digest, and result digest. They are observations,
 not verdicts or release evidence.
+
+## Accepted S1 target, implementation pending
+
+The development direction and Float32 goal are accepted.
+[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) specifies the
+revised image/scalar/per-port design and operation ABI v3, now Accepted.
+Implementation facts above remain unchanged; new elements and bindings are
+not implemented. #256 tracks decision delivery; #257 owns implementation.

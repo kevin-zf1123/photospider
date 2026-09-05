@@ -3,6 +3,13 @@
 - Status: Accepted, narrowed by ADR 0015
 - Date: 2026-09-01 boundary revision
 
+## Accepted target amendment by ADR 0016
+
+The accepted target replaces operation ABI v2 with ABI v3 and per-port schemas; provider ABI v1 keeps its layout and adds Float32 element decoding.
+See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
+and representation descriptions below remain the implementation baseline until
+#257 delivers the target; decision acceptance does not report runtime changes.
+
 ## Context
 
 The kernel needs an operation extension point and a directly related data

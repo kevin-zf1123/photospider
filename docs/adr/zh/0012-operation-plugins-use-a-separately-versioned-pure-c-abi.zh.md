@@ -3,6 +3,12 @@
 - 状态：已接受，由 ADR 0015 收窄
 - 日期：2026-09-01 边界修订
 
+## ADR 0016 的已接受目标
+
+已接受目标以 ABI v3 和逐端口 schema 替代 operation ABI v2；provider ABI v1 保持布局并增加 Float32 元素解码。
+参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
+表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+
 ## 背景
 
 Kernel 需要 operation extension point 和与其直接相关的 data-definition extension point，

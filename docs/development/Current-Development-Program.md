@@ -1,8 +1,8 @@
 # Current Development Program
 
-- Snapshot date: 2026-09-04
+- Snapshot date: 2026-09-05
 - Audited implementation baseline: `main@703569bb74164f061b233f9edc2c0b964bc868fb`
-- Current milestone: S1 reusable input-to-result vertical
+- Current milestone: S1 reusable image and ordinary-parameter bindings
 
 ## Role and authority
 
@@ -42,9 +42,9 @@ It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
 
 ## Current milestone
 
-S1 makes a compiled graph reusable with caller-owned runtime Values. The
-milestone separates graph input declarations, compile-time facts, per-run
-bindings, output demand, and result transport.
+S1 makes one compiled graph reusable with caller-owned Float32 images and
+ordinary numeric parameter Values. It separates static facts, per-run
+snapshots, output demand and image semantics. Runtime implementation is pending.
 
 ### Critical path
 
@@ -57,14 +57,12 @@ bindings, output demand, and result transport.
 3. [#258](https://github.com/kevin-zf1123/photospider/issues/258)
    adds one real input Value, operation chain, named output, and independent
    correctness oracle across repeated executions of one compiled plan.
-4. The daemon projects the accepted kernel contract into per-Job bindings and
-   an ephemeral bulk-result path. The daemon program records its own Issues and
-   lifecycle constraints.
-
-The kernel contract and daemon bulk-transport decision may proceed in
-parallel. Kernel implementation begins after the contract decision. The final
-daemon vertical begins after both kernel execution and daemon transport
-contracts are complete.
+The next main stage after S1 is CPU regional execution under the accepted
+[development direction](Refactor-Development-Plan.md). New daemon bindings and
+bulk-result features are demand-driven and are not kernel S1 acceptance gates.
+Minimal daemon consumer/package maintenance remains necessary for breaking
+installed changes; existing technical dependencies remain recorded in the
+owning Issues.
 
 ## Active backlog outside the milestone
 
@@ -97,9 +95,28 @@ integration dependency, completion gate, named fixture or vertical, exact
 tests and oracle, non-goals, and expected completion evidence. Parent Issues
 are indexes and closure aggregators and do not carry `ready-for-agent`.
 
+For task status, authorization endpoints and decision/implementation completion,
+see [Task Collaboration](Task-Collaboration.md).
+
 ## Update rule
 
 Update this snapshot when the audited baseline, current milestone, critical
 path, or blocked reason changes. Ordinary implementation details remain in the
 owning Issue and tests. Every status claim must cite completed code and tests;
 an unchecked item does not define current behavior.
+
+## Accepted development direction, 2026-09-05
+
+The maintainer explicitly accepted the adjusted direction in this task:
+[S1 images/ordinary parameters, S2 CPU regions, S3 cache/interaction, S4 native
+GPU and S5 measured optimization](Refactor-Development-Plan.md). Float32 is an
+accepted S1 goal. Daemon features are demand-driven; compatibility maintenance
+continues. Decision delivery is tracked by
+[#256](https://github.com/kevin-zf1123/photospider/issues/256).
+
+[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) now contains
+a unified image/scalar contract and its operation ABI v3/per-port
+contract has been explicitly accepted. #256 delivers the decision documents;
+#257 is the next implementation task after decision delivery and task
+authorization. Its implementation has not started. The S0 implementation
+baseline and current capabilities have not changed.

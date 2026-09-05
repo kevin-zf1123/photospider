@@ -23,3 +23,9 @@ Region 覆盖完整 descriptor，且 layout 已通过普通 Value validation 的
 
 Incremental dirty propagation 位于 active package 边界之外。Demand legality 不能创建
 worker、storage、daemon state，也不能宣称 partial execution 已存在。
+
+## 已接受的 S1 目标，尚未实现
+
+开发方向与 Float32 目标已经接受。[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md)
+已修订图像、普通标量、逐端口需求和 operation ABI v3 的具体方案；契约已经
+Accepted。上述当前实现事实不变，未实现新元素或绑定；#256 跟踪决策交付，#257 负责实现。

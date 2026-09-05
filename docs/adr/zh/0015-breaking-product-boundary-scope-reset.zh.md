@@ -7,6 +7,12 @@
 - 已归档 kernel commit：`446e83687ecf49be8e9b66beac8b40c7b8b224de`
 - 配套 daemon 决策：`photospider-daemon/docs/adr/0001`
 
+## ADR 0016 的已接受目标
+
+产品所有权及排除范围保持不变。已接受目标仅修订 operation ABI、输入及元素契约条款，包括 ABI v3 与 Float32。
+参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
+表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+
 ## 背景
 
 Photospider 曾在一个 kernel 中累积多种不同产品概念：嵌入式图执行、本地 daemon

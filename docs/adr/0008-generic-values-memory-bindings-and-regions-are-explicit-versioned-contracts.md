@@ -3,6 +3,13 @@
 - Status: Accepted, narrowed by ADR 0015
 - Date: 2026-09-01 boundary revision
 
+## Accepted target amendment by ADR 0016
+
+The accepted target adds Float32 and the S1 image/scalar binding constraints.
+See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
+and representation descriptions below remain the implementation baseline until
+#257 delivers the target; decision acceptance does not report runtime changes.
+
 ## Context
 
 Typed compilation and local heterogeneous execution need a runtime value that

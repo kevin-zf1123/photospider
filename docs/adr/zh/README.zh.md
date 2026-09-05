@@ -17,6 +17,7 @@ architecture 或 delivery authority。
 | [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | Operation 与 data provider 使用版本化进程内 ABI。 |
 | [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | Compiler document、IR、plan 与 digest 具有独立 identity。 |
 | [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 产品边界是可嵌入 kernel 与临时 local daemon。 |
+| [0016](0016-workflow-inputs-and-execution-bindings.zh.md) | 已接受的 Float32 图像、运行期标量及 operation ABI v3 目标；实现尚未交付。 |
 
 ADR 0015 是最高 active 产品边界权威。重置前 ADR 0001、0004、0009、0010、0011 与 0013 已由该
 breaking decision 有意从 active 集合退役。其历史文本只能从 Git 历史和

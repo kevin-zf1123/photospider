@@ -28,3 +28,11 @@ complete descriptor, and whose layout passes ordinary Value validation.
 Incremental dirty propagation is outside the active package boundary. Demand
 legality does not create workers, storage, daemon state, or a claim that
 partial execution exists.
+
+## Accepted S1 target, implementation pending
+
+The development direction and Float32 goal are accepted.
+[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) specifies the
+revised image/scalar/per-port design and operation ABI v3, now Accepted.
+Implementation facts above remain unchanged; new elements and bindings are
+not implemented. #256 tracks decision delivery; #257 owns implementation.
