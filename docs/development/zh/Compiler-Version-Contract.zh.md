@@ -40,3 +40,15 @@ target capability。任何 mismatch 都变成 cache miss 并重建；删除 cach
 - 更新 live GitHub Issue/Project state 与 checked-in delivery snapshot。
 - 运行 focused stage validation 与隔离 installed consumer。
 - 除非独立显式产品决策要求，否则不增加 compatibility shim 或第二 reader。
+
+## 已接受的 S1 目标版本，尚未实现
+
+[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md) 按已接受
+契约定义目标 package 0.3.0、WorkflowDocument schema 2、OperationTraits 3、v3 编译
+身份域及 operation ABI 3。Provider ABI 保持1，新增 Float32 元素4。ABI 3 为
+C/C++ 公布相同逐端口约束，明确拒绝旧 operation ABI 2，不保留兼容适配器。
+该具体契约已接受；当前头文件、运行版本和构建要求没有改变。
+
+C++20 工具链另行评估。#257 验证新静态/共享安装消费者和旧次版本拒绝。
+Daemon 新功能按需排期，破坏性 package 迁移仍需协调维护；状态写入继续遵循
+[任务协作](Task-Collaboration.zh.md) 中的授权。

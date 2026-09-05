@@ -7,6 +7,13 @@
 - Archived kernel commit: `446e83687ecf49be8e9b66beac8b40c7b8b224de`
 - Companion daemon decision: `photospider-daemon/docs/adr/0001`
 
+## Accepted target amendment by ADR 0016
+
+Product ownership and excluded domains remain unchanged. The accepted target revises only operation ABI and input/element contract clauses, including ABI v3 and Float32.
+See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
+and representation descriptions below remain the implementation baseline until
+#257 delivers the target; decision acceptance does not report runtime changes.
+
 ## Context
 
 Photospider accumulated several distinct product concepts in one kernel:

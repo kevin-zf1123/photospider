@@ -3,6 +3,12 @@
 - 状态：已接受，由 ADR 0015 收窄
 - 日期：2026-09-01 边界修订
 
+## ADR 0016 的已接受目标
+
+已接受目标增加 Float32 与 S1 图像/标量绑定约束。
+参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
+表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+
 ## 背景
 
 Typed compilation 与 local heterogeneous execution 需要一种 runtime value，不能从 raw

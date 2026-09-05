@@ -44,3 +44,9 @@ type 与 maximum rank，然后 freeze。Provider load 只接受 platform loader 
 非空、1..4096-byte 且不含 embedded NUL 的 path；malformed path 返回
 `InvalidArgument`，无法加载的合法 path 返回 `NotFound`。它不构造 Value，也不提供
 storage。
+
+## 已接受的 S1 目标，尚未实现
+
+开发方向与 Float32 目标已经接受。[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md)
+已修订图像、普通标量、逐端口需求和 operation ABI v3 的具体方案；契约已经
+Accepted。上述当前实现事实不变，未实现新元素或绑定；#256 跟踪决策交付，#257 负责实现。

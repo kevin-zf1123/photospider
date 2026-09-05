@@ -110,3 +110,9 @@ nonzero callback result 会让 Run 失败，不产生 CPU attempt。
 Raw diagnostic 包含 compile-stage duration、execute duration、operation attempt
 timing/outcome、selected backend、transfer count/bytes、peak modeled bytes、fallback reason、
 plan digest 与 result digest。它们是 observation，不是 verdict 或 release evidence。
+
+## 已接受的 S1 目标，尚未实现
+
+开发方向与 Float32 目标已经接受。[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md)
+已修订图像、普通标量、逐端口需求和 operation ABI v3 的具体方案；契约已经
+Accepted。上述当前实现事实不变，未实现新元素或绑定；#256 跟踪决策交付，#257 负责实现。

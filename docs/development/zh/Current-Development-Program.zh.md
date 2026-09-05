@@ -1,8 +1,8 @@
 # 当前开发计划
 
-- 快照日期：2026-09-04
+- 快照日期：2026-09-05
 - 已审计实现 baseline：`main@703569bb74164f061b233f9edc2c0b964bc868fb`
-- 当前 milestone：S1 可复用 input-to-result vertical
+- 当前 milestone：S1 可复用图像与普通参数绑定
 
 ## 角色与权威
 
@@ -39,9 +39,8 @@ compiler 与 execution contract，因此进入 Project #8。
 
 ## 当前 milestone
 
-S1 使 compiled graph 可以重复处理 caller-owned runtime Value。该 milestone 分离 graph
-input declaration、compile-time fact、per-run binding、output demand 与 result
-transport。
+S1 使同一编译计划可以重复处理调用方的 Float32 图像与普通数值参数 Value，
+分离静态事实、每次运行快照、输出需求和图像语义。运行实现尚未交付。
 
 ### Critical path
 
@@ -53,12 +52,10 @@ transport。
 3. [#258](https://github.com/kevin-zf1123/photospider/issues/258)
    增加一个真实 input Value、operation chain、named output 与 independent correctness
    oracle，并使用一个 compiled plan 重复执行。
-4. Daemon 把已接受 kernel contract 投影为 per-Job binding 与 ephemeral bulk-result
-   path。Daemon program 记录其自身 Issue 与 lifecycle constraint。
-
-Kernel contract 与 daemon bulk-transport decision 可以并行。Kernel implementation 在
-contract decision 完成后开始。最终 daemon vertical 在 kernel execution 与 daemon
-transport contract 均完成后开始。
+S1 后的主线阶段为已接受[开发方向](Refactor-Development-Plan.zh.md) 中的 CPU
+区域执行。Daemon 新绑定及大结果功能按需启动，不作为 kernel S1 的验收门槛。
+安装边界发生破坏性变化时仍需最低限度的 daemon consumer/package 维护；所有
+现有技术依赖继续记录在所属 Issue 中。
 
 ## 当前 milestone 以外的 active backlog
 
@@ -89,8 +86,23 @@ completion gate、named fixture 或 vertical、精确 test 与 oracle、non-goal
 completion evidence。Parent Issue 只作为 index 与 closure aggregator，不携带
 `ready-for-agent`。
 
+任务状态、授权终点和决策/实现完成条件见[任务协作](Task-Collaboration.zh.md)。
+
 ## 更新规则
 
 Audited baseline、当前 milestone、critical path 或 blocked reason 变化时更新本快照。
 普通 implementation detail 保留在所属 Issue 与 test 中。每项 status claim 必须引用已
 完成 code 与 test；unchecked item 不定义当前行为。
+
+## 已接受的开发方向，2026-09-05
+
+维护者已明确回复“接受建议内容，采用调整后的方向。”，采用
+[开发计划](Refactor-Development-Plan.zh.md) 的 S1 图像与普通参数、S2 CPU 区域、
+S3 缓存与交互、S4 原生 GPU、S5 实测优化方向。Float32 是 S1 已接受目标，
+daemon 新功能按需推进，兼容维护继续。决策交付状态由
+[#256](https://github.com/kevin-zf1123/photospider/issues/256) 跟踪。
+
+[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md) 已统一
+修订为图像与运行期标量契约，其 operation ABI v3 和逐端口约束已由维护者明确接受。
+#256 交付决策文档；决策交付并取得任务授权后，下一实现任务为 #257。
+其实现尚未启动，S0 实现基线和当前功能没有改变。

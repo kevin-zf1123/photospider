@@ -19,6 +19,7 @@ no public architecture or delivery authority.
 | [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md) | Operations and data providers use versioned in-process ABIs. |
 | [0014](0014-compiler-document-and-plan-versions-are-independent.md) | Compiler documents, IR, plans, and digests have separate identities. |
 | [0015](0015-breaking-product-boundary-scope-reset.md) | The product boundary is an embeddable kernel and an ephemeral local daemon. |
+| [0016](0016-workflow-inputs-and-execution-bindings.md) | Accepted Float32 image/scalar and operation ABI v3 target; implementation pending. |
 
 ADR 0015 is the highest active product-boundary authority. Pre-reset ADRs 0001,
 0004, 0009, 0010, 0011, and 0013 were deliberately retired from the active set

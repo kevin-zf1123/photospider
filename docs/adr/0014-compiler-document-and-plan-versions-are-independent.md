@@ -3,6 +3,13 @@
 - Status: Accepted, narrowed by ADR 0015
 - Date: 2026-09-01 boundary revision
 
+## Accepted target amendment by ADR 0016
+
+The accepted target extends canonical identities with static input/port schemas and excludes ordinary scalar/image run bytes; the specified new domains and versions belong to implementation #257.
+See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
+and representation descriptions below remain the implementation baseline until
+#257 delivers the target; decision acceptance does not report runtime changes.
+
 ## Context
 
 A typed compiler needs reproducible intermediate identities without confusing a

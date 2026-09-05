@@ -45,3 +45,17 @@ rebuild; cache deletion is always valid.
 - Run focused stage validation plus the isolated installed consumer.
 - Do not add a compatibility shim or second reader unless a separate explicit
   product decision requires it.
+
+## Accepted S1 target versions, not yet implemented
+
+[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md), following the
+accepted direction, defines accepted target package 0.3.0, WorkflowDocument schema 2,
+OperationTraits 3, v3 compiler identity domains and operation ABI 3. Provider
+ABI remains 1 with Float32 element4. ABI3 publishes identical C/C++ per-port
+constraints and rejects old operation ABI2 without an adapter. This concrete
+contract is accepted; installed headers/runtime/build requirements have
+not changed.
+
+Evaluate C++20 separately. #257 checks static/shared installed consumers and
+old-minor rejection. Demand-driven daemon features still require coordinated
+breaking-package maintenance. Status writes follow [Task Collaboration](Task-Collaboration.md).

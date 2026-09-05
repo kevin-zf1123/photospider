@@ -3,6 +3,12 @@
 - 状态：已接受，由 ADR 0015 收窄
 - 日期：2026-09-01 边界修订
 
+## ADR 0016 的已接受目标
+
+已接受目标将静态输入/端口 schema 纳入规范身份，排除普通标量及图像运行字节；新身份域与版本由 #257 实现。
+参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
+表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+
 ## 背景
 
 Typed compiler 需要可复现的中间 identity，同时不能混淆 source document、semantic
