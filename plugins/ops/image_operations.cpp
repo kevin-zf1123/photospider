@@ -72,7 +72,8 @@ std::uint64_t clamp_axis(std::uint64_t coordinate, int tap,
     return coordinate < static_cast<std::uint64_t>(-tap)
                ? 0
                : coordinate - static_cast<std::uint64_t>(-tap);
-  return std::min(coordinate + static_cast<std::uint64_t>(tap), length - 1);
+  const auto room = length - 1 - coordinate;
+  return coordinate + std::min(static_cast<std::uint64_t>(tap), room);
 }
 Result<Value> gaussian(const OperationInvocation& invocation) {
   const auto& input = invocation.inputs[0];

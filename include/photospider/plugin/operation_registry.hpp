@@ -362,9 +362,9 @@ class PHOTOSPIDER_API OperationRegistry final {
   /**
    * @brief Invokes one operation through its exception fence.
    * @param key Exact registered operation key.
-   * @param invocation Immutable validated invocation.
-   * @return Complete Value; `InvalidArgument` for a default input Value,
-   * unknown backend, or malformed counts/demands/parameters;
+   * @param invocation Borrowed invocation, validated before any callback.
+   * @return Requested regional Value; `InvalidArgument` for a default input
+   * Value, unknown backend, or malformed counts/demands/parameters;
    * `BackendUnavailable` for a known unsupported backend; `TypeMismatch` for
    * Preserve/Match input incompatibility or invalid generic callback output; or
    * the callback's typed failure.
@@ -377,7 +377,11 @@ class PHOTOSPIDER_API OperationRegistry final {
    * incompatible Preserve/Match invocation cannot run user or DSO code.
    * Callback exceptions other than bad_alloc become `OperationFailed`; a
    * standard exception with a null diagnostic becomes an empty message.
-   * Image/scalar ports additionally validate exact dense metadata, facets,
+   * Output demand is checked against the Whole/image-channel rule. Supplied
+   * demands must cover the output-derived requirement, including resolved
+   * static halo and mask spatial shape, and input Values must cover those
+   * demands. Invalid coverage never enters the callback or its allocator.
+   * Image/scalar ports additionally validate regional metadata, facets,
    * finite scalar intervals and premultiplied pixel domains before callback
    * entry. Malformed computed image outputs are OperationFailed; explicit
    * cancellation/resource failures keep their categories. Image scopes save

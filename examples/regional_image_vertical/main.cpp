@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -162,6 +163,87 @@ std::vector<float> pixels(const Value& output) {
   std::vector<float> result(output.bytes().size() / 4);
   std::memcpy(result.data(), output.bytes().data(), output.bytes().size());
   return result;
+}
+void direct_invocation(const std::shared_ptr<OperationRegistry>& operations) {
+  const auto image = value(std::vector<float>(36, .5F), {3, 3, 4}, true);
+  const auto gain = value({2}, {1}, false);
+  const std::map<std::string, ParameterValue> none;
+  std::vector<Value> inputs{image, gain};
+  std::vector<Region> demands{image.region(), gain.region()};
+  unsigned allocations = 0;
+  BufferAllocator allocator([&](std::uint64_t) {
+    ++allocations;
+    return Result<std::shared_ptr<void>>(std::make_shared<int>(0));
+  });
+  OperationInvocation channels(inputs, demands, none, Backend::Cpu, {},
+                               Region({{0, 1}, {0, 1}, {0, 1}}), allocator);
+  require(operations->invoke("image.exposure_gain", channels).status().code ==
+              ErrorCode::InvalidArgument,
+          "direct partial-channel output must fail before allocation");
+  require(allocations == 0, "partial output entered callback");
+  for (bool broadcast : {true, false}) {
+    auto unusual = Value::create(
+        image.descriptor(), image.region(),
+        broadcast
+            ? StridedLayout{0, {0, 0, 4}, {UINT64_C(1) << 63, UINT64_MAX, 0}}
+            : StridedLayout{0, {-48, -16, 4}, {2, 2, 0}},
+        broadcast ? std::vector<std::uint8_t>(image.bytes().begin(),
+                                              image.bytes().begin() + 16)
+                  : image.copy_bytes(),
+        image.facets());
+    require(unusual.ok(), unusual.status().message);
+    inputs = {unusual.take_value(), gain};
+    OperationInvocation strided(inputs, demands, none);
+    auto exposed = operations->invoke("image.exposure_gain", strided);
+    require(exposed.ok(), exposed.status().message);
+    const auto output = pixels(exposed.value());
+    for (std::size_t index = 0; index < output.size(); ++index)
+      require(output[index] == (index % 4 == 3 ? .5F : 1.F),
+              "broadcast/reversed C view");
+  }
+  inputs = {image};
+  demands = {Region({{1, 1}, {0, 3}, {0, 4}})};
+  const std::map<std::string, ParameterValue> parameters{
+      {"radius", static_cast<std::int64_t>(1)},
+      {"sigma", 1.0}};
+  OperationInvocation halo(inputs, demands, parameters, Backend::Cpu, {},
+                           Region({{1, 1}, {1, 1}, {0, 4}}), allocator);
+  require(operations->invoke("image.gaussian_blur", halo).status().code ==
+              ErrorCode::InvalidArgument,
+          "direct Gaussian must reject insufficient halo");
+  require(allocations == 0, "insufficient halo entered callback");
+  inputs[0] = image.view(demands[0]).take_value();
+  demands[0] = image.region();
+  require(operations->invoke("image.gaussian_blur", halo).status().code ==
+              ErrorCode::TypeMismatch,
+          "input Value must cover its claimed demand");
+  inputs[0] = image;
+  require(operations->invoke("image.gaussian_blur", halo).ok(),
+          "direct valid halo");
+  auto far_edge = Value::create(
+      {ElementType::Float32, {UINT64_MAX, 1, 4}},
+      Region({{UINT64_MAX - 4, 4}, {0, 1}, {0, 4}}), {0, {0, 0, 4}},
+      std::vector<std::uint8_t>(image.bytes().begin(),
+                                image.bytes().begin() + 16),
+      {profile()});
+  require(far_edge.ok(), far_edge.status().message);
+  inputs = {far_edge.take_value()};
+  demands = {inputs[0].region()};
+  const std::map<std::string, ParameterValue> far_parameters{
+      {"radius", static_cast<std::int64_t>(3)},
+      {"sigma", 1.0}};
+  OperationInvocation far(inputs, demands, far_parameters, Backend::Cpu, {},
+                          Region({{UINT64_MAX - 1, 1}, {0, 1}, {0, 4}}));
+  auto far_result = operations->invoke("image.gaussian_blur", far);
+  require(far_result.ok(), far_result.status().message);
+  require(pixels(far_result.value()) == std::vector<float>(4, .5F),
+          "large logical edge clamp");
+  inputs = {image, value(std::vector<float>(6, 1), {2, 3}, false)};
+  demands = {image.region(), inputs[1].region()};
+  OperationInvocation mask(inputs, demands, none);
+  require(operations->invoke("image.mask", mask).status().code ==
+              ErrorCode::TypeMismatch,
+          "direct mask shape mismatch");
 }
 void numerical(const std::shared_ptr<OperationRegistry>& operations) {
   Compiler compiler(operations);
@@ -378,6 +460,7 @@ int main(int argc, char** argv) {
       require(status.ok(), status.message);
       operations->freeze();
     }
+    direct_invocation(operations);
     numerical(operations);
     large_source(operations);
     return 0;

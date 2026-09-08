@@ -854,10 +854,14 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
 /** @brief Finds work needed for outputs, stopping at Run-local
  * materializations. */
 std::vector<bool> required_steps(const ExecutionPlan& plan,
-                                 const std::map<std::uint64_t, Value>& cached) {
+                                 const std::map<std::uint64_t, Value>& cached,
+                                 std::size_t future_whole_begin = SIZE_MAX) {
   std::vector<bool> required(plan.steps().size(), false);
   for (const auto& output : plan.outputs())
     required[output.second] = true;
+  for (std::size_t i = future_whole_begin; i < plan.steps().size(); ++i)
+    if (plan.steps()[i].whole_boundary)
+      required[i] = true;
   for (std::size_t reverse = plan.steps().size(); reverse > 0; --reverse) {
     const auto i = reverse - 1;
     if (!required[i] || cached.count(plan.steps()[i].node_id) != 0)
@@ -1069,7 +1073,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     diagnostics_.retained_input_bytes = retained_input_bytes_;
     result.diagnostics = std::move(diagnostics_);
     result.diagnostics.plan_digest = plan_->digest().value;
-    result.diagnostics.result_digest = result_digest(result.values);
+    if (!regional_)
+      result.diagnostics.result_digest = result_digest(result.values);
     result.diagnostics.execute_us = duration_us(started);
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
     if (!regional_)
@@ -1341,6 +1346,24 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return;
         }
         inputs[input_index] = transferred.take_value();
+      }
+
+      // Generic producers may supply masks without an image output guarantee.
+      // Attribute invalid computed samples to that operation, not the caller.
+      for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+        if (!std::holds_alternative<PlanStepInput>(step.inputs[port]) ||
+            step.traits.input_schema[port].kind !=
+                OperationPortKind::Float32Mask)
+          continue;
+        const auto valid = input_internal::validate_port_value(
+            step.traits.input_schema[port], inputs[port],
+            ErrorCode::OperationFailed,
+            [&] { return binding_stop(*plan_, cancellation_); });
+        if (!valid.ok()) {
+          inputs.clear();
+          finish_failure(valid);
+          return;
+        }
       }
 
       const auto started = std::chrono::steady_clock::now();
@@ -2151,6 +2174,14 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       cached_backends[step.node_id] =
           backend == diagnostics.selected_backends.end() ? step.backend
                                                          : backend->second;
+      // Completed boundaries cut their ancestors from future demands. Retain
+      // only cache entries needed by a remaining boundary or named output.
+      const auto future = required_steps(plan, cached, i + 1);
+      for (std::size_t prior = 0; prior <= i; ++prior)
+        if (!future[prior]) {
+          cached.erase(plan.steps()[prior].node_id);
+          cached_backends.erase(plan.steps()[prior].node_id);
+        }
     }
     // Whole results with no output-side reader can retire before streaming.
     const auto needed = required_steps(plan, cached);

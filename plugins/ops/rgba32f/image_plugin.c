@@ -16,6 +16,33 @@ static const ps_operation_port_constraint_v4 ports_opacity[] = {
     {sizeof(ps_operation_port_constraint_v4),
      PS_OPERATION_PORT_FLOAT32_SCALAR_V4, 0, 0x3f800000U}};
 
+/* Host validation proves each requested coordinate is inside valid coverage.
+ * Match its unsigned distance arithmetic: a broadcast origin may exceed
+ * INT64_MAX. */
+static float sample(const ps_operation_value_view_v4* value, uint64_t y,
+                    uint64_t x, uint64_t c) {
+  const uint64_t coordinate[] = {y, x, c};
+  uint64_t positive = value->byte_offset, negative = 0;
+  for (uint32_t axis = 0; axis < value->rank; ++axis) {
+    const uint64_t origin = value->storage_origin[axis],
+                   coord = coordinate[axis];
+    const int64_t stride = value->byte_strides[axis];
+    if (stride == 0 || coord == origin)
+      continue;
+    const uint64_t distance = coord >= origin ? coord - origin : origin - coord;
+    const uint64_t magnitude =
+        stride < 0 ? UINT64_C(0) - (uint64_t)stride : (uint64_t)stride;
+    const uint64_t span = distance * magnitude;
+    if ((coord < origin) != (stride < 0))
+      negative += span;
+    else
+      positive += span;
+  }
+  float number = 0;
+  memcpy(&number, value->data + (positive - negative), 4);
+  return number;
+}
+
 /* The ABI4 host validates regional views and supplies nearest/gradual
  * arithmetic. All pointers are callback-local; output and scratch are owned by
  * the host. */
@@ -49,16 +76,7 @@ static int execute_image(void* state, const ps_operation_value_view_v4* inputs,
     for (uint64_t x = sink->output_offsets[1];
          x < sink->output_offsets[1] + sink->output_extents[1]; ++x) {
       for (uint64_t c = 0; c < 4; ++c) {
-        const int64_t offset =
-            (int64_t)inputs[0].byte_offset +
-            ((int64_t)y - (int64_t)inputs[0].storage_origin[0]) *
-                inputs[0].byte_strides[0] +
-            ((int64_t)x - (int64_t)inputs[0].storage_origin[1]) *
-                inputs[0].byte_strides[1] +
-            ((int64_t)c - (int64_t)inputs[0].storage_origin[2]) *
-                inputs[0].byte_strides[2];
-        float number = 0;
-        memcpy(&number, inputs[0].data + offset, sizeof(number));
+        float number = sample(&inputs[0], y, x, c);
         if (state || c < 3)
           number *= factor;
         memcpy(bytes + target, &number, sizeof(number));
@@ -92,26 +110,11 @@ static const ps_operation_parameter_descriptor_v4 gaussian_parameters[] = {
      PS_OPERATION_PARAMETER_INT64_V4, 1, 1, 1, 64},
     {sizeof(ps_operation_parameter_descriptor_v4), "sigma", 5,
      PS_OPERATION_PARAMETER_FLOAT64_V4, 1, 1, 0.1, 64}};
-static float sample(const ps_operation_value_view_v4* value, uint64_t y,
-                    uint64_t x, uint64_t c) {
-  const int64_t offset =
-      (int64_t)value->byte_offset +
-      ((int64_t)y - (int64_t)value->storage_origin[0]) *
-          value->byte_strides[0] +
-      ((int64_t)x - (int64_t)value->storage_origin[1]) *
-          value->byte_strides[1] +
-      (value->rank == 3 ? ((int64_t)c - (int64_t)value->storage_origin[2]) *
-                              value->byte_strides[2]
-                        : 0);
-  float number = 0;
-  memcpy(&number, value->data + offset, 4);
-  return number;
-}
 static uint64_t clamp_axis(uint64_t coordinate, int tap, uint64_t length) {
   if (tap < 0)
     return coordinate < (uint64_t)-tap ? 0 : coordinate - (uint64_t)-tap;
-  const uint64_t result = coordinate + (uint64_t)tap;
-  return result < length ? result : length - 1;
+  const uint64_t room = length - 1 - coordinate;
+  return coordinate + ((uint64_t)tap < room ? (uint64_t)tap : room);
 }
 static int mask_state, over_state;
 static int execute_regional(

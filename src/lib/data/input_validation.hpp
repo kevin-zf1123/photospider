@@ -58,6 +58,13 @@ Status validate_port_schema(const OperationTraits& traits);
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
                               const std::vector<ValueFacet>& facets);
+/** @brief Shared checked Whole/elementwise/halo demand rule for planning and
+ * direct invocation. Halo traits must have their static parameter resolved.
+ */
+Result<Region> derive_input_demand(
+    const OperationTraits& traits, const Region& output_demand,
+    const std::vector<std::uint64_t>& output_shape,
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
 /** @brief Returns the exact S1 image profile facet. */
 ValueFacet image_facet();
 /**

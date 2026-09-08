@@ -184,3 +184,10 @@ part of the payload budget. `test_memory_liveness` exercises gated fan-out,
 post-context results, budget recovery and exact/one-byte-short workspace limits.
 RawBenchmarkOptions.bindings is copied once on entry and supplied to each
 independently compiled sample.
+
+Direct `OperationRegistry::invoke` uses the same input-demand derivation as
+physical planning: it rejects partial-channel RGBA outputs, incomplete Whole
+outputs, insufficient halo, mismatched mask spatial shape and Value coverage
+shorter than the claimed demand before callback allocation. Whole caches retire
+after their final remaining boundary/output reader, including chains of Whole
+operations; `test_regional_execution` checks a three-node chain at 16/15 bytes.

@@ -302,6 +302,56 @@ int main() {
       both.token());
   PS_CHECK(prioritized.status().code == ErrorCode::Cancelled);
 
+  // Three independently allocated Whole results require two live buffers,
+  // regardless of chain length. Retired ancestors must not remain cached.
+  auto chain_registry = std::make_shared<OperationRegistry>();
+  auto allocate_scalar = [](const OperationInvocation& invocation) {
+    auto made = MutableValue::allocate(
+        {ElementType::Float64, {1}}, Region::whole({1}), invocation.allocator);
+    if (!made.ok())
+      return Result<Value>(made.status());
+    auto writer = made.take_value();
+    const double number = 2;
+    std::memcpy(writer.data(), &number, sizeof(number));
+    return std::move(writer).publish();
+  };
+  OperationTraits constant_traits, chain_traits;
+  chain_traits.input_count = 1;
+  chain_traits.input_schema.resize(1);
+  chain_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  PS_CHECK(
+      chain_registry
+          ->register_operation({"allocate", constant_traits, allocate_scalar})
+          .ok());
+  PS_CHECK(chain_registry
+               ->register_operation({"copy", chain_traits, allocate_scalar})
+               .ok());
+  PS_CHECK(chain_registry->freeze().ok());
+  WorkflowDocument chain_document;
+  chain_document.nodes = {{1, "allocate", {}, {}},
+                          {2, "copy", {WorkflowNodeOutput{1, "value"}}, {}},
+                          {3, "copy", {WorkflowNodeOutput{2, "value"}}, {}}};
+  chain_document.outputs = {{"result", 3, "value"}};
+  GraphContext chain_graph(chain_document);
+  Compiler chain_compiler(chain_registry);
+  auto chain_plan = chain_compiler.compile(chain_graph);
+  PS_CHECK(chain_plan.ok());
+  ExecutionContext chain_execution(chain_registry, {1, false, 4, 16});
+  auto chain_result = chain_execution.execute_stream(
+      chain_plan.value().plan, {},
+      [](const std::string&, ValueView) { return Status::success(); });
+  PS_CHECK(chain_result.ok());
+  PS_CHECK(chain_result.value().peak_live_bytes == 16);
+  PS_CHECK(chain_result.value().planned_peak_bytes == 16);
+  ExecutionContext chain_denied(chain_registry, {1, false, 4, 15});
+  PS_CHECK(chain_denied
+               .execute_stream(chain_plan.value().plan, {},
+                               [](const std::string&, ValueView) {
+                                 return Status::success();
+                               })
+               .status()
+               .code == ErrorCode::ResourceExhausted);
+
   // Whole materializations and unrelated side effects execute once per Run.
   auto whole_registry = std::make_shared<OperationRegistry>();
   PS_CHECK(whole_registry->load_plugin(PS_IMAGE_FIXTURE_PATH).ok());
@@ -332,6 +382,27 @@ int main() {
                                            Value::from_float64(1));
                                      }})
                .ok());
+  OperationTraits mask_traits;
+  mask_traits.output_element_type = ElementType::Float32;
+  mask_traits.shape_rule = OperationShapeRule::Fixed;
+  mask_traits.fixed_output_shape = {5, 7};
+  float computed_mask = -1;
+  PS_CHECK(whole_registry
+               ->register_operation(
+                   {"computed_mask", mask_traits,
+                    [&](const OperationInvocation& invocation) {
+                      auto made = MutableValue::allocate(
+                          {ElementType::Float32, {5, 7}}, Region::whole({5, 7}),
+                          invocation.allocator);
+                      if (!made.ok())
+                        return Result<Value>(made.status());
+                      auto writer = made.take_value();
+                      for (std::size_t offset = 0; offset < writer.size();
+                           offset += 4)
+                        std::memcpy(writer.data() + offset, &computed_mask, 4);
+                      return std::move(writer).publish();
+                    }})
+               .ok());
   PS_CHECK(whole_registry->freeze().ok());
   auto small = document(5, 7);
   small.nodes.insert(small.nodes.begin(),
@@ -353,6 +424,33 @@ int main() {
   PS_CHECK(streamed.ok() && whole_calls == 1 && effects == 1 &&
            whole_reads->calls == 1);
   PS_CHECK(streamed.value().tile_count == 18);
+  auto mask_document = document(5, 7);
+  mask_document.nodes = {
+      {1, "computed_mask", {}, {}},
+      {2,
+       "image.mask",
+       {WorkflowInputReference{1}, WorkflowNodeOutput{1, "value"}},
+       {}}};
+  mask_document.outputs = {{"result", 2, "value"}};
+  GraphContext mask_graph(mask_document);
+  auto mask_plan = whole_compiler.compile(mask_graph, tiling);
+  PS_CHECK(mask_plan.ok());
+  const auto mask_sink = [](const std::string&, ValueView) {
+    return Status::success();
+  };
+  for (float invalid : {-1.F, std::numeric_limits<float>::quiet_NaN()}) {
+    computed_mask = invalid;
+    auto invalid_result = whole_execution.execute_stream(
+        mask_plan.value().plan, bindings(source(mask_document, whole_reads)),
+        mask_sink);
+    PS_CHECK(invalid_result.status().code == ErrorCode::OperationFailed);
+  }
+  computed_mask = .5F;
+  PS_CHECK(whole_execution
+               .execute_stream(mask_plan.value().plan,
+                               bindings(source(mask_document, whole_reads)),
+                               mask_sink)
+               .ok());
   ExecutionContext denied(whole_registry, {2, false, 8, 100});
   PS_CHECK(denied
                .execute_stream(whole_plan.value().plan,

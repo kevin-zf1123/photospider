@@ -1542,6 +1542,16 @@ Result<Value> OperationRegistry::invoke_current(
     if (!demand_status.ok()) {
       return Result<Value>(demand_status);
     }
+    for (std::size_t axis = 0; axis < invocation.input_demands[index].rank();
+         ++axis) {
+      const auto needed = invocation.input_demands[index].dimensions()[axis];
+      const auto supplied =
+          invocation.inputs[index].region().dimensions()[axis];
+      if (supplied.offset > needed.offset ||
+          supplied.offset + supplied.extent < needed.offset + needed.extent)
+        return Result<Value>(Status::failure(
+            ErrorCode::TypeMismatch, "input Value does not cover its demand"));
+    }
   }
   const Status parameter_status =
       validate_operation_parameters(definition->traits, invocation.parameters);
@@ -1609,6 +1619,38 @@ Result<Value> OperationRegistry::invoke_current(
         !normalized.output_region.validate(expected_output.value().shape).ok())
       return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                            "invalid operation output demand"));
+    if (definition->traits.output_schema.kind ==
+            OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        !input_internal::image_demand(normalized.output_region))
+      return Result<Value>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "image output requires all RGBA channels"));
+    auto resolved = definition->traits;
+    if (!resolved.halo_radius_parameter.empty())
+      resolved.halo_radius = static_cast<std::uint32_t>(std::get<std::int64_t>(
+          invocation.parameters.at(resolved.halo_radius_parameter)));
+    if (resolved.region_rule == OperationRegionRule::Whole &&
+        !input_internal::whole_region(normalized.output_region,
+                                      expected_output.value().shape))
+      return Result<Value>(Status::failure(
+          ErrorCode::InvalidArgument, "Whole operation requires whole output"));
+    for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
+      const auto required = input_internal::derive_input_demand(
+          resolved, normalized.output_region, expected_output.value().shape,
+          invocation.inputs[i].descriptor().shape,
+          resolved.input_schema[i].kind);
+      if (!required.ok())
+        return Result<Value>(required.status());
+      for (std::size_t axis = 0; axis < required.value().rank(); ++axis) {
+        const auto needed = required.value().dimensions()[axis];
+        const auto supplied = invocation.input_demands[i].dimensions()[axis];
+        if (supplied.offset > needed.offset ||
+            supplied.offset + supplied.extent < needed.offset + needed.extent)
+          return Result<Value>(Status::failure(
+              ErrorCode::InvalidArgument,
+              "input demand omits required output/halo coverage"));
+      }
+    }
     auto result = definition->callback(normalized);
     if (!result.ok()) {
       return result;
