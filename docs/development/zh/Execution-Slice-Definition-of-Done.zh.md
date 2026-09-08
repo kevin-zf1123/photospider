@@ -1,6 +1,7 @@
 # Compiler 与 Execution Slice 完成定义
 
-只有以下适用项全部成立，compiler/execution change 才算完成。
+compiler/execution change 在约定交付位置验证以下适用行为后完成。按改动风险
+选择检查项，本清单不要求每个算子或局部修复执行完整测试套件。
 
 ## 设计与 identity
 
@@ -29,10 +30,13 @@
 
 ## Verification 与文档
 
-- Focused unit/integration/negative/concurrency test 通过。
+- 聚焦行为测试通过；改动行为需要时包含错误或并发场景。
+- 新增可组合的算子或 workflow 执行能力具备通过公开入口实际执行的最小
+  workflow 和可检查的预期结果，
+  可由现有示例或集成测试提供。
 - 受影响时 installed public header/export/consumer inventory 通过。
-- 英文公开文档、中文镜像、GitHub Issue/Project 与 checked-in delivery snapshot
-  一致。
+- 受影响英文公共文档和中文镜像与行为一致。Issue/Project 更新依交付授权范围
+  执行；仅在阶段或关键依赖变化时更新交付状态快照。
 - 私有 OpenSpec working note 不属于公开 completion gate。
 - 记录实际 command 与 limitation；未运行 gate 不得宣称已运行。
 

@@ -1,7 +1,8 @@
 # Compiler and Execution Slice Definition of Done
 
-A compiler/execution change is complete only when all applicable items below
-are true.
+A compiler/execution change is complete when the applicable behavior below is
+verified at the agreed delivery location. Select checks by the changed risk;
+this list does not require a full test suite for each operation or local fix.
 
 ## Design and identity
 
@@ -31,10 +32,15 @@ are true.
 
 ## Verification and documentation
 
-- Focused unit/integration/negative/concurrency tests pass.
+- Focused behavioral tests pass, including negative or concurrency cases when
+  the changed behavior requires them.
+- New composable operations or workflow execution capabilities have a minimal
+  workflow executed through a public entrypoint with a checkable expected
+  result; existing examples or integration tests may supply it.
 - Installed public header/export/consumer inventory passes when affected.
-- English public documents, Chinese mirrors, GitHub Issues/Projects, and the
-  checked-in delivery snapshot agree.
+- Affected English public documents and Chinese mirrors match the behavior.
+  Issue/Project updates follow the authorized delivery scope; a delivery
+  snapshot changes only when the milestone or key dependencies change.
 - Private OpenSpec working notes are outside the public completion gate.
 - Actual commands and limitations are recorded; unrun gates are not claimed.
 
