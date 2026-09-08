@@ -1,8 +1,8 @@
 # 当前开发计划
 
 - 快照日期：2026-09-09
-- 已审计实现 baseline：`main@703569bb74164f061b233f9edc2c0b964bc868fb`
-- 下一实现 milestone：S2 CPU 区域执行
+- 已审计实现 baseline：`d85e7b8`（S2），前序 main 为 `70b760f`
+- 当前 milestone：S2 CPU 区域执行与 daemon 安装消费
 
 ## 角色与权威
 
@@ -33,40 +33,44 @@ compiler 与 execution contract，因此进入 Project #8。
 | Typed source 与 compiler stage | [#199](https://github.com/kevin-zf1123/photospider/issues/199)、[#200](https://github.com/kevin-zf1123/photospider/issues/200)、[#201](https://github.com/kevin-zf1123/photospider/issues/201)、[#202](https://github.com/kevin-zf1123/photospider/issues/202) | 公开 WorkflowDocument、operation trait、semantic/optimized IR、physical plan、typed digest 与 focused test |
 | Raw benchmark vertical | [#240](https://github.com/kevin-zf1123/photospider/issues/240) | `RawBenchmarkRunner`、named oracle 或显式 unchecked 状态、raw diagnostic 与 execution regression |
 
-最新 baseline CI 是
+历史 S0 baseline CI 是
 [`kernel-ci` run 68](https://github.com/kevin-zf1123/photospider/actions/runs/33738054894)。
 它在 Linux 与 macOS 上通过 static/shared kernel、ASAN 与 TSAN。
 
 ## 当前 milestone
 
-S1 实现在 `ce9164c` 完成：同一编译计划通过独立的每次运行快照接收调用方的
-Float32 图像与普通数值参数 Value。#257 由
-[test_bindings](../../../tests/integration/test_bindings.cpp) 验证；#258 提供
-[维护的算子包与可运行 oracle](../../kernel-architecture/zh/Image-Operations.zh.md)。
-本地静态验证通过 9/9 项测试，共享验证通过 4/4，均包含隔离安装消费及独立本地审核
-新增的图像 sink 资源错误回归。此前 `72b9d81` 的
-[push CI](https://github.com/kevin-zf1123/photospider/actions/runs/34276504731)
-通过 Linux/macOS 静态及共享构建、ASAN/TSAN。最终修订的 CI、合并及 Issue/Project 结算记录在
-#255、#257 和 #258 中。
+S1 已在 main@70b760f 结算。S2 按已接受的
+[ADR 0017](../../adr/zh/0017-cpu-regional-execution-and-storage.zh.md)
+实现 kernel 0.4.0、OperationTraits 4 和 operation ABI 4，保留 C++17、schema 2 和
+provider ABI 1。按顺序的本地提交如下：
 
-下一实现 milestone 为 S2 CPU 区域执行。首先在 #152 下决定部分输出与 CPU
-Storage/lifetime 契约，再细化 #210 存活期与 #211 tile/halo 验收，然后进行区域
-实现。这些契约和 S2 实现仍待完成。
+| Issue | 实现 | Commit |
+| --- | --- | --- |
+| [#263](https://github.com/kevin-zf1123/photospider/issues/263) | 接受研究与存储/执行契约 | f0c1ae0 |
+| [#264](https://github.com/kevin-zf1123/photospider/issues/264) | 区域 Value、宿主缓冲区、ABI4 和安装消费 | cd9bdcc |
+| [#210](https://github.com/kevin-zf1123/photospider/issues/210) | 按完成释放及受限 workspace | b3cbc52 |
+| [#211](https://github.com/kevin-zf1123/photospider/issues/211) | 惰性 tile 与静态 halo | 40dfd69 |
+| [#265](https://github.com/kevin-zf1123/photospider/issues/265) | 区域源、结果收集和有序流式执行 | d9f4032 |
+| [#266](https://github.com/kevin-zf1123/photospider/issues/266) | Gaussian/曝光/蒙版/source-over 公开场景 | 3b08b41 |
+| [daemon #15](https://github.com/kevin-zf1123/photospider-daemon/issues/15) | 消费安装的 kernel 0.4，保留 IPC 子集 | 53ec2ca（daemon） |
 
-### 已完成的 S1 实现顺序
+独立全面审查修复位于 d85e7b8，固定 fuzz seed 迁移修复位于 921ad5c。直接调用共享受检查
+的需求推导，Whole 链及时释放祖先，C 图像地址/clamp 有独立回归，计算产生的蒙版错误
+保持 OperationFailed 分类。本地复核未发现剩余 blocker/required。
 
-1. [#256](https://github.com/kevin-zf1123/photospider/issues/256)
-   冻结 `WorkflowInputDeclaration`、`ExecutionBindings`、validation、identity、
-   output-demand、Value lifetime 与最小 element vocabulary。
-2. [#257](https://github.com/kevin-zf1123/photospider/issues/257)
-   按已接受的公开 contract 实现，并增加 focused negative 与 installed consumer 覆盖。
-3. [#258](https://github.com/kevin-zf1123/photospider/issues/258)
-   增加一个真实 input Value、operation chain、named output 与 independent correctness
-   oracle，并使用一个 compiled plan 重复执行。
-S1 后的主线阶段为已接受[开发方向](Refactor-Development-Plan.zh.md) 中的 CPU
-区域执行。Daemon 新绑定及大结果功能按需启动，不作为 kernel S1 的验收门槛。
-安装边界发生破坏性变化时仍需最低限度的 daemon consumer/package 维护；所有
-现有技术依赖继续记录在所属 Issue 中。
+S2Image.RegionAndTiles 通过 C++ 和受维护 C module 的公开入口运行，整图/分块逐位一致，
+匹配独立二维 oracle。65536² 程序化源以九个 tile 处理 5x7 ROI，读取 9900 字节，实际
+峰值 1808 字节，保守预留 3840 字节。Focused 覆盖精确/少一字节预算、非法视图、Whole
+链、fan-out、并发快照、源/sink 失败、取消和 currentness。
+
+本地 static/shared kernel 整合及修复重跑覆盖全部 15 项注册测试，含隔离安装消费者；
+daemon 两种安装形态各覆盖 15 项。C module 的专项 UBSAN no-recover 示例也通过。
+受保护 Linux/macOS static/shared、ASAN/TSAN、Codex bot、合并和最终结算记录在相关
+Issue/PR；本地测试不单独构成交付 gate。
+
+Project #9 同步 CPU 叶子，daemon #15 同步 Project #15。#152 保持原生设备范围开放，
+#209 机器成本标定及 #153/#154 不属于本轮 CPU 场景。S2 CPU 子集不会关闭 HEX/MED 父任务。
+S3 缓存/交互与原生 GPU 继续由后续独立范围推进。
 
 ## 当前 milestone 以外的 active backlog
 
@@ -113,8 +117,6 @@ S3 缓存与交互、S4 原生 GPU、S5 实测优化方向。Float32 是 S1 已�
 daemon 新功能按需推进，兼容维护继续。决策交付状态由
 [#256](https://github.com/kevin-zf1123/photospider/issues/256) 跟踪。
 
-[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md) 已统一
-修订为图像与运行期标量契约，其 operation ABI v3 和逐端口约束已由维护者明确接受。
-#256 交付决策文档；#257 实现内核 API/ABI，#258 交付可复用图像算子包、示例和独立
-CPU oracle。验证链接见上文，最终交付状态由 Issue 维护。上方已交付 baseline 表格
-保留历史含义；协调公开发布 0.3 前仍需维护 daemon 0.2 consumer。
+ADR 0016 保留 S1 source/binding/profile 契约。ADR 0017 替代其整图存储/输出、整图
+扫描和估算预算条款。Daemon 兼容维护消费安装的 0.4；新 bindings 和 bulk transport
+继续由 daemon 仓库按实际需求推进。

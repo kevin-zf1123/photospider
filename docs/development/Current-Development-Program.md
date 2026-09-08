@@ -1,8 +1,8 @@
 # Current Development Program
 
 - Snapshot date: 2026-09-09
-- Audited implementation baseline: `main@703569bb74164f061b233f9edc2c0b964bc868fb`
-- Next implementation milestone: S2 CPU regional execution
+- Audited implementation baseline: `d85e7b8` (S2), following `main@70b760f`
+- Current milestone: S2 CPU regional execution and installed daemon consumption
 
 ## Role and authority
 
@@ -36,46 +36,51 @@ and were reconciled with their GitHub Issues:
 | Typed source and compiler stages | [#199](https://github.com/kevin-zf1123/photospider/issues/199), [#200](https://github.com/kevin-zf1123/photospider/issues/200), [#201](https://github.com/kevin-zf1123/photospider/issues/201), [#202](https://github.com/kevin-zf1123/photospider/issues/202) | Public WorkflowDocument, operation traits, semantic/optimized IR, physical plan, typed digests, and focused tests |
 | Raw benchmark vertical | [#240](https://github.com/kevin-zf1123/photospider/issues/240) | `RawBenchmarkRunner`, named oracle or explicit unchecked status, raw diagnostics, and execution regressions |
 
-The latest baseline CI was
+The historical S0 baseline CI was
 [`kernel-ci` run 68](https://github.com/kevin-zf1123/photospider/actions/runs/33738054894).
 It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
 
 ## Current milestone
 
-S1 implementation is complete at `ce9164c`: one compiled graph accepts
-caller-owned Float32 images and ordinary numeric parameter Values through
-independent per-run snapshots. #257 is covered by
-[test_bindings](../../tests/integration/test_bindings.cpp); #258 supplies the
-[maintained operation package and runnable oracle](../kernel-architecture/Image-Operations.md).
-Local static validation passed 9/9 tests and shared validation passed 4/4,
-including isolated installed consumers and the image-sink resource-error
-regression added during independent local review. The preceding `72b9d81`
-[push CI](https://github.com/kevin-zf1123/photospider/actions/runs/34276504731)
-passed Linux/macOS static/shared builds and ASAN/TSAN. Final revision CI,
-merge and Issue/Project settlement are recorded in #255, #257 and #258.
+S1 is settled at `main@70b760f`. S2 implements the accepted
+[ADR 0017](../adr/0017-cpu-regional-execution-and-storage.md) in kernel 0.4.0,
+OperationTraits 4 and operation ABI 4. C++17, source schema 2 and provider ABI 1
+remain. The ordered local commits are:
 
-The next implementation milestone is S2 CPU regional execution. Its first
-action is to decide partial-output and CPU Storage/lifetime contracts under
-#152, then refine #210 liveness and #211 tile/halo acceptance before regional
-implementation. Those contracts and S2 implementation remain pending.
+| Issue | Implementation | Commit |
+| --- | --- | --- |
+| [#263](https://github.com/kevin-zf1123/photospider/issues/263) | Accepted research and storage/execution contract | `f0c1ae0` |
+| [#264](https://github.com/kevin-zf1123/photospider/issues/264) | Regional Value storage, host buffers, ABI4 and installed consumers | `cd9bdcc` |
+| [#210](https://github.com/kevin-zf1123/photospider/issues/210) | Completion-owned allocation and bounded workspace | `b3cbc52` |
+| [#211](https://github.com/kevin-zf1123/photospider/issues/211) | Lazy tile plans and static halo specialization | `40dfd69` |
+| [#265](https://github.com/kevin-zf1123/photospider/issues/265) | Regional sources, collection and ordered streaming | `d9f4032` |
+| [#266](https://github.com/kevin-zf1123/photospider/issues/266) | Gaussian/exposure/mask/source-over public vertical | `3b08b41` |
+| [daemon #15](https://github.com/kevin-zf1123/photospider-daemon/issues/15) | Installed kernel 0.4 consumption with existing IPC subset | `53ec2ca` (daemon) |
 
-### Completed S1 implementation sequence
+Independent comprehensive review corrections are in `d85e7b8`; fixed fuzz-seed
+migration is in `921ad5c`. Direct invocation shares checked demand derivation,
+Whole chains release completed ancestors, and C image address/clamp arithmetic
+has dedicated regression coverage. Computed-mask errors retain operation-failure
+classification. No outstanding blocker/required was found in the local recheck.
 
-1. [#256](https://github.com/kevin-zf1123/photospider/issues/256)
-   freezes `WorkflowInputDeclaration`, `ExecutionBindings`, validation,
-   identity, output-demand, Value lifetime, and the minimum element vocabulary.
-2. [#257](https://github.com/kevin-zf1123/photospider/issues/257)
-   implements the accepted public contract with focused negative and installed
-   consumer coverage.
-3. [#258](https://github.com/kevin-zf1123/photospider/issues/258)
-   adds one real input Value, operation chain, named output, and independent
-   correctness oracle across repeated executions of one compiled plan.
-The next main stage after S1 is CPU regional execution under the accepted
-[development direction](Refactor-Development-Plan.md). New daemon bindings and
-bulk-result features are demand-driven and are not kernel S1 acceptance gates.
-Minimal daemon consumer/package maintenance remains necessary for breaking
-installed changes; existing technical dependencies remain recorded in the
-owning Issues.
+`S2Image.RegionAndTiles` runs through public APIs in C++ and the maintained C
+module. Whole/tiled outputs are bitwise equal and match an independent 2D oracle.
+The 65536² source example processes a 5x7 ROI in nine tiles with 9900 source bytes,
+1808 actual peak bytes and a 3840-byte conservative reservation. Exact/one-byte-
+short budgets, malformed views, Whole chains, fan-out, concurrent snapshots,
+source/sink failures and cancellation/currentness have focused coverage.
+
+Local static/shared kernel validation covers all 15 registered tests across the
+integration pass and focused correction reruns, including isolated installed
+consumers. Daemon static/shared validation covers 15 tests each. The C module's
+focused UBSAN no-recover example also passes. Protected Linux/macOS static/shared,
+ASAN/TSAN, Codex bot review, merge and final settlement are recorded in the linked
+Issues and PRs; local validation alone is not the delivery gate.
+
+Project #9 mirrors these CPU leaves; daemon #15 mirrors Project #15. #152 stays
+open for native-device scope, with #209 machine-cost calibration and #153/#154
+outside this CPU milestone. No HEX or MED parent is closed by the S2 CPU subset.
+S3 cache/interaction and native GPU work remain separately scoped future work.
 
 ## Active backlog outside the milestone
 
@@ -127,11 +132,7 @@ accepted S1 goal. Daemon features are demand-driven; compatibility maintenance
 continues. Decision delivery is tracked by
 [#256](https://github.com/kevin-zf1123/photospider/issues/256).
 
-[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) now contains
-a unified image/scalar contract and its operation ABI v3/per-port
-contract has been explicitly accepted. #256 delivered the decision documents;
-#257 implements the kernel API/ABI and #258 delivers the reusable image
-package, example and independent CPU oracle. Validation is linked above;
-Issues own final delivery status. The delivered baseline table remains
-historical; daemon 0.2 consumer maintenance is required before a coordinated
-public 0.3 rollout.
+ADR 0016 remains the S1 source/binding/profile contract. ADR 0017 replaces its
+whole-storage/output, whole-image scan and modeled-budget clauses for S2.
+Daemon compatibility maintenance consumes installed 0.4; new bindings and bulk
+transport remain demand-driven work in the daemon repository.
