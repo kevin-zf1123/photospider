@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -323,6 +324,22 @@ Status validate_parameter_schema(
         known_type = true;
         break;
     }
+    const bool numeric = parameter.type == OperationParameterType::Int64 ||
+                         parameter.type == OperationParameterType::Float64;
+    if ((parameter.bounded && (!numeric || !std::isfinite(parameter.minimum) ||
+                               !std::isfinite(parameter.maximum) ||
+                               parameter.minimum > parameter.maximum)) ||
+        (!parameter.bounded &&
+         (parameter.minimum != 0 || parameter.maximum != 0 ||
+          std::signbit(parameter.minimum) ||
+          std::signbit(parameter.maximum))) ||
+        (parameter.bounded && parameter.type == OperationParameterType::Int64 &&
+         (std::abs(parameter.minimum) > 9007199254740991.0 ||
+          std::abs(parameter.maximum) > 9007199254740991.0 ||
+          std::floor(parameter.minimum) != parameter.minimum ||
+          std::floor(parameter.maximum) != parameter.maximum)))
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "invalid parameter interval");
     if (!known_type || !valid_key(parameter.key) ||
         (!previous.empty() && parameter.key <= previous)) {
       return Status::failure(
@@ -409,13 +426,27 @@ Status validate_traits(const OperationTraits& traits) {
         traits.shape_rule == OperationShapeRule::MatchAllInputs) &&
        traits.input_count == 0U) ||
       (traits.region_rule == OperationRegionRule::Halo &&
-       traits.halo_radius == 0U) ||
+       traits.halo_radius == 0U && traits.halo_radius_parameter.empty()) ||
       (traits.region_rule != OperationRegionRule::Halo &&
        traits.halo_radius != 0U) ||
       !schema_status.ok() || !fixed_shape_valid ||
       !input_internal::validate_port_schema(traits).ok()) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation semantic traits are inconsistent");
+  }
+  if (!traits.halo_radius_parameter.empty()) {
+    auto parameter = std::find_if(
+        traits.parameter_schema.begin(), traits.parameter_schema.end(),
+        [&](const OperationParameterSpec& spec) {
+          return spec.key == traits.halo_radius_parameter;
+        });
+    if (traits.region_rule != OperationRegionRule::Halo ||
+        traits.halo_radius != 0 || parameter == traits.parameter_schema.end() ||
+        !parameter->required || !parameter->bounded ||
+        parameter->type != OperationParameterType::Int64 ||
+        parameter->minimum < 1 || parameter->maximum > UINT32_MAX)
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "invalid halo parameter binding");
   }
   return Status::success();
 }
@@ -862,6 +893,24 @@ Status validate_operation_parameters(
           "operation string parameter exceeds bounds: " + declaration.key);
     }
   }
+  for (const auto& spec : traits.parameter_schema) {
+    const auto found = parameters.find(spec.key);
+    if (!spec.bounded || found == parameters.end())
+      continue;
+    bool valid = false;
+    if (spec.type == OperationParameterType::Int64) {
+      const auto value = std::get<std::int64_t>(found->second);
+      valid = value >= static_cast<std::int64_t>(spec.minimum) &&
+              value <= static_cast<std::int64_t>(spec.maximum);
+    } else {
+      const auto value = std::get<double>(found->second);
+      valid = std::isfinite(value) && value >= spec.minimum &&
+              value <= spec.maximum;
+    }
+    if (!valid)
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "parameter outside finite interval: " + spec.key);
+  }
   for (const auto& parameter : parameters) {
     const auto declaration = std::lower_bound(
         traits.parameter_schema.begin(), traits.parameter_schema.end(),
@@ -1097,6 +1146,15 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     definition.traits.workspace_bytes = descriptor.workspace_bytes;
     definition.traits.workspace_input_multiplier =
         descriptor.workspace_input_multiplier;
+    if (descriptor.halo_radius_parameter_size > 1024 ||
+        ((descriptor.halo_radius_parameter_size == 0) !=
+         (descriptor.halo_radius_parameter == nullptr)))
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "invalid halo parameter pointer/count");
+    if (descriptor.halo_radius_parameter)
+      definition.traits.halo_radius_parameter.assign(
+          descriptor.halo_radius_parameter,
+          descriptor.halo_radius_parameter_size);
     auto output_type = decode_element_type(descriptor.output_element_type);
     auto shape_rule = decode_shape_rule(descriptor.shape_rule);
     auto region_rule = decode_region_rule(descriptor.region_rule);
@@ -1122,7 +1180,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       if (parameter.struct_size !=
               sizeof(ps_operation_parameter_descriptor_v4) ||
           !parameter.key || parameter.key_size == 0U ||
-          parameter.key_size > 1024U || parameter.required > 1U) {
+          parameter.key_size > 1024U || parameter.required > 1U ||
+          parameter.bounded > 1U) {
         return Status::failure(
             ErrorCode::InvalidArgument,
             "operation plugin parameter descriptor is malformed");
@@ -1135,6 +1194,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       copied.key.assign(parameter.key, parameter.key_size);
       copied.type = parameter_type.value();
       copied.required = parameter.required != 0U;
+      copied.bounded = parameter.bounded != 0U;
+      copied.minimum = parameter.minimum;
+      copied.maximum = parameter.maximum;
       definition.traits.parameter_schema.push_back(std::move(copied));
     }
     std::sort(definition.traits.parameter_schema.begin(),

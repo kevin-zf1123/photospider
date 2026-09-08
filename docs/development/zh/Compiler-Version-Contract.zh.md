@@ -67,3 +67,7 @@ consumer 需要协调迁移后才能消费 0.3。状态写入遵循[任务协作
 保留 schema 2/provider ABI 1/C++17；C++ 消费者重新构建，拒绝 ABI 3 与 package 0.3 消费者。
 semantic/optimizer/physical-plan/cache domain 使用 v4。运行期 origin 地址不进入 semantic
 identity。其余 S2 调度、资源与场景由 ADR 0017 下的 #210/#211/#265/#266 追踪。
+
+#211 在 v4 semantic framing 中增加静态数值边界（bound flag、精确 binary64 endpoint bits）
+和带长度 halo 参数名。physical v4 包含 tile 高/宽及各排序输出名称的精确 Region；即使
+合并的 producer demand 相同，不同区域的输出别名也具有不同 physical identity。

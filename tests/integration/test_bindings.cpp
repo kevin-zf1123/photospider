@@ -403,8 +403,8 @@ int compile_failures_and_identity() {
   PS_CHECK(all.ok());
   auto subregion = compiler.plan(all.value().optimized, s1_fixture::demand());
   PS_CHECK(subregion.ok());
-  PS_CHECK(subregion.value().digest().value == all.value().plan.digest().value);
-  PS_CHECK(subregion.value().cache_key().value ==
+  PS_CHECK(subregion.value().digest().value != all.value().plan.digest().value);
+  PS_CHECK(subregion.value().cache_key().value !=
            all.value().plan.cache_key().value);
   // Metadata-only maximum dense input is accepted; the complete two-image
   // working-set sum overflows.

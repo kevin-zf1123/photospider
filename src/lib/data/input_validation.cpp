@@ -27,6 +27,7 @@ std::uint32_t float_bits(float value) noexcept {
 bool valid_constraint(const OperationPortConstraint& port) noexcept {
   switch (port.kind) {
     case OperationPortKind::Value:
+    case OperationPortKind::Float32Mask:
     case OperationPortKind::LinearPremultipliedRgbaFloat32:
       return float_bits(port.minimum) == 0 && float_bits(port.maximum) == 0;
     case OperationPortKind::Float32Scalar:
@@ -189,7 +190,8 @@ Status validate_port_schema(const OperationTraits& traits) {
   if (traits.input_count > 1024 ||
       traits.input_schema.size() != traits.input_count ||
       !valid_constraint(traits.output_schema) ||
-      traits.output_schema.kind == OperationPortKind::Float32Scalar) {
+      (traits.output_schema.kind == OperationPortKind::Float32Scalar ||
+       traits.output_schema.kind == OperationPortKind::Float32Mask)) {
     return failure(ErrorCode::InvalidArgument,
                    "invalid port schema count or output");
   }
@@ -211,7 +213,8 @@ Status validate_port_schema(const OperationTraits& traits) {
          (traits.shape_rule == OperationShapeRule::MatchAllInputs ||
           (i == 0 &&
            traits.shape_rule == OperationShapeRule::PreserveFirstInput))) ||
-        (port.kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        ((port.kind == OperationPortKind::LinearPremultipliedRgbaFloat32 ||
+          port.kind == OperationPortKind::Float32Mask) &&
          traits.region_rule != OperationRegionRule::Whole && !image_output)) {
       return failure(ErrorCode::InvalidArgument,
                      "invalid input port combination");
@@ -232,6 +235,12 @@ Status validate_port_metadata(const OperationPortConstraint& port,
     return Status::success();
   if (descriptor.element_type != ElementType::Float32) {
     return failure(ErrorCode::TypeMismatch, "port requires Float32");
+  }
+  if (port.kind == OperationPortKind::Float32Mask) {
+    if (descriptor.shape.size() != 2 || descriptor.shape[0] == 0 ||
+        descriptor.shape[1] == 0 || !facets.empty())
+      return failure(ErrorCode::TypeMismatch, "mask requires HW and no facets");
+    return Status::success();
   }
   if (port.kind == OperationPortKind::Float32Scalar) {
     if (descriptor.shape != std::vector<std::uint64_t>{1} || !facets.empty()) {
@@ -300,6 +309,17 @@ Status validate_port_value(const OperationPortConstraint& port,
     }
     for (std::uint64_t x = x_region.offset;
          x < x_region.offset + x_region.extent; ++x) {
+      if (port.kind == OperationPortKind::Float32Mask) {
+        auto offset = value.byte_address({y, x});
+        if (!offset.ok())
+          return offset.status();
+        float sample = 0;
+        std::memcpy(&sample, value.bytes().data() + offset.value(),
+                    sizeof(sample));
+        if (!std::isfinite(sample) || sample < 0 || sample > 1)
+          return failure(numeric_failure, "mask sample outside finite [0,1]");
+        continue;
+      }
       float rgba[4];
       for (std::uint64_t c = 0; c < 4; ++c) {
         auto offset = value.byte_address({y, x, c});

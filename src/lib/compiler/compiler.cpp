@@ -172,11 +172,18 @@ void append_traits(DigestBuilder* digest,
   digest->integer(static_cast<std::uint32_t>(traits.shape_rule));
   digest->integer(static_cast<std::uint32_t>(traits.region_rule));
   digest->integer(traits.halo_radius);
+  digest->text(traits.halo_radius_parameter);
   digest->integer(traits.parameter_schema.size());
   for (const OperationParameterSpec& parameter : traits.parameter_schema) {
     digest->text(parameter.key);
     digest->integer(static_cast<std::uint32_t>(parameter.type));
     digest->integer(parameter.required ? 1U : 0U);
+    digest->integer(parameter.bounded ? 1U : 0U);
+    std::uint64_t minimum = 0, maximum = 0;
+    std::memcpy(&minimum, &parameter.minimum, sizeof(minimum));
+    std::memcpy(&maximum, &parameter.maximum, sizeof(maximum));
+    digest->integer(minimum);
+    digest->integer(maximum);
   }
   digest->integer(traits.fixed_output_shape.size());
   for (std::uint64_t extent : traits.fixed_output_shape) {
@@ -393,9 +400,18 @@ std::string optimized_digest(
 std::string physical_digest(
     const std::string& optimized, const std::vector<PlanStep>& steps,
     const std::map<std::string, std::size_t>& outputs,
-    const std::vector<WorkflowInputDeclaration>& declarations) {
+    const std::vector<WorkflowInputDeclaration>& declarations,
+    const std::map<std::string, Region>& output_regions,
+    std::uint64_t tile_height, std::uint64_t tile_width) {
   DigestBuilder digest;
   digest.text("physical-plan-v4");
+  digest.integer(tile_height);
+  digest.integer(tile_width);
+  digest.integer(output_regions.size());
+  for (const auto& requested : output_regions) {
+    digest.text(requested.first);
+    append_region(&digest, requested.second);
+  }
   append_declarations(&digest, declarations);
   digest.text(optimized);
   digest.integer(steps.size());
@@ -505,6 +521,17 @@ Result<Region> derive_input_demand(
   if (kind == OperationPortKind::Float32Scalar) {
     return Result<Region>(Region::whole(input_shape));
   }
+  if (kind == OperationPortKind::Float32Mask &&
+      traits.region_rule != OperationRegionRule::Whole) {
+    if (input_shape.size() != 2 || output_shape.size() != 3 ||
+        input_shape[0] != output_shape[0] || input_shape[1] != output_shape[1])
+      return Result<Region>(Status::failure(
+          ErrorCode::TypeMismatch, "mask/image spatial shapes differ"));
+    return derive_input_demand(
+        traits,
+        Region({output_demand.dimensions()[0], output_demand.dimensions()[1]}),
+        input_shape, input_shape, OperationPortKind::Value);
+  }
   switch (traits.region_rule) {
     case OperationRegionRule::Whole:
       return Result<Region>(Region::whole(input_shape));
@@ -561,6 +588,136 @@ std::uint64_t microseconds(
 }
 
 }  // namespace
+
+Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
+                                               const Region& region) const {
+  if (!current() || operation_registry_.expired())
+    return Result<ExecutionPlan>(
+        Status::failure(ErrorCode::Stale, "tile parent is stale"));
+  const auto named = outputs_.find(name);
+  if (named == outputs_.end() || region.empty() ||
+      !region.validate(steps_[named->second].output_descriptor.shape).ok())
+    return Result<ExecutionPlan>(Status::failure(ErrorCode::InvalidArgument,
+                                                 "invalid named tile Region"));
+  const auto& requested = output_regions_.at(name);
+  for (std::size_t axis = 0; axis < region.rank(); ++axis) {
+    const auto part = region.dimensions()[axis],
+               allowed = requested.dimensions()[axis];
+    if (part.offset < allowed.offset ||
+        part.offset + part.extent > allowed.offset + allowed.extent)
+      return Result<ExecutionPlan>(Status::failure(
+          ErrorCode::InvalidArgument, "tile exceeds requested output"));
+  }
+  if (steps_[named->second].traits.output_schema.kind ==
+          OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+      !input_internal::image_demand(region))
+    return Result<ExecutionPlan>(Status::failure(
+        ErrorCode::InvalidArgument, "tile must contain all RGBA channels"));
+  ExecutionPlan tile = *this;
+  std::vector<std::optional<Region>> demands(steps_.size());
+  demands[named->second] = region;
+  for (std::size_t reverse = steps_.size(); reverse > 0; --reverse) {
+    const auto i = reverse - 1;
+    if (!demands[i])
+      continue;
+    auto& step = tile.steps_[i];
+    if (step.traits.output_schema.kind ==
+            OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        !input_internal::image_demand(*demands[i]))
+      return Result<ExecutionPlan>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "propagated tile demand omits RGBA channels"));
+    step.output_demand = step.whole_boundary
+                             ? Region::whole(step.output_descriptor.shape)
+                             : *demands[i];
+    step.input_demands.clear();
+    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+      const auto* producer = std::get_if<PlanStepInput>(&step.inputs[port]);
+      const auto& descriptor =
+          producer ? steps_[producer->step_index].output_descriptor
+                   : input_declarations_[std::get<PlanWorkflowInput>(
+                                             step.inputs[port])
+                                             .declaration_index]
+                         .descriptor;
+      auto demand = derive_input_demand(
+          step.traits, step.output_demand, step.output_descriptor.shape,
+          descriptor.shape, step.traits.input_schema[port].kind);
+      if (!demand.ok())
+        return Result<ExecutionPlan>(demand.status());
+      step.input_demands.push_back(demand.value());
+      if (producer) {
+        auto& prior = demands[producer->step_index];
+        if (prior) {
+          auto merged = merge_regions(*prior, demand.value(), descriptor.shape);
+          if (!merged.ok())
+            return Result<ExecutionPlan>(merged.status());
+          prior = merged.take_value();
+        } else {
+          prior = demand.take_value();
+        }
+      }
+    }
+    ValueDescriptor packed = step.output_descriptor;
+    for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
+      packed.shape[axis] = step.output_demand.dimensions()[axis].extent;
+    auto dense = input_internal::dense_metadata(packed);
+    if (!dense.ok() && step.traits.output_schema.kind ==
+                           OperationPortKind::LinearPremultipliedRgbaFloat32)
+      return Result<ExecutionPlan>(dense.status());
+    step.planned_bytes =
+        std::max(step.traits.estimated_bytes,
+                 dense.ok() ? dense.value().bytes
+                            : static_cast<std::uint64_t>(
+                                  Value::element_size(packed.element_type)));
+    std::uint64_t workspace = step.traits.workspace_bytes;
+    for (std::size_t port = 0; port < step.inputs.size() &&
+                               step.traits.workspace_input_multiplier != 0;
+         ++port) {
+      const auto* producer = std::get_if<PlanStepInput>(&step.inputs[port]);
+      const auto type =
+          producer ? steps_[producer->step_index].output_descriptor.element_type
+                   : input_declarations_[std::get<PlanWorkflowInput>(
+                                             step.inputs[port])
+                                             .declaration_index]
+                         .descriptor.element_type;
+      auto count = step.input_demands[port].element_count();
+      const auto factor =
+          Value::element_size(type) * step.traits.workspace_input_multiplier;
+      if (!count.ok() || count.value() > (UINT64_MAX - workspace) / factor)
+        return Result<ExecutionPlan>(Status::failure(
+            ErrorCode::ResourceExhausted, "tile workspace overflows"));
+      workspace += count.value() * factor;
+    }
+    if (workspace > UINT64_MAX - step.planned_bytes)
+      return Result<ExecutionPlan>(Status::failure(
+          ErrorCode::ResourceExhausted, "tile output/workspace overflows"));
+    step.planned_bytes += workspace;
+  }
+  std::vector<PlanStep> pruned;
+  std::vector<std::size_t> mapping(steps_.size());
+  for (std::size_t i = 0; i < steps_.size(); ++i) {
+    if (!demands[i])
+      continue;
+    mapping[i] = pruned.size();
+    auto step = std::move(tile.steps_[i]);
+    for (auto& input : step.inputs)
+      if (auto* producer = std::get_if<PlanStepInput>(&input))
+        producer->step_index = mapping[producer->step_index];
+    pruned.push_back(std::move(step));
+  }
+  tile.steps_ = std::move(pruned);
+  tile.outputs_ = {{name, mapping[named->second]}};
+  tile.output_regions_ = {{name, region}};
+  tile.digest_.value =
+      physical_digest(tile.optimized_digest_.value, tile.steps_, tile.outputs_,
+                      tile.input_declarations_, tile.output_regions_,
+                      tile.tile_height_, tile.tile_width_);
+  tile.cache_key_.value = plan_cache_key(tile.digest_.value);
+  if (!current())
+    return Result<ExecutionPlan>(
+        Status::failure(ErrorCode::Stale, "graph changed while deriving tile"));
+  return Result<ExecutionPlan>(std::move(tile));
+}
 
 /**
  * @brief Implements compiler construction over one frozen operation set.
@@ -714,6 +871,10 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     node.operation = source.operation;
     node.parameters = source.parameters;
     node.traits = traits.value();
+    if (!node.traits.halo_radius_parameter.empty())
+      node.traits.halo_radius =
+          static_cast<std::uint32_t>(std::get<std::int64_t>(
+              node.parameters.at(node.traits.halo_radius_parameter)));
     node.inputs.reserve(source.inputs.size());
     std::vector<ValueDescriptor> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
@@ -765,6 +926,16 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     }
     node.output_descriptor = output.take_value();
     for (std::size_t i = 0; i < input_descriptors.size(); ++i) {
+      if (node.traits.input_schema[i].kind == OperationPortKind::Float32Mask &&
+          node.traits.region_rule != OperationRegionRule::Whole) {
+        if (node.output_descriptor.shape.size() != 3 ||
+            input_descriptors[i].shape.size() != 2 ||
+            input_descriptors[i].shape[0] != node.output_descriptor.shape[0] ||
+            input_descriptors[i].shape[1] != node.output_descriptor.shape[1])
+          return Result<SemanticGraphIR>(Status::failure(
+              ErrorCode::TypeMismatch, "mask/image spatial shapes differ"));
+        continue;
+      }
       if (node.traits.input_schema[i].kind !=
               OperationPortKind::Float32Scalar &&
           node.traits.region_rule != OperationRegionRule::Whole &&
@@ -849,6 +1020,9 @@ Result<OptimizedGraphIR> Compiler::optimize(
  */
 Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                                      const PlanningOptions& options) const {
+  if (options.tile_height == 0 || options.tile_width == 0)
+    return Result<ExecutionPlan>(Status::failure(
+        ErrorCode::InvalidArgument, "tile extents must be positive"));
   const auto source_operations = optimized.operation_registry_.lock();
   if (optimized.revision() == 0U || optimized.nodes().empty() ||
       optimized.digest().value.empty() || !optimized.current() ||
@@ -860,6 +1034,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   std::unordered_map<std::uint64_t, std::size_t> step_by_node;
   step_by_node.reserve(optimized.nodes().size());
   ExecutionPlan plan;
+  plan.tile_height_ = options.tile_height;
+  plan.tile_width_ = options.tile_width;
   plan.revision_ = optimized.revision();
   plan.input_declarations_ = optimized.input_declarations();
   std::map<std::uint64_t, std::size_t> declaration_by_id;
@@ -872,6 +1048,9 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     step.operation = node.operation;
     step.parameters = node.parameters;
     step.traits = node.traits;
+    step.whole_boundary =
+        node.traits.region_rule == OperationRegionRule::Whole ||
+        !node.traits.deterministic || !node.traits.side_effect_free;
     step.output_descriptor = node.output_descriptor;
     step.backend = options.allow_gpu && node.traits.supports_gpu ? Backend::Gpu
                                                                  : Backend::Cpu;
@@ -1036,10 +1215,19 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
           ErrorCode::ResourceExhausted, "complete working set overflows"));
     complete_working_set += step.planned_bytes;
   }
+  for (const auto& output : plan.outputs_) {
+    const auto requested = options.output_regions.find(output.first);
+    plan.output_regions_.emplace(
+        output.first,
+        requested == options.output_regions.end()
+            ? Region::whole(plan.steps_[output.second].output_descriptor.shape)
+            : requested->second);
+  }
   plan.optimized_digest_ = optimized.digest();
   plan.digest_.value =
       physical_digest(plan.optimized_digest_.value, plan.steps_, plan.outputs_,
-                      plan.input_declarations_);
+                      plan.input_declarations_, plan.output_regions_,
+                      plan.tile_height_, plan.tile_width_);
   plan.cache_key_.value = plan_cache_key(plan.digest_.value);
   plan.current_check_ = optimized.current_check_;
   plan.operation_registry_ = operations_;

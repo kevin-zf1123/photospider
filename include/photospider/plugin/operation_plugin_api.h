@@ -103,6 +103,16 @@ typedef struct ps_operation_parameter_descriptor_v4 {
   uint32_t type;
   /** @brief Zero for optional or one for required. */
   uint32_t required;
+  /** @brief Optional finite numeric interval; zero fields when unbounded. */
+#ifdef __cplusplus
+  uint32_t bounded = 0;
+  double minimum = 0;
+  double maximum = 0;
+#else
+  uint32_t bounded;
+  double minimum;
+  double maximum;
+#endif
 } ps_operation_parameter_descriptor_v4;
 
 /**
@@ -284,6 +294,8 @@ typedef int (*ps_operation_execute_v4)(
 #define PS_OPERATION_PORT_FLOAT32_SCALAR_V4 2U
 /** @brief Dense HWC Float32 RGBA with exact linear premultiplied profile. */
 #define PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4 3U
+/** @brief Float32 {H,W} mask with no facets and finite [0,1] samples. */
+#define PS_OPERATION_PORT_FLOAT32_MASK_V4 4U
 
 /**
  * @brief Immutable copied port schema record, never retained by the compiler.
@@ -366,9 +378,13 @@ typedef struct ps_operation_descriptor_v4 {
 #ifdef __cplusplus
   uint64_t workspace_bytes = 0;
   uint32_t workspace_input_multiplier = 0;
+  const char* halo_radius_parameter = nullptr;
+  uint32_t halo_radius_parameter_size = 0;
 #else
   uint64_t workspace_bytes;
   uint32_t workspace_input_multiplier;
+  const char* halo_radius_parameter;
+  uint32_t halo_radius_parameter_size;
 #endif
 } ps_operation_descriptor_v4;
 
