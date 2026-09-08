@@ -706,7 +706,7 @@ int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1U;
   config.maximum_queued_tasks = 1U;
-  config.maximum_live_bytes = sizeof(double);
+  config.maximum_live_bytes = 2 * sizeof(double);
   ps::ExecutionContext execution(registry, config);
   auto first_result = execution.execute(first_compilation.value().plan);
   auto second_result = execution.execute(second_compilation.value().plan);

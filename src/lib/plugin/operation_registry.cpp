@@ -400,8 +400,9 @@ Status validate_traits(const OperationTraits& traits) {
                           traits.fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.fixed_output_shape.empty();
-  if (traits.version != 4U || !traits.supports_cpu || !known_shape ||
-      !known_region || (traits.allows_cpu_fallback && !traits.supports_gpu) ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 4U ||
+      !traits.supports_cpu || !known_shape || !known_region ||
+      (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       ((traits.shape_rule == OperationShapeRule::PreserveFirstInput ||
@@ -1093,6 +1094,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     definition.traits.allows_cpu_fallback =
         (descriptor.flags & PS_OPERATION_FLAG_CPU_FALLBACK) != 0U;
     definition.traits.estimated_bytes = descriptor.estimated_bytes;
+    definition.traits.workspace_bytes = descriptor.workspace_bytes;
+    definition.traits.workspace_input_multiplier =
+        descriptor.workspace_input_multiplier;
     auto output_type = decode_element_type(descriptor.output_element_type);
     auto shape_rule = decode_shape_rule(descriptor.shape_rule);
     auto region_rule = decode_region_rule(descriptor.region_rule);
@@ -1588,6 +1592,23 @@ std::vector<std::string> OperationRegistry::keys() const {
   return result;
 }
 
+namespace {
+/** @brief Creates a scalar through the callback allocator, preserving all bits.
+ */
+Value allocated_scalar(const OperationInvocation& invocation, double number) {
+  auto allocation = MutableValue::allocate(
+      {ElementType::Float64, {1}}, Region::whole({1}), invocation.allocator);
+  if (!allocation.ok())
+    throw std::bad_alloc();
+  auto value = allocation.take_value();
+  std::memcpy(value.data(), &number, sizeof(number));
+  auto result = std::move(value).publish();
+  if (!result.ok())
+    throw std::logic_error(result.status().message);
+  return result.take_value();
+}
+}  // namespace
+
 /**
  * @brief Implements the maintained frozen built-in operation set.
  * @copydetails make_default_operation_registry
@@ -1620,7 +1641,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
         if (!value.ok()) {
           return Result<Value>(value.status());
         }
-        return Result<Value>(Value::from_float64(value.value()));
+        return Result<Value>(allocated_scalar(invocation, value.value()));
       }});
   if (!status.ok()) {
     throw std::logic_error(status.message);
@@ -1680,7 +1701,8 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
         if (!right.ok()) {
           return Result<Value>(right.status());
         }
-        return Result<Value>(Value::from_float64(left.value() + right.value()));
+        return Result<Value>(
+            allocated_scalar(invocation, left.value() + right.value()));
       }});
   if (!status.ok()) {
     throw std::logic_error(status.message);

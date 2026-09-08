@@ -14,8 +14,8 @@
 9. Scheduler/admission failure 成为 first failure 前，以及 operation callback complete
    时，Run 都按 cancellation、graph staleness、original failure 的顺序选择结果；随后在
    Value publication 前检查 type/shape 与 dependency identity。
-10. 完整 named output 成为一个 in-memory `ExecutionResult`；全部 byte lease 与 temporary
-    Value 通过精确 ownership 退役。
+10. 完整 named output 成为一个 in-memory `ExecutionResult`；temporary Value 在最后 reader 后释放；返回 Value
+    持有分配租约，直到最后一个所有者释放。
 
 Cancellation 是 cooperative，不是 preemption。Running callback 可以晚返回，但其 Value
 不能在 cancellation 或 graph replacement 后发布。Exception 被隔离成 typed failure，不会

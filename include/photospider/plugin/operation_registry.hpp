@@ -128,11 +128,12 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief Recoverable GPU failure may execute the CPU implementation. */
   bool allows_cpu_fallback = false;
   /**
-   * @brief Estimated peak invocation bytes for resource admission.
-   * @note This modeled bound is independent of a fixed shape's dense logical
-   * byte product for generic outputs. Image outputs reserve at least twice
-   * the checked dense byte count, including callback output and host copy;
-   * retained inputs and complete process memory are outside this model.
+   * @brief Declared output-capacity bound, raised to packed bytes when
+   * representable.
+   * @note Non-densely-representable generic outputs use this bound with at
+   * least one element. Workspace and potential transfers are accounted
+   * separately; every controlled allocation must fit its complete working-set
+   * reservation.
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
@@ -159,6 +160,10 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::vector<OperationPortConstraint> input_schema;
   /** @brief Value or image guarantee; image preserves the first image input. */
   OperationPortConstraint output_schema;
+  /** @brief Fixed maximum scratch bytes per invocation, excluding output. */
+  std::uint64_t workspace_bytes = 0;
+  /** @brief Additional scratch bound per demanded input byte, in 0..16. */
+  std::uint32_t workspace_input_multiplier = 0;
 };
 
 /**

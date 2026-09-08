@@ -67,7 +67,7 @@ int dynamic_bindings() {
   PS_CHECK(
       std::get<PlanStepInput>(workflow.plan.steps()[1].inputs[0]).step_index ==
       0);
-  ExecutionContext execution(operations, {2, false, 16, 128});
+  ExecutionContext execution(operations, {2, false, 16, 1024});
   for (bool second : {false, true}) {
     auto result =
         execution.execute(workflow.plan, s1_fixture::bindings(second));
@@ -80,7 +80,7 @@ int dynamic_bindings() {
              workflow.plan.digest().value);
   }
   for (const auto& step : workflow.plan.steps()) {
-    PS_CHECK(step.planned_bytes == 128);
+    PS_CHECK(step.planned_bytes == 64);
     PS_CHECK(step.input_demands[0].dimensions()[1].offset == 1);
     PS_CHECK(step.input_demands[0].dimensions()[0].extent == 1);
     PS_CHECK(step.input_demands[0].dimensions()[2].extent == 4);
@@ -406,8 +406,8 @@ int compile_failures_and_identity() {
   PS_CHECK(subregion.value().digest().value == all.value().plan.digest().value);
   PS_CHECK(subregion.value().cache_key().value ==
            all.value().plan.cache_key().value);
-  // Metadata-only maximum dense input is accepted; the image 2B model
-  // overflows.
+  // Metadata-only maximum dense input is accepted; the complete two-image
+  // working-set sum overflows.
   doc = s1_fixture::document();
   doc.inputs[0].descriptor.shape = {UINT64_C(1) << 59, 1, 4};
   doc.inputs[0].region = Region::whole(doc.inputs[0].descriptor.shape);

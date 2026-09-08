@@ -96,7 +96,9 @@ static const ps_operation_descriptor_v4 operations[] = {
      {sizeof(ps_operation_port_constraint_v4),
       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
      execute_image,
-     NULL},
+     NULL,
+     0,
+     0},
     {sizeof(ps_operation_descriptor_v4),
      "image.opacity",
      13,
@@ -118,7 +120,9 @@ static const ps_operation_descriptor_v4 operations[] = {
      {sizeof(ps_operation_port_constraint_v4),
       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
      execute_image,
-     &opacity_state}};
+     &opacity_state,
+     0,
+     0}};
 static void destroy(const ps_operation_descriptor_v4* records, uint32_t count) {
   (void)records;
   (void)count;

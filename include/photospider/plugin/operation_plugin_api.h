@@ -361,6 +361,15 @@ typedef struct ps_operation_descriptor_v4 {
   ps_operation_execute_v4 execute;
   /** @brief Descriptor-owned opaque callback state, possibly null. */
   void* user_data;
+  /** @brief Fixed scratch bound and additional bytes per demanded input byte.
+   */
+#ifdef __cplusplus
+  uint64_t workspace_bytes = 0;
+  uint32_t workspace_input_multiplier = 0;
+#else
+  uint64_t workspace_bytes;
+  uint32_t workspace_input_multiplier;
+#endif
 } ps_operation_descriptor_v4;
 
 /**

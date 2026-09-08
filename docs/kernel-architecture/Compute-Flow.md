@@ -17,8 +17,8 @@
    when an operation callback completes, the Run selects cancellation before
    graph staleness before the original failure. It then checks type/shape and
    dependency identity before any Value publication.
-10. Complete named outputs become one in-memory `ExecutionResult`; all byte
-    leases and temporary Values retire through exact ownership.
+10. Complete named outputs become one in-memory `ExecutionResult`; temporary Values retire after their last reader, while returned Values
+    retain allocation leases until their final owner releases them.
 
 Cancellation is cooperative, not preemption. Running callbacks may return
 late, but their Values cannot publish after cancellation or graph replacement.

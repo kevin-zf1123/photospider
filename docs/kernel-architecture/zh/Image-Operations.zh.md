@@ -36,8 +36,8 @@ profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/
 ## 可复用算子包与可执行示例
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
-`Photospider::operation_sdk` 构建受维护的 ABI3 C module `photospider_rgba32f_ops`。
-它实现上述两个算子和相同 profile，使用严格浮点编译选项。ABI3 host 在进入 callback
+`Photospider::operation_sdk` 构建受维护的 ABI4 C module `photospider_rgba32f_ops`。
+它实现上述两个算子和相同 profile，使用严格浮点编译选项。ABI4 host 在进入 callback
 之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 持有临时输出
 buffer，等同步 sink 复制后释放；成功、拒绝和取消路径均释放。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
@@ -87,3 +87,10 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
 0.3 消费及 0.2 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+
+## S2 存储与 liveness 修订
+
+#264/#210 已迁移 ABI4 宿主输出/scratch。每个图像 step 预留输出字节，不需要第二份
+sink copy；完整 Run 预留包含保留中间结果和 scratch。调用方已有输入及进程 RSS 不计入
+受控预算。当前 S1 整图两步场景实际分配峰值为 128 bytes，每步输出容量 64 bytes；
+旧 2B 回调估算说明由这些实际存储语义替换。区域执行尚由 #265 追踪。

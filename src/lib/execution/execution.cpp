@@ -15,6 +15,7 @@
 #include <new>
 #include <optional>
 #include <queue>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "data/input_validation.hpp"
+#include "execution/memory_budget.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -362,188 +364,8 @@ class ThreadPool final {
   bool stopping_ = false;
 };
 
-/**
- * @brief Process-local exact modeled-byte admission ledger.
- *
- * Acquisition is nonblocking: callers receive ordinary backpressure when the
- * configured bound would be exceeded. Every successful acquisition returns a
- * move-only lease whose destruction releases the exact byte count.
- */
-class ResourceLedger final {
- public:
-  /**
-   * @brief Move-only exact-release token for one admission.
-   *
-   * @note A default token owns no bytes and is safe to destroy.
-   */
-  class Lease final {
-   public:
-    /**
-     * @brief Constructs an empty non-owning lease.
-     * @throws Nothing.
-     * @note Destruction performs no ledger mutation.
-     */
-    Lease() noexcept = default;
-
-    /**
-     * @brief Transfers exact-release ownership.
-     * @param other Source lease invalidated by the move.
-     * @throws Nothing.
-     */
-    Lease(Lease&& other) noexcept
-        : ledger_(std::exchange(other.ledger_, nullptr)),
-          bytes_(std::exchange(other.bytes_, 0U)),
-          live_after_acquire_(other.live_after_acquire_) {}
-
-    /**
-     * @brief Releases current ownership before taking another lease.
-     * @param other Source lease invalidated by the move.
-     * @return This lease.
-     * @throws Nothing.
-     */
-    Lease& operator=(Lease&& other) noexcept {
-      if (this != &other) {
-        release();
-        ledger_ = std::exchange(other.ledger_, nullptr);
-        bytes_ = std::exchange(other.bytes_, 0U);
-        live_after_acquire_ = other.live_after_acquire_;
-      }
-      return *this;
-    }
-
-    /**
-     * @brief Releases the exact owned byte count.
-     * @throws Nothing.
-     * @note A moved-from or default lease releases nothing.
-     */
-    ~Lease() noexcept { release(); }
-
-    /**
-     * @brief Forbids duplicating exact byte-release ownership.
-     * @param other Source lease that cannot be copied.
-     * @throws Nothing; the operation is deleted.
-     * @note Move operations preserve exactly-once release.
-     */
-    Lease(const Lease& other) = delete;
-    /**
-     * @brief Forbids copy assignment of exact byte-release ownership.
-     * @param other Source lease that cannot be assigned.
-     * @return No value; the operation is deleted.
-     * @throws Nothing; the operation is deleted.
-     * @note A ledger admission can have only one releasing lease.
-     */
-    Lease& operator=(const Lease& other) = delete;
-
-    /**
-     * @brief Returns shared live bytes immediately after this acquisition.
-     * @return Global live-byte observation.
-     * @throws Nothing.
-     */
-    [[nodiscard]] std::uint64_t live_after_acquire() const noexcept {
-      return live_after_acquire_;
-    }
-
-   private:
-    friend class ResourceLedger;
-
-    /**
-     * @brief Constructs one owning lease.
-     * @param ledger Owning ledger.
-     * @param bytes Exact admitted byte count.
-     * @param live_after_acquire Shared live-byte observation.
-     * @throws Nothing.
-     */
-    Lease(ResourceLedger* ledger, std::uint64_t bytes,
-          std::uint64_t live_after_acquire) noexcept
-        : ledger_(ledger),
-          bytes_(bytes),
-          live_after_acquire_(live_after_acquire) {}
-
-    /**
-     * @brief Releases owned bytes once and becomes empty.
-     * @throws Nothing.
-     * @note Ledger lifetime exceeds every lease by ExecutionContext contract.
-     */
-    void release() noexcept {
-      if (ledger_) {
-        ledger_->release(bytes_);
-        ledger_ = nullptr;
-        bytes_ = 0U;
-      }
-    }
-
-    /** @brief Ledger receiving exact release, or null. */
-    ResourceLedger* ledger_ = nullptr;
-    /** @brief Exact admitted byte count. */
-    std::uint64_t bytes_ = 0U;
-    /** @brief Shared live-byte count after acquisition. */
-    std::uint64_t live_after_acquire_ = 0U;
-  };
-
-  /**
-   * @brief Constructs a positive fixed-capacity ledger.
-   * @param maximum_bytes Maximum simultaneous modeled bytes.
-   * @throws std::invalid_argument If capacity is zero.
-   * @note Admission is global to one ExecutionContext, not per graph.
-   */
-  explicit ResourceLedger(std::uint64_t maximum_bytes)
-      : maximum_bytes_(maximum_bytes) {
-    if (maximum_bytes == 0U) {
-      throw std::invalid_argument("resource-ledger capacity must be positive");
-    }
-  }
-
-  /**
-   * @brief Attempts immediate exact byte admission.
-   * @param bytes Planned invocation byte demand.
-   * @return Owning lease or `ResourceExhausted` backpressure.
-   * @throws std::bad_alloc If diagnostic allocation fails.
-   * @note Zero-byte demand still returns a valid empty accounting lease.
-   */
-  [[nodiscard]] Result<Lease> acquire(std::uint64_t bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (bytes > maximum_bytes_ || live_bytes_ > maximum_bytes_ - bytes) {
-      return Result<Lease>(Status::failure(
-          ErrorCode::ResourceExhausted,
-          "local modeled-byte capacity is temporarily exhausted"));
-    }
-    live_bytes_ += bytes;
-    return Result<Lease>(Lease(this, bytes, live_bytes_));
-  }
-
-  /**
-   * @brief Returns currently admitted modeled bytes.
-   * @return Exact shared live count.
-   * @throws Nothing.
-   */
-  [[nodiscard]] std::uint64_t live_bytes() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return live_bytes_;
-  }
-
- private:
-  /**
-   * @brief Releases one previously admitted exact byte count.
-   * @param bytes Exact lease count.
-   * @throws Nothing.
-   * @note Underflow is prevented by Lease move-only ownership.
-   */
-  void release(std::uint64_t bytes) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (bytes <= live_bytes_) {
-      live_bytes_ -= bytes;
-    } else {
-      live_bytes_ = 0U;
-    }
-  }
-
-  /** @brief Serializes aggregate accounting. */
-  mutable std::mutex mutex_;
-  /** @brief Fixed maximum simultaneous modeled bytes. */
-  const std::uint64_t maximum_bytes_;
-  /** @brief Current exactly admitted bytes. */
-  std::uint64_t live_bytes_ = 0U;
-};
+using execution_internal::MemoryBudget;
+using execution_internal::MemoryReservation;
 
 /**
  * @brief Resolves a bounded positive default CPU worker count.
@@ -630,7 +452,7 @@ std::string format_digest(std::uint64_t state) {
  */
 std::string result_digest(const std::map<std::string, Value>& values) {
   std::uint64_t state = 14695981039346656037ULL;
-  constexpr char kDomain[] = "photospider.result-digest.v1";
+  constexpr char kDomain[] = "photospider.result-digest.v2";
   state = fnv_bytes(state, kDomain, sizeof(kDomain) - 1U);
   for (const auto& entry : values) {
     state = fnv_bytes(state, entry.first.data(), entry.first.size());
@@ -646,6 +468,10 @@ std::string result_digest(const std::map<std::string, Value>& values) {
       state = fnv_integer(state, dimension.extent);
     }
     state = fnv_integer(state, value.layout().byte_offset);
+    for (std::size_t axis = 0; axis < value.descriptor().shape.size(); ++axis)
+      state = fnv_integer(state, value.layout().origin.empty()
+                                     ? 0
+                                     : value.layout().origin[axis]);
     for (std::int64_t stride : value.layout().byte_strides) {
       std::uint64_t stride_bits = 0U;
       std::memcpy(&stride_bits, &stride, sizeof(stride_bits));
@@ -686,9 +512,16 @@ Result<std::uint64_t> checked_add(std::uint64_t left, std::uint64_t right) {
  * @note Backend residency is tracked by the owning ExecutionRun; Value itself
  * remains backend-neutral and exposes no native device handle.
  */
-Result<Value> transfer_value(const Value& source) {
-  return Value::create(source.descriptor(), source.region(), source.layout(),
-                       source.copy_bytes(), source.facets());
+Result<Value> transfer_value(const Value& source,
+                             const BufferAllocator& allocator) {
+  auto allocated = allocator.allocate(source.bytes().size());
+  if (!allocated.ok())
+    return Result<Value>(allocated.status());
+  auto buffer = allocated.take_value();
+  std::memcpy(buffer.data(), source.bytes().data(), source.bytes().size());
+  return Value::from_storage(source.descriptor(), source.region(),
+                             source.layout(), std::move(buffer).freeze(),
+                             source.facets());
 }
 
 /**
@@ -744,7 +577,7 @@ struct ExecutionContext::Impl final {
         gpu_available(requested.gpu_enabled),
         maximum_waiting_callbacks(requested.maximum_queued_tasks),
         operation_registry(std::move(operations)),
-        ledger(requested.maximum_live_bytes),
+        budget(std::make_shared<MemoryBudget>(requested.maximum_live_bytes)),
         waiting_admission(maximum_waiting_callbacks),
         cpu_pool(cpu_worker_count, Backend::Cpu) {
     if (!operation_registry || !operation_registry->frozen()) {
@@ -765,7 +598,7 @@ struct ExecutionContext::Impl final {
   /** @brief Frozen operation registry retained beyond all callbacks. */
   std::shared_ptr<OperationRegistry> operation_registry;
   /** @brief Shared exact modeled-byte capacity. */
-  ResourceLedger ledger;
+  std::shared_ptr<MemoryBudget> budget;
   /** @brief Shared CPU/GPU waiting-callback admission owner. */
   WaitingAdmission waiting_admission;
   /** @brief Required fixed CPU callback pool. */
@@ -863,7 +696,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param cpu_pool Required CPU callback pool with context lifetime.
    * @param gpu_pool Optional GPU callback pool with context lifetime.
    * @param waiting_admission Context-wide waiting-callback owner.
-   * @param ledger Context-wide modeled-byte owner.
+   * @param reservation Complete accounted working-set owner.
    * @param invoke Callback entry retaining registry ownership and currentness.
    * @param plan Immutable validated physical plan.
    * @param cancellation Cooperative caller token.
@@ -873,7 +706,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @note No callback is submitted during construction.
    */
   ExecutionRun(ThreadPool* cpu_pool, ThreadPool* gpu_pool,
-               WaitingAdmission* waiting_admission, ResourceLedger* ledger,
+               WaitingAdmission* waiting_admission,
+               std::shared_ptr<MemoryReservation> reservation,
                std::function<Result<Value>(const std::string&,
                                            const OperationInvocation&)>
                    invoke,
@@ -883,7 +717,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
-        ledger_(ledger),
+        reservation_(std::move(reservation)),
         invoke_(std::move(invoke)),
         plan_(plan),
         bindings_(std::move(bindings)),
@@ -893,9 +727,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         value_backends_(plan->steps().size(), Backend::Cpu),
         completed_(plan->steps().size(), false),
         remaining_dependencies_(plan->steps().size(), 0U),
-        dependents_(plan->steps().size()) {
-    if (!cpu_pool_ || !waiting_admission_ || !ledger_ || !invoke_ || !plan_ ||
-        plan_->revision() == 0U || plan_->steps().empty() ||
+        dependents_(plan->steps().size()),
+        remaining_readers_(plan->steps().size(), 0),
+        retained_output_(plan->steps().size(), false) {
+    if (!cpu_pool_ || !waiting_admission_ || !reservation_ || !invoke_ ||
+        !plan_ || plan_->revision() == 0U || plan_->steps().empty() ||
         maximum_parallelism_ == 0U) {
       throw std::invalid_argument("execution plan or bounds are invalid");
     }
@@ -917,6 +753,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             throw std::invalid_argument("plan input must name earlier step");
           descriptor = &plan_->steps()[producer->step_index].output_descriptor;
           dependents_[producer->step_index].push_back(step_index);
+          ++remaining_readers_[producer->step_index];
           ++remaining_dependencies_[step_index];
         } else {
           const auto index =
@@ -938,6 +775,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (output.first.empty() || output.second >= plan_->steps().size()) {
         throw std::invalid_argument("execution plan output mapping is invalid");
       }
+      retained_output_[output.second] = true;
     }
   }
 
@@ -961,6 +799,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         ready_.pop();
         const Backend backend = plan_->steps()[step_index].backend;
         ++in_flight_;
+        diagnostics_.peak_active_tasks =
+            std::max(diagnostics_.peak_active_tasks, in_flight_);
         lock.unlock();
         submit_attempt(step_index, backend);
         lock.lock();
@@ -996,6 +836,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     ExecutionResult result;
     for (const auto& output : plan_->outputs()) {
       result.values.emplace(output.first, values_[output.second]);
+    }
+    diagnostics_.peak_live_bytes = reservation_->peak();
+    diagnostics_.planned_peak_bytes = reservation_->planned();
+    std::set<const CpuStorage*> input_storage;
+    for (const auto& value : bindings_) {
+      if (value.valid() && input_storage.insert(value.storage().get()).second)
+        diagnostics_.retained_input_bytes += value.storage()->capacity();
     }
     result.diagnostics = std::move(diagnostics_);
     result.diagnostics.plan_digest = plan_->digest().value;
@@ -1238,12 +1085,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
 
+      const auto allocator = reservation_->allocator();
+      const auto callback_allocator =
+          reservation_->allocator(step.planned_bytes);
       for (std::size_t input_index = 0U; input_index < inputs.size();
            ++input_index) {
         if (!transfer_inputs[input_index]) {
           continue;
         }
-        auto transferred = transfer_value(inputs[input_index]);
+        auto transferred = transfer_value(inputs[input_index], allocator);
         if (!transferred.ok()) {
           finish_failure(transferred.status());
           return;
@@ -1251,17 +1101,25 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         inputs[input_index] = transferred.take_value();
       }
 
-      auto lease_result = ledger_->acquire(step.planned_bytes);
-      if (!lease_result.ok()) {
-        finish_failure(lease_result.status());
-        return;
-      }
-      ResourceLedger::Lease lease = lease_result.take_value();
       const auto started = std::chrono::steady_clock::now();
       Result<Value> invocation_result =
-          invoke_(step.operation,
-                  OperationInvocation{inputs, step.input_demands,
-                                      step.parameters, backend, cancellation_});
+          invoke_(step.operation, OperationInvocation{inputs,
+                                                      step.input_demands,
+                                                      step.parameters,
+                                                      backend,
+                                                      cancellation_,
+                                                      {},
+                                                      callback_allocator});
+      if (invocation_result.ok() &&
+          !invocation_result.value().storage()->accounted()) {
+        const auto storage = invocation_result.value().storage();
+        const bool borrowed = std::any_of(
+            inputs.begin(), inputs.end(),
+            [&](const Value& input) { return input.storage() == storage; });
+        if (!borrowed)
+          invocation_result =
+              transfer_value(invocation_result.value(), callback_allocator);
+      }
       const std::uint64_t elapsed = duration_us(started);
 
       bool should_fallback = false;
@@ -1269,14 +1127,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::lock_guard<std::mutex> lock(mutex_);
         diagnostics_.operation_timings.push_back(OperationTiming{
             step.node_id, backend, elapsed, invocation_result.status().code});
-        diagnostics_.peak_live_bytes =
-            std::max(diagnostics_.peak_live_bytes, lease.live_after_acquire());
+
         auto count_sum =
             checked_add(diagnostics_.transfer_count, transfer_count);
         auto byte_sum =
             checked_add(diagnostics_.transfer_bytes, transfer_bytes);
         if (!count_sum.ok() || !byte_sum.ok()) {
-          lease = ResourceLedger::Lease();
           finish_failure_locked(!count_sum.ok() ? count_sum.status()
                                                 : byte_sum.status());
           return;
@@ -1296,9 +1152,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
 
-      // Release modeled bytes before making the attempt terminal so execute()
-      // cannot return while a completed callback still owns accounting state.
-      lease = ResourceLedger::Lease();
+      // Drop callback-local input/transfer owners before retiring the attempt.
+      inputs.clear();
       if (should_fallback) {
         submit_attempt(step_index, Backend::Cpu);
         return;
@@ -1361,6 +1216,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     }
 
     values_[step_index] = result.take_value();
+    for (const auto& input : plan_->steps()[step_index].inputs) {
+      if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+        auto& readers = remaining_readers_[producer->step_index];
+        if (readers == 0) {
+          finish_failure_locked(
+              Status::failure(ErrorCode::Internal, "reader counter underflow"));
+          return;
+        }
+        --readers;
+        if (readers == 0 && !retained_output_[producer->step_index])
+          values_[producer->step_index] = Value();
+      }
+    }
+    if (remaining_readers_[step_index] == 0 && !retained_output_[step_index])
+      values_[step_index] = Value();
     value_backends_[step_index] = backend;
     completed_[step_index] = true;
     ++completed_count_;
@@ -1500,7 +1370,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   /** @brief Shared waiting admission with longer context lifetime. */
   WaitingAdmission* waiting_admission_;
   /** @brief Shared local byte ledger with longer context lifetime. */
-  ResourceLedger* ledger_;
+  std::shared_ptr<MemoryReservation> reservation_;
   /** @brief Run callback entry retaining registry ownership and currentness. */
   std::function<Result<Value>(const std::string&, const OperationInvocation&)>
       invoke_;
@@ -1526,6 +1396,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   std::vector<std::size_t> remaining_dependencies_;
   /** @brief Reverse dependency adjacency. */
   std::vector<std::vector<std::size_t>> dependents_;
+  std::vector<std::size_t> remaining_readers_;
+  std::vector<bool> retained_output_;
   /** @brief Deterministic smallest-index ready ordering. */
   std::priority_queue<std::size_t, std::vector<std::size_t>,
                       std::greater<std::size_t>>
@@ -1597,9 +1469,46 @@ Result<ExecutionResult> ExecutionContext::execute(
                                         ? impl_->cpu_worker_count
                                         : options.maximum_parallelism;
   try {
+    std::uint64_t working_bytes = 0;
+    for (const auto& step : plan.steps()) {
+      auto sum = checked_add(working_bytes, step.planned_bytes);
+      if (!sum.ok())
+        return Result<ExecutionResult>(sum.status());
+      working_bytes = sum.value();
+      for (const auto& source : step.inputs) {
+        const auto* producer = std::get_if<PlanStepInput>(&source);
+        const auto backend = producer
+                                 ? plan.steps()[producer->step_index].backend
+                                 : Backend::Cpu;
+        if (backend != Backend::Cpu || step.backend != Backend::Cpu) {
+          const auto& descriptor =
+              producer
+                  ? plan.steps()[producer->step_index].output_descriptor
+                  : plan.input_declarations()
+                        [std::get<PlanWorkflowInput>(source).declaration_index]
+                            .descriptor;
+          auto dense = input_internal::dense_metadata(descriptor);
+          if (!dense.ok())
+            return Result<ExecutionResult>(dense.status());
+          sum = checked_add(working_bytes, dense.value().bytes);
+          if (!sum.ok())
+            return Result<ExecutionResult>(sum.status());
+          working_bytes = sum.value();
+        }
+      }
+    }
+    auto reserved = impl_->budget->reserve(
+        working_bytes, [&] { return binding_stop(plan, cancellation); });
+    if (!reserved.ok())
+      return Result<ExecutionResult>(reserved.status());
+    auto reservation = reserved.take_value();
+    struct Seal {
+      std::shared_ptr<MemoryReservation> reservation;
+      ~Seal() { reservation->seal(); }
+    } seal{reservation};
     auto coordinator = std::make_shared<ExecutionRun>(
         &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->waiting_admission,
-        &impl_->ledger,
+        reservation,
         [operations = impl_->operation_registry, &plan](
             const std::string& key, const OperationInvocation& invocation) {
           return operations->invoke_current(key, invocation,
