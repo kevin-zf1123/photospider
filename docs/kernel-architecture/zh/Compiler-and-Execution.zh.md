@@ -141,3 +141,8 @@ fan-out/重复边逐个计数。回调局部输入先于完成信号释放；非
 实际 peak_live_bytes、retained_input_bytes 和 peak_active_tasks；元数据/栈/RSS 不计入。
 test_memory_liveness 验证 gated fan-out、跨 context 生命周期、预算恢复及精确/少一字节
 workspace 上限。RawBenchmarkOptions.bindings 在入口复制一次，供每个独立编译 sample 使用。
+
+直接 OperationRegistry::invoke 与物理规划共享输入需求推导：在 callback 分配前拒绝
+不完整 RGBA 输出、非整图 Whole 输出、不足 halo、蒙版空间 shape 不匹配和 Value 未覆盖
+其声明需求。Whole 缓存在最后剩余边界/输出 reader 完成后释放，包括连续 Whole 链；
+test_regional_execution 验证三节点链的 16/15 字节预算。

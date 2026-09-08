@@ -63,7 +63,9 @@ input 的 type 或 shape 不一致。两者都在 callback 前返回 `TypeMismat
 带副作用或原本会失败，也不会进入 callback。Callback output validation 复用该预计算
 descriptor；成功 callback 返回 default-invalid generic `Value` 时仍安全地得到
 `TypeMismatch`，错误 image output 返回 `OperationFailed`。
-Plan-derived demand coverage 继续由 `ExecutionRun` 负责，registry 不在此重新推导。
+直接调用与物理规划共享受检查的输入需求规则。Registry 在 callback 前拒绝 Value/halo
+覆盖不足、不完整通道图像输出和蒙版 shape 不匹配。计算产生的蒙版数值错误为
+OperationFailed，绑定蒙版数值错误仍为 InvalidArgument。
 
 C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会
 验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算

@@ -224,6 +224,78 @@ Status validate_port_schema(const OperationTraits& traits) {
   return Status::success();
 }
 
+/**
+ * @brief Derives one legal input demand from an operation Region rule.
+ * @param traits Canonical compiler-visible operation traits.
+ * @param output_demand Valid demanded coverage of the operation output.
+ * @param output_shape Statically inferred output shape.
+ * @param input_shape Producer descriptor shape for this input.
+ * @return Whole, exact, or overflow-safe clipped-halo input demand.
+ * @throws std::bad_alloc If result or diagnostic allocation fails.
+ * @note Halo expansion clips without evaluating overflowing addition.
+ */
+Result<Region> derive_input_demand(
+    const OperationTraits& traits, const Region& output_demand,
+    const std::vector<std::uint64_t>& output_shape,
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
+  const Status output_status = output_demand.validate(output_shape);
+  if (!output_status.ok() || output_demand.empty()) {
+    return Result<Region>(Status::failure(
+        ErrorCode::InvalidArgument,
+        "physical planning output demand is empty or out of bounds"));
+  }
+  if (kind == OperationPortKind::Float32Scalar) {
+    return Result<Region>(Region::whole(input_shape));
+  }
+  if (kind == OperationPortKind::Float32Mask &&
+      traits.region_rule != OperationRegionRule::Whole) {
+    if (input_shape.size() != 2 || output_shape.size() != 3 ||
+        input_shape[0] != output_shape[0] || input_shape[1] != output_shape[1])
+      return Result<Region>(Status::failure(
+          ErrorCode::TypeMismatch, "mask/image spatial shapes differ"));
+    return derive_input_demand(
+        traits,
+        Region({output_demand.dimensions()[0], output_demand.dimensions()[1]}),
+        input_shape, input_shape, OperationPortKind::Value);
+  }
+  switch (traits.region_rule) {
+    case OperationRegionRule::Whole:
+      return Result<Region>(Region::whole(input_shape));
+    case OperationRegionRule::Elementwise:
+      if (input_shape != output_shape) {
+        return Result<Region>(Status::failure(
+            ErrorCode::TypeMismatch,
+            "elementwise Region rule requires matching input/output shapes"));
+      }
+      return Result<Region>(output_demand);
+    case OperationRegionRule::Halo:
+      if (input_shape != output_shape || traits.halo_radius == 0U) {
+        return Result<Region>(Status::failure(
+            ErrorCode::TypeMismatch,
+            "halo Region rule requires matching shapes and positive radius"));
+      }
+      break;
+  }
+  std::vector<RegionDimension> dimensions;
+  dimensions.reserve(input_shape.size());
+  const std::uint64_t radius = traits.halo_radius;
+  for (std::size_t axis = 0U; axis < input_shape.size(); ++axis) {
+    const RegionDimension& requested = output_demand.dimensions()[axis];
+    if (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        axis == 2) {
+      dimensions.push_back(RegionDimension{0, 4});
+      continue;
+    }
+    const std::uint64_t start =
+        requested.offset > radius ? requested.offset - radius : 0U;
+    const std::uint64_t requested_end = requested.offset + requested.extent;
+    const std::uint64_t right_room = input_shape[axis] - requested_end;
+    const std::uint64_t end = requested_end + std::min(radius, right_room);
+    dimensions.push_back(RegionDimension{start, end - start});
+  }
+  return Result<Region>(Region(std::move(dimensions)));
+}
+
 ValueFacet image_facet() {
   const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
   return ValueFacet{"photospider.image", 1, {profile.begin(), profile.end()}};

@@ -81,8 +81,11 @@ or shape disagreement. Both are pre-callback `TypeMismatch` results, so even a
 side-effecting or failing callback is not entered. Callback output validation
 reuses the precomputed descriptor; a successful callback that returns a
 default-invalid generic `Value` remains a safe `TypeMismatch`; invalid image
-output is `OperationFailed`. Plan-derived demand
-coverage remains an `ExecutionRun` responsibility and is not re-derived here.
+output is `OperationFailed`. Direct invocation and physical planning share
+the checked input-demand rule. The registry rejects insufficient Value/halo
+coverage, partial-channel image output and mismatched mask shape before
+callback entry. Computed mask numeric failures are OperationFailed; bound
+mask numeric failures remain InvalidArgument.
 
 A C++ `OperationTraits::Fixed` record describes only the logical output
 descriptor. Registration validates a nonzero rank-1..8 shape, closed element
