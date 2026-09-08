@@ -1,8 +1,8 @@
 # Float32 Image Operations
 
-The default registry includes two CPU operations implemented in
+The default registry includes CPU operations implemented in
 [`plugins/ops/image_operations.cpp`](../../plugins/ops/image_operations.cpp).
-Both have two ordered runtime Value inputs, no compile-time parameters or
+The two S1 operations below have two ordered runtime Value inputs, no compile-time parameters or
 implicit defaults, and one regional image output named by the workflow.
 
 | Operation | Input 0 | Input 1 | Output |
@@ -42,7 +42,7 @@ the consuming callback. Unread pixels are not scanned.
 
 [`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
 maintained ABI4 C module `photospider_rgba32f_ops` using only
-`Photospider::operation_sdk`. It implements the same two operations and profile
+`Photospider::operation_sdk`. It implements the same image operations and profile
 as the built-ins above, with strict floating-point compilation. The ABI4 host
 validates ports and establishes nearest/gradual-underflow arithmetic before
 entry. The callback requests its output from the host allocator and publishes that
@@ -104,3 +104,59 @@ against the installed SDK, runs A/B through its shared bridge, and runs the
 same executable with built-ins and the module. Static and shared kernel builds
 exercise this path and package 0.4/rejected 0.3 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
+
+## S2 Gaussian, mask and composition
+
+The built-in registry and maintained ABI4 C package also provide:
+
+| Operation | Ordered inputs | Required static parameters | Region rule |
+| --- | --- | --- | --- |
+| `image.gaussian_blur` | RGBA image | `radius:Int64 [1,64]`, `sigma:Float64 [0.1,64]` | Halo resolved from radius; all RGBA channels |
+| `image.mask` | RGBA image, Float32 `{H,W}` mask | None | Elementwise; mask maps matching H/W |
+| `image.source_over` | Foreground RGBA, background RGBA of identical shape | None | Elementwise; MatchAllInputs |
+
+All operations are CPU, deterministic and side-effect-free. Images preserve
+logical shape and the profile above. Masks have no facets and finite samples
+in `[0,1]`; each mask sample multiplies all foreground RGBA channels. Source-over
+computes `F + B * (1 - F.alpha)` separately for each channel using premultiplied
+values, following the [W3C formula](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover).
+The subtraction, multiplication and addition round to Float32 with no FMA.
+
+Gaussian computes normalized binary64 `exp(-tap²/(2*sigma²))` weights in tap order
+`-radius..radius`. Each horizontal and then vertical pass accumulates binary64
+products in that order and rounds its output to Float32. Edges clamp at the
+full logical image boundary; tile edges never clamp independently. Radius and
+sigma are source parameters and changes require recompilation. Workspace bounds
+are 1032 fixed coefficient bytes plus one byte per demanded input byte; the
+horizontal scratch only stores demanded rows and output columns. All coefficient,
+scratch and output buffers come from the host allocator. Fast-math and FMA
+contraction are disabled for both C++ and C implementations.
+
+[`photospider_regional_image_vertical`](../../examples/regional_image_vertical/main.cpp)
+runs `foreground -> Gaussian -> exposure -> mask -> source-over(background)`
+through public compile/execute/execute_stream. Fixture `S2Image.RegionAndTiles`
+checks a hand-computed uniform scene (RGB .3125, alpha .625), a separate full-image
+2D Gaussian oracle (`atol=1e-6, rtol=1e-5`), and bitwise equality between whole and
+1x1/2x3/5x7/128x128 tiles. It includes a nonzero ROI, edges, non-divisible tiles,
+radius 64, sigma .1, transparent/HDR values, mask 0/1, dynamic gain reuse and
+invalid parameter/mask/shape cases. The independent oracle shares no operation
+callback or separable-pass implementation.
+
+A 65536x65536 procedural source variant streams a 5x7 ROI in nine tiles, checks
+sample values, 9900 source bytes and an actual peak of 1808 bytes, and tests its
+3840-byte conservative reservation
+exactly and one byte short. This proves a controlled
+buffer bound, not a process RSS bound. Regional-source, fan-out, concurrent-Run,
+cancellation, stale and sink-failure coverage is in `test_regional_execution`
+and `test_memory_liveness`.
+
+```sh
+cmake --build build/issue257-static --target photospider_regional_image_vertical -j 8
+build/issue257-static/examples/regional_image_vertical/photospider_regional_image_vertical
+ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
+```
+
+The example directory is also an independent `find_package(Photospider 0.4)`
+consumer. `test_installed_consumer` builds and runs it against isolated static
+and shared installations, both with built-ins and with the separately built C
+module. Pass the trusted module's exact path as the sole optional argument.

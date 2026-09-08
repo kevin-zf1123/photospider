@@ -207,8 +207,12 @@ install(
 
 add_subdirectory(plugins/ops/rgba32f EXCLUDE_FROM_ALL)
 add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
+add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
+  add_test(NAME test_s2_vertical COMMAND photospider_regional_image_vertical)
+  add_test(NAME test_s2_vertical_plugin COMMAND photospider_regional_image_vertical
+    $<TARGET_FILE:photospider_rgba32f_ops>)
   add_test(NAME test_image_vertical COMMAND photospider_image_vertical)
   add_test(NAME test_image_vertical_plugin COMMAND photospider_image_vertical
     "$<TARGET_FILE:photospider_rgba32f_ops>")
@@ -336,7 +340,7 @@ if(BUILD_TESTING)
 
   photospider_add_test(test_bindings Photospider::kernel tests/integration/test_bindings.cpp)
   target_include_directories(test_bindings PRIVATE examples)
-  add_dependencies(test_bindings photospider_image_vertical)
+  add_dependencies(test_bindings photospider_image_vertical photospider_regional_image_vertical)
   add_library(operation_bad_image_fixture MODULE tests/fixtures/operation_bad_image_fixture.c)
   target_link_libraries(operation_bad_image_fixture PRIVATE Photospider::operation_sdk)
   target_compile_definitions(operation_bad_image_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)

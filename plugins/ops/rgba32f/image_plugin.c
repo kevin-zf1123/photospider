@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,6 +74,155 @@ static int execute_image(void* state, const ps_operation_value_view_v4* inputs,
                   : PS_OPERATION_RESULT_FAILURE_V4;
 }
 
+static const ps_operation_port_constraint_v4 ports_image[] = {
+    {sizeof(ps_operation_port_constraint_v4),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0}};
+static const ps_operation_port_constraint_v4 ports_mask[] = {
+    {sizeof(ps_operation_port_constraint_v4),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
+    {sizeof(ps_operation_port_constraint_v4), PS_OPERATION_PORT_FLOAT32_MASK_V4,
+     0, 0}};
+static const ps_operation_port_constraint_v4 ports_over[] = {
+    {sizeof(ps_operation_port_constraint_v4),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
+    {sizeof(ps_operation_port_constraint_v4),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0}};
+static const ps_operation_parameter_descriptor_v4 gaussian_parameters[] = {
+    {sizeof(ps_operation_parameter_descriptor_v4), "radius", 6,
+     PS_OPERATION_PARAMETER_INT64_V4, 1, 1, 1, 64},
+    {sizeof(ps_operation_parameter_descriptor_v4), "sigma", 5,
+     PS_OPERATION_PARAMETER_FLOAT64_V4, 1, 1, 0.1, 64}};
+static float sample(const ps_operation_value_view_v4* value, uint64_t y,
+                    uint64_t x, uint64_t c) {
+  const int64_t offset =
+      (int64_t)value->byte_offset +
+      ((int64_t)y - (int64_t)value->storage_origin[0]) *
+          value->byte_strides[0] +
+      ((int64_t)x - (int64_t)value->storage_origin[1]) *
+          value->byte_strides[1] +
+      (value->rank == 3 ? ((int64_t)c - (int64_t)value->storage_origin[2]) *
+                              value->byte_strides[2]
+                        : 0);
+  float number = 0;
+  memcpy(&number, value->data + offset, 4);
+  return number;
+}
+static uint64_t clamp_axis(uint64_t coordinate, int tap, uint64_t length) {
+  if (tap < 0)
+    return coordinate < (uint64_t)-tap ? 0 : coordinate - (uint64_t)-tap;
+  const uint64_t result = coordinate + (uint64_t)tap;
+  return result < length ? result : length - 1;
+}
+static int mask_state, over_state;
+static int execute_regional(
+    void* state, const ps_operation_value_view_v4* inputs, uint32_t count,
+    const ps_operation_parameter_value_v4* parameters, uint32_t parameter_count,
+    uint32_t backend, ps_operation_cancelled_v4 cancelled,
+    void* cancellation_context, const ps_operation_output_sink_v4* sink,
+    char* diagnostic, size_t diagnostic_capacity) {
+  (void)diagnostic;
+  (void)diagnostic_capacity;
+  if (!inputs || !sink || backend != 1 || count != (state ? 2U : 1U) ||
+      parameter_count != (state ? 0U : 2U))
+    return PS_OPERATION_RESULT_FAILURE_V4;
+  uint8_t* output = sink->allocate_output(sink->context);
+  if (!output)
+    return PS_OPERATION_RESULT_FAILURE_V4;
+  const uint64_t y0 = sink->output_offsets[0], x0 = sink->output_offsets[1];
+  const uint64_t height = sink->output_extents[0],
+                 width = sink->output_extents[1];
+  if (!state) {
+    const int radius = (int)parameters[0].int64_value;
+    const double sigma = parameters[1].float64_value;
+    uint8_t* weights =
+        sink->allocate_scratch(sink->context, (uint64_t)(2 * radius + 1) * 8);
+    const uint64_t first_row = inputs[0].demand_offsets[0];
+    uint8_t* scratch = sink->allocate_scratch(
+        sink->context, inputs[0].demand_extents[0] * width * 16);
+    if (!weights || !scratch)
+      return PS_OPERATION_RESULT_FAILURE_V4;
+    double total = 0;
+    for (int tap = -radius; tap <= radius; ++tap) {
+      const double weight = exp(-(double)(tap * tap) / (2.0 * sigma * sigma));
+      total += weight;
+      memcpy(weights + (tap + radius) * 8, &weight, 8);
+    }
+    for (int tap = -radius; tap <= radius; ++tap) {
+      double weight = 0;
+      memcpy(&weight, weights + (tap + radius) * 8, 8);
+      weight /= total;
+      memcpy(weights + (tap + radius) * 8, &weight, 8);
+    }
+    for (uint64_t y = first_row; y < first_row + inputs[0].demand_extents[0];
+         ++y) {
+      if (cancelled && cancelled(cancellation_context))
+        return PS_OPERATION_RESULT_CANCELLED_V4;
+      for (uint64_t x = x0; x < x0 + width; ++x)
+        for (uint64_t c = 0; c < 4; ++c) {
+          double sum = 0;
+          for (int tap = -radius; tap <= radius; ++tap) {
+            double weight = 0;
+            memcpy(&weight, weights + (tap + radius) * 8, 8);
+            const double product =
+                sample(&inputs[0], y, clamp_axis(x, tap, inputs[0].shape[1]),
+                       c) *
+                weight;
+            sum += product;
+          }
+          const float rounded = (float)sum;
+          memcpy(scratch + (((y - first_row) * width + x - x0) * 4 + c) * 4,
+                 &rounded, 4);
+        }
+    }
+    for (uint64_t y = y0; y < y0 + height; ++y) {
+      if (cancelled && cancelled(cancellation_context))
+        return PS_OPERATION_RESULT_CANCELLED_V4;
+      for (uint64_t x = x0; x < x0 + width; ++x)
+        for (uint64_t c = 0; c < 4; ++c) {
+          double sum = 0;
+          for (int tap = -radius; tap <= radius; ++tap) {
+            double weight = 0;
+            memcpy(&weight, weights + (tap + radius) * 8, 8);
+            const uint64_t row = clamp_axis(y, tap, inputs[0].shape[0]);
+            float number = 0;
+            memcpy(&number,
+                   scratch + (((row - first_row) * width + x - x0) * 4 + c) * 4,
+                   4);
+            const double product = number * weight;
+            sum += product;
+          }
+          const float rounded = (float)sum;
+          memcpy(output + (((y - y0) * width + x - x0) * 4 + c) * 4, &rounded,
+                 4);
+        }
+    }
+  } else {
+    for (uint64_t y = y0; y < y0 + height; ++y) {
+      if (cancelled && cancelled(cancellation_context))
+        return PS_OPERATION_RESULT_CANCELLED_V4;
+      for (uint64_t x = x0; x < x0 + width; ++x) {
+        const float factor = state == &mask_state
+                                 ? sample(&inputs[1], y, x, 0)
+                                 : 1.0F - sample(&inputs[0], y, x, 3);
+        for (uint64_t c = 0; c < 4; ++c) {
+          const float attenuated =
+              sample(&inputs[state == &mask_state ? 0 : 1], y, x, c) * factor;
+          const float number = state == &mask_state
+                                   ? attenuated
+                                   : sample(&inputs[0], y, x, c) + attenuated;
+          memcpy(output + (((y - y0) * width + x - x0) * 4 + c) * 4, &number,
+                 4);
+        }
+      }
+    }
+  }
+  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V4,
+                       sink->output_shape, sink->output_rank, inputs[0].facets,
+                       inputs[0].facet_count, output, sink->output_byte_size)
+             ? PS_OPERATION_RESULT_SUCCESS_V4
+             : PS_OPERATION_RESULT_FAILURE_V4;
+}
+
 static int opacity_state;
 static const ps_operation_descriptor_v4 operations[] = {
     {sizeof(ps_operation_descriptor_v4),
@@ -126,13 +276,91 @@ static const ps_operation_descriptor_v4 operations[] = {
      0,
      0,
      NULL,
+     0},
+    {sizeof(ps_operation_descriptor_v4),
+     "image.gaussian_blur",
+     19,
+     1,
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+         PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
+     0,
+     PS_OPERATION_ELEMENT_FLOAT32_V4,
+     0,
+     NULL,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V4,
+     PS_OPERATION_REGION_HALO_V4,
+     0,
+     1,
+     2,
+     gaussian_parameters,
+     1,
+     ports_image,
+     {sizeof(ps_operation_port_constraint_v4),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
+     execute_regional,
+     NULL,
+     1032,
+     1,
+     "radius",
+     6},
+    {sizeof(ps_operation_descriptor_v4),
+     "image.mask",
+     10,
+     2,
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+         PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
+     0,
+     PS_OPERATION_ELEMENT_FLOAT32_V4,
+     0,
+     NULL,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V4,
+     PS_OPERATION_REGION_ELEMENTWISE_V4,
+     0,
+     1,
+     0,
+     NULL,
+     2,
+     ports_mask,
+     {sizeof(ps_operation_port_constraint_v4),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
+     execute_regional,
+     &mask_state,
+     0,
+     0,
+     NULL,
+     0},
+    {sizeof(ps_operation_descriptor_v4),
+     "image.source_over",
+     17,
+     2,
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+         PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
+     0,
+     PS_OPERATION_ELEMENT_FLOAT32_V4,
+     0,
+     NULL,
+     PS_OPERATION_SHAPE_MATCH_INPUTS_V4,
+     PS_OPERATION_REGION_ELEMENTWISE_V4,
+     0,
+     1,
+     0,
+     NULL,
+     2,
+     ports_over,
+     {sizeof(ps_operation_port_constraint_v4),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4, 0, 0},
+     execute_regional,
+     &over_state,
+     0,
+     0,
+     NULL,
      0}};
 static void destroy(const ps_operation_descriptor_v4* records, uint32_t count) {
   (void)records;
   (void)count;
 }
 static const ps_operation_plugin_api_v4 api = {
-    sizeof(ps_operation_plugin_api_v4), 2, operations, destroy};
+    sizeof(ps_operation_plugin_api_v4), 5, operations, destroy};
 PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void) {
   return PS_OPERATION_ABI_VERSION_4;
 }

@@ -199,9 +199,9 @@ typedef struct ps_operation_value_view_v4 {
 } ps_operation_value_view_v4;
 
 /**
- * @brief Host-owned sink used to publish one complete output Value.
+ * @brief Host-owned sink used to publish the requested output Region.
  *
- * @note The callback copies data synchronously and returns nonzero on success.
+ * @note Publication freezes host output or copies external data synchronously.
  */
 typedef struct ps_operation_output_sink_v4 {
   /** @brief Exact structure byte size supplied by the host. */
@@ -209,7 +209,7 @@ typedef struct ps_operation_output_sink_v4 {
   /** @brief Opaque host state returned unchanged to `publish`. */
   void* context;
   /**
-   * @brief Copies and validates one complete output.
+   * @brief Validates and freezes/copies the requested output Region.
    * @param context Opaque host state.
    * @param element_type One `ps_operation_element_type_v4` value.
    * @param shape Rank-sized nonzero shape array.
@@ -221,10 +221,11 @@ typedef struct ps_operation_output_sink_v4 {
    * @return Nonzero when the first output was accepted; zero for null context,
    * first-call validation/allocation failure, or any second invocation.
    * @throws Nothing; exceptions never cross this pure-C ABI callback boundary.
-   * @note The host copies all bytes before return. The first invocation claims
-   * the sink even when validation rejects it. Any second invocation violates
-   * the callback contract and makes the complete operation fail closed; it
-   * never replaces the first copied or rejected result.
+   * @note The host freezes allocate_output storage or copies external bytes
+   * before return. The first invocation claims the sink even when validation
+   * rejects it. Any second invocation violates the callback contract and makes
+   * the complete operation fail closed; it never replaces the first copied or
+   * rejected result.
    */
   int (*publish)(void* context, uint32_t element_type, const uint64_t* shape,
                  uint32_t rank, const ps_operation_facet_view_v4* facets,
