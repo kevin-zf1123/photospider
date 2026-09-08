@@ -688,7 +688,7 @@ Result<std::uint64_t> checked_add(std::uint64_t left, std::uint64_t right) {
  */
 Result<Value> transfer_value(const Value& source) {
   return Value::create(source.descriptor(), source.region(), source.layout(),
-                       source.bytes(), source.facets());
+                       source.copy_bytes(), source.facets());
 }
 
 /**

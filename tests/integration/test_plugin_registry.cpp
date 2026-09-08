@@ -1391,7 +1391,7 @@ int main() {
     auto traits = registry.find_traits("fixture.double");
     PS_CHECK(traits.ok());
     PS_CHECK(traits.value().input_count == 1U);
-    PS_CHECK(traits.value().version == 3U);
+    PS_CHECK(traits.value().version == 4U);
     PS_CHECK(traits.value().parameter_schema.size() == 1U);
     PS_CHECK(traits.value().parameter_schema.front().key == "scale");
     PS_CHECK(traits.value().parameter_schema.front().type ==
@@ -1426,8 +1426,8 @@ int main() {
 
     const Value scalar = Value::from_float64(3.0);
     auto faceted_input = Value::create(
-        scalar.descriptor(), scalar.region(), scalar.layout(), scalar.bytes(),
-        {ValueFacet{"test.semantic", 2U, {8U, 9U}}});
+        scalar.descriptor(), scalar.region(), scalar.layout(),
+        scalar.copy_bytes(), {ValueFacet{"test.semantic", 2U, {8U, 9U}}});
     PS_CHECK(faceted_input.ok());
     std::vector<Value> inputs{faceted_input.take_value()};
     const std::vector<Region> demands{Region::whole({1U})};
@@ -1453,7 +1453,7 @@ int main() {
         OperationInvocation{trailing_inputs, demands, parameters, Backend::Cpu,
                             CancellationToken()});
     PS_CHECK(!trailing_rejected.ok());
-    PS_CHECK(trailing_rejected.status().code == ErrorCode::TypeMismatch);
+    PS_CHECK(trailing_rejected.status().code == ErrorCode::OperationFailed);
     const std::map<std::string, ParameterValue> no_parameters;
     const std::uint32_t invalid_dso_gpu_before = operation_observer.counter(
         "ps_operation_fixture_gpu_invocation_count", kGpuBackendUnavailable);

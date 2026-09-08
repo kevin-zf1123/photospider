@@ -2,7 +2,7 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v3: copied semantic traits, closed typed parameter schema,
+- operation ABI v4: copied semantic traits, closed typed parameter schema,
   ordered scalar/image port constraints, plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
@@ -35,22 +35,24 @@ presence. The compiler rejects unknown, missing, wrong-type, and conflicting
 parameters before semantic IR; callbacks receive only validated canonical
 values and there is no hidden default fallback.
 
-The callback receives bounded dense whole-Region input views, per-input planned
-demand offsets/extents, bounded facet arrays, backend enum, cooperative
-cancellation callback, and a host-owned output sink. It may publish at most one
-output with bounded facets, which the host copies and validates as a dense
-whole-Region Value. The first sink call claims publication even when validation
-rejects it. Any second call sets an invocation-local sticky violation without
-allocating, throwing, or replacing the first accepted/rejected `Result`; after
-the callback returns, the adapter reports the stable terminal
-`OperationFailed` diagnostic
-`operation plugin violated output sink at-most-once contract`. A null sink
-context returns zero without changing invocation state. A DSO input view covers
-exactly its logical contiguous bytes; trailing backing bytes are rejected
-instead of becoming invisible plugin state.
+The callback receives regional strided input views with separate storage origin,
+byte offset, signed strides, valid coverage and planned demand. Pointers expire
+at callback return. The output sink declares exact output descriptor/Region and
+packed byte size; allocate_output supplies host-owned bytes, and allocate_scratch
+supplies host-owned callback-local scratch. Publishing the allocated output
+freezes it without copying. Publishing stack/caller data copies it through the
+same host allocator. Callbacks must allocate computation buffers through the
+host, and must not free or retain borrowed pointers.
+
+The first publish attempt claims the sink even on failure. A second attempt
+sets a sticky violation and cannot replace the first result. It produces
+OperationFailed after the callback, subject to host cancellation priority.
+Null context has no side effects. Resource allocation failures remain typed.
+Generic input views may include backing padding; callbacks address only valid
+coverage via the supplied origin and strides.
 
 The synchronous callback retains its `int` signature but returns one closed
-version-three result: success, ordinary failure, cancellation, or backend
+version-four result: success, ordinary failure, cancellation, or backend
 unavailable. Backend unavailable is distinct from ordinary failure and may
 request CPU fallback only from a GPU attempt whose copied traits allow it.
 Unknown nonzero integers are ordinary `OperationFailed` results. A callback
@@ -88,7 +90,7 @@ type/rules, and the ordinary trait combinations without evaluating a dense
 element or byte product. The callback may return any Value layout that passes
 normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
-admission estimate. A C DSO Fixed descriptor is stricter because ABI v3 carries
+admission estimate. A C DSO Fixed descriptor is stricter because ABI v4 carries
 no output strides: loading separately requires representable contiguous
 signed strides and uint64 byte count. For total dense bytes `B`, the loader
 also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
@@ -132,7 +134,7 @@ embedding C++ operation callback's `std::bad_alloc` propagates so the caller can
 preserve resource-exhaustion policy. Every other `std::exception` becomes
 `OperationFailed`; a null `what()` pointer is normalized to an empty diagnostic
 without constructing a string from null. Nonstandard exceptions receive a
-stable generic `OperationFailed` diagnostic. Output is copied before callback
+stable generic `OperationFailed` diagnostic. Output is frozen or copied before callback
 return. Plugin-owned descriptor tables are destroyed before library unload.
 
 Dense layout products use checked uint64 division before multiplication, then
@@ -165,7 +167,7 @@ certificate, package-admission, or process-isolation system.
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
 
-## Version-three port schemas
+## Version-four port schemas
 
 `input_schema_count` equals input_count <= 1024; its pointer is null exactly for
 zero count and otherwise naturally aligned. Each input and the inline output
@@ -177,8 +179,8 @@ combinations before atomic publication. Output kinds are Value or image;
 image output preserves the first image input. Scalar ports require direct
 workflow inputs; no implicit scalar broadcasting or profile inference exists.
 
-Host checks ABI version 3 before looking up get_api_v3. No v2 aliases or
-adapters remain. Float32 has code 4 in both operation ABI3 and the unchanged
+Host checks ABI version 4 before looking up get_api_v4. No v3 aliases or
+adapters remain. Float32 has code 4 in both operation ABI4 and the unchanged
 provider ABI1 schema layout. Provider codes 1..3 retain meaning. Host image
 validation and callback scopes restore the embedding's floating environment;
 see [Image Operations](Image-Operations.md).

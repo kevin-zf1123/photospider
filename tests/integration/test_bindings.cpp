@@ -6,6 +6,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -217,23 +218,24 @@ int binding_failures() {
     return fail(std::move(bindings), ErrorCode::TypeMismatch);
   };
   PS_CHECK(check_value({ElementType::UInt8, {2, 2, 4}}, original.region(),
-                       original.layout(), original.bytes(), original.facets()));
+                       original.layout(), original.copy_bytes(),
+                       original.facets()));
   PS_CHECK(check_value({ElementType::Float32, {1, 4, 4}},
                        Region::whole({1, 4, 4}), {0, {64, 16, 4}},
-                       original.bytes(), original.facets()));
+                       original.copy_bytes(), original.facets()));
   for (auto region :
        {Region({{0, 1}, {0, 2}, {0, 4}}), Region({{0, 0}, {0, 2}, {0, 4}})})
     PS_CHECK(check_value(original.descriptor(), region, original.layout(),
-                         original.bytes(), original.facets()));
+                         original.copy_bytes(), original.facets()));
   for (auto layout :
        {StridedLayout{32, {-32, 16, 4}}, StridedLayout{0, {0, 16, 4}},
         StridedLayout{0, {36, 16, 4}}, StridedLayout{4, {32, 16, 4}}}) {
-    auto bytes = original.bytes();
+    auto bytes = original.copy_bytes();
     bytes.resize(68);
     PS_CHECK(check_value(original.descriptor(), original.region(), layout,
                          bytes, original.facets()));
   }
-  auto trailing = original.bytes();
+  auto trailing = original.copy_bytes();
   trailing.push_back(0);
   PS_CHECK(check_value(original.descriptor(), original.region(),
                        original.layout(), trailing, original.facets()));
@@ -250,7 +252,7 @@ int binding_failures() {
     if (mode == 4)
       facets[0].payload.push_back(0);
     PS_CHECK(check_value(original.descriptor(), original.region(),
-                         original.layout(), original.bytes(), facets));
+                         original.layout(), original.copy_bytes(), facets));
   }
   for (std::size_t port : {1U, 2U}) {
     for (float number : {-1.F, 17.F, std::numeric_limits<float>::infinity(),
@@ -690,6 +692,43 @@ int plugin_boundaries() {
   return 0;
 }
 
+int regional_operation_views() {
+  const Region roi({{1, 1}, {0, 2}, {0, 4}});
+  for (bool plugin : {false, true}) {
+    auto registry = plugin ? std::make_shared<ps::OperationRegistry>()
+                           : make_default_operation_registry();
+    if (plugin) {
+      PS_CHECK(registry->load_plugin(PS_IMAGE_FIXTURE_PATH).ok());
+      PS_CHECK(registry->freeze().ok());
+    }
+    const auto binding = s1_fixture::bindings();
+    auto input = binding.inputs[0].value.view(roi);
+    PS_CHECK(input.ok());
+    std::vector<Value> inputs{input.value(), s1_fixture::scalar(2)};
+    std::vector<Region> demands{roi, Region::whole({1})};
+    const std::map<std::string, ps::ParameterValue> parameters;
+    auto output = registry->invoke("image.exposure_gain",
+                                   ps::OperationInvocation{inputs,
+                                                           demands,
+                                                           parameters,
+                                                           ps::Backend::Cpu,
+                                                           {},
+                                                           roi});
+    PS_CHECK(output.ok());
+    PS_CHECK(output.value().descriptor().shape ==
+             std::vector<std::uint64_t>({2, 2, 4}));
+    PS_CHECK(output.value().bytes().size() == 32);
+    PS_CHECK(output.value().layout().origin ==
+             std::vector<std::uint64_t>({1, 0, 0}));
+    float channels[8];
+    std::memcpy(channels, output.value().bytes().data(), sizeof(channels));
+    PS_CHECK(channels[0] == 0 && channels[1] == .5F && channels[2] == 1 &&
+             channels[3] == 1);
+    PS_CHECK(channels[4] == 0 && channels[7] == 0);
+  }
+  return 0;
+}
+
 int floating_environment() {
   std::fenv_t original;
   PS_CHECK(std::fegetenv(&original) == 0);
@@ -755,6 +794,7 @@ int main() {
   PS_CHECK(output_failure() == 0);
   PS_CHECK(schemas_halo_and_snapshots() == 0);
   PS_CHECK(plugin_boundaries() == 0);
+  PS_CHECK(regional_operation_views() == 0);
   PS_CHECK(floating_environment() == 0);
   PS_CHECK(static_constraint_identity() == 0);
   std::cout << "s1-rgba32f-exposure-opacity-v1: A/B exact; binding failures "

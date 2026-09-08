@@ -146,9 +146,10 @@ int main() {
   PS_CHECK(scalar.as_float64().ok());
   PS_CHECK(scalar.as_float64().value() == 42.5);
 
-  auto empty_scalar = Value::create(ValueDescriptor{ElementType::Float64, {1U}},
-                                    Region({RegionDimension{0U, 0U}}),
-                                    StridedLayout{0U, {8}}, scalar.bytes());
+  auto empty_scalar =
+      Value::create(ValueDescriptor{ElementType::Float64, {1U}},
+                    Region({RegionDimension{0U, 0U}}), StridedLayout{0U, {8}},
+                    scalar.copy_bytes());
   PS_CHECK(empty_scalar.ok());
   PS_CHECK(!empty_scalar.value().as_float64().ok());
   PS_CHECK(empty_scalar.value().as_float64().status().code ==
@@ -157,7 +158,7 @@ int main() {
   auto offset_scalar =
       Value::create(ValueDescriptor{ElementType::Float64, {1U}},
                     Region({RegionDimension{1U, 0U}}), StridedLayout{0U, {8}},
-                    scalar.bytes());
+                    scalar.copy_bytes());
   PS_CHECK(offset_scalar.ok());
   PS_CHECK(!offset_scalar.value().as_float64().ok());
   PS_CHECK(offset_scalar.value().as_float64().status().code ==

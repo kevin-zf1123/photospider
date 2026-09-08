@@ -15,8 +15,8 @@
 namespace {
 
 /** @brief Explicit generic v3 port schema. */
-const ps_operation_port_constraint_v3 value_port = {
-    sizeof(ps_operation_port_constraint_v3), PS_OPERATION_PORT_VALUE_V3, 0U,
+const ps_operation_port_constraint_v4 value_port = {
+    sizeof(ps_operation_port_constraint_v4), PS_OPERATION_PORT_VALUE_V4, 0U,
     0U};  // NOLINT(whitespace/indent_namespace)
 
 /** @brief Number of exact destroy callbacks observed by this fixture image. */
@@ -123,13 +123,13 @@ KeyBytes parameter_key() noexcept {
  * @note Negative cases must fail before callback publication; the positive
  * case validates only registry text acceptance.
  */
-int execute_never(void* user_data, const ps_operation_value_view_v3* inputs,
+int execute_never(void* user_data, const ps_operation_value_view_v4* inputs,
                   std::uint32_t input_count,
-                  const ps_operation_parameter_value_v3* parameters,
+                  const ps_operation_parameter_value_v4* parameters,
                   std::uint32_t parameter_count, std::uint32_t backend,
-                  ps_operation_cancelled_v3 cancelled,
+                  ps_operation_cancelled_v4 cancelled,
                   void* cancellation_context,
-                  const ps_operation_output_sink_v3* sink, char* diagnostic,
+                  const ps_operation_output_sink_v4* sink, char* diagnostic,
                   std::size_t diagnostic_capacity) {
   static_cast<void>(user_data);
   static_cast<void>(inputs);
@@ -152,7 +152,7 @@ int execute_never(void* user_data, const ps_operation_value_view_v3* inputs,
  * @throws Nothing.
  * @note Every accepted API table ownership path must call this exactly once.
  */
-void destroy_fixture(const ps_operation_descriptor_v3* operations,
+void destroy_fixture(const ps_operation_descriptor_v4* operations,
                      std::uint32_t operation_count) {
   if (operations && operation_count == 1U) {
     destroy_count.fetch_add(1U, std::memory_order_relaxed);
@@ -164,34 +164,34 @@ void destroy_fixture(const ps_operation_descriptor_v3* operations,
  * @return Structurally complete parameter record carrying selected key bytes.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v3 make_parameter() noexcept {
+ps_operation_parameter_descriptor_v4 make_parameter() noexcept {
   const KeyBytes key = parameter_key();
-  return {sizeof(ps_operation_parameter_descriptor_v3), key.data, key.size,
-          PS_OPERATION_PARAMETER_FLOAT64_V3, 0U};
+  return {sizeof(ps_operation_parameter_descriptor_v4), key.data, key.size,
+          PS_OPERATION_PARAMETER_FLOAT64_V4, 0U};
 }
 
 /** @brief Static parameter declaration for the selected UTF-8 case. */
-const ps_operation_parameter_descriptor_v3 parameter = make_parameter();
+const ps_operation_parameter_descriptor_v4 parameter = make_parameter();
 
 /**
  * @brief Builds one structurally complete operation descriptor.
  * @return Descriptor carrying the selected operation and parameter keys.
  * @throws Nothing.
  */
-ps_operation_descriptor_v3 make_descriptor() noexcept {
+ps_operation_descriptor_v4 make_descriptor() noexcept {
   const KeyBytes key = operation_key();
-  return {sizeof(ps_operation_descriptor_v3),
+  return {sizeof(ps_operation_descriptor_v4),
           key.data,
           key.size,
           0U,
           PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
               PS_OPERATION_FLAG_CPU,
           sizeof(double),
-          PS_OPERATION_ELEMENT_FLOAT64_V3,
+          PS_OPERATION_ELEMENT_FLOAT64_V4,
           0U,
           nullptr,
-          PS_OPERATION_SHAPE_SCALAR_V3,
-          PS_OPERATION_REGION_WHOLE_V3,
+          PS_OPERATION_SHAPE_SCALAR_V4,
+          PS_OPERATION_REGION_WHOLE_V4,
           0U,
           1U,
           1U,
@@ -204,30 +204,30 @@ ps_operation_descriptor_v3 make_descriptor() noexcept {
 }
 
 /** @brief Static descriptor carrying the selected UTF-8 contract case. */
-const ps_operation_descriptor_v3 descriptor = make_descriptor();
+const ps_operation_descriptor_v4 descriptor = make_descriptor();
 
 /**
  * @brief Builds the complete operation ABI table.
  * @return Static one-record table with exact destroy ownership.
  * @throws Nothing.
  */
-ps_operation_plugin_api_v3 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v3), 1U, &descriptor, destroy_fixture};
+ps_operation_plugin_api_v4 make_api() noexcept {
+  return {sizeof(ps_operation_plugin_api_v4), 1U, &descriptor, destroy_fixture};
 }
 
 /** @brief Complete operation ABI table for the selected UTF-8 case. */
-const ps_operation_plugin_api_v3 api = make_api();
+const ps_operation_plugin_api_v4 api = make_api();
 
 }  // namespace
 
 /**
  * @brief Returns operation ABI version three.
- * @return `PS_OPERATION_ABI_VERSION_3`.
+ * @return `PS_OPERATION_ABI_VERSION_4`.
  * @throws Nothing.
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_3;
+  return PS_OPERATION_ABI_VERSION_4;
 }
 
 /**
@@ -235,8 +235,8 @@ ps_operation_plugin_get_abi_version(void) {
  * @return Process-lifetime immutable table.
  * @throws Nothing.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v3*
-ps_operation_plugin_get_api_v3(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v4*
+ps_operation_plugin_get_api_v4(void) {
   return &api;
 }
 

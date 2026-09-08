@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
@@ -135,7 +136,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 3U;
+  std::uint32_t version = 4U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -180,6 +181,21 @@ struct PHOTOSPIDER_API OperationTraits final {
  * @note Input Values, parameters, and token remain valid for the callback only.
  */
 struct PHOTOSPIDER_API OperationInvocation final {
+  /** @brief Creates a borrowed invocation; an empty output Region resolves to
+   * Whole. */
+  OperationInvocation(const std::vector<Value>& values,
+                      const std::vector<Region>& demands,
+                      const std::map<std::string, ParameterValue>& params,
+                      Backend selected = Backend::Cpu,
+                      CancellationToken token = {}, Region output = {},
+                      BufferAllocator allocation = BufferAllocator())
+      : inputs(values),
+        input_demands(demands),
+        parameters(params),
+        backend(selected),
+        cancellation(std::move(token)),
+        output_region(std::move(output)),
+        allocator(std::move(allocation)) {}
   /** @brief Ordered immutable input Values. */
   const std::vector<Value>& inputs;
   /** @brief Planned logical demand for each corresponding input Value. */
@@ -193,6 +209,11 @@ struct PHOTOSPIDER_API OperationInvocation final {
   Backend backend = Backend::Cpu;
   /** @brief Cooperative cancellation observation. */
   CancellationToken cancellation;
+  /** @brief Exact logical output requested by this invocation. */
+  Region output_region;
+  /** @brief Host allocator for output and scratch, valid for callback duration.
+   */
+  BufferAllocator allocator;
 };
 
 /** @brief Function signature for one synchronous operation invocation. */
@@ -290,7 +311,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v3 carries no output strides.
+   * must be densely representable because ABI v4 carries no output strides.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);

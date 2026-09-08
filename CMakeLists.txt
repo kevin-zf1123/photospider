@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.3.0
+  VERSION 0.4.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -70,6 +70,7 @@ set(
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
+  src/lib/data/storage.cpp
   src/lib/data/value.cpp
   src/lib/data/input_validation.cpp
   src/lib/execution/execution.cpp
@@ -355,6 +356,7 @@ if(BUILD_TESTING)
     target_compile_definitions(test_bindings PRIVATE PS_BAD_PORT_${_port_case}="$<TARGET_FILE:operation_bad_port_${_port_case}>")
   endforeach()
 
+  photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
   photospider_add_test(
     test_compiler Photospider::kernel tests/unit/test_compiler.cpp)

@@ -139,7 +139,7 @@ class OperationLibrary final {
    * @throws Nothing.
    * @note A nonnull destroy callback becomes part of rollback immediately.
    */
-  void attach_api(const ps_operation_plugin_api_v3* api) noexcept {
+  void attach_api(const ps_operation_plugin_api_v4* api) noexcept {
     api_ = api;
   }
 
@@ -147,7 +147,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_operation_plugin_api_v3* api_ = nullptr;
+  const ps_operation_plugin_api_v4* api_ = nullptr;
 };
 
 /**
@@ -215,13 +215,13 @@ void* find_symbol(void* handle, const char* name) noexcept {
  */
 Result<ElementType> decode_element_type(std::uint32_t type) {
   switch (type) {
-    case PS_OPERATION_ELEMENT_UINT8_V3:
+    case PS_OPERATION_ELEMENT_UINT8_V4:
       return Result<ElementType>(ElementType::UInt8);
-    case PS_OPERATION_ELEMENT_INT64_V3:
+    case PS_OPERATION_ELEMENT_INT64_V4:
       return Result<ElementType>(ElementType::Int64);
-    case PS_OPERATION_ELEMENT_FLOAT32_V3:
+    case PS_OPERATION_ELEMENT_FLOAT32_V4:
       return Result<ElementType>(ElementType::Float32);
-    case PS_OPERATION_ELEMENT_FLOAT64_V3:
+    case PS_OPERATION_ELEMENT_FLOAT64_V4:
       return Result<ElementType>(ElementType::Float64);
     default:
       return Result<ElementType>(Status::failure(
@@ -231,20 +231,20 @@ Result<ElementType> decode_element_type(std::uint32_t type) {
 
 /**
  * @brief Decodes one closed C ABI output-shape inference rule.
- * @param value Numeric version-three rule.
+ * @param value Numeric version-four rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_SHAPE_SCALAR_V3:
+    case PS_OPERATION_SHAPE_SCALAR_V4:
       return Result<OperationShapeRule>(OperationShapeRule::Scalar);
-    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V3:
+    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V4:
       return Result<OperationShapeRule>(OperationShapeRule::PreserveFirstInput);
-    case PS_OPERATION_SHAPE_MATCH_INPUTS_V3:
+    case PS_OPERATION_SHAPE_MATCH_INPUTS_V4:
       return Result<OperationShapeRule>(OperationShapeRule::MatchAllInputs);
-    case PS_OPERATION_SHAPE_FIXED_V3:
+    case PS_OPERATION_SHAPE_FIXED_V4:
       return Result<OperationShapeRule>(OperationShapeRule::Fixed);
     default:
       return Result<OperationShapeRule>(
@@ -255,18 +255,18 @@ Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI Region propagation rule.
- * @param value Numeric version-three rule.
+ * @param value Numeric version-four rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_REGION_WHOLE_V3:
+    case PS_OPERATION_REGION_WHOLE_V4:
       return Result<OperationRegionRule>(OperationRegionRule::Whole);
-    case PS_OPERATION_REGION_ELEMENTWISE_V3:
+    case PS_OPERATION_REGION_ELEMENTWISE_V4:
       return Result<OperationRegionRule>(OperationRegionRule::Elementwise);
-    case PS_OPERATION_REGION_HALO_V3:
+    case PS_OPERATION_REGION_HALO_V4:
       return Result<OperationRegionRule>(OperationRegionRule::Halo);
     default:
       return Result<OperationRegionRule>(
@@ -277,20 +277,20 @@ Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI source-parameter type.
- * @param value Numeric operation ABI v3 parameter type.
+ * @param value Numeric operation ABI v4 parameter type.
  * @return Typed parameter kind or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown numeric values fail before registry publication.
  */
 Result<OperationParameterType> decode_parameter_type(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_PARAMETER_INT64_V3:
+    case PS_OPERATION_PARAMETER_INT64_V4:
       return Result<OperationParameterType>(OperationParameterType::Int64);
-    case PS_OPERATION_PARAMETER_FLOAT64_V3:
+    case PS_OPERATION_PARAMETER_FLOAT64_V4:
       return Result<OperationParameterType>(OperationParameterType::Float64);
-    case PS_OPERATION_PARAMETER_BOOL_V3:
+    case PS_OPERATION_PARAMETER_BOOL_V4:
       return Result<OperationParameterType>(OperationParameterType::Bool);
-    case PS_OPERATION_PARAMETER_STRING_V3:
+    case PS_OPERATION_PARAMETER_STRING_V4:
       return Result<OperationParameterType>(OperationParameterType::String);
     default:
       return Result<OperationParameterType>(
@@ -358,7 +358,7 @@ bool parameter_type_matches(const ParameterValue& value,
 }
 
 /**
- * @brief Validates one complete version-three semantic trait record.
+ * @brief Validates one complete version-four semantic trait record.
  * @param traits Candidate copied record.
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
@@ -400,7 +400,7 @@ Status validate_traits(const OperationTraits& traits) {
                           traits.fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.fixed_output_shape.empty();
-  if (traits.version != 3U || !traits.supports_cpu || !known_shape ||
+  if (traits.version != 4U || !traits.supports_cpu || !known_shape ||
       !known_region || (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
@@ -491,7 +491,7 @@ Result<ValueDescriptor> expected_callback_output_descriptor(
  * `TypeMismatch` rather than an accessor exception.
  */
 Status validate_callback_output(const ValueDescriptor& expected,
-                                const Value& output) {
+                                const Value& output, const Region& demand) {
   if (!output.valid() ||
       output.descriptor().element_type != expected.element_type ||
       output.descriptor().shape != expected.shape) {
@@ -502,13 +502,9 @@ Status validate_callback_output(const ValueDescriptor& expected,
     return Status::failure(ErrorCode::TypeMismatch,
                            "operation output Region rank is incomplete");
   }
-  for (std::size_t axis = 0U; axis < expected.shape.size(); ++axis) {
-    const RegionDimension& dimension = output.region().dimensions()[axis];
-    if (dimension.offset != 0U || dimension.extent != expected.shape[axis]) {
-      return Status::failure(ErrorCode::TypeMismatch,
-                             "operation output Region is not whole");
-    }
-  }
+  if (!output.view(demand).ok())
+    return Status::failure(ErrorCode::TypeMismatch,
+                           "operation output does not cover demand");
   return Status::success();
 }
 
@@ -579,7 +575,55 @@ struct OutputSinkState final {
   bool published = false;
   /** @brief True after any second or later call with this invocation state. */
   bool duplicate_publish_attempted = false;
+  ValueDescriptor descriptor;
+  Region region;
+  BufferAllocator allocator;
+  std::optional<MutableValue> allocation;
+  std::vector<MutableBuffer> scratch;
+  Status allocation_failure;
 };
+
+/** @brief Allocates exact regional output; exceptions never cross the C ABI. */
+std::uint8_t* allocate_plugin_output(void* context) noexcept {
+  auto* state = static_cast<OutputSinkState*>(context);
+  if (!state || state->published || !state->allocation_failure.ok())
+    return nullptr;
+  try {
+    if (!state->allocation) {
+      auto value = MutableValue::allocate(state->descriptor, state->region,
+                                          state->allocator);
+      if (!value.ok()) {
+        state->allocation_failure = value.status();
+        return nullptr;
+      }
+      state->allocation.emplace(value.take_value());
+    }
+    return state->allocation->data();
+  } catch (...) {
+    state->allocation_failure.code = ErrorCode::ResourceExhausted;
+    return nullptr;
+  }
+}
+/** @brief Holds scratch until callback retirement, including failed
+ * publication. */
+std::uint8_t* allocate_plugin_scratch(void* context,
+                                      std::uint64_t size) noexcept {
+  auto* state = static_cast<OutputSinkState*>(context);
+  if (!state || state->published || !state->allocation_failure.ok())
+    return nullptr;
+  try {
+    auto buffer = state->allocator.allocate(size);
+    if (!buffer.ok()) {
+      state->allocation_failure = buffer.status();
+      return nullptr;
+    }
+    state->scratch.push_back(buffer.take_value());
+    return state->scratch.back().data();
+  } catch (...) {
+    state->allocation_failure.code = ErrorCode::ResourceExhausted;
+    return nullptr;
+  }
+}
 
 /**
  * @brief C callback that copies and validates one DSO output.
@@ -600,7 +644,7 @@ struct OutputSinkState final {
  */
 int publish_plugin_output(void* context, std::uint32_t element_type,
                           const std::uint64_t* shape, std::uint32_t rank,
-                          const ps_operation_facet_view_v3* facets,
+                          const ps_operation_facet_view_v4* facets,
                           std::uint32_t facet_count, const std::uint8_t* data,
                           std::uint64_t byte_size) noexcept {
   auto* state = static_cast<OutputSinkState*>(context);
@@ -619,7 +663,7 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
         rank == 0U || rank > 8U || facet_count > 64U ||
         (facet_count != 0U &&
          (!facets || reinterpret_cast<std::uintptr_t>(facets) %
-                             alignof(ps_operation_facet_view_v3) !=
+                             alignof(ps_operation_facet_view_v4) !=
                          0U)) ||
         (byte_size != 0U && !data) ||
         byte_size > static_cast<std::uint64_t>(
@@ -641,8 +685,23 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
           ErrorCode::InvalidArgument, "plugin output shape contains zero"));
       return 0;
     }
+    if (owned_shape != state->descriptor.shape ||
+        decoded_type.value() != state->descriptor.element_type) {
+      auto candidate =
+          dense_layout(owned_shape, Value::element_size(decoded_type.value()));
+      if (!candidate.ok()) {
+        state->result = Result<Value>(candidate.status());
+        return 0;
+      }
+      state->result = Result<Value>(Status::failure(
+          ErrorCode::TypeMismatch, "plugin output descriptor differs"));
+      return 0;
+    }
+    std::vector<std::uint64_t> extents;
+    for (const auto dim : state->region.dimensions())
+      extents.push_back(dim.extent);
     auto layout =
-        dense_layout(owned_shape, Value::element_size(decoded_type.value()));
+        dense_layout(extents, Value::element_size(decoded_type.value()));
     if (!layout.ok()) {
       state->result = Result<Value>(layout.status());
       return 0;
@@ -656,8 +715,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     std::vector<ValueFacet> owned_facets;
     owned_facets.reserve(facet_count);
     for (std::uint32_t index = 0U; index < facet_count; ++index) {
-      const ps_operation_facet_view_v3& facet = facets[index];
-      if (facet.struct_size != sizeof(ps_operation_facet_view_v3) ||
+      const ps_operation_facet_view_v4& facet = facets[index];
+      if (facet.struct_size != sizeof(ps_operation_facet_view_v4) ||
           !facet.key || facet.key_size == 0U || facet.key_size > 256U ||
           facet.version == 0U || facet.payload_size > 64U * 1024U ||
           (facet.payload_size != 0U && !facet.payload)) {
@@ -673,15 +732,24 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
       }
       owned_facets.push_back(std::move(owned));
     }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byte_size));
-    if (byte_size != 0U) {
-      std::memcpy(bytes.data(), data, bytes.size());
+    if (!state->allocation_failure.ok()) {
+      state->result = Result<Value>(state->allocation_failure);
+      return 0;
     }
+    if (!state->allocation) {
+      auto allocation = MutableValue::allocate(state->descriptor, state->region,
+                                               state->allocator);
+      if (!allocation.ok()) {
+        state->result = Result<Value>(allocation.status());
+        return 0;
+      }
+      state->allocation.emplace(allocation.take_value());
+    }
+    if (data != state->allocation->data())
+      std::memcpy(state->allocation->data(), data,
+                  static_cast<std::size_t>(byte_size));
     state->result =
-        Value::create(ValueDescriptor{decoded_type.value(), owned_shape},
-                      Region::whole(owned_shape),
-                      StridedLayout{0U, std::move(owned_layout.byte_strides)},
-                      std::move(bytes), std::move(owned_facets));
+        std::move(*state->allocation).publish(std::move(owned_facets));
     return state->result.ok() ? 1 : 0;
   } catch (const std::bad_alloc&) {
     Status failure;
@@ -891,7 +959,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   OperationLibrary pending_library(opened.value());
 
   using VersionFunction = std::uint32_t (*)();
-  using ApiFunction = const ps_operation_plugin_api_v3* (*)();
+  using ApiFunction = const ps_operation_plugin_api_v4* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
   void* version_symbol = find_symbol(pending_library.handle(),
@@ -903,14 +971,14 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin ABI version is unsupported");
   }
-  const ps_operation_plugin_api_v3* api = nullptr;
+  const ps_operation_plugin_api_v4* api = nullptr;
   try {
-    if (version() != PS_OPERATION_ABI_VERSION_3) {
+    if (version() != PS_OPERATION_ABI_VERSION_4) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin ABI version is unsupported");
     }
     void* api_symbol =
-        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v3");
+        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v4");
     std::memcpy(&get_api, &api_symbol, sizeof(get_api));
     if (!get_api)
       return Status::failure(ErrorCode::InvalidArgument,
@@ -925,9 +993,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-              alignof(ps_operation_plugin_api_v3) !=
+              alignof(ps_operation_plugin_api_v4) !=
           0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v3)) {
+      api->struct_size != sizeof(ps_operation_plugin_api_v4)) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin API table is malformed");
   }
@@ -935,7 +1003,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   if (api->operation_count == 0U || api->operation_count > 1024U ||
       !api->operations ||
       reinterpret_cast<std::uintptr_t>(api->operations) %
-              alignof(ps_operation_descriptor_v3) !=
+              alignof(ps_operation_descriptor_v4) !=
           0U ||
       !api->destroy) {
     return Status::failure(ErrorCode::InvalidArgument,
@@ -952,8 +1020,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v3& descriptor = api->operations[index];
-    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v3) ||
+    const ps_operation_descriptor_v4& descriptor = api->operations[index];
+    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v4) ||
         !descriptor.key || descriptor.key_size == 0U ||
         descriptor.key_size > 1024U || !descriptor.execute ||
         descriptor.input_count > 1024U || descriptor.cacheable > 1U ||
@@ -962,7 +1030,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.input_schema == nullptr)) ||
         (descriptor.input_schema &&
          reinterpret_cast<std::uintptr_t>(descriptor.input_schema) %
-                 alignof(ps_operation_port_constraint_v3) !=
+                 alignof(ps_operation_port_constraint_v4) !=
              0) ||
         descriptor.output_rank > 8U ||
         ((descriptor.output_rank == 0U) !=
@@ -976,7 +1044,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.parameters == nullptr)) ||
         (descriptor.parameters &&
          reinterpret_cast<std::uintptr_t>(descriptor.parameters) %
-                 alignof(ps_operation_parameter_descriptor_v3) !=
+                 alignof(ps_operation_parameter_descriptor_v4) !=
              0U) ||
         (descriptor.flags &
          ~(PS_OPERATION_FLAG_DETERMINISTIC |
@@ -994,9 +1062,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin key is invalid or duplicated");
     }
-    auto copy_port = [](const ps_operation_port_constraint_v3& source,
+    auto copy_port = [](const ps_operation_port_constraint_v4& source,
                         OperationPortConstraint* target) {
-      if (source.struct_size != sizeof(ps_operation_port_constraint_v3))
+      if (source.struct_size != sizeof(ps_operation_port_constraint_v4))
         return false;
       target->kind = static_cast<OperationPortKind>(source.kind);
       std::memcpy(&target->minimum, &source.minimum_bits, sizeof(float));
@@ -1045,10 +1113,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     definition.traits.parameter_schema.reserve(descriptor.parameter_count);
     for (std::uint32_t parameter_index = 0U;
          parameter_index < descriptor.parameter_count; ++parameter_index) {
-      const ps_operation_parameter_descriptor_v3& parameter =
+      const ps_operation_parameter_descriptor_v4& parameter =
           descriptor.parameters[parameter_index];
       if (parameter.struct_size !=
-              sizeof(ps_operation_parameter_descriptor_v3) ||
+              sizeof(ps_operation_parameter_descriptor_v4) ||
           !parameter.key || parameter.key_size == 0U ||
           parameter.key_size > 1024U || parameter.required > 1U) {
         return Status::failure(
@@ -1090,9 +1158,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v3* descriptor = &api->operations[index];
+    const ps_operation_descriptor_v4* descriptor = &api->operations[index];
     staged[index]->callback =
-        [library, descriptor,
+        [library, descriptor, traits = staged[index]->traits,
          image_output = staged[index]->traits.output_schema.kind ==
                         OperationPortKind::LinearPremultipliedRgbaFloat32](
             const OperationInvocation& invocation) -> Result<Value> {
@@ -1115,9 +1183,11 @@ Status OperationRegistry::load_plugin(const std::string& path) {
               Status::failure(ErrorCode::InvalidArgument,
                               "plugin invocation backend is unknown"));
       }
-      std::vector<ps_operation_value_view_v3> views;
-      std::vector<std::vector<ps_operation_facet_view_v3>> facet_views;
+      std::vector<ps_operation_value_view_v4> views;
+      std::vector<std::vector<ps_operation_facet_view_v4>> facet_views;
       std::vector<std::vector<std::uint64_t>> demand_offsets;
+      std::vector<std::vector<std::uint64_t>> storage_origins;
+      std::vector<std::vector<std::uint64_t>> region_offsets, region_extents;
       std::vector<std::vector<std::uint64_t>> demand_extents;
       views.reserve(invocation.inputs.size());
       facet_views.reserve(invocation.inputs.size());
@@ -1133,46 +1203,20 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                               "plugin invocation input Value is invalid"));
         }
         const ValueDescriptor& input_descriptor = input.descriptor();
-        auto layout =
-            dense_layout(input_descriptor.shape,
-                         Value::element_size(input_descriptor.element_type));
-        if (!layout.ok() ||
-            input.region().rank() != input_descriptor.shape.size() ||
-            demand.rank() != input_descriptor.shape.size() ||
-            !demand.validate(input_descriptor.shape).ok() ||
-            input.layout().byte_offset > input.bytes().size() ||
-            input.layout().byte_strides != layout.value().byte_strides) {
-          return Result<Value>(Status::failure(
-              ErrorCode::TypeMismatch,
-              "operation plugin requires contiguous input Values"));
-        }
-        for (std::size_t axis = 0U; axis < input_descriptor.shape.size();
-             ++axis) {
-          const RegionDimension& dimension = input.region().dimensions()[axis];
-          if (dimension.offset != 0U ||
-              dimension.extent != input_descriptor.shape[axis]) {
-            return Result<Value>(Status::failure(
-                ErrorCode::TypeMismatch,
-                "operation plugin requires whole input Regions"));
-          }
-        }
-        const std::uint64_t logical_bytes = layout.value().byte_size;
-        if (logical_bytes !=
-            input.bytes().size() - input.layout().byte_offset) {
-          return Result<Value>(
-              Status::failure(ErrorCode::TypeMismatch,
-                              "operation plugin input bytes are incomplete"));
-        }
+        if (!input.view(demand).ok())
+          return Result<Value>(Status::failure(ErrorCode::TypeMismatch,
+                                               "input does not cover demand"));
+        const std::uint64_t logical_bytes = input.bytes().size();
         auto& input_facets = facet_views.emplace_back();
         input_facets.reserve(input.facets().size());
         for (const ValueFacet& facet : input.facets()) {
-          input_facets.push_back(ps_operation_facet_view_v3{
-              sizeof(ps_operation_facet_view_v3), facet.key.data(),
+          input_facets.push_back(ps_operation_facet_view_v4{
+              sizeof(ps_operation_facet_view_v4), facet.key.data(),
               static_cast<std::uint32_t>(facet.key.size()), facet.version,
               facet.payload.empty() ? nullptr : facet.payload.data(),
               static_cast<std::uint32_t>(facet.payload.size())});
         }
-        ps_operation_value_view_v3 view{};
+        ps_operation_value_view_v4 view{};
         view.struct_size = sizeof(view);
         view.element_type =
             static_cast<std::uint32_t>(input_descriptor.element_type);
@@ -1189,41 +1233,80 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         }
         view.demand_offsets = offsets.data();
         view.demand_extents = extents.data();
-        view.data = input.bytes().data() + input.layout().byte_offset;
+        view.data = input.bytes().data();
+        auto& origin = storage_origins.emplace_back(input.layout().origin);
+        if (origin.empty())
+          origin.resize(input_descriptor.shape.size(), 0);
+        auto& coverage_offsets = region_offsets.emplace_back();
+        auto& coverage_extents = region_extents.emplace_back();
+        for (const auto dim : input.region().dimensions()) {
+          coverage_offsets.push_back(dim.offset);
+          coverage_extents.push_back(dim.extent);
+        }
+        view.storage_origin = origin.data();
+        view.byte_strides = input.layout().byte_strides.data();
+        view.region_offsets = coverage_offsets.data();
+        view.region_extents = coverage_extents.data();
+        view.byte_offset = input.layout().byte_offset;
         view.facet_count = static_cast<std::uint32_t>(input_facets.size());
         view.facets = input_facets.empty() ? nullptr : input_facets.data();
         views.push_back(view);
       }
-      std::vector<ps_operation_parameter_value_v3> parameter_views;
+      std::vector<ps_operation_parameter_value_v4> parameter_views;
       parameter_views.reserve(invocation.parameters.size());
       for (const auto& parameter : invocation.parameters) {
-        ps_operation_parameter_value_v3 view{};
+        ps_operation_parameter_value_v4 view{};
         view.struct_size = sizeof(view);
         view.key = parameter.first.data();
         view.key_size = static_cast<std::uint32_t>(parameter.first.size());
         if (const auto* value = std::get_if<std::int64_t>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_INT64_V3;
+          view.type = PS_OPERATION_PARAMETER_INT64_V4;
           view.int64_value = *value;
         } else if (const auto* value = std::get_if<double>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_FLOAT64_V3;
+          view.type = PS_OPERATION_PARAMETER_FLOAT64_V4;
           view.float64_value = *value;
         } else if (const auto* value = std::get_if<bool>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_BOOL_V3;
+          view.type = PS_OPERATION_PARAMETER_BOOL_V4;
           view.bool_value = *value ? 1U : 0U;
         } else {
           const std::string& string_value =
               std::get<std::string>(parameter.second);
-          view.type = PS_OPERATION_PARAMETER_STRING_V3;
+          view.type = PS_OPERATION_PARAMETER_STRING_V4;
           view.string_value = string_value.data();
           view.string_size = static_cast<std::uint32_t>(string_value.size());
         }
         parameter_views.push_back(view);
       }
       OutputSinkState output;
-      ps_operation_output_sink_v3 sink{};
+      auto expected =
+          expected_callback_output_descriptor(traits, invocation.inputs);
+
+      if (!expected.ok())
+        return Result<Value>(expected.status());
+      output.descriptor = expected.value();
+      output.region = invocation.output_region;
+      output.allocator = invocation.allocator;
+      std::vector<std::uint64_t> output_offsets, output_extents;
+      for (const auto dim : output.region.dimensions()) {
+        output_offsets.push_back(dim.offset);
+        output_extents.push_back(dim.extent);
+      }
+      auto packed = dense_layout(
+          output_extents, Value::element_size(output.descriptor.element_type));
+      if (!packed.ok())
+        return Result<Value>(packed.status());
+      ps_operation_output_sink_v4 sink{};
       sink.struct_size = sizeof(sink);
       sink.context = &output;
       sink.publish = publish_plugin_output;
+      sink.output_rank =
+          static_cast<std::uint32_t>(output.descriptor.shape.size());
+      sink.output_shape = output.descriptor.shape.data();
+      sink.output_offsets = output_offsets.data();
+      sink.output_extents = output_extents.data();
+      sink.output_byte_size = packed.value().byte_size;
+      sink.allocate_output = allocate_plugin_output;
+      sink.allocate_scratch = allocate_plugin_scratch;
       char diagnostic[4097]{};
       const int code = descriptor->execute(
           descriptor->user_data, views.data(),
@@ -1238,7 +1321,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         return Result<Value>(
             Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
       }
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V3 &&
+      if (!output.allocation_failure.ok())
+        return Result<Value>(output.allocation_failure);
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V4 &&
           output.published && !output.result.ok() &&
           output.result.status().code != ErrorCode::ResourceExhausted &&
           output.result.status().code != ErrorCode::Cancelled) {
@@ -1251,12 +1336,12 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             ErrorCode::OperationFailed,
             "operation plugin violated output sink at-most-once contract"));
       }
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V3 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V4 &&
           output.published && !output.result.ok() &&
           output.result.status().code == ErrorCode::ResourceExhausted) {
         return output.result;
       }
-      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V3 &&
+      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V4 &&
           output.published) {
         if (!output.result.ok()) {
           return output.result;
@@ -1266,13 +1351,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             "operation plugin published output before reporting backend "
             "unavailable"));
       }
-      if (code != PS_OPERATION_RESULT_SUCCESS_V3) {
+      if (code != PS_OPERATION_RESULT_SUCCESS_V4) {
         ErrorCode error_code = ErrorCode::OperationFailed;
         const char* default_diagnostic = "operation plugin callback failed";
-        if (code == PS_OPERATION_RESULT_CANCELLED_V3) {
+        if (code == PS_OPERATION_RESULT_CANCELLED_V4) {
           error_code = ErrorCode::Cancelled;
           default_diagnostic = "operation plugin callback was cancelled";
-        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V3) {
+        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V4) {
           error_code = ErrorCode::BackendUnavailable;
           default_diagnostic = "operation plugin backend is unavailable";
         }
@@ -1451,12 +1536,19 @@ Result<Value> OperationRegistry::invoke_current(
         return Result<Value>(Status::failure(
             ErrorCode::OperationFailed, "cannot set binary32 environment"));
     }
-    auto result = definition->callback(invocation);
+    OperationInvocation normalized = invocation;
+    if (normalized.output_region.rank() == 0)
+      normalized.output_region = Region::whole(expected_output.value().shape);
+    if (normalized.output_region.empty() ||
+        !normalized.output_region.validate(expected_output.value().shape).ok())
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "invalid operation output demand"));
+    auto result = definition->callback(normalized);
     if (!result.ok()) {
       return result;
     }
-    Status output_status =
-        validate_callback_output(expected_output.value(), result.value());
+    Status output_status = validate_callback_output(
+        expected_output.value(), result.value(), normalized.output_region);
     if (definition->traits.output_schema.kind ==
         OperationPortKind::LinearPremultipliedRgbaFloat32) {
       if (output_status.ok())
@@ -1512,7 +1604,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       sizeof(double),
-                      3U,
+                      4U,
                       true,
                       ElementType::Float64,
                       OperationShapeRule::Scalar,
@@ -1543,7 +1635,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       0U,
-                      3U,
+                      4U,
                       true,
                       ElementType::Float64,
                       OperationShapeRule::PreserveFirstInput,
@@ -1569,7 +1661,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       sizeof(double),
-                      3U,
+                      4U,
                       true,
                       ElementType::Float64,
                       OperationShapeRule::MatchAllInputs,
@@ -1603,7 +1695,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       false,
                       false,
                       0U,
-                      3U,
+                      4U,
                       false,
                       ElementType::Float64,
                       OperationShapeRule::PreserveFirstInput,
@@ -1646,7 +1738,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       0U,
-                      3U,
+                      4U,
                       true,
                       ElementType::Float64,
                       OperationShapeRule::PreserveFirstInput,

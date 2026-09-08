@@ -21,22 +21,34 @@ Result<Value> execute_image(const OperationInvocation& invocation,
   const Value& input = invocation.inputs[0];
   float factor = 0;
   std::memcpy(&factor, invocation.inputs[1].bytes().data(), sizeof(factor));
-  std::vector<std::uint8_t> bytes = input.bytes();
-  for (std::size_t offset = 0; offset < bytes.size(); offset += 16) {
-    if (offset % 16384 == 0 && invocation.cancellation.cancelled()) {
+  auto allocated = MutableValue::allocate(
+      input.descriptor(), invocation.output_region, invocation.allocator);
+  if (!allocated.ok())
+    return Result<Value>(allocated.status());
+  auto output = allocated.take_value();
+  const auto yd = invocation.output_region.dimensions()[0];
+  const auto xd = invocation.output_region.dimensions()[1];
+  std::size_t destination = 0;
+  for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y) {
+    if (invocation.cancellation.cancelled())
       return Result<Value>(
           Status::failure(ErrorCode::Cancelled, "image operation cancelled"));
-    }
-    for (std::size_t channel = 0; channel < (opacity ? 4U : 3U); ++channel) {
-      float value = 0;
-      std::memcpy(&value, bytes.data() + offset + channel * 4, sizeof(value));
-      const float product = value * factor;
-      std::memcpy(bytes.data() + offset + channel * 4, &product,
-                  sizeof(product));
+    for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x) {
+      for (std::uint64_t channel = 0; channel < 4; ++channel) {
+        const auto offset = input.byte_address({y, x, channel});
+        if (!offset.ok())
+          return Result<Value>(offset.status());
+        float number = 0;
+        std::memcpy(&number, input.bytes().data() + offset.value(),
+                    sizeof(number));
+        if (opacity || channel < 3)
+          number *= factor;
+        std::memcpy(output.data() + destination, &number, sizeof(number));
+        destination += sizeof(number);
+      }
     }
   }
-  return Value::create(input.descriptor(), input.region(), input.layout(),
-                       std::move(bytes), {input_internal::image_facet()});
+  return std::move(output).publish({input_internal::image_facet()});
 }
 }  // namespace
 
