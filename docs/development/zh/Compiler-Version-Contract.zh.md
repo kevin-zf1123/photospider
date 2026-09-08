@@ -20,7 +20,7 @@ IPC。
 `PlanCacheKey` 使用 canonical domain-separated input。它们排除 runtime allocation、
 timing、cancellation、ready-queue state 与 daemon identity；是非安全
 reproducibility/cache identity，不是 signature、attestation、durable object id 或
-receipt。Operation-v3 parameter schema 与已验证 value 影响 semantic identity。Float64
+receipt。Operation-v4 parameter schema 与已验证 value 影响 semantic identity。Float64
 parameter 会按 fixed little-endian order 编码 copied IEEE-754 binary64 的精确 bit，因此
 `+0.0` 与 `-0.0` 具有不同的 semantic、optimized、plan 与 cache-key identity。不会执行
 NaN-payload、infinity 或 signed-zero normalization，这份 digest contract 也不增加
@@ -66,7 +66,9 @@ consumer 需要协调迁移后才能消费 0.3。状态写入遵循[任务协作
 #264 实现 package 0.4.0、OperationTraits 4、operation ABI 4、区域存储视图和宿主输出/scratch。
 保留 schema 2/provider ABI 1/C++17；C++ 消费者重新构建，拒绝 ABI 3 与 package 0.3 消费者。
 semantic/optimizer/physical-plan/cache domain 使用 v4。运行期 origin 地址不进入 semantic
-identity。其余 S2 调度、资源与场景由 ADR 0017 下的 #210/#211/#265/#266 追踪。
+identity。#210/#211/#265 已实现按完成释放、惰性 tile、区域源和同步流式执行；
+Gaussian/蒙版/合成场景由 ADR 0017 下的 #266 追踪。Result digest framing 为
+photospider.result-digest.v2，包含显式 storage origin；流式 tile 借用后释放，不计算 result digest。
 
 #211 在 v4 semantic framing 中增加静态数值边界（bound flag、精确 binary64 endpoint bits）
 和带长度 halo 参数名。physical v4 包含 tile 高/宽及各排序输出名称的精确 Region；即使

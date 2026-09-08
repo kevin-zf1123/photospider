@@ -7,6 +7,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -200,6 +201,9 @@ struct QueuedCallback final {
   std::function<void()> callback;
   /** @brief Aggregate waiting admission released before callback entry. */
   WaitingAdmission::Lease admission;
+  /** @brief Optional completion notification after the callback body retires.
+   */
+  std::function<void()> retired = {};
 };
 
 /**
@@ -325,6 +329,8 @@ class ThreadPool final {
         // Execution callbacks have their own status fence. This final fence
         // preserves pool liveness if a future callback violates that contract.
       }
+      if (callback.retired)
+        callback.retired();
     }
   }
 
@@ -504,6 +510,77 @@ Result<std::uint64_t> checked_add(std::uint64_t left, std::uint64_t right) {
   return Result<std::uint64_t>(left + right);
 }
 
+/** @brief Tests exact logical coverage, without comparing allocation layout. */
+bool same_region(const Region& a, const Region& b) {
+  if (a.rank() != b.rank())
+    return false;
+  for (std::size_t i = 0; i < a.rank(); ++i)
+    if (a.dimensions()[i].offset != b.dimensions()[i].offset ||
+        a.dimensions()[i].extent != b.dimensions()[i].extent)
+      return false;
+  return true;
+}
+/** @brief Computes packed bytes for demanded coverage without allocating
+ * payload. */
+Result<std::uint64_t> region_bytes(const ValueDescriptor& descriptor,
+                                   const Region& region) {
+  if (!region.validate(descriptor.shape).ok() || region.empty())
+    return Result<std::uint64_t>(
+        Status::failure(ErrorCode::InvalidArgument, "invalid packed region"));
+  auto count = region.element_count();
+  const auto width = Value::element_size(descriptor.element_type);
+  if (!count.ok() || count.value() > UINT64_MAX / width)
+    return Result<std::uint64_t>(Status::failure(
+        ErrorCode::ResourceExhausted, "regional byte count overflows"));
+  return Result<std::uint64_t>(count.value() * width);
+}
+/** @brief Copies only logical coverage into a packed destination with global
+ * origin. */
+Status copy_region(ValueView source, MutableValue* destination,
+                   const Region& available) {
+  const auto& region = source.region();
+  if (region.rank() != available.rank())
+    return Status::failure(ErrorCode::TypeMismatch, "copy region rank differs");
+  std::vector<std::uint64_t> coordinate;
+  for (std::size_t i = 0; i < region.rank(); ++i) {
+    const auto part = region.dimensions()[i],
+               bounds = available.dimensions()[i];
+    if (part.offset < bounds.offset ||
+        part.offset + part.extent > bounds.offset + bounds.extent)
+      return Status::failure(ErrorCode::TypeMismatch,
+                             "copy exceeds destination coverage");
+    coordinate.push_back(part.offset);
+  }
+  auto count = region.element_count();
+  if (!count.ok())
+    return count.status();
+  const auto width = Value::element_size(source.descriptor().element_type);
+  for (std::uint64_t element = 0; element < count.value(); ++element) {
+    auto from = source.byte_address(coordinate);
+    if (!from.ok())
+      return from.status();
+    std::uint64_t to = 0;
+    for (std::size_t axis = 0; axis < coordinate.size(); ++axis)
+      to +=
+          (coordinate[axis] - available.dimensions()[axis].offset) *
+          static_cast<std::uint64_t>(destination->layout().byte_strides[axis]);
+    if (to > destination->size() || width > destination->size() - to)
+      return Status::failure(ErrorCode::TypeMismatch,
+                             "copy exceeds destination bytes");
+    std::memcpy(destination->data() + to, source.bytes().data() + from.value(),
+                width);
+    for (std::size_t reverse = coordinate.size(); reverse > 0; --reverse) {
+      const auto axis = reverse - 1;
+      ++coordinate[axis];
+      const auto dim = region.dimensions()[axis];
+      if (coordinate[axis] < dim.offset + dim.extent)
+        break;
+      coordinate[axis] = dim.offset;
+    }
+  }
+  return Status::success();
+}
+
 /**
  * @brief Materializes one immutable Value into another local backend residency.
  * @param source Valid producer Value.
@@ -513,7 +590,19 @@ Result<std::uint64_t> checked_add(std::uint64_t left, std::uint64_t right) {
  * remains backend-neutral and exposes no native device handle.
  */
 Result<Value> transfer_value(const Value& source,
-                             const BufferAllocator& allocator) {
+                             const BufferAllocator& allocator,
+                             bool compact = false) {
+  if (compact) {
+    auto allocated =
+        MutableValue::allocate(source.descriptor(), source.region(), allocator);
+    if (!allocated.ok())
+      return Result<Value>(allocated.status());
+    auto output = allocated.take_value();
+    auto status = copy_region(ValueView(source), &output, source.region());
+    if (!status.ok())
+      return Result<Value>(status);
+    return std::move(output).publish(source.facets());
+  }
   auto allocated = allocator.allocate(source.bytes().size());
   if (!allocated.ok())
     return Result<Value>(allocated.status());
@@ -681,6 +770,105 @@ Result<std::vector<Value>> preflight_bindings(
   return Result<std::vector<Value>>(std::move(values));
 }
 
+/** @brief Validates/copies complete regional binding metadata before any source
+ * callback. */
+Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
+    const ExecutionPlan& plan, const ExecutionBindings& bindings,
+    const CancellationToken& cancellation) {
+  if (bindings.inputs.size() > 4096)
+    return Result<std::vector<ExecutionBinding>>(
+        Status::failure(ErrorCode::InvalidArgument, "too many bindings"));
+  std::map<std::string, std::vector<const ExecutionBinding*>> named;
+  for (const auto& binding : bindings.inputs)
+    named[binding.name].push_back(&binding);
+  for (const auto& entry : named)
+    if (!input_internal::valid_input_name(entry.first))
+      return Result<std::vector<ExecutionBinding>>(Status::failure(
+          ErrorCode::InvalidArgument, "malformed binding name"));
+  for (const auto& entry : named)
+    if (entry.second.size() != 1)
+      return Result<std::vector<ExecutionBinding>>(Status::failure(
+          ErrorCode::InvalidArgument, "duplicate binding name"));
+  std::set<std::string> declared;
+  for (const auto& declaration : plan.input_declarations())
+    declared.insert(declaration.name);
+  for (const auto& entry : named)
+    if (declared.count(entry.first) == 0)
+      return Result<std::vector<ExecutionBinding>>(
+          Status::failure(ErrorCode::InvalidArgument, "extra binding name"));
+  for (const auto& name : declared)
+    if (named.count(name) == 0)
+      return Result<std::vector<ExecutionBinding>>(
+          Status::failure(ErrorCode::InvalidArgument, "missing binding name"));
+  std::vector<ExecutionBinding> result;
+  for (const auto& declaration : plan.input_declarations()) {
+    auto binding = *named.at(declaration.name)[0];
+    if (binding.source) {
+      if (binding.value.valid() || !binding.source->read)
+        return Result<std::vector<ExecutionBinding>>(
+            Status::failure(ErrorCode::InvalidArgument,
+                            "binding must select one valid source or Value"));
+      auto source = std::make_shared<RegionalSource>(*binding.source);
+      auto status = input_internal::canonicalize_facets(&source->facets);
+      if (!status.ok())
+        return Result<std::vector<ExecutionBinding>>(status);
+      if (source->descriptor.element_type !=
+              declaration.descriptor.element_type ||
+          source->descriptor.shape != declaration.descriptor.shape ||
+          !input_internal::same_facets(source->facets, declaration.facets))
+        return Result<std::vector<ExecutionBinding>>(Status::failure(
+            ErrorCode::TypeMismatch,
+            "regional source metadata differs from declaration"));
+      binding.source = std::move(source);
+    } else {
+      auto status =
+          input_internal::validate_binding(declaration, binding.value);
+      if (!status.ok())
+        return Result<std::vector<ExecutionBinding>>(status);
+    }
+    result.push_back(std::move(binding));
+  }
+  const auto stop = [&] { return binding_stop(plan, cancellation); };
+  for (const auto& step : plan.steps()) {
+    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+      const auto* input = std::get_if<PlanWorkflowInput>(&step.inputs[port]);
+      if (!input)
+        continue;
+      const auto& binding = result[input->declaration_index];
+      const auto& constraint = step.traits.input_schema[port];
+      if (constraint.kind != OperationPortKind::Float32Scalar)
+        continue;
+      if (binding.source)
+        return Result<std::vector<ExecutionBinding>>(
+            Status::failure(ErrorCode::InvalidArgument,
+                            "scalar parameter requires a Value binding"));
+      auto status = input_internal::validate_port_value(
+          constraint, binding.value, ErrorCode::InvalidArgument, stop);
+      if (!status.ok())
+        return Result<std::vector<ExecutionBinding>>(status);
+    }
+  }
+  return Result<std::vector<ExecutionBinding>>(std::move(result));
+}
+
+/** @brief Finds work needed for outputs, stopping at Run-local
+ * materializations. */
+std::vector<bool> required_steps(const ExecutionPlan& plan,
+                                 const std::map<std::uint64_t, Value>& cached) {
+  std::vector<bool> required(plan.steps().size(), false);
+  for (const auto& output : plan.outputs())
+    required[output.second] = true;
+  for (std::size_t reverse = plan.steps().size(); reverse > 0; --reverse) {
+    const auto i = reverse - 1;
+    if (!required[i] || cached.count(plan.steps()[i].node_id) != 0)
+      continue;
+    for (const auto& source : plan.steps()[i].inputs)
+      if (const auto* producer = std::get_if<PlanStepInput>(&source))
+        required[producer->step_index] = true;
+  }
+  return required;
+}
+
 /**
  * @brief Coordinates one dependency-ordered execution through shared pools.
  *
@@ -713,7 +901,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                    invoke,
                const ExecutionPlan* plan, std::vector<Value> bindings,
                CancellationToken cancellation,
-               std::uint32_t maximum_parallelism)
+               std::uint32_t maximum_parallelism, bool regional = false,
+               const std::map<std::uint64_t, Value>& cached = {},
+               const std::map<std::uint64_t, Backend>& cached_backends = {})
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
@@ -723,21 +913,52 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         bindings_(std::move(bindings)),
         cancellation_(std::move(cancellation)),
         maximum_parallelism_(maximum_parallelism),
+        regional_(regional),
         values_(plan->steps().size()),
         value_backends_(plan->steps().size(), Backend::Cpu),
         completed_(plan->steps().size(), false),
         remaining_dependencies_(plan->steps().size(), 0U),
         dependents_(plan->steps().size()),
         remaining_readers_(plan->steps().size(), 0),
-        retained_output_(plan->steps().size(), false) {
+        retained_output_(plan->steps().size(), false),
+        binding_readers_(bindings_.size(), 0) {
     if (!cpu_pool_ || !waiting_admission_ || !reservation_ || !invoke_ ||
         !plan_ || plan_->revision() == 0U || plan_->steps().empty() ||
         maximum_parallelism_ == 0U) {
       throw std::invalid_argument("execution plan or bounds are invalid");
     }
+    std::set<const CpuStorage*> external_owners;
+    for (const auto& input : bindings_) {
+      if (input.valid() &&
+          external_owners.insert(input.storage().get()).second) {
+        auto sum =
+            checked_add(retained_input_bytes_, input.storage()->capacity());
+        if (!sum.ok())
+          throw std::invalid_argument(sum.status().message);
+        retained_input_bytes_ = sum.value();
+      }
+    }
+    const auto required = regional
+                              ? required_steps(*plan_, cached)
+                              : std::vector<bool>(plan_->steps().size(), true);
+    for (std::size_t i = 0; i < plan_->steps().size(); ++i) {
+      const auto found = cached.find(plan_->steps()[i].node_id);
+      if (!required[i] || found != cached.end()) {
+        completed_[i] = true;
+        ++completed_count_;
+        if (found != cached.end()) {
+          values_[i] = found->second;
+          const auto backend = cached_backends.find(plan_->steps()[i].node_id);
+          if (backend != cached_backends.end())
+            value_backends_[i] = backend->second;
+        }
+      }
+    }
     for (std::size_t step_index = 0; step_index < plan_->steps().size();
          ++step_index) {
       const PlanStep& step = plan_->steps()[step_index];
+      if (completed_[step_index])
+        continue;
       if (step.input_demands.size() != step.inputs.size() ||
           step.output_demand.empty() ||
           !step.output_demand.validate(step.output_descriptor.shape).ok()) {
@@ -754,7 +975,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           descriptor = &plan_->steps()[producer->step_index].output_descriptor;
           dependents_[producer->step_index].push_back(step_index);
           ++remaining_readers_[producer->step_index];
-          ++remaining_dependencies_[step_index];
+          if (!completed_[producer->step_index])
+            ++remaining_dependencies_[step_index];
         } else {
           const auto index =
               std::get<PlanWorkflowInput>(input).declaration_index;
@@ -762,6 +984,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               index >= plan_->input_declarations().size())
             throw std::invalid_argument("plan declaration index is invalid");
           descriptor = &plan_->input_declarations()[index].descriptor;
+          ++binding_readers_[index];
         }
         if (step.input_demands[position].empty() ||
             !step.input_demands[position].validate(descriptor->shape).ok())
@@ -835,21 +1058,22 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 
     ExecutionResult result;
     for (const auto& output : plan_->outputs()) {
-      result.values.emplace(output.first, values_[output.second]);
+      auto view =
+          values_[output.second].view(plan_->output_regions().at(output.first));
+      if (!view.ok())
+        return Result<ExecutionResult>(view.status());
+      result.values.emplace(output.first, view.take_value());
     }
     diagnostics_.peak_live_bytes = reservation_->peak();
     diagnostics_.planned_peak_bytes = reservation_->planned();
-    std::set<const CpuStorage*> input_storage;
-    for (const auto& value : bindings_) {
-      if (value.valid() && input_storage.insert(value.storage().get()).second)
-        diagnostics_.retained_input_bytes += value.storage()->capacity();
-    }
+    diagnostics_.retained_input_bytes = retained_input_bytes_;
     result.diagnostics = std::move(diagnostics_);
     result.diagnostics.plan_digest = plan_->digest().value;
     result.diagnostics.result_digest = result_digest(result.values);
     result.diagnostics.execute_us = duration_us(started);
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-    execution_testing::notify_final_result_ready();
+    if (!regional_)
+      execution_testing::notify_final_result_ready();
 #endif
     if (cancellation_.cancelled()) {
       return Result<ExecutionResult>(Status::failure(
@@ -1064,7 +1288,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             finish_failure_locked(demand_status);
             return;
           }
-          inputs.push_back(*value);
+          if (regional_) {
+            auto part = value->view(step.input_demands[input_position]);
+            if (!part.ok()) {
+              finish_failure_locked(part.status());
+              return;
+            }
+            inputs.push_back(part.take_value());
+          } else {
+            inputs.push_back(*value);
+          }
           const bool requires_transfer = source_backend != backend;
           transfer_inputs.push_back(requires_transfer);
           if (requires_transfer) {
@@ -1075,7 +1308,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return;
             }
             ++transfer_count;
-            auto sum = checked_add(transfer_bytes, value->bytes().size());
+            auto bytes = regional_
+                             ? region_bytes(value->descriptor(),
+                                            step.input_demands[input_position])
+                             : Result<std::uint64_t>(value->bytes().size());
+            if (!bytes.ok()) {
+              finish_failure_locked(bytes.status());
+              return;
+            }
+            auto sum = checked_add(transfer_bytes, bytes.value());
             if (!sum.ok()) {
               finish_failure_locked(sum.status());
               return;
@@ -1093,7 +1334,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (!transfer_inputs[input_index]) {
           continue;
         }
-        auto transferred = transfer_value(inputs[input_index], allocator);
+        auto transferred =
+            transfer_value(inputs[input_index], allocator, regional_);
         if (!transferred.ok()) {
           finish_failure(transferred.status());
           return;
@@ -1103,15 +1345,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 
       const auto started = std::chrono::steady_clock::now();
       Result<Value> invocation_result =
-          invoke_(step.operation, OperationInvocation{inputs,
-                                                      step.input_demands,
-                                                      step.parameters,
-                                                      backend,
-                                                      cancellation_,
-                                                      {},
-                                                      callback_allocator});
+          invoke_(step.operation,
+                  OperationInvocation{inputs, step.input_demands,
+                                      step.parameters, backend, cancellation_,
+                                      regional_ ? step.output_demand : Region{},
+                                      callback_allocator});
       if (invocation_result.ok() &&
-          !invocation_result.value().storage()->accounted()) {
+          !callback_allocator.owns(*invocation_result.value().storage())) {
         const auto storage = invocation_result.value().storage();
         const bool borrowed = std::any_of(
             inputs.begin(), inputs.end(),
@@ -1127,6 +1367,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::lock_guard<std::mutex> lock(mutex_);
         diagnostics_.operation_timings.push_back(OperationTiming{
             step.node_id, backend, elapsed, invocation_result.status().code});
+        auto elements = step.output_demand.element_count();
+        if (elements.ok())
+          diagnostics_.operation_timings.back().computed_elements =
+              elements.value();
 
         auto count_sum =
             checked_add(diagnostics_.transfer_count, transfer_count);
@@ -1227,6 +1471,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         --readers;
         if (readers == 0 && !retained_output_[producer->step_index])
           values_[producer->step_index] = Value();
+      } else {
+        const auto index = std::get<PlanWorkflowInput>(input).declaration_index;
+        if (binding_readers_[index] == 0) {
+          finish_failure_locked(Status::failure(
+              ErrorCode::Internal, "binding reader counter underflow"));
+          return;
+        }
+        --binding_readers_[index];
+        if (binding_readers_[index] == 0)
+          bindings_[index] = Value();
       }
     }
     if (remaining_readers_[step_index] == 0 && !retained_output_[step_index])
@@ -1382,6 +1636,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   CancellationToken cancellation_;
   /** @brief Positive per-execution callback bound. */
   std::uint32_t maximum_parallelism_;
+  bool regional_;
   /** @brief Serializes every per-execution state transition. */
   std::mutex mutex_;
   /** @brief Wakes the scheduling loop after a state transition. */
@@ -1398,6 +1653,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   std::vector<std::vector<std::size_t>> dependents_;
   std::vector<std::size_t> remaining_readers_;
   std::vector<bool> retained_output_;
+  std::vector<std::size_t> binding_readers_;
+  std::uint64_t retained_input_bytes_ = 0;
   /** @brief Deterministic smallest-index ready ordering. */
   std::priority_queue<std::size_t, std::vector<std::size_t>,
                       std::greater<std::size_t>>
@@ -1436,6 +1693,23 @@ ExecutionContext::~ExecutionContext() noexcept = default;
 Result<ExecutionResult> ExecutionContext::execute(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  const bool spatial = std::any_of(
+      plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
+        return step.traits.output_schema.kind ==
+               OperationPortKind::LinearPremultipliedRgbaFloat32;
+      });
+  const bool regional_demand = std::any_of(
+      plan.outputs().begin(), plan.outputs().end(), [&](const auto& output) {
+        return !input_internal::whole_region(
+            plan.output_regions().at(output.first),
+            plan.steps()[output.second].output_descriptor.shape);
+      });
+  const bool sourced = std::any_of(
+      bindings.inputs.begin(), bindings.inputs.end(),
+      [](const ExecutionBinding& input) { return input.source != nullptr; });
+  if (spatial || sourced || regional_demand)
+    return execute_regions(plan, std::move(bindings), nullptr, cancellation,
+                           options);
   if (!impl_) {
     return Result<ExecutionResult>(Status::failure(
         ErrorCode::Internal, "execution context has no implementation"));
@@ -1519,6 +1793,494 @@ Result<ExecutionResult> ExecutionContext::execute(
   } catch (const std::invalid_argument& error) {
     return Result<ExecutionResult>(
         Status::failure(ErrorCode::InvalidArgument, error.what()));
+  }
+}
+
+Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
+    const ExecutionPlan& plan, ExecutionBindings bindings,
+    const ExecutionSink& sink, const CancellationToken& cancellation,
+    const ExecutionOptions& options) {
+  auto result =
+      execute_regions(plan, std::move(bindings), &sink, cancellation, options);
+  if (!result.ok())
+    return Result<ExecutionDiagnostics>(result.status());
+  return Result<ExecutionDiagnostics>(result.take_value().diagnostics);
+}
+
+Result<ExecutionResult> ExecutionContext::execute_regions(
+    const ExecutionPlan& plan, ExecutionBindings bindings,
+    const ExecutionSink* sink, const CancellationToken& cancellation,
+    const ExecutionOptions& options) {
+  if (!impl_ || !plan.current() ||
+      plan.operation_registry_.lock() != impl_->operation_registry)
+    return Result<ExecutionResult>(Status::failure(
+        ErrorCode::Stale, "regional plan is invalid, stale or foreign"));
+  const auto stop = [&] { return binding_stop(plan, cancellation); };
+  const auto failure = [&](Status status) {
+    const auto code = stop();
+    if (code != ErrorCode::Ok) {
+      status.code = code;
+      status.message.clear();
+    }
+    return Result<ExecutionResult>(std::move(status));
+  };
+  if (stop() != ErrorCode::Ok) {
+    Status status;
+    status.code = stop();
+    return failure(status);
+  }
+  if (sink && !*sink)
+    return failure(
+        Status::failure(ErrorCode::InvalidArgument, "stream sink is empty"));
+  const auto started = std::chrono::steady_clock::now();
+  try {
+    auto validated = preflight_regional_bindings(plan, bindings, cancellation);
+    if (!validated.ok())
+      return failure(validated.status());
+    auto snapshot = validated.take_value();
+    auto observation =
+        std::make_shared<execution_internal::MemoryObservation>();
+    std::map<std::uint64_t, Value> cached;
+    std::map<std::uint64_t, Backend> cached_backends;
+    ExecutionDiagnostics diagnostics;
+    diagnostics.plan_digest = plan.digest().value;
+    std::set<const CpuStorage*> input_owners;
+    for (const auto& binding : snapshot) {
+      if (binding.value.valid() &&
+          input_owners.insert(binding.value.storage().get()).second) {
+        auto sum = checked_add(diagnostics.retained_input_bytes,
+                               binding.value.storage()->capacity());
+        if (!sum.ok())
+          return failure(sum.status());
+        diagnostics.retained_input_bytes = sum.value();
+      }
+    }
+    const auto accumulate = [&](const ExecutionDiagnostics& part) -> Status {
+      auto add = [](std::uint64_t* into, std::uint64_t count) {
+        auto sum = checked_add(*into, count);
+        if (!sum.ok())
+          return sum.status();
+        *into = sum.value();
+        return Status::success();
+      };
+      auto status = add(&diagnostics.transfer_count, part.transfer_count);
+      if (!status.ok())
+        return status;
+      status = add(&diagnostics.transfer_bytes, part.transfer_bytes);
+      if (!status.ok())
+        return status;
+      diagnostics.peak_active_tasks =
+          std::max(diagnostics.peak_active_tasks, part.peak_active_tasks);
+      for (const auto& backend : part.selected_backends)
+        diagnostics.selected_backends[backend.first] = backend.second;
+      for (const auto& timing : part.operation_timings) {
+        auto found = std::find_if(diagnostics.operation_timings.begin(),
+                                  diagnostics.operation_timings.end(),
+                                  [&](const OperationTiming& prior) {
+                                    return prior.node_id == timing.node_id &&
+                                           prior.backend == timing.backend;
+                                  });
+        if (found == diagnostics.operation_timings.end()) {
+          diagnostics.operation_timings.push_back(timing);
+        } else {
+          for (const auto pair :
+               {std::make_pair(&found->duration_us, timing.duration_us),
+                std::make_pair(&found->invocation_count,
+                               timing.invocation_count),
+                std::make_pair(&found->computed_elements,
+                               timing.computed_elements)}) {
+            status = add(pair.first, pair.second);
+            if (!status.ok())
+              return status;
+          }
+          found->outcome = timing.outcome;
+        }
+      }
+      for (const auto& reason : part.fallback_reasons)
+        if (diagnostics.fallback_reasons.size() < 2 * plan.steps().size() &&
+            std::find(diagnostics.fallback_reasons.begin(),
+                      diagnostics.fallback_reasons.end(),
+                      reason) == diagnostics.fallback_reasons.end())
+          diagnostics.fallback_reasons.push_back(reason);
+      return Status::success();
+    };
+    struct Seal {
+      std::shared_ptr<MemoryReservation> reservation;
+      ~Seal() {
+        if (reservation)
+          reservation->seal();
+      }
+    };
+    std::map<std::string, MutableValue> collected;
+    std::map<std::string, std::vector<ValueFacet>> collected_facets;
+    if (!sink) {
+      std::uint64_t bytes = 0;
+      for (const auto& output : plan.outputs()) {
+        auto size = region_bytes(plan.steps()[output.second].output_descriptor,
+                                 plan.output_regions().at(output.first));
+        if (!size.ok())
+          return failure(size.status());
+        auto sum = checked_add(bytes, size.value());
+        if (!sum.ok())
+          return failure(sum.status());
+        bytes = sum.value();
+      }
+      auto reserved = impl_->budget->reserve(bytes, stop, observation);
+      if (!reserved.ok())
+        return failure(reserved.status());
+      Seal seal{reserved.take_value()};
+      auto allocator = seal.reservation->allocator();
+      for (const auto& output : plan.outputs()) {
+        auto value = MutableValue::allocate(
+            plan.steps()[output.second].output_descriptor,
+            plan.output_regions().at(output.first), allocator);
+        if (!value.ok())
+          return failure(value.status());
+        collected.emplace(output.first, value.take_value());
+      }
+      // Collector capacity is retained storage, never an active task to wait
+      // on.
+      seal.reservation->seal();
+    }
+    const std::uint32_t parallelism = options.maximum_parallelism == 0
+                                          ? impl_->cpu_worker_count
+                                          : options.maximum_parallelism;
+    const auto materialize =
+        [&](const ExecutionPlan& tile) -> Result<ExecutionResult> {
+      const auto required = required_steps(tile, cached);
+      std::vector<std::optional<Region>> input_demands(snapshot.size());
+      std::uint64_t working = 0;
+      for (std::size_t i = 0; i < tile.steps().size(); ++i) {
+        const auto& step = tile.steps()[i];
+        if (!required[i] || cached.count(step.node_id))
+          continue;
+        auto sum = checked_add(working, step.planned_bytes);
+        if (!sum.ok())
+          return Result<ExecutionResult>(sum.status());
+        working = sum.value();
+        for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+          const auto& source = step.inputs[port];
+          const auto* producer = std::get_if<PlanStepInput>(&source);
+          if (!producer) {
+            auto index = std::get<PlanWorkflowInput>(source).declaration_index;
+            const auto& demand = step.input_demands[port];
+            auto& merged = input_demands[index];
+            if (!merged) {
+              merged = demand;
+            } else {
+              std::vector<RegionDimension> dimensions;
+              for (std::size_t axis = 0; axis < demand.rank(); ++axis) {
+                const auto a = merged->dimensions()[axis],
+                           b = demand.dimensions()[axis];
+                const auto start = std::min(a.offset, b.offset);
+                dimensions.push_back(
+                    {start, std::max(a.offset + a.extent, b.offset + b.extent) -
+                                start});
+              }
+              merged = Region(std::move(dimensions));
+            }
+          }
+          const auto backend = producer
+                                   ? tile.steps()[producer->step_index].backend
+                                   : Backend::Cpu;
+          if (backend != Backend::Cpu || step.backend != Backend::Cpu) {
+            const auto& descriptor =
+                producer
+                    ? tile.steps()[producer->step_index].output_descriptor
+                    : tile.input_declarations()[std::get<PlanWorkflowInput>(
+                                                    source)
+                                                    .declaration_index]
+                          .descriptor;
+            auto bytes = region_bytes(descriptor, step.input_demands[port]);
+            if (!bytes.ok())
+              return Result<ExecutionResult>(bytes.status());
+            sum = checked_add(working, bytes.value());
+            if (!sum.ok())
+              return Result<ExecutionResult>(sum.status());
+            working = sum.value();
+          }
+        }
+      }
+      for (std::size_t i = 0; i < snapshot.size(); ++i) {
+        if (!input_demands[i] || !snapshot[i].source)
+          continue;
+        auto bytes =
+            region_bytes(snapshot[i].source->descriptor, *input_demands[i]);
+        if (!bytes.ok())
+          return Result<ExecutionResult>(bytes.status());
+        auto total =
+            checked_add(bytes.value(), snapshot[i].source->workspace_bytes);
+        if (!total.ok())
+          return Result<ExecutionResult>(total.status());
+        total = checked_add(working, total.value());
+        if (!total.ok())
+          return Result<ExecutionResult>(total.status());
+        working = total.value();
+      }
+      auto reserved = impl_->budget->reserve(working, stop, observation);
+      if (!reserved.ok())
+        return Result<ExecutionResult>(reserved.status());
+      Seal seal{reserved.take_value()};
+      std::vector<Value> values(snapshot.size());
+      for (std::size_t i = 0; i < snapshot.size(); ++i) {
+        if (!input_demands[i])
+          continue;
+        const auto& binding = snapshot[i];
+        if (!binding.source) {
+          auto view = binding.value.view(*input_demands[i]);
+          if (!view.ok())
+            return Result<ExecutionResult>(view.status());
+          values[i] = view.take_value();
+          continue;
+        }
+        if (stop() != ErrorCode::Ok) {
+          Status status;
+          status.code = stop();
+          return Result<ExecutionResult>(status);
+        }
+        auto made = MutableValue::allocate(binding.source->descriptor,
+                                           *input_demands[i],
+                                           seal.reservation->allocator());
+        if (!made.ok())
+          return Result<ExecutionResult>(made.status());
+        auto writer = made.take_value();
+        struct ReadCompletion {
+          std::promise<Result<Region>> promise;
+          Result<Region> result{Status{ErrorCode::Internal, {}}};
+        };
+        auto completion = std::make_shared<ReadCompletion>();
+        auto future = completion->promise.get_future();
+        auto admission = impl_->waiting_admission.try_acquire();
+        if (!admission)
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::ResourceExhausted, "source waiting queue is full"));
+        auto scratch =
+            seal.reservation->allocator(binding.source->workspace_bytes);
+        QueuedCallback callback{
+            [&, completion, source = binding.source, demand = *input_demands[i],
+             scratch]() {
+              try {
+                const auto code = stop();
+                if (code != ErrorCode::Ok) {
+                  Status status;
+                  status.code = code;
+                  completion->result = Result<Region>(status);
+                  return;
+                }
+                completion->result =
+                    source->read(demand, writer.data(), writer.size(), scratch,
+                                 cancellation);
+              } catch (const std::bad_alloc&) {
+                Status status;
+                status.code = ErrorCode::ResourceExhausted;
+                completion->result = Result<Region>(status);
+              } catch (const std::exception& error) {
+                try {
+                  completion->result = Result<Region>(
+                      Status::failure(ErrorCode::OperationFailed,
+                                      error.what() ? error.what() : ""));
+                } catch (...) {
+                  Status status;
+                  status.code = ErrorCode::OperationFailed;
+                  completion->result = Result<Region>(status);
+                }
+              } catch (...) {
+                Status status;
+                status.code = ErrorCode::OperationFailed;
+                completion->result = Result<Region>(status);
+              }
+            },
+            std::move(*admission),
+            [completion] {
+              completion->promise.set_value(std::move(completion->result));
+            }};
+        if (!impl_->cpu_pool.submit(std::move(callback)))
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::ResourceExhausted, "source queue stopped"));
+        auto written = future.get();
+        if (!written.ok())
+          return Result<ExecutionResult>(written.status());
+        if (!same_region(written.value(), *input_demands[i]))
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::TypeMismatch, "source returned different coverage"));
+        auto sum = checked_add(diagnostics.source_read_bytes, writer.size());
+        if (!sum.ok())
+          return Result<ExecutionResult>(sum.status());
+        diagnostics.source_read_bytes = sum.value();
+        ++diagnostics.source_read_count;
+        diagnostics.peak_active_tasks =
+            std::max(diagnostics.peak_active_tasks, UINT32_C(1));
+        auto published = std::move(writer).publish(binding.source->facets);
+        if (!published.ok())
+          return Result<ExecutionResult>(published.status());
+        values[i] = published.take_value();
+      }
+      auto coordinator = std::make_shared<ExecutionRun>(
+          &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->waiting_admission,
+          seal.reservation,
+          [operations = impl_->operation_registry, &tile](
+              const std::string& key, const OperationInvocation& invocation) {
+            return operations->invoke_current(
+                key, invocation, [&tile] { return tile.current(); });
+          },
+          &tile, std::move(values), cancellation, parallelism, true, cached,
+          cached_backends);
+      return coordinator->run();
+    };
+    // Materialize Whole/effect boundaries once in source-topological order.
+    for (std::size_t i = 0; i < plan.steps().size(); ++i) {
+      const auto& step = plan.steps()[i];
+      if (!step.whole_boundary)
+        continue;
+      ExecutionPlan whole = plan;
+      const std::string name = "__s2_whole";
+      const auto full = Region::whole(step.output_descriptor.shape);
+      whole.outputs_ = {{name, i}};
+      whole.output_regions_ = {{name, full}};
+      auto subplan = whole.tile_plan(name, full);
+      if (!subplan.ok())
+        return failure(subplan.status());
+      auto result = materialize(subplan.value());
+      if (!result.ok())
+        return failure(result.status());
+      auto status = accumulate(result.value().diagnostics);
+      if (!status.ok())
+        return failure(status);
+      cached[step.node_id] = result.value().values.at(name);
+      const auto backend = diagnostics.selected_backends.find(step.node_id);
+      cached_backends[step.node_id] =
+          backend == diagnostics.selected_backends.end() ? step.backend
+                                                         : backend->second;
+    }
+    // Whole results with no output-side reader can retire before streaming.
+    const auto needed = required_steps(plan, cached);
+    for (std::size_t i = 0; i < plan.steps().size(); ++i)
+      if (!needed[i]) {
+        cached.erase(plan.steps()[i].node_id);
+        cached_backends.erase(plan.steps()[i].node_id);
+      }
+
+    ExecutionPlan remaining_outputs = plan;
+    for (const auto& output : plan.outputs()) {
+      const auto& requested = plan.output_regions().at(output.first);
+      const bool spatial = requested.rank() >= 2;
+      std::uint64_t y = spatial ? requested.dimensions()[0].offset : 0;
+      const auto y_end = spatial ? y + requested.dimensions()[0].extent : 1;
+      while (y < y_end) {
+        const auto height =
+            spatial ? std::min(plan.tile_height(), y_end - y) : 1;
+        std::uint64_t x = spatial ? requested.dimensions()[1].offset : 0;
+        const auto x_end = spatial ? x + requested.dimensions()[1].extent : 1;
+        while (x < x_end) {
+          if (stop() != ErrorCode::Ok) {
+            Status status;
+            status.code = stop();
+            return failure(status);
+          }
+          const auto width =
+              spatial ? std::min(plan.tile_width(), x_end - x) : 1;
+          auto dimensions = requested.dimensions();
+          if (spatial) {
+            dimensions[0] = {y, height};
+            dimensions[1] = {x, width};
+          }
+          const Region region(std::move(dimensions));
+          auto tile = plan.tile_plan(output.first, region);
+          if (!tile.ok())
+            return failure(tile.status());
+          auto result = materialize(tile.value());
+          if (!result.ok())
+            return failure(result.status());
+          auto status = accumulate(result.value().diagnostics);
+          if (!status.ok())
+            return failure(status);
+          if (stop() != ErrorCode::Ok) {
+            status.code = stop();
+            return failure(status);
+          }
+          const auto& value = result.value().values.at(output.first);
+          if (sink) {
+            status = (*sink)(output.first, ValueView(value));
+          } else {
+            auto found = collected_facets.find(output.first);
+            if (found == collected_facets.end())
+              collected_facets[output.first] = value.facets();
+            else if (!input_internal::same_facets(found->second,
+                                                  value.facets()))
+              return failure(
+                  Status::failure(ErrorCode::TypeMismatch,
+                                  "output facets changed between tiles"));
+            status = copy_region(ValueView(value), &collected.at(output.first),
+                                 requested);
+          }
+          if (!status.ok())
+            return failure(status);
+          if (stop() != ErrorCode::Ok) {
+            status.code = stop();
+            return failure(status);
+          }
+          if (diagnostics.tile_count == UINT64_MAX)
+            return failure(Status::failure(ErrorCode::ResourceExhausted,
+                                           "tile count overflows"));
+          ++diagnostics.tile_count;
+          x += width;
+        }
+        y += height;
+      }
+      remaining_outputs.outputs_.erase(output.first);
+      const auto future_needed = required_steps(remaining_outputs, cached);
+      for (std::size_t i = 0; i < plan.steps().size(); ++i)
+        if (!future_needed[i]) {
+          cached.erase(plan.steps()[i].node_id);
+          cached_backends.erase(plan.steps()[i].node_id);
+        }
+    }
+    cached.clear();
+    ExecutionResult result;
+    for (auto& output : collected) {
+      auto value = std::move(output.second)
+                       .publish(std::move(collected_facets.at(output.first)));
+      if (!value.ok())
+        return failure(value.status());
+      result.values.emplace(output.first, value.take_value());
+    }
+    const auto peaks = impl_->budget->peaks(observation);
+    diagnostics.peak_live_bytes = peaks.first;
+    diagnostics.planned_peak_bytes = peaks.second;
+    std::sort(diagnostics.operation_timings.begin(),
+              diagnostics.operation_timings.end(),
+              [](const OperationTiming& a, const OperationTiming& b) {
+                return a.node_id != b.node_id ? a.node_id < b.node_id
+                                              : a.backend < b.backend;
+              });
+    if (!sink)
+      diagnostics.result_digest = result_digest(result.values);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    diagnostics.execute_us =
+        elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
+    result.diagnostics = std::move(diagnostics);
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    execution_testing::notify_final_result_ready();
+#endif
+    if (stop() != ErrorCode::Ok) {
+      Status status;
+      status.code = stop();
+      return failure(status);
+    }
+    return Result<ExecutionResult>(std::move(result));
+  } catch (const std::bad_alloc&) {
+    Status status;
+    status.code = ErrorCode::ResourceExhausted;
+    return failure(status);
+  } catch (const std::exception& error) {
+    return failure(Status::failure(ErrorCode::OperationFailed,
+                                   error.what() ? error.what() : ""));
+  } catch (...) {
+    Status status;
+    status.code = ErrorCode::OperationFailed;
+    return failure(status);
   }
 }
 

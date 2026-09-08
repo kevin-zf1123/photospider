@@ -66,6 +66,7 @@ class PHOTOSPIDER_API CpuStorage final {
   friend class BufferAllocator;
   friend class MutableBuffer;
   friend class Value;
+  std::shared_ptr<const void> domain_;
   CpuStorage() = default;
   // Declaration order makes bytes retire before their accounting lease.
   std::shared_ptr<void> lease_;
@@ -112,11 +113,16 @@ class PHOTOSPIDER_API BufferAllocator final {
   /** @brief Reservation function; failure prevents the payload allocation. */
   using Reserve = std::function<Result<std::shared_ptr<void>>(std::uint64_t)>;
   /** @brief Creates an allocator retaining the supplied reservation owner. */
-  explicit BufferAllocator(Reserve reserve = {});
+  explicit BufferAllocator(Reserve reserve = {},
+                           std::shared_ptr<const void> domain = {});
+  /** @brief Reports whether storage belongs to this allocator's accounting
+   * domain. */
+  bool owns(const CpuStorage& storage) const noexcept;
   /** @brief Allocates exactly size zero-initialized bytes after reservation. */
   Result<MutableBuffer> allocate(std::uint64_t size) const;
 
  private:
   Reserve reserve_;
+  std::shared_ptr<const void> domain_;
 };
 }  // namespace ps

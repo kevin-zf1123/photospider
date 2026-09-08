@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -34,12 +35,48 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
 };
 
+/**
+ * @brief Immutable regional input source captured independently by each Run.
+ * @note Metadata and callable are copied before invocation. Shared source state
+ * must support concurrent reads and stay unchanged during those Reads. Scalar
+ * parameter ports use ordinary Value bindings. No provider ABI or codec is
+ * added.
+ */
+struct PHOTOSPIDER_API RegionalSource final {
+  ValueDescriptor descriptor;
+  std::vector<ValueFacet> facets;
+  /**
+   * @brief Fills exact packed regional bytes and reports the coverage written.
+   * @param region Requested nonempty region in full logical coordinates.
+   * @param destination Host-owned writable storage; never free or retain it.
+   * @param byte_size Exact destination size, packed in descriptor axis order.
+   * @param allocator Host allocator for declared source scratch only.
+   * @param cancellation Cooperative stop observation.
+   * @return Exactly region on success; differing coverage is TypeMismatch.
+   * @note All pointers expire at return. Exceptions are fenced. Source metadata
+   * must match the declaration; samples are checked after each successful read.
+   */
+  using Read = std::function<Result<Region>(
+      const Region&, std::uint8_t*, std::uint64_t, const BufferAllocator&,
+      const CancellationToken&)>;
+  Read read = {};
+  /** @brief Fixed maximum scratch capacity used while reading one region. */
+  std::uint64_t workspace_bytes = 0;
+};
+
+/** @brief Synchronous ordered tile sink; the borrowed view expires on return.
+ */
+using ExecutionSink = std::function<Status(const std::string&, ValueView)>;
+
 /** @brief One exact-name immutable Value supplied to a Run. */
 struct PHOTOSPIDER_API ExecutionBinding final {
   /** @brief Case-sensitive required declaration name. */
   std::string name;
   /** @brief Valid Value with exactly matching metadata and dense bytes. */
   Value value;
+  /** @brief Alternative source; exactly one of a valid Value or source is
+   * required. */
+  std::shared_ptr<const RegionalSource> source = {};
 };
 /**
  * @brief Per-call input snapshot; duplicate entries remain visible to
@@ -78,6 +115,11 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t duration_us = 0;
   /** @brief Attempt outcome category. */
   ErrorCode outcome = ErrorCode::Ok;
+  /** @brief Number of attempts aggregated for this node/backend in regional
+   * execution. */
+  std::uint64_t invocation_count = 1;
+  /** @brief Total logical output elements computed by these attempts. */
+  std::uint64_t computed_elements = 0;
 };
 
 /**
@@ -102,6 +144,12 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint64_t retained_input_bytes = 0;
   /** @brief Maximum admitted plan callbacks, bounded by maximum_parallelism. */
   std::uint32_t peak_active_tasks = 0;
+  /** @brief Successfully delivered output tile count, across named outputs. */
+  std::uint64_t tile_count = 0;
+  /** @brief Successful regional source reads and bytes; Value bindings are
+   * separate. */
+  std::uint64_t source_read_count = 0;
+  std::uint64_t source_read_bytes = 0;
   /** @brief Human-readable CPU fallback reasons in occurrence order. */
   std::vector<std::string> fallback_reasons;
   /** @brief Raw physical callback attempts. */
@@ -215,6 +263,27 @@ class PHOTOSPIDER_API ExecutionContext final {
       const ExecutionOptions& options = {});
 
   /**
+   * @brief Streams named output tiles without retaining the full output.
+   * @param plan Current matching plan, with fixed ROI/tile geometry.
+   * @param bindings Independent Value/regional-source snapshot.
+   * @param sink Required synchronous sink, called in name/row/column order.
+   * @param cancellation Cooperative stop observation, including admission
+   * waits.
+   * @param options Per-Run callback bounds.
+   * @return Aggregate diagnostics or typed failure. Already consumed tiles
+   * cannot be rolled back; only final success validates the complete stream.
+   * @throws std::bad_alloc For unhandled metadata allocation failures.
+   * @note Sink/source exceptions are fenced. No further tile is delivered after
+   * observed cancellation/staleness/failure; callbacks retire before return.
+   * Streaming result_digest is empty; correctness is checked by the sink.
+   */
+  [[nodiscard]] Result<ExecutionDiagnostics> execute_stream(
+      const ExecutionPlan& plan, ExecutionBindings bindings,
+      const ExecutionSink& sink,
+      const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+
+  /**
    * @brief Returns the fixed resolved CPU worker count.
    * @return Positive worker count.
    * @throws Nothing.
@@ -231,6 +300,11 @@ class PHOTOSPIDER_API ExecutionContext final {
   [[nodiscard]] bool gpu_enabled() const noexcept;
 
  private:
+  Result<ExecutionResult> execute_regions(const ExecutionPlan& plan,
+                                          ExecutionBindings bindings,
+                                          const ExecutionSink* sink,
+                                          const CancellationToken& cancellation,
+                                          const ExecutionOptions& options);
   /** @brief Opaque pools, shared waiting admission, and resource ledger. */
   struct Impl;
   /** @brief Unique local execution ownership. */

@@ -1,72 +1,99 @@
 # Region Semantics
 
-The current package has no dirty-update API, ROI execution mode, dirty-source
-lifecycle, or incremental propagation engine.
+A Value's bounds-checked Region is logical coverage in its complete descriptor,
+independent of its origin-relative storage view. S2 provides CPU regional
+execution; cross-run dirty propagation and result caches are not implemented.
 
-Every published `Value` carries one bounds-checked rank-general `Region`.
-Compiler-visible `OperationTraits` carry one closed rule:
+## Planning
 
-- `Whole`: complete logical coverage;
-- `Elementwise`: input and output coordinates correspond directly;
-- `Halo`: elementwise input demand plus a nonzero symmetric radius.
+Whole demands complete inputs. Elementwise maps matching coordinates. Halo
+expands symmetric demand and clips at the complete image boundary with checked
+arithmetic. RGBA ports require all four channels, scalars always demand whole
+{1}, and Float32Mask {H,W} ports project the image's spatial axes. Empty,
+out-of-bounds, unknown-name and partial-channel image demands fail planning,
+including channel demand propagated through a generic downstream port.
 
-Planning accepts optional bounded demands for named workflow outputs and walks
-the plan backward. `Whole` demands every complete input. `Elementwise` maps the
-exact output interval to each shape-compatible input. `Halo` expands that exact
-demand symmetrically and clips it to the input shape without overflowing
-`offset + extent + radius`. Multiple downstream demands merge to a conservative
-bounding Region. Every output/input demand participates in physical plan and
-cache identity.
+PlanningOptions retains each output name's exact Region and positive
+`tile_height`/`tile_width`, default 128x128. Changing these options replans
+optimized IR. Named Regions and geometry enter physical identity even when
+several names alias one node. Runtime bytes never enter plan identity.
 
-The current executor still evaluates complete Values; it does not crop or
-materialize a partial Value. Before transfer or callback entry it verifies the
-available Value Region covers the plan-derived input demand and passes that
-demand to the C++ callback/operation ABI v4 view. An operation callback must
-return a Value whose descriptor matches the plan, whose Region covers the
-complete descriptor, and whose layout passes ordinary Value validation.
+`ExecutionPlan::tile_plan(name, region)` derives one dependency-pruned plan
+without source analysis or a complete tile-grid allocation. Fan-out demand
+merges inside that tile; neighboring tiles may recompute overlapping halo.
+Whole, nondeterministic and side-effecting nodes are explicit whole_boundary
+steps. Their materialization remains complete and must fit the resource budget.
 
-Incremental dirty propagation is outside the active package boundary. Demand
-legality does not create workers, storage, daemon state, or a claim that
-partial execution exists.
+Numeric parameter schemas can declare finite inclusive bounds. Int64 endpoints
+are exact integers within +/- (2^53-1); Float64 endpoints are finite. A
+halo_radius_parameter references a required bounded Int64 with minimum >=1 and
+maximum <=UINT32_MAX on a Halo operation with zero fixed radius. Analyze
+validates and resolves it into copied node traits. Unbounded Float64 parameters
+retain their exact prior bit semantics.
 
-## Per-port S1 demand
+## Execution and storage
 
-OperationTraits 4 supplies an ordered input schema. Value ports retain the
-rules above. Float32Scalar ports always request whole {1}. Image ports require
-Float32 {H,W,4} with the exact linear premultiplied profile; Elementwise maps
-spatial H/W demand and Halo expands/clips only H/W. Every image demand includes
-channels {offset=0, extent=4}. Partial-channel, empty, out-of-bounds and unknown
-named demands fail planning, including partial-channel demands propagated from
-a generic downstream consumer. Each step input is a tagged `PlanStepInput` or
-`PlanWorkflowInput`; declaration references do not become scheduling tasks.
+Image paths, explicit regional demands and RegionalSource bindings use the
+regional executor. Complete generic scalar/broadcast execution keeps the same
+bounded worker executor. Ordinary execute returns each name's requested
+coverage; image collection packs that Region while preserving the complete
+logical descriptor. No request means complete output.
 
-Changing `PlanningOptions.output_regions`, `tile_height` or `tile_width` replans
-optimized IR. Tile dimensions must be positive and default to 128x128. Every
-named output retains its exact Region in physical identity, including names
-that alias one node with different requests. Runtime payloads remain excluded.
+The Run materializes Whole/effect boundaries once in topological order, then
+lazily processes output tiles in name/row/column order. Completed Whole results
+are immutable Run-local values, not a cross-run cache. References expire when
+no remaining output needs them. Tile processing is sequential at the outer
+level; independent dependency-ready branches use the fixed worker pools.
+Callbacks see exact input/output demands. Source reads and computation buffers
+use the same context budget and owned worker queue.
 
-## Lazy tile planning
+Regular Value bindings remain complete dense snapshots. RegionalSource copies
+metadata/callable per Run and fills host-provided packed region storage, with a
+separately declared scratch limit. It must return exactly the written requested
+Region. Bounded scalar parameter ports require ordinary Value bindings; other
+regional inputs may use sources. Every binding name, descriptor/facet set and
+scalar interval is validated before a source or operation callback. Pixel
+content is checked only in the region consumed by a constrained port.
 
-`ExecutionPlan::tile_plan(name, region)` derives a dependency-pruned plan for a
-nonempty subset of that name's request without analyzing the source or building
-a complete tile grid. Each tile walks demand backward independently, merging
-fan-out only inside the tile. Overlapping halos may be recomputed. A step marked
-whole_boundary (Whole rule, nondeterminism or side effects) receives complete
-coverage and must execute once per Run; #265 owns runtime retention and streaming.
-The ordinary whole executor remains the current integration path until #265.
+A source must support concurrent immutable reads and observe cooperative stop.
+Source and operation callbacks must not synchronously reenter execution on the
+same context's workers. All admitted callbacks retire before their borrowed
+source/output storage is reused. No source codec or provider-ABI extension is
+introduced.
 
-Operation parameters may declare finite inclusive numeric bounds. Int64 bounds
-must be exact integer endpoints within +/- (2^53-1); Float64 bounds are finite.
-A halo_radius_parameter must name a required bounded Int64 schema with minimum
-at least 1 and maximum no greater than UINT32_MAX, on a Halo operation with
-zero fixed radius. Analyze validates source parameters and resolves that radius
-into copied node traits before shape/demand inference. Unbounded Float64 source
-parameters retain their previous exact bit-pattern behavior.
+## Streaming and resource observations
 
-Float32Mask ports use rank-two {H,W}, no facets and finite [0,1] samples; H/W
-must match the image. Their demand projects image spatial axes, while Float32
-scalar demand remains whole {1}. Halo clipping uses logical image boundaries,
-never tile boundaries. Propagated partial-channel image demand is rejected even
-through a generic downstream port. Tile working-set bounds use regional output
-bytes plus declared scratch. `test_tile_plan` covers static bounds, edge/clipped
-halos, small tiles, fan-out, masks, Whole/effect boundaries and identity.
+`execute_stream` invokes a required synchronous ExecutionSink with borrowed
+ValueView objects. Views and pointers expire when the sink returns. A blocked
+sink prevents the next tile's source read, bounding output staging. Sink calls
+run on the execute caller thread. The caller may copy pixels into its own
+separately owned memory.
+
+Cancellation/currentness is checked before admission, at callback entry and
+completion, before and after each sink call, and after final assembly. A sink
+failure stops subsequent delivery and drains admitted work. Consumed tiles
+cannot be revoked; only final success validates the complete stream. Collected
+failure returns no partial ExecutionResult. Entry Stale precedes token/binding
+validation; after entry Cancelled precedes Stale and ordinary errors.
+
+The budget counts actual controlled source/output/scratch/intermediate/transfer/
+collector capacity once per owner. A conservative complete working set is
+reserved before work, and individual allocations retain their leases until the
+last owner retires. Source buffers and intermediate slots clear after their
+last reader. Caller-preexisting Values and source-owned external state, metadata,
+thread stacks and process RSS are outside the controlled allocation bound.
+`retained_input_bytes` reports distinct preexisting Value storage; opaque source
+state is not measured. Foreign accounting domains are not mistaken for this
+context's allocations.
+
+Diagnostics aggregate operation count/elements/timing by node/backend, report
+successful source reads/bytes, delivered tiles, active callbacks, actual peak
+and planned reservation peak. Storage peaks include collector, Whole and tile
+allocations in the same Run. Streaming has no result_digest; its sink checks
+actual pixels. Collected digests include logical coverage and storage origins.
+
+`test_tile_plan` checks demand legality and identity. `test_regional_execution`
+executes a 5x7 ROI of a logical 64 GiB image without full allocation, verifies
+9 ordered tiles and exact resource bounds, and covers concurrent snapshots,
+backpressure, source/sink failures, cancellation/stale, Whole/effect single
+execution and multiple outputs. Gaussian/composition acceptance is #266.

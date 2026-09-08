@@ -21,7 +21,7 @@ can be decoded or executed. The daemon never places internal IR on local IPC.
 `PlanCacheKey` use canonical domain-separated inputs. They exclude runtime
 allocation, timing, cancellation, ready-queue state, and daemon identity.
 They are non-security reproducibility/cache identities, not signatures,
-attestations, durable object ids, or receipts. Operation-v3 parameter schemas
+attestations, durable object ids, or receipts. Operation-v4 parameter schemas
 and validated values affect semantic identity. Float64 parameters encode the
 exact copied IEEE-754 binary64 bits in fixed little-endian order, so `+0.0`
 and `-0.0` have different semantic, optimized, plan, and cache-key identities.
@@ -75,8 +75,11 @@ coordinated migration before consuming 0.3. Status writes follow
 storage views and host output/scratch allocation. Schema 2/provider ABI 1/C++17
 remain. C++ consumers rebuild; ABI 3 and package 0.3 consumers are rejected.
 Semantic/optimizer/physical-plan/cache domains now use v4. Runtime region-origin
-addresses never enter semantic identity. The remaining S2 scheduler, resource
-and vertical work is tracked by #210/#211/#265/#266 under ADR 0017.
+addresses never enter semantic identity. #210/#211/#265 implement completion-owned
+allocation, lazy tile planning, regional sources and synchronous streaming under
+ADR 0017; the Gaussian/mask/composition vertical is tracked by #266.
+Result digest framing is `photospider.result-digest.v2`, including explicit storage origin;
+streaming has no result digest because tiles are borrowed and retired.
 
 #211 adds bounded numeric parameter records and static halo parameter names to
 v4 semantic framing (bound flag, exact binary64 endpoint bits, length-framed

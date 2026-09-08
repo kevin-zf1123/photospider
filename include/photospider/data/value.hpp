@@ -238,6 +238,28 @@ class PHOTOSPIDER_API Value final {
 };
 
 /**
+ * @brief Borrowed logical Value view with no allocation ownership.
+ * @note The referenced Value must outlive this view. Stream sinks may use it
+ * only until callback return; retaining this view or its pointers is invalid.
+ */
+class PHOTOSPIDER_API ValueView final {
+ public:
+  explicit ValueView(const Value& value) : value_(&value) {}
+  const ValueDescriptor& descriptor() const { return value_->descriptor(); }
+  const Region& region() const { return value_->region(); }
+  const StridedLayout& layout() const { return value_->layout(); }
+  const std::vector<ValueFacet>& facets() const { return value_->facets(); }
+  ByteView bytes() const { return value_->bytes(); }
+  Result<std::size_t> byte_address(
+      const std::vector<std::uint64_t>& coordinate) const {
+    return value_->byte_address(coordinate);
+  }
+
+ private:
+  const Value* value_;
+};
+
+/**
  * @brief Move-only tightly packed writable region allocated by the host.
  * @note Valid until publish/destruction; callbacks must not retain data().
  */

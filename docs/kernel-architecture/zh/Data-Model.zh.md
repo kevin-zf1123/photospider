@@ -39,7 +39,8 @@ BufferAllocator 在精确容量的 CPU 分配之前取得租约。MutableBuffer/
 验证 origin-relative coverage；view 共享所有者并收窄范围，byte_address 检查逻辑坐标。
 bytes() 返回借用 ByteView，copy_bytes() 明确复制到调用方所有的内存。存储与租约可
 晚于 allocator 销毁。test_storage 验证部分/反向视图和最后引用释放。
-全执行资源准入及惰性 tile 分别由 #210/#211/#265 追踪，存储 API 本身不代表区域执行完成。
+全执行资源准入让分配租约存活到最后一个所有者释放。惰性 tile 和逐次执行区域源使用
+同一存储；同步流式 sink 接收仅在回调内有效的借用 ValueView。
 
 ## Result 与 data definition
 
@@ -64,7 +65,9 @@ Declaration 固定 UInt8/Int64/Float64/Float32 descriptor、whole Region、零 b
 byte count B：B > 0、B - 1 <= INT64_MAX、B <= SIZE_MAX；每个存储 stride 必须适配 int64。
 通用 Value 保留已有 strided/partial-Region 行为。
 
-`ExecutionBindings` 是精确 name 对应的 `ExecutionBinding` Value vector。每个 declaration
+`ExecutionBindings` 是精确 name 对应的 `ExecutionBinding` vector，每项提供完整 Value
+或 RegionalSource。每个 Run 复制源元数据和 callable，每次 read 按精确 Region 填充宿主
+拥有的紧密存储。全部 name/metadata/scalar 在执行前检查，图像/蒙版像素只检查消费区域。每个 declaration
 包含未使用的声明都必须绑定一次。重复、缺失、多余、非法 name 和无效 Value 返回
 InvalidArgument；合法但不匹配的 type/shape/Region/layout/byte-count/facet 返回
 TypeMismatch。每次调用复制 name 和 Value metadata，共享 immutable byte ownership。

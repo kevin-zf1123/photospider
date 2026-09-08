@@ -80,7 +80,7 @@ CPU/GPU backend vocabulary、backend capability 与 static descriptor compatibil
 `BackendUnavailable`。Capability 通过后，registry 预计算唯一一份预期
 Scalar/Fixed/Preserve/Match output descriptor。Preserve 的首 input type 冲突以及 Match
 的 type/shape 冲突会在 callback entry 前返回 `TypeMismatch`。Callback 返回后复用同一
-descriptor 验证 output type、shape 与 whole Region，包括 default-invalid output。这不会
+descriptor 验证 output type、shape 与请求的 Region，包括 default-invalid output。这不会
 重复 Run 的 plan-derived demand coverage check，也不会重复 DSO adapter 的 contiguous-
 layout/facet view validation。
 
@@ -90,7 +90,8 @@ derived state；kernel 不暴露 native GPU handle 或 persistent residency regi
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
 transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v4 input
-view 会接收该精确 demand。Executor 仍 materialize complete Value。Execution context 必须使用
+view 会接收该精确 demand。图像和区域源 Run 惰性物化需求 tile，Whole/副作用边界每个 Run
+完整物化一次，参见[区域语义](Region-Semantics.zh.md)。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
 全部 named Value、diagnostic、plan/result digest 与 execute timing 组装完毕后，都会检查
 cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness recheck 期间
@@ -120,15 +121,15 @@ interval；analyze 检查所有消费 interval 的交集非空。Image consumer 
 的精确 profile 或 producer 的 image output guarantee，通用 producer 不隐式获得该保证。
 
 `execute(plan, bindings, cancellation, options)` 复制 input name 和 Value metadata，
-先检查 name multiset，再按 declaration id 检查 Value，最后检查全部直接 scalar/image
-约束，之后才允许首个 callback 或 transfer。Entry 在读取 binding/token 前将 default、
+先检查 name multiset，再按 declaration id 检查 Value，最后检查全部直接 scalar
+约束，之后才允许首个 callback 或 transfer。图像/蒙版像素仅检查消费区域，检查先于其消费 callback。Entry 在读取 binding/token 前将 default、
 stale 或 foreign-registry plan 判为 Stale。Entry 后 cancellation 优先于 Stale 和普通
 binding failure。长数值扫描周期检查 cancellation 与 graph currentness。
 Run-owned snapshot 保留到全部已准入 callback 退场；返回 Value 独立拥有 immutable
 bytes。Run 不共享可变 binding/result，也不按 plan digest 重用 output。
 
-外部输入初始 backend label 为 CPU，沿用显式 transfer/fallback 路径。保留 input bytes
-不计入 maximum_live_bytes。每个 step 的上限包含输出容量、workspace_bytes，以及
+外部输入初始 backend label 为 CPU，沿用显式 transfer/fallback 路径。调用方已有 input bytes
+不计入 maximum_live_bytes；源读取和收集/流式输出缓冲区计入预算。每个 step 的上限包含输出容量、workspace_bytes，以及
 workspace_input_multiplier（0..16）乘需求输入字节数。图像不再预留重复 sink copy。
 执行器在回调之前预留保守完整工作集，包含可能的传输；输出、复制、scratch 各自取得
 子租约。每次 invocation 的上限防止 scratch 占用其他 step 预算。临时竞争仅等待活动工作，

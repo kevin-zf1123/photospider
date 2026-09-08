@@ -46,8 +46,9 @@ while sharing ownership, and `byte_address` checks logical coordinates.
 `bytes()` returns a borrowed `ByteView`; `copy_bytes()` explicitly copies into
 caller-owned memory. Storage and its reservation may outlive the allocator.
 `test_storage` verifies partial/reversed views and last-owner lease release.
-Execution-wide resource admission and lazy tiles are tracked separately in
-#210/#211/#265; this storage API alone does not claim regional execution.
+Execution-wide resource admission retains allocation leases to the last owner.
+Lazy tiles and per-run sources use the same storage; synchronous streaming sinks
+receive a borrowed `ValueView` that expires when the callback returns.
 
 ## Results and data definitions
 
@@ -76,7 +77,11 @@ facet set. Dense byte count B is checked without allocating payload: B > 0,
 B - 1 <= INT64_MAX and B <= SIZE_MAX; every stored stride also fits int64.
 General Values retain their existing strided/partial-Region behavior.
 
-`ExecutionBindings` contains a vector of exact-name `ExecutionBinding` Values.
+`ExecutionBindings` contains exact-name `ExecutionBinding` entries, each holding
+either a complete Value or a `RegionalSource`. Source metadata/callables are
+copied per Run; each read fills host-owned packed storage for exactly the requested
+Region. All names/metadata/scalars are checked before work; image and mask
+pixels are checked only where consumed.
 Every declaration, including unused ones, is bound exactly once. Duplicate,
 missing, extra, malformed names and invalid Values fail InvalidArgument;
 valid type/shape/Region/layout/byte-count/facet mismatches fail TypeMismatch.

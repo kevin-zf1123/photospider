@@ -100,7 +100,7 @@ backends remain `BackendUnavailable`. After capability succeeds, the registry
 precomputes one expected Scalar/Fixed/Preserve/Match output descriptor.
 Preserve first-input type conflicts and Match type/shape conflicts return
 `TypeMismatch` before callback entry. The same descriptor is reused after the
-callback to validate output type, shape, and whole Region, including a
+callback to validate output type, shape, and requested Region, including a
 default-invalid output. This does not duplicate the Run's plan-derived demand
 coverage checks or the DSO adapter's contiguous-layout/facet views.
 
@@ -112,7 +112,8 @@ does not expose a native GPU handle or persistent residency registry.
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
 transfer or callback entry; callbacks and ABI v4 input views receive that exact
-demand. The executor still materializes complete Values.
+demand. Image and regional-source Runs lazily materialize only demanded tiles;
+Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
 The execution context must use the same frozen registry that produced the
 plan. Cancellation and plan currentness are checked before work, during
 completion, before result assembly, and once more after all named Values,
@@ -151,7 +152,8 @@ output guarantee. Generic producers do not implicitly acquire that guarantee.
 
 `execute(plan, bindings, cancellation, options)` snapshots input names and Value
 metadata, checks the name multiset, then Values in declaration-id order, then
-all direct scalar/image constraints before the first callback or transfer.
+all direct scalar constraints before the first callback or transfer. Image and
+mask pixels are validated only in consumed regions, before their consuming callback.
 Entry rejects default/stale/foreign-registry plans as Stale before observing
 bindings or the token. After entry, cancellation precedes Stale and ordinary
 binding failure. Long numeric scans periodically check cancellation and graph
@@ -160,7 +162,8 @@ Values own their immutable bytes independently. Runs share no mutable bindings
 or results and do not reuse output by plan digest.
 
 External inputs begin with a CPU backend label and use the existing explicit
-transfer/fallback path. Retained input bytes are outside maximum_live_bytes.
+transfer/fallback path. Caller-preexisting input bytes are outside maximum_live_bytes; source-read buffers
+and collected or streamed output buffers are inside it.
 Each step bounds output capacity plus workspace_bytes and
 workspace_input_multiplier (0..16) times demanded input bytes. Images no longer
 reserve a duplicate sink copy. The executor reserves a conservative complete

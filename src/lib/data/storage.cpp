@@ -21,8 +21,12 @@ std::size_t MutableBuffer::size() const noexcept {
 std::shared_ptr<const CpuStorage> MutableBuffer::freeze() && noexcept {
   return std::move(storage_);
 }
-BufferAllocator::BufferAllocator(Reserve reserve)
-    : reserve_(std::move(reserve)) {}
+BufferAllocator::BufferAllocator(Reserve reserve,
+                                 std::shared_ptr<const void> domain)
+    : reserve_(std::move(reserve)), domain_(std::move(domain)) {}
+bool BufferAllocator::owns(const CpuStorage& storage) const noexcept {
+  return domain_ && domain_ == storage.domain_;
+}
 Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
   if (size == 0 || size > static_cast<std::uint64_t>(INT64_MAX) ||
       size > std::numeric_limits<std::size_t>::max()) {
@@ -33,6 +37,7 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
   try {
     MutableBuffer result;
     result.storage_ = std::shared_ptr<CpuStorage>(new CpuStorage());
+    result.storage_->domain_ = domain_;
     if (reserve_) {
       auto lease = reserve_(size);
       if (!lease.ok())
