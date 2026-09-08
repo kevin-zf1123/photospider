@@ -1251,6 +1251,11 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             ErrorCode::OperationFailed,
             "operation plugin violated output sink at-most-once contract"));
       }
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V3 &&
+          output.published && !output.result.ok() &&
+          output.result.status().code == ErrorCode::ResourceExhausted) {
+        return output.result;
+      }
       if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V3 &&
           output.published) {
         if (!output.result.ok()) {

@@ -38,6 +38,16 @@ static int execute_image(void* state, const ps_operation_value_view_v3* inputs,
   memcpy(bytes, inputs[0].data, (size_t)inputs[0].byte_size);
   float factor = 0;
   memcpy(&factor, inputs[1].data, sizeof(factor));
+  if (factor == 16) {
+    /* Exercise host sink overflow without allocating a large payload. */
+    const uint64_t shape[] = {2, UINT64_MAX, 4};
+    const int accepted = sink->publish(
+        sink->context, PS_OPERATION_ELEMENT_FLOAT32_V3, shape, 3,
+        inputs[0].facets, inputs[0].facet_count, bytes, inputs[0].byte_size);
+    free(bytes);
+    return accepted ? PS_OPERATION_RESULT_SUCCESS_V3
+                    : PS_OPERATION_RESULT_FAILURE_V3;
+  }
   for (size_t offset = 0; offset < inputs[0].byte_size; offset += 16) {
     if (cancelled && cancelled(cancellation_context)) {
       free(bytes);

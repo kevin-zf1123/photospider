@@ -679,6 +679,13 @@ int plugin_boundaries() {
         PS_CHECK(s1_fixture::oracle(result.value(), second));
       }
     }
+    if (bad) {
+      auto input = s1_fixture::bindings();
+      input.inputs[1].value = s1_fixture::scalar(16);
+      const auto exhausted = execution.execute(compiled.value().plan, input);
+      PS_CHECK(!exhausted.ok());
+      PS_CHECK(exhausted.status().code == ErrorCode::ResourceExhausted);
+    }
   }
   return 0;
 }
