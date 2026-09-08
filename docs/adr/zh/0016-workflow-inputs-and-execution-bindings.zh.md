@@ -358,3 +358,7 @@ Node10 的 image.exposure_gain 接 id1、id2；node20 的 image.opacity 接 node
 
 #256 跟踪公开文档交付与 Issue/Project 结算。维护者已另行授权两个文档 PR、
 CI 通过后的合并及 #256 结算。决策接受不表示实现完成，也不自动启动 #257。
+
+## S2 修订
+
+[ADR 0017](0017-cpu-regional-execution-and-storage.zh.md) 为 S2 替换完整存储/输出、整图像素预检、ABI 3 和估算预算条款。其他 S1 语义保留；Issue 区分已接受目标与实际交付。
