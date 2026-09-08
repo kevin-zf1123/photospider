@@ -1906,7 +1906,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         if (found == diagnostics.operation_timings.end()) {
           diagnostics.operation_timings.push_back(timing);
         } else {
-          for (const auto pair :
+          for (const auto& pair :
                {std::make_pair(&found->duration_us, timing.duration_us),
                 std::make_pair(&found->invocation_count,
                                timing.invocation_count),
