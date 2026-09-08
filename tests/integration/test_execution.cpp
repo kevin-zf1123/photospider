@@ -229,7 +229,10 @@ ps::WorkflowDocument dso_operation_document(const std::string& operation) {
   ps::WorkflowDocument document;
   document.nodes = {
       ps::WorkflowNode{1U, "test.dso_source", {}, {}},
-      ps::WorkflowNode{2U, operation, {ps::WorkflowInput{1U, "value"}}, {}},
+      ps::WorkflowNode{2U,
+                       operation,
+                       {ps::WorkflowNodeOutput{1U, "value"}},
+                       {}},
   };
   document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
   return document;
@@ -1156,6 +1159,7 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
   }
   ps::OperationTraits consumer_traits;
   consumer_traits.input_count = 1U;
+  consumer_traits.input_schema.resize(1);
   consumer_traits.output_element_type = ps::ElementType::Float64;
   consumer_traits.shape_rule = ps::OperationShapeRule::PreserveFirstInput;
   consumer_traits.region_rule = rule;
@@ -1188,7 +1192,10 @@ ps::WorkflowDocument region_document() {
   ps::WorkflowDocument document;
   document.nodes = {
       ps::WorkflowNode{1U, "test.region_source", {}, {}},
-      ps::WorkflowNode{2U, "test.region", {ps::WorkflowInput{1U, "value"}}, {}},
+      ps::WorkflowNode{2U,
+                       "test.region",
+                       {ps::WorkflowNodeOutput{1U, "value"}},
+                       {}},
   };
   document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
   return document;
@@ -1363,8 +1370,8 @@ int main() {
   using ps::ValueDescriptor;
   using ps::ValueFacet;
   using ps::WorkflowDocument;
-  using ps::WorkflowInput;
   using ps::WorkflowNode;
+  using ps::WorkflowNodeOutput;
   using ps::WorkflowOutput;
 
   auto operations = make_default_operation_registry();
@@ -1415,6 +1422,7 @@ int main() {
                .ok());
   OperationTraits effect_sink_traits;
   effect_sink_traits.input_count = 1U;
+  effect_sink_traits.input_schema.resize(1);
   effect_sink_traits.deterministic = true;
   effect_sink_traits.side_effect_free = false;
   effect_sink_traits.cacheable = false;
@@ -1444,7 +1452,10 @@ int main() {
   WorkflowDocument effect_document;
   effect_document.nodes = {
       WorkflowNode{1U, "test.effect_source", {}, {}},
-      WorkflowNode{2U, "test.effect_sink", {WorkflowInput{1U, "value"}}, {}},
+      WorkflowNode{2U,
+                   "test.effect_sink",
+                   {WorkflowNodeOutput{1U, "value"}},
+                   {}},
   };
   effect_document.outputs = {WorkflowOutput{"effect", 2U, "value"}};
   GraphContext effect_graph(std::move(effect_document));
@@ -1476,12 +1487,15 @@ int main() {
     PS_CHECK(!plan_step.traits.side_effect_free);
     PS_CHECK(!plan_step.traits.cacheable);
   }
-  PS_CHECK(effect_workflow.semantic.nodes()[1U].inputs ==
-           std::vector<std::uint64_t>({1U}));
-  PS_CHECK(effect_workflow.optimized.nodes()[1U].inputs ==
-           std::vector<std::uint64_t>({1U}));
-  PS_CHECK(effect_workflow.plan.steps()[1U].input_steps ==
-           std::vector<std::size_t>({0U}));
+  PS_CHECK(std::get<WorkflowNodeOutput>(
+               effect_workflow.semantic.nodes()[1U].inputs.at(0))
+               .source_node == 1U);
+  PS_CHECK(std::get<WorkflowNodeOutput>(
+               effect_workflow.optimized.nodes()[1U].inputs.at(0))
+               .source_node == 1U);
+  PS_CHECK(
+      std::get<ps::PlanStepInput>(effect_workflow.plan.steps()[1U].inputs.at(0))
+          .step_index == 0U);
   PS_CHECK(effect_workflow.optimized.semantic_digest().value ==
            effect_workflow.semantic.digest().value);
   PS_CHECK(effect_workflow.plan.optimized_digest().value ==
@@ -1501,9 +1515,9 @@ int main() {
   ExecutionOptions serial_execution;
   serial_execution.maximum_parallelism = 1U;
   auto first_effect_result =
-      effect_execution.execute(effect_workflow.plan, {}, serial_execution);
+      effect_execution.execute(effect_workflow.plan, {}, {}, serial_execution);
   auto second_effect_result =
-      effect_execution.execute(effect_workflow.plan, {}, serial_execution);
+      effect_execution.execute(effect_workflow.plan, {}, {}, serial_execution);
   PS_CHECK(first_effect_result.ok());
   PS_CHECK(second_effect_result.ok());
   PS_CHECK(ps::test::named_scalar(first_effect_result.value(), "effect") ==
@@ -1583,7 +1597,7 @@ int main() {
       &waiting_rejection_cancellation, nullptr, nullptr, false);
   g_scheduler_failure_controller = &waiting_rejection_control;
   auto cancelled_waiting_rejection = queue_bound_execution.execute(
-      competing_gpu_workflow.plan, waiting_rejection_cancellation.token());
+      competing_gpu_workflow.plan, {}, waiting_rejection_cancellation.token());
   g_scheduler_failure_controller = nullptr;
   queue_gate.release();
   auto waiting_cpu_result = waiting_cpu_future.get();
@@ -1668,7 +1682,7 @@ int main() {
     ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
     auto queued_target_future = std::async(std::launch::async, [&] {
       return queued_attempt_execution.execute(
-          queued_target_workflow.plan, queued_target_cancellation.token());
+          queued_target_workflow.plan, {}, queued_target_cancellation.token());
     });
     const bool post_submit_observed =
         queued_attempt_gate.wait_until_post_submit_observed(
@@ -1728,7 +1742,7 @@ int main() {
   g_final_result_ready_gate = &final_cancel_gate;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto final_cancel_future = std::async(std::launch::async, [&] {
-    return final_result_execution.execute(final_cancel_workflow.plan,
+    return final_result_execution.execute(final_cancel_workflow.plan, {},
                                           final_cancel_source.token());
   });
   const bool final_cancel_ready =
@@ -1786,7 +1800,7 @@ int main() {
   g_final_result_ready_gate = &final_both_gate;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto final_both_future = std::async(std::launch::async, [&] {
-    return final_result_execution.execute(final_both_workflow.plan,
+    return final_result_execution.execute(final_both_workflow.plan, {},
                                           final_both_source.token());
   });
   const bool final_both_ready =
@@ -1867,7 +1881,7 @@ int main() {
   g_scheduler_failure_controller = &unavailable_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto cancelled_unavailable = no_gpu_execution.execute(
-      unavailable_workflow.plan, unavailable_cancellation.token());
+      unavailable_workflow.plan, {}, unavailable_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(unavailable_cancel_control.failure_observed());
@@ -1947,7 +1961,7 @@ int main() {
   g_scheduler_failure_controller = &submission_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto cancelled_submission = gpu_submission_execution.execute(
-      unavailable_workflow.plan, submission_cancellation.token());
+      unavailable_workflow.plan, {}, submission_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(submission_cancel_control.failure_observed());
@@ -2019,7 +2033,7 @@ int main() {
   g_scheduler_failure_controller = &safe_cancel_control;
   ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
   auto safe_cancelled_submission = gpu_submission_execution.execute(
-      unavailable_workflow.plan, safe_fallback_cancellation.token());
+      unavailable_workflow.plan, {}, safe_fallback_cancellation.token());
   ps::execution_testing::install_execution_test_hooks(nullptr);
   g_scheduler_failure_controller = nullptr;
   PS_CHECK(safe_cancel_control.failure_observed());
@@ -2148,7 +2162,7 @@ int main() {
     g_external_stop_race_controller = &external_stop_control;
     ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
     auto external_stop_future = std::async(std::launch::async, [&] {
-      return external_stop_execution.execute(external_stop_workflow.plan,
+      return external_stop_execution.execute(external_stop_workflow.plan, {},
                                              external_stop_cancellation.token(),
                                              ExecutionOptions{2U});
     });
@@ -2228,7 +2242,8 @@ int main() {
       compile_or_throw(&compiler, cancellable);
   CancellationSource cancellation;
   auto cancelled_future = std::async(std::launch::async, [&] {
-    return execution.execute(cancellable_workflow.plan, cancellation.token());
+    return execution.execute(cancellable_workflow.plan, {},
+                             cancellation.token());
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
   PS_CHECK(cancellation.cancel());
@@ -2252,7 +2267,7 @@ int main() {
       WorkflowNode{1U, "core.constant", {}, {{"value", 9.0}}},
       WorkflowNode{2U,
                    "core.gpu_fallback_probe",
-                   {WorkflowInput{1U, "value"}},
+                   {WorkflowNodeOutput{1U, "value"}},
                    {}},
   };
   fallback_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
@@ -2292,7 +2307,7 @@ int main() {
       WorkflowNode{1U, "test.dso_source", {}, {}},
       WorkflowNode{2U,
                    "fixture.gpu_fallback",
-                   {WorkflowInput{1U, "value"}},
+                   {WorkflowNodeOutput{1U, "value"}},
                    {}},
   };
   dso_fallback_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
@@ -2324,7 +2339,10 @@ int main() {
   WorkflowDocument dso_failure_document;
   dso_failure_document.nodes = {
       WorkflowNode{1U, "test.dso_source", {}, {}},
-      WorkflowNode{2U, "fixture.gpu_failure", {WorkflowInput{1U, "value"}}, {}},
+      WorkflowNode{2U,
+                   "fixture.gpu_failure",
+                   {WorkflowNodeOutput{1U, "value"}},
+                   {}},
   };
   dso_failure_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
   GraphContext dso_failure_graph(std::move(dso_failure_document));
@@ -2341,7 +2359,10 @@ int main() {
   WorkflowDocument dso_unknown_document;
   dso_unknown_document.nodes = {
       WorkflowNode{1U, "test.dso_source", {}, {}},
-      WorkflowNode{2U, "fixture.gpu_unknown", {WorkflowInput{1U, "value"}}, {}},
+      WorkflowNode{2U,
+                   "fixture.gpu_unknown",
+                   {WorkflowNodeOutput{1U, "value"}},
+                   {}},
   };
   dso_unknown_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
   GraphContext dso_unknown_graph(std::move(dso_unknown_document));
@@ -2360,7 +2381,7 @@ int main() {
       WorkflowNode{1U, "test.dso_source", {}, {}},
       WorkflowNode{2U,
                    "fixture.gpu_output_unavailable",
-                   {WorkflowInput{1U, "value"}},
+                   {WorkflowNodeOutput{1U, "value"}},
                    {}},
   };
   dso_output_unavailable_document.outputs = {
@@ -2387,7 +2408,7 @@ int main() {
       WorkflowNode{1U, "test.dso_source", {}, {}},
       WorkflowNode{2U,
                    "fixture.gpu_bad_output_unavailable",
-                   {WorkflowInput{1U, "value"}},
+                   {WorkflowNodeOutput{1U, "value"}},
                    {}},
   };
   dso_bad_output_unavailable_document.outputs = {
@@ -2452,7 +2473,7 @@ int main() {
       compile_or_throw(&dso_compiler, duplicate_cancel_graph, true);
   CancellationSource duplicate_cancellation;
   auto duplicate_cancel_future = std::async(std::launch::async, [&] {
-    return dso_execution.execute(duplicate_cancel_workflow.plan,
+    return dso_execution.execute(duplicate_cancel_workflow.plan, {},
                                  duplicate_cancellation.token());
   });
   const bool duplicate_callback_waiting =
@@ -2497,6 +2518,7 @@ int main() {
                .ok());
   OperationTraits facet_identity_traits;
   facet_identity_traits.input_count = 1U;
+  facet_identity_traits.input_schema.resize(1);
   facet_identity_traits.supports_gpu = true;
   facet_identity_traits.output_element_type = ElementType::UInt8;
   facet_identity_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
@@ -2515,7 +2537,10 @@ int main() {
   WorkflowDocument facet_document;
   facet_document.nodes = {
       WorkflowNode{1U, "test.facet_source", {}, {}},
-      WorkflowNode{2U, "test.facet_identity", {WorkflowInput{1U, "value"}}, {}},
+      WorkflowNode{2U,
+                   "test.facet_identity",
+                   {WorkflowNodeOutput{1U, "value"}},
+                   {}},
   };
   facet_document.outputs = {WorkflowOutput{"faceted", 2U, "value"}};
   GraphContext facet_graph(std::move(facet_document));

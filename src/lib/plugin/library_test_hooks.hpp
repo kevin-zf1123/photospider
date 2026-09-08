@@ -7,7 +7,7 @@ namespace ps::plugin_testing {
 
 /** @brief Closed native-library kind vocabulary for private lifecycle tests. */
 enum class LibraryKind : std::uint32_t {
-  /** @brief Operation ABI v2 library. */
+  /** @brief Operation ABI v3 library. */
   Operation = 1U,
   /** @brief Data-provider ABI v1 library. */
   Provider = 2U,

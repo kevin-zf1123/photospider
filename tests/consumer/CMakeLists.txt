@@ -55,8 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
+find_package(Photospider 0.2 CONFIG QUIET COMPONENTS kernel)
+if(Photospider_FOUND)
+  message(FATAL_ERROR "Photospider 0.3 must reject a 0.2 consumer")
+endif()
+
 find_package(
-  Photospider 0.2 CONFIG REQUIRED
+  Photospider 0.3 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -105,7 +110,19 @@ set_target_properties(
              C_STANDARD_REQUIRED ON
              C_EXTENSIONS OFF)
 
+# Both source packages consume only the installed public targets above.
+add_subdirectory(../../plugins/ops/rgba32f rgba32f)
+add_subdirectory(../../examples/image_vertical image_vertical)
+target_compile_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_link_options})
+target_compile_options(photospider_image_vertical PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_image_vertical PRIVATE ${_photospider_consumer_link_options})
+
 add_library(photospider_consumer_bridge SHARED pipeline_bridge.cpp)
+add_dependencies(photospider_consumer_bridge photospider_rgba32f_ops)
+target_include_directories(photospider_consumer_bridge PRIVATE ../../examples)
+target_compile_definitions(photospider_consumer_bridge PRIVATE
+  PS_IMAGE_CONSUMER_PLUGIN_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
 target_link_libraries(
   photospider_consumer_bridge PRIVATE Photospider::kernel)
 target_compile_options(
@@ -140,6 +157,8 @@ set_target_properties(
 add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_consumer>"
-  DEPENDS photospider_consumer
+  COMMAND "$<TARGET_FILE:photospider_image_vertical>"
+  COMMAND "$<TARGET_FILE:photospider_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
+  DEPENDS photospider_consumer photospider_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

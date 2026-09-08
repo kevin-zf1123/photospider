@@ -21,7 +21,7 @@ can be decoded or executed. The daemon never places internal IR on local IPC.
 `PlanCacheKey` use canonical domain-separated inputs. They exclude runtime
 allocation, timing, cancellation, ready-queue state, and daemon identity.
 They are non-security reproducibility/cache identities, not signatures,
-attestations, durable object ids, or receipts. Operation-v2 parameter schemas
+attestations, durable object ids, or receipts. Operation-v3 parameter schemas
 and validated values affect semantic identity. Float64 parameters encode the
 exact copied IEEE-754 binary64 bits in fixed little-endian order, so `+0.0`
 and `-0.0` have different semantic, optimized, plan, and cache-key identities.
@@ -46,16 +46,25 @@ rebuild; cache deletion is always valid.
 - Do not add a compatibility shim or second reader unless a separate explicit
   product decision requires it.
 
-## Accepted S1 target versions, not yet implemented
+## Implemented S1 versions
 
-[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md), following the
-accepted direction, defines accepted target package 0.3.0, WorkflowDocument schema 2,
-OperationTraits 3, v3 compiler identity domains and operation ABI 3. Provider
-ABI remains 1 with Float32 element4. ABI3 publishes identical C/C++ per-port
-constraints and rejects old operation ABI2 without an adapter. This concrete
-contract is accepted; installed headers/runtime/build requirements have
-not changed.
+[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) is implemented
+by #257: package 0.3.0, WorkflowDocument schema 2, OperationTraits 3 and operation
+ABI 3. Provider ABI remains 1 and adds Float32 element code 4. C++ consumers
+must rebuild; schema 1 and operation ABI 2 are rejected without adapters.
+`execute(plan, token, options)` becomes `execute(plan, {}, token, options)`.
+SameMinorVersion rejects a 0.2 package consumer against 0.3.
 
-Evaluate C++20 separately. #257 checks static/shared installed consumers and
-old-minor rejection. Demand-driven daemon features still require coordinated
-breaking-package maintenance. Status writes follow [Task Collaboration](Task-Collaboration.md).
+The domains are `semantic-graph-ir-v3`, `optimizer-v3-canonical-noop`,
+`physical-plan-v3` and `plan-cache-key-v3`. Canonical declarations encode id,
+name, element, shape, Region, layout and sorted facet key/version/payload.
+Ordered sources encode tag 1 for node/step and 2 for declaration. Port kinds and
+binary32 interval endpoint bits enter traits; all integer fields use uint64
+little-endian framing. Payload bytes and binding order never enter these stage
+identities. No runtime result cache is introduced.
+
+C++17 remains required. Static/shared installed consumers execute the named
+image oracle through C++ and C plugin paths and verify old-minor rejection.
+Daemon feature/wire work remains separate; its 0.2 package consumer needs a
+coordinated migration before consuming 0.3. Status writes follow
+[Task Collaboration](Task-Collaboration.md).

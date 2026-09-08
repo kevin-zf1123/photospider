@@ -39,10 +39,11 @@ inline WorkflowDocument addition_document(double left, double right) {
   document.nodes = {
       WorkflowNode{1U, "core.constant", {}, {{"value", left}}},
       WorkflowNode{2U, "core.constant", {}, {{"value", right}}},
-      WorkflowNode{3U,
-                   "math.add",
-                   {WorkflowInput{1U, "value"}, WorkflowInput{2U, "value"}},
-                   {}},
+      WorkflowNode{
+          3U,
+          "math.add",
+          {WorkflowNodeOutput{1U, "value"}, WorkflowNodeOutput{2U, "value"}},
+          {}},
   };
   document.outputs = {WorkflowOutput{"sum", 3U, "value"}};
   return document;
@@ -60,7 +61,7 @@ inline WorkflowDocument delayed_document(std::int64_t milliseconds) {
       WorkflowNode{1U, "core.constant", {}, {{"value", 7.0}}},
       WorkflowNode{2U,
                    "core.delay",
-                   {WorkflowInput{1U, "value"}},
+                   {WorkflowNodeOutput{1U, "value"}},
                    {{"milliseconds", milliseconds}}},
   };
   document.outputs = {WorkflowOutput{"result", 2U, "value"}};

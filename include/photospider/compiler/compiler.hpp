@@ -64,8 +64,8 @@ struct PHOTOSPIDER_API SemanticNode final {
   std::uint64_t id = 0;
   /** @brief Stable registered operation key. */
   std::string operation;
-  /** @brief Producer node ids in exact input order. */
-  std::vector<std::uint64_t> inputs;
+  /** @brief Tagged producer references in exact input order. */
+  std::vector<WorkflowInput> inputs;
   /** @brief Canonically ordered normalized parameters. */
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied compiler-visible operation traits. */
@@ -123,6 +123,16 @@ class PHOTOSPIDER_API SemanticGraphIR final {
     return digest_;
   }
   /**
+   * @brief Returns canonical declaration metadata sorted by id.
+   * @return Immutable vector owned by this stage, valid for its lifetime.
+   * @throws Nothing.
+   * @note Contains no runtime payload; concurrent immutable reads are safe.
+   */
+  [[nodiscard]] const std::vector<WorkflowInputDeclaration>&
+  input_declarations() const noexcept {
+    return input_declarations_;
+  }
+  /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only for a compiler-produced IR whose context is unchanged.
    * @throws Nothing.
@@ -135,6 +145,8 @@ class PHOTOSPIDER_API SemanticGraphIR final {
  private:
   friend class Compiler;
 
+  /** @brief Canonical copied input metadata, with no runtime owners. */
+  std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
   /** @brief Deterministic topologically sorted semantic nodes. */
@@ -207,6 +219,16 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
     return digest_;
   }
   /**
+   * @brief Returns canonical declaration metadata sorted by id.
+   * @return Immutable vector owned by this stage, valid for its lifetime.
+   * @throws Nothing.
+   * @note Contains no runtime payload; concurrent immutable reads are safe.
+   */
+  [[nodiscard]] const std::vector<WorkflowInputDeclaration>&
+  input_declarations() const noexcept {
+    return input_declarations_;
+  }
+  /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only when the source context still has the captured revision.
    * @throws Nothing.
@@ -219,6 +241,8 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
  private:
   friend class Compiler;
 
+  /** @brief Canonical copied input metadata, with no runtime owners. */
+  std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
   /** @brief Optimized semantic nodes. */
@@ -247,23 +271,37 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * @brief Optional bounded logical demand per named workflow output.
    *
    * Missing names default to whole-output demand. Unknown names, rank/shape
-   * mismatch, and out-of-bounds Regions fail before plan publication.
+   * mismatch, empty/out-of-bounds Regions and partial-channel image demand
+   * fail before plan publication. Changed demand replans optimized IR.
    */
   std::map<std::string, Region> output_regions;
 };
 
+/** @brief Reference to an earlier physical step. */
+struct PHOTOSPIDER_API PlanStepInput final {
+  /** @brief Earlier step index; contributes a scheduling dependency. */
+  std::size_t step_index = 0;
+};
+/** @brief Reference to canonical external declaration metadata. */
+struct PHOTOSPIDER_API PlanWorkflowInput final {
+  /** @brief In-bounds declaration index; contributes no task dependency. */
+  std::size_t declaration_index = 0;
+};
+/** @brief Tagged physical producer reference in input-port order. */
+using PlanInput = std::variant<PlanStepInput, PlanWorkflowInput>;
+
 /**
  * @brief One validated local physical plan step.
  *
- * @note `input_steps` indexes earlier plan steps only.
+ * @note `inputs` distinguishes earlier steps from external declarations.
  */
 struct PHOTOSPIDER_API PlanStep final {
   /** @brief Stable source node id. */
   std::uint64_t node_id = 0;
   /** @brief Stable operation key. */
   std::string operation;
-  /** @brief Producer plan-step indexes in exact input order. */
-  std::vector<std::size_t> input_steps;
+  /** @brief Tagged physical producers in exact input order. */
+  std::vector<PlanInput> inputs;
   /** @brief Canonically ordered source parameters. */
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied semantic traits used for validation/fallback. */
@@ -305,7 +343,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
    * @brief Returns dependency-ordered local plan steps.
    * @return Immutable borrowed step sequence owned by this plan.
    * @throws Nothing.
-   * @note Every input index refers only to an earlier step.
+   * @note Tagged step indexes refer only to earlier steps; declaration indexes
+   * refer to the canonical input_declarations() table.
    */
   [[nodiscard]] const std::vector<PlanStep>& steps() const noexcept {
     return steps_;
@@ -348,6 +387,16 @@ class PHOTOSPIDER_API ExecutionPlan final {
     return cache_key_;
   }
   /**
+   * @brief Returns canonical declaration metadata sorted by id.
+   * @return Immutable vector owned by this stage, valid for its lifetime.
+   * @throws Nothing.
+   * @note Contains no runtime payload; concurrent immutable reads are safe.
+   */
+  [[nodiscard]] const std::vector<WorkflowInputDeclaration>&
+  input_declarations() const noexcept {
+    return input_declarations_;
+  }
+  /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only when the source context still has the captured revision.
    * @throws Nothing.
@@ -361,6 +410,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
   friend class Compiler;
   friend class ExecutionContext;
 
+  /** @brief Canonical copied input metadata, with no runtime owners. */
+  std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
   /** @brief Validated dependency-ordered plan steps. */

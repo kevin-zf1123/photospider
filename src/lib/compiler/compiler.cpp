@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include "data/input_validation.hpp"
+
 namespace ps {
 namespace {
 
@@ -96,7 +98,7 @@ class DigestBuilder final {
  * @param maximum Inclusive byte limit.
  * @return True for nonempty text without ASCII control bytes.
  * @throws Nothing.
- * @note Full Unicode normalization is outside source schema version one.
+ * @note Full Unicode normalization is outside source schema validation.
  */
 bool valid_text(const std::string& value, std::size_t maximum) noexcept {
   return !value.empty() && value.size() <= maximum &&
@@ -131,6 +133,17 @@ void append_parameter(DigestBuilder* digest,
   }
 }
 
+/** @brief Appends the exact binary32 port contract as uint64 fields. */
+void append_port(DigestBuilder* digest,
+                 const OperationPortConstraint& port) noexcept {
+  digest->integer(static_cast<std::uint32_t>(port.kind));
+  std::uint32_t minimum = 0, maximum = 0;
+  std::memcpy(&minimum, &port.minimum, sizeof(minimum));
+  std::memcpy(&maximum, &port.maximum, sizeof(maximum));
+  digest->integer(minimum);
+  digest->integer(maximum);
+}
+
 /**
  * @brief Appends compiler-visible operation traits.
  * @param digest Destination builder.
@@ -141,6 +154,10 @@ void append_parameter(DigestBuilder* digest,
 void append_traits(DigestBuilder* digest,
                    const OperationTraits& traits) noexcept {
   digest->integer(traits.input_count);
+  digest->integer(traits.input_schema.size());
+  for (const auto& port : traits.input_schema)
+    append_port(digest, port);
+  append_port(digest, traits.output_schema);
   digest->integer(traits.deterministic ? 1U : 0U);
   digest->integer(traits.side_effect_free ? 1U : 0U);
   digest->integer(traits.supports_cpu ? 1U : 0U);
@@ -195,9 +212,33 @@ void append_descriptor(DigestBuilder* digest,
   }
 }
 
+/** @brief Encodes canonical declaration metadata without runtime payload. */
+void append_declarations(
+    DigestBuilder* digest,
+    const std::vector<WorkflowInputDeclaration>& declarations) noexcept {
+  digest->integer(declarations.size());
+  for (const auto& declaration : declarations) {
+    digest->integer(declaration.id);
+    digest->text(declaration.name);
+    append_descriptor(digest, declaration.descriptor);
+    append_region(digest, declaration.region);
+    digest->integer(declaration.layout.byte_offset);
+    digest->integer(declaration.layout.byte_strides.size());
+    for (auto stride : declaration.layout.byte_strides)
+      digest->integer(static_cast<std::uint64_t>(stride));
+    digest->integer(declaration.facets.size());
+    for (const auto& facet : declaration.facets) {
+      digest->text(facet.key);
+      digest->integer(facet.version);
+      digest->integer(facet.payload.size());
+      digest->bytes(facet.payload.data(), facet.payload.size());
+    }
+  }
+}
+
 /**
  * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-two semantic traits.
+ * @param traits Complete version-three semantic traits.
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
@@ -207,7 +248,7 @@ void append_descriptor(DigestBuilder* digest,
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 2U || inputs.size() != traits.input_count ||
+  if (traits.version != 3U || inputs.size() != traits.input_count ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.region_rule == OperationRegionRule::Halo &&
@@ -279,17 +320,27 @@ Result<ValueDescriptor> infer_output_descriptor(
  * @note Graph revision is excluded so equal semantics across replacements
  * match.
  */
-std::string semantic_digest(const std::vector<SemanticNode>& nodes,
-                            const std::vector<WorkflowOutput>& outputs) {
+std::string semantic_digest(
+    const std::vector<SemanticNode>& nodes,
+    const std::vector<WorkflowOutput>& outputs,
+    const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v2");
+  digest.text("semantic-graph-ir-v3");
+  append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
     digest.integer(node.id);
     digest.text(node.operation);
     digest.integer(node.inputs.size());
-    for (std::uint64_t input : node.inputs) {
-      digest.integer(input);
+    for (const WorkflowInput& input : node.inputs) {
+      if (const auto* node_source = std::get_if<WorkflowNodeOutput>(&input)) {
+        digest.integer(1);
+        digest.integer(node_source->source_node);
+        digest.text(node_source->source_port);
+      } else {
+        digest.integer(2);
+        digest.integer(std::get<WorkflowInputReference>(input).input_id);
+      }
     }
     digest.integer(node.parameters.size());
     for (const auto& parameter : node.parameters) {
@@ -317,13 +368,14 @@ std::string semantic_digest(const std::vector<SemanticNode>& nodes,
  * @throws std::bad_alloc If digest text allocation fails.
  * @note Optimizer identity is explicit even for a no-op result.
  */
-std::string optimized_digest(const std::string& semantic,
-                             const std::vector<SemanticNode>& nodes,
-                             const std::vector<WorkflowOutput>& outputs) {
+std::string optimized_digest(
+    const std::string& semantic, const std::vector<SemanticNode>& nodes,
+    const std::vector<WorkflowOutput>& outputs,
+    const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("optimizer-v2-canonical-noop");
+  digest.text("optimizer-v3-canonical-noop");
   digest.text(semantic);
-  digest.text(semantic_digest(nodes, outputs));
+  digest.text(semantic_digest(nodes, outputs, declarations));
   return digest.finish();
 }
 
@@ -336,19 +388,27 @@ std::string optimized_digest(const std::string& semantic,
  * @throws std::bad_alloc If digest text allocation fails.
  * @note Runtime availability/cancellation/timing is excluded.
  */
-std::string physical_digest(const std::string& optimized,
-                            const std::vector<PlanStep>& steps,
-                            const std::map<std::string, std::size_t>& outputs) {
+std::string physical_digest(
+    const std::string& optimized, const std::vector<PlanStep>& steps,
+    const std::map<std::string, std::size_t>& outputs,
+    const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("physical-plan-v2");
+  digest.text("physical-plan-v3");
+  append_declarations(&digest, declarations);
   digest.text(optimized);
   digest.integer(steps.size());
   for (const PlanStep& step : steps) {
     digest.integer(step.node_id);
     digest.text(step.operation);
-    digest.integer(step.input_steps.size());
-    for (std::size_t input : step.input_steps) {
-      digest.integer(input);
+    digest.integer(step.inputs.size());
+    for (const PlanInput& input : step.inputs) {
+      if (const auto* source = std::get_if<PlanStepInput>(&input)) {
+        digest.integer(1);
+        digest.integer(source->step_index);
+      } else {
+        digest.integer(2);
+        digest.integer(std::get<PlanWorkflowInput>(input).declaration_index);
+      }
     }
     digest.integer(static_cast<std::uint32_t>(step.backend));
     digest.integer(step.planned_bytes);
@@ -382,7 +442,7 @@ std::string physical_digest(const std::string& optimized,
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v2");
+  digest.text("plan-cache-key-v3");
   digest.text(plan);
   return digest.finish();
 }
@@ -433,12 +493,15 @@ Result<Region> merge_regions(const Region& left, const Region& right,
 Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape) {
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
   const Status output_status = output_demand.validate(output_shape);
   if (!output_status.ok() || output_demand.empty()) {
     return Result<Region>(Status::failure(
         ErrorCode::InvalidArgument,
         "physical planning output demand is empty or out of bounds"));
+  }
+  if (kind == OperationPortKind::Float32Scalar) {
+    return Result<Region>(Region::whole(input_shape));
   }
   switch (traits.region_rule) {
     case OperationRegionRule::Whole:
@@ -463,6 +526,11 @@ Result<Region> derive_input_demand(
   const std::uint64_t radius = traits.halo_radius;
   for (std::size_t axis = 0U; axis < input_shape.size(); ++axis) {
     const RegionDimension& requested = output_demand.dimensions()[axis];
+    if (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        axis == 2) {
+      dimensions.push_back(RegionDimension{0, 4});
+      continue;
+    }
     const std::uint64_t start =
         requested.offset > radius ? requested.offset - radius : 0U;
     const std::uint64_t requested_end = requested.offset + requested.extent;
@@ -514,12 +582,37 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
   }
   const WorkflowDocument& document = snapshot.document();
-  if (document.schema_version != 1U || document.nodes.empty() ||
+  if (document.schema_version != 2U || document.nodes.empty() ||
       document.nodes.size() > 65536U || document.outputs.empty() ||
-      document.outputs.size() > 4096U) {
+      document.outputs.size() > 4096U || document.inputs.size() > 4096U) {
     return Result<SemanticGraphIR>(
         Status::failure(ErrorCode::InvalidArgument,
                         "WorkflowDocument version/count bounds are invalid"));
+  }
+
+  input_internal::Float32Environment float_environment;
+  if (!float_environment.active())
+    return Result<SemanticGraphIR>(Status::failure(
+        ErrorCode::OperationFailed, "cannot set binary32 environment"));
+  auto declarations = document.inputs;
+  std::sort(declarations.begin(), declarations.end(),
+            [](const auto& a, const auto& b) { return a.id < b.id; });
+  std::map<std::uint64_t, std::size_t> declaration_by_id;
+  std::set<std::string> input_names;
+  for (std::size_t i = 0; i < declarations.size(); ++i) {
+    const auto& declaration = declarations[i];
+    if (declaration.id == 0 ||
+        !input_internal::valid_input_name(declaration.name) ||
+        !declaration_by_id.emplace(declaration.id, i).second ||
+        !input_names.insert(declaration.name).second) {
+      return Result<SemanticGraphIR>(Status::failure(
+          ErrorCode::InvalidArgument, "invalid or duplicate input id/name"));
+    }
+  }
+  for (auto& declaration : declarations) {
+    const auto status = input_internal::validate_declaration(&declaration);
+    if (!status.ok())
+      return Result<SemanticGraphIR>(status);
   }
 
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
@@ -555,18 +648,26 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!parameter_status.ok()) {
       return Result<SemanticGraphIR>(parameter_status);
     }
-    indegree.emplace(node.id, node.inputs.size());
+    indegree.emplace(node.id, 0);
   }
 
   for (const WorkflowNode& node : document.nodes) {
     for (const WorkflowInput& input : node.inputs) {
-      if (input.source_node == 0U || input.source_port != "value" ||
-          nodes_by_id.count(input.source_node) == 0U) {
+      if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
+        if (source->source_node == 0 || source->source_port != "value" ||
+            nodes_by_id.count(source->source_node) == 0) {
+          return Result<SemanticGraphIR>(
+              Status::failure(ErrorCode::NotFound,
+                              "workflow input references a missing producer"));
+        }
+        dependents[source->source_node].push_back(node.id);
+        ++indegree[node.id];
+      } else if (declaration_by_id.count(
+                     std::get<WorkflowInputReference>(input).input_id) == 0) {
         return Result<SemanticGraphIR>(
             Status::failure(ErrorCode::NotFound,
-                            "workflow input references a missing producer"));
+                            "workflow input references a missing declaration"));
       }
-      dependents[input.source_node].push_back(node.id);
     }
   }
 
@@ -592,6 +693,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
 
   SemanticGraphIR semantic;
   semantic.revision_ = snapshot.revision();
+  semantic.input_declarations_ = declarations;
+  std::map<std::uint64_t, OperationPortKind> output_kinds;
+  std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::unordered_map<std::uint64_t, ValueDescriptor> output_by_node;
   output_by_node.reserve(document.nodes.size());
@@ -611,21 +715,64 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     node.inputs.reserve(source.inputs.size());
     std::vector<ValueDescriptor> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
-    for (const WorkflowInput& input : source.inputs) {
-      node.inputs.push_back(input.source_node);
-      const auto descriptor = output_by_node.find(input.source_node);
-      if (descriptor == output_by_node.end()) {
-        return Result<SemanticGraphIR>(Status::failure(
-            ErrorCode::Internal,
-            "typed lowering could not find a producer descriptor"));
+    for (std::size_t position = 0; position < source.inputs.size();
+         ++position) {
+      const auto& input = source.inputs[position];
+      const auto& port = node.traits.input_schema[position];
+      node.inputs.push_back(input);
+      ValueDescriptor descriptor;
+      std::vector<ValueFacet> facets;
+      if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
+        if (port.kind == OperationPortKind::Float32Scalar) {
+          return Result<SemanticGraphIR>(Status::failure(
+              ErrorCode::InvalidArgument,
+              "bounded scalar port requires a direct workflow input"));
+        }
+        descriptor = output_by_node.at(producer->source_node);
+        if (output_kinds.at(producer->source_node) ==
+            OperationPortKind::LinearPremultipliedRgbaFloat32) {
+          facets.push_back(input_internal::image_facet());
+        }
+      } else {
+        const auto id = std::get<WorkflowInputReference>(input).input_id;
+        const auto& declaration = declarations[declaration_by_id.at(id)];
+        descriptor = declaration.descriptor;
+        facets = declaration.facets;
+        if (port.kind == OperationPortKind::Float32Scalar) {
+          auto inserted = scalar_intervals.emplace(
+              id, std::make_pair(port.minimum, port.maximum));
+          auto& interval = inserted.first->second;
+          interval.first = std::max(interval.first, port.minimum);
+          interval.second = std::min(interval.second, port.maximum);
+          if (interval.first > interval.second) {
+            return Result<SemanticGraphIR>(Status::failure(
+                ErrorCode::InvalidArgument,
+                "scalar consumer intervals have empty intersection"));
+          }
+        }
       }
-      input_descriptors.push_back(descriptor->second);
+      const auto status =
+          input_internal::validate_port_metadata(port, descriptor, facets);
+      if (!status.ok())
+        return Result<SemanticGraphIR>(status);
+      input_descriptors.push_back(std::move(descriptor));
     }
     auto output = infer_output_descriptor(node.traits, input_descriptors);
     if (!output.ok()) {
       return Result<SemanticGraphIR>(output.status());
     }
     node.output_descriptor = output.take_value();
+    for (std::size_t i = 0; i < input_descriptors.size(); ++i) {
+      if (node.traits.input_schema[i].kind !=
+              OperationPortKind::Float32Scalar &&
+          node.traits.region_rule != OperationRegionRule::Whole &&
+          input_descriptors[i].shape != node.output_descriptor.shape) {
+        return Result<SemanticGraphIR>(
+            Status::failure(ErrorCode::TypeMismatch,
+                            "spatial port input/output shapes differ"));
+      }
+    }
+    output_kinds.emplace(node.id, node.traits.output_schema.kind);
     output_by_node.emplace(node.id, node.output_descriptor);
     semantic.nodes_.push_back(std::move(node));
     for (std::uint64_t dependent : dependents[id]) {
@@ -649,7 +796,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
             [](const WorkflowOutput& left, const WorkflowOutput& right) {
               return left.name < right.name;
             });
-  semantic.digest_.value = semantic_digest(semantic.nodes_, semantic.outputs_);
+  semantic.digest_.value = semantic_digest(semantic.nodes_, semantic.outputs_,
+                                           semantic.input_declarations_);
   semantic.current_check_ = [snapshot]() noexcept {
     return snapshot.current();
   };
@@ -678,10 +826,12 @@ Result<OptimizedGraphIR> Compiler::optimize(
   OptimizedGraphIR optimized;
   optimized.revision_ = semantic.revision();
   optimized.nodes_ = semantic.nodes();
+  optimized.input_declarations_ = semantic.input_declarations();
   optimized.outputs_ = semantic.outputs();
   optimized.semantic_digest_ = semantic.digest();
-  optimized.digest_.value = optimized_digest(
-      optimized.semantic_digest_.value, optimized.nodes_, optimized.outputs_);
+  optimized.digest_.value =
+      optimized_digest(optimized.semantic_digest_.value, optimized.nodes_,
+                       optimized.outputs_, optimized.input_declarations_);
   optimized.current_check_ = semantic.current_check_;
   optimized.operation_registry_ = operations_;
   if (!optimized.current()) {
@@ -709,6 +859,10 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   step_by_node.reserve(optimized.nodes().size());
   ExecutionPlan plan;
   plan.revision_ = optimized.revision();
+  plan.input_declarations_ = optimized.input_declarations();
+  std::map<std::uint64_t, std::size_t> declaration_by_id;
+  for (std::size_t i = 0; i < plan.input_declarations_.size(); ++i)
+    declaration_by_id.emplace(plan.input_declarations_[i].id, i);
   plan.steps_.reserve(optimized.nodes().size());
   for (const SemanticNode& node : optimized.nodes()) {
     PlanStep step;
@@ -725,15 +879,32 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                           "operation has no required CPU implementation"));
     }
     step.planned_bytes = node.traits.estimated_bytes;
-    step.input_steps.reserve(node.inputs.size());
-    for (std::uint64_t input : node.inputs) {
-      const auto iterator = step_by_node.find(input);
-      if (iterator == step_by_node.end() ||
-          iterator->second >= plan.steps_.size()) {
+    if (node.traits.output_schema.kind ==
+        OperationPortKind::LinearPremultipliedRgbaFloat32) {
+      auto dense = input_internal::dense_metadata(step.output_descriptor);
+      if (!dense.ok())
+        return Result<ExecutionPlan>(dense.status());
+      if (dense.value().bytes > UINT64_MAX / 2) {
         return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::Internal, "optimized IR input order is invalid"));
+            ErrorCode::ResourceExhausted, "image modeled 2B size overflows"));
       }
-      step.input_steps.push_back(iterator->second);
+      step.planned_bytes =
+          std::max(step.planned_bytes, dense.value().bytes * 2);
+    }
+    step.inputs.reserve(node.inputs.size());
+    for (const WorkflowInput& input : node.inputs) {
+      if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
+        const auto iterator = step_by_node.find(source->source_node);
+        if (iterator == step_by_node.end() ||
+            iterator->second >= plan.steps_.size()) {
+          return Result<ExecutionPlan>(Status::failure(
+              ErrorCode::Internal, "optimized IR input order is invalid"));
+        }
+        step.inputs.push_back(PlanStepInput{iterator->second});
+      } else {
+        step.inputs.push_back(PlanWorkflowInput{declaration_by_id.at(
+            std::get<WorkflowInputReference>(input).input_id)});
+      }
     }
     step_by_node.emplace(node.id, plan.steps_.size());
     plan.steps_.push_back(std::move(step));
@@ -772,6 +943,13 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             "planned workflow output Region is empty or out of bounds"));
       }
       demand = requested->second;
+      if (step.traits.output_schema.kind ==
+              OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+          !input_internal::image_demand(demand)) {
+        return Result<ExecutionPlan>(
+            Status::failure(ErrorCode::InvalidArgument,
+                            "image demand must include all four channels"));
+      }
     }
     if (demand_by_step[output.second].has_value()) {
       auto merged = merge_regions(demand_by_step[output.second].value(), demand,
@@ -791,22 +969,35 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
     }
     step.output_demand = demand_by_step[step_index].value();
-    step.input_demands.reserve(step.input_steps.size());
-    for (std::size_t input_position = 0U;
-         input_position < step.input_steps.size(); ++input_position) {
-      const std::size_t producer_index = step.input_steps[input_position];
-      const PlanStep& producer = plan.steps_[producer_index];
-      auto input_demand = derive_input_demand(step.traits, step.output_demand,
-                                              step.output_descriptor.shape,
-                                              producer.output_descriptor.shape);
-      if (!input_demand.ok()) {
+    if (step.traits.output_schema.kind ==
+            OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        !input_internal::image_demand(step.output_demand)) {
+      return Result<ExecutionPlan>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "propagated image demand must include all channels"));
+    }
+    step.input_demands.reserve(step.inputs.size());
+    for (std::size_t input_position = 0U; input_position < step.inputs.size();
+         ++input_position) {
+      const auto& input = step.inputs[input_position];
+      const auto* producer = std::get_if<PlanStepInput>(&input);
+      const auto& descriptor =
+          producer ? plan.steps_[producer->step_index].output_descriptor
+                   : plan.input_declarations_[std::get<PlanWorkflowInput>(input)
+                                                  .declaration_index]
+                         .descriptor;
+      auto input_demand = derive_input_demand(
+          step.traits, step.output_demand, step.output_descriptor.shape,
+          descriptor.shape, step.traits.input_schema[input_position].kind);
+      if (!input_demand.ok())
         return Result<ExecutionPlan>(input_demand.status());
-      }
       step.input_demands.push_back(input_demand.value());
+      if (!producer)
+        continue;
+      const std::size_t producer_index = producer->step_index;
       if (demand_by_step[producer_index].has_value()) {
         auto merged = merge_regions(demand_by_step[producer_index].value(),
-                                    input_demand.value(),
-                                    producer.output_descriptor.shape);
+                                    input_demand.value(), descriptor.shape);
         if (!merged.ok()) {
           return Result<ExecutionPlan>(merged.status());
         }
@@ -818,7 +1009,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   }
   plan.optimized_digest_ = optimized.digest();
   plan.digest_.value =
-      physical_digest(plan.optimized_digest_.value, plan.steps_, plan.outputs_);
+      physical_digest(plan.optimized_digest_.value, plan.steps_, plan.outputs_,
+                      plan.input_declarations_);
   plan.cache_key_.value = plan_cache_key(plan.digest_.value);
   plan.current_check_ = optimized.current_check_;
   plan.operation_registry_ = operations_;

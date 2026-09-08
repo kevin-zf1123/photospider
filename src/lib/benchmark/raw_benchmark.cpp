@@ -100,6 +100,7 @@ RawBenchmarkRunner::RawBenchmarkRunner(Compiler* compiler,
 Result<RawBenchmarkReport> RawBenchmarkRunner::run(
     const GraphContext& graph, const RawBenchmarkOptions& options,
     const CancellationToken& cancellation) const {
+  const ExecutionBindings bindings = options.bindings;
   if (options.iterations == 0U) {
     return Result<RawBenchmarkReport>(
         Status::failure(ErrorCode::InvalidArgument,
@@ -149,8 +150,8 @@ Result<RawBenchmarkReport> RawBenchmarkRunner::run(
 #endif
     sample.compilation = workflow.diagnostics;
 
-    auto executed =
-        execution_->execute(workflow.plan, cancellation, options.execution);
+    auto executed = execution_->execute(workflow.plan, bindings, cancellation,
+                                        options.execution);
     if (!executed.ok()) {
       if (executed.status().code == ErrorCode::Cancelled) {
         return Result<RawBenchmarkReport>(executed.status());

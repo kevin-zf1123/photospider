@@ -46,6 +46,12 @@ struct PHOTOSPIDER_API RawBenchmarkOptions final {
   PlanningOptions planning;
   /** @brief Local execution parallelism repeated for every sample. */
   ExecutionOptions execution;
+  /**
+   * @brief Immutable per-sample input bindings, copied once on runner entry.
+   * @note Caller must not mutate options during run; sample compilation remains
+   * independent and runtime bytes never specialize plan identity.
+   */
+  ExecutionBindings bindings;
   /** @brief Optional correctness observation run after successful execution. */
   CorrectnessOracle correctness_oracle;
   /**

@@ -23,6 +23,7 @@ maintainer operational view。Checked-in
 8. [Cache 模型](Cache-Model.zh.md)
 9. [Region 语义](Region-Semantics.zh.md)
 10. [Plugin ABI](Plugin-ABI.zh.md)
+11. [图像算子](Image-Operations.zh.md)
 
 Kernel 是 session-agnostic 的，不拥有 daemon Job、network service、durable work、
 process supervisor、policy DSO、plugin security product、durable result object 或

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "photospider/core/export.hpp"
+#include "photospider/data/value.hpp"
 
 namespace ps {
 
@@ -26,11 +27,46 @@ using ParameterValue = std::variant<std::int64_t, double, bool, std::string>;
  * @note The current compiler models one output Value per node; `source_port`
  * remains explicit for document evolution and must currently be `value`.
  */
-struct PHOTOSPIDER_API WorkflowInput final {
+struct PHOTOSPIDER_API WorkflowNodeOutput final {
   /** @brief Nonzero producer node id. */
   std::uint64_t source_node = 0;
   /** @brief Producer output port, currently `value`. */
   std::string source_port = "value";
+};
+
+/** @brief Tagged reference to a nonzero document-local declaration id. */
+struct PHOTOSPIDER_API WorkflowInputReference final {
+  /** @brief Input id, independent of the node id namespace. */
+  std::uint64_t input_id = 0;
+};
+
+/** @brief Ordered producer reference; tags distinguish nodes from inputs. */
+using WorkflowInput = std::variant<WorkflowNodeOutput, WorkflowInputReference>;
+
+/**
+ * @brief Compile-time input metadata copied into immutable compiler stages.
+ * @note Analyze validates 0..4096 unique nonzero ids and exact case-sensitive
+ * printable ASCII names (1..128 bytes, no spaces). Every declaration is bound
+ * once per Run, including unused declarations. No payload or owner is retained
+ * in IR/plans. Metadata changes require recompilation; order is nonsemantic.
+ * Malformed declaration metadata is InvalidArgument at analyze; checked dense
+ * products/strides/host sizes and bounded payload exhaustion are
+ * ResourceExhausted. B must be positive, B-1 <= INT64_MAX and B <= SIZE_MAX.
+ * Caller mutation must finish before GraphContext copies the document.
+ */
+struct PHOTOSPIDER_API WorkflowInputDeclaration final {
+  /** @brief Nonzero id, canonical declaration ordering key. */
+  std::uint64_t id = 0;
+  /** @brief Exact unique binding name. */
+  std::string name;
+  /** @brief Fixed element type and nonzero rank-1..8 shape. */
+  ValueDescriptor descriptor;
+  /** @brief Required whole descriptor coverage. */
+  Region region;
+  /** @brief Zero offset and checked positive canonical row-major strides. */
+  StridedLayout layout;
+  /** @brief Exact closed facet set using Value bounds, canonicalized by key. */
+  std::vector<ValueFacet> facets;
 };
 
 /**
@@ -70,8 +106,11 @@ struct PHOTOSPIDER_API WorkflowOutput final {
  * identity.
  */
 struct PHOTOSPIDER_API WorkflowDocument final {
-  /** @brief Positive source schema version; current writer emits 1. */
-  std::uint32_t schema_version = 1;
+  /** @brief Positive source schema version; current writer emits 2. */
+  std::uint32_t schema_version = 2;
+  /** @brief Required runtime inputs; canonical semantic order is declaration
+   * id. */
+  std::vector<WorkflowInputDeclaration> inputs;
   /** @brief Source nodes; semantic ordering is derived during analysis. */
   std::vector<WorkflowNode> nodes;
   /** @brief Named values requested from successful execution. */

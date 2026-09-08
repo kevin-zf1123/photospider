@@ -943,6 +943,7 @@ int verify_cpp_invocation_prevalidation() {
 
   OperationTraits preserve_traits;
   preserve_traits.input_count = 1U;
+  preserve_traits.input_schema.resize(1);
   preserve_traits.output_element_type = ElementType::Float64;
   preserve_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   PS_CHECK(
@@ -960,6 +961,7 @@ int verify_cpp_invocation_prevalidation() {
 
   OperationTraits match_traits;
   match_traits.input_count = 2U;
+  match_traits.input_schema.resize(2);
   match_traits.output_element_type = ElementType::Float64;
   match_traits.shape_rule = OperationShapeRule::MatchAllInputs;
   PS_CHECK(
@@ -1158,8 +1160,8 @@ int main() {
   using ps::ValueDescriptor;
   using ps::ValueFacet;
   using ps::WorkflowDocument;
-  using ps::WorkflowInput;
   using ps::WorkflowNode;
+  using ps::WorkflowNodeOutput;
   using ps::WorkflowOutput;
 
   PS_CHECK(verify_immutable_callback_handles() == 0);
@@ -1389,7 +1391,7 @@ int main() {
     auto traits = registry.find_traits("fixture.double");
     PS_CHECK(traits.ok());
     PS_CHECK(traits.value().input_count == 1U);
-    PS_CHECK(traits.value().version == 2U);
+    PS_CHECK(traits.value().version == 3U);
     PS_CHECK(traits.value().parameter_schema.size() == 1U);
     PS_CHECK(traits.value().parameter_schema.front().key == "scale");
     PS_CHECK(traits.value().parameter_schema.front().type ==
@@ -1403,7 +1405,7 @@ int main() {
         WorkflowNode{1U, "fixture.source", {}, {}},
         WorkflowNode{2U,
                      "fixture.double",
-                     {WorkflowInput{1U, "value"}},
+                     {WorkflowNodeOutput{1U, "value"}},
                      {{"scale", 2.0}}},
     };
     plugin_document.outputs = {WorkflowOutput{"value", 2U, "value"}};

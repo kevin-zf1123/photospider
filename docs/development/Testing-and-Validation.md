@@ -60,7 +60,7 @@ Kernel tests cover:
   cleanup;
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
-  including operation-v2 typed parameter schemas, demand views, and
+  including operation-v3 typed parameter schemas, demand views, and
   deterministic owner-allocation failure with exact destroy/close counts. A
   copy-aware C++ embedding callable is registered by rvalue, armed to reject
   later copies, then survives freeze/invoke and a valid DSO load into an
@@ -228,7 +228,7 @@ exact library paths, and callback outputs. Malformed local IPC frames belong to
 the daemon repository.
 
 The long-lived manual target `photospider_operation_contract_ir_fuzz` exercises
-operation-v2 trait/parameter vocabulary and compiler validation. It is
+operation-v3 trait/parameter vocabulary and compiler validation. It is
 `EXCLUDE_FROM_ALL`, is never registered with CTest, and is enabled explicitly
 with `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` under Clang. Seed inputs are
 maintained in `tests/fuzz/corpus/operation_contract_ir/`; caller-selected crash
@@ -286,3 +286,45 @@ cmake --install <clean-build> --prefix <fresh-prefix>
 Format changed C/C++ with ClangFormat 21 and lint the same files with
 `python3 -m cpplint`. Record unsupported sanitizer/GPU platforms as limitations
 rather than successful gates.
+
+## Workflow bindings and binary32 image acceptance
+
+`test_bindings` runs the ADR0016 `s1-rgba32f-exposure-opacity-v1` fixture through
+public compilation/execution, comparing descriptors and exact A/B bytes. It
+covers sequential/concurrent independent snapshots, scalar/image preflight,
+declaration and binding mismatches, tagged identity, normalized demands, Halo,
+cancellation/stale publication, resource bounds, malformed C port tables and
+provider ABI1 Float32. Floating-environment regressions exercise inherited
+rounding and denormal modes; generic Value bit patterns remain unrestricted.
+
+```sh
+cmake --build build/issue257-static --target test_bindings test_compiler test_value test_execution test_plugin_registry test_operation_contract_ir_seeds -j 8
+ctest --test-dir build/issue257-static -R '^test_(bindings|compiler|value|execution|plugin_registry|operation_contract_ir_seeds|installed_consumer)$' --output-on-failure
+```
+
+The installed consumer builds its own ABI3 C image plugin, runs the same oracle
+through C++ and C paths, and requires a 0.2 package request to fail against 0.3.
+Configure a separate build with `-DBUILD_SHARED_LIBS=ON`, build `photospider` and
+`test_bindings`, then run `-R '^test_(bindings|installed_consumer)$'` there to
+validate shared exports and installed use. These commands are scoped to the
+changed API/ABI; they do not request sanitizer or platform release matrices.
+
+## Reusable image vertical acceptance
+
+`test_image_vertical` and `test_image_vertical_plugin` execute the same public
+A/B fixture with built-ins and the `plugins/ops/rgba32f` source package. They
+validate one compilation, two runtime bindings, exact output demand, complete
+named results, two CPU callbacks, the independent CPU oracle, and raw benchmark
+identity/backend/transfer/resource/correctness fields. The example and shared
+fixture live in `examples/image_vertical` and use only public APIs.
+
+```sh
+cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
+ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
+```
+
+Repeat these targets and regex with `build/issue257-shared`. The installed
+consumer builds the same operation package using the installed operation SDK
+and runs the same example through built-ins and the DSO, retaining the shared
+bridge check. See [Image operations](../kernel-architecture/Image-Operations.md)
+for the exact fixture, standalone build, and report semantics.

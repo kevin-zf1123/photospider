@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "data/input_validation.hpp"
+
 namespace ps {
 namespace {
 
@@ -83,54 +85,6 @@ Result<std::pair<std::int64_t, std::int64_t>> addressed_range(
       std::make_pair(minimum, maximum));
 }
 
-/**
- * @brief Validates and canonicalizes bounded Value facets.
- * @param facets Candidate owned facet records.
- * @return Success or a precise invalid-argument/resource failure.
- * @throws std::bad_alloc If canonical key tracking or diagnostics allocate.
- * @note At most 64 records, 64 KiB each, and 1 MiB total payload are accepted.
- */
-Status validate_facets(std::vector<ValueFacet>* facets) {
-  constexpr std::size_t kMaximumFacetCount = 64U;
-  constexpr std::size_t kMaximumKeyBytes = 256U;
-  constexpr std::size_t kMaximumFacetPayloadBytes = 64U * 1024U;
-  constexpr std::size_t kMaximumTotalPayloadBytes = 1024U * 1024U;
-  if (!facets || facets->size() > kMaximumFacetCount) {
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "Value facet count exceeds 64");
-  }
-  std::set<std::string> keys;
-  std::size_t total_payload = 0U;
-  for (const ValueFacet& facet : *facets) {
-    if (facet.key.empty() || facet.key.size() > kMaximumKeyBytes ||
-        facet.version == 0U) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "Value facet key/version is invalid");
-    }
-    for (unsigned char byte : facet.key) {
-      if (byte < 0x21U || byte > 0x7eU) {
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "Value facet key is not printable ASCII");
-      }
-    }
-    if (!keys.insert(facet.key).second) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "Value facet keys must be unique");
-    }
-    if (facet.payload.size() > kMaximumFacetPayloadBytes ||
-        facet.payload.size() > kMaximumTotalPayloadBytes - total_payload) {
-      return Status::failure(ErrorCode::ResourceExhausted,
-                             "Value facet payload bounds are exceeded");
-    }
-    total_payload += facet.payload.size();
-  }
-  std::sort(facets->begin(), facets->end(),
-            [](const ValueFacet& left, const ValueFacet& right) {
-              return left.key < right.key;
-            });
-  return Status::success();
-}
-
 }  // namespace
 
 /**
@@ -173,7 +127,7 @@ Result<Value> Value::create(ValueDescriptor descriptor, Region region,
     return Result<Value>(Status::failure(
         ErrorCode::InvalidArgument, "Value layout addresses outside buffer"));
   }
-  const Status facet_status = validate_facets(&facets);
+  const Status facet_status = input_internal::canonicalize_facets(&facets);
   if (!facet_status.ok()) {
     return Result<Value>(facet_status);
   }
@@ -288,6 +242,8 @@ std::size_t Value::element_size(ElementType type) {
   switch (type) {
     case ElementType::UInt8:
       return 1U;
+    case ElementType::Float32:
+      return 4U;
     case ElementType::Int64:
     case ElementType::Float64:
       return 8U;

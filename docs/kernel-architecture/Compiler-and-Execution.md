@@ -111,7 +111,7 @@ does not expose a native GPU handle or persistent residency registry.
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v2 input views receive that exact
+transfer or callback entry; callbacks and ABI v3 input views receive that exact
 demand. The executor still materializes complete Values.
 The execution context must use the same frozen registry that produced the
 plan. Cancellation and plan currentness are checked before work, during
@@ -123,7 +123,7 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v2 callback can distinguish ordinary failure from backend
+An operation ABI v3 callback can distinguish ordinary failure from backend
 unavailability without changing its C signature or descriptor layout. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits
@@ -139,10 +139,29 @@ attempt timing/outcome, selected backend, transfer count/bytes, peak modeled
 bytes, fallback reason, plan digest, and result digest. They are observations,
 not verdicts or release evidence.
 
-## Accepted S1 target, implementation pending
+## Runtime input lowering and execution
 
-The development direction and Float32 goal are accepted.
-[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) specifies the
-revised image/scalar/per-port design and operation ABI v3, now Accepted.
-Implementation facts above remain unchanged; new elements and bindings are
-not implemented. #256 tracks decision delivery; #257 owns implementation.
+Schema 2 validates every input declaration before semantic publication and
+copies its canonical table through semantic IR, optimized IR and plan. Ordered
+sources retain node/declaration tags. Scalar ports require direct Float32 {1}
+workflow inputs, exact empty facets and finite inclusive intervals; all
+consuming intervals must have nonempty intersection during analyze. Image
+consumers require the exact profile from a declaration or a producer's image
+output guarantee. Generic producers do not implicitly acquire that guarantee.
+
+`execute(plan, bindings, cancellation, options)` snapshots input names and Value
+metadata, checks the name multiset, then Values in declaration-id order, then
+all direct scalar/image constraints before the first callback or transfer.
+Entry rejects default/stale/foreign-registry plans as Stale before observing
+bindings or the token. After entry, cancellation precedes Stale and ordinary
+binding failure. Long numeric scans periodically check cancellation and graph
+currentness. Run-owned snapshots survive all admitted callbacks; returned
+Values own their immutable bytes independently. Runs share no mutable bindings
+or results and do not reuse output by plan digest.
+
+External inputs begin with a CPU backend label and use the existing explicit
+transfer/fallback path. Retained input bytes are outside maximum_live_bytes.
+Image-output steps reserve max(estimated_bytes, 2*B) with checked multiplication;
+this models callback output and sink copy, not total process RAM. Generic Value
+outputs retain estimated-byte semantics. RawBenchmarkOptions.bindings is copied
+once on entry and supplied to each independently compiled sample.

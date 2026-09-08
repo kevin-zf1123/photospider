@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.2.0
+  VERSION 0.3.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -66,15 +66,28 @@ find_package(Threads REQUIRED)
 
 set(
   PHOTOSPIDER_KERNEL_SOURCES
+  plugins/ops/image_operations.cpp
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
   src/lib/data/value.cpp
+  src/lib/data/input_validation.cpp
   src/lib/execution/execution.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
   src/lib/plugin/operation_registry.cpp
   src/lib/plugin/utf8_validation.cpp)
+# S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  set_source_files_properties(plugins/ops/image_operations.cpp
+    src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+    src/lib/plugin/operation_registry.cpp PROPERTIES
+    COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
+elseif(MSVC)
+  set_source_files_properties(plugins/ops/image_operations.cpp
+    src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+    src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
+endif()
 add_library(photospider ${PHOTOSPIDER_KERNEL_SOURCES})
 add_library(Photospider::kernel ALIAS photospider)
 
@@ -191,7 +204,13 @@ install(
         ${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Photospider)
 
+add_subdirectory(plugins/ops/rgba32f EXCLUDE_FROM_ALL)
+add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
+
 if(BUILD_TESTING)
+  add_test(NAME test_image_vertical COMMAND photospider_image_vertical)
+  add_test(NAME test_image_vertical_plugin COMMAND photospider_image_vertical
+    "$<TARGET_FILE:photospider_rgba32f_ops>")
   add_library(
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
     ${PHOTOSPIDER_KERNEL_SOURCES}
@@ -313,6 +332,28 @@ if(BUILD_TESTING)
   photospider_add_provider_utf8_fixture(
     data_provider_invalid_utf8_overlong_fixture 1)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
+
+  photospider_add_test(test_bindings Photospider::kernel tests/integration/test_bindings.cpp)
+  target_include_directories(test_bindings PRIVATE examples)
+  add_dependencies(test_bindings photospider_image_vertical)
+  add_library(operation_bad_image_fixture MODULE tests/fixtures/operation_bad_image_fixture.c)
+  target_link_libraries(operation_bad_image_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(operation_bad_image_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  add_library(data_provider_float32_fixture MODULE tests/fixtures/data_provider_float32_fixture.c)
+  target_link_libraries(data_provider_float32_fixture PRIVATE Photospider::data_provider_sdk)
+  target_compile_definitions(data_provider_float32_fixture PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD)
+  add_dependencies(test_bindings photospider_rgba32f_ops operation_bad_image_fixture data_provider_float32_fixture)
+  target_compile_definitions(test_bindings PRIVATE
+    PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>"
+    PS_BAD_IMAGE_FIXTURE_PATH="$<TARGET_FILE:operation_bad_image_fixture>"
+    PS_FLOAT32_PROVIDER_PATH="$<TARGET_FILE:data_provider_float32_fixture>")
+  foreach(_port_case RANGE 1 8)
+    add_library(operation_bad_port_${_port_case} MODULE tests/fixtures/operation_bad_port_fixture.cpp)
+    target_link_libraries(operation_bad_port_${_port_case} PRIVATE Photospider::operation_sdk)
+    target_compile_definitions(operation_bad_port_${_port_case} PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD PS_BAD_PORT_CASE=${_port_case})
+    add_dependencies(test_bindings operation_bad_port_${_port_case})
+    target_compile_definitions(test_bindings PRIVATE PS_BAD_PORT_${_port_case}="$<TARGET_FILE:operation_bad_port_${_port_case}>")
+  endforeach()
 
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
   photospider_add_test(

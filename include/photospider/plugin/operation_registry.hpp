@@ -79,6 +79,35 @@ struct PHOTOSPIDER_API OperationParameterSpec final {
   bool required = true;
 };
 
+/** @brief Closed input/output semantic port vocabulary. */
+enum class OperationPortKind : std::uint32_t {
+  /** @brief Generic Value with ordinary shape and Region rules. */
+  Value = 1,
+  /** @brief Direct whole Float32 {1} declaration with no facets. */
+  Float32Scalar = 2,
+  /** @brief Dense Float32 {H,W,4} with exact linear premultiplied profile. */
+  LinearPremultipliedRgbaFloat32 = 3,
+};
+/**
+ * @brief Copied compile-time port contract included in stage identities.
+ * @note Scalars require a direct Float32 {1} workflow input, no facets and a
+ * finite inclusive interval. Other kinds require positive-zero bound bits.
+ * Image ports require dense Float32 HWC RGBA and the exact photospider.image
+ * v1 payload rgba;linear-srgb;premultiplied;hwc (34 ASCII bytes, no NUL).
+ * RGB is finite/nonnegative; alpha is finite in [0,1], and alpha zero requires
+ * RGB zero. HDR RGB and signed zeros are accepted without normalization.
+ * Registration validates combinations; image outputs preserve an image first
+ * input, while scalar outputs and computed bounded scalar inputs are invalid.
+ */
+struct PHOTOSPIDER_API OperationPortConstraint final {
+  /** @brief Closed port kind; scalar output is unsupported. */
+  OperationPortKind kind = OperationPortKind::Value;
+  /** @brief Finite inclusive binary32 lower bound for scalar ports. */
+  float minimum = 0.0F;
+  /** @brief Finite inclusive binary32 upper bound for scalar ports. */
+  float maximum = 0.0F;
+};
+
 /**
  * @brief Immutable compiler-visible facts for one operation implementation.
  *
@@ -100,11 +129,13 @@ struct PHOTOSPIDER_API OperationTraits final {
   /**
    * @brief Estimated peak invocation bytes for resource admission.
    * @note This modeled bound is independent of a fixed shape's dense logical
-   * byte product and must describe the callback's actual materialization.
+   * byte product for generic outputs. Image outputs reserve at least twice
+   * the checked dense byte count, including callback output and host copy;
+   * retained inputs and complete process memory are outside this model.
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 2U;
+  std::uint32_t version = 3U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -123,6 +154,10 @@ struct PHOTOSPIDER_API OperationTraits final {
    * layout, including a zero-stride broadcast whose dense product overflows.
    */
   std::vector<std::uint64_t> fixed_output_shape;
+  /** @brief Exactly input_count ordered constraints, at most 1024. */
+  std::vector<OperationPortConstraint> input_schema;
+  /** @brief Value or image guarantee; image preserves the first image input. */
+  OperationPortConstraint output_schema;
 };
 
 /**
@@ -255,7 +290,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v2 carries no output strides.
+   * must be densely representable because ABI v3 carries no output strides.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);
@@ -293,8 +328,8 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @return Complete Value; `InvalidArgument` for a default input Value,
    * unknown backend, or malformed counts/demands/parameters;
    * `BackendUnavailable` for a known unsupported backend; `TypeMismatch` for
-   * Preserve/Match input incompatibility or invalid callback output; or the
-   * callback's typed failure.
+   * Preserve/Match input incompatibility or invalid generic callback output; or
+   * the callback's typed failure.
    * @throws std::bad_alloc Only for process resource exhaustion before a
    * recoverable result can be constructed.
    * @note Validation preserves lookup, count, demand, parameter, cancellation,
@@ -304,6 +339,11 @@ class PHOTOSPIDER_API OperationRegistry final {
    * incompatible Preserve/Match invocation cannot run user or DSO code.
    * Callback exceptions other than bad_alloc become `OperationFailed`; a
    * standard exception with a null diagnostic becomes an empty message.
+   * Image/scalar ports additionally validate exact dense metadata, facets,
+   * finite scalar intervals and premultiplied pixel domains before callback
+   * entry. Malformed computed image outputs are OperationFailed; explicit
+   * cancellation/resource failures keep their categories. Image scopes save
+   * and restore the thread floating environment for binary32 semantics.
    * Lookup copies only an immutable owning handle under the registry mutex;
    * callback copy/execution never runs there, and a DSO lease remains alive
    * through callback completion.
@@ -320,6 +360,19 @@ class PHOTOSPIDER_API OperationRegistry final {
   [[nodiscard]] std::vector<std::string> keys() const;
 
  private:
+  friend class ExecutionContext;
+  /**
+   * @brief Internal Run entry with periodic graph-currentness observation.
+   * @param key Registered key.
+   * @param invocation Immutable callback inputs and cancellation.
+   * @param current Empty for direct embedding calls; otherwise Run currentness.
+   * @return The public invoke result with Cancelled/Stale scan interruption.
+   * @throws std::bad_alloc Under the same rules as invoke.
+   * @note The probe is never retained in registry or compiled stage state.
+   */
+  [[nodiscard]] Result<Value> invoke_current(
+      const std::string& key, const OperationInvocation& invocation,
+      const std::function<bool()>& current) const;
   /** @brief Opaque synchronized registry and DSO ownership state. */
   struct Impl;
   /** @brief Unique private state. */
@@ -329,7 +382,7 @@ class PHOTOSPIDER_API OperationRegistry final {
 /**
  * @brief Creates the maintained built-in operation set and freezes it.
  * @return Shared read-only registry containing constant, identity, add, and
- * delay operations.
+ * delay, image exposure-gain, and image opacity operations.
  * @throws std::bad_alloc If construction fails.
  * @note The caller may instead assemble a custom registry before freezing.
  */

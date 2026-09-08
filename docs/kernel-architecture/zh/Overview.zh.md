@@ -24,7 +24,7 @@ plan、runtime Value 与 daemon identity 相互分离。
 | compiler | fail-closed parameter validation、typed IR、conservative no-op optimization、demand-aware local plan、typed digest/key |
 | execution | bounded CPU pool、optional GPU callback lane、private Run、cancellation、byte ledger、raw diagnostic |
 | data | dense immutable `Value`、rank-general `Region`、`StridedLayout` |
-| plugin | exact operation ABI v2/data-definition ABI v1、typed parameter schema、demand-aware callback 与 startup-frozen registry |
+| plugin | exact operation ABI v3/data-definition ABI v1、typed parameter schema、demand-aware callback 与 startup-frozen registry |
 | benchmark | raw compile/plan/execute observation，加 named correctness oracle 或显式 unchecked 状态；execution cancellation 会中止完整 run 且不发布 report |
 
 CPU execution 是必需能力。Optional GPU support 是 configured local callback lane，只为声明

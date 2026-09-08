@@ -14,7 +14,7 @@ stable keys, never callbacks, DSO handles, runtime allocations, or daemon ids.
 
 The current dense `Value` contains:
 
-- `ValueDescriptor`: `UInt8`, `Int64`, or `Float64` plus rank-1-to-8 nonzero
+- `ValueDescriptor`: `UInt8`, `Int64`, `Float64`, or `Float32` plus rank-1-to-8 nonzero
   shape;
 - one rank-matching logical `Region`;
 - `StridedLayout`: byte offset and one signed byte stride per axis;
@@ -51,10 +51,28 @@ the platform loader; malformed paths are `InvalidArgument`, while a valid path
 that cannot be loaded is `NotFound`. It does not construct Values or provide
 storage.
 
-## Accepted S1 target, implementation pending
+## Workflow inputs and binding snapshots
 
-The development direction and Float32 goal are accepted.
-[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) specifies the
-revised image/scalar/per-port design and operation ABI v3, now Accepted.
-Implementation facts above remain unchanged; new elements and bindings are
-not implemented. #256 tracks decision delivery; #257 owns implementation.
+Schema 2 adds `WorkflowInputDeclaration` and tagged `WorkflowInput` sources:
+`WorkflowNodeOutput` or `WorkflowInputReference`. Node ids and declaration ids
+have independent namespaces. Declarations are unique by nonzero id and exact
+1..128-byte printable ASCII name without spaces, bounded by 4096 and copied in
+id order through `input_declarations()` on every compiler stage.
+
+Each declaration fixes a UInt8/Int64/Float64/Float32 descriptor, whole Region,
+zero byte offset, positive canonical row-major strides and an exact closed
+facet set. Dense byte count B is checked without allocating payload: B > 0,
+B - 1 <= INT64_MAX and B <= SIZE_MAX; every stored stride also fits int64.
+General Values retain their existing strided/partial-Region behavior.
+
+`ExecutionBindings` contains a vector of exact-name `ExecutionBinding` Values.
+Every declaration, including unused ones, is bound exactly once. Duplicate,
+missing, extra, malformed names and invalid Values fail InvalidArgument;
+valid type/shape/Region/layout/byte-count/facet mismatches fail TypeMismatch.
+Names and Value metadata are copied per call; byte ownership is immutable and
+shared. Plans never retain bindings or payload addresses. Independent snapshots
+can execute one current plan repeatedly or concurrently.
+
+Float32 uses element code 4 and preserves all IEEE binary32 bit patterns in a
+generic Value. Image/scalar port constraints add their own finite domain checks;
+see [Image operations](Image-Operations.md) and [ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md).
