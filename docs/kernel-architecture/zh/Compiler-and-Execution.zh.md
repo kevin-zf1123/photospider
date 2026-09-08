@@ -38,7 +38,7 @@ runtime-only weak identity；它不进入 digest/serialization。
 ## Execution
 
 `ExecutionContext` 拥有固定 CPU pool、optional single-worker GPU callback lane、每个 lane
-一个 deterministic FIFO、frozen operation registry 与 modeled-byte ledger。两个 FIFO 对尚未
+一个 deterministic FIFO、frozen operation registry 与 共享受控缓冲区预算。两个 FIFO 对尚未
 开始的 callback 共享 single nonblocking `maximum_queued_tasks` admission。Worker 在进入
 callback 前释放 move-only admission token，因此 running callback 不占 waiting bound；
 rejection、exception 与 shutdown drop path 会把 token 恰好释放一次。`execute` 创建一个
@@ -63,7 +63,7 @@ FIFO successor 排在其后。Successor 完成证明目标 callback 已完成 ab
 GPU callback 仍被 gate 阻塞，目标 future 必须继续保持未完成。
 
 从任一 backend FIFO pop 的每个 callback 都会进入 Run mutex，并在复制 dependency、
-transfer Value、取得 modeled-byte admission 或调用 operation 前，使用同一个 no-throw
+transfer Value、取得 已预留的缓冲区分配 或调用 operation 前，使用同一个 no-throw
 external-stop observation。若 failure 已存在或刚被选中，该 worker 会通过 abandonment
 path 精确退役自己的唯一 in-flight slot。Direct CPU work、GPU work 与 GPU-to-CPU fallback
 都会汇入这一 queued-attempt admission cutoff；observation 本身绝不退役 slot，
@@ -89,7 +89,7 @@ layout/facet view validation。
 derived state；kernel 不暴露 native GPU handle 或 persistent residency registry。
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
-transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v3 input
+transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v4 input
 view 会接收该精确 demand。Executor 仍 materialize complete Value。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
 全部 named Value、diagnostic、plan/result digest 与 execute timing 组装完毕后，都会检查
@@ -98,7 +98,7 @@ cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness 
 linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
 与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
-Operation ABI v3 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
+Operation ABI v4 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
 result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
 上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
@@ -108,7 +108,7 @@ nonzero callback result 会让 Run 失败，不产生 CPU attempt。
 ## Diagnostic
 
 Raw diagnostic 包含 compile-stage duration、execute duration、operation attempt
-timing/outcome、selected backend、transfer count/bytes、peak modeled bytes、fallback reason、
+timing/outcome、selected backend、transfer count/bytes、实际分配峰值、fallback reason、
 plan digest 与 result digest。它们是 observation，不是 verdict 或 release evidence。
 
 ## Runtime input 降级与执行
@@ -128,7 +128,15 @@ Run-owned snapshot 保留到全部已准入 callback 退场；返回 Value 独�
 bytes。Run 不共享可变 binding/result，也不按 plan digest 重用 output。
 
 外部输入初始 backend label 为 CPU，沿用显式 transfer/fallback 路径。保留 input bytes
-不计入 maximum_live_bytes。Image-output step 在检查乘法溢出后预留
-max(estimated_bytes, 2*B)，表示 callback output 与 sink copy 的模型，并非进程 RAM 上限。
-通用 Value output 保留 estimated-byte 语义。RawBenchmarkOptions.bindings 在入口复制
-一次，并传给每个独立编译的 sample。
+不计入 maximum_live_bytes。每个 step 的上限包含输出容量、workspace_bytes，以及
+workspace_input_multiplier（0..16）乘需求输入字节数。图像不再预留重复 sink copy。
+执行器在回调之前预留保守完整工作集，包含可能的传输；输出、复制、scratch 各自取得
+子租约。每次 invocation 的上限防止 scratch 占用其他 step 预算。临时竞争仅等待活动工作，
+同时检查取消/currentness；外部结果保留导致容量不足时失败。
+
+fan-out/重复边逐个计数。回调局部输入先于完成信号释放；非命名输出在最后 reader 完成后
+清空 producer 槽位。共享存储只有一个租约。返回 Value 可晚于 Run/ExecutionContext 销毁，
+完成时退回未用预留，最后一个结果所有者销毁时退回保留容量。诊断区分 planned_peak_bytes、
+实际 peak_live_bytes、retained_input_bytes 和 peak_active_tasks；元数据/栈/RSS 不计入。
+test_memory_liveness 验证 gated fan-out、跨 context 生命周期、预算恢复及精确/少一字节
+workspace 上限。RawBenchmarkOptions.bindings 在入口复制一次，供每个独立编译 sample 使用。

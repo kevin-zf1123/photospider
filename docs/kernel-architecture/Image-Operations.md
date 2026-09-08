@@ -25,9 +25,10 @@ are not source parameters and do not change compiler identities.
 These operations are deterministic, side-effect-free, cacheable, PreserveFirstInput
 and Elementwise. Image input demand equals requested spatial output demand with
 all four channels; scalar demand is always whole {1}. Smaller demand still
-returns the complete dense image. Each image step models at least twice its
-output byte count for callback output and host copy. This is not a total
-input/intermediate/process memory bound.
+returns the complete dense image. Each image step reserves its output bytes through the host allocator; no
+second sink copy is needed. The complete Run reservation includes retained
+intermediates and scratch. Caller-preexisting inputs and process RSS are
+outside the controlled-buffer bound.
 
 Multiplication rounds each stage to IEEE binary32 nearest, ties to even, with
 gradual underflow. Host schema/numeric validation and image callback scopes
@@ -39,9 +40,9 @@ Bound pixel/scalar domain errors fail InvalidArgument before any callback.
 ## Reusable operation package and executable example
 
 [`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
-maintained ABI3 C module `photospider_rgba32f_ops` using only
+maintained ABI4 C module `photospider_rgba32f_ops` using only
 `Photospider::operation_sdk`. It implements the same two operations and profile
-as the built-ins above, with strict floating-point compilation. The ABI3 host
+as the built-ins above, with strict floating-point compilation. The ABI4 host
 validates ports and establishes nearest/gradual-underflow arithmetic before
 entry. The callback owns its temporary output buffer until the synchronous
 sink copies it, then frees it on success, rejection, or cancellation. Load this
@@ -61,7 +62,7 @@ that calculation against the frozen table, and compares the complete named
 [`photospider_image_vertical`](../../examples/image_vertical/main.cpp) compiles
 once and executes A/B with that same plan. Each run requires two successful CPU
 callbacks (nodes 10,20), unchanged plan identity, the expected distinct result
-digests, zero transfers/bytes/fallbacks, and peak 128 modeled bytes. Both image
+digests, zero transfers/bytes/fallbacks, and peak 128 actual allocated bytes. Both image
 input demands and step output demands are offsets {0,1,0}/extents {1,1,4};
 scalar demand stays whole {1}, and the result remains the complete {2,2,4} image.
 The executable prints named input/output Values, descriptor/Region/layout/facets,

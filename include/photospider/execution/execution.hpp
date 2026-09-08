@@ -30,7 +30,7 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
    * callbacks do not consume this ExecutionContext-wide bound.
    */
   std::uint32_t maximum_queued_tasks = 1024;
-  /** @brief Maximum concurrently reserved modeled bytes. */
+  /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
 };
 
@@ -94,8 +94,14 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint64_t transfer_count = 0;
   /** @brief Sum of copied input bytes for explicit transfers. */
   std::uint64_t transfer_bytes = 0;
-  /** @brief Peak modeled bytes reserved by the shared local ledger. */
+  /** @brief Peak actual controlled buffer bytes allocated by this Run. */
   std::uint64_t peak_live_bytes = 0;
+  /** @brief Conservative complete working-set reservation for this Run. */
+  std::uint64_t planned_peak_bytes = 0;
+  /** @brief Caller-preexisting immutable input capacity outside the budget. */
+  std::uint64_t retained_input_bytes = 0;
+  /** @brief Maximum admitted plan callbacks, bounded by maximum_parallelism. */
+  std::uint32_t peak_active_tasks = 0;
   /** @brief Human-readable CPU fallback reasons in occurrence order. */
   std::vector<std::string> fallback_reasons;
   /** @brief Raw physical callback attempts. */
@@ -194,11 +200,14 @@ class PHOTOSPIDER_API ExecutionContext final {
    * or cancellation are read. After entry, observed cancellation precedes
    * stale graph state and ordinary failure. Concurrent calls may reuse a plan
    * with independent bindings; plan/options references must remain immutable
-   * and valid. Input retention is outside modeled maximum_live_bytes.
-   * After every completion and after complete final result/digest/timing
-   * assembly, publication rechecks cancellation before plan currentness under
-   * the Run mutex. Passing that last check is the sole success-publication
-   * linearization point; rejected local output is discarded.
+   * and valid. Caller-preexisting input retention is outside
+   * maximum_live_bytes; controlled output/scratch/intermediate/transfer buffers
+   * are charged until their last owner retires. Returned Values may outlive
+   * this context. After every completion and after complete final
+   * result/digest/timing assembly, publication rechecks cancellation before
+   * plan currentness under the Run mutex. Passing that last check is the sole
+   * success-publication linearization point; rejected local output is
+   * discarded.
    */
   [[nodiscard]] Result<ExecutionResult> execute(
       const ExecutionPlan& plan, ExecutionBindings bindings = {},

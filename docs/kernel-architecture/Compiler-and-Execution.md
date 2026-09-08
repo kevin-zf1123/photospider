@@ -14,9 +14,9 @@ topological order plus `SemanticGraphDigest`.
 Fixed inference validates a logical nonzero rank-1..8 descriptor and does not
 require its dense element or byte product to fit. A C++ embedding operation may
 materialize that descriptor as a valid strided or zero-stride broadcast Value;
-the plan records the independently declared `estimated_bytes`, so modeled
-admission and peak diagnostics reflect actual callback materialization rather
-than an implicit dense allocation. Explicit `Region::element_count()` remains
+the plan uses the declared `estimated_bytes` for a non-densely-representable
+output, with at least one element of capacity. Actual allocations must fit
+the declared bound; no dense allocation is inferred for that case. Explicit `Region::element_count()` remains
 checked and may still return overflow for the same multi-dimensional logical
 shape. A stride-free C DSO Fixed descriptor is separately required to be
 densely representable at load: its checked uint64 contiguous products must
@@ -47,7 +47,7 @@ frozen operation registry; it is excluded from digests and serialization.
 
 `ExecutionContext` owns a fixed CPU pool, an optional one-worker GPU callback
 lane, one deterministic FIFO per lane, a frozen operation registry, and a
-modeled-byte ledger. Both FIFOs share the single nonblocking
+shared controlled-buffer budget. Both FIFOs share the single nonblocking
 `maximum_queued_tasks` admission for callbacks that have not started. A worker
 releases the move-only admission token before entering the callback, so running
 callbacks do not occupy the waiting bound; rejection, exception, and shutdown
@@ -79,7 +79,7 @@ independent GPU callback is gate-held.
 
 Every callback popped from either backend FIFO enters the Run mutex and uses
 that same no-throw external-stop observation before copying dependencies,
-transferring Values, acquiring modeled bytes, or invoking the operation. An
+transferring Values, allocating reserved buffers, or invoking the operation. An
 existing or newly selected failure makes that worker retire exactly its own
 in-flight slot through the abandonment path. Direct CPU work, GPU work, and a
 GPU-to-CPU fallback all converge on this queued-attempt admission cutoff; the
@@ -111,7 +111,7 @@ does not expose a native GPU handle or persistent residency registry.
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v3 input views receive that exact
+transfer or callback entry; callbacks and ABI v4 input views receive that exact
 demand. The executor still materializes complete Values.
 The execution context must use the same frozen registry that produced the
 plan. Cancellation and plan currentness are checked before work, during
@@ -123,7 +123,7 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v3 callback can distinguish ordinary failure from backend
+An operation ABI v4 callback can distinguish ordinary failure from backend
 unavailability without changing its C signature or descriptor layout. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits
@@ -135,7 +135,7 @@ the Run without a CPU attempt.
 ## Diagnostics
 
 Raw diagnostics include compile-stage duration, execute duration, operation
-attempt timing/outcome, selected backend, transfer count/bytes, peak modeled
+attempt timing/outcome, selected backend, transfer count/bytes, peak allocated
 bytes, fallback reason, plan digest, and result digest. They are observations,
 not verdicts or release evidence.
 
@@ -161,7 +161,23 @@ or results and do not reuse output by plan digest.
 
 External inputs begin with a CPU backend label and use the existing explicit
 transfer/fallback path. Retained input bytes are outside maximum_live_bytes.
-Image-output steps reserve max(estimated_bytes, 2*B) with checked multiplication;
-this models callback output and sink copy, not total process RAM. Generic Value
-outputs retain estimated-byte semantics. RawBenchmarkOptions.bindings is copied
-once on entry and supplied to each independently compiled sample.
+Each step bounds output capacity plus workspace_bytes and
+workspace_input_multiplier (0..16) times demanded input bytes. Images no longer
+reserve a duplicate sink copy. The executor reserves a conservative complete
+working set before callbacks, including possible transfers, then each output,
+copy and scratch allocation obtains a sublease. Per-invocation limits prevent
+scratch from consuming another step's reserved capacity. Temporary competition
+waits only for active work, observes cancellation/currentness, and fails when
+externally retained results leave insufficient capacity.
+
+Fan-out/repeated edges count every reader. Callback-local inputs retire before
+completion; producer slots clear after their last reader completes unless they
+are named outputs. Shared storage has one lease. Returned Values retain their
+allocation after the Run or ExecutionContext ends. Completion returns unused
+reservation capacity; final owner destruction releases retained capacity.
+Diagnostics distinguish planned_peak_bytes, actual peak_live_bytes,
+retained_input_bytes and peak_active_tasks. Metadata/stacks/process RSS are not
+part of the payload budget. `test_memory_liveness` exercises gated fan-out,
+post-context results, budget recovery and exact/one-byte-short workspace limits.
+RawBenchmarkOptions.bindings is copied once on entry and supplied to each
+independently compiled sample.

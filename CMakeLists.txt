@@ -356,6 +356,7 @@ if(BUILD_TESTING)
     target_compile_definitions(test_bindings PRIVATE PS_BAD_PORT_${_port_case}="$<TARGET_FILE:operation_bad_port_${_port_case}>")
   endforeach()
 
+  photospider_add_test(test_memory_liveness Photospider::kernel tests/integration/test_memory_liveness.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
   photospider_add_test(

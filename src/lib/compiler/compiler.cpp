@@ -164,6 +164,8 @@ void append_traits(DigestBuilder* digest,
   digest->integer(traits.supports_gpu ? 1U : 0U);
   digest->integer(traits.allows_cpu_fallback ? 1U : 0U);
   digest->integer(traits.estimated_bytes);
+  digest->integer(traits.workspace_bytes);
+  digest->integer(traits.workspace_input_multiplier);
   digest->integer(traits.version);
   digest->integer(traits.cacheable ? 1U : 0U);
   digest->integer(static_cast<std::uint32_t>(traits.output_element_type));
@@ -878,19 +880,16 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
           Status::failure(ErrorCode::BackendUnavailable,
                           "operation has no required CPU implementation"));
     }
-    step.planned_bytes = node.traits.estimated_bytes;
-    if (node.traits.output_schema.kind ==
-        OperationPortKind::LinearPremultipliedRgbaFloat32) {
-      auto dense = input_internal::dense_metadata(step.output_descriptor);
-      if (!dense.ok())
-        return Result<ExecutionPlan>(dense.status());
-      if (dense.value().bytes > UINT64_MAX / 2) {
-        return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::ResourceExhausted, "image modeled 2B size overflows"));
-      }
-      step.planned_bytes =
-          std::max(step.planned_bytes, dense.value().bytes * 2);
-    }
+    auto dense_output = input_internal::dense_metadata(step.output_descriptor);
+    if (!dense_output.ok() &&
+        node.traits.output_schema.kind ==
+            OperationPortKind::LinearPremultipliedRgbaFloat32)
+      return Result<ExecutionPlan>(dense_output.status());
+    step.planned_bytes = std::max(
+        node.traits.estimated_bytes,
+        dense_output.ok() ? dense_output.value().bytes
+                          : static_cast<std::uint64_t>(Value::element_size(
+                                step.output_descriptor.element_type)));
     step.inputs.reserve(node.inputs.size());
     for (const WorkflowInput& input : node.inputs) {
       if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
@@ -1006,6 +1005,36 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         demand_by_step[producer_index] = input_demand.take_value();
       }
     }
+  }
+  std::uint64_t complete_working_set = 0;
+  for (auto& step : plan.steps_) {
+    std::uint64_t workspace = step.traits.workspace_bytes;
+    for (std::size_t i = 0; i < step.inputs.size(); ++i) {
+      if (step.traits.workspace_input_multiplier == 0)
+        break;
+      const auto* producer = std::get_if<PlanStepInput>(&step.inputs[i]);
+      const auto& descriptor =
+          producer ? plan.steps_[producer->step_index].output_descriptor
+                   : plan.input_declarations_[std::get<PlanWorkflowInput>(
+                                                  step.inputs[i])
+                                                  .declaration_index]
+                         .descriptor;
+      auto count = step.input_demands[i].element_count();
+      const auto width = Value::element_size(descriptor.element_type);
+      const auto factor = width * step.traits.workspace_input_multiplier;
+      if (!count.ok() || count.value() > (UINT64_MAX - workspace) / factor)
+        return Result<ExecutionPlan>(Status::failure(
+            ErrorCode::ResourceExhausted, "workspace byte bound overflows"));
+      workspace += count.value() * factor;
+    }
+    if (workspace > UINT64_MAX - step.planned_bytes)
+      return Result<ExecutionPlan>(Status::failure(
+          ErrorCode::ResourceExhausted, "step working set overflows"));
+    step.planned_bytes += workspace;
+    if (step.planned_bytes > UINT64_MAX - complete_working_set)
+      return Result<ExecutionPlan>(Status::failure(
+          ErrorCode::ResourceExhausted, "complete working set overflows"));
+    complete_working_set += step.planned_bytes;
   }
   plan.optimized_digest_ = optimized.digest();
   plan.digest_.value =
