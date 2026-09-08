@@ -15,6 +15,11 @@
 
 namespace ps::execution_internal {
 class MemoryReservation;
+/** @brief Per-Run observations shared by collector, Whole boundaries and tiles.
+ */
+struct MemoryObservation final {
+  std::uint64_t live = 0, peak = 0, reserved = 0, peak_reserved = 0;
+};
 
 /** @brief Shared payload budget; retained results may outlive the context. */
 class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
@@ -24,7 +29,13 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
       throw std::invalid_argument("memory budget must be positive");
   }
   Result<std::shared_ptr<MemoryReservation>> reserve(
-      std::uint64_t bytes, const std::function<ErrorCode()>& stop = {});
+      std::uint64_t bytes, const std::function<ErrorCode()>& stop = {},
+      std::shared_ptr<MemoryObservation> observation = {});
+  std::pair<std::uint64_t, std::uint64_t> peaks(
+      const std::shared_ptr<MemoryObservation>& observation) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {observation->peak, observation->peak_reserved};
+  }
   std::uint64_t live() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return live_;
@@ -67,29 +78,32 @@ class MemoryReservation final
     };
     auto self = shared_from_this();
     auto local = std::make_shared<Local>();
-    return BufferAllocator([self, local, limit](std::uint64_t bytes) {
-      auto lease = std::make_shared<Lease>();
-      lease->local = local;
-      {
-        std::lock_guard<std::mutex> lock(local->mutex);
-        if (bytes > limit - local->used)
-          return Result<std::shared_ptr<void>>(
-              Status::failure(ErrorCode::ResourceExhausted,
-                              "invocation exceeds declared workspace"));
-        local->used += bytes;
-        lease->bytes = bytes;
-      }
-      auto allocation = self->allocate(bytes);
-      if (!allocation.ok())
-        return Result<std::shared_ptr<void>>(allocation.status());
-      lease->allocation = allocation.take_value();
-      return Result<std::shared_ptr<void>>(std::move(lease));
-    });
+    return BufferAllocator(
+        [self, local, limit](std::uint64_t bytes) {
+          auto lease = std::make_shared<Lease>();
+          lease->local = local;
+          {
+            std::lock_guard<std::mutex> lock(local->mutex);
+            if (bytes > limit - local->used)
+              return Result<std::shared_ptr<void>>(
+                  Status::failure(ErrorCode::ResourceExhausted,
+                                  "invocation exceeds declared workspace"));
+            local->used += bytes;
+            lease->bytes = bytes;
+          }
+          auto allocation = self->allocate(bytes);
+          if (!allocation.ok())
+            return Result<std::shared_ptr<void>>(allocation.status());
+          lease->allocation = allocation.take_value();
+          return Result<std::shared_ptr<void>>(std::move(lease));
+        },
+        budget_);
   }
   void seal() {
     std::lock_guard<std::mutex> lock(budget_->mutex_);
     if (!sealed_ && admitted_) {
       budget_->reserved_ -= capacity_ - used_;
+      observation_->reserved -= capacity_ - used_;
       capacity_ = used_;
       sealed_ = true;
       --budget_->active_;
@@ -113,9 +127,11 @@ class MemoryReservation final
       std::lock_guard<std::mutex> lock(owner->budget_->mutex_);
       owner->used_ -= bytes;
       owner->budget_->live_ -= bytes;
+      owner->observation_->live -= bytes;
       if (owner->sealed_) {
         owner->capacity_ -= bytes;
         owner->budget_->reserved_ -= bytes;
+        owner->observation_->reserved -= bytes;
         owner->budget_->changed_.notify_all();
       }
     }
@@ -133,11 +149,14 @@ class MemoryReservation final
                           "operation exceeds reserved working set"));
     used_ += bytes;
     budget_->live_ += bytes;
+    observation_->live += bytes;
+    observation_->peak = std::max(observation_->peak, observation_->live);
     peak_ = std::max(peak_, used_);
     lease->bytes = bytes;
     return Result<std::shared_ptr<void>>(std::move(lease));
   }
   std::shared_ptr<MemoryBudget> budget_;
+  std::shared_ptr<MemoryObservation> observation_;
   std::uint64_t capacity_;
   std::uint64_t planned_;
   std::uint64_t used_ = 0;
@@ -147,9 +166,13 @@ class MemoryReservation final
 };
 
 inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
-    std::uint64_t bytes, const std::function<ErrorCode()>& stop) {
+    std::uint64_t bytes, const std::function<ErrorCode()>& stop,
+    std::shared_ptr<MemoryObservation> observation) {
   auto reservation = std::shared_ptr<MemoryReservation>(
       new MemoryReservation(shared_from_this(), 0));
+  reservation->observation_ = observation
+                                  ? std::move(observation)
+                                  : std::make_shared<MemoryObservation>();
   std::unique_lock<std::mutex> lock(mutex_);
   if (bytes > maximum_)
     return Result<std::shared_ptr<MemoryReservation>>(Status::failure(
@@ -173,6 +196,10 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
   reservation->planned_ = bytes;
   reservation->admitted_ = true;
   reserved_ += bytes;
+  reservation->observation_->reserved += bytes;
+  reservation->observation_->peak_reserved =
+      std::max(reservation->observation_->peak_reserved,
+               reservation->observation_->reserved);
   ++active_;
   return Result<std::shared_ptr<MemoryReservation>>(std::move(reservation));
 }

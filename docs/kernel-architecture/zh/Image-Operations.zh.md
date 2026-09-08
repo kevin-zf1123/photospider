@@ -3,15 +3,15 @@
 默认 registry 包含两个 CPU 算子，实现位于
 [`plugins/ops/image_operations.cpp`](../../../plugins/ops/image_operations.cpp)。
 两者都有两个有序 runtime Value input，无 compile-time parameter 或隐式默认值，
-输出一个由 workflow 命名的完整图像。
+输出一个由 workflow 命名的区域图像。
 
 | Operation | Input 0 | Input 1 | Output |
 | --- | --- | --- | --- |
 | `image.exposure_gain` | 图像 | Float32 gain scalar，闭区间 [0,16] | RGB 乘 gain，alpha 逐 bit 复制 |
 | `image.opacity` | 图像 | Float32 opacity scalar，闭区间 [0,1] | 全部 RGBA channel 乘 opacity |
 
-图像必须为 dense Float32 {H,W,4}，H/W 为正，whole Region，零 offset，canonical
-row-major stride；精确包含一个 facet：key `photospider.image`，version 1，payload
+图像声明必须为 dense Float32 {H,W,4}，H/W 为正，whole Region，零 offset，canonical
+row-major stride；运行视图带有显式 origin、stride 和有效 Region。两者精确包含一个 facet：key `photospider.image`，version 1，payload
 `rgba;linear-srgb;premultiplied;hwc`，共 34 个 ASCII byte，不含 NUL。
 RGB 必须 finite 且非负，alpha 必须 finite 且位于 [0,1]，alpha 为零时 RGB 必须全零。
 HDR RGB 可以超过 1 或 alpha，接受 signed zero。Caller 提供已转换为 linear-sRGB
@@ -23,23 +23,23 @@ stride {4}、四字节且无 facet。每次运行的 gain/opacity byte 不属于
 
 两者为 deterministic、side-effect-free、cacheable、PreserveFirstInput 和 Elementwise。
 Image input demand 为请求的空间 output demand，完整包含四个 channel；scalar demand
-始终为 whole {1}。小范围 demand 仍返回完整 dense image。每个 image step 至少按 output
-byte count 的两倍建模 callback output 和 host copy，不表示 input/intermediate/process
-总内存上限。
+始终为 whole {1}。小范围 demand 只返回所请求 Region，保留逻辑 descriptor。
+每个 image step 经宿主分配输出，无重复 sink copy；完整预留包含保留中间结果和 scratch，
+调用方已有输入和进程 RSS 单列。
 
 每个运算阶段按 IEEE binary32 nearest、ties-to-even 舍入，保留 gradual underflow。
 Host schema/numeric validation 和 image callback scope 保存并恢复 thread 浮点环境，
 避免继承的 rounding 或 flush-to-zero 模式改变结果。计算出的 non-finite pixel、错误
 profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/scalar
-数值域错误在所有 callback 前返回 InvalidArgument。
+数值域错误返回 InvalidArgument：scalar 在执行前检查，pixel 在消费 callback 前检查，
+未读取像素不扫描。
 
 ## 可复用算子包与可执行示例
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
 `Photospider::operation_sdk` 构建受维护的 ABI4 C module `photospider_rgba32f_ops`。
 它实现上述两个算子和相同 profile，使用严格浮点编译选项。ABI4 host 在进入 callback
-之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 持有临时输出
-buffer，等同步 sink 复制后释放；成功、拒绝和取消路径均释放。将可信包加载到空
+之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 向宿主申请输出并发布同一 buffer；成功后冻结为只读，失败时释放且不发布。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
 
 [`examples/image_vertical/image_fixture.hpp`](../../../examples/image_vertical/image_fixture.hpp)
@@ -48,13 +48,13 @@ registry，随后 freeze 再编译；default registry 已有相同 operation key
 中的声明、算子链、A/B 值、shape/layout/facet、请求像素 (0,1) 和输出表。
 有界 CPU oracle `s1-rgba32f-exposure-opacity-v1` 从每份 binding snapshot 独立计算
 16 个 channel，每阶段舍入到 binary32，先核对冻结输出表，再精确比较具名 `result`
-的完整 descriptor 和全部 64 字节。Oracle 不调用算子 callback。
+的完整逻辑 descriptor 和所请求像素的 16 字节。Oracle 不调用算子 callback。
 
 [`photospider_image_vertical`](../../../examples/image_vertical/main.cpp) 编译一次，
 以同一个 plan 执行 A/B。每次要求两个成功 CPU callback（node 10、20）、相同 plan
-identity、预期的不同 result digest、零 transfer/byte/fallback 和 128 modeled byte
+identity、预期的不同 result digest、零 transfer/byte/fallback 和 48 bytes 实际分配
 峰值。两个 image input demand 和 step output demand 均为 offsets {0,1,0}/extents
-{1,1,4}；scalar demand 为 whole {1}，结果仍是完整 {2,2,4} 图像。程序分行输出具名
+{1,1,4}；scalar demand 为 whole {1}，结果为逻辑 shape {2,2,4} 的单像素 Region。程序分行输出具名
 输入/输出 Value、descriptor/Region/layout/facet、plan/result digest、编译/执行/算子
 耗时、选用 backend、传输/资源观测及 correctness。耗时可以为零。Digest 用于诊断，
 correctness 比较实际 byte。
@@ -86,11 +86,4 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 
 隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
-0.3 消费及 0.2 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
-
-## S2 存储与 liveness 修订
-
-#264/#210 已迁移 ABI4 宿主输出/scratch。每个图像 step 预留输出字节，不需要第二份
-sink copy；完整 Run 预留包含保留中间结果和 scratch。调用方已有输入及进程 RSS 不计入
-受控预算。当前 S1 整图两步场景实际分配峰值为 128 bytes，每步输出容量 64 bytes；
-旧 2B 回调估算说明由这些实际存储语义替换。区域执行尚由 #265 追踪。
+0.4 消费及 0.3 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。

@@ -75,12 +75,12 @@ int dynamic_bindings() {
     PS_CHECK(s1_fixture::oracle(result.value(), second));
     PS_CHECK(result.value().diagnostics.operation_timings.size() == 2);
     PS_CHECK(result.value().diagnostics.transfer_count == 0);
-    PS_CHECK(result.value().diagnostics.peak_live_bytes == 128);
+    PS_CHECK(result.value().diagnostics.peak_live_bytes == 48);
     PS_CHECK(result.value().diagnostics.plan_digest ==
              workflow.plan.digest().value);
   }
   for (const auto& step : workflow.plan.steps()) {
-    PS_CHECK(step.planned_bytes == 64);
+    PS_CHECK(step.planned_bytes == 16);
     PS_CHECK(step.input_demands[0].dimensions()[1].offset == 1);
     PS_CHECK(step.input_demands[0].dimensions()[0].extent == 1);
     PS_CHECK(step.input_demands[0].dimensions()[2].extent == 4);
@@ -139,7 +139,7 @@ int dynamic_bindings() {
   PS_CHECK(report.ok() && report.value().samples.size() == 2);
   for (const auto& sample : report.value().samples)
     PS_CHECK(sample.correctness_accepted);
-  ExecutionContext limited(operations, {1, false, 16, 127});
+  ExecutionContext limited(operations, {1, false, 16, 47});
   PS_CHECK(
       limited.execute(workflow.plan, s1_fixture::bindings()).status().code ==
       ErrorCode::ResourceExhausted);

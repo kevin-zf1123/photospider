@@ -118,23 +118,28 @@ inline bool oracle(const ps::ExecutionResult& result, bool second = false) {
     return false;
   const auto& output = found->second;
   const auto facet = profile();
-  return output.valid() &&
-         output.descriptor().element_type == ps::ElementType::Float32 &&
-         output.descriptor().shape == std::vector<std::uint64_t>({2, 2, 4}) &&
-         output.layout().byte_offset == 0 &&
-         output.layout().byte_strides ==
-             std::vector<std::int64_t>({32, 16, 4}) &&
-         output.region().dimensions()[0].offset == 0 &&
-         output.region().dimensions()[0].extent == 2 &&
-         output.region().dimensions()[1].offset == 0 &&
-         output.region().dimensions()[1].extent == 2 &&
-         output.region().dimensions()[2].offset == 0 &&
-         output.region().dimensions()[2].extent == 4 &&
-         output.facets().size() == 1 && output.facets()[0].key == facet.key &&
-         output.facets()[0].version == facet.version &&
-         output.facets()[0].payload == facet.payload &&
-         output.bytes().size() == sizeof(expected) &&
-         std::memcmp(output.bytes().data(), expected.data(),
-                     sizeof(expected)) == 0;
+  if (!output.valid() ||
+      output.descriptor().element_type != ps::ElementType::Float32 ||
+      output.descriptor().shape != std::vector<std::uint64_t>({2, 2, 4}) ||
+      output.region().empty() || output.region().dimensions()[2].offset != 0 ||
+      output.region().dimensions()[2].extent != 4 ||
+      output.facets().size() != 1 || output.facets()[0].key != facet.key ||
+      output.facets()[0].version != facet.version ||
+      output.facets()[0].payload != facet.payload)
+    return false;
+  const auto yd = output.region().dimensions()[0],
+             xd = output.region().dimensions()[1];
+  if (output.bytes().size() != yd.extent * xd.extent * 16)
+    return false;
+  for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y)
+    for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x)
+      for (std::uint64_t c = 0; c < 4; ++c) {
+        auto address = output.byte_address({y, x, c});
+        if (!address.ok() ||
+            std::memcmp(output.bytes().data() + address.value(),
+                        &expected[(y * 2 + x) * 4 + c], sizeof(float)) != 0)
+          return false;
+      }
+  return true;
 }
 }  // namespace s1_fixture

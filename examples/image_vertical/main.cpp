@@ -46,7 +46,7 @@ bool diagnostics_match(const ps::ExecutionDiagnostics& diagnostics,
       diagnostics.operation_timings.size() != 2 ||
       diagnostics.selected_backends.size() != 2 ||
       diagnostics.transfer_count != 0 || diagnostics.transfer_bytes != 0 ||
-      diagnostics.peak_live_bytes != 128 ||
+      diagnostics.peak_live_bytes != 48 ||
       !diagnostics.fallback_reasons.empty())
     return false;
   for (std::size_t index = 0; index < 2; ++index) {
@@ -83,7 +83,7 @@ void check_demand(const ps::ExecutionPlan& plan) {
           "expected three inputs and two operation steps");
   const auto image_demand = s1_fixture::demand().output_regions.at("result");
   for (const auto& step : plan.steps()) {
-    require(step.backend == ps::Backend::Cpu && step.planned_bytes == 64 &&
+    require(step.backend == ps::Backend::Cpu && step.planned_bytes == 16 &&
                 step.input_demands.size() == 2,
             "unexpected CPU plan or output allocation bound");
     for (std::size_t axis = 0; axis < 3; ++axis) {

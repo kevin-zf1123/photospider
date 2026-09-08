@@ -1187,6 +1187,20 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   }
   std::uint64_t complete_working_set = 0;
   for (auto& step : plan.steps_) {
+    ValueDescriptor packed = step.output_descriptor;
+    const auto coverage =
+        step.whole_boundary ? Region::whole(packed.shape) : step.output_demand;
+    for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
+      packed.shape[axis] = coverage.dimensions()[axis].extent;
+    auto dense = input_internal::dense_metadata(packed);
+    if (!dense.ok() && step.traits.output_schema.kind ==
+                           OperationPortKind::LinearPremultipliedRgbaFloat32)
+      return Result<ExecutionPlan>(dense.status());
+    step.planned_bytes =
+        std::max(step.traits.estimated_bytes,
+                 dense.ok() ? dense.value().bytes
+                            : static_cast<std::uint64_t>(
+                                  Value::element_size(packed.element_type)));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t i = 0; i < step.inputs.size(); ++i) {
       if (step.traits.workspace_input_multiplier == 0)
