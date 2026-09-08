@@ -77,3 +77,9 @@ remain. C++ consumers rebuild; ABI 3 and package 0.3 consumers are rejected.
 Semantic/optimizer/physical-plan/cache domains now use v4. Runtime region-origin
 addresses never enter semantic identity. The remaining S2 scheduler, resource
 and vertical work is tracked by #210/#211/#265/#266 under ADR 0017.
+
+#211 adds bounded numeric parameter records and static halo parameter names to
+v4 semantic framing (bound flag, exact binary64 endpoint bits, length-framed
+halo key). Physical v4 framing also includes tile height/width and each sorted
+output name's exact Region. Aliased names with different Regions now have
+different physical identities even when their merged producer demand agrees.

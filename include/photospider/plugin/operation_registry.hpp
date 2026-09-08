@@ -78,6 +78,13 @@ struct PHOTOSPIDER_API OperationParameterSpec final {
   OperationParameterType type = OperationParameterType::Int64;
   /** @brief Whether semantic lowering requires the key to be present. */
   bool required = true;
+  /** @brief Whether a numeric parameter must be finite and within the interval.
+   */
+  bool bounded = false;
+  /** @brief Inclusive bounds; bounded Int64 endpoints are exact integers in
+   * +/-2^53-1. */
+  double minimum = 0;
+  double maximum = 0;
 };
 
 /** @brief Closed input/output semantic port vocabulary. */
@@ -88,6 +95,8 @@ enum class OperationPortKind : std::uint32_t {
   Float32Scalar = 2,
   /** @brief Dense Float32 {H,W,4} with exact linear premultiplied profile. */
   LinearPremultipliedRgbaFloat32 = 3,
+  /** @brief Float32 {H,W}, no facets, finite [0,1] spatial mask. */
+  Float32Mask = 4,
 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
@@ -164,6 +173,9 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::uint64_t workspace_bytes = 0;
   /** @brief Additional scratch bound per demanded input byte, in 0..16. */
   std::uint32_t workspace_input_multiplier = 0;
+  /** @brief Required bounded Int64 parameter resolving a positive spatial halo.
+   */
+  std::string halo_radius_parameter = {};
 };
 
 /**

@@ -94,6 +94,8 @@ static const ps_operation_descriptor_v4 operations[] = {
      execute_image,
      NULL,
      0,
+     0,
+     NULL,
      0},
     {sizeof(ps_operation_descriptor_v4),
      "image.opacity",
@@ -118,6 +120,8 @@ static const ps_operation_descriptor_v4 operations[] = {
      execute_image,
      &opacity_state,
      0,
+     0,
+     NULL,
      0}};
 static void destroy(const ps_operation_descriptor_v4* records, uint32_t count) {
   (void)records;

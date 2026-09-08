@@ -275,6 +275,10 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * fail before plan publication. Changed demand replans optimized IR.
    */
   std::map<std::string, Region> output_regions;
+  /** @brief Positive spatial tile extents; changing them only replans optimized
+   * IR. */
+  std::uint64_t tile_height = 128;
+  std::uint64_t tile_width = 128;
 };
 
 /** @brief Reference to an earlier physical step. */
@@ -317,6 +321,9 @@ struct PHOTOSPIDER_API PlanStep final {
   /** @brief Per-input logical demands derived from the operation Region rule.
    */
   std::vector<Region> input_demands;
+  /** @brief Requires one complete materialization, never per-tile
+   * recomputation. */
+  bool whole_boundary = false;
 };
 
 /**
@@ -406,10 +413,35 @@ class PHOTOSPIDER_API ExecutionPlan final {
     return current_check_ && current_check_();
   }
 
+  /** @brief Returns each name's exact output Region, including default Whole.
+   */
+  const std::map<std::string, Region>& output_regions() const noexcept {
+    return output_regions_;
+  }
+  /** @brief Returns positive spatial tile geometry fixed by planning. */
+  std::uint64_t tile_height() const noexcept { return tile_height_; }
+  std::uint64_t tile_width() const noexcept { return tile_width_; }
+  /**
+   * @brief Derives one demand-local plan without reanalyzing or enumerating
+   * tiles.
+   * @param output_name Existing named output.
+   * @param region Nonempty subset of that name's requested Region.
+   * @return A dependency-pruned tile plan or Stale/InvalidArgument/overflow.
+   * @throws std::bad_alloc For graph metadata allocation.
+   * @note Whole boundaries retain complete demand. No runtime Value is
+   * retained; callers must preserve graph/registry currentness as for the
+   * parent plan.
+   */
+  Result<ExecutionPlan> tile_plan(const std::string& output_name,
+                                  const Region& region) const;
+
  private:
   friend class Compiler;
   friend class ExecutionContext;
 
+  std::map<std::string, Region> output_regions_;
+  std::uint64_t tile_height_ = 128;
+  std::uint64_t tile_width_ = 128;
   /** @brief Canonical copied input metadata, with no runtime owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
