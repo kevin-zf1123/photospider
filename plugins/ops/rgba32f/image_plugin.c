@@ -15,6 +15,10 @@ static const ps_operation_port_constraint_v3 ports_opacity[] = {
     {sizeof(ps_operation_port_constraint_v3),
      PS_OPERATION_PORT_FLOAT32_SCALAR_V3, 0, 0x3f800000U}};
 
+/* The ABI3 host validates dense image/scalar ports before entry and supplies
+ * nearest/ties-even rounding with gradual underflow. Input and facet pointers
+ * are borrowed only until return; publish copies bytes before we free them.
+ * Spatial demand is advisory in S1: every callback returns the whole image. */
 static int execute_image(void* state, const ps_operation_value_view_v3* inputs,
                          uint32_t count,
                          const ps_operation_parameter_value_v3* parameters,
@@ -50,23 +54,13 @@ static int execute_image(void* state, const ps_operation_value_view_v3* inputs,
       memcpy(bytes + offset + channel * 4, &number, sizeof(number));
     }
   }
-  const int accepted = sink->publish(
-      sink->context, PS_OPERATION_ELEMENT_FLOAT32_V3, inputs[0].shape,
-      inputs[0].rank, inputs[0].facets, inputs[0].facet_count, bytes,
-#ifdef PS_BAD_IMAGE_OUTPUT
-      inputs[0].byte_size - 4
-#else
-      inputs[0].byte_size
-#endif
-  );
+  const int accepted =
+      sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V3,
+                    inputs[0].shape, inputs[0].rank, inputs[0].facets,
+                    inputs[0].facet_count, bytes, inputs[0].byte_size);
   free(bytes);
-#ifdef PS_BAD_IMAGE_OUTPUT
-  (void)accepted;
-  return PS_OPERATION_RESULT_SUCCESS_V3;
-#else
   return accepted ? PS_OPERATION_RESULT_SUCCESS_V3
                   : PS_OPERATION_RESULT_FAILURE_V3;
-#endif
 }
 
 static int opacity_state;

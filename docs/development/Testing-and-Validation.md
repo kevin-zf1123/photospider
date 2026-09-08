@@ -308,3 +308,23 @@ Configure a separate build with `-DBUILD_SHARED_LIBS=ON`, build `photospider` an
 `test_bindings`, then run `-R '^test_(bindings|installed_consumer)$'` there to
 validate shared exports and installed use. These commands are scoped to the
 changed API/ABI; they do not request sanitizer or platform release matrices.
+
+## Reusable image vertical acceptance
+
+`test_image_vertical` and `test_image_vertical_plugin` execute the same public
+A/B fixture with built-ins and the `plugins/ops/rgba32f` source package. They
+validate one compilation, two runtime bindings, exact output demand, complete
+named results, two CPU callbacks, the independent CPU oracle, and raw benchmark
+identity/backend/transfer/resource/correctness fields. The example and shared
+fixture live in `examples/image_vertical` and use only public APIs.
+
+```sh
+cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
+ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
+```
+
+Repeat these targets and regex with `build/issue257-shared`. The installed
+consumer builds the same operation package using the installed operation SDK
+and runs the same example through built-ins and the DSO, retaining the shared
+bridge check. See [Image operations](../kernel-architecture/Image-Operations.md)
+for the exact fixture, standalone build, and report semantics.

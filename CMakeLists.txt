@@ -204,7 +204,13 @@ install(
         ${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Photospider)
 
+add_subdirectory(plugins/ops/rgba32f EXCLUDE_FROM_ALL)
+add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
+
 if(BUILD_TESTING)
+  add_test(NAME test_image_vertical COMMAND photospider_image_vertical)
+  add_test(NAME test_image_vertical_plugin COMMAND photospider_image_vertical
+    "$<TARGET_FILE:photospider_rgba32f_ops>")
   add_library(
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
     ${PHOTOSPIDER_KERNEL_SOURCES}
@@ -328,18 +334,17 @@ if(BUILD_TESTING)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
 
   photospider_add_test(test_bindings Photospider::kernel tests/integration/test_bindings.cpp)
-  add_library(operation_image_fixture MODULE tests/consumer/image_plugin.c)
-  target_link_libraries(operation_image_fixture PRIVATE Photospider::operation_sdk)
-  target_compile_definitions(operation_image_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-  add_library(operation_bad_image_fixture MODULE tests/consumer/image_plugin.c)
+  target_include_directories(test_bindings PRIVATE examples)
+  add_dependencies(test_bindings photospider_image_vertical)
+  add_library(operation_bad_image_fixture MODULE tests/fixtures/operation_bad_image_fixture.c)
   target_link_libraries(operation_bad_image_fixture PRIVATE Photospider::operation_sdk)
-  target_compile_definitions(operation_bad_image_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD PS_BAD_IMAGE_OUTPUT)
+  target_compile_definitions(operation_bad_image_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   add_library(data_provider_float32_fixture MODULE tests/fixtures/data_provider_float32_fixture.c)
   target_link_libraries(data_provider_float32_fixture PRIVATE Photospider::data_provider_sdk)
   target_compile_definitions(data_provider_float32_fixture PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD)
-  add_dependencies(test_bindings operation_image_fixture operation_bad_image_fixture data_provider_float32_fixture)
+  add_dependencies(test_bindings photospider_rgba32f_ops operation_bad_image_fixture data_provider_float32_fixture)
   target_compile_definitions(test_bindings PRIVATE
-    PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:operation_image_fixture>"
+    PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>"
     PS_BAD_IMAGE_FIXTURE_PATH="$<TARGET_FILE:operation_bad_image_fixture>"
     PS_FLOAT32_PROVIDER_PATH="$<TARGET_FILE:data_provider_float32_fixture>")
   foreach(_port_case RANGE 1 8)

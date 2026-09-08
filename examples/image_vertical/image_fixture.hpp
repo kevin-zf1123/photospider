@@ -79,6 +79,27 @@ inline ps::PlanningOptions demand() {
                                  ps::Region({{0, 1}, {1, 1}, {0, 4}}));
   return options;
 }
+// Independent, bounded CPU calculation for the exact A/B table. Binary-fraction
+// inputs make both stage results exactly representable even before rounding.
+// No operation callback, registry, or kernel arithmetic participates here.
+inline std::array<float, 16> cpu_reference(bool second) {
+  const auto input = bindings(second);
+  std::array<float, 16> pixels{};
+  std::memcpy(pixels.data(), input.inputs[0].value.bytes().data(),
+              sizeof(pixels));
+  float gain = 0;
+  float opacity = 0;
+  std::memcpy(&gain, input.inputs[1].value.bytes().data(), sizeof(gain));
+  std::memcpy(&opacity, input.inputs[2].value.bytes().data(), sizeof(opacity));
+  for (std::size_t index = 0; index < pixels.size(); ++index) {
+    const float exposed =
+        index % 4 == 3
+            ? pixels[index]
+            : static_cast<float>(static_cast<double>(pixels[index]) * gain);
+    pixels[index] = static_cast<float>(static_cast<double>(exposed) * opacity);
+  }
+  return pixels;
+}
 inline bool oracle(const ps::ExecutionResult& result, bool second = false) {
   // Frozen independently rounded binary fractions from ADR0016.
   const std::array<float, 16> expected =
@@ -89,6 +110,9 @@ inline bool oracle(const ps::ExecutionResult& result, bool second = false) {
              : std::array<float, 16>{.125F, .25F, 0, .25F, .25F, .125F,
                                      .125F, .25F, 0, .25F, .5F,  .5F,
                                      0,     0,    0, 0};
+  const auto reference = cpu_reference(second);
+  if (std::memcmp(reference.data(), expected.data(), sizeof(expected)) != 0)
+    return false;
   const auto found = result.values.find("result");
   if (result.values.size() != 1 || found == result.values.end())
     return false;

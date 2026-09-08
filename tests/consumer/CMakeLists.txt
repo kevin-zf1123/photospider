@@ -110,17 +110,19 @@ set_target_properties(
              C_STANDARD_REQUIRED ON
              C_EXTENSIONS OFF)
 
-add_library(photospider_image_consumer_plugin MODULE image_plugin.c)
-target_link_libraries(photospider_image_consumer_plugin PRIVATE Photospider::operation_sdk)
-target_compile_definitions(photospider_image_consumer_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-set_target_properties(photospider_image_consumer_plugin PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-target_compile_options(photospider_image_consumer_plugin PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_image_consumer_plugin PRIVATE ${_photospider_consumer_link_options})
+# Both source packages consume only the installed public targets above.
+add_subdirectory(../../plugins/ops/rgba32f rgba32f)
+add_subdirectory(../../examples/image_vertical image_vertical)
+target_compile_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_link_options})
+target_compile_options(photospider_image_vertical PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_image_vertical PRIVATE ${_photospider_consumer_link_options})
 
 add_library(photospider_consumer_bridge SHARED pipeline_bridge.cpp)
-add_dependencies(photospider_consumer_bridge photospider_image_consumer_plugin)
+add_dependencies(photospider_consumer_bridge photospider_rgba32f_ops)
+target_include_directories(photospider_consumer_bridge PRIVATE ../../examples)
 target_compile_definitions(photospider_consumer_bridge PRIVATE
-  PS_IMAGE_CONSUMER_PLUGIN_PATH="$<TARGET_FILE:photospider_image_consumer_plugin>")
+  PS_IMAGE_CONSUMER_PLUGIN_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
 target_link_libraries(
   photospider_consumer_bridge PRIVATE Photospider::kernel)
 target_compile_options(
@@ -155,6 +157,8 @@ set_target_properties(
 add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_consumer>"
-  DEPENDS photospider_consumer
+  COMMAND "$<TARGET_FILE:photospider_image_vertical>"
+  COMMAND "$<TARGET_FILE:photospider_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
+  DEPENDS photospider_consumer photospider_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

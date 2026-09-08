@@ -38,6 +38,16 @@
 !plugins/
 !plugins/ops/
 !plugins/ops/*.cpp
+!plugins/ops/rgba32f/
+!plugins/ops/rgba32f/*.c
+!plugins/ops/rgba32f/CMakeLists.txt
+
+# Maintained public-API image example and shared acceptance fixture.
+!examples/
+!examples/image_vertical/
+!examples/image_vertical/*.cpp
+!examples/image_vertical/*.hpp
+!examples/image_vertical/CMakeLists.txt
 
 # Maintained unit, integration, fixture, support, and consumer sources.
 !tests/

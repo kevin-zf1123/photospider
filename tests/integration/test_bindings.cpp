@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "consumer/image_fixture.hpp"
+#include "image_vertical/image_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {

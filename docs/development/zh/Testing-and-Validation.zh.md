@@ -252,3 +252,21 @@ Installed consumer 独立构建 ABI3 C image plugin，通过 C++ 与 C 路径执
 `photospider` 和 `test_bindings`，然后在该目录运行
 `-R '^test_(bindings|installed_consumer)$'`，验证共享导出与安装消费。上述命令针对本次
 API/ABI 变化，不要求 sanitizer 或平台 release matrix。
+
+## 可复用图像 vertical 验收
+
+`test_image_vertical` 和 `test_image_vertical_plugin` 执行相同的公开 A/B fixture，
+分别使用默认算子和 `plugins/ops/rgba32f` 源码包。它们验证一次编译、两份运行期绑定、
+精确 output demand、完整具名结果、两次 CPU callback、独立 CPU oracle，以及
+raw benchmark 的 identity/backend/transfer/resource/correctness 字段。示例与
+fixture 位于 `examples/image_vertical`，仅使用公开 API。
+
+```sh
+cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
+ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
+```
+
+对 `build/issue257-shared` 执行相同 target 和正则。Installed consumer 用安装后的
+operation SDK 构建同一算子包，并运行同一示例的默认与 DSO 路径，保留 shared bridge
+检查。详细 fixture、独立构建和报告语义见
+[图像算子](../../kernel-architecture/zh/Image-Operations.zh.md)。

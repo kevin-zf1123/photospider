@@ -2,7 +2,7 @@
 #include <memory>
 #include <utility>
 
-#include "image_fixture.hpp"  // NOLINT(build/include_subdir)
+#include "image_vertical/image_fixture.hpp"
 #include "photospider/photospider.hpp"
 
 #if defined(_MSVC_LANG)

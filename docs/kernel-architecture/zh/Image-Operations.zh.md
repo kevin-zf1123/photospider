@@ -33,20 +33,57 @@ Host schema/numeric validation 和 image callback scope 保存并恢复 thread �
 profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/scalar
 数值域错误在所有 callback 前返回 InvalidArgument。
 
-## 可执行 public API 示例
+## 可复用算子包与可执行示例
 
-[`tests/consumer/image_fixture.hpp`](../../../tests/consumer/image_fixture.hpp)
-构造 [ADR 0016](../../adr/0016-workflow-inputs-and-execution-bindings.md) 的精确三项声明、
-两个节点和 A/B binding snapshot。[`test_bindings.cpp`](../../../tests/integration/test_bindings.cpp)
-编译一次，分别顺序和并发执行两个快照，将具名 `result` descriptor 与全部 64 字节
-output 对照 `s1-rgba32f-exposure-opacity-v1`。它也覆盖各 input 单独变化、opacity 为零、
-preflight failure、schema、Halo、停止和资源边界。
+[`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
+`Photospider::operation_sdk` 构建受维护的 ABI3 C module `photospider_rgba32f_ops`。
+它实现上述两个算子和相同 profile，使用严格浮点编译选项。ABI3 host 在进入 callback
+之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 持有临时输出
+buffer，等同步 sink 复制后释放；成功、拒绝和取消路径均释放。将可信包加载到空
+registry，随后 freeze 再编译；default registry 已有相同 operation key。
+
+[`examples/image_vertical/image_fixture.hpp`](../../../examples/image_vertical/image_fixture.hpp)
+是测试、安装消费者和配套 daemon vertical 共用的公开 fixture contract，固定
+[ADR 0016](../../adr/0016-workflow-inputs-and-execution-bindings.md#named-fixtures-and-image-oracle)
+中的声明、算子链、A/B 值、shape/layout/facet、请求像素 (0,1) 和输出表。
+有界 CPU oracle `s1-rgba32f-exposure-opacity-v1` 从每份 binding snapshot 独立计算
+16 个 channel，每阶段舍入到 binary32，先核对冻结输出表，再精确比较具名 `result`
+的完整 descriptor 和全部 64 字节。Oracle 不调用算子 callback。
+
+[`photospider_image_vertical`](../../../examples/image_vertical/main.cpp) 编译一次，
+以同一个 plan 执行 A/B。每次要求两个成功 CPU callback（node 10、20）、相同 plan
+identity、预期的不同 result digest、零 transfer/byte/fallback 和 128 modeled byte
+峰值。两个 image input demand 和 step output demand 均为 offsets {0,1,0}/extents
+{1,1,4}；scalar demand 为 whole {1}，结果仍是完整 {2,2,4} 图像。程序分行输出具名
+输入/输出 Value、descriptor/Region/layout/facet、plan/result digest、编译/执行/算子
+耗时、选用 backend、传输/资源观测及 correctness。耗时可以为零。Digest 用于诊断，
+correctness 比较实际 byte。
+
+随后每份 payload 执行两个 raw benchmark sample，分别捕获匹配的 CPU oracle。
+这些 sample 保留 `RawBenchmarkRunner` 每次独立编译的语义，与编译一次的直接执行
+分开报告。任何不匹配返回非零。无参数时使用内置算子，可选参数为可信 native module
+的精确路径。
 
 ```sh
-cmake --build build/issue257-static --target test_bindings -j 8
-ctest --test-dir build/issue257-static -R '^test_bindings$' --output-on-failure
+cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
+build/issue257-static/examples/image_vertical/photospider_image_vertical
+ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
 ```
 
-隔离 installed consumer 通过默认 C++ 算子和独立编译的 ABI3 C plugin 执行相同 oracle，
-检查 package 0.3 消费成功并拒绝 0.2 consumer。分别使用 BUILD_SHARED_LIBS OFF/ON
-验证两种 package，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+`test_image_vertical_plugin` 向同一程序传入 generator 解析的包路径。`test_bindings`
+保留精确 binding/output-demand 负例、独立并发快照、数值/浮点环境边界、取消和资源
+检查，正常 DSO 路径改用受维护的算子包。故意发布错误输出的 DSO 仅留在测试中。
+
+安装内核后，两个源码目录也可以独立构建：
+
+```sh
+cmake -S plugins/ops/rgba32f -B build/rgba32f-package -DCMAKE_PREFIX_PATH=/absolute/kernel-prefix -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/rgba32f-package --target photospider_rgba32f_ops -j 8
+cmake -S examples/image_vertical -B build/image-example -DCMAKE_PREFIX_PATH=/absolute/kernel-prefix -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/image-example --target photospider_image_vertical -j 8
+build/image-example/photospider_image_vertical /absolute/path/to/native-module
+```
+
+隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
+并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
+0.3 消费及 0.2 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。

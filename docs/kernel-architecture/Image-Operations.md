@@ -36,24 +36,69 @@ rounding or flush-to-zero modes from changing the result. Computed non-finite
 pixels, invalid profile or alpha-zero/nonzero-RGB output fail OperationFailed.
 Bound pixel/scalar domain errors fail InvalidArgument before any callback.
 
-## Executable public-API example
+## Reusable operation package and executable example
 
-[`tests/consumer/image_fixture.hpp`](../../tests/consumer/image_fixture.hpp)
-constructs the exact three declarations, two nodes and A/B binding snapshots
-from [ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md).
-[`test_bindings.cpp`](../../tests/integration/test_bindings.cpp) compiles once,
-executes both snapshots sequentially and concurrently, and compares the named
-`result` descriptor and all 64 output bytes with
-`s1-rgba32f-exposure-opacity-v1`. It also covers changing each input separately,
-opacity zero, failure preflight, schemas, Halo, stopping and resource bounds.
+[`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
+maintained ABI3 C module `photospider_rgba32f_ops` using only
+`Photospider::operation_sdk`. It implements the same two operations and profile
+as the built-ins above, with strict floating-point compilation. The ABI3 host
+validates ports and establishes nearest/gradual-underflow arithmetic before
+entry. The callback owns its temporary output buffer until the synchronous
+sink copies it, then frees it on success, rejection, or cancellation. Load this
+trusted package into an empty registry and freeze it before compilation;
+its operation keys are already present in the default registry.
+
+[`examples/image_vertical/image_fixture.hpp`](../../examples/image_vertical/image_fixture.hpp)
+is the shared public fixture contract for tests, installed consumers, and the
+companion daemon vertical. It fixes the exact declarations, chain, A/B values,
+shape/layout/facets, requested pixel (0,1), and output table from
+[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md#named-fixtures-and-image-oracle).
+The bounded CPU oracle `s1-rgba32f-exposure-opacity-v1` independently computes
+16 channels from each binding snapshot, rounds each stage to binary32, checks
+that calculation against the frozen table, and compares the complete named
+`result` descriptor and all 64 bytes exactly. It calls no operation callback.
+
+[`photospider_image_vertical`](../../examples/image_vertical/main.cpp) compiles
+once and executes A/B with that same plan. Each run requires two successful CPU
+callbacks (nodes 10,20), unchanged plan identity, the expected distinct result
+digests, zero transfers/bytes/fallbacks, and peak 128 modeled bytes. Both image
+input demands and step output demands are offsets {0,1,0}/extents {1,1,4};
+scalar demand stays whole {1}, and the result remains the complete {2,2,4} image.
+The executable prints named input/output Values, descriptor/Region/layout/facets,
+plan/result digests, compile/execute/operation timings, selected backends,
+transfer/resource observations, and correctness on separate lines. Timing
+values may be zero. Digests are diagnostic; correctness uses actual bytes.
+
+It then runs two raw benchmark samples per payload with the matching captured
+CPU oracle. These samples retain `RawBenchmarkRunner`'s independent compilation
+semantics and are reported separately from the compile-once executions.
+A mismatch exits nonzero. With no argument it uses built-ins; its optional
+argument is the exact trusted native module path.
 
 ```sh
-cmake --build build/issue257-static --target test_bindings -j 8
-ctest --test-dir build/issue257-static -R '^test_bindings$' --output-on-failure
+cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
+build/issue257-static/examples/image_vertical/photospider_image_vertical
+ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
 ```
 
-The isolated installed consumer runs the same oracle through both the default
-C++ operations and its independently compiled ABI3 C plugin. It checks package
-0.3 compatibility and rejection of a 0.2 consumer. Build with BUILD_SHARED_LIBS
-OFF and ON to exercise both package forms; see
+`test_image_vertical_plugin` passes the generator-resolved package path to the
+same executable. `test_bindings` retains the exact negative binding and output
+demand cases, independent concurrent snapshots, numeric/floating-environment
+boundaries, cancellation, and resource checks; its positive DSO path now uses
+the maintained package. The intentionally invalid output DSO stays test-only.
+
+For an installed kernel prefix, both source directories also build independently:
+
+```sh
+cmake -S plugins/ops/rgba32f -B build/rgba32f-package -DCMAKE_PREFIX_PATH=/absolute/kernel-prefix -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/rgba32f-package --target photospider_rgba32f_ops -j 8
+cmake -S examples/image_vertical -B build/image-example -DCMAKE_PREFIX_PATH=/absolute/kernel-prefix -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/image-example --target photospider_image_vertical -j 8
+build/image-example/photospider_image_vertical /absolute/path/to/native-module
+```
+
+The isolated installed consumer builds this same operation source package
+against the installed SDK, runs A/B through its shared bridge, and runs the
+same executable with built-ins and the module. Static and shared kernel builds
+exercise this path and package 0.3/rejected 0.2 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
