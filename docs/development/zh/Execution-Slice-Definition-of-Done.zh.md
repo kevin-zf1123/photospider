@@ -36,7 +36,7 @@ compiler/execution change 在约定交付位置验证以下适用行为后完成
   可由现有示例或集成测试提供。
 - 受影响时 installed public header/export/consumer inventory 通过。
 - 受影响英文公共文档和中文镜像与行为一致。Issue/Project 更新依交付授权范围
-  执行；仅在阶段或关键依赖变化时更新交付状态快照。
+  执行；交付状态快照遵循 Current Development Program 中的更新规则。
 - 私有 OpenSpec working note 不属于公开 completion gate。
 - 记录实际 command 与 limitation；未运行 gate 不得宣称已运行。
 

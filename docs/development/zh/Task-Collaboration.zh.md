@@ -52,8 +52,9 @@ commit/push、GitHub 写入、merge、清理和私有 overlay 同步依当前任
 
 Issues 管理公共交付状态，Projects 同步该状态。已授权写入时，在交付或阻塞
 发生实质变化时更新相关状态，简要记录结果、位置、实际验证、剩余事项和下一
-动作。仅在阶段或关键依赖变化时更新 Current Development Program。不在
-feedback、tracking 和报告中复制进度。私有 OpenSpec 仅显式调用，不构成公共门槛。
+动作。按 Current Development Program 的更新规则，在已核验基线、当前阶段、
+关键路径或阻塞原因变化时更新。不在 feedback、tracking 和报告中复制进度。
+私有 OpenSpec 仅显式调用，不构成公共门槛。
 
 公共 ADR 记录决策，架构文档记录已实现行为。同步受影响英文文档与中文镜像。
 研究完成不代表设计已被接受，设计接受不证明实现完成。完成表示所请求行为

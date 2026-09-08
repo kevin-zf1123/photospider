@@ -39,8 +39,8 @@ this list does not require a full test suite for each operation or local fix.
   result; existing examples or integration tests may supply it.
 - Installed public header/export/consumer inventory passes when affected.
 - Affected English public documents and Chinese mirrors match the behavior.
-  Issue/Project updates follow the authorized delivery scope; a delivery
-  snapshot changes only when the milestone or key dependencies change.
+  Issue/Project updates follow the authorized delivery scope; delivery snapshots
+  follow the update rule in the Current Development Program.
 - Private OpenSpec working notes are outside the public completion gate.
 - Actual commands and limitations are recorded; unrun gates are not claimed.
 
