@@ -531,3 +531,7 @@ kernel contract; #258 retains its separate integration acceptance.
 maintainer separately authorized the two documentation PRs, CI-gated merge
 and #256 settlement. Decision acceptance does not report implementation or
 automatically start #257.
+
+## S2 amendment
+
+[ADR 0017](0017-cpu-regional-execution-and-storage.md) replaces the whole-only storage/output, full-image numeric preflight, ABI 3 and modeled-budget clauses for S2. Other S1 semantics remain; Issues distinguish accepted target from delivered implementation.
