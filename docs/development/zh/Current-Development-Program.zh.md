@@ -2,7 +2,7 @@
 
 - 快照日期：2026-09-09
 - 已审计实现 baseline：`main@703569bb74164f061b233f9edc2c0b964bc868fb`
-- 当前 milestone：S1 可复用图像与普通参数绑定
+- 下一实现 milestone：S2 CPU 区域执行
 
 ## 角色与权威
 
@@ -39,13 +39,21 @@ compiler 与 execution contract，因此进入 Project #8。
 
 ## 当前 milestone
 
-S1 使同一编译计划可以重复处理调用方的 Float32 图像与普通数值参数 Value，
-分离静态事实、每次运行快照、输出需求和图像语义。#257 实现位于
-`foundation/kernel_vertical`，由
-[test_bindings](../../../tests/integration/test_bindings.cpp) 进行 focused 验收。
-合并与 Issue/Project 结算仍待完成。
+S1 实现在 `ce9164c` 完成：同一编译计划通过独立的每次运行快照接收调用方的
+Float32 图像与普通数值参数 Value。#257 由
+[test_bindings](../../../tests/integration/test_bindings.cpp) 验证；#258 提供
+[维护的算子包与可运行 oracle](../../kernel-architecture/zh/Image-Operations.zh.md)。
+本地静态验证通过 9/9 项测试，共享验证通过 4/4，均包含隔离安装消费及独立本地审核
+新增的图像 sink 资源错误回归。此前 `72b9d81` 的
+[push CI](https://github.com/kevin-zf1123/photospider/actions/runs/34276504731)
+通过 Linux/macOS 静态及共享构建、ASAN/TSAN。最终修订的 CI、合并及 Issue/Project 结算记录在
+#255、#257 和 #258 中。
 
-### Critical path
+下一实现 milestone 为 S2 CPU 区域执行。首先在 #152 下决定部分输出与 CPU
+Storage/lifetime 契约，再细化 #210 存活期与 #211 tile/halo 验收，然后进行区域
+实现。这些契约和 S2 实现仍待完成。
+
+### 已完成的 S1 实现顺序
 
 1. [#256](https://github.com/kevin-zf1123/photospider/issues/256)
    冻结 `WorkflowInputDeclaration`、`ExecutionBindings`、validation、identity、
@@ -107,7 +115,6 @@ daemon 新功能按需推进，兼容维护继续。决策交付状态由
 
 [ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md) 已统一
 修订为图像与运行期标量契约，其 operation ABI v3 和逐端口约束已由维护者明确接受。
-#256 交付决策文档；#257 在 `foundation/kernel_vertical` 实现内核 API/ABI 与可复用图像
-fixture。静态/共享 installed consumer 和 focused test 验证该变化；此处不声明 public CI
-结果或 Issue/Project 结算。#258 保留独立图像集成验收。上方已交付 baseline
+#256 交付决策文档；#257 实现内核 API/ABI，#258 交付可复用图像算子包、示例和独立
+CPU oracle。验证链接见上文，最终交付状态由 Issue 维护。上方已交付 baseline 表格
 保留历史含义；协调公开发布 0.3 前仍需维护 daemon 0.2 consumer。

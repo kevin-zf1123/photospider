@@ -2,7 +2,7 @@
 
 - Snapshot date: 2026-09-09
 - Audited implementation baseline: `main@703569bb74164f061b233f9edc2c0b964bc868fb`
-- Current milestone: S1 reusable image and ordinary-parameter bindings
+- Next implementation milestone: S2 CPU regional execution
 
 ## Role and authority
 
@@ -42,14 +42,24 @@ It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
 
 ## Current milestone
 
-S1 makes one compiled graph reusable with caller-owned Float32 images and
-ordinary numeric parameter Values. It separates static facts, per-run
-snapshots, output demand and image semantics. #257 implementation is on
-`foundation/kernel_vertical`, with focused acceptance in
-[test_bindings](../../tests/integration/test_bindings.cpp). Merge and
-Issue/Project settlement remain pending.
+S1 implementation is complete at `ce9164c`: one compiled graph accepts
+caller-owned Float32 images and ordinary numeric parameter Values through
+independent per-run snapshots. #257 is covered by
+[test_bindings](../../tests/integration/test_bindings.cpp); #258 supplies the
+[maintained operation package and runnable oracle](../kernel-architecture/Image-Operations.md).
+Local static validation passed 9/9 tests and shared validation passed 4/4,
+including isolated installed consumers and the image-sink resource-error
+regression added during independent local review. The preceding `72b9d81`
+[push CI](https://github.com/kevin-zf1123/photospider/actions/runs/34276504731)
+passed Linux/macOS static/shared builds and ASAN/TSAN. Final revision CI,
+merge and Issue/Project settlement are recorded in #255, #257 and #258.
 
-### Critical path
+The next implementation milestone is S2 CPU regional execution. Its first
+action is to decide partial-output and CPU Storage/lifetime contracts under
+#152, then refine #210 liveness and #211 tile/halo acceptance before regional
+implementation. Those contracts and S2 implementation remain pending.
+
+### Completed S1 implementation sequence
 
 1. [#256](https://github.com/kevin-zf1123/photospider/issues/256)
    freezes `WorkflowInputDeclaration`, `ExecutionBindings`, validation,
@@ -120,9 +130,8 @@ continues. Decision delivery is tracked by
 [ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) now contains
 a unified image/scalar contract and its operation ABI v3/per-port
 contract has been explicitly accepted. #256 delivered the decision documents;
-#257 implements the kernel API/ABI and reusable image fixture on
-`foundation/kernel_vertical`. Static/shared installed consumers and focused
-tests validate the change; public CI results and Issue/Project settlement are
-not claimed here. #258 retains separate image integration acceptance. The delivered
-baseline above remains historical; daemon 0.2 consumer maintenance is required
-before a coordinated public 0.3 rollout.
+#257 implements the kernel API/ABI and #258 delivers the reusable image
+package, example and independent CPU oracle. Validation is linked above;
+Issues own final delivery status. The delivered baseline table remains
+historical; daemon 0.2 consumer maintenance is required before a coordinated
+public 0.3 rollout.
