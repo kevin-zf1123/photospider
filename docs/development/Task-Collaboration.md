@@ -1,65 +1,79 @@
 # Task Collaboration
 
-This public contract applies to kernel and daemon tasks. Product boundaries
-remain governed by each repository's accepted ADRs. It does not change CI or
-branch protection and does not require private assistant files for review.
+These conventions govern work in this repository. Accepted public ADRs retain
+product authority; this document does not alter CI or branch protection.
 
-## Sources and task scope
+## Scope and completion
 
-Use the named live Issue as the task source. Public ADRs record accepted
-long-term decisions; architecture documents record implemented facts. An ADR
-proposal or accepted target must be clearly distinguished from available API
-behavior. Issues own delivery status; Projects are operational views. Update
-the Current Development Program only for milestone, baseline, critical-path,
-or blocker changes. Private OpenSpec does not define public acceptance.
+Start from the current user request or named live Issue. Read its acceptance,
+direct dependencies, relevant code, tests, and affected contracts. Ordinary
+implementation does not require an Issue, proposal, or a repository-wide read.
+Check the current branch, HEAD, and existing edits before modifying files.
 
-At start identify task type (research, decision, implementation, delivery),
-validation mode, acceptance criteria, dependencies, and authorized endpoint
-(local draft, local implementation and validation, PR submission, or merged
-settlement). Verify the branch, HEAD, existing changes, and relevant PRs.
-These endpoints are collaboration agreements. Use existing authorization;
-ask only for a missing material decision or permission. File editing, testing,
-and review do not imply commit/push, metadata writes, merge, or cleanup.
+Complete implementation, run it, inspect results, and fix in-scope failures
+until the agreed endpoint is reached. Default to local implementation and
+validation. Reuse existing authorization; ask only for a missing material
+decision or external action. Do not stop after the first implementation when
+verification or repairs remain. An authorized Issue list or Project range can
+be completed in dependency order without asking again after every item.
 
-## Execution and validation
+## Early kernel, operation, and workflow iteration
 
-Default to `rapid`: locate, make the focused change, validate its behavior,
-and review the diff. Use `reviewed` for public API/ABI, package/consumer,
-ownership, persistent-format, unresolved external-behavior or substantive
-alternative decisions, concurrency, memory, or untrusted-input risk. Add an
-independent relevant code/spec review and only risk-justified wider checks.
-Use `release` only when explicitly requested.
+Develop kernel capabilities alongside useful operations and runnable workflows.
+An operation using the existing ABI normally follows `rapid`. Describe its
+name, input/output types and shapes, parameter types/ranges/defaults, numeric
+or image semantics, and applicable Region demand near its existing docs or
+example. Avoid creating a second operation catalog with duplicated schemas.
 
-Keep one code writer for a task and coordinate tasks sharing a worktree.
-Independent read-only research/review can run concurrently. Review findings
-are `blocker`, `required`, `suggestion`, or `invalid or unverified`; only
-verified, in-scope blockers and required findings enter the repair loop.
-Out-of-scope findings are reported for triage. Ordinary work does not create
-OpenSpec, feedback, tracking, evidence, branches, worktrees, or full test
-matrices automatically. Workflow-text checks do not become product CI gates.
+For a new composable operation or workflow execution capability, provide a
+minimal workflow run through a public entrypoint and a checkable expected
+result. Reuse existing examples or integration tests;
+a bug fix may reuse the workflow and add a focused regression. Examples intended
+for GPT must use implemented APIs. Accepted target contracts are explicitly
+identified as such. Add deterministic behavioral coverage and error/boundary
+cases according to the operation's actual risks. Do not require a whole-kernel
+validation matrix for each new operation.
 
-## Status and completion
+## Validation and review
 
-Maintain one concise Issue current-status block, where remote updates are
-authorized, covering result/location, checked acceptance and validation,
-remaining work, blockers, concrete maintainer decisions, and one next action
-with owner, prerequisites, and stopping point. Comments retain discussion.
-State the actual lifecycle: needs clarification, ready, in progress, awaiting
-review, awaiting acceptance, or complete. Record blockers separately and
-identify when nobody is executing. `ready-for-agent` describes readiness only.
+Default to `rapid`: focused implementation, behavioral tests, scoped format/lint,
+and diff review. Use `reviewed` for shared public API/ABI, installed-consumer,
+ownership or persistent-format changes, or actual concurrency, memory, or
+untrusted-input risk. Verify unresolved external behavior and substantive
+alternatives before choosing. Add an independent relevant code/contract check
+and widen tests only for the affected risk. `release` is explicitly requested.
 
-Research delivers evidence, conclusions, unknowns, and next steps. A decision
-requires explicit maintainer acceptance and its specified delivery. An
-implementation reaches the agreed delivery location with applicable tests.
-A parent capability requires a repeatable integrated acceptance scenario.
-Cancelled work and issue counts do not establish delivered capability or a
-project completion percentage. Stop at the authorized endpoint; a suggested
-next Issue is not authorization to start it.
+Keep one code writer per task. Delegate only independent, bounded research,
+review, or CI analysis when useful; no fixed agent count, nesting, fresh-owner
+requirement, or mandatory review cycle. Reuse reviewers for follow-up checks.
+Fix verified, in-scope `blocker` and `required` findings; report suggestions and
+out-of-scope findings without automatically expanding the task.
 
-One task owner updates Issue status, then the Project mapping. Verify actual
-remote changes. If updates are unauthorized or fail, report that GitHub was
-not updated and provide the exact pending text when needed. Private recovery
-notes are optional and require task authorization; never publish private
-paths, credentials, configuration, or local reports. Fresh sessions recheck
-references and Git state. Uncommitted work requires its original worktree
-unless an authorized accessible commit or patch preserves it.
+Reuse valid checks until later changes invalidate them. CI failures start with
+logs; retrieve relevant artifacts only when needed for diagnosis. Workflow,
+score, migration, and tracking checks do not become product CI gates.
+
+## Delivery and records
+
+Commit/push, GitHub writes, merge, cleanup, and private overlay synchronization
+follow the current task's authorization. Organize commits and PRs by coherent
+behavior; related Issues may share a PR. Use the repository's actual required
+checks for the current PR revision. Additional remote reviews and post-merge
+validation are conditional on risk or explicit delivery requirements. Do not
+assume admin merge, bypass protection, or create a separate CI branch for every
+CI correction; split unrelated infrastructure work when it merits its own PR.
+
+Issues own public delivery status and Projects reflect it. When writes are
+authorized, update relevant status at delivery or a meaningful blocker change.
+Keep the result, location, actual validation, remaining work, and next action
+concise. Update the Current Development Program when its audited baseline,
+current milestone, critical path, or blocked reason changes, as defined in its
+update rule. Do not duplicate progress in feedback, tracking, and reports.
+Private OpenSpec is explicit-only and supplies no public delivery gate.
+
+Public ADRs record decisions; architecture docs record implemented behavior.
+Update affected English documents and their Chinese mirrors. Research does not
+accept a design; an accepted design does not prove implementation. Completion
+means the requested behavior is verified at the agreed delivery location.
+Private recovery notes are optional when requested; uncommitted work requires
+its original worktree unless an accessible commit or patch preserves it.
