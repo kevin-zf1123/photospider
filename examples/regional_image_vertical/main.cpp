@@ -263,7 +263,7 @@ void numerical(const std::shared_ptr<OperationRegistry>& operations) {
         require(reference[i] == (i % 4 == 3 ? .625F : .3125F),
                 "hand-computed uniform fixture");
     }
-    for (const auto geometry :
+    for (const auto& geometry :
          {std::make_pair(1, 1), std::make_pair(2, 3), std::make_pair(5, 7),
           std::make_pair(128, 128)}) {
       for (bool roi : {false, true}) {
