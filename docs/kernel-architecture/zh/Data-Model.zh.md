@@ -13,7 +13,7 @@ DSO handle、runtime allocation 或 daemon id。
 
 当前 dense `Value` 包含：
 
-- `ValueDescriptor`：`UInt8`、`Int64` 或 `Float64`，以及 rank 1..8 的 nonzero shape；
+- `ValueDescriptor`：`UInt8`、`Int64`、`Float64` 或 `Float32`，以及 rank 1..8 的 nonzero shape；
 - 一个 rank-matching logical `Region`；
 - `StridedLayout`：byte offset 与每个 axis 的 signed byte stride；
 - 最多 64 个 unique versioned `ValueFacet` key/payload record；
@@ -45,8 +45,24 @@ type 与 maximum rank，然后 freeze。Provider load 只接受 platform loader 
 `InvalidArgument`，无法加载的合法 path 返回 `NotFound`。它不构造 Value，也不提供
 storage。
 
-## 已接受的 S1 目标，尚未实现
+## Workflow input 与绑定快照
 
-开发方向与 Float32 目标已经接受。[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md)
-已修订图像、普通标量、逐端口需求和 operation ABI v3 的具体方案；契约已经
-Accepted。上述当前实现事实不变，未实现新元素或绑定；#256 跟踪决策交付，#257 负责实现。
+Schema 2 增加 `WorkflowInputDeclaration` 和 tagged `WorkflowInput` source：
+`WorkflowNodeOutput` 或 `WorkflowInputReference`。Node id 与 declaration id 使用独立
+命名空间。最多 4096 个 declaration，nonzero id 和精确的 1..128-byte 可打印 ASCII
+name 必须唯一，name 不含空格。各 compiler stage 的 `input_declarations()` 按 id 排序复制。
+
+Declaration 固定 UInt8/Int64/Float64/Float32 descriptor、whole Region、零 byte offset、
+正的 canonical row-major stride 和精确闭合 facet 集合。无需分配 payload 即检查 dense
+byte count B：B > 0、B - 1 <= INT64_MAX、B <= SIZE_MAX；每个存储 stride 必须适配 int64。
+通用 Value 保留已有 strided/partial-Region 行为。
+
+`ExecutionBindings` 是精确 name 对应的 `ExecutionBinding` Value vector。每个 declaration
+包含未使用的声明都必须绑定一次。重复、缺失、多余、非法 name 和无效 Value 返回
+InvalidArgument；合法但不匹配的 type/shape/Region/layout/byte-count/facet 返回
+TypeMismatch。每次调用复制 name 和 Value metadata，共享 immutable byte ownership。
+Plan 不保留 binding 或 payload address。同一 current plan 可重复或并发执行独立快照。
+
+Float32 使用 element code 4，通用 Value 保留全部 IEEE binary32 bit pattern。
+图像/标量 port 增加各自的 finite domain 检查，参见
+[图像算子](Image-Operations.zh.md) 和 [ADR 0016](../../adr/0016-workflow-inputs-and-execution-bindings.md)。

@@ -34,6 +34,26 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
 };
 
+/** @brief One exact-name immutable Value supplied to a Run. */
+struct PHOTOSPIDER_API ExecutionBinding final {
+  /** @brief Case-sensitive required declaration name. */
+  std::string name;
+  /** @brief Valid Value with exactly matching metadata and dense bytes. */
+  Value value;
+};
+/**
+ * @brief Per-call input snapshot; duplicate entries remain visible to
+ * validation.
+ * @note Names and Value metadata are copied by execute; bytes have shared
+ * immutable ownership. Caller containers must not be modified during copying.
+ * A Run retains its snapshot until admitted callbacks retire. Returned Values
+ * own their bytes independently. Payloads never enter compiler/cache identity.
+ */
+struct PHOTOSPIDER_API ExecutionBindings final {
+  /** @brief 0..4096 entries; every declaration must occur exactly once. */
+  std::vector<ExecutionBinding> inputs;
+};
+
 /**
  * @brief Per-execution scheduling controls.
  *
@@ -161,18 +181,27 @@ class PHOTOSPIDER_API ExecutionContext final {
   /**
    * @brief Executes one validated plan through bounded local resources.
    * @param plan Immutable physical plan for one graph revision.
+   * @param bindings Owned snapshot validated completely before callbacks.
+   * Missing/extra/duplicate/malformed names or invalid Values fail
+   * InvalidArgument; descriptor/Region/layout/facet differences fail
+   * TypeMismatch. Scalar intervals and bound-image pixels fail InvalidArgument.
    * @param cancellation Cooperative cancellation observation.
    * @param options Per-Run parallelism controls.
    * @return Named result or typed cancellation/stale/backend/resource failure.
    * @throws std::bad_alloc If staging/result allocation fails before a
    * recoverable status can be built.
-   * @note After every completion and after complete final result/digest/timing
+   * @note Default, stale, or foreign-registry plans fail Stale before bindings
+   * or cancellation are read. After entry, observed cancellation precedes
+   * stale graph state and ordinary failure. Concurrent calls may reuse a plan
+   * with independent bindings; plan/options references must remain immutable
+   * and valid. Input retention is outside modeled maximum_live_bytes.
+   * After every completion and after complete final result/digest/timing
    * assembly, publication rechecks cancellation before plan currentness under
    * the Run mutex. Passing that last check is the sole success-publication
    * linearization point; rejected local output is discarded.
    */
   [[nodiscard]] Result<ExecutionResult> execute(
-      const ExecutionPlan& plan,
+      const ExecutionPlan& plan, ExecutionBindings bindings = {},
       const CancellationToken& cancellation = CancellationToken(),
       const ExecutionOptions& options = {});
 

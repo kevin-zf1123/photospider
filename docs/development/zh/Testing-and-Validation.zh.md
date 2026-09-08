@@ -48,7 +48,7 @@ Kernel test 覆盖：
   `ExecutionResult`，并各自以一次健康 execute 证明精确 cleanup；
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
-  operation-v2 typed parameter schema、demand view，以及带精确 destroy/close count 的
+  operation-v3 typed parameter schema、demand view，以及带精确 destroy/close count 的
   deterministic owner-allocation failure。一个 copy-aware C++ embedding callable 通过
   rvalue 注册，随后 arm 为拒绝后续 copy；它仍能完成 freeze/invoke，并允许未冻结 registry
   加载合法 DSO，且只有一次 invocation、copy count 不增加。这证明 registry/map/staging
@@ -180,7 +180,7 @@ shared-bridge/final-executable 拓扑，同时不向 installed package export �
 普通 test 覆盖 malformed Value/Region/layout、graph document、operation/provider record、
 精确 library path 与 callback output。Malformed local IPC frame 属于 daemon repository。
 
-长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 operation-v2
+长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 operation-v3
 trait/parameter vocabulary 与 compiler validation。它使用 `EXCLUDE_FROM_ALL`，绝不注册到
 CTest；Clang 下通过 `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` 显式启用。Seed input
 维护在 `tests/fuzz/corpus/operation_contract_ir/`；调用者选择的 crash/artifact directory
@@ -232,3 +232,23 @@ cmake --install <clean-build> --prefix <fresh-prefix>
 使用 ClangFormat 21 格式化 changed C/C++，并对相同文件运行
 `python3 -m cpplint`。不支持的 sanitizer/GPU platform 记录为 limitation，而不是
 successful gate。
+
+## Workflow binding 与 binary32 图像验收
+
+`test_bindings` 通过公开 compile/execute 执行 ADR0016 的
+`s1-rgba32f-exposure-opacity-v1` fixture，对照 descriptor 和 A/B 精确 byte。
+覆盖顺序/并发独立快照、scalar/image preflight、declaration/binding mismatch、tagged
+identity、normalized demand、Halo、cancellation/stale publication、resource bound、
+错误 C port table 和 provider ABI1 Float32。浮点环境回归覆盖继承的 rounding 与
+denormal 模式，通用 Value bit pattern 不受图像数值域限制。
+
+```sh
+cmake --build build/issue257-static --target test_bindings test_compiler test_value test_execution test_plugin_registry test_operation_contract_ir_seeds -j 8
+ctest --test-dir build/issue257-static -R '^test_(bindings|compiler|value|execution|plugin_registry|operation_contract_ir_seeds|installed_consumer)$' --output-on-failure
+```
+
+Installed consumer 独立构建 ABI3 C image plugin，通过 C++ 与 C 路径执行相同 oracle，
+并要求 0.2 package request 对 0.3 消费失败。单独配置 `-DBUILD_SHARED_LIBS=ON`，构建
+`photospider` 和 `test_bindings`，然后在该目录运行
+`-R '^test_(bindings|installed_consumer)$'`，验证共享导出与安装消费。上述命令针对本次
+API/ABI 变化，不要求 sanitizer 或平台 release matrix。

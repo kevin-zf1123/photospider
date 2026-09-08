@@ -1,6 +1,6 @@
 # Current Development Program
 
-- Snapshot date: 2026-09-05
+- Snapshot date: 2026-09-09
 - Audited implementation baseline: `main@703569bb74164f061b233f9edc2c0b964bc868fb`
 - Current milestone: S1 reusable image and ordinary-parameter bindings
 
@@ -44,7 +44,10 @@ It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
 
 S1 makes one compiled graph reusable with caller-owned Float32 images and
 ordinary numeric parameter Values. It separates static facts, per-run
-snapshots, output demand and image semantics. Runtime implementation is pending.
+snapshots, output demand and image semantics. #257 implementation is on
+`foundation/kernel_vertical`, with focused acceptance in
+[test_bindings](../../tests/integration/test_bindings.cpp). Merge and
+Issue/Project settlement remain pending.
 
 ### Critical path
 
@@ -116,7 +119,10 @@ continues. Decision delivery is tracked by
 
 [ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) now contains
 a unified image/scalar contract and its operation ABI v3/per-port
-contract has been explicitly accepted. #256 delivers the decision documents;
-#257 is the next implementation task after decision delivery and task
-authorization. Its implementation has not started. The S0 implementation
-baseline and current capabilities have not changed.
+contract has been explicitly accepted. #256 delivered the decision documents;
+#257 implements the kernel API/ABI and reusable image fixture on
+`foundation/kernel_vertical`. Static/shared installed consumers and focused
+tests validate the change; public CI results and Issue/Project settlement are
+not claimed here. #258 retains separate image integration acceptance. The delivered
+baseline above remains historical; daemon 0.2 consumer maintenance is required
+before a coordinated public 0.3 rollout.

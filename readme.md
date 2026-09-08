@@ -9,11 +9,12 @@ reset is governed by
 
 The installed `Photospider::kernel` target provides:
 
-- `WorkflowDocument` source graphs;
+- schema-2 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v2 semantic traits with closed typed parameter schemas,
+- operation ABI v3 semantic traits with closed typed parameter schemas,
   optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
+- Float32 image exposure/opacity operations with bounded runtime scalars;
 - explicit dense `Value`, bounded semantic facets, rank-general `Region`,
   strided layout, immutable bytes, and Run-local cross-backend copies;
 - cooperative cancellation, local resource accounting, fallback, and stale
@@ -55,7 +56,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.2 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.3 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -86,6 +87,7 @@ format, remote endpoint, or plugin path method.
 | Current ownership and behavior | [Architecture overview](docs/kernel-architecture/Overview.md) |
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
+| Runnable image workflow | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
 | Build and validation | [Testing and validation](docs/development/Testing-and-Validation.md) |

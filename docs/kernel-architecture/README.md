@@ -24,6 +24,7 @@ summarizes the baseline and execution order without changing this architecture.
 8. [Cache Model](Cache-Model.md)
 9. [Region Semantics](Region-Semantics.md)
 10. [Plugin ABI](Plugin-ABI.md)
+11. [Image Operations](Image-Operations.md)
 
 The kernel is session-agnostic and owns no daemon Job, network service,
 durable work, process supervisor, policy DSO, plugin security product, durable

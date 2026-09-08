@@ -89,7 +89,7 @@ layout/facet view validation。
 derived state；kernel 不暴露 native GPU handle 或 persistent residency registry。
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
-transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v2 input
+transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v3 input
 view 会接收该精确 demand。Executor 仍 materialize complete Value。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
 全部 named Value、diagnostic、plan/result digest 与 execute timing 组装完毕后，都会检查
@@ -98,7 +98,7 @@ cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness 
 linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
 与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
-Operation ABI v2 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
+Operation ABI v3 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
 result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
 上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
@@ -111,8 +111,24 @@ Raw diagnostic 包含 compile-stage duration、execute duration、operation atte
 timing/outcome、selected backend、transfer count/bytes、peak modeled bytes、fallback reason、
 plan digest 与 result digest。它们是 observation，不是 verdict 或 release evidence。
 
-## 已接受的 S1 目标，尚未实现
+## Runtime input 降级与执行
 
-开发方向与 Float32 目标已经接受。[ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md)
-已修订图像、普通标量、逐端口需求和 operation ABI v3 的具体方案；契约已经
-Accepted。上述当前实现事实不变，未实现新元素或绑定；#256 跟踪决策交付，#257 负责实现。
+Schema 2 在 semantic publication 前验证所有 input declaration，将 canonical table
+复制到 semantic IR、optimized IR 和 plan。Ordered source 保留 node/declaration tag。
+Scalar port 要求直接 Float32 {1} workflow input、精确空 facet 和 finite inclusive
+interval；analyze 检查所有消费 interval 的交集非空。Image consumer 要求 declaration
+的精确 profile 或 producer 的 image output guarantee，通用 producer 不隐式获得该保证。
+
+`execute(plan, bindings, cancellation, options)` 复制 input name 和 Value metadata，
+先检查 name multiset，再按 declaration id 检查 Value，最后检查全部直接 scalar/image
+约束，之后才允许首个 callback 或 transfer。Entry 在读取 binding/token 前将 default、
+stale 或 foreign-registry plan 判为 Stale。Entry 后 cancellation 优先于 Stale 和普通
+binding failure。长数值扫描周期检查 cancellation 与 graph currentness。
+Run-owned snapshot 保留到全部已准入 callback 退场；返回 Value 独立拥有 immutable
+bytes。Run 不共享可变 binding/result，也不按 plan digest 重用 output。
+
+外部输入初始 backend label 为 CPU，沿用显式 transfer/fallback 路径。保留 input bytes
+不计入 maximum_live_bytes。Image-output step 在检查乘法溢出后预留
+max(estimated_bytes, 2*B)，表示 callback output 与 sink copy 的模型，并非进程 RAM 上限。
+通用 Value output 保留 estimated-byte 语义。RawBenchmarkOptions.bindings 在入口复制
+一次，并传给每个独立编译的 sample。

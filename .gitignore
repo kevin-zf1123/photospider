@@ -34,6 +34,11 @@
 !src/**/*.hpp
 !src/**/*.mm
 
+# Maintained repository-owned operation implementations.
+!plugins/
+!plugins/ops/
+!plugins/ops/*.cpp
+
 # Maintained unit, integration, fixture, support, and consumer sources.
 !tests/
 !tests/**/

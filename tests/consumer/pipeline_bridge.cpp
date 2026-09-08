@@ -1,6 +1,8 @@
 #include <exception>
+#include <memory>
 #include <utility>
 
+#include "image_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/photospider.hpp"
 
 #if defined(_MSVC_LANG)
@@ -30,11 +32,11 @@ extern "C" int photospider_consumer_run_pipeline(void) {
     document.nodes = {
         ps::WorkflowNode{1U, "core.constant", {}, {{"value", 20.0}}},
         ps::WorkflowNode{2U, "core.constant", {}, {{"value", 22.0}}},
-        ps::WorkflowNode{
-            3U,
-            "math.add",
-            {ps::WorkflowInput{1U, "value"}, ps::WorkflowInput{2U, "value"}},
-            {}},
+        ps::WorkflowNode{3U,
+                         "math.add",
+                         {ps::WorkflowNodeOutput{1U, "value"},
+                          ps::WorkflowNodeOutput{2U, "value"}},
+                         {}},
     };
     document.outputs = {ps::WorkflowOutput{"answer", 3U, "value"}};
 
@@ -51,7 +53,32 @@ extern "C" int photospider_consumer_run_pipeline(void) {
       return 2;
     }
     const auto value = result.value().values.at("answer").as_float64();
-    return value.ok() && value.value() == 42.0 ? 0 : 3;
+    if (!value.ok() || value.value() != 42.0)
+      return 3;
+    for (bool plugin : {false, true}) {
+      auto image_operations = plugin ? std::make_shared<ps::OperationRegistry>()
+                                     : ps::make_default_operation_registry();
+      if (plugin) {
+        if (!image_operations->load_plugin(PS_IMAGE_CONSUMER_PLUGIN_PATH).ok())
+          return 6;
+        image_operations->freeze();
+      }
+      ps::Compiler image_compiler(image_operations);
+      ps::GraphContext image_graph(s1_fixture::document());
+      auto image_compiled =
+          image_compiler.compile(image_graph, s1_fixture::demand());
+      if (!image_compiled.ok())
+        return 7;
+      ps::ExecutionContext image_execution(image_operations);
+      for (bool second : {false, true}) {
+        auto image_result = image_execution.execute(
+            image_compiled.value().plan, s1_fixture::bindings(second));
+        if (!image_result.ok() ||
+            !s1_fixture::oracle(image_result.value(), second))
+          return 8;
+      }
+    }
+    return 0;
   } catch (const std::exception&) {
     return 5;
   } catch (...) {

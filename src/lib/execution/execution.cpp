@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "data/input_validation.hpp"
+
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
 #endif
@@ -774,6 +776,78 @@ struct ExecutionContext::Impl final {
 
 namespace {
 
+/** @brief Allocation-free stop selection after a successful plan entry check.
+ */
+ErrorCode binding_stop(const ExecutionPlan& plan,
+                       const CancellationToken& cancellation) noexcept {
+  if (cancellation.cancelled())
+    return ErrorCode::Cancelled;
+  return plan.current() ? ErrorCode::Ok : ErrorCode::Stale;
+}
+
+/** @brief Validates the complete name multiset then all Values and consumers.
+ */
+Result<std::vector<Value>> preflight_bindings(
+    const ExecutionPlan& plan, const ExecutionBindings& bindings,
+    const CancellationToken& cancellation) {
+  if (bindings.inputs.size() > 4096) {
+    return Result<std::vector<Value>>(
+        Status::failure(ErrorCode::InvalidArgument, "too many bindings"));
+  }
+  std::map<std::string, std::vector<const Value*>> by_name;
+  for (const auto& binding : bindings.inputs)
+    by_name[binding.name].push_back(&binding.value);
+  for (const auto& entry : by_name) {
+    if (!input_internal::valid_input_name(entry.first))
+      return Result<std::vector<Value>>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "malformed binding name: " + entry.first));
+  }
+  for (const auto& entry : by_name) {
+    if (entry.second.size() != 1)
+      return Result<std::vector<Value>>(
+          Status::failure(ErrorCode::InvalidArgument,
+                          "duplicate binding name: " + entry.first));
+  }
+  std::map<std::string, std::size_t> declared_names;
+  const auto& declarations = plan.input_declarations();
+  for (std::size_t i = 0; i < declarations.size(); ++i)
+    declared_names.emplace(declarations[i].name, i);
+  for (const auto& entry : by_name) {
+    if (declared_names.count(entry.first) == 0)
+      return Result<std::vector<Value>>(Status::failure(
+          ErrorCode::InvalidArgument, "extra binding name: " + entry.first));
+  }
+  for (const auto& entry : declared_names) {
+    if (by_name.count(entry.first) == 0)
+      return Result<std::vector<Value>>(Status::failure(
+          ErrorCode::InvalidArgument, "missing binding name: " + entry.first));
+  }
+  std::vector<Value> values;
+  values.reserve(declarations.size());
+  for (const auto& declaration : declarations) {
+    const auto& value = *by_name.at(declaration.name).front();
+    const auto status = input_internal::validate_binding(declaration, value);
+    if (!status.ok())
+      return Result<std::vector<Value>>(status);
+    values.push_back(value);
+  }
+  const auto stop = [&]() noexcept { return binding_stop(plan, cancellation); };
+  for (const auto& step : plan.steps()) {
+    for (std::size_t i = 0; i < step.inputs.size(); ++i) {
+      const auto* input = std::get_if<PlanWorkflowInput>(&step.inputs[i]);
+      if (!input)
+        continue;
+      const auto status = input_internal::validate_port_value(
+          step.traits.input_schema[i], values.at(input->declaration_index),
+          ErrorCode::InvalidArgument, stop);
+      if (!status.ok())
+        return Result<std::vector<Value>>(status);
+    }
+  }
+  return Result<std::vector<Value>>(std::move(values));
+}
+
 /**
  * @brief Coordinates one dependency-ordered execution through shared pools.
  *
@@ -790,7 +864,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param gpu_pool Optional GPU callback pool with context lifetime.
    * @param waiting_admission Context-wide waiting-callback owner.
    * @param ledger Context-wide modeled-byte owner.
-   * @param operations Frozen registry shared by every callback.
+   * @param invoke Callback entry retaining registry ownership and currentness.
    * @param plan Immutable validated physical plan.
    * @param cancellation Cooperative caller token.
    * @param maximum_parallelism Positive per-execution in-flight bound.
@@ -800,15 +874,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    */
   ExecutionRun(ThreadPool* cpu_pool, ThreadPool* gpu_pool,
                WaitingAdmission* waiting_admission, ResourceLedger* ledger,
-               std::shared_ptr<OperationRegistry> operations,
-               const ExecutionPlan* plan, CancellationToken cancellation,
+               std::function<Result<Value>(const std::string&,
+                                           const OperationInvocation&)>
+                   invoke,
+               const ExecutionPlan* plan, std::vector<Value> bindings,
+               CancellationToken cancellation,
                std::uint32_t maximum_parallelism)
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
         ledger_(ledger),
-        operations_(std::move(operations)),
+        invoke_(std::move(invoke)),
         plan_(plan),
+        bindings_(std::move(bindings)),
         cancellation_(std::move(cancellation)),
         maximum_parallelism_(maximum_parallelism),
         values_(plan->steps().size()),
@@ -816,36 +894,41 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         completed_(plan->steps().size(), false),
         remaining_dependencies_(plan->steps().size(), 0U),
         dependents_(plan->steps().size()) {
-    if (!cpu_pool_ || !waiting_admission_ || !ledger_ || !operations_ ||
-        !plan_ || plan_->revision() == 0U || plan_->steps().empty() ||
+    if (!cpu_pool_ || !waiting_admission_ || !ledger_ || !invoke_ || !plan_ ||
+        plan_->revision() == 0U || plan_->steps().empty() ||
         maximum_parallelism_ == 0U) {
       throw std::invalid_argument("execution plan or bounds are invalid");
     }
     for (std::size_t step_index = 0; step_index < plan_->steps().size();
          ++step_index) {
       const PlanStep& step = plan_->steps()[step_index];
-      if (step.input_demands.size() != step.input_steps.size() ||
+      if (step.input_demands.size() != step.inputs.size() ||
           step.output_demand.empty() ||
           !step.output_demand.validate(step.output_descriptor.shape).ok()) {
         throw std::invalid_argument(
             "execution plan Region demand metadata is invalid");
       }
-      remaining_dependencies_[step_index] = step.input_steps.size();
-      for (std::size_t input_position = 0U;
-           input_position < step.input_steps.size(); ++input_position) {
-        const std::size_t input_index = step.input_steps[input_position];
-        if (input_index >= step_index) {
-          throw std::invalid_argument(
-              "execution plan input must name an earlier step");
+      for (std::size_t position = 0; position < step.inputs.size();
+           ++position) {
+        const auto& input = step.inputs[position];
+        const ValueDescriptor* descriptor = nullptr;
+        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+          if (producer->step_index >= step_index)
+            throw std::invalid_argument("plan input must name earlier step");
+          descriptor = &plan_->steps()[producer->step_index].output_descriptor;
+          dependents_[producer->step_index].push_back(step_index);
+          ++remaining_dependencies_[step_index];
+        } else {
+          const auto index =
+              std::get<PlanWorkflowInput>(input).declaration_index;
+          if (index >= bindings_.size() ||
+              index >= plan_->input_declarations().size())
+            throw std::invalid_argument("plan declaration index is invalid");
+          descriptor = &plan_->input_declarations()[index].descriptor;
         }
-        if (step.input_demands[input_position].empty() ||
-            !step.input_demands[input_position]
-                 .validate(plan_->steps()[input_index].output_descriptor.shape)
-                 .ok()) {
-          throw std::invalid_argument(
-              "execution plan input Region demand is invalid");
-        }
-        dependents_[input_index].push_back(step_index);
+        if (step.input_demands[position].empty() ||
+            !step.input_demands[position].validate(descriptor->shape).ok())
+          throw std::invalid_argument("plan input Region demand is invalid");
       }
       if (remaining_dependencies_[step_index] == 0U) {
         ready_.push(step_index);
@@ -1098,8 +1181,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const PlanStep& step = plan_->steps()[step_index];
       std::vector<Value> inputs;
       std::vector<bool> transfer_inputs;
-      inputs.reserve(step.input_steps.size());
-      transfer_inputs.reserve(step.input_steps.size());
+      inputs.reserve(step.inputs.size());
+      transfer_inputs.reserve(step.inputs.size());
       std::uint64_t transfer_count = 0U;
       std::uint64_t transfer_bytes = 0U;
       {
@@ -1110,23 +1193,32 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return;
         }
         for (std::size_t input_position = 0U;
-             input_position < step.input_steps.size(); ++input_position) {
-          const std::size_t input_index = step.input_steps[input_position];
-          if (!completed_[input_index]) {
-            finish_failure_locked(Status::failure(
-                ErrorCode::Internal,
-                "ready step observed an incomplete dependency"));
-            return;
+             input_position < step.inputs.size(); ++input_position) {
+          const auto& source = step.inputs[input_position];
+          const Value* value = nullptr;
+          Backend source_backend = Backend::Cpu;
+          if (const auto* producer = std::get_if<PlanStepInput>(&source)) {
+            const auto input_index = producer->step_index;
+            if (!completed_[input_index]) {
+              finish_failure_locked(
+                  Status::failure(ErrorCode::Internal,
+                                  "ready step observed incomplete dependency"));
+              return;
+            }
+            value = &values_[input_index];
+            source_backend = value_backends_[input_index];
+          } else {
+            value = &bindings_[std::get<PlanWorkflowInput>(source)
+                                   .declaration_index];
           }
-          const Status demand_status = validate_input_demand(
-              values_[input_index], step.input_demands[input_position]);
+          const Status demand_status =
+              validate_input_demand(*value, step.input_demands[input_position]);
           if (!demand_status.ok()) {
             finish_failure_locked(demand_status);
             return;
           }
-          inputs.push_back(values_[input_index]);
-          const bool requires_transfer =
-              value_backends_[input_index] != backend;
+          inputs.push_back(*value);
+          const bool requires_transfer = source_backend != backend;
           transfer_inputs.push_back(requires_transfer);
           if (requires_transfer) {
             if (transfer_count == std::numeric_limits<std::uint64_t>::max()) {
@@ -1136,8 +1228,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return;
             }
             ++transfer_count;
-            auto sum = checked_add(transfer_bytes,
-                                   values_[input_index].bytes().size());
+            auto sum = checked_add(transfer_bytes, value->bytes().size());
             if (!sum.ok()) {
               finish_failure_locked(sum.status());
               return;
@@ -1167,10 +1258,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       }
       ResourceLedger::Lease lease = lease_result.take_value();
       const auto started = std::chrono::steady_clock::now();
-      Result<Value> invocation_result = operations_->invoke(
-          step.operation,
-          OperationInvocation{inputs, step.input_demands, step.parameters,
-                              backend, cancellation_});
+      Result<Value> invocation_result =
+          invoke_(step.operation,
+                  OperationInvocation{inputs, step.input_demands,
+                                      step.parameters, backend, cancellation_});
       const std::uint64_t elapsed = duration_us(started);
 
       bool should_fallback = false;
@@ -1410,10 +1501,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   WaitingAdmission* waiting_admission_;
   /** @brief Shared local byte ledger with longer context lifetime. */
   ResourceLedger* ledger_;
-  /** @brief Frozen operation registry retained through every callback. */
-  std::shared_ptr<OperationRegistry> operations_;
+  /** @brief Run callback entry retaining registry ownership and currentness. */
+  std::function<Result<Value>(const std::string&, const OperationInvocation&)>
+      invoke_;
   /** @brief Immutable caller-owned plan valid until `run` returns. */
   const ExecutionPlan* plan_;
+  /** @brief Run-owned immutable Values in canonical declaration order. */
+  std::vector<Value> bindings_;
   /** @brief Cooperative cancellation observation. */
   CancellationToken cancellation_;
   /** @brief Positive per-execution callback bound. */
@@ -1468,8 +1562,8 @@ ExecutionContext::~ExecutionContext() noexcept = default;
  * @copydetails ExecutionContext::execute
  */
 Result<ExecutionResult> ExecutionContext::execute(
-    const ExecutionPlan& plan, const CancellationToken& cancellation,
-    const ExecutionOptions& options) {
+    const ExecutionPlan& plan, ExecutionBindings bindings,
+    const CancellationToken& cancellation, const ExecutionOptions& options) {
   if (!impl_) {
     return Result<ExecutionResult>(Status::failure(
         ErrorCode::Internal, "execution context has no implementation"));
@@ -1484,14 +1578,34 @@ Result<ExecutionResult> ExecutionContext::execute(
         ErrorCode::Stale,
         "execution plan belongs to another frozen operation set"));
   }
+  auto stopped = binding_stop(plan, cancellation);
+  if (stopped != ErrorCode::Ok) {
+    Status status;
+    status.code = stopped;
+    return Result<ExecutionResult>(std::move(status));
+  }
+  auto prepared = preflight_bindings(plan, bindings, cancellation);
+  stopped = binding_stop(plan, cancellation);
+  if (stopped != ErrorCode::Ok) {
+    Status status;
+    status.code = stopped;
+    return Result<ExecutionResult>(std::move(status));
+  }
+  if (!prepared.ok())
+    return Result<ExecutionResult>(prepared.status());
   const std::uint32_t parallelism = options.maximum_parallelism == 0U
                                         ? impl_->cpu_worker_count
                                         : options.maximum_parallelism;
   try {
     auto coordinator = std::make_shared<ExecutionRun>(
         &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->waiting_admission,
-        &impl_->ledger, impl_->operation_registry, &plan, cancellation,
-        parallelism);
+        &impl_->ledger,
+        [operations = impl_->operation_registry, &plan](
+            const std::string& key, const OperationInvocation& invocation) {
+          return operations->invoke_current(key, invocation,
+                                            [&plan] { return plan.current(); });
+        },
+        &plan, prepared.take_value(), cancellation, parallelism);
     return coordinator->run();
   } catch (const std::invalid_argument& error) {
     return Result<ExecutionResult>(

@@ -1,12 +1,12 @@
 # ADR 0016：工作流输入与每次运行的图像绑定
 
-- 状态：Accepted，目标契约已接受，尚未实现
+- 状态：Accepted，#257 已提供内核实现
 - 日期：2026-09-05
 - 已接受范围：维护者在当前任务明确接受调整后的开发方向、Float32 图像输入和普通运行期参数
 - 接受记录：2026-09-05，维护者针对 operation ABI v3 及配套契约的明确确认问题回复“是，继续。”
 - 任务：[kernel #256](https://github.com/kevin-zf1123/photospider/issues/256)
 - 已核验源码：`main@369da60bdcf7aa26eefbd7a99f7e5d1a8afd79e8`
-- 实现状态：尚未实现，由 #257 和 #258 处理
+- 实现状态：#257 实现内核契约；#258 保留独立集成验收
 - 英文权威原稿：[英文](../0016-workflow-inputs-and-execution-bindings.md)
 
 维护者已接受[调整后的方向](../../development/zh/Refactor-Development-Plan.zh.md)。
@@ -302,7 +302,9 @@ consumer/package 协调迁移，或另行批准的版本/CI 选版策略；现�
 
 ## 命名测试与图像参考
 
-这些为 #257/#258 的未来验收要求，当前没有运行实现。声明分别为 id1/name=image、
+这些为 #257/#258 的验收要求。当前内核 executable fixture 为
+[test_bindings](../../../tests/integration/test_bindings.cpp)，#258 保留独立图像集成验收。
+声明分别为 id1/name=image、
 id2/name=gain、id3/name=opacity。图像为 Float32 {2,2,4}、完整 Region、偏移0、
 strides {32,16,4}、64字节及精确图像 facet；两个标量均为 Float32 {1}、完整
 Region、偏移0、stride4、4字节、无 facet。
@@ -352,7 +354,7 @@ Node10 的 image.exposure_gain 接 id1、id2；node20 的 image.opacity 接 node
 
 维护者已接受调整方向、Float32、上述完整端口 schema 和单一 operation ABI v3。
 接受依据为当前任务中针对具体 ABI 升级及配套契约问题的明确回复“是，继续。”。
-无需再次确认这些决定。已接受目标尚未实现，#257/#258 负责代码及运行验收。
+无需再次确认这些决定。决策接受时目标尚未实现；当前 #257 实现内核契约，#258 保留独立集成验收。
 
 #256 跟踪公开文档交付与 Issue/Project 结算。维护者已另行授权两个文档 PR、
 CI 通过后的合并及 #256 结算。决策接受不表示实现完成，也不自动启动 #257。

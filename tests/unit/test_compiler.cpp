@@ -22,8 +22,8 @@ int main() {
   using ps::make_default_operation_registry;
   using ps::PlanningOptions;
   using ps::WorkflowDocument;
-  using ps::WorkflowInput;
   using ps::WorkflowNode;
+  using ps::WorkflowNodeOutput;
   using ps::WorkflowOutput;
 
   auto operations = make_default_operation_registry();
@@ -115,16 +115,16 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  PS_CHECK(positive_zero.value().semantic.digest().value == "7ad5d0e23f1164b3");
+  PS_CHECK(positive_zero.value().semantic.digest().value == "ee63d40ea1334f9c");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "02d649acb07e120a");
-  PS_CHECK(positive_zero.value().plan.digest().value == "b3201be660702a9c");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "61853ba3f4ca3fa0");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "e5682637a9eab433");
+           "94da04f4b547f36f");
+  PS_CHECK(positive_zero.value().plan.digest().value == "52024113ab522467");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "7a1a449a7bb279d9");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "ab1adb2c10d2401c");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "0d4103d0a4a6dcce");
-  PS_CHECK(negative_zero.value().plan.digest().value == "edee134b3dc08cfc");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "cd7b604b0b72766e");
+           "8674696deae2829b");
+  PS_CHECK(negative_zero.value().plan.digest().value == "d6f0bfb3beea3e90");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "938c37892044ff43");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=
@@ -153,7 +153,8 @@ int main() {
   PS_CHECK(duplicate_result.status().code == ErrorCode::InvalidArgument);
 
   WorkflowDocument missing = ps::test::addition_document(1.0, 1.0);
-  missing.nodes.back().inputs.back().source_node = 99U;
+  std::get<WorkflowNodeOutput>(missing.nodes.back().inputs.back()).source_node =
+      99U;
   GraphContext missing_context(std::move(missing));
   auto missing_result = compiler.compile(missing_context);
   PS_CHECK(!missing_result.ok());
@@ -161,8 +162,8 @@ int main() {
 
   WorkflowDocument cycle;
   cycle.nodes = {
-      WorkflowNode{1U, "core.identity", {WorkflowInput{2U, "value"}}, {}},
-      WorkflowNode{2U, "core.identity", {WorkflowInput{1U, "value"}}, {}},
+      WorkflowNode{1U, "core.identity", {WorkflowNodeOutput{2U, "value"}}, {}},
+      WorkflowNode{2U, "core.identity", {WorkflowNodeOutput{1U, "value"}}, {}},
   };
   cycle.outputs = {WorkflowOutput{"cycle", 1U, "value"}};
   GraphContext cycle_context(std::move(cycle));

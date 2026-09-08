@@ -2,7 +2,7 @@
 
 Photospider 安装两份 narrow same-trust extension header：
 
-- operation ABI v2：copied semantic trait、closed typed parameter schema、
+- operation ABI v3：copied semantic trait、closed typed parameter schema、
   plan-derived input demand 与一个 synchronous Value callback；
 - data-provider ABI v1：copied schema key、element type 与 maximum rank。
 
@@ -40,12 +40,13 @@ dense whole-Region Value。第一次 sink 调用即占用 publication，即使 v
 且不改变 invocation state。DSO input view 精确覆盖其 logical contiguous bytes；trailing
 backing bytes 会被拒绝，不能成为不可见的 plugin state。
 
-Synchronous callback 保持 `int` signature，但返回一个闭合的 version-two result：success、
+Synchronous callback 保持 `int` signature，但返回一个闭合的 version-three result：success、
 ordinary failure、cancellation 或 backend unavailable。backend unavailable 与 ordinary
 failure 不同，并且只有 copied trait 允许时才能从 GPU attempt 请求 CPU fallback。unknown
 nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailable 的 callback
 不得调用 output sink。若已调用，accepted output 是 terminal `OperationFailed` contract
-violation；rejected output 保留 sink 的精确 typed failure。两种路径都不暴露
+violation；rejected generic output 保留 sink 的精确 typed failure。错误 image output
+返回 OperationFailed，显式 callback cancellation 与 resource exhaustion 保留各自分类。两种路径都不暴露
 `BackendUnavailable` 或触发 CPU fallback；host cancellation 继续是最高优先级 result。
 在该 cancellation check 之后，duplicate sink violation 优先于 success、backend
 unavailable、ordinary failure、callback-reported cancellation 与 unknown result；因此它
@@ -60,7 +61,8 @@ backend 返回 `InvalidArgument`，且 DSO adapter 绝不会把它转换为 GPU�
 Preserve 会拒绝与声明 output type 冲突的首个 input element type；Match 会拒绝任一合法
 input 的 type 或 shape 不一致。两者都在 callback 前返回 `TypeMismatch`，因此即使 callback
 带副作用或原本会失败，也不会进入 callback。Callback output validation 复用该预计算
-descriptor；成功 callback 返回 default-invalid `Value` 时仍安全地得到 `TypeMismatch`。
+descriptor；成功 callback 返回 default-invalid generic `Value` 时仍安全地得到
+`TypeMismatch`，错误 image output 返回 `OperationFailed`。
 Plan-derived demand coverage 继续由 `ExecutionRun` 负责，registry 不在此重新推导。
 
 C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会
@@ -68,7 +70,7 @@ C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Regist
 dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
 layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
 `estimated_bytes` 是独立的 modeled admission estimate。C DSO Fixed descriptor 更严格，
-因为 ABI v2 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
+因为 ABI v3 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
 byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last
 byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上，UInt8
 `{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被
@@ -130,3 +132,19 @@ certificate、package admission 或 process isolation。
 
 不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
 ABI 不构造 Value，也不提供 storage。
+
+## Version-three port schema
+
+`input_schema_count` 必须等于 input_count <= 1024；pointer 当且仅当 count 为零时为空，
+否则必须 naturally aligned。每个 input 和 inline output constraint 具有精确 struct_size、
+closed port kind 和以 numeric uint32 表示的 binary32 minimum/maximum bit。
+Scalar interval 必须 finite/inclusive，其他 kind 的 bound 必须为 positive-zero bit。
+Host 复制所有 constraint，在 atomic publication 前拒绝未知 kind、错误 count/size/bound
+或不兼容的 shape/Region combination。Output kind 为 Value 或 image；image output
+保留首个 image input。Scalar port 要求直接 workflow input，不存在隐式 scalar broadcast
+或 profile inference。
+
+Host 在查找 get_api_v3 前检查 ABI version 3，无 v2 alias 或 adapter。Float32 在 operation
+ABI3 和布局不变的 provider ABI1 schema 中均为 code 4；provider code 1..3 保持原义。
+Host image validation 和 callback scope 恢复 embedding 的浮点环境，参见
+[图像算子](Image-Operations.zh.md)。

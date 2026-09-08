@@ -1,12 +1,12 @@
 # ADR 0016: Workflow Inputs and Per-Run Image Bindings
 
-- Status: Accepted; target contract, not yet implemented
+- Status: Accepted; kernel implementation in #257
 - Date: 2026-09-05
 - Accepted scope: adjusted development direction, Float32 image inputs and ordinary per-run parameters, explicitly approved by the maintainer in this task
 - Acceptance record: 2026-09-05; the maintainer explicitly confirmed the operation ABI v3 upgrade and companion contract in the current task.
 - Task: [kernel #256](https://github.com/kevin-zf1123/photospider/issues/256)
 - Verified source: `main@369da60bdcf7aa26eefbd7a99f7e5d1a8afd79e8`
-- Implementation: absent; belongs to #257 and #258
+- Implementation: #257 implements the kernel contract; #258 retains its separate integration acceptance
 - Reader mirror: [Chinese](zh/0016-workflow-inputs-and-execution-bindings.zh.md)
 
 The maintainer accepted the [adjusted direction](../development/Refactor-Development-Plan.md).
@@ -467,8 +467,9 @@ cannot silently remain compatible. #10 keeps its own Session/wire decision.
 
 ## Named fixtures and image oracle
 
-These are future #257/#258 acceptance requirements, not executed runtime
-results. Declarations are id1/name=image, id2/name=gain and id3/name=opacity.
+These are the #257/#258 acceptance requirements. The kernel executable fixture
+is [test_bindings](../../tests/integration/test_bindings.cpp); separate image
+integration acceptance remains with #258. Declarations are id1/name=image, id2/name=gain and id3/name=opacity.
 Image: Float32 {2,2,4}, whole Region, offset0, strides {32,16,4}, 64 bytes and
 exact image facet. Each scalar: Float32 {1}, whole Region, offset0, stride4,
 4 bytes, no facets. Node10 image.exposure_gain takes id1/id2; node20
@@ -523,8 +524,8 @@ promise S2's real storage budget.
 The maintainer accepted the direction, Float32, complete port schema and single
 operation ABI v3 above by explicitly confirming the concrete ABI/companion-
 contract question in this task on 2026-09-05. These decisions need no repeated
-confirmation. The accepted target is unimplemented; #257/#258 own code and
-runtime acceptance.
+confirmation. The target was unimplemented at decision acceptance. #257 now implements the
+kernel contract; #258 retains its separate integration acceptance.
 
 #256 tracks public document delivery and Issue/Project settlement. The
 maintainer separately authorized the two documentation PRs, CI-gated merge

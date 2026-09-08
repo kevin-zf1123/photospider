@@ -1,6 +1,6 @@
 # 当前开发计划
 
-- 快照日期：2026-09-05
+- 快照日期：2026-09-09
 - 已审计实现 baseline：`main@703569bb74164f061b233f9edc2c0b964bc868fb`
 - 当前 milestone：S1 可复用图像与普通参数绑定
 
@@ -40,7 +40,10 @@ compiler 与 execution contract，因此进入 Project #8。
 ## 当前 milestone
 
 S1 使同一编译计划可以重复处理调用方的 Float32 图像与普通数值参数 Value，
-分离静态事实、每次运行快照、输出需求和图像语义。运行实现尚未交付。
+分离静态事实、每次运行快照、输出需求和图像语义。#257 实现位于
+`foundation/kernel_vertical`，由
+[test_bindings](../../../tests/integration/test_bindings.cpp) 进行 focused 验收。
+合并与 Issue/Project 结算仍待完成。
 
 ### Critical path
 
@@ -104,5 +107,7 @@ daemon 新功能按需推进，兼容维护继续。决策交付状态由
 
 [ADR 0016](../../adr/zh/0016-workflow-inputs-and-execution-bindings.zh.md) 已统一
 修订为图像与运行期标量契约，其 operation ABI v3 和逐端口约束已由维护者明确接受。
-#256 交付决策文档；决策交付并取得任务授权后，下一实现任务为 #257。
-其实现尚未启动，S0 实现基线和当前功能没有改变。
+#256 交付决策文档；#257 在 `foundation/kernel_vertical` 实现内核 API/ABI 与可复用图像
+fixture。静态/共享 installed consumer 和 focused test 验证该变化；此处不声明 public CI
+结果或 Issue/Project 结算。#258 保留独立图像集成验收。上方已交付 baseline
+保留历史含义；协调公开发布 0.3 前仍需维护 daemon 0.2 consumer。

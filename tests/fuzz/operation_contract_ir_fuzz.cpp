@@ -82,7 +82,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ps::OperationTraits traits;
   traits.version = reader.next() % 4U;
   traits.output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 5U) + PS_OPERATION_ELEMENT_UINT8_V2);
+      (reader.next() % 5U) + PS_OPERATION_ELEMENT_UINT8_V3);
   traits.shape_rule =
       static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
   traits.region_rule =
@@ -143,7 +143,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
 }  // namespace ps::fuzz_testing
 
 /**
- * @brief Fuzzes operation-v2 vocabulary, parameter schema, and typed IR gates.
+ * @brief Fuzzes operation-v3 vocabulary, parameter schema, and typed IR gates.
  * @param data Arbitrary libFuzzer bytes.
  * @param size Exact byte count.
  * @return Always zero after bounded validation/compile attempts.

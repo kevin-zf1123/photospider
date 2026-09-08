@@ -33,7 +33,7 @@ typedef struct ps_data_schema_v1 {
   const char* key;
   /** @brief Exact schema-key byte count excluding any terminator. */
   uint32_t key_size;
-  /** @brief Scalar element type compatible with operation ABI values. */
+  /** @brief UInt8=1, Int64=2, Float64=3, Float32=4; unknown codes rejected. */
   uint32_t element_type;
   /** @brief Maximum supported rank in 1..8. */
   uint32_t maximum_rank;

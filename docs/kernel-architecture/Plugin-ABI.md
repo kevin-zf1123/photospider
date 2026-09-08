@@ -2,8 +2,8 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v2: copied semantic traits, closed typed parameter schema,
-  plan-derived input demands, and one synchronous Value callback;
+- operation ABI v3: copied semantic traits, closed typed parameter schema,
+  ordered scalar/image port constraints, plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
 The installed C++ convenience wrapper `operation_plugin.hpp` is a direct,
@@ -28,7 +28,8 @@ The package does not publish a separate `data_definition_sdk` alias.
 An operation descriptor has a length-framed key, input count, flags, estimated
 bytes, output element type, closed scalar/preserve/match/fixed shape and
 Whole/Elementwise/Halo Region rules, halo radius, cacheability, a bounded
-parameter-schema pointer/count, callback, and opaque plugin state. Parameter
+parameter-schema pointer/count, input-schema pointer/count, output port constraint,
+callback, and opaque plugin state. Parameter
 records publish unique keys, exact Int64/Float64/Bool/String types, and required
 presence. The compiler rejects unknown, missing, wrong-type, and conflicting
 parameters before semantic IR; callbacks receive only validated canonical
@@ -49,13 +50,15 @@ exactly its logical contiguous bytes; trailing backing bytes are rejected
 instead of becoming invisible plugin state.
 
 The synchronous callback retains its `int` signature but returns one closed
-version-two result: success, ordinary failure, cancellation, or backend
+version-three result: success, ordinary failure, cancellation, or backend
 unavailable. Backend unavailable is distinct from ordinary failure and may
 request CPU fallback only from a GPU attempt whose copied traits allow it.
 Unknown nonzero integers are ordinary `OperationFailed` results. A callback
 reporting backend unavailable must not invoke the output sink. If it does, an
 accepted output is a terminal `OperationFailed` contract violation and a
-rejected output retains the sink's exact typed failure. Neither path exposes
+rejected generic output retains the sink's exact typed failure. A malformed
+image output is OperationFailed; explicit callback cancellation and resource
+exhaustion retain their categories. Neither path exposes
 `BackendUnavailable` or triggers CPU fallback, while host cancellation remains
 the highest-priority result. After that cancellation check, a duplicate sink
 violation outranks success, backend unavailability, ordinary failure,
@@ -75,7 +78,8 @@ contradicts the declared output type, while Match rejects any valid input type
 or shape disagreement. Both are pre-callback `TypeMismatch` results, so even a
 side-effecting or failing callback is not entered. Callback output validation
 reuses the precomputed descriptor; a successful callback that returns a
-default-invalid `Value` remains a safe `TypeMismatch`. Plan-derived demand
+default-invalid generic `Value` remains a safe `TypeMismatch`; invalid image
+output is `OperationFailed`. Plan-derived demand
 coverage remains an `ExecutionRun` responsibility and is not re-derived here.
 
 A C++ `OperationTraits::Fixed` record describes only the logical output
@@ -84,7 +88,7 @@ type/rules, and the ordinary trait combinations without evaluating a dense
 element or byte product. The callback may return any Value layout that passes
 normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
-admission estimate. A C DSO Fixed descriptor is stricter because ABI v2 carries
+admission estimate. A C DSO Fixed descriptor is stricter because ABI v3 carries
 no output strides: loading separately requires representable contiguous
 signed strides and uint64 byte count. For total dense bytes `B`, the loader
 also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
@@ -114,7 +118,7 @@ validation rejects invalid continuation bytes, truncation, overlong encodings,
 UTF-16 surrogates, values above U+10FFFF, embedded nulls, and ASCII controls
 before publication; it does not normalize Unicode. Ordinary facet payload and
 Value bytes remain opaque binary data. This ABI version rejects trailing
-structure bytes and publishes no v1 compatibility entry point.
+structure bytes and publishes no old operation compatibility entry point.
 
 Malformed registration publishes nothing. A built-in/embedding definition and
 every DSO definition are fully constructed before publication, then retained by
@@ -160,3 +164,21 @@ certificate, package-admission, or process-isolation system.
 
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
+
+## Version-three port schemas
+
+`input_schema_count` equals input_count <= 1024; its pointer is null exactly for
+zero count and otherwise naturally aligned. Each input and the inline output
+constraint has exact struct_size, a closed port kind and numeric uint32
+binary32 minimum/maximum bits. Scalar intervals are finite/inclusive; other
+kinds require positive-zero bound bits. Host copies every constraint and rejects
+unknown kinds, bad counts/structure sizes/bounds or incompatible shape/Region
+combinations before atomic publication. Output kinds are Value or image;
+image output preserves the first image input. Scalar ports require direct
+workflow inputs; no implicit scalar broadcasting or profile inference exists.
+
+Host checks ABI version 3 before looking up get_api_v3. No v2 aliases or
+adapters remain. Float32 has code 4 in both operation ABI3 and the unchanged
+provider ABI1 schema layout. Provider codes 1..3 retain meaning. Host image
+validation and callback scopes restore the embedding's floating environment;
+see [Image Operations](Image-Operations.md).
