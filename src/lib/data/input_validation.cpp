@@ -141,8 +141,14 @@ Status validate_declaration(WorkflowInputDeclaration* declaration) {
   auto dense = dense_metadata(declaration->descriptor);
   if (!dense.ok())
     return dense.status();
-  if (!whole_region(declaration->region, declaration->descriptor.shape) ||
+  if ((!declaration->layout.origin.empty() &&
+       declaration->layout.origin.size() !=
+           declaration->descriptor.shape.size()) ||
+      !whole_region(declaration->region, declaration->descriptor.shape) ||
       declaration->layout.byte_offset != 0 ||
+      std::any_of(declaration->layout.origin.begin(),
+                  declaration->layout.origin.end(),
+                  [](std::uint64_t value) { return value != 0; }) ||
       declaration->layout.byte_strides != dense.value().layout.byte_strides) {
     return failure(ErrorCode::InvalidArgument,
                    "input requires whole dense layout");
@@ -258,16 +264,14 @@ Status validate_port_value(const OperationPortConstraint& port,
       validate_port_metadata(port, value.descriptor(), value.facets());
   if (!status.ok())
     return status;
-  auto dense = dense_metadata(value.descriptor());
-  if (!dense.ok())
-    return dense.status();
-  if (!whole_region(value.region(), value.descriptor().shape) ||
-      value.layout().byte_offset != 0 ||
-      value.layout().byte_strides != dense.value().layout.byte_strides ||
-      value.bytes().size() != dense.value().bytes) {
+  if (value.region().empty())
+    return failure(ErrorCode::TypeMismatch, "port requires nonempty coverage");
+  if (port.kind == OperationPortKind::Float32Scalar &&
+      (!whole_region(value.region(), {1}) || value.bytes().size() != 4 ||
+       value.layout().byte_offset != 0 ||
+       value.layout().byte_strides != std::vector<std::int64_t>{4}))
     return failure(ErrorCode::TypeMismatch,
-                   "port requires exact whole dense Value");
-  }
+                   "scalar requires exact dense coverage");
   Float32Environment environment;
   if (!environment.active())
     return failure(ErrorCode::OperationFailed,
@@ -282,8 +286,11 @@ Status validate_port_value(const OperationPortConstraint& port,
     }
     return Status::success();
   }
-  for (std::size_t offset = 0; offset < value.bytes().size(); offset += 16) {
-    if (offset % 16384 == 0 && stop) {
+  const auto y_region = value.region().dimensions()[0];
+  const auto x_region = value.region().dimensions()[1];
+  for (std::uint64_t y = y_region.offset; y < y_region.offset + y_region.extent;
+       ++y) {
+    if (stop) {
       const auto code = stop();
       if (code != ErrorCode::Ok) {
         Status stopped;
@@ -291,18 +298,25 @@ Status validate_port_value(const OperationPortConstraint& port,
         return stopped;
       }
     }
-    float rgba[4];
-    std::memcpy(rgba, value.bytes().data() + offset, sizeof(rgba));
-    for (float channel : rgba) {
-      if (!std::isfinite(channel) || channel < 0) {
-        return failure(numeric_failure,
-                       "image channel is negative or nonfinite");
+    for (std::uint64_t x = x_region.offset;
+         x < x_region.offset + x_region.extent; ++x) {
+      float rgba[4];
+      for (std::uint64_t c = 0; c < 4; ++c) {
+        auto offset = value.byte_address({y, x, c});
+        if (!offset.ok())
+          return offset.status();
+        std::memcpy(&rgba[c], value.bytes().data() + offset.value(),
+                    sizeof(float));
       }
-    }
-    if (rgba[3] > 1 ||
-        (rgba[3] == 0 && (rgba[0] != 0 || rgba[1] != 0 || rgba[2] != 0))) {
-      return failure(numeric_failure,
-                     "image violates premultiplied alpha domain");
+      for (float channel : rgba) {
+        if (!std::isfinite(channel) || channel < 0)
+          return failure(numeric_failure,
+                         "image channel is negative or nonfinite");
+      }
+      if (rgba[3] > 1 ||
+          (rgba[3] == 0 && (rgba[0] != 0 || rgba[1] != 0 || rgba[2] != 0)))
+        return failure(numeric_failure,
+                       "image violates premultiplied alpha domain");
     }
   }
   return Status::success();

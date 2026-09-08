@@ -68,3 +68,12 @@ image oracle through C++ and C plugin paths and verify old-minor rejection.
 Daemon feature/wire work remains separate; its 0.2 package consumer needs a
 coordinated migration before consuming 0.3. Status writes follow
 [Task Collaboration](Task-Collaboration.md).
+
+## S2 storage/ABI foundation
+
+#264 implements package 0.4.0, OperationTraits 4 and operation ABI 4 with regional
+storage views and host output/scratch allocation. Schema 2/provider ABI 1/C++17
+remain. C++ consumers rebuild; ABI 3 and package 0.3 consumers are rejected.
+Semantic/optimizer/physical-plan/cache domains now use v4. Runtime region-origin
+addresses never enter semantic identity. The remaining S2 scheduler, resource
+and vertical work is tracked by #210/#211/#265/#266 under ADR 0017.

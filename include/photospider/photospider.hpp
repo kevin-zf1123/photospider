@@ -12,6 +12,7 @@
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/status.hpp"
 #include "photospider/data/region.hpp"
+#include "photospider/data/storage.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/execution.hpp"

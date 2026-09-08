@@ -11,16 +11,16 @@ DSO handle、runtime allocation 或 daemon id。
 
 ## Runtime Value
 
-当前 dense `Value` 包含：
+当前 regional `Value` 包含：
 
 - `ValueDescriptor`：`UInt8`、`Int64`、`Float64` 或 `Float32`，以及 rank 1..8 的 nonzero shape；
 - 一个 rank-matching logical `Region`；
-- `StridedLayout`：byte offset 与每个 axis 的 signed byte stride；
+- `StridedLayout`：逻辑 origin、byte offset 与每个 axis 的 signed byte stride；
 - 最多 64 个 unique versioned `ValueFacet` key/payload record；
-- 一个 shared immutable owned byte vector。
+- 一个共享只读 CpuStorage 所有者。
 
 `Value::create` 在原子 publication 前检查 rank、shape、Region containment、element
-vocabulary、stride count、signed offset/span arithmetic、overflow、element tail、完整
+vocabulary、stride count、signed offset/span arithmetic、overflow、element tail、有效 Region 的
 buffer bound、facet key/version、duplicate key 与 bounded facet payload。只有 addressed byte
 range 位于 buffer 内时才接受 negative/zero stride。Facet 按 key 排序；副本共享
 immutable bytes，且不暴露 writable pointer。
@@ -33,6 +33,13 @@ arithmetic。
 layout 与 storage bound，Value Region 还必须为 rank one 且精确覆盖
 `{offset=0, extent=1}`。Empty、partial 与 offset Region 仍是合法的通用 Value
 coverage，但通过该 accessor 读取时返回 `TypeMismatch`。
+
+BufferAllocator 在精确容量的 CPU 分配之前取得租约。MutableBuffer/MutableValue
+只能移动，发布消耗 writer，并让只读存储继续持有租约。Value::from_storage 无复制地
+验证 origin-relative coverage；view 共享所有者并收窄范围，byte_address 检查逻辑坐标。
+bytes() 返回借用 ByteView，copy_bytes() 明确复制到调用方所有的内存。存储与租约可
+晚于 allocator 销毁。test_storage 验证部分/反向视图和最后引用释放。
+全执行资源准入及惰性 tile 分别由 #210/#211/#265 追踪，存储 API 本身不代表区域执行完成。
 
 ## Result 与 data definition
 

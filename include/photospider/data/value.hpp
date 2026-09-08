@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "photospider/core/status.hpp"
 #include "photospider/data/region.hpp"
+#include "photospider/data/storage.hpp"
 
 namespace ps {
 
@@ -26,7 +28,7 @@ enum class ElementType : std::uint32_t {
 };
 
 /**
- * @brief Logical type and shape of one dense runtime Value.
+ * @brief Logical type and full shape of one runtime Value.
  *
  * @note Shape rank is 1..8 and every extent is nonzero.
  */
@@ -38,7 +40,7 @@ struct PHOTOSPIDER_API ValueDescriptor final {
 };
 
 /**
- * @brief Explicit byte layout for one dense runtime Value.
+ * @brief Origin-relative byte layout for one regional runtime Value.
  *
  * @note Signed strides permit reversed/broadcast views when bounds validation
  * proves every addressed element remains inside the retained buffer. A
@@ -46,10 +48,20 @@ struct PHOTOSPIDER_API ValueDescriptor final {
  * a singleton axis likewise does not use its stride value.
  */
 struct PHOTOSPIDER_API StridedLayout final {
-  /** @brief Byte offset of logical coordinate zero from buffer start. */
+  /** @brief Creates an empty layout, invalid until strides are supplied. */
+  StridedLayout() = default;
+  /** @brief Creates an origin-relative view; empty origin denotes zero. */
+  StridedLayout(std::uint64_t offset, std::vector<std::int64_t> strides,
+                std::vector<std::uint64_t> logical_origin = {})
+      : byte_offset(offset),
+        byte_strides(std::move(strides)),
+        origin(std::move(logical_origin)) {}
+  /** @brief Byte offset of origin from buffer start. */
   std::uint64_t byte_offset = 0;
   /** @brief Signed byte stride for each descriptor axis. */
   std::vector<std::int64_t> byte_strides;
+  /** @brief Logical coordinate at byte_offset; empty means all-zero origin. */
+  std::vector<std::uint64_t> origin;
 };
 
 /**
@@ -68,7 +80,7 @@ struct PHOTOSPIDER_API ValueFacet final {
 };
 
 /**
- * @brief Immutable validated dense runtime Value with bounded facets.
+ * @brief Immutable validated regional runtime Value with bounded facets.
  *
  * @note Copies share immutable bytes and copied facet records. Logical
  * identity is independent from allocation address, residency, and optional
@@ -122,12 +134,12 @@ class PHOTOSPIDER_API Value final {
 
   /**
    * @brief Returns whether this object contains a published Value.
-   * @return True when immutable byte storage is present.
+   * @return True when immutable storage is present.
    * @throws Nothing.
    * @note A valid Value may contain zero bytes only when validation permits it;
-   * current dense descriptors always require at least one element.
+   * empty coverage may own an empty caller allocation.
    */
-  [[nodiscard]] bool valid() const noexcept { return bytes_ != nullptr; }
+  [[nodiscard]] bool valid() const noexcept { return storage_ != nullptr; }
 
   /**
    * @brief Returns the immutable descriptor.
@@ -163,11 +175,45 @@ class PHOTOSPIDER_API Value final {
 
   /**
    * @brief Returns immutable storage bytes.
-   * @return Shared byte vector reference.
+   * @return Borrowed read-only byte view.
    * @throws std::logic_error If this Value is invalid/default.
    * @note Callers cannot mutate the retained allocation through this API.
    */
-  [[nodiscard]] const std::vector<std::uint8_t>& bytes() const;
+  [[nodiscard]] ByteView bytes() const;
+
+  /** @brief Copies allocation bytes into caller-owned memory; may throw
+   * bad_alloc. */
+  [[nodiscard]] std::vector<std::uint8_t> copy_bytes() const;
+  /** @brief Returns shared immutable storage, valid independently of this
+   * Value. */
+  [[nodiscard]] const std::shared_ptr<const CpuStorage>& storage() const;
+  /**
+   * @brief Validates a regional view and retains immutable storage without
+   * copying.
+   * @param descriptor Complete logical descriptor.
+   * @param region Valid nonempty or empty logical coverage inside descriptor.
+   * @param layout Origin-relative byte layout of that coverage.
+   * @param storage Immutable owner; null is InvalidArgument.
+   * @param facets Semantic metadata, canonicalized before publication.
+   * @return Validated Value or bounds/type/facet failure; no partial
+   * publication.
+   * @throws std::bad_alloc For metadata allocation failure.
+   */
+  [[nodiscard]] static Result<Value> from_storage(
+      ValueDescriptor descriptor, Region region, StridedLayout layout,
+      std::shared_ptr<const CpuStorage> storage,
+      std::vector<ValueFacet> facets = {});
+  /** @brief Creates a shared read-only subview; rejects coverage outside this
+   * Value. */
+  [[nodiscard]] Result<Value> view(const Region& region) const;
+  /**
+   * @brief Returns an element byte offset for a logical coordinate in coverage.
+   * @return Checked offset or InvalidArgument for a coordinate outside
+   * coverage.
+   * @note The offset addresses bytes(); no mutable pointer or storage copy.
+   */
+  [[nodiscard]] Result<std::size_t> byte_address(
+      const std::vector<std::uint64_t>& coordinate) const;
 
   /**
    * @brief Returns the physical scalar width.
@@ -187,8 +233,42 @@ class PHOTOSPIDER_API Value final {
   StridedLayout layout_;
   /** @brief Published facets sorted by key for deterministic observation. */
   std::vector<ValueFacet> facets_;
-  /** @brief Shared immutable allocation; null marks the default state. */
-  std::shared_ptr<const std::vector<std::uint8_t>> bytes_;
+  /** @brief Shared immutable CPU owner; null marks the default state. */
+  std::shared_ptr<const CpuStorage> storage_;
+};
+
+/**
+ * @brief Move-only tightly packed writable region allocated by the host.
+ * @note Valid until publish/destruction; callbacks must not retain data().
+ */
+class PHOTOSPIDER_API MutableValue final {
+ public:
+  MutableValue() = default;
+  MutableValue(MutableValue&&) noexcept = default;
+  MutableValue& operator=(MutableValue&&) noexcept = default;
+  MutableValue(const MutableValue&) = delete;
+  MutableValue& operator=(const MutableValue&) = delete;
+  /** @brief Allocates nonempty regional coverage, checking all byte products.
+   */
+  static Result<MutableValue> allocate(const ValueDescriptor& descriptor,
+                                       const Region& region,
+                                       const BufferAllocator& allocator);
+  /** @brief Borrowed writable region bytes; invalidated by publication. */
+  std::uint8_t* data() noexcept { return buffer_.data(); }
+  /** @brief Exact regional allocation size. */
+  std::size_t size() const noexcept { return buffer_.size(); }
+  /** @brief Regional origin and row-major strides, borrowed until destruction.
+   */
+  const StridedLayout& layout() const noexcept { return layout_; }
+  /** @brief Freezes this writer and validates facets; consumes even on failure.
+   */
+  Result<Value> publish(std::vector<ValueFacet> facets = {}) &&;
+
+ private:
+  ValueDescriptor descriptor_;
+  Region region_;
+  StridedLayout layout_;
+  MutableBuffer buffer_;
 };
 
 }  // namespace ps

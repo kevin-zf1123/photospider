@@ -12,17 +12,17 @@ stable keys, never callbacks, DSO handles, runtime allocations, or daemon ids.
 
 ## Runtime Value
 
-The current dense `Value` contains:
+The current regional `Value` contains:
 
 - `ValueDescriptor`: `UInt8`, `Int64`, `Float64`, or `Float32` plus rank-1-to-8 nonzero
   shape;
 - one rank-matching logical `Region`;
-- `StridedLayout`: byte offset and one signed byte stride per axis;
+- `StridedLayout`: logical origin, byte offset and one signed byte stride per axis;
 - up to 64 unique versioned `ValueFacet` key/payload records;
-- one shared immutable owned byte vector.
+- one shared immutable `CpuStorage` owner.
 
 `Value::create` checks rank, shape, Region containment, element vocabulary,
-stride count, signed offset/span arithmetic, overflow, element tail, complete
+stride count, signed offset/span arithmetic, overflow, element tail, valid-Region
 buffer bounds, facet keys/versions, duplicate keys, and bounded facet payloads
 before atomic publication. Negative and zero strides are accepted only when
 the addressed byte range stays inside the buffer. Facets are sorted by key;
@@ -37,6 +37,17 @@ Float64 descriptor, contiguous layout, and storage bounds, the Value Region
 must be rank one and exactly `{offset=0, extent=1}`. Empty, partial, and offset
 Regions remain legal general Value coverage but return `TypeMismatch` through
 this accessor.
+
+`BufferAllocator` obtains a reservation before allocating exact-capacity CPU
+bytes. `MutableBuffer` and `MutableValue` are move-only; publication consumes
+the writer and retains the lease with immutable storage. `Value::from_storage`
+validates origin-relative coverage without copying; `view` restricts coverage
+while sharing ownership, and `byte_address` checks logical coordinates.
+`bytes()` returns a borrowed `ByteView`; `copy_bytes()` explicitly copies into
+caller-owned memory. Storage and its reservation may outlive the allocator.
+`test_storage` verifies partial/reversed views and last-owner lease release.
+Execution-wide resource admission and lazy tiles are tracked separately in
+#210/#211/#265; this storage API alone does not claim regional execution.
 
 ## Results and data definitions
 

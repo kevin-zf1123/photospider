@@ -238,7 +238,7 @@ void append_declarations(
 
 /**
  * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-three semantic traits.
+ * @param traits Complete version-four semantic traits.
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
@@ -248,7 +248,7 @@ void append_declarations(
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 3U || inputs.size() != traits.input_count ||
+  if (traits.version != 4U || inputs.size() != traits.input_count ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.region_rule == OperationRegionRule::Halo &&
@@ -325,7 +325,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v3");
+  digest.text("semantic-graph-ir-v4");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -373,7 +373,7 @@ std::string optimized_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("optimizer-v3-canonical-noop");
+  digest.text("optimizer-v4-canonical-noop");
   digest.text(semantic);
   digest.text(semantic_digest(nodes, outputs, declarations));
   return digest.finish();
@@ -393,7 +393,7 @@ std::string physical_digest(
     const std::map<std::string, std::size_t>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("physical-plan-v3");
+  digest.text("physical-plan-v4");
   append_declarations(&digest, declarations);
   digest.text(optimized);
   digest.integer(steps.size());
@@ -442,7 +442,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v3");
+  digest.text("plan-cache-key-v4");
   digest.text(plan);
   return digest.finish();
 }

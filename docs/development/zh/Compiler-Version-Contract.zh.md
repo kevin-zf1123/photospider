@@ -60,3 +60,10 @@ Payload byte 和 binding order 不进入 stage identity，也未引入 runtime r
 仍要求 C++17。静态/共享 installed consumer 通过 C++ 和 C plugin 路径执行具名图像
 oracle，并检查旧 minor version 拒绝。Daemon feature/wire 工作独立，其 0.2 package
 consumer 需要协调迁移后才能消费 0.3。状态写入遵循[任务协作](Task-Collaboration.zh.md)。
+
+## S2 存储/ABI 基础
+
+#264 实现 package 0.4.0、OperationTraits 4、operation ABI 4、区域存储视图和宿主输出/scratch。
+保留 schema 2/provider ABI 1/C++17；C++ 消费者重新构建，拒绝 ABI 3 与 package 0.3 消费者。
+semantic/optimizer/physical-plan/cache domain 使用 v4。运行期 origin 地址不进入 semantic
+identity。其余 S2 调度、资源与场景由 ADR 0017 下的 #210/#211/#265/#266 追踪。
