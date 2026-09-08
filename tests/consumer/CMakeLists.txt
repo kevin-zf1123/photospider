@@ -113,6 +113,9 @@ set_target_properties(
 # Both source packages consume only the installed public targets above.
 add_subdirectory(../../plugins/ops/rgba32f rgba32f)
 add_subdirectory(../../examples/image_vertical image_vertical)
+add_subdirectory(../../examples/regional_image_vertical regional_image_vertical)
+target_compile_options(photospider_regional_image_vertical PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_regional_image_vertical PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_image_vertical PRIVATE ${_photospider_consumer_compile_options})
@@ -159,6 +162,8 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_consumer>"
   COMMAND "$<TARGET_FILE:photospider_image_vertical>"
   COMMAND "$<TARGET_FILE:photospider_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_consumer photospider_image_vertical photospider_rgba32f_ops
+  COMMAND "$<TARGET_FILE:photospider_regional_image_vertical>"
+  COMMAND "$<TARGET_FILE:photospider_regional_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
+  DEPENDS photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

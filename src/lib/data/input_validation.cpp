@@ -199,7 +199,8 @@ Status validate_port_schema(const OperationTraits& traits) {
                             OperationPortKind::LinearPremultipliedRgbaFloat32;
   if (image_output &&
       (traits.output_element_type != ElementType::Float32 ||
-       traits.shape_rule != OperationShapeRule::PreserveFirstInput ||
+       (traits.shape_rule != OperationShapeRule::PreserveFirstInput &&
+        traits.shape_rule != OperationShapeRule::MatchAllInputs) ||
        traits.input_schema.empty() ||
        traits.input_schema.front().kind !=
            OperationPortKind::LinearPremultipliedRgbaFloat32)) {

@@ -1,8 +1,8 @@
 # Float32 图像算子
 
-默认 registry 包含两个 CPU 算子，实现位于
+默认 registry 包含 CPU 算子，实现位于
 [`plugins/ops/image_operations.cpp`](../../../plugins/ops/image_operations.cpp)。
-两者都有两个有序 runtime Value input，无 compile-time parameter 或隐式默认值，
+下列两个 S1 算子都有两个有序 runtime Value input，无 compile-time parameter 或隐式默认值，
 输出一个由 workflow 命名的区域图像。
 
 | Operation | Input 0 | Input 1 | Output |
@@ -38,7 +38,7 @@ profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
 `Photospider::operation_sdk` 构建受维护的 ABI4 C module `photospider_rgba32f_ops`。
-它实现上述两个算子和相同 profile，使用严格浮点编译选项。ABI4 host 在进入 callback
+它实现相同图像算子和 profile，使用严格浮点编译选项。ABI4 host 在进入 callback
 之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 向宿主申请输出并发布同一 buffer；成功后冻结为只读，失败时释放且不发布。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
 
@@ -87,3 +87,48 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
 0.4 消费及 0.3 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+
+## S2 Gaussian、蒙版与合成
+
+默认 registry 和受维护 ABI4 C 包还提供：
+
+| Operation | 有序输入 | 必填静态参数 | Region 规则 |
+| --- | --- | --- | --- |
+| `image.gaussian_blur` | RGBA 图像 | `radius:Int64 [1,64]`、`sigma:Float64 [0.1,64]` | 从 radius 解析 Halo，完整 RGBA |
+| `image.mask` | RGBA 图像、Float32 `{H,W}` 蒙版 | 无 | Elementwise，蒙版映射相同 H/W |
+| `image.source_over` | 前景 RGBA、相同 shape 的背景 RGBA | 无 | Elementwise、MatchAllInputs |
+
+三个算子均为 CPU、确定且无副作用，保留图像逻辑 shape 和上述 profile。蒙版无 facet，
+样本有限且在 `[0,1]`，逐像素缩放前景全部 RGBA。Source-over 按预乘值对每个通道计算
+`F + B * (1 - F.alpha)`，遵循 [W3C 公式](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover)。
+减法、乘法和加法分别舍入到 Float32，不使用 FMA。
+
+Gaussian 按 `-radius..radius` 顺序计算归一化 binary64 `exp(-tap²/(2*sigma²))` 系数。
+先横向再纵向，每遍按该顺序累计 binary64 乘积，再将该遍输出舍入到 Float32。边缘 clamp
+到完整逻辑图像边界，不在 tile 边界单独 clamp。radius/sigma 属于源码参数，修改需要重新
+编译。Workspace 上限为固定 1032 字节系数加需求输入字节数的一倍；横向 scratch 只保留
+需求行和输出列。系数、scratch 和输出全部通过宿主分配器申请。C++/C 均禁用 fast-math
+和 FMA contraction。
+
+[`photospider_regional_image_vertical`](../../../examples/regional_image_vertical/main.cpp)
+通过公开 compile/execute/execute_stream 运行
+`foreground -> Gaussian -> exposure -> mask -> source-over(background)`。
+`S2Image.RegionAndTiles` 验证手算均匀场景（RGB .3125、alpha .625）、独立整图二维
+Gaussian oracle（`atol=1e-6, rtol=1e-5`），以及整图与 1x1/2x3/5x7/128x128 tile 的逐位
+一致。覆盖非零 ROI、边缘、不可整除 tile、radius 64、sigma .1、透明/HDR、蒙版 0/1、
+逐次 gain 复用，以及非法参数/蒙版/shape。独立 oracle 不复用算子 callback 或两遍实现。
+
+65536x65536 程序化源场景以九个 tile 流式处理 5x7 ROI，核对样本、9900 字节源读取和 1808 字节实际分配峰值，
+验证 3840 字节保守预留恰好足够和少一字节。此处证明受控缓冲区上限，不代表进程 RSS。
+区域源、fan-out、并发 Run、取消、stale 和 sink 失败覆盖位于 test_regional_execution
+与 test_memory_liveness。
+
+```sh
+cmake --build build/issue257-static --target photospider_regional_image_vertical -j 8
+build/issue257-static/examples/regional_image_vertical/photospider_regional_image_vertical
+ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
+```
+
+示例目录也可作为独立 find_package(Photospider 0.4) 消费者。test_installed_consumer
+针对隔离 static/shared 安装构建并运行它，分别使用内置算子和单独构建的 C module。
+唯一可选参数为可信 module 的精确路径。

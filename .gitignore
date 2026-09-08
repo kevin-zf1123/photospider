@@ -48,6 +48,9 @@
 !examples/image_vertical/*.cpp
 !examples/image_vertical/*.hpp
 !examples/image_vertical/CMakeLists.txt
+!examples/regional_image_vertical/
+!examples/regional_image_vertical/*.cpp
+!examples/regional_image_vertical/CMakeLists.txt
 
 # Maintained unit, integration, fixture, support, and consumer sources.
 !tests/

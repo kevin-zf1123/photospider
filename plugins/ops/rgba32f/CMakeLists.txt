@@ -16,3 +16,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
 elseif(MSVC)
   target_compile_options(photospider_rgba32f_ops PRIVATE /fp:strict)
 endif()
+
+if(UNIX)
+  target_link_libraries(photospider_rgba32f_ops PRIVATE m)
+endif()
