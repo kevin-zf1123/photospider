@@ -86,7 +86,7 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 
 隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
-0.5 消费及 0.4 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+0.6 消费及 0.5 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
 
 ## S2 Gaussian、蒙版与合成
 
@@ -129,13 +129,13 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-示例目录也可作为独立 find_package(Photospider 0.5) 消费者。test_installed_consumer
+示例目录也可作为独立 find_package(Photospider 0.6) 消费者。test_installed_consumer
 针对隔离 static/shared 安装构建并运行它，分别使用内置算子和单独构建的 C module。
 唯一可选参数为可信 module 的精确路径。
 
 ## S3 box 缩小与圆章
 
-package 0.5 / operation ABI 5 的内建与 C 模块提供 image.downsample_box、
+package 0.6 / operation ABI 6 的内建与 C 模块提供 image.downsample_box、
 mask.downsample_box、image.brush_circle。前两者分别接收既有 RGBA 图像和 HW 蒙版，
 必需静态 Int64 factor 为 [1,16]，无隐式默认。输出 H/W 除以 factor 向上取整，
 反向需求为裁剪后的整数 box。按行/列 binary64 累加，以实际覆盖样本数平均并舍入

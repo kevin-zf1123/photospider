@@ -1,8 +1,8 @@
 # 当前开发计划
 
 - 快照日期：2026-09-09
-- 已审计基础：main@54d57f3（已结算 S2）；S3 交付由 #268 跟踪
-- 当前 milestone：S3 缓存、冻结执行与交互图像 workflow
+- 已审计基础：main@0e65eac（已结算 S3，PR #278）
+- 当前 milestone：S4 Metal 执行与驻留图像 workflow
 
 ## 角色与权威
 
@@ -39,19 +39,20 @@ compiler 与 execution contract，因此进入 Project #8。
 
 ## 当前 milestone
 
-S2 已由 [kernel PR #267](https://github.com/kevin-zf1123/photospider/pull/267)
-在 main@54d57f3 结算，配套 daemon PR #16。区域存储、有界分配和 Gaussian/蒙版/
-合成 fixture 是 S3 基础。
+S3 已由 [kernel PR #278](https://github.com/kevin-zf1123/photospider/pull/278)
+在 main@0e65eac 结算。区域缓存与冻结执行是 S4 基础。
 
-[S3 #268](https://github.com/kevin-zf1123/photospider/issues/268) 实现已接受的
-[ADR 0018](../../adr/0018-local-result-caches-and-frozen-execution.md)：package 0.5、
-ABI/traits 5、不可变分块输入、冻结导出、区域结果共享、box/圆章算子、应用预览及
-跨重启可丢弃磁盘区域。C++17、schema 2、provider ABI 1 保持。叶子 #269–#277 按序
-推进，daemon #17 消费安装包并保持 IPC 子集。
+[S4 #279](https://github.com/kevin-zf1123/photospider/issues/279) 实现
+[ADR 0019](../../adr/0019-metal-resident-image-workflows.md)：package 0.6、
+operation ABI/traits 6、显式 CpuExact/MetalFp32 规划、原生 shared storage 与同步完成、
+八个可复用算子、区域上传、有界跨 Run 驻留、回退及诊断。C++17、schema 2 和
+provider ABI 1 保持。
 
-[S3 workflow 指南](../../kernel-architecture/zh/S3-Workflow.zh.md) 记录公开入口和
-独立 oracle。Issue 记录本地验证、独立审查、CI/bot 修复与受保护合并状态；接受和
-本地提交不等于远端结算。原生 GPU 和增量编译 #203 保持独立；S3 不关闭更广 HEX/MED。
+叶项按 #280、#281、#153、#154、#282、#283、#156、#284 顺序推进；daemon #19
+消费安装包并保持 IPC v3。[S4 workflow 指南](../../kernel-architecture/zh/S4-Workflow.zh.md)
+提供公开示例和独立 oracle。Issue 记录验证、独立审查、CI/bot 修复与合并状态；
+本地实现不表示远端已结算。成本校准和自动选址 #209 保留到 S5；增量编译 #203、
+其他 GPU 后端、GUI 与 IPC 扩展不属于 S4。
 
 ## 当前 milestone 以外的 active backlog
 
@@ -69,9 +70,8 @@ ABI/traits 5、不可变分块输入、冻结导出、区域结果共享、box/�
 - [#149](https://github.com/kevin-zf1123/photospider/issues/149) 与
   [#203](https://github.com/kevin-zf1123/photospider/issues/203) 在 S1 后依次处理
   trait-proven optimization 与 disposable incremental recompilation。
-- [#151](https://github.com/kevin-zf1123/photospider/issues/151) 继续等待明确的 device
-  storage/access、cost、liveness、transfer、residency、fallback 与真实 operation
-  vertical 决策。
+- [#151](https://github.com/kevin-zf1123/photospider/issues/151) 和 #152 保留 S5
+  成本与校准工作；S4 显式选址不依赖 #209，也不结算这些上层 Issue。
 - MED work 只由选定 operation vertical 的 semantic 需求启用。
 
 ## Issue 执行契约
@@ -99,5 +99,5 @@ daemon 新功能按需推进，兼容维护继续。决策交付状态由
 [#256](https://github.com/kevin-zf1123/photospider/issues/256) 跟踪。
 
 ADR 0016 保留 S1 source/binding/profile 契约。ADR 0017 替代其整图存储/输出、整图
-扫描和估算预算条款。Daemon 兼容维护消费安装的 0.4；新 bindings 和 bulk transport
+扫描和估算预算条款。Daemon 兼容维护消费安装的 0.6；新 bindings 和 bulk transport
 继续由 daemon 仓库按实际需求推进。

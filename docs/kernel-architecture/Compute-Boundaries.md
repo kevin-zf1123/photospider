@@ -5,7 +5,7 @@
 | `GraphContext` | copied source document, monotonic revision, snapshot currentness | compiler result, worker, device lane, result registry |
 | `Compiler` | validation, semantic/optimized IR, local plan, typed digests/key | runtime allocation, callbacks, queue state, daemon lifecycle |
 | `ExecutionRun` | one call's dependencies, ready order, intermediate Values, backend labels, cancellation, diagnostics | shared pools, persistent result, public identity |
-| `ExecutionContext` | bounded CPU/GPU callback pools, frozen operations, modeled-byte ledger | source mutation, daemon Jobs, durable state |
+| `ExecutionContext` | bounded CPU pool, optional native queue/lane, frozen operations, native/CPU caches and actual byte ledger | source mutation, daemon Jobs, durable state |
 | operation/data definition | copied traits/schema and invocation-local callback work | capacity, publication authority, mutation after freeze |
 
 A graph revision is not a Session. A private ExecutionRun is not a Job. A

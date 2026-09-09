@@ -11,12 +11,12 @@ The installed `Photospider::kernel` target provides:
 
 - schema-2 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v3 semantic traits with closed typed parameter schemas,
+- operation ABI v6 semantic traits with closed typed parameter schemas,
   optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
-- Float32 image exposure/opacity operations with bounded runtime scalars;
-- explicit dense `Value`, bounded semantic facets, rank-general `Region`,
-  strided layout, immutable bytes, and Run-local cross-backend copies;
+- eight Float32 image/mask operations with bounded runtime scalars;
+- explicit regional `Value`, bounded semantic facets, rank-general `Region`,
+  strided layout, immutable bytes, Metal shared storage and bounded local caches;
 - cooperative cancellation, local resource accounting, fallback, and stale
   completion rejection;
 - raw compile/plan/execute diagnostics, named correctness oracle or explicit
@@ -45,9 +45,12 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-CPU execution is always available. `ExecutionContext` may configure one local
-GPU callback lane; the physical planner selects it only for declared
-operations and fallback to CPU requires an explicit trait.
+CPU exact execution is the default. Explicit `MetalFp32` planning and
+`ExecutionContextConfig::gpu_enabled` enable one optional Apple Silicon Metal
+queue with completion-safe shared buffers and trait-permitted CPU fallback.
+Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF`
+for the CPU configuration. See the [S4 workflow guide](docs/kernel-architecture/S4-Workflow.md)
+for installed examples, numeric eligibility, Xcode validation and checkable results.
 
 ## Install and consume
 
@@ -56,7 +59,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.3 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.6 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -87,6 +90,7 @@ format, remote endpoint, or plugin path method.
 | Current ownership and behavior | [Architecture overview](docs/kernel-architecture/Overview.md) |
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
+| Native Metal workflows | [S4 examples](docs/kernel-architecture/S4-Workflow.md) |
 | Runnable image workflow | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |

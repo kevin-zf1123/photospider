@@ -11,8 +11,9 @@
 7. Dependency-ready steps enter a bounded CPU queue or optional local GPU
    callback queue under per-Run parallelism and one context-wide waiting
    admission.
-8. Cross-backend inputs are copied into distinct validated Values; the Run
-   records backend labels and transfer observations.
+8. Explicit native upload actions pack demanded input Regions into shared
+   buffers when no valid retained copy exists. GPU successors reuse buffers;
+   host access follows completion without a fabricated D2H copy.
 9. Before a scheduler/admission failure becomes the first failure, and again
    when an operation callback completes, the Run selects cancellation before
    graph staleness before the original failure. It then checks type/shape and
@@ -27,6 +28,8 @@ The first-failure selector is allocation-free and is also used when failure
 diagnostic construction itself fails, so an already observed stop cannot be
 downgraded to queue, admission, or backend failure.
 
-GPU selection names an optional in-process callback lane, not a hardware SDK
-or remote device. A GPU attempt falls back to CPU only when operation traits
-allow it, and both attempts remain visible in raw diagnostics.
+GPU selection names the optional native Metal implementation under explicit
+MetalFp32 policy. The existing single GPU lane drains submitted commands before
+callback retirement, including cancellation. Traits permit output-free CPU
+fallback; submitted device execution errors terminate the Run. Both attempts,
+actual dispatches/copies and cache reuse remain visible in raw diagnostics.

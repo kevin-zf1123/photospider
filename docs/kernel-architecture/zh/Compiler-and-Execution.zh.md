@@ -84,12 +84,16 @@ descriptor 验证 output type、shape 与请求的 Region，包括 default-inval
 重复 Run 的 plan-derived demand coverage check，也不会重复 DSO adapter 的 contiguous-
 layout/facet view validation。
 
-当 dependency 与 consumer 的 backend label 不同时，Run 复制 immutable bytes，创建一个
-不同的 validated Value。该 copy 显式计入 transfer count/bytes。Backend label 是 Run-local
-derived state；kernel 不暴露 native GPU handle 或 persistent residency registry。
+MetalFp32 计划暴露 Upload/Operation/HostAccess。Run 验证实际打包上传字节与容量，
+复用原生 buffer，检查回退新增上传。CpuStorage 可持有完成后的 Metal shared buffer，
+CPU 访问不强制再次复制。原生输入/输出/scratch/保留副本共用受控预算，单队列同步服务
+在既有 completion/currentness 边界前排空设备工作，原生句柄私有。
+
+缓存按 CPU 精确与 Metal 数值/实现/设备身份隔离；回退及后继不写预期原生结果，Metal
+模式关闭磁盘读写。参见 Cache-Model 与 S4-Workflow。
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
-transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v5 input
+transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v6 input
 view 会接收该精确 demand。图像和区域源 Run 惰性物化需求 tile，Whole/副作用边界每个 Run
 完整物化一次，参见[区域语义](Region-Semantics.zh.md)。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
@@ -99,7 +103,7 @@ cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness 
 linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
 与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
-Operation ABI v5 callback 无需改变 C signature 或 descriptor layout，就能区分 ordinary
+Operation ABI v6 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
 result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
 上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
@@ -151,3 +155,5 @@ Run 完成同时等待队列 callback 所有者和逻辑 in-flight step 退场�
 取消和失败时清理 Run 持有的 Value/binding，因此调用方释放返回结果后立即退回其
 payload 容量。test_memory_liveness 的私有 callback-body gate 使用八字节预算验证
 成功/取消边界，队列元数据退场不再延长结果缓冲区的保留。
+
+S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收集输出复制、shared host access 和原生缓存复用，均为实际观察。

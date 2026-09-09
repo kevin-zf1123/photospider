@@ -23,14 +23,16 @@ semantic, optimized, plan, runtime Value, and daemon identities are separate.
 | --- | --- |
 | graph | `GraphContext`, `GraphSnapshot`, copied source revision/currentness |
 | compiler | fail-closed parameter validation, typed IR, conservative no-op optimization, demand-aware local plan, typed digests/key |
-| execution | bounded CPU pool, optional GPU callback lane, private Run, cancellation, byte ledger, raw diagnostics |
-| data | dense immutable `Value`, rank-general `Region`, `StridedLayout` |
-| plugin | exact operation ABI v3/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
+| execution | bounded CPU pool, optional native Metal queue/lane, private Run, cancellation, byte ledger, raw diagnostics |
+| data | regional immutable `Value` and CPU-accessible/native storage, rank-general `Region`, `StridedLayout` |
+| plugin | exact operation ABI v6/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
 | benchmark | raw compile/plan/execute observations plus named correctness-oracle or explicit unchecked status; execution cancellation aborts the complete run without a report |
 
-CPU execution is required. Optional GPU support is a configured local callback
-lane selected only for operations that declare it. Cross-backend inputs are
-explicit immutable copies; no native GPU SDK is required by the kernel package.
+CPU exact execution is required. Explicit MetalFp32 selects declared native
+implementations on optional Apple Silicon hardware. Shared buffers retain
+completed native results and avoid redundant uploads; host access and actual
+copies have separate diagnostics. Metal/Foundation are private Apple build
+requirements and can be disabled. See [S4 Workflow](S4-Workflow.md).
 
 Cancellation is cooperative. Plan currentness and cancellation are checked at
 completion and before final result return. Resource leases and intermediate

@@ -5,7 +5,7 @@
 
 ## 开发循环
 
-实现期间使用 scoped formatting/lint、affected target 与 focused test。Source 与
+实现期间使用 scoped formatting/lint、affected target 与 focused test。仅在明确请求 release 验证时，Source 与
 documentation 冻结后，最多运行一次 native clean configure、一次 full build 与一次
 完整 CTest/JUnit。该 final pass 不使用 Docker 或本地 architecture emulation。
 
@@ -270,3 +270,15 @@ ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_
 operation SDK 构建同一算子包，并运行同一示例的默认与 DSO 路径，保留 shared bridge
 检查。详细 fixture、独立构建和报告语义见
 [图像算子](../../kernel-architecture/zh/Image-Operations.zh.md)。
+
+## S4 Metal 与安装消费
+
+复用构建目录运行 `test_native_gpu`、`test_native_execution`、`test_metal_images`、
+`test_native_cache`、`test_s4_*` 与 `test_installed_consumer`。图像与缓存测试同时
+运行内置注册和纯 C 模块，使用独立 CPU oracle；硬件缺失时返回 77，明确跳过。
+`PHOTOSPIDER_ENABLE_METAL=OFF` 验证 CPU 构建与回退。Apple Silicon 可设置
+`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` 检查真实 dispatch。
+
+安装消费在 static/shared 下单独构建 S4 示例；消费者只启用 C/C++。示例命令、
+预期结果和诊断见 [S4 指南](../../kernel-architecture/zh/S4-Workflow.zh.md)。
+不设置 GPU 耗时阈值。CI 保持六项必需检查，覆盖 Linux/macOS 与 sanitizer。

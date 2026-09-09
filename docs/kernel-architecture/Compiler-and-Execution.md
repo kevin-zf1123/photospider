@@ -104,14 +104,22 @@ callback to validate output type, shape, and requested Region, including a
 default-invalid output. This does not duplicate the Run's plan-derived demand
 coverage checks or the DSO adapter's contiguous-layout/facet views.
 
-When a dependency and consumer have different backend labels, the Run creates
-a distinct validated Value by copying immutable bytes. The copy is explicit in
-transfer count/bytes. Backend labels are Run-local derived state; the kernel
-does not expose a native GPU handle or persistent residency registry.
+MetalFp32 plans expose typed Upload/Operation/HostAccess actions. The Run
+validates actual packed upload bytes/capacity against that plan, reuses native
+buffers and checks fallback-induced extra uploads. CpuStorage can retain a
+completed Metal shared buffer; CPU access does not force another copy. Native
+allocation, source/scratch/output and retained copies share the controlled byte
+budget. One queue and synchronous host services drain device work before the
+existing completion/currentness boundary. Native handles remain private.
+
+Optional context caches separate CPU exact and Metal numeric/implementation/device
+identity. Numeric fallback and its descendants cannot populate expected native
+result entries; Metal-mode disk read/write is disabled. See [Cache Model](Cache-Model.md)
+and [S4 Workflow](S4-Workflow.md).
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v5 input views receive that exact
+transfer or callback entry; callbacks and ABI v6 input views receive that exact
 demand. Image and regional-source Runs lazily materialize only demanded tiles;
 Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
 The execution context must use the same frozen registry that produced the
@@ -124,8 +132,8 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v5 callback can distinguish ordinary failure from backend
-unavailability without changing its C signature or descriptor layout. The
+An operation ABI v6 callback can distinguish ordinary failure from backend
+unavailability. ABI 6 additionally provides host-owned synchronous native services. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits
 allow fallback. An output-publication attempt makes backend unavailability
@@ -136,7 +144,9 @@ the Run without a CPU attempt.
 ## Diagnostics
 
 Raw diagnostics include compile-stage duration, execute duration, operation
-attempt timing/outcome, selected backend, transfer count/bytes, peak allocated
+attempt timing/outcome, per-operation native dispatch/time, selected backend,
+input copy count/bytes, collected output-copy bytes, shared host access, native
+upload/result reuse, peak allocated
 bytes, fallback reason, plan digest, and result digest. They are observations,
 not verdicts or release evidence.
 

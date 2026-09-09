@@ -7,7 +7,7 @@ completion or provenance.
 ## Development loop
 
 During implementation, use scoped formatting/lint, affected targets, and
-focused tests. After source and documentation freeze, run at most one native
+focused tests. Only for an explicitly requested release pass, after source and documentation freeze, run at most one native
 clean configure, one full build, and one complete CTest/JUnit pass. Do not use
 Docker or local architecture emulation for that final pass.
 
@@ -328,3 +328,18 @@ consumer builds the same operation package using the installed operation SDK
 and runs the same example through built-ins and the DSO, retaining the shared
 bridge check. See [Image operations](../kernel-architecture/Image-Operations.md)
 for the exact fixture, standalone build, and report semantics.
+
+## S4 Metal and installed consumption
+
+Reuse build directories for `test_native_gpu`, `test_native_execution`,
+`test_metal_images`, `test_native_cache`, `test_s4_*` and
+`test_installed_consumer`. Image/cache tests exercise both builtins and the
+pure C module with independent CPU oracles. Missing hardware returns 77 as an
+explicit skip. `PHOTOSPIDER_ENABLE_METAL=OFF` checks CPU builds and fallback.
+On Apple Silicon, use `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` to validate
+real dispatches.
+
+The installed gate builds the S4 example separately for static/shared kernels;
+consumers enable only C/C++. Commands, checkable outcomes and diagnostics are
+in the [S4 guide](../kernel-architecture/S4-Workflow.md). No GPU duration is a
+pass threshold. CI retains six required Linux/macOS and sanitizer checks.

@@ -3,7 +3,7 @@
 PlanCacheKey 仍是非安全物理计划身份，不包含输入像素，也不能验证过期计划或标识
 执行结果。
 
-package 0.5 通过 ExecutionContext.result_cache_bytes 显式启用结果保留，它是
+package 0.6 通过 ExecutionContext.result_cache_bytes 显式启用结果保留，它是
 maximum_live_bytes 的子限额。副本共享不可变分配租约；驱逐只释放缓存引用，严格
 工作集接纳前优先回收可选条目。clear_result_cache() 推进保留 epoch，活动读取者
 仍有效，旧生产者不能重新填充已清空 epoch。统计报告命中、未命中、驱逐、共享、

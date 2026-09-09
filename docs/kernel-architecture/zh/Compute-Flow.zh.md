@@ -9,8 +9,8 @@
    private `ExecutionRun`。
 7. Dependency-ready step 在 per-Run parallelism 与 single context-wide waiting admission
    下进入 bounded CPU queue 或 optional local GPU callback queue。
-8. Cross-backend input 被复制成不同的 validated Value；Run 记录 backend label 与 transfer
-   observation。
+8. 显式原生上传把需求 Region 打包到 shared buffer；有效驻留副本避免重复上传，GPU
+   后继复用 buffer，完成后的主机访问不虚构 D2H 复制。
 9. Scheduler/admission failure 成为 first failure 前，以及 operation callback complete
    时，Run 都按 cancellation、graph staleness、original failure 的顺序选择结果；随后在
    Value publication 前检查 type/shape 与 dependency identity。
@@ -23,6 +23,6 @@ Cancellation 是 cooperative，不是 preemption。Running callback 可以晚返
 First-failure selector 不分配内存，并在 failure diagnostic construction 本身失败时继续复用，
 因此已经观察到的 stop 不会被降级为 queue、admission 或 backend failure。
 
-GPU selection 表示 optional in-process callback lane，不是 hardware SDK 或 remote device。
-只有 operation trait 允许时，GPU attempt 才 fallback 到 CPU；两个 attempt 都保留在 raw
-diagnostic 中。
+GPU selection 在显式 MetalFp32 下选择原生 Metal。单 GPU lane 包含取消在内均在
+退役前排空提交。Trait 允许发布前 CPU 回退；已提交设备执行错误终止 Run。分别报告
+尝试、实际 dispatch/复制和缓存复用。

@@ -102,7 +102,7 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 The isolated installed consumer builds this same operation source package
 against the installed SDK, runs A/B through its shared bridge, and runs the
 same executable with built-ins and the module. Static and shared kernel builds
-exercise this path and package 0.5/rejected 0.4 requests; see
+exercise this path and package 0.6/rejected 0.5 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
 
 ## S2 Gaussian, mask and composition
@@ -156,14 +156,14 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-The example directory is also an independent `find_package(Photospider 0.5)`
+The example directory is also an independent `find_package(Photospider 0.6)`
 consumer. `test_installed_consumer` builds and runs it against isolated static
 and shared installations, both with built-ins and with the separately built C
 module. Pass the trusted module's exact path as the sole optional argument.
 
 ## S3 box shrink and circle stamp
 
-Package 0.5 / operation ABI 5 exposes the following built-ins and the same C
+Package 0.6 / operation ABI 6 exposes the following built-ins and the same C
 module operations. These use existing Float32 linear-sRGB premultiplied RGBA
 and finite [0,1] Float32 HW masks. All parameters listed as scalar inputs are
 ordinary Float32 `{1}` bindings, not compile-time node parameters.

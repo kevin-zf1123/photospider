@@ -22,14 +22,14 @@ plan、runtime Value 与 daemon identity 相互分离。
 | --- | --- |
 | graph | `GraphContext`、`GraphSnapshot`、copied source revision/currentness |
 | compiler | fail-closed parameter validation、typed IR、conservative no-op optimization、demand-aware local plan、typed digest/key |
-| execution | bounded CPU pool、optional GPU callback lane、private Run、cancellation、byte ledger、raw diagnostic |
-| data | dense immutable `Value`、rank-general `Region`、`StridedLayout` |
-| plugin | exact operation ABI v3/data-definition ABI v1、typed parameter schema、demand-aware callback 与 startup-frozen registry |
+| execution | bounded CPU pool、optional native Metal queue/lane、private Run、cancellation、byte ledger、raw diagnostic |
+| data | regional immutable `Value` 与 CPU 可访问/原生存储、rank-general `Region`、`StridedLayout` |
+| plugin | exact operation ABI v6/data-definition ABI v1、typed parameter schema、demand-aware callback 与 startup-frozen registry |
 | benchmark | raw compile/plan/execute observation，加 named correctness oracle 或显式 unchecked 状态；execution cancellation 会中止完整 run 且不发布 report |
 
-CPU execution 是必需能力。Optional GPU support 是 configured local callback lane，只为声明
-支持它的 operation 选择。Cross-backend input 是显式 immutable copy；kernel package 不需要
-native GPU SDK。
+CPU exact 为必需默认。显式 MetalFp32 在可选 Apple Silicon 设备选择声明支持的原生
+实现。Shared buffer 保留完成结果并避免重复上传，主机访问与实际复制分别报告。
+Metal/Foundation 是可关闭的 Apple 私有构建依赖，参见 [S4 工作流](S4-Workflow.zh.md)。
 
 Cancellation 是 cooperative。Completion 与 final result return 前都会检查 plan currentness
 和 cancellation。Resource lease 与 intermediate Value 使用普通精确 C++ ownership。
