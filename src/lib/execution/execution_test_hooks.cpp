@@ -103,4 +103,11 @@ void notify_post_submit_observation() noexcept {
   }
 }
 
+/** @brief Implements the private callback body/owner retirement boundary. */
+void notify_callback_body_finished() noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->callback_body_finished)
+    hooks->callback_body_finished();
+}
+
 }  // namespace ps::execution_testing
