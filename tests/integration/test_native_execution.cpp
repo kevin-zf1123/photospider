@@ -154,6 +154,21 @@ int main() {
     PS_CHECK(execution.execute(compiled.value().plan, bindings).ok());
   }
   PS_CHECK(retained.bytes() == fallback.value().values.at("result").bytes());
+  // Generic Value execution must evict retained uploads before reserving again.
+  document.nodes.resize(1);
+  document.outputs = {{"result", 1, "value"}};
+  ps::GraphContext bounded_graph(document);
+  auto bounded_plan = ps::Compiler(registry).compile(bounded_graph, options);
+  PS_CHECK(bounded_plan.ok());
+  config.maximum_live_bytes = 48;
+  config.result_cache_bytes = 16;
+  ps::ExecutionContext bounded(registry, config);
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    auto result = bounded.execute(bounded_plan.value().plan, bindings);
+    PS_CHECK(result.ok());
+    PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
+    PS_CHECK(bounded.cache_statistics().retained_bytes == 16);
+  }
   std::cout << "native chain: dispatches=2 uploads=1 bytes=16 host_access=1 "
                "oracle=passed\n";
   return 0;

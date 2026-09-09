@@ -211,6 +211,10 @@ Status Device::execute(const std::vector<BufferView>& views,
         if (!source || !entry)
           return Status::failure(ErrorCode::InvalidArgument,
                                  "invalid shader UTF-8");
+        // Safe math alone still permits within-expression FMA on Metal.
+        // Establish the ABI policy even for plugins without their own pragma.
+        source = [@"#pragma clang fp contract(off)\n"
+            stringByAppendingString:source];
         MTLCompileOptions* options = [MTLCompileOptions new];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"

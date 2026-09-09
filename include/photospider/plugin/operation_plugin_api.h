@@ -207,11 +207,18 @@ typedef struct ps_operation_value_view_v6 {
  * 0..30. writable is 0 or 1 and cannot promote an immutable input to writable.
  */
 typedef struct ps_gpu_buffer_binding_v6 {
+  /** @brief Exact structure byte size. */
   uint32_t struct_size;
+  /** @brief Unique Metal buffer argument index in 0..30. */
   uint32_t index;
+  /** @brief Nonzero token returned by this invocation's buffer service. */
   uint64_t token;
+  /** @brief Byte offset relative to the acquired view, with 4-byte alignment.
+   */
   uint64_t offset;
+  /** @brief Positive accessible byte count within the acquired view. */
   uint64_t byte_size;
+  /** @brief Zero for read-only access, one for permitted mutable access. */
   uint32_t writable;
 } ps_gpu_buffer_binding_v6;
 
@@ -219,19 +226,31 @@ typedef struct ps_gpu_buffer_binding_v6 {
  * @note Source is 1..262144 bytes, entry 1..128 bytes, bindings <=31. Constants
  * are at most 4096 bytes at a distinct index. Grid dimensions
  * are 1..UINT32_MAX. Safe math and no contraction are host policy; source is
- * trusted process code.
+ * trusted process code. Shader access must remain inside declared views;
+ * binding validation is not a shader sandbox.
  */
 typedef struct ps_gpu_dispatch_v6 {
+  /** @brief Exact structure byte size. */
   uint32_t struct_size;
+  /** @brief UTF-8 MSL source, borrowed without requiring a terminator. */
   const char* source;
+  /** @brief Exact source byte count. */
   uint32_t source_size;
+  /** @brief UTF-8 entry name, borrowed without requiring a terminator. */
   const char* entry;
+  /** @brief Exact entry-name byte count. */
   uint32_t entry_size;
+  /** @brief Naturally aligned binding array, nullable when count is zero. */
   const ps_gpu_buffer_binding_v6* buffers;
+  /** @brief Binding count, with unique indexes distinct from constants. */
   uint32_t buffer_count;
+  /** @brief Borrowed constant bytes, nullable when constant_size is zero. */
   const void* constants;
+  /** @brief Constant byte count; copied into command metadata by the host. */
   uint32_t constant_size;
+  /** @brief Buffer argument index for nonempty constants, in 0..30. */
   uint32_t constant_index;
+  /** @brief Positive total thread counts along x, y and z. */
   uint64_t grid[3];
 } ps_gpu_dispatch_v6;
 
@@ -239,16 +258,36 @@ typedef struct ps_gpu_dispatch_v6 {
  * @note All tokens and pointers expire at callback return. Host buffers alone
  * are eligible. Calls never throw; failures are sticky and override callback
  * success. execute accepts 1..32 dispatches and drains submitted native work
- * before returning, including cancellation/failure. Do not access mutable
- * buffer bytes concurrently with execute. The service owns queue and pipelines.
+ * before returning, including cancellation/failure. Use only on the invoking
+ * callback thread; do not access mutable buffer bytes concurrently with
+ * execute. The service owns queue and pipelines. Output and scratch allocations
+ * use the enclosing sink services and count against the host's live buffer
+ * budget.
  */
 typedef struct ps_gpu_service_v6 {
+  /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
+  /** @brief Borrowed host state passed unchanged to both functions. */
   void* context;
-  /** @brief Acquires a bounded buffer token; writes token only on success. */
+  /** @brief Acquires a bounded buffer token; writes token only on success.
+   * @param context This service's host state.
+   * @param bytes Start of a live host native input, output or scratch view.
+   * @param byte_size Positive view size within the allocation payload.
+   * @param writable Zero or one; immutable inputs cannot become writable.
+   * @param token Nonnull destination for the invocation-local token.
+   * @return A PS_OPERATION_RESULT_*_V6 code; failure becomes sticky.
+   * @note At most 1024 views per invocation; publication revokes write access.
+   */
   int (*buffer)(void* context, const uint8_t* bytes, uint64_t byte_size,
                 uint32_t writable, uint64_t* token);
-  /** @brief Executes trusted dispatch records; returns an operation result. */
+  /** @brief Executes trusted dispatch records synchronously.
+   * @param context This service's host state.
+   * @param commands Naturally aligned borrowed dispatch array.
+   * @param command_count Array size in 1..32.
+   * @return A PS_OPERATION_RESULT_*_V6 code; submitted device failure ends Run.
+   * @note Successful return permits CPU access to the completed shared bytes.
+   * Retained pipelines are internal; callers must not retain service pointers.
+   */
   int (*execute)(void* context, const ps_gpu_dispatch_v6* commands,
                  uint32_t command_count);
 } ps_gpu_service_v6;

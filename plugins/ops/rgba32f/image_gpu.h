@@ -73,7 +73,8 @@ static int ps_execute_gpu_image(
     const ps_operation_value_view_v6* v = &inputs[i];
     if (v->rank == 1)
       continue;
-    if (v->shape[0] > UINT32_MAX || v->shape[1] > UINT32_MAX)
+    if (v->byte_offset % 4 || v->shape[0] > UINT32_MAX ||
+        v->shape[1] > UINT32_MAX)
       return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6;
     for (uint32_t axis = 0; axis < v->rank; ++axis)
       if (v->byte_strides[axis] < 0 || v->byte_strides[axis] % 4)

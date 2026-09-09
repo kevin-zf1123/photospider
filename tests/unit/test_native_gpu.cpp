@@ -63,11 +63,34 @@ int main() {
     std::memcpy(actual, output.data(), sizeof(actual));
     for (int i = 0; i < 4; ++i)
       PS_CHECK(actual[i] == data[i] * .5F);
+    // This shader supplies no pragma: the host must disable contraction.
+    auto rounding = allocator.allocate(16).take_value();
+    const float operands[4] = {0x1.000002p0F, 1, 1, 1};
+    std::memcpy(rounding.data(), operands, sizeof(operands));
+    std::uint64_t rounding_token = 0;
+    PS_CHECK(api->buffer(api->context, rounding.data(), 16, 0,
+                         &rounding_token) == 0);
+    const char arithmetic[] =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void scale(device const float* a [[buffer(0)]], "
+        "device float* b [[buffer(1)]], uint i [[thread_position_in_grid]])"
+        "{b[i]=a[i]*0x1.fffffcp-1f-1.0f;}";
+    buffers[0].token = rounding_token;
+    command.source = arithmetic;
+    command.source_size = sizeof(arithmetic) - 1;
+    PS_CHECK(api->execute(api->context, &command, 1) == 0);
+    float rounded = 1;
+    std::memcpy(&rounded, output.data(), 4);
+    PS_CHECK(rounded == 0);  // FMA would produce -2^-46.
+    buffers[0].token = source;
+    command.source = shader;
+    command.source_size = sizeof(shader) - 1;
+    PS_CHECK(api->execute(api->context, &command, 1) == 0);
     retained = std::move(output).freeze();
     buffers[0].byte_size = 17;
     PS_CHECK(api->execute(api->context, &command, 1) != 0);
     PS_CHECK(invocation.status().code == ErrorCode::InvalidArgument);
-    PS_CHECK(invocation.statistics().dispatches == 1);
+    PS_CHECK(invocation.statistics().dispatches == 3);
   }
   allocator = BufferAllocator();
   device.reset();

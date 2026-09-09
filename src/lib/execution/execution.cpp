@@ -2166,8 +2166,18 @@ Result<ExecutionResult> ExecutionContext::execute(
         }
       }
     }
+    if (impl_->disk && impl_->budget->available() < working_bytes)
+      impl_->disk->drop_pending();
+    if (impl_->cache)
+      impl_->cache->reclaim_for(working_bytes);
     auto reserved = impl_->budget->reserve(
-        working_bytes, [&] { return binding_stop(plan, cancellation); });
+        working_bytes, [&] { return binding_stop(plan, cancellation); }, {},
+        [this, working_bytes] {
+          if (impl_->disk)
+            impl_->disk->drop_pending();
+          if (impl_->cache)
+            impl_->cache->reclaim_for(working_bytes);
+        });
     if (!reserved.ok())
       return Result<ExecutionResult>(reserved.status());
     auto reservation = reserved.take_value();
