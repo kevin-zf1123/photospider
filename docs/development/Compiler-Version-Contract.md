@@ -103,3 +103,19 @@ its digest changes through the new semantic input. Result region keys use v2
 and separate numeric/backend/device/implementation identity. Native upload keys
 hash actual logical bytes under their own domain. No native pointer or timing
 enters compiler identity. See ADR 0019 and the installed S4 workflow guide.
+
+## Accepted operation-foundations target
+
+[ADR 0020](../adr/0020-composable-operation-foundations.md), tracked by #287,
+targets package 0.7.0, operation ABI/OperationTraits 7, image facet v2 replacing
+v1, semantic/physical-plan/plan-cache domains v7 and result-region-key v3.
+The unchanged optimizer remains optimizer-v5-canonical-noop; result digest
+framing remains v2. Disk-derived data becomes v2 with old entries treated as
+misses. WorkflowDocument schema 2, provider ABI 1 and C++17 remain unchanged.
+Complete constraints, output facets and inference rules enter the affected
+identities. Old operation tables/package-minor requests are rejected; C++
+consumers rebuild. Daemon 0.6 migration is a separate task.
+
+These are accepted targets on `ops-foundations`, destined only for `ops`.
+The decision baseline `main@fba06270` remains package 0.6.0/ABI 6; this document
+change does not claim a 0.7 runtime or an implementation merge into main.

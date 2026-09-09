@@ -1,5 +1,7 @@
 # 实施依赖与执行路线
 
+2026-09-10：[ADR 0020](../../adr/0020-composable-operation-foundations.md) 已接受 G1/G2/G3/G5 的限定基础方案，总追踪 #287、顺序 #288–#297 已建立。仅该子集进入本轮开发；其余阶段继续 Proposed。交付为 ops-foundations→ops，不合 main。
+
 状态 Proposed。顺序依据可复用性、现有代码约束和可检查工作流，不依据商业软件菜单数量。阶段是需求依赖规划，不是已创建的 Issue、实施授权或工时承诺。
 
 ## 优先要补的基础
@@ -16,11 +18,11 @@
 
 | 关口 | 当前事实与必须作出的选择 | 首个验收流程 |
 | --- | --- | --- |
-| G1 数值表示 | 现有4种 element；决定是否先用 Float32/64 通用数组，哪些 UInt16/Int16/Float16 有立即使用需求；complex可先用显式实虚轴 | uint8→Float32→uint8 有界 round-trip；signed 梯度不丢负值 |
-| G2 语义类型 | 新 image/scalar/vector/complex/profile 的契约与合法组合；旧 RGBA profile 原义保留 | extract→process→merge；straight↔premul；Lab往返 |
-| G3 shape/输出 | 当前单输出与有限 shape rules；决定通道变换、节点级固定尺寸、变长 path、统计多输出如何表达 | expression count→LUT→图像；mask→components和属性 |
+| G1 数值表示 | 已接受保留4种 element，Float32/64计算，cast与range分离；complex显式实虚轴，不新增dtype | uint8→Float32→uint8 有界 round-trip；signed 梯度不丢负值 |
+| G2 语义类型 | 新 image/scalar/vector/complex/profile 的契约与合法组合；本轮 image v2 替换 v1，无旧接口保留 | extract→process→merge；straight↔premul；Lab往返 |
+| G3 shape/输出 | 已接受dtype与shape分离、静态轴+checked offset、bounded重复输入、单输出独立属性节点；变长path排除 | expression count→LUT→图像；mask→components和属性 |
 | G4 空间依赖 | 任意变换、动态半径、全局scan/reduce；可先Whole，逐项增加必要映射 | identity STMap与跨tile warp等价；变半径脉冲 |
-| G5 值组合 | 当前 bounded scalar 必须直接 binding；控制点/核/LUT 应为 Value；形状参数静态与数值参数动态分清 | generator→运行时曝光gain；修改系数复用计划 |
+| G5 值组合 | 已接受computed Float32 {1}及兼容dimensionless单样本signal；消费前finite/range，静态shape与动态系数分离 | generator→运行时曝光gain；修改系数复用计划 |
 | G6 外部输入 | 宿主负责 codec/profile/模型/帧序列加载及不可变快照，数据进入公开Value/区域源 | 解码图片→颜色转换→处理→宿主编码 |
 
 G1..G5 不是要求一次重写内核。每个首批 workflow 先核验现有 generic 路径能否合法承载，无法承载的行为再形成最小契约变化。数值例子可以用当前 Float32/Float64 和固定 shape 起步。
@@ -44,12 +46,12 @@ G1..G5 不是要求一次重写内核。每个首批 workflow 先核验现有 ge
 
 库复用仅减少实现成本，不能替代契约和验收。选库前用真实图像和有界难例验证结果、支持 dtype/layout、线程/取消、临时空间、许可与安装消费。不要将一次 FFT 或 ICC 调用的时间当成完整 workflow 时间。
 
-## 尚未分配到确定实现的决策
+## 本轮已分配及其余待决内容
 
-- G2 图像/颜色元数据怎样进入受校验端口及编译/缓存身份。
-- G3 多结果、输出 shape 和空集合采用哪一种最小表达方式。
+- G2 typed facet、端口和编译/缓存身份已在 ADR 0020 定稿，由 #289/#291 实现。
+- G3 静态轴推断、单输出拆分节点、固定容量与有效计数已在 ADR 0020 定稿。
 - G4 任意采样映射/全局scan的公共描述是否值得扩展，还是先保留Whole。
-- 首个稳定工作空间和 HDR/display 输出方案，ICC 与 OCIO 的职责分界。
+- 首工作空间已固定为 linear sRGB/Rec.709 D65，signed/HDR 合法；display 输出、ICC/OCIO 继续待后续专项。
 - Lab 非可分离混合在超色域时默认哪种 gamut mapping，以及L*亮度/XYZ Y是否各设模式。
 - mask soft Boolean 的默认产品语义、路径宽度自变量和 stroke overlap规则。
 - RAW decoder 选择与处理状态、模型许可、视频时间基和deep表示。

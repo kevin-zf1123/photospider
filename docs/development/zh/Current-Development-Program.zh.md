@@ -1,8 +1,9 @@
 # 当前开发计划
 
-- 快照日期：2026-09-09
-- 已审计基础：main@0e65eac（已结算 S3，PR #278）
-- 当前 milestone：S4 Metal 执行与驻留图像 workflow
+- 快照日期：2026-09-10
+- 已审计基础：`main@fba06270`（已交付 S4，package 0.6.0）
+- 当前 milestone：G1/G2/G3/G5 算子基础，#287；实现待交付
+- 交付分支：`ops-foundations` 合入 `ops`，不合入 main
 
 ## 角色与权威
 
@@ -39,20 +40,40 @@ compiler 与 execution contract，因此进入 Project #8。
 
 ## 当前 milestone
 
-S3 已由 [kernel PR #278](https://github.com/kevin-zf1123/photospider/pull/278)
-在 main@0e65eac 结算。区域缓存与冻结执行是 S4 基础。
+同步基线 `main@fba06270` 包含 S4 package 0.6.0、operation ABI/traits 6：显式
+CpuExact/MetalFp32、原生 shared storage、全部八个图像算子、区域上传、有界驻留和
+fallback。[S4 指南](../../kernel-architecture/zh/S4-Workflow.zh.md) 及其可执行示例/测试
+记录该实现基线。本次文档切片没有重新运行这些产品测试。
 
-[S4 #279](https://github.com/kevin-zf1123/photospider/issues/279) 实现
-[ADR 0019](../../adr/0019-metal-resident-image-workflows.md)：package 0.6、
-operation ABI/traits 6、显式 CpuExact/MetalFp32 规划、原生 shared storage 与同步完成、
-八个可复用算子、区域上传、有界跨 Run 驻留、回退及诊断。C++17、schema 2 和
-provider ABI 1 保持。
+[Foundations #287](https://github.com/kevin-zf1123/photospider/issues/287) 实现
+[ADR 0020](../../adr/0020-composable-operation-foundations.md)。已接受目标为 package
+0.7.0/ABI 7、结构化语义与 image v2、静态输出推断、computed scalar、八算子完整迁移、
+cache/snapshot 集成及可复用 numeric/channel/color/expression/LUT/component workflow。
+本快照仅记录契约，实现与合并仍待完成。Schema 2、provider ABI 1、C++17 保持。
 
-叶项按 #280、#281、#153、#154、#282、#283、#156、#284 顺序推进；daemon #19
-消费安装包并保持 IPC v3。[S4 workflow 指南](../../kernel-architecture/zh/S4-Workflow.zh.md)
-提供公开示例和独立 oracle。Issue 记录验证、独立审查、CI/bot 修复与合并状态；
-本地实现不表示远端已结算。成本校准和自动选址 #209 保留到 S5；增量编译 #203、
-其他 GPU 后端、GUI 与 IPC 扩展不属于 S4。
+| 顺序 | Active leaf | 完成边界 |
+| --- | --- | --- |
+| 1 | #288 | 接受契约及目标/事实区分 |
+| 2 | #289 | 共享语义、输出推断、C/C++ ABI |
+| 3 | #290 | 八算子 C++/C/Metal 迁移 |
+| 4 | #291 | Snapshot、freeze、完整 cache 语义 |
+| 5 | #292 | Computed scalar 验证与组合 |
+| 6 | #293 | Numeric cast/range/arithmetic/reduction |
+| 7 | #294 | Channel、alpha、参考白颜色组合 |
+| 8 | #295 | 有界 expression、动态 coefficients、linear LUT |
+| 9 | #296 | Threshold、labels、固定容量属性 |
+| 10 | #297 | 安装包公开 workflow 示例与组合验收 |
+
+每叶项依赖前一交付切片。ABI 迁移可机械更新既有调用方以保持各提交可构建；完整八算子
+行为及验证属于 #290。Snapshot/cache 未支持的表示在 #291 完成前必须拒绝。
+唯一实现写入者负责项目修改，协调者负责 Issue/commit/PR 行政操作。每 Issue 单独提交后，
+新建独立全面审查，完成六项必需 CI 和 Codex review bot 修复。唯一实现 PR 通过 merge
+commit 将 `ops-foundations` 合入 `ops`。验证 ops 交付后结算 Issue，保留本地/远端 ops，
+仅删除 ops-foundations。
+
+G4 空间依赖扩展、G6 宿主资产、daemon 0.6 迁移、完整路径、FFT、ICC/OCIO 不属于本次
+milestone。Main 保持基线，不表示已交付 0.7。S5 校准/自动选址 #209、增量编译 #203
+继续独立处理；更广泛算子目录保持 Proposed。
 
 ## 当前 milestone 以外的 active backlog
 

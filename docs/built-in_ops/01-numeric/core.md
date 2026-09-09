@@ -1,5 +1,7 @@
 # 数值与数组基础
 
+已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：四 dtype cast/range 分离，Float32/64 同 shape 基础算术和显式 clamp，全数组 Float64 mean/variance，有界单通道 expression（静态 start/step/count、动态 Float64 coefficients）及 linear 1D LUT。默认由 workflow 显式提交，全部新增算子首版 Whole；其他 unary/broadcast/scan/数组操作继续 Proposed。
+
 状态 Proposed。本篇为 D1 数学核心，受 G1/G3/G5 数据与组合前置条件约束。建议 CPU Float32/Float64 参考实现；整数支持逐项定义，不能默认为所有张量运算有 Metal 后端。符号 E/W/S 和默认约定见[公共契约](../00-foundation/contracts.md)。
 
 ## 基础目录

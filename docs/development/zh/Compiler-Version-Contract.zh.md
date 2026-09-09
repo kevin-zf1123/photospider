@@ -86,3 +86,16 @@ IPC v3 保持。semantic-graph-ir-v6、physical-plan-v6、plan-cache-key-v6 编�
 数值模式及显式访问。优化规则仍为 optimizer-v5-canonical-noop，摘要由新语义输入改变。
 结果区域键 v2 区分数值/后端/设备/实现，上传键单独散列实际逻辑字节；句柄与耗时不进入
 编译身份。参见 ADR 0019 与 S4 安装示例。
+
+## 已接受的算子基础目标
+
+[ADR 0020](../../adr/0020-composable-operation-foundations.md) 由 #287 追踪：
+目标 package 0.7.0、operation ABI/OperationTraits 7，image facet v2 替换 v1，
+semantic/physical-plan/plan-cache domain v7、result-region-key v3。优化规则保持
+optimizer-v5-canonical-noop；result digest framing 保持 v2。磁盘派生数据为 v2，
+旧 entry 作为 miss。WorkflowDocument schema 2、provider ABI 1、C++17 保持。
+完整约束、输出 facets 和推断规则进入受影响 identity。拒绝旧 operation table/package
+minor 请求，C++ consumer 重建。Daemon 0.6 迁移为独立任务。
+
+这些是 `ops-foundations` 上仅交付到 `ops` 的已接受目标。决策基线 `main@fba06270`
+仍为 package 0.6.0/ABI 6；本次文档修改不宣称已有 0.7 runtime 或实现已合入 main。

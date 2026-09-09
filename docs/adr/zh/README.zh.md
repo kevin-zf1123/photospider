@@ -19,6 +19,7 @@ architecture 或 delivery authority。
 | [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 产品边界是可嵌入 kernel 与临时 local daemon。 |
 | [0016](0016-workflow-inputs-and-execution-bindings.zh.md) | 已接受的 Float32 图像、运行期标量及 operation ABI v3 目标；实现尚未交付。 |
 | [0017](0017-cpu-regional-execution-and-storage.zh.md) | 已接受的 CPU 区域存储、有界执行与 operation ABI 4 目标。 |
+| [0020](0020-composable-operation-foundations.zh.md) | 已接受的 G1/G2/G3/G5 组合、image v2 与 operation ABI 7 目标；实现由 #287 追踪。 |
 
 ADR 0015 是最高 active 产品边界权威。重置前 ADR 0001、0004、0009、0010、0011 与 0013 已由该
 breaking decision 有意从 active 集合退役。其历史文本只能从 Git 历史和

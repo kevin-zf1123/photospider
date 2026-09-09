@@ -1,8 +1,9 @@
 # Current Development Program
 
-- Snapshot date: 2026-09-09
-- Audited foundation: `main@0e65eac` (settled S3, PR #278)
-- Current milestone: S4 Metal execution and resident image workflows
+- Snapshot date: 2026-09-10
+- Audited foundation: `main@fba06270` (delivered S4, package 0.6.0)
+- Current milestone: G1/G2/G3/G5 operation foundations, #287; implementation pending
+- Delivery branch: `ops-foundations` into `ops`, with no merge into main
 
 ## Role and authority
 
@@ -42,23 +43,48 @@ It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
 
 ## Current milestone
 
-S3 is settled by [kernel PR #278](https://github.com/kevin-zf1123/photospider/pull/278)
-at `main@0e65eac`. Its regional cache and frozen execution are the S4 foundation.
+The synchronized baseline `main@fba06270` contains S4 package 0.6.0 and
+operation ABI/traits 6: explicit CpuExact/MetalFp32 planning, native shared
+storage, all eight image operations, regional uploads, bounded residency and
+fallback. The [S4 guide](../kernel-architecture/S4-Workflow.md) and its executable
+examples/tests document that implemented baseline. This documentation slice
+has not rerun those product tests.
 
-[S4 #279](https://github.com/kevin-zf1123/photospider/issues/279) implements
-[ADR 0019](../adr/0019-metal-resident-image-workflows.md): package 0.6,
-operation ABI/traits 6, explicit CpuExact/MetalFp32 planning, native shared
-storage and synchronous completion, eight reusable operations, regional
-uploads, bounded cross-Run residency, fallback and diagnostics. C++17, schema 2
-and provider ABI 1 remain unchanged.
+[Foundations #287](https://github.com/kevin-zf1123/photospider/issues/287) implements
+[ADR 0020](../adr/0020-composable-operation-foundations.md). Its accepted target
+is package 0.7.0/ABI 7, structured semantics and image v2, static output inference,
+computed scalars, complete eight-op migration, cache/snapshot integration and
+reusable numeric/channel/color/expression/LUT/component workflows. At this
+snapshot only the contract is being recorded; implementation and merge remain
+pending. Schema 2, provider ABI 1 and C++17 remain.
 
-The ordered leaves are #280, #281, #153, #154, #282, #283, #156 and #284;
-daemon #19 consumes the installed package while preserving IPC v3.
-The [S4 workflow guide](../kernel-architecture/S4-Workflow.md) gives runnable
-public examples and independent oracles. Issues record validation, independent
-review, CI/bot fixes and merge status; local implementation does not claim
-remote settlement. Cost calibration and automatic placement #209 remain S5.
-Incremental compiler #203, other GPU backends, GUI and IPC expansion are outside S4.
+| Order | Active leaf | Completion boundary |
+| --- | --- | --- |
+| 1 | #288 | Accepted contracts and target/fact separation |
+| 2 | #289 | Shared semantics, output inference and C/C++ ABI |
+| 3 | #290 | Eight-op C++/C/Metal migration |
+| 4 | #291 | Snapshots, freeze and complete cache semantics |
+| 5 | #292 | Computed scalar validation and composition |
+| 6 | #293 | Numeric cast/range/arithmetic/reduction |
+| 7 | #294 | Channel, alpha and reference-white color combinations |
+| 8 | #295 | Bounded expression, dynamic coefficients and linear LUT |
+| 9 | #296 | Threshold, labels and fixed-capacity attributes |
+| 10 | #297 | Installed public workflow examples and combined acceptance |
+
+Each leaf depends on the preceding delivery slice. ABI migration may update
+existing callers mechanically to keep each commit buildable; complete eight-op
+behavior/validation belongs to #290. Unsupported snapshot/cache representations
+must be rejected until #291 implements them. One implementation writer owns
+project changes; the coordinator owns Issue/commit/PR administration. Separate
+Issue commits precede a fresh independent comprehensive review, six required
+CI jobs and Codex review-bot fixes. The sole implementation PR merges
+`ops-foundations` into `ops` with a merge commit. Settle Issues after verified
+ops delivery, retain local/remote ops, then remove only ops-foundations.
+
+G4 spatial dependency expansion, G6 host assets, daemon 0.6 migration, full paths,
+FFT and ICC/OCIO are outside this milestone. Main keeps its baseline; no 0.7
+main delivery is implied. S5 calibration/automatic placement #209 and incremental
+compiler #203 remain separate work. The broader operation catalogue is Proposed.
 
 ## Active backlog outside the milestone
 
