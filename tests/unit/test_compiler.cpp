@@ -118,13 +118,13 @@ int main() {
   PS_CHECK(positive_zero.value().semantic.digest().value == "29c62b472c03c76b");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
            "a6d12c7f1638fdc5");
-  PS_CHECK(positive_zero.value().plan.digest().value == "cfa201c85ed40faa");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "594927ae31871101");
+  PS_CHECK(positive_zero.value().plan.digest().value == "4cf42222c7973a62");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "3d65e89c7d522390");
   PS_CHECK(negative_zero.value().semantic.digest().value == "1aa25ccb931456eb");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
            "a3c3d3cfea2b8ed9");
-  PS_CHECK(negative_zero.value().plan.digest().value == "48293796b23c4366");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "5cbc5e79b66348ae");
+  PS_CHECK(negative_zero.value().plan.digest().value == "2539cb8da7a0634e");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "39db773c69d90600");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=
@@ -179,7 +179,7 @@ int main() {
   PS_CHECK(stale_result.status().code == ErrorCode::Stale);
 
   PlanningOptions gpu_options;
-  gpu_options.allow_gpu = true;
+  gpu_options.execution_mode = ps::ExecutionMode::MetalFp32;
   auto gpu_compiled = compiler.compile(first, gpu_options);
   PS_CHECK(gpu_compiled.ok());
   PS_CHECK(gpu_compiled.value().plan.steps().front().backend == Backend::Gpu);

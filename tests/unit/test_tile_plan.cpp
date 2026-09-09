@@ -41,9 +41,11 @@ int main() {
       {"sigma", OperationParameterType::Float64, true, true, .1, 64}};
   PS_CHECK(registry->register_operation({"blur", blur, dummy}).ok());
   auto gain = image_traits(2);
+  gain.supports_gpu = gain.allows_cpu_fallback = true;
   gain.input_schema[1] = {OperationPortKind::Float32Scalar, 0, 16};
   PS_CHECK(registry->register_operation({"gain", gain, dummy}).ok());
   auto mask = image_traits(2);
+  mask.supports_gpu = mask.allows_cpu_fallback = true;
   mask.input_schema[1] = {OperationPortKind::Float32Mask, 0, 0};
   PS_CHECK(registry->register_operation({"mask", mask, dummy}).ok());
   PS_CHECK(registry->register_operation({"over", image_traits(2), dummy}).ok());
@@ -133,6 +135,31 @@ int main() {
            changed.value().digest().value != plan.digest().value);
   PS_CHECK(changed.value().optimized_digest().value ==
            plan.optimized_digest().value);
+  options.execution_mode = ExecutionMode::MetalFp32;
+  auto native = compiler.plan(compiled.value().optimized, options);
+  PS_CHECK(native.ok());
+  auto native_tile =
+      native.value().tile_plan("result", Region({{2, 1}, {3, 2}, {0, 4}}));
+  PS_CHECK(native_tile.ok());
+  std::uint64_t uploads = 0, bytes = 0, host_access = 0;
+  for (const auto& action : native_tile.value().physical_steps()) {
+    if (action.kind == PhysicalStepKind::Upload) {
+      ++uploads;
+      bytes += action.packed_bytes;
+      PS_CHECK(action.allocation_bytes == action.packed_bytes);
+      PS_CHECK(action.destination_backend == Backend::Gpu);
+      PS_CHECK(action.packed_layout.origin.size() == action.region.rank());
+    }
+    if (action.kind == PhysicalStepKind::HostAccess)
+      ++host_access;
+  }
+  PS_CHECK(uploads == 3 && bytes == 44 && host_access == 1);
+  PS_CHECK(native_tile.value().execution_mode() == ExecutionMode::MetalFp32);
+  PS_CHECK(native.value().optimized_digest().value ==
+           plan.optimized_digest().value);
+  options.execution_mode = static_cast<ExecutionMode>(99);
+  PS_CHECK(!compiler.plan(compiled.value().optimized, options).ok());
+  options.execution_mode = ExecutionMode::CpuExact;
   options.tile_height = 0;
   PS_CHECK(compiler.plan(compiled.value().optimized, options).status().code ==
            ErrorCode::InvalidArgument);
