@@ -192,7 +192,11 @@ Generic opaque facets and unrestricted generic floating bytes remain available.
 Malformed known typed facets are rejected when constructing Value metadata.
 
 Each C port has an optional exact-sized semantic constraint record for kind,
-facets, dtype and rank. An optional operation contract selects declared/input/
+facets, dtype and rank. `element_type_mask` optionally accepts a dtype set:
+low bits 0..3 mean UInt8/Int64/Float64/Float32, zero is unrestricted, and it is
+mutually exclusive with nonzero exact `element_type`. Unknown bits and conflicting
+fields reject registration. The copied mask enters compiler and result identities.
+An optional operation contract selects declared/input/
 static-parameter dtype, rank-1..8 axes (constant, positive Int64 parameter,
 input axis or actual input count) with checked nonnegative offset, and output
 semantics (drop, preserve input, establish facets or static semantic parameter).
@@ -218,7 +222,7 @@ rejects old formats. Bounded scalars accept compatible computed Float32 `{1}` re
 dimensionless Scalar/single-sample Signal facets. Each consumer validates its
 range before callback entry, including cache hits; direct bindings retain
 preflight checks. Logical scalar addresses support padded and strided views.
-Operation-specific conversions follow with their operation slices. The general typed image validator also accepts straight
+The default registry also supplies the CPU Whole [numeric operations](Numeric-Operations.md). The general typed image validator also accepts straight
 representations; the eight existing operation ports require canonical RGBA.
 
 ## S3 scaled ports

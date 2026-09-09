@@ -31,6 +31,7 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
   digest->integer(port.semantic_kind);
   digest->integer(port.element_type);
   digest->integer(port.rank);
+  digest->integer(port.element_type_mask);
   append_facets(digest, port.facets);
 }
 

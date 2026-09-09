@@ -20,6 +20,7 @@
 #include "photospider/plugin/operation_plugin_api.h"
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/image_operations.hpp"
+#include "plugin/numeric_operations.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -1190,6 +1191,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         target->semantic_kind = m->semantic_kind;
         target->element_type = m->element_type;
         target->rank = m->rank;
+        target->element_type_mask = m->element_type_mask;
       }
       return true;
     };
@@ -2037,6 +2039,9 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   }
 
   status = plugin_internal::register_image_operations(registry.get());
+  if (!status.ok())
+    throw std::logic_error(status.message);
+  status = plugin_internal::register_numeric_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
   registry->builtins_ = true;

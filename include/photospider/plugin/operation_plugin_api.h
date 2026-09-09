@@ -415,6 +415,11 @@ typedef struct ps_operation_semantic_constraint_v7 {
   uint32_t rank;
   uint32_t facet_count;
   const ps_operation_facet_view_v7* facets;
+  /** @brief Allowed dtype bits (element code - 1), low four bits only.
+   * Zero adds no restriction; nonzero element_type and mask are mutually
+   * exclusive.
+   */
+  uint32_t element_type_mask;
 } ps_operation_semantic_constraint_v7;
 
 /** @brief Typed semantic port, conservatively Whole in ABI 7. */

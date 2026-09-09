@@ -25,7 +25,9 @@ std::uint32_t float_bits(float value) noexcept {
   return bits;
 }
 bool valid_constraint(const OperationPortConstraint& port) {
-  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 9)
+  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 9 ||
+      (port.element_type_mask & ~UINT32_C(15)) ||
+      (port.element_type && port.element_type_mask))
     return false;
   if (port.kind != OperationPortKind::Typed &&
       (port.semantic_kind || !port.facets.empty()))
@@ -368,7 +370,9 @@ Status validate_port_metadata(const OperationPortConstraint& port,
   if ((port.element_type &&
        port.element_type !=
            static_cast<std::uint32_t>(descriptor.element_type)) ||
-      (port.rank && port.rank != descriptor.shape.size()))
+      (port.rank && port.rank != descriptor.shape.size()) ||
+      (port.element_type_mask &&
+       !(port.element_type_mask & (1U << (element - 1)))))
     return failure(ErrorCode::TypeMismatch, "port dtype/rank mismatch");
   for (const auto& facet : facets) {
     if (facet.key != "photospider.image" && facet.key != "photospider.semantic")

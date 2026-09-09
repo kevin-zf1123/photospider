@@ -153,6 +153,9 @@ Image 为 Float32 HWC，typed image validation 支持 finite signed/HDR。Vector
 及其浮点位模式保持；构造 Value 元数据时拒绝 malformed known typed facets。
 
 每个 C port 可指向 exact-sized semantic constraint，声明 kind/facets/dtype/rank。
+`element_type_mask` 低 0..3 位对应 UInt8/Int64/Float64/Float32，零表示无限制，
+与非零精确 `element_type` 互斥；未知位或冲突字段在注册时拒绝。复制的 mask 进入
+compiler/result identity。
 可选 operation contract 选择声明/输入/静态参数 dtype，rank 1..8 axes（常量、正 Int64
 参数、输入轴、实际输入数量）及 checked 非负偏移，output semantics 选择 drop、preserve
 input、establish facets 或静态 semantic 参数。固定前缀后可有一个同构重复组，启用时
@@ -169,7 +172,7 @@ coverage-premultiplied D65 语义，包含符合资格的原生 Metal 执行。�
 首输入的语义 facet。快照与 memory/native/disk cache 保留受支持 image-v2 表示和真实
 canonical facet；磁盘格式 2 拒绝旧格式。Bounded scalar 接受兼容 computed Float32 `{1}`，包含 dimensionless Scalar/单样本 Signal facet。
 每个 consumer 在 callback 前检查范围（含缓存命中），直接绑定保留 preflight。标量读取
-使用逻辑地址，支持 padding/stride；算子专用转换随对应切片推进。
+使用逻辑地址，支持 padding/stride。默认 registry 也提供 CPU Whole [数值算子](Numeric-Operations.zh.md)。
 通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
 
 ## ABI 7 区域视图与宿主分配

@@ -27,9 +27,14 @@ static int execute(void* user, const ps_operation_value_view_v7* inputs,
   if (!bytes)
     return PS_OPERATION_RESULT_FAILURE_V7;
   for (uint32_t i = 0; i < count; ++i) {
-    double input;
-    memcpy(&input, inputs[i].data + inputs[i].byte_offset, sizeof(input));
-    const float output = (float)input;
+    float output;
+    if (inputs[i].element_type == PS_OPERATION_ELEMENT_FLOAT32_V7) {
+      memcpy(&output, inputs[i].data + inputs[i].byte_offset, sizeof(output));
+    } else {
+      double input;
+      memcpy(&input, inputs[i].data + inputs[i].byte_offset, sizeof(input));
+      output = (float)input;
+    }
     memcpy(bytes + i * sizeof(output), &output, sizeof(output));
   }
   return sink->publish(sink->context, sink->output_element_type,
@@ -44,13 +49,8 @@ static const ps_operation_parameter_descriptor_v7 parameters[] = {
      PS_OPERATION_PARAMETER_STRING_V7, 1, 0, 0, 0},
     {sizeof(ps_operation_parameter_descriptor_v7), "semantic", 8,
      PS_OPERATION_PARAMETER_STRING_V7, 1, 0, 0, 0}};
-static const ps_operation_semantic_constraint_v7 input_constraint = {
-    sizeof(ps_operation_semantic_constraint_v7),
-    0,
-    PS_OPERATION_ELEMENT_FLOAT64_V7,
-    1,
-    0,
-    NULL};
+static ps_operation_semantic_constraint_v7 input_constraint = {
+    sizeof(ps_operation_semantic_constraint_v7), 0, 0, 1, 0, NULL, 12};
 static const ps_operation_port_constraint_v7 ports[] = {
     {sizeof(ps_operation_port_constraint_v7), PS_OPERATION_PORT_VALUE_V7, 0, 0,
      &input_constraint}};
@@ -127,6 +127,10 @@ const ps_operation_plugin_api_v7* ps_operation_plugin_get_api_v7(void) {
   operations[0].output_shape = wide_shape;
   operations[0].shape_rule = PS_OPERATION_SHAPE_FIXED_V7;
   operations[0].output_element_type = PS_OPERATION_ELEMENT_UINT8_V7;
+#elif PS_BAD_CONTRACT_CASE == 8
+  input_constraint.element_type_mask = 16;
+#elif PS_BAD_CONTRACT_CASE == 9
+  input_constraint.element_type = PS_OPERATION_ELEMENT_FLOAT64_V7;
 #endif
   return &api;
 }

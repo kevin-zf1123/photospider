@@ -72,6 +72,7 @@ find_package(Threads REQUIRED)
 set(
   PHOTOSPIDER_KERNEL_SOURCES
   plugins/ops/image_operations.cpp
+  plugins/ops/numeric_operations.cpp
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
@@ -95,11 +96,13 @@ endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   set_source_files_properties(plugins/ops/image_operations.cpp
+    plugins/ops/numeric_operations.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 elseif(MSVC)
   set_source_files_properties(plugins/ops/image_operations.cpp
+    plugins/ops/numeric_operations.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -403,7 +406,7 @@ if(BUILD_TESTING)
   set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
   target_compile_definitions(test_semantic_contract PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
   add_dependencies(test_semantic_contract operation_contract_fixture)
-  foreach(_case RANGE 1 7)
+  foreach(_case RANGE 1 9)
     add_library(operation_bad_contract_${_case} MODULE tests/fixtures/operation_contract_fixture.c)
     target_link_libraries(operation_bad_contract_${_case} PRIVATE Photospider::operation_sdk)
     set_target_properties(operation_bad_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -448,6 +451,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
+  photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
   target_include_directories(test_computed_scalar PRIVATE examples)
   add_dependencies(test_computed_scalar photospider_rgba32f_ops)

@@ -45,6 +45,13 @@ Float narrowing rejects finite overflow; floating cast preserves supported
 non-finite values. Float-to-Int64 checks the rounded value before conversion,
 without representing INT64_MAX as a rounded binary64 upper bound. Int64
 identity/conversion must not unnecessarily pass through double.
+Range evaluation uses Float64 affine arithmetic with a nearby endpoint anchor,
+error-free high/low differences, compensated products/sums, explicit fused
+multiply-add and nearest-even rounding. Unrepresentable affine coefficients or
+unresolved quotient/accumulation error exceeding one output Float64 ULP fail
+explicitly; finite source values whose evaluated result overflows the target
+dtype obey reject/clip, including final floating overflow. Clip never admits
+an originally non-finite source. Dither is fixed off in this delivery.
 
 No implicit clamp, cast, broadcast, gamma operation or hidden epsilon is added.
 Arithmetic accepts finite Float32/Float64 inputs of equal dtype and shape;
@@ -150,6 +157,14 @@ eligibility must accept representative signed inputs and outputs: a blanket
 explicit numerical fallback and real-dispatch validation required by ADR 0019.
 
 ## G3: static descriptor inference
+
+A port can declare an exact `element_type` or `element_type_mask`. The mask's
+low four bits correspond to UInt8, Int64, Float64 and Float32 (element code minus
+one); zero adds no restriction. Nonzero exact type and mask are mutually exclusive,
+and unknown bits reject registration. The same sized C constraint field is copied,
+validated and included in compiler/result identities. The unreleased ABI/Traits 7
+target includes this field; numeric floating ports use mask 12 and binary operators
+use a fixed two-member homogeneous group to enforce dtype/shape equality.
 
 Output dtype and output shape are independent. Add an output dtype rule selecting
 the declared dtype, an input dtype, or a validated static dtype parameter.

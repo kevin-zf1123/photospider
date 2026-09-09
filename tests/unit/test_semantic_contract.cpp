@@ -218,6 +218,48 @@ int inference() {
                .code == ErrorCode::TypeMismatch);
   return 0;
 }
+int dtype_masks() {
+  OperationDefinition definition;
+  definition.key = "test.floating";
+  definition.traits.input_count = 1;
+  definition.traits.input_schema.resize(1);
+  definition.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  definition.traits.output_dtype_rule = OperationDtypeRule::Input;
+  definition.callback = [](const OperationInvocation& call) {
+    return Result<Value>(call.inputs[0]);
+  };
+  OperationRegistry malformed;
+  definition.traits.input_schema[0].element_type_mask = 16;
+  PS_CHECK(!malformed.register_operation(definition).ok());
+  definition.traits.input_schema[0].element_type_mask = 12;
+  definition.traits.input_schema[0].element_type = 3;
+  PS_CHECK(!malformed.register_operation(definition).ok() &&
+           malformed.keys().empty());
+  definition.traits.input_schema[0].element_type = 0;
+  std::vector<std::string> digests;
+  for (const auto mask : {4U, 12U}) {
+    definition.traits.input_schema[0].element_type_mask = mask;
+    auto registry = std::make_shared<OperationRegistry>();
+    PS_CHECK(registry->register_operation(definition).ok());
+    PS_CHECK(registry->freeze().ok());
+    WorkflowDocument doc;
+    doc.inputs = {{1,
+                   "a",
+                   {ElementType::Float64, {1}},
+                   Region::whole({1}),
+                   {0, {8}},
+                   {}}};
+    doc.nodes = {{1, definition.key, {WorkflowInputReference{1}}, {}}};
+    doc.outputs = {{"result", 1, "value"}};
+    GraphContext graph(doc);
+    Compiler compiler(registry);
+    auto plan = compiler.compile(graph);
+    PS_CHECK(plan.ok());
+    digests.push_back(plan.value().semantic.digest().value);
+  }
+  PS_CHECK(digests[0] != digests[1]);
+  return 0;
+}
 int builtin_identity() {
   auto registry = make_default_operation_registry();
   Compiler compiler(registry);
@@ -304,10 +346,36 @@ int c_contract() {
               sizeof(values));
   PS_CHECK(values[0] == 2 && values[1] == -3);
   PS_CHECK(decode_semantic(run.value().values.at("output").facets()[0]).ok());
+  for (auto& input : doc.inputs) {
+    input.descriptor.element_type = ElementType::Float32;
+    input.layout.byte_strides = {4};
+  }
+  GraphContext fp32_graph(doc);
+  auto fp32_plan = compiler.compile(fp32_graph);
+  PS_CHECK(fp32_plan.ok());
+  const float half = .5F;
+  std::vector<std::uint8_t> raw(4);
+  std::memcpy(raw.data(), &half, 4);
+  auto scalar = Value::create({ElementType::Float32, {1}}, Region::whole({1}),
+                              {0, {4}}, raw)
+                    .take_value();
+  auto fp32_run = execution.execute(fp32_plan.value().plan,
+                                    {{{"a", scalar}, {"b", scalar}}});
+  PS_CHECK(fp32_run.ok());
+  std::memcpy(values, fp32_run.value().values.at("output").bytes().data(),
+              sizeof(values));
+  PS_CHECK(values[0] == .5F && values[1] == .5F);
+  doc.inputs[0].descriptor.element_type = ElementType::Int64;
+  doc.inputs[0].layout.byte_strides = {8};
+  GraphContext integer_graph(doc);
+  PS_CHECK(compiler.compile(integer_graph).status().code ==
+           ErrorCode::TypeMismatch);
+
 #ifdef PS_BAD_CONTRACT_1
   for (const auto* path :
        {PS_BAD_CONTRACT_1, PS_BAD_CONTRACT_2, PS_BAD_CONTRACT_3,
-        PS_BAD_CONTRACT_4, PS_BAD_CONTRACT_5, PS_BAD_CONTRACT_6}) {
+        PS_BAD_CONTRACT_4, PS_BAD_CONTRACT_5, PS_BAD_CONTRACT_6,
+        PS_BAD_CONTRACT_8, PS_BAD_CONTRACT_9}) {
     OperationRegistry malformed;
     PS_CHECK(!malformed.load_plugin(path).ok());
     PS_CHECK(malformed.keys().empty());
@@ -337,5 +405,6 @@ int main() {
   PS_CHECK(inference() == 0);
   PS_CHECK(c_contract() == 0);
   PS_CHECK(builtin_identity() == 0);
+  PS_CHECK(dtype_masks() == 0);
   return 0;
 }

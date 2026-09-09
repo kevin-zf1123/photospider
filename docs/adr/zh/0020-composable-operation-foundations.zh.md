@@ -34,6 +34,9 @@ Generic Value 保留既有合法浮点位模式；finite/range 由语义描述�
 NaN/infinity。浮点收窄拒绝有限值溢出，浮点 cast 保留所支持的非有限值。
 Float→Int64 在转换前检查舍入后的值，不能把 INT64_MAX 转成已向上舍入的 binary64
 作为上界；Int64 恒等/转换不进行不必要的 double 中转。
+Range 采用 Float64 仿射运算（就近端点锚定、无误差高低位差及补偿乘加）、显式 fused multiply-add 和 nearest-even 舍入。
+无法表示的仿射系数或超过输出 Float64 一个 ULP 的未解决商/累加误差显式失败；有限源值的求值结果超出目标 dtype 时遵循 reject/clip，
+包含最终浮点溢出。Clip 不接受原本非有限的源值。本次 dither 固定关闭。
 
 不增加隐式 clamp、cast、broadcast、gamma 操作或 epsilon。基础算术输入为同 dtype、
 同 shape 的 finite Float32/Float64；除零和非有限计算结果失败。归约按逻辑 row-major
@@ -109,6 +112,12 @@ coverage mask；已知角色/单位必须匹配对应目标通道。Generic 输�
 `channel < 0` 回退。Subnormal/overflow 保留 ADR 0019 的显式数值回退和真实 dispatch 验收。
 
 ## G3：静态描述推断
+
+端口可声明精确 `element_type` 或 `element_type_mask`。Mask 低四位按 element code-1
+对应 UInt8、Int64、Float64、Float32，零表示无额外限制。非零精确类型与 mask 互斥，
+未知位在注册时拒绝。相同的 sized C constraint 字段经过复制、验证并进入 compiler/result
+identity。尚未发布的 ABI/Traits 7 目标包含该字段；浮点数值端口使用 mask 12，二元算子
+使用固定两个成员的同构组强制 dtype/shape 相等。
 
 Output dtype 与 shape 独立。新增 dtype rule，选择声明 dtype、输入 dtype 或已验证的
 静态 dtype 参数。Preserve/match shape rule 独立于 dtype 比较 shape。显式输出各轴
