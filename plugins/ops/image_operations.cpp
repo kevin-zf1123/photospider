@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -189,6 +190,85 @@ Result<Value> combine(const OperationInvocation& invocation, bool mask) {
   }
   return std::move(output).publish({input_internal::image_facet()});
 }
+/** @brief Averages clipped integer boxes in fixed row/column sample order. */
+Result<Value> downsample(const OperationInvocation& invocation) {
+  const auto& input = invocation.inputs[0];
+  const auto factor = static_cast<std::uint64_t>(
+      std::get<std::int64_t>(invocation.parameters.at("factor")));
+  auto descriptor = input.descriptor();
+  for (std::size_t a = 0; a < 2; ++a)
+    descriptor.shape[a] =
+        descriptor.shape[a] / factor + (descriptor.shape[a] % factor != 0);
+  auto made = MutableValue::allocate(descriptor, invocation.output_region,
+                                     invocation.allocator);
+  if (!made.ok())
+    return Result<Value>(made.status());
+  auto output = made.take_value();
+  const auto yd = invocation.output_region.dimensions()[0],
+             xd = invocation.output_region.dimensions()[1];
+  const std::uint64_t channels = descriptor.shape.size() == 3 ? 4 : 1;
+  std::size_t target = 0;
+  for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y) {
+    if (invocation.cancellation.cancelled())
+      return Result<Value>(
+          Status::failure(ErrorCode::Cancelled, "downsample cancelled"));
+    for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x) {
+      const auto y0 = y * factor, x0 = x * factor;
+      const auto h = std::min(factor, input.descriptor().shape[0] - y0),
+                 w = std::min(factor, input.descriptor().shape[1] - x0);
+      for (std::uint64_t c = 0; c < channels; ++c) {
+        double sum = 0;
+        for (std::uint64_t row = y0; row < y0 + h; ++row)
+          for (std::uint64_t col = x0; col < x0 + w; ++col)
+            sum += sample(input, row, col, c);
+        const float number =
+            static_cast<float>(sum / static_cast<double>(h * w));
+        std::memcpy(output.data() + target, &number, 4);
+        target += 4;
+      }
+    }
+  }
+  return std::move(output).publish(input.facets());
+}
+/** @brief Applies one hard circular stamp; dynamic scalar inputs are immutable.
+ */
+Result<Value> brush_circle(const OperationInvocation& invocation) {
+  const auto& input = invocation.inputs[0];
+  float args[7];
+  for (std::size_t i = 0; i < 7; ++i)
+    std::memcpy(&args[i], invocation.inputs[i + 1].bytes().data(), 4);
+  const double cx = args[0], cy = args[1], radius = args[2];
+  const float alpha = args[6], remaining = 1.0F - alpha;
+  auto made = MutableValue::allocate(
+      input.descriptor(), invocation.output_region, invocation.allocator);
+  if (!made.ok())
+    return Result<Value>(made.status());
+  auto output = made.take_value();
+  const auto yd = invocation.output_region.dimensions()[0],
+             xd = invocation.output_region.dimensions()[1];
+  std::size_t target = 0;
+  for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y) {
+    if (invocation.cancellation.cancelled())
+      return Result<Value>(
+          Status::failure(ErrorCode::Cancelled, "brush cancelled"));
+    for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x) {
+      const double dx = static_cast<double>(x) + .5 - cx,
+                   dy = static_cast<double>(y) + .5 - cy;
+      const bool inside = dx * dx + dy * dy <= radius * radius;
+      for (std::uint64_t c = 0; c < 4; ++c) {
+        float number = sample(input, y, x, c);
+        if (inside) {
+          const float source = c == 3 ? alpha : args[3 + c] * alpha;
+          const float back = number * remaining;
+          number = source + back;
+        }
+        std::memcpy(output.data() + target, &number, 4);
+        target += 4;
+      }
+    }
+  }
+  return std::move(output).publish(input.facets());
+}
 }  // namespace
 
 Status register_image_operations(OperationRegistry* registry) {
@@ -246,6 +326,48 @@ Status register_image_operations(OperationRegistry* registry) {
     if (!status.ok())
       return status;
   }
+  for (bool mask : {false, true}) {
+    OperationDefinition operation;
+    operation.key = mask ? "mask.downsample_box" : "image.downsample_box";
+    auto& traits = operation.traits;
+    traits.input_count = 1;
+    traits.output_element_type = ElementType::Float32;
+    traits.shape_rule = OperationShapeRule::Shrink;
+    traits.region_rule = OperationRegionRule::Shrink;
+    traits.spatial_factor_parameter = "factor";
+    traits.parameter_schema = {
+        {"factor", OperationParameterType::Int64, true, true, 1, 16}};
+    traits.output_schema.kind =
+        mask ? OperationPortKind::Float32Mask
+             : OperationPortKind::LinearPremultipliedRgbaFloat32;
+    traits.input_schema = {traits.output_schema};
+    operation.callback = downsample;
+    auto status = registry->register_operation(std::move(operation));
+    if (!status.ok())
+      return status;
+  }
+  OperationDefinition brush;
+  brush.key = "image.brush_circle";
+  brush.callback = brush_circle;
+  auto& traits = brush.traits;
+  traits.input_count = 8;
+  traits.output_element_type = ElementType::Float32;
+  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.region_rule = OperationRegionRule::Elementwise;
+  traits.output_schema.kind = OperationPortKind::LinearPremultipliedRgbaFloat32;
+  const float maximum = std::numeric_limits<float>::max();
+  traits.input_schema = {traits.output_schema,
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
+                         {OperationPortKind::Float32Scalar,
+                          std::numeric_limits<float>::min(), maximum},
+                         {OperationPortKind::Float32Scalar, 0, maximum},
+                         {OperationPortKind::Float32Scalar, 0, maximum},
+                         {OperationPortKind::Float32Scalar, 0, maximum},
+                         {OperationPortKind::Float32Scalar, 0, 1}};
+  auto status = registry->register_operation(std::move(brush));
+  if (!status.ok())
+    return status;
   return Status::success();
 }
 }  // namespace ps::plugin_internal

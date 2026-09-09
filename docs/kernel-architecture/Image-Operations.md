@@ -160,3 +160,35 @@ The example directory is also an independent `find_package(Photospider 0.4)`
 consumer. `test_installed_consumer` builds and runs it against isolated static
 and shared installations, both with built-ins and with the separately built C
 module. Pass the trusted module's exact path as the sole optional argument.
+
+## S3 box shrink and circle stamp
+
+Package 0.5 / operation ABI 5 exposes the following built-ins and the same C
+module operations. These use existing Float32 linear-sRGB premultiplied RGBA
+and finite [0,1] Float32 HW masks. All parameters listed as scalar inputs are
+ordinary Float32 `{1}` bindings, not compile-time node parameters.
+
+| Name | Inputs | Static parameters | Output and Region |
+| --- | --- | --- | --- |
+| `image.downsample_box` | RGBA image | Required Int64 `factor` in [1,16], no implicit default | RGBA `{ceil(H/f),ceil(W/f),4}`; clipped integer-box demand |
+| `mask.downsample_box` | HW mask | Same `factor` | Mask `{ceil(H/f),ceil(W/f)}`; clipped integer-box demand |
+| `image.brush_circle` | image, x, y, radius, red, green, blue, alpha, in this order | None | Same image shape; Elementwise demand |
+
+Box operations sum each cell in binary64 row/column order and round the actual
+covered-sample average to binary32. Edges divide by their actual sample count.
+Factor one preserves numeric values. No gamma conversion or unpremultiplication
+occurs. The application preview defaults to factor four.
+
+Brush x/y accept all finite Float32; radius accepts positive normal Float32
+through FLT_MAX; linear unassociated RGB accepts [0,FLT_MAX], alpha [0,1]. Every
+input is required. The closed circle tests pixel centers using binary64 squared
+distance. Inside, source RGB is multiplied by alpha in binary32 and composited
+with the premultiplied background using source-over without contraction;
+outside, all sample bits are retained. One event is one hard-edge circle, with
+no antialiasing, interpolation, pressure or device input. The application plans
+the clipped bounding ROI and applies its result as a snapshot patch.
+
+`test_s3_operations [trusted-module]` runs public compile/execute examples with
+independent box-distribution and circle oracles, including odd sizes, edge ROIs,
+factors 1/2/4/16 and invalid scalar inputs. The reusable interactive example is
+tracked by #275/#277.

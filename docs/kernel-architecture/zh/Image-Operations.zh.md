@@ -132,3 +132,23 @@ ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin
 示例目录也可作为独立 find_package(Photospider 0.4) 消费者。test_installed_consumer
 针对隔离 static/shared 安装构建并运行它，分别使用内置算子和单独构建的 C module。
 唯一可选参数为可信 module 的精确路径。
+
+## S3 box 缩小与圆章
+
+package 0.5 / operation ABI 5 的内建与 C 模块提供 image.downsample_box、
+mask.downsample_box、image.brush_circle。前两者分别接收既有 RGBA 图像和 HW 蒙版，
+必需静态 Int64 factor 为 [1,16]，无隐式默认。输出 H/W 除以 factor 向上取整，
+反向需求为裁剪后的整数 box。按行/列 binary64 累加，以实际覆盖样本数平均并舍入
+binary32。因子 1 保留数值。不转换 gamma 或解除预乘。应用代理默认 factor 4。
+
+image.brush_circle 输入依次为 image、x、y、radius、red、green、blue、alpha；后七项
+均为必需运行期 Float32 {1} 绑定，无静态参数。输出保持图像形状，使用 Elementwise。
+x/y 为任意有限 Float32，radius 为正 normal Float32 至 FLT_MAX；非预乘线性 RGB 为
+[0,FLT_MAX]，alpha 为 [0,1]。使用 binary64 平方距离判断闭圆内像素中心；圆内 RGB
+先以 binary32 乘 alpha，再无融合地对预乘背景执行 source-over；圆外保留原位。
+一事件一硬边圆章，不抗锯齿、不补点、不处理压力或设备。应用规划裁剪包围 ROI
+并将结果作为快照 patch。
+
+test_s3_operations [trusted-module] 通过公开 compile/execute 使用独立 box 分配
+和圆公式验证，覆盖奇数尺寸、边缘 ROI、因子 1/2/4/16 与无效标量。可复用交互
+示例由 #275/#277 跟踪。
