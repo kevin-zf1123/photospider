@@ -41,7 +41,7 @@ struct DiskCacheStatistics final {
 struct PHOTOSPIDER_API ExecutionContextConfig final {
   /** @brief Fixed CPU worker count; zero resolves to bounded hardware count. */
   std::uint32_t cpu_workers = 0;
-  /** @brief Whether one optional local GPU lane is present. */
+  /** @brief Whether to attempt creating a native Apple Silicon Metal device. */
   bool gpu_enabled = false;
   /**
    * @brief Single aggregate waiting-callback limit across CPU/GPU lanes.
@@ -168,6 +168,20 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint64_t transfer_count = 0;
   /** @brief Sum of copied input bytes for explicit transfers. */
   std::uint64_t transfer_bytes = 0;
+  /** @brief Actual native dispatches/submissions, including unpublished
+   * attempts. */
+  std::uint64_t native_dispatch_count = 0;
+  std::uint64_t native_submission_count = 0;
+  /** @brief Device command time; zero when unavailable, never host callback
+   * time. */
+  std::uint64_t native_compute_us = 0;
+  /** @brief Bytes encoded as shader constants, separate from image copies. */
+  std::uint64_t native_constant_bytes = 0;
+  /** @brief Shared GPU storage consumed on the host, without fabricated copies.
+   */
+  std::uint64_t host_access_count = 0;
+  /** @brief Actual bytes copied when assembling collected output tiles. */
+  std::uint64_t result_copy_bytes = 0;
   /** @brief Peak actual controlled buffer bytes allocated by this Run. */
   std::uint64_t peak_live_bytes = 0;
   /** @brief Maximum allocation peak of shared producers used by this call.

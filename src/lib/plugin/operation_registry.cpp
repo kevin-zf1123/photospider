@@ -1774,6 +1774,11 @@ Value allocated_scalar(const OperationInvocation& invocation, double number) {
  */
 std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   auto registry = std::make_shared<OperationRegistry>();
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+  constexpr bool simulated_gpu = true;
+#else
+  constexpr bool simulated_gpu = false;
+#endif
 
   Status status = registry->register_operation(OperationDefinition{
       "core.constant",
@@ -1781,8 +1786,8 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       true,
-                      true,
-                      true,
+                      simulated_gpu,
+                      simulated_gpu,
                       sizeof(double),
                       6U,
                       true,
@@ -1812,8 +1817,8 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       true,
-                      true,
-                      true,
+                      simulated_gpu,
+                      simulated_gpu,
                       0U,
                       6U,
                       true,
@@ -1838,8 +1843,8 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       true,
                       true,
                       true,
-                      true,
-                      true,
+                      simulated_gpu,
+                      simulated_gpu,
                       sizeof(double),
                       6U,
                       true,

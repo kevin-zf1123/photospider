@@ -182,7 +182,7 @@ int main() {
   gpu_options.execution_mode = ps::ExecutionMode::MetalFp32;
   auto gpu_compiled = compiler.compile(first, gpu_options);
   PS_CHECK(gpu_compiled.ok());
-  PS_CHECK(gpu_compiled.value().plan.steps().front().backend == Backend::Gpu);
+  PS_CHECK(gpu_compiled.value().plan.steps().front().backend == Backend::Cpu);
   PS_CHECK(gpu_compiled.value().plan.digest().value !=
            compiled.value().plan.digest().value);
 

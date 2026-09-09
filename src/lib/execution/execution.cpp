@@ -27,6 +27,7 @@
 #include "data/input_validation.hpp"
 #include "execution/disk_cache.hpp"
 #include "execution/memory_budget.hpp"
+#include "execution/native_gpu.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/result_identity.hpp"
 
@@ -651,6 +652,34 @@ Status validate_input_demand(const Value& value, const Region& demand) {
 
 }  // namespace
 
+/** @brief Creates production native resources; scheduler fixtures use fake
+ * lanes. */
+std::shared_ptr<gpu_internal::Device> execution_device(bool enabled) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+  // The noninstalled scheduler test kernel controls callback completion without
+  // requiring hardware. Native tests and installed consumers use the product.
+  static_cast<void>(enabled);
+  return {};
+#else
+  return enabled ? gpu_internal::Device::create() : nullptr;
+#endif
+}
+/** @brief Keys a Run-local upload by retained allocation and complete view. */
+std::string upload_view_key(const Value& value) {
+  std::ostringstream key;
+  key << value.storage().get() << ':' << value.layout().byte_offset << ':'
+      << static_cast<unsigned>(value.descriptor().element_type);
+  for (auto n : value.descriptor().shape)
+    key << ':' << n;
+  for (auto n : value.layout().origin)
+    key << ':' << n;
+  for (auto n : value.layout().byte_strides)
+    key << ':' << n;
+  for (auto d : value.region().dimensions())
+    key << ':' << d.offset << ':' << d.extent;
+  return key.str();
+}
+
 /**
  * @brief Opaque fixed resource ownership for ExecutionContext.
  * @note Destruction order stops the optional GPU lane and required CPU pool
@@ -669,7 +698,12 @@ struct ExecutionContext::Impl final {
   Impl(std::shared_ptr<OperationRegistry> operations,
        ExecutionContextConfig requested)
       : cpu_worker_count(resolve_cpu_workers(requested.cpu_workers)),
+        native_device(execution_device(requested.gpu_enabled)),
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
         gpu_available(requested.gpu_enabled),
+#else
+        gpu_available(native_device && native_device->available()),
+#endif
         maximum_waiting_callbacks(requested.maximum_queued_tasks),
         operation_registry(std::move(operations)),
         budget(std::make_shared<MemoryBudget>(requested.maximum_live_bytes)),
@@ -702,6 +736,7 @@ struct ExecutionContext::Impl final {
 
   /** @brief Fixed resolved CPU worker count. */
   const std::uint32_t cpu_worker_count;
+  std::shared_ptr<gpu_internal::Device> native_device;
   /** @brief Fixed optional GPU-lane availability. */
   const bool gpu_available;
   /** @brief Context-wide maximum callbacks waiting across all lanes. */
@@ -955,7 +990,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       CancellationToken cancellation, std::uint32_t maximum_parallelism,
       bool regional = false, const std::map<std::uint64_t, Value>& cached = {},
       const std::map<std::uint64_t, Backend>& cached_backends = {},
-      std::function<void(std::size_t, const Value&, Backend)> retain = {})
+      std::function<void(std::size_t, const Value&, Backend)> retain = {},
+      std::shared_ptr<gpu_internal::Device> native_device = {})
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
@@ -967,6 +1003,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         maximum_parallelism_(maximum_parallelism),
         regional_(regional),
         retain_(std::move(retain)),
+        native_device_(std::move(native_device)),
         values_(plan->steps().size()),
         value_backends_(plan->steps().size(), Backend::Cpu),
         completed_(plan->steps().size(), false),
@@ -1125,6 +1162,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           values_[output.second].view(plan_->output_regions().at(output.first));
       if (!view.ok())
         return Result<ExecutionResult>(view.status());
+      if (native_device_ && value_backends_[output.second] == Backend::Gpu)
+        ++diagnostics_.host_access_count;
       result.values.emplace(output.first, view.take_value());
     }
     diagnostics_.peak_live_bytes = reservation_->peak();
@@ -1222,7 +1261,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    */
   void submit_attempt(std::size_t step_index, Backend backend) noexcept {
     try {
-      if (backend == Backend::Gpu && !gpu_pool_) {
+      if (backend == Backend::Gpu &&
+          (!gpu_pool_ || (native_device_ && !native_device_->available()))) {
         const PlanStep& step = plan_->steps()[step_index];
         const bool can_fallback =
             step.traits.allows_cpu_fallback && step.traits.supports_cpu &&
@@ -1379,9 +1419,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           } else {
             inputs.push_back(*value);
           }
-          const bool requires_transfer = source_backend != backend;
+          const bool requires_transfer =
+              native_device_ ? backend == Backend::Gpu &&
+                                   !native_device_->owns(*value->storage())
+                             : source_backend != backend;
+          if (native_device_ && backend == Backend::Cpu &&
+              source_backend == Backend::Gpu)
+            ++diagnostics_.host_access_count;
           transfer_inputs.push_back(requires_transfer);
-          if (requires_transfer) {
+          if (requires_transfer && !native_device_) {
             if (transfer_count == std::numeric_limits<std::uint64_t>::max()) {
               finish_failure_locked(
                   Status::failure(ErrorCode::ResourceExhausted,
@@ -1407,19 +1453,44 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
 
-      const auto allocator = reservation_->allocator();
-      const auto callback_allocator =
-          reservation_->allocator(step.planned_bytes);
+      auto allocator = reservation_->allocator();
+      auto callback_allocator = reservation_->allocator(step.planned_bytes);
+      if (native_device_ && backend == Backend::Gpu) {
+        allocator = native_device_->allocator(allocator);
+        callback_allocator = native_device_->allocator(callback_allocator);
+      }
       for (std::size_t input_index = 0U; input_index < inputs.size();
            ++input_index) {
         if (!transfer_inputs[input_index]) {
           continue;
+        }
+        const auto key = native_device_ ? upload_view_key(inputs[input_index])
+                                        : std::string{};
+        if (native_device_) {
+          const auto found = native_inputs_.find(key);
+          if (found != native_inputs_.end()) {
+            inputs[input_index] = found->second.second;
+            continue;
+          }
         }
         auto transferred =
             transfer_value(inputs[input_index], allocator, regional_);
         if (!transferred.ok()) {
           finish_failure(transferred.status());
           return;
+        }
+        if (native_device_) {
+          ++transfer_count;
+          auto total =
+              checked_add(transfer_bytes, transferred.value().bytes().size());
+          if (!total.ok()) {
+            finish_failure(total.status());
+            return;
+          }
+          transfer_bytes = total.value();
+          native_inputs_.emplace(key,
+                                 std::make_pair(inputs[input_index].storage(),
+                                                transferred.value()));
         }
         inputs[input_index] = transferred.take_value();
       }
@@ -1443,12 +1514,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       }
 
       const auto started = std::chrono::steady_clock::now();
-      Result<Value> invocation_result =
-          invoke_(step.operation,
-                  OperationInvocation{inputs, step.input_demands,
-                                      step.parameters, backend, cancellation_,
-                                      regional_ ? step.output_demand : Region{},
-                                      callback_allocator});
+      std::optional<gpu_internal::Invocation> native;
+      OperationInvocation call{inputs,
+                               step.input_demands,
+                               step.parameters,
+                               backend,
+                               cancellation_,
+                               regional_ ? step.output_demand : Region{},
+                               callback_allocator};
+      if (native_device_ && backend == Backend::Gpu) {
+        native.emplace(native_device_, cancellation_);
+        call.gpu = native->service();
+      }
+      Result<Value> invocation_result = invoke_(step.operation, call);
+      if (native && !native->status().ok())
+        invocation_result = Result<Value>(native->status());
+      if (native && invocation_result.ok() &&
+          native->statistics().dispatches == 0)
+        invocation_result = Result<Value>(
+            Status::failure(ErrorCode::BackendUnavailable,
+                            "GPU callback submitted no native work"));
       if (invocation_result.ok() &&
           !callback_allocator.owns(*invocation_result.value().storage())) {
         const auto storage = invocation_result.value().storage();
@@ -1466,6 +1551,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::lock_guard<std::mutex> lock(mutex_);
         diagnostics_.operation_timings.push_back(OperationTiming{
             step.node_id, backend, elapsed, invocation_result.status().code});
+        if (native) {
+          diagnostics_.native_dispatch_count += native->statistics().dispatches;
+          diagnostics_.native_submission_count +=
+              native->statistics().submissions;
+          diagnostics_.native_compute_us += native->statistics().device_us;
+          diagnostics_.native_constant_bytes +=
+              native->statistics().constant_bytes;
+        }
         auto elements = step.output_demand.element_count();
         if (elements.ok())
           diagnostics_.operation_timings.back().computed_elements =
@@ -1495,6 +1588,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
 
+      native.reset();
       // Drop callback-local input/transfer owners before retiring the attempt.
       inputs.clear();
       if (should_fallback) {
@@ -1739,6 +1833,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   std::uint32_t maximum_parallelism_;
   bool regional_;
   std::function<void(std::size_t, const Value&, Backend)> retain_;
+  std::shared_ptr<gpu_internal::Device> native_device_;
+  // GPU-lane-only map; retained sources prevent allocation address reuse.
+  std::map<std::string, std::pair<std::shared_ptr<const CpuStorage>, Value>>
+      native_inputs_;
   /** @brief Serializes every per-execution state transition. */
   std::mutex mutex_;
   /** @brief Wakes the scheduling loop after a state transition. */
@@ -1944,7 +2042,8 @@ Result<ExecutionResult> ExecutionContext::execute(
           auto dense = input_internal::dense_metadata(descriptor);
           if (!dense.ok())
             return Result<ExecutionResult>(dense.status());
-          sum = checked_add(working_bytes, dense.value().bytes);
+          sum = checked_add(working_bytes, gpu_internal::allocation_capacity(
+                                               dense.value().bytes));
           if (!sum.ok())
             return Result<ExecutionResult>(sum.status());
           working_bytes = sum.value();
@@ -1968,7 +2067,10 @@ Result<ExecutionResult> ExecutionContext::execute(
           return operations->invoke_current(key, invocation,
                                             [&plan] { return plan.current(); });
         },
-        &plan, prepared.take_value(), cancellation, parallelism);
+        &plan, prepared.take_value(), cancellation, parallelism, false,
+        std::map<std::uint64_t, Value>{}, std::map<std::uint64_t, Backend>{},
+        std::function<void(std::size_t, const Value&, Backend)>{},
+        impl_->native_device);
     return coordinator->run();
   } catch (const std::invalid_argument& error) {
     return Result<ExecutionResult>(
@@ -2052,6 +2154,12 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       diagnostics.shared_computations += part.shared_computations;
       diagnostics.source_read_count += part.source_read_count;
       diagnostics.source_read_bytes += part.source_read_bytes;
+      diagnostics.native_dispatch_count += part.native_dispatch_count;
+      diagnostics.native_submission_count += part.native_submission_count;
+      diagnostics.native_compute_us += part.native_compute_us;
+      diagnostics.native_constant_bytes += part.native_constant_bytes;
+      diagnostics.host_access_count += part.host_access_count;
+      diagnostics.result_copy_bytes += part.result_copy_bytes;
       auto status = add(&diagnostics.transfer_count, part.transfer_count);
       if (!status.ok())
         return status;
@@ -2203,7 +2311,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             auto bytes = region_bytes(descriptor, step.input_demands[port]);
             if (!bytes.ok())
               return Result<ExecutionResult>(bytes.status());
-            sum = checked_add(working, bytes.value());
+            sum = checked_add(working,
+                              gpu_internal::allocation_capacity(bytes.value()));
             if (!sum.ok())
               return Result<ExecutionResult>(sum.status());
             working = sum.value();
@@ -2351,7 +2460,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                 impl_->cache->epoch() == cache_epoch)
               impl_->disk->put(keys[index], value,
                                tile.steps()[index].traits.output_schema.kind);
-          });
+          },
+          impl_->native_device);
       auto result = coordinator->run();
       if (result.ok()) {
         auto completed = result.take_value();
@@ -2558,6 +2668,12 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                                   "output facets changed between tiles"));
             status = copy_region(ValueView(value), &collected.at(output.first),
                                  requested);
+            if (status.ok()) {
+              auto copied = region_bytes(value.descriptor(), value.region());
+              if (!copied.ok())
+                return failure(copied.status());
+              diagnostics.result_copy_bytes += copied.value();
+            }
           }
           if (!status.ok())
             return failure(status);
@@ -2644,7 +2760,8 @@ std::uint32_t ExecutionContext::cpu_workers() const noexcept {
  * @copydetails ExecutionContext::gpu_enabled
  */
 bool ExecutionContext::gpu_enabled() const noexcept {
-  return impl_ && impl_->gpu_available;
+  return impl_ && impl_->gpu_available &&
+         (!impl_->native_device || impl_->native_device->available());
 }
 
 }  // namespace ps
