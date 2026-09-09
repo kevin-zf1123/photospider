@@ -17,7 +17,8 @@ namespace ps::execution_internal {
  * caching for unproven input ancestry; no global graph/node ids are hashed.
  */
 inline std::vector<std::string> result_keys(
-    const ExecutionPlan& plan, const std::vector<ExecutionBinding>& bindings) {
+    const ExecutionPlan& plan, const std::vector<ExecutionBinding>& bindings,
+    const std::string& native_identity = {}) {
   std::vector<std::string> keys(plan.steps().size());
   std::map<std::pair<std::size_t, std::string>, std::string> memo;
   std::function<std::string(std::size_t, Region)> identify;
@@ -25,7 +26,8 @@ inline std::vector<std::string> result_keys(
     const auto& step = plan.steps()[i];
     const auto& t = step.traits;
     if (!t.cacheable || !t.deterministic || !t.side_effect_free ||
-        step.backend != Backend::Cpu || requested.empty())
+        (step.backend == Backend::Gpu && native_identity.empty()) ||
+        requested.empty())
       return {};
     if (step.whole_boundary)
       requested = Region::whole(step.output_descriptor.shape);
@@ -39,7 +41,11 @@ inline std::vector<std::string> result_keys(
     if (prior != memo.end())
       return prior->second;
     content_internal::Sha256 hash;
-    hash.text("photospider.result-region.v1");
+    hash.text("photospider.result-region.v2");
+    hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
+    hash.integer(static_cast<std::uint32_t>(step.backend));
+    if (step.backend == Backend::Gpu)
+      hash.text(native_identity);
     hash.text(step.operation);
     hash.integer(t.version);
     hash.integer(static_cast<std::uint32_t>(t.shape_rule));

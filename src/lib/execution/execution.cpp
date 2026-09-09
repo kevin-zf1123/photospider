@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "execution/disk_cache.hpp"
 #include "execution/memory_budget.hpp"
@@ -680,6 +681,52 @@ std::string upload_view_key(const Value& value) {
   return key.str();
 }
 
+/** @brief Content identity for an immutable packed upload, independent of
+ * owners. */
+Result<std::string> upload_content_key(const Value& value,
+                                       const std::string& device,
+                                       const CancellationToken& cancellation) {
+  content_internal::Sha256 hash;
+  hash.text("photospider.native-upload.v1");
+  hash.text(device);
+  hash.integer(static_cast<std::uint32_t>(value.descriptor().element_type));
+  hash.integer(value.descriptor().shape.size());
+  for (auto n : value.descriptor().shape)
+    hash.integer(n);
+  for (auto d : value.region().dimensions()) {
+    hash.integer(d.offset);
+    hash.integer(d.extent);
+  }
+  hash.integer(value.facets().size());
+  for (const auto& f : value.facets()) {
+    hash.text(f.key);
+    hash.integer(f.version);
+    hash.integer(f.payload.size());
+    hash.bytes(f.payload.data(), f.payload.size());
+  }
+  auto count = value.region().element_count();
+  if (!count.ok())
+    return Result<std::string>(count.status());
+  const auto width = Value::element_size(value.descriptor().element_type);
+  std::vector<std::uint64_t> coordinate(value.region().rank());
+  for (std::uint64_t i = 0; i < count.value(); ++i) {
+    if ((i & 1023) == 0 && cancellation.cancelled())
+      return Result<std::string>(Status::failure(
+          ErrorCode::Cancelled, "native upload identity cancelled"));
+    auto index = i;
+    for (std::size_t axis = coordinate.size(); axis > 0; --axis) {
+      const auto d = value.region().dimensions()[axis - 1];
+      coordinate[axis - 1] = d.offset + index % d.extent;
+      index /= d.extent;
+    }
+    auto address = value.byte_address(coordinate);
+    if (!address.ok())
+      return Result<std::string>(address.status());
+    hash.bytes(value.bytes().data() + address.value(), width);
+  }
+  return Result<std::string>(hash.finish());
+}
+
 /**
  * @brief Opaque fixed resource ownership for ExecutionContext.
  * @note Destruction order stops the optional GPU lane and required CPU pool
@@ -991,7 +1038,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       bool regional = false, const std::map<std::uint64_t, Value>& cached = {},
       const std::map<std::uint64_t, Backend>& cached_backends = {},
       std::function<void(std::size_t, const Value&, Backend)> retain = {},
-      std::shared_ptr<gpu_internal::Device> native_device = {})
+      std::shared_ptr<gpu_internal::Device> native_device = {},
+      execution_internal::ResultCache* native_cache = nullptr,
+      std::uint64_t cache_epoch = 0)
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
@@ -1004,6 +1053,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         regional_(regional),
         retain_(std::move(retain)),
         native_device_(std::move(native_device)),
+        native_cache_(native_cache),
+        cache_epoch_(cache_epoch),
+        fallback_taint_(plan->steps().size(), false),
         values_(plan->steps().size()),
         value_backends_(plan->steps().size(), Backend::Cpu),
         completed_(plan->steps().size(), false),
@@ -1041,6 +1093,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           const auto backend = cached_backends.find(plan_->steps()[i].node_id);
           if (backend != cached_backends.end())
             value_backends_[i] = backend->second;
+          fallback_taint_[i] = value_backends_[i] != plan_->steps()[i].backend;
         }
       }
     }
@@ -1377,6 +1430,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       transfer_inputs.reserve(step.inputs.size());
       std::uint64_t transfer_count = 0U;
       std::uint64_t transfer_bytes = 0U;
+      std::uint64_t upload_hits = 0;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         observe_external_stop_locked();
@@ -1473,6 +1527,22 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             continue;
           }
         }
+        std::string retained_key;
+        if (native_device_ && native_cache_) {
+          auto identity = upload_content_key(
+              inputs[input_index], native_device_->identity(), cancellation_);
+          if (!identity.ok()) {
+            finish_failure(identity.status());
+            return;
+          }
+          retained_key = identity.take_value();
+          auto retained = native_cache_->get(retained_key);
+          if (retained.valid() && native_device_->owns(*retained.storage())) {
+            inputs[input_index] = std::move(retained);
+            ++upload_hits;
+            continue;
+          }
+        }
         auto transferred =
             transfer_value(inputs[input_index], allocator, regional_);
         if (!transferred.ok()) {
@@ -1492,6 +1562,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                  std::make_pair(inputs[input_index].storage(),
                                                 transferred.value()));
         }
+        if (native_cache_ && native_device_ && !cancellation_.cancelled() &&
+            plan_->current())
+          native_cache_->put(retained_key, transferred.value(), cache_epoch_,
+                             true);
         inputs[input_index] = transferred.take_value();
       }
 
@@ -1573,6 +1647,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                                 : byte_sum.status());
           return;
         }
+        diagnostics_.native_upload_hits += upload_hits;
         diagnostics_.transfer_count = count_sum.value();
         diagnostics_.transfer_bytes = byte_sum.value();
 
@@ -1653,7 +1728,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     }
 
     values_[step_index] = result.take_value();
-    if (retain_)
+    fallback_taint_[step_index] = plan_->steps()[step_index].backend != backend;
+    for (const auto& source : plan_->steps()[step_index].inputs)
+      if (const auto* producer = std::get_if<PlanStepInput>(&source))
+        fallback_taint_[step_index] = fallback_taint_[step_index] ||
+                                      fallback_taint_[producer->step_index];
+    if (retain_ && !fallback_taint_[step_index])
       retain_(step_index, values_[step_index], backend);
     for (const auto& input : plan_->steps()[step_index].inputs) {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
@@ -1834,6 +1914,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   bool regional_;
   std::function<void(std::size_t, const Value&, Backend)> retain_;
   std::shared_ptr<gpu_internal::Device> native_device_;
+  execution_internal::ResultCache* native_cache_;
+  std::uint64_t cache_epoch_;
+  std::vector<bool> fallback_taint_;
   // GPU-lane-only map; retained sources prevent allocation address reuse.
   std::map<std::string, std::pair<std::shared_ptr<const CpuStorage>, Value>>
       native_inputs_;
@@ -2070,8 +2153,13 @@ Result<ExecutionResult> ExecutionContext::execute(
         &plan, prepared.take_value(), cancellation, parallelism, false,
         std::map<std::uint64_t, Value>{}, std::map<std::uint64_t, Backend>{},
         std::function<void(std::size_t, const Value&, Backend)>{},
-        impl_->native_device);
-    return coordinator->run();
+        impl_->native_device, impl_->cache.get(),
+        impl_->cache ? impl_->cache->epoch() : 0);
+    auto result = coordinator->run();
+    if (impl_->cache && impl_->native_device &&
+        !impl_->native_device->available())
+      impl_->cache->clear();
+    return result;
   } catch (const std::invalid_argument& error) {
     return Result<ExecutionResult>(
         Status::failure(ErrorCode::InvalidArgument, error.what()));
@@ -2127,6 +2215,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     std::map<std::uint64_t, Backend> cached_backends;
     ExecutionDiagnostics diagnostics;
     diagnostics.plan_digest = plan.digest().value;
+    if (impl_->cache && impl_->native_device &&
+        !impl_->native_device->available())
+      impl_->cache->clear();
     std::set<const CpuStorage*> input_owners;
     for (const auto& binding : snapshot) {
       if (binding.value.valid() &&
@@ -2158,6 +2249,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       diagnostics.native_submission_count += part.native_submission_count;
       diagnostics.native_compute_us += part.native_compute_us;
       diagnostics.native_constant_bytes += part.native_constant_bytes;
+      diagnostics.native_upload_hits += part.native_upload_hits;
       diagnostics.host_access_count += part.host_access_count;
       diagnostics.result_copy_bytes += part.result_copy_bytes;
       auto status = add(&diagnostics.transfer_count, part.transfer_count);
@@ -2454,15 +2546,23 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           tile_backends,
           [this, keys, cache_epoch, &tile](
               std::size_t index, const Value& value, Backend backend) {
-            if (impl_->cache && backend == Backend::Cpu && index < keys.size())
-              impl_->cache->put(keys[index], value, cache_epoch);
-            if (impl_->disk && index < keys.size() &&
-                impl_->cache->epoch() == cache_epoch)
+            if (impl_->cache && index < keys.size() &&
+                backend == tile.steps()[index].backend)
+              impl_->cache->put(
+                  keys[index], value, cache_epoch,
+                  impl_->native_device &&
+                      impl_->native_device->owns(*value.storage()));
+            if (impl_->disk &&
+                tile.execution_mode() == ExecutionMode::CpuExact &&
+                index < keys.size() && impl_->cache->epoch() == cache_epoch)
               impl_->disk->put(keys[index], value,
                                tile.steps()[index].traits.output_schema.kind);
           },
-          impl_->native_device);
+          impl_->native_device, impl_->cache.get(), cache_epoch);
       auto result = coordinator->run();
+      if (impl_->cache && impl_->native_device &&
+          !impl_->native_device->available())
+        impl_->cache->clear();
       if (result.ok()) {
         auto completed = result.take_value();
         completed.diagnostics.source_read_count +=
@@ -2482,7 +2582,11 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                                    ? producer_epoch
                                    : (impl_->cache ? impl_->cache->epoch() : 0);
       if (impl_->cache) {
-        keys = execution_internal::result_keys(tile, snapshot);
+        keys = execution_internal::result_keys(
+            tile, snapshot,
+            impl_->native_device && impl_->native_device->available()
+                ? impl_->native_device->identity()
+                : std::string{});
         std::vector<bool> needed(keys.size(), false);
         for (const auto& output : tile.outputs())
           needed[output.second] = true;
@@ -2491,7 +2595,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
             continue;
           auto hit = impl_->cache->get(keys[i]);
-          if (!hit.valid() && impl_->disk) {
+          if (!hit.valid() && impl_->disk &&
+              tile.execution_mode() == ExecutionMode::CpuExact) {
             const auto& step = tile.steps()[i];
             hit = impl_->disk->get(keys[i], step.output_descriptor,
                                    step.output_demand,
@@ -2501,7 +2606,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           }
           if (hit.valid()) {
             tile_cached[tile.steps()[i].node_id] = std::move(hit);
-            tile_backends[tile.steps()[i].node_id] = Backend::Cpu;
+            tile_backends[tile.steps()[i].node_id] = tile.steps()[i].backend;
             ++diagnostics.cache_hits;
           } else {
             for (const auto& input : tile.steps()[i].inputs)
@@ -2518,6 +2623,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         const auto& step = tile.steps()[i];
         if (!required[i] || tile_cached.count(step.node_id))
           continue;
+        for (const auto& source : step.inputs)
+          if (const auto* producer = std::get_if<PlanStepInput>(&source))
+            if (keys[producer->step_index].empty())
+              keys[i].clear();
         auto node = tile;
         const std::string name = "__shared_node";
         node.outputs_ = {{name, i}};
@@ -2559,6 +2668,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             backend == completed.diagnostics.selected_backends.end()
                 ? step.backend
                 : backend->second;
+        if (tile_backends[step.node_id] != step.backend)
+          keys[i].clear();
         // Keep only ancestors still read by an unfinished node or output.
         const auto remaining = required_steps(tile, tile_cached);
         for (std::size_t j = 0; j < tile.steps().size(); ++j)

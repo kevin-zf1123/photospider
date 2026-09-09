@@ -3,7 +3,7 @@
 `PlanCacheKey` remains a non-security physical-plan identity and excludes input
 payload. It does not validate stale plans or identify execution results.
 
-Package 0.5 additionally provides opt-in ExecutionContext result retention with
+Package 0.6 provides opt-in ExecutionContext result retention with
 `result_cache_bytes`, a sublimit of `maximum_live_bytes`. Copies share immutable
 allocation leases, eviction releases only cache references, and strict working
 admission reclaims optional entries first. `clear_result_cache()` invalidates
@@ -22,7 +22,7 @@ operation semantics/parameters and stable input content. Unrelated graph edits
 and node identifiers do not invalidate unchanged content. Whole dependencies
 remain conservative; scalar changes invalidate dependent output. Generic
 unproven input sources remain executable but disable cross-Run reuse for their
-descendants. Only deterministic, side-effect-free, cacheable CPU work qualifies.
+descendants. Only deterministic, side-effect-free, cacheable work with a proven implementation qualifies.
 
 Bounded shared coordinators merge identical in-flight regional computations;
 CPU work stays in the existing callback pool. Each waiting caller independently
@@ -64,3 +64,34 @@ entries and invalidates pending write epochs.
 `test_disk_cache` runs separate processes for initial write, reuse, header,
 length, checksum and version corruption, deletion/rebuild, failed writes and
 strict quota/queue-pressure cases. See [ADR 0018](../adr/0018-local-result-caches-and-frozen-execution.md).
+
+## S4 native retention
+
+MetalFp32 result keys additionally separate the numeric mode, planned backend,
+compiled implementation fingerprint and context device generation. A fallback
+result and its descendants never populate the expected native result keys.
+The current frozen registry fixes C-module implementation ownership for the
+context. CPU exact results cannot be replaced by approximately computed native
+results. Loss of the device disables native keys and clears retained entries.
+
+Completed native input copies share the same bounded LRU. Their keys hash the
+actual demanded logical sample bytes, descriptor, facets, Region and device;
+they do not rely on mutable addresses or caller revision claims. This can avoid
+another native upload even for immutable ordinary Value bindings. It does not
+make an arbitrary RegionalSource eligible for computed-result caching; such a
+source is read again before its actual bytes authorize input-copy reuse.
+
+`native_retained_bytes` counts unique native owners within `retained_bytes`.
+`native_upload_hits` reports avoided uploads. Copies, result retention and
+active readers all retain their original controlled allocation leases. Clear
+and eviction retire eligibility without invalidating borrowed active data.
+Native shared computations keep the independent/last-subscriber cancellation
+rules. Shared followers report shared work without counting the producer's
+native dispatches and transfers a second time.
+
+Disk read and write are restricted to CpuExact execution in this implementation,
+including when an explicitly Metal plan falls back to CPU. CPU disk behavior
+otherwise remains unchanged. Native implementations and generated shader inputs
+participate in maintained build identity; generated build headers are not source
+assets. `test_native_cache` and its C-module variant cover reuse, edits, numeric
+mode/fallback isolation, cancellation, clear races and bounded retained capacity.

@@ -152,6 +152,9 @@ struct PHOTOSPIDER_API OperationTiming final {
 struct ResultCacheStatistics final {
   std::uint64_t hits = 0, misses = 0, evictions = 0, shared_computations = 0;
   std::uint64_t retained_bytes = 0, entries = 0, in_flight = 0;
+  /** @brief Unique retained native allocation capacity, included in
+   * retained_bytes. */
+  std::uint64_t native_retained_bytes = 0;
 };
 
 /**
@@ -177,6 +180,8 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint64_t native_compute_us = 0;
   /** @brief Bytes encoded as shader constants, separate from image copies. */
   std::uint64_t native_constant_bytes = 0;
+  /** @brief Completed input-copy cache hits that avoid another upload. */
+  std::uint64_t native_upload_hits = 0;
   /** @brief Shared GPU storage consumed on the host, without fabricated copies.
    */
   std::uint64_t host_access_count = 0;

@@ -38,8 +38,10 @@ struct Stamp {
 class Scene final {
  public:
   static constexpr std::uint64_t height = 13, width = 17;
-  explicit Scene(std::shared_ptr<ps::OperationRegistry> registry)
-      : registry_(std::move(registry)),
+  explicit Scene(std::shared_ptr<ps::OperationRegistry> registry,
+                 ps::ExecutionMode mode = ps::ExecutionMode::CpuExact)
+      : mode_(mode),
+        registry_(std::move(registry)),
         compiler_(registry_),
         store_({1024 * 1024, 4}) {
     foreground = take(store_.import_value(make_image(false)));
@@ -55,6 +57,7 @@ class Scene final {
     full_graph_ = std::make_unique<ps::GraphContext>(document(1));
     proxy_graph_ = std::make_unique<ps::GraphContext>(document(4));
     ps::PlanningOptions options;
+    options.execution_mode = mode_;
     options.tile_height = options.tile_width = 4;
     full_ = take(compiler_.compile(*full_graph_, options)).plan;
     proxy_ = take(compiler_.compile(*proxy_graph_, options)).plan;
@@ -126,6 +129,7 @@ class Scene final {
                             {{"radius", INT64_C(3)}, {"sigma", 1.0}}});
     full_graph_->replace(std::move(edited));
     ps::PlanningOptions options;
+    options.execution_mode = mode_;
     options.tile_height = options.tile_width = 4;
     full_ = take(compiler_.compile(*full_graph_, options)).plan;
   }
@@ -287,6 +291,7 @@ class Scene final {
     d.outputs = {{"image", 1, "value"}};
     return d;
   }
+  ps::ExecutionMode mode_;
   std::shared_ptr<ps::OperationRegistry> registry_;
   ps::Compiler compiler_;
   ps::InputSnapshotStore store_;

@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
 #include "execution/native_gpu.hpp"
 
 namespace ps::gpu_internal {
@@ -25,6 +26,8 @@ std::string diagnostic(NSError* error, const char* fallback) {
 }
 }  // namespace
 struct Device::Impl final {
+  inline static std::atomic<std::uint64_t> next_generation{0};
+  const std::uint64_t generation = ++next_generation;
   id<MTLDevice> device;
   id<MTLCommandQueue> queue;
   std::shared_ptr<const void> domain = std::make_shared<int>(0);
@@ -54,7 +57,8 @@ bool Device::available() const noexcept {
   return impl_->valid.load();
 }
 std::string Device::identity() const {
-  return "metal-fp32-v1:" + std::to_string(impl_->device.registryID);
+  return "metal-fp32-v1:" + std::to_string(impl_->device.registryID) + ":" +
+         std::to_string(impl_->generation) + ":" + PHOTOSPIDER_CACHE_BUILD_ID;
 }
 bool Device::owns(const CpuStorage& storage) const noexcept {
   return available() && storage.native_domain_ == impl_->domain;
