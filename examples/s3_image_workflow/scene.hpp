@@ -117,6 +117,18 @@ class Scene final {
     auto result = take(execution.execute(tile, std::move(bound)));
     foreground = take(store_.patch(foreground, result.values.at("image")));
   }
+  /** @brief Demonstrates a graph edit whose branch does not feed the image. */
+  void edit_unrelated_branch() {
+    auto edited = document(1);
+    edited.nodes.push_back({99,
+                            "image.gaussian_blur",
+                            {ps::WorkflowInputReference{2}},
+                            {{"radius", INT64_C(3)}, {"sigma", 1.0}}});
+    full_graph_->replace(std::move(edited));
+    ps::PlanningOptions options;
+    options.tile_height = options.tile_width = 4;
+    full_ = take(compiler_.compile(*full_graph_, options)).plan;
+  }
   /** @brief Independent full-image 2D convolution/composition oracle. */
   std::vector<float> oracle(float gain) const {
     std::vector<float> front(height * width * 4), back(front.size()),

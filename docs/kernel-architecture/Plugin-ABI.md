@@ -2,7 +2,7 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v4: copied semantic traits, closed typed parameter schema,
+- operation ABI v5: copied semantic traits, closed typed parameter schema,
   ordered scalar/image port constraints, plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
@@ -93,7 +93,7 @@ type/rules, and the ordinary trait combinations without evaluating a dense
 element or byte product. The callback may return any Value layout that passes
 normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
-admission estimate. A C DSO Fixed descriptor is stricter because ABI v4 carries
+admission estimate. A C DSO Fixed descriptor is stricter because ABI v5 carries
 no output strides: loading separately requires representable contiguous
 signed strides and uint64 byte count. For total dense bytes `B`, the loader
 also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
@@ -170,7 +170,7 @@ certificate, package-admission, or process-isolation system.
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
 
-## Version-four port schemas
+## Version-five port schemas
 
 `input_schema_count` equals input_count <= 1024; its pointer is null exactly for
 zero count and otherwise naturally aligned. Each input and the inline output
@@ -178,12 +178,16 @@ constraint has exact struct_size, a closed port kind and numeric uint32
 binary32 minimum/maximum bits. Scalar intervals are finite/inclusive; other
 kinds require positive-zero bound bits. Host copies every constraint and rejects
 unknown kinds, bad counts/structure sizes/bounds or incompatible shape/Region
-combinations before atomic publication. Output kinds are Value or image;
-image output preserves the first image input. Scalar ports require direct
+combinations before atomic publication. Output kinds are Value, image or mask. Image/mask outputs preserve their first
+input or use the explicit integer box-shrink rule. Scalar ports require direct
 workflow inputs; no implicit scalar broadcasting or profile inference exists.
 
-Host checks ABI version 4 before looking up get_api_v4. No v3 aliases or
-adapters remain. Float32 has code 4 in both operation ABI4 and the unchanged
+Host checks ABI version 5 before looking up get_api_v5. No v4 aliases or
+adapters remain. Float32 has code 4 in both operation ABI5 and the unchanged
 provider ABI1 schema layout. Provider codes 1..3 retain meaning. Host image
 validation and callback scopes restore the embedding's floating environment;
 see [Image Operations](Image-Operations.md).
+
+## S3 scaled ports
+
+ABI 5 adds Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 4 fail before publication.

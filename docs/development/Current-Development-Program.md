@@ -1,8 +1,8 @@
 # Current Development Program
 
 - Snapshot date: 2026-09-09
-- Audited implementation baseline: `d85e7b8` (S2), following `main@70b760f`
-- Current milestone: S2 CPU regional execution and installed daemon consumption
+- Audited foundation: `main@54d57f3` (settled S2); S3 delivery tracked by #268
+- Current milestone: S3 cache, frozen execution and interactive image workflows
 
 ## Role and authority
 
@@ -42,45 +42,24 @@ It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
 
 ## Current milestone
 
-S1 is settled at `main@70b760f`. S2 implements the accepted
-[ADR 0017](../adr/0017-cpu-regional-execution-and-storage.md) in kernel 0.4.0,
-OperationTraits 4 and operation ABI 4. C++17, source schema 2 and provider ABI 1
-remain. The ordered local commits are:
+S2 is settled by [kernel PR #267](https://github.com/kevin-zf1123/photospider/pull/267)
+at `main@54d57f3`, with companion daemon PR #16. Its regional storage, bounded
+allocation and Gaussian/mask/composition fixture remain the S3 foundation.
 
-| Issue | Implementation | Commit |
-| --- | --- | --- |
-| [#263](https://github.com/kevin-zf1123/photospider/issues/263) | Accepted research and storage/execution contract | `f0c1ae0` |
-| [#264](https://github.com/kevin-zf1123/photospider/issues/264) | Regional Value storage, host buffers, ABI4 and installed consumers | `cd9bdcc` |
-| [#210](https://github.com/kevin-zf1123/photospider/issues/210) | Completion-owned allocation and bounded workspace | `b3cbc52` |
-| [#211](https://github.com/kevin-zf1123/photospider/issues/211) | Lazy tile plans and static halo specialization | `40dfd69` |
-| [#265](https://github.com/kevin-zf1123/photospider/issues/265) | Regional sources, collection and ordered streaming | `d9f4032` |
-| [#266](https://github.com/kevin-zf1123/photospider/issues/266) | Gaussian/exposure/mask/source-over public vertical | `3b08b41` |
-| [daemon #15](https://github.com/kevin-zf1123/photospider-daemon/issues/15) | Installed kernel 0.4 consumption with existing IPC subset | `53ec2ca` (daemon) |
+[S3 #268](https://github.com/kevin-zf1123/photospider/issues/268) implements the
+accepted [ADR 0018](../adr/0018-local-result-caches-and-frozen-execution.md):
+package 0.5 / operation ABI and traits 5, immutable tiled inputs, frozen exports,
+regional result sharing, box/brush operations, application-owned preview policy
+and disposable cross-restart disk regions. C++17, schema 2 and provider ABI 1
+remain. Ordered leaf Issues are #269 through #277; daemon #17 consumes the
+installed package and preserves its IPC subset.
 
-Independent comprehensive review corrections are in `d85e7b8`; fixed fuzz-seed
-migration is in `921ad5c`. Direct invocation shares checked demand derivation,
-Whole chains release completed ancestors, and C image address/clamp arithmetic
-has dedicated regression coverage. Computed-mask errors retain operation-failure
-classification. No outstanding blocker/required was found in the local recheck.
-
-`S2Image.RegionAndTiles` runs through public APIs in C++ and the maintained C
-module. Whole/tiled outputs are bitwise equal and match an independent 2D oracle.
-The 65536² source example processes a 5x7 ROI in nine tiles with 9900 source bytes,
-1808 actual peak bytes and a 3840-byte conservative reservation. Exact/one-byte-
-short budgets, malformed views, Whole chains, fan-out, concurrent snapshots,
-source/sink failures and cancellation/currentness have focused coverage.
-
-Local static/shared kernel validation covers all 15 registered tests across the
-integration pass and focused correction reruns, including isolated installed
-consumers. Daemon static/shared validation covers 15 tests each. The C module's
-focused UBSAN no-recover example also passes. Protected Linux/macOS static/shared,
-ASAN/TSAN, Codex bot review, merge and final settlement are recorded in the linked
-Issues and PRs; local validation alone is not the delivery gate.
-
-Project #9 mirrors these CPU leaves; daemon #15 mirrors Project #15. #152 stays
-open for native-device scope, with #209 machine-cost calibration and #153/#154
-outside this CPU milestone. No HEX or MED parent is closed by the S2 CPU subset.
-S3 cache/interaction and native GPU work remain separately scoped future work.
+The runnable [S3 workflow guide](../kernel-architecture/S3-Workflow.md) records
+public entrypoints and independent oracles. GitHub Issues own current local
+validation, independent review, required CI/bot fixes and protected merge status.
+This snapshot does not turn accepted contracts or local commits into a claim
+of remote settlement. Native GPU and incremental compiler #203 remain outside
+this milestone; broader HEX/MED parents are not closed by S3.
 
 ## Active backlog outside the milestone
 

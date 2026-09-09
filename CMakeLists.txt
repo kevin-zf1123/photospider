@@ -203,7 +203,8 @@ install(
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY include/photospider DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY include/photospider DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
 install(
   EXPORT PhotospiderTargets
   FILE PhotospiderTargets.cmake
@@ -229,8 +230,10 @@ add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
+  add_test(NAME test_s3_cache COMMAND photospider_s3_image_workflow --scenario cache)
+  add_test(NAME test_s3_cache_plugin COMMAND photospider_s3_image_workflow --scenario cache --module $<TARGET_FILE:photospider_rgba32f_ops>)
   add_test(NAME test_s3_preview COMMAND photospider_s3_image_workflow)
-  add_test(NAME test_s3_preview_plugin COMMAND photospider_s3_image_workflow $<TARGET_FILE:photospider_rgba32f_ops>)
+  add_test(NAME test_s3_preview_plugin COMMAND photospider_s3_image_workflow --module $<TARGET_FILE:photospider_rgba32f_ops>)
   add_test(NAME test_s2_vertical COMMAND photospider_regional_image_vertical)
   add_test(NAME test_s2_vertical_plugin COMMAND photospider_regional_image_vertical
     $<TARGET_FILE:photospider_rgba32f_ops>)

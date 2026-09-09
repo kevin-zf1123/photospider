@@ -73,6 +73,7 @@ int main() {
        {"gain", scalar(2)}}};
   auto first = execution.execute(plan, bindings);
   PS_CHECK(first.ok() && calls(first.value(), 1) == 9);
+  PS_CHECK(first.value().diagnostics.shared_peak_live_bytes > 0);
   bindings.inputs[1].value = scalar(3);
   auto second = execution.execute(plan, bindings);
   PS_CHECK(second.ok());

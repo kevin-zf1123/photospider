@@ -67,3 +67,13 @@ streaming 不提供 result_digest，由 sink 检查实际像素；收集 digest 
 test_tile_plan 验证需求合法性和 identity。test_regional_execution 对逻辑 64 GiB 图像
 仅执行 5x7 ROI，验证 9 个顺序 tile、精确资源边界、并发快照、背压、源/sink 失败、
 取消/stale、Whole/effect 单次执行和多输出。Gaussian/合成场景由 #266 验收。
+
+## S3 修订
+
+ADR 0018 已实现显式正向脏区映射、不可变快照和可选跨 Run 结果缓存。Shrink 规则
+使用向上取整空间输出和裁剪整数输入 box；operation_dirty_region 包括 Halo 扩张
+及 Whole/标量整图回退。快照保留旧版本；FrozenExecution 使用冻结有效性，普通
+execute 仍检查 stale。此前未实现缓存/脏区传播的描述由本节替换。参见缓存模型和
+S3 workflow 指南。
+
+共享生产者分配峰值单独报告在 shared_peak_live_bytes；peak_live_bytes 保留调用方局部分配含义。context 预算对共享所有者只计费一次。

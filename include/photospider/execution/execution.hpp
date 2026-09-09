@@ -170,6 +170,11 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint64_t transfer_bytes = 0;
   /** @brief Peak actual controlled buffer bytes allocated by this Run. */
   std::uint64_t peak_live_bytes = 0;
+  /** @brief Maximum allocation peak of shared producers used by this call.
+   * @note Separate from caller-owned collection; shared work is never charged
+   * twice in the context budget and cached earlier allocations are excluded.
+   */
+  std::uint64_t shared_peak_live_bytes = 0;
   /** @brief Conservative complete working-set reservation for this Run. */
   std::uint64_t planned_peak_bytes = 0;
   /** @brief Caller-preexisting immutable input capacity outside the budget. */
