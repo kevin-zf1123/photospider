@@ -164,10 +164,11 @@ SemanticNode/PlanStep 保留真实 output facets，C sink 向 callback 提供相
 typed 语义保证，无关 opaque generic facet 保持既有发布规则。完整约束及输出规则进入
 v7 compiler identity 和 v3 result-region key。
 
-#289 提供共享契约；八算子数值迁移及 signed Metal eligibility 由 #290 完成，snapshot/
-cache 表示扩展为 #291，computed bounded scalar 为 #292，算子专用转换随对应切片推进。
-此阶段 bounded scalar 仍要求直接 workflow binding，已有 RGBA 专用 callback 保留此前
-数值接受范围。新的 typed image signed/straight/coverage 验证已独立测试。
+共享契约与八个既有算子现已支持 image-v2 signed/HDR RGB、canonical
+coverage-premultiplied D65 语义，包含符合资格的原生 Metal 执行。八算子显式保留
+首输入的语义 facet。Snapshot/cache 表示扩展仍为 #291，computed bounded scalar
+仍为 #292，算子专用转换随对应切片推进。Bounded scalar 仍要求直接 workflow binding。
+通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
 
 ## ABI 7 区域视图与宿主分配
 

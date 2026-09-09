@@ -1,5 +1,6 @@
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -116,6 +117,73 @@ void check_native_alignment(const std::shared_ptr<ps::OperationRegistry>& base,
           result.value().diagnostics.fallback_reasons.size() == 1,
       "unaligned native successor did not fall back");
 }
+void check_domain_failures(
+    ps::ExecutionContext& execution,
+    const std::shared_ptr<ps::OperationRegistry>& operations,
+    ps::ExecutionMode mode) {
+  ps::Compiler compiler(operations);
+  for (unsigned kind = 0; kind < 8; ++kind) {
+    auto scene = s4_fixture::scene(kind);
+    ps::GraphContext graph(scene.document);
+    ps::PlanningOptions options;
+    options.execution_mode = mode;
+    auto compiled = compiler.compile(graph, options);
+    s4_fixture::require(compiled.ok(), compiled.status().message);
+    // All public entry paths must reject invalid samples before consumption.
+    // Values keep valid metadata so these are numeric, not descriptor errors.
+    for (unsigned failure = 0; failure < 5; ++failure) {
+      auto bindings = scene.bindings;
+      const auto& original = bindings.inputs[0].value;
+      auto bytes = original.copy_bytes();
+      float invalid = failure == 0   ? std::numeric_limits<float>::quiet_NaN()
+                      : failure == 1 ? std::numeric_limits<float>::infinity()
+                      : failure == 2 ? -1.F
+                                     : 1.25F;
+      const auto offset = kind == 6 || failure < 2 ? 0 : 12;
+      std::memcpy(bytes.data() + offset, &invalid, 4);
+      if (failure == 4 && kind != 6) {
+        const float zero = 0, hidden = -1;
+        std::memcpy(bytes.data(), &hidden, 4);
+        std::memcpy(bytes.data() + 12, &zero, 4);
+      }
+      auto value = ps::Value::create(original.descriptor(), original.region(),
+                                     original.layout(), std::move(bytes),
+                                     original.facets());
+      s4_fixture::require(value.ok(), value.status().message);
+      bindings.inputs[0].value = value.take_value();
+      auto rejected = execution.execute(compiled.value().plan, bindings);
+      s4_fixture::require(
+          rejected.status().code == ps::ErrorCode::InvalidArgument,
+          "invalid image/mask samples reached operation");
+    }
+    for (std::size_t input = 0; input < scene.document.inputs.size(); ++input) {
+      if (scene.document.inputs[input].descriptor.shape.size() == 1)
+        continue;
+      auto document = scene.document;
+      document.inputs[input].facets.clear();
+      ps::GraphContext missing(document);
+      s4_fixture::require(compiler.compile(missing, options).status().code ==
+                              ps::ErrorCode::TypeMismatch,
+                          "untyped spatial input accepted");
+      if (scene.document.inputs[input].descriptor.shape.size() != 3)
+        continue;
+      auto straight = ps::rgba_semantics();
+      straight.association = "straight";
+      document.inputs[input].facets = {
+          ps::encode_semantic(straight).take_value()};
+      ps::GraphContext wrong_association(document);
+      s4_fixture::require(
+          compiler.compile(wrong_association, options).status().code ==
+              ps::ErrorCode::TypeMismatch,
+          "straight image accepted by premultiplied operation");
+      document.inputs[input].facets = {{"photospider.image", 1, {}}};
+      ps::GraphContext old_image(document);
+      s4_fixture::require(compiler.compile(old_image, options).status().code ==
+                              ps::ErrorCode::InvalidArgument,
+                          "image-v1 metadata accepted");
+    }
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -130,6 +198,10 @@ int main(int argc, char** argv) {
     ps::ExecutionContextConfig config;
     config.gpu_enabled = true;
     ps::ExecutionContext execution(operations, config);
+    ps::ExecutionContext cpu(operations);
+    s4_fixture::all_operations(cpu, operations, ps::ExecutionMode::CpuExact);
+    check_domain_failures(cpu, operations, ps::ExecutionMode::CpuExact);
+    check_domain_failures(execution, operations, ps::ExecutionMode::MetalFp32);
     const auto dispatches = s4_fixture::all_operations(
         execution, operations, ps::ExecutionMode::MetalFp32);
     s4_fixture::numeric_edges(execution, operations);
@@ -140,7 +212,7 @@ int main(int argc, char** argv) {
     check_native_alignment(operations);
     check_native_alignment(operations, true);
     std::cout << "all_operations=8 dispatches=" << dispatches
-              << " oracle=passed\n";
+              << " signed_hdr=passed fallback=0 oracle=passed\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

@@ -44,7 +44,7 @@ static float sample(const ps_operation_value_view_v7* value, uint64_t y,
   return number;
 }
 
-/* The ABI4 host validates regional views and supplies nearest/gradual
+/* The ABI7 host validates regional views and supplies nearest/gradual
  * arithmetic. All pointers are callback-local; output and scratch are owned by
  * the host. */
 static int execute_image(void* state, const ps_operation_value_view_v7* inputs,
@@ -323,11 +323,11 @@ static const ps_operation_port_constraint_v7 ports_brush[] = {
     {sizeof(ps_operation_port_constraint_v7),
      PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0x00800000U, 0x7f7fffffU, NULL},
     {sizeof(ps_operation_port_constraint_v7),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0, 0x7f7fffffU, NULL},
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0xff7fffffU, 0x7f7fffffU, NULL},
     {sizeof(ps_operation_port_constraint_v7),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0, 0x7f7fffffU, NULL},
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0xff7fffffU, 0x7f7fffffU, NULL},
     {sizeof(ps_operation_port_constraint_v7),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0, 0x7f7fffffU, NULL},
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0xff7fffffU, 0x7f7fffffU, NULL},
     {sizeof(ps_operation_port_constraint_v7),
      PS_OPERATION_PORT_FLOAT32_SCALAR_V7, 0, 0x3f800000U, NULL}};
 static const ps_operation_parameter_descriptor_v7 shrink_parameters[] = {
@@ -335,6 +335,9 @@ static const ps_operation_parameter_descriptor_v7 shrink_parameters[] = {
      PS_OPERATION_PARAMETER_INT64_V7, 1, 1, 1, 16}};
 static int brush_state;
 static int opacity_state;
+static const ps_operation_contract_v7 preserve_semantics = {
+    .struct_size = sizeof(ps_operation_contract_v7),
+    .semantic_rule = PS_OPERATION_SEMANTIC_PRESERVE_V7};
 static const ps_operation_descriptor_v7 operations[] = {
     {sizeof(ps_operation_descriptor_v7),
      "image.exposure_gain",
@@ -365,7 +368,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      0,
      NULL,
      0,
-     NULL},
+     &preserve_semantics},
     {sizeof(ps_operation_descriptor_v7),
      "image.opacity",
      13,
@@ -395,7 +398,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      0,
      NULL,
      0,
-     NULL},
+     &preserve_semantics},
     {sizeof(ps_operation_descriptor_v7),
      "image.gaussian_blur",
      19,
@@ -425,7 +428,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      6,
      NULL,
      0,
-     NULL},
+     &preserve_semantics},
     {sizeof(ps_operation_descriptor_v7),
      "image.mask",
      10,
@@ -455,7 +458,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      0,
      NULL,
      0,
-     NULL},
+     &preserve_semantics},
     {sizeof(ps_operation_descriptor_v7),
      "image.source_over",
      17,
@@ -485,7 +488,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      0,
      NULL,
      0,
-     NULL},
+     &preserve_semantics},
     {.struct_size = sizeof(ps_operation_descriptor_v7),
      .key = "image.downsample_box",
      .key_size = 20,
@@ -506,7 +509,8 @@ static const ps_operation_descriptor_v7 operations[] = {
      .execute = execute_s3,
      .user_data = NULL,
      .spatial_factor_parameter = "factor",
-     .spatial_factor_parameter_size = 6},
+     .spatial_factor_parameter_size = 6,
+     .contract = &preserve_semantics},
     {.struct_size = sizeof(ps_operation_descriptor_v7),
      .key = "mask.downsample_box",
      .key_size = 19,
@@ -527,7 +531,8 @@ static const ps_operation_descriptor_v7 operations[] = {
      .execute = execute_s3,
      .user_data = NULL,
      .spatial_factor_parameter = "factor",
-     .spatial_factor_parameter_size = 6},
+     .spatial_factor_parameter_size = 6,
+     .contract = &preserve_semantics},
     {.struct_size = sizeof(ps_operation_descriptor_v7),
      .key = "image.brush_circle",
      .key_size = 18,
@@ -549,7 +554,8 @@ static const ps_operation_descriptor_v7 operations[] = {
      .user_data = &brush_state,
      .workspace_input_multiplier = 1,
      .spatial_factor_parameter = NULL,
-     .spatial_factor_parameter_size = 0}};
+     .spatial_factor_parameter_size = 0,
+     .contract = &preserve_semantics}};
 static void destroy(const ps_operation_descriptor_v7* records, uint32_t count) {
   (void)records;
   (void)count;

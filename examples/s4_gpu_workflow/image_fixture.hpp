@@ -26,28 +26,42 @@ inline void require(bool condition, const std::string& message) {
   if (!condition)
     throw std::runtime_error(message);
 }
-inline float foreground(std::uint64_t y, std::uint64_t x, std::uint64_t c) {
+inline float foreground(std::uint64_t y, std::uint64_t x, std::uint64_t c,
+                        bool signed_data = false) {
+  if (signed_data) {
+    const float alpha = (x + y) % 11 == 0  ? 0.F
+                        : (x + y) % 7 == 0 ? 1.F
+                        : (x + y) % 5 == 0 ? 1e-10F
+                                           : .5F;
+    return c == 3       ? alpha
+           : alpha == 0 ? 0.F
+           : c == 0     ? -2.F - static_cast<float>(x % 4) * .125F
+           : c == 1     ? 4.F + static_cast<float>(y % 3) * .25F
+                        : -.125F;
+  }
   return c == 0   ? static_cast<float>(x % 4) * .125F
          : c == 1 ? static_cast<float>(y % 3) * .25F
          : c == 2 ? .125F
                   : .5F;
 }
-inline float background(std::uint64_t c) {
+inline float background(std::uint64_t c, bool signed_data = false) {
+  if (signed_data && c < 3)
+    return c == 1 ? 2.F : -1.F;
   return c == 0 ? .25F : c == 1 ? .5F : c == 2 ? .125F : .5F;
 }
 inline float mask(std::uint64_t y, std::uint64_t x) {
   return static_cast<float>((x + y) % 9) * .125F;
 }
 inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
-                   std::uint64_t factor = 4) {
+                   std::uint64_t factor = 4, bool signed_data = false) {
   Scene s;
   std::vector<float> pixels, masks, back;
   for (std::uint64_t y = 0; y < 13; ++y)
     for (std::uint64_t x = 0; x < 17; ++x) {
       masks.push_back(mask(y, x));
       for (std::uint64_t c = 0; c < 4; ++c) {
-        pixels.push_back(foreground(y, x, c));
-        back.push_back(background(c));
+        pixels.push_back(foreground(y, x, c, signed_data));
+        back.push_back(background(c, signed_data));
       }
     }
   auto add = [&](const std::string& name, ps::Value value) {
@@ -65,7 +79,13 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
     add("background", s1_fixture::value(back, {13, 17, 4}));
   if (kind == 7) {
     const char* names[] = {"x", "y", "radius", "red", "green", "blue", "alpha"};
-    const float args[] = {5.5F, 4.5F, 3.F, .25F, .5F, .75F, .5F};
+    const float args[] = {5.5F,
+                          4.5F,
+                          3.F,
+                          signed_data ? -4.F : .25F,
+                          signed_data ? 8.F : .5F,
+                          signed_data ? -2.F : .75F,
+                          .5F};
     for (int i = 0; i < 7; ++i)
       add(names[i], s1_fixture::scalar(args[i]));
   }
@@ -97,7 +117,7 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
   for (std::uint64_t y = 0; y < s.height; ++y)
     for (std::uint64_t x = 0; x < s.width; ++x)
       for (std::uint64_t c = 0; c < s.channels; ++c) {
-        double value = foreground(y, x, c);
+        double value = foreground(y, x, c, signed_data);
         if (kind == 0 && c < 3)
           value *= 2;
         if (kind == 1)
@@ -116,27 +136,31 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
                   std::exp(-static_cast<double>(dx * dx + dy * dy) /
                            (2 * sigma * sigma)) /
                   (weights_total * weights_total);
-              value += foreground(yy, xx, c) * weight;
+              value += foreground(yy, xx, c, signed_data) * weight;
             }
         }
         if (kind == 3)
           value *= mask(y, x);
         if (kind == 4)
-          value += background(c) * .5;
+          value += background(c, signed_data) *
+                   (1 - foreground(y, x, 3, signed_data));
         if (kind == 5 || kind == 6) {
           value = 0;
           const auto h = std::min(factor, 13 - y * factor),
                      w = std::min(factor, 17 - x * factor);
           for (std::uint64_t yy = y * factor; yy < y * factor + h; ++yy)
             for (std::uint64_t xx = x * factor; xx < x * factor + w; ++xx)
-              value += kind == 6 ? mask(yy, xx) : foreground(yy, xx, c);
+              value +=
+                  kind == 6 ? mask(yy, xx) : foreground(yy, xx, c, signed_data);
           value /= static_cast<double>(h * w);
         }
         if (kind == 7) {
           const double dx = static_cast<double>(x) + .5 - 5.5,
                        dy = static_cast<double>(y) + .5 - 4.5;
           if (dx * dx + dy * dy <= 9) {
-            const float source[] = {.125F, .25F, .375F, .5F};
+            const float source[] = {signed_data ? -2.F : .125F,
+                                    signed_data ? 4.F : .25F,
+                                    signed_data ? -1.F : .375F, .5F};
             value = source[c] + value * .5;
           }
         }
@@ -145,6 +169,12 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
   return s;
 }
 inline void check(const Scene& s, const ps::Value& value) {
+  require(value.facets().size() == 1, "output must retain one typed facet");
+  auto semantic = ps::decode_semantic(value.facets()[0]);
+  require(semantic.ok() && semantic.value().kind ==
+                               (s.channels == 4 ? ps::SemanticKind::Image
+                                                : ps::SemanticKind::Mask),
+          "output typed semantics changed");
   const auto y = value.region().dimensions()[0],
              x = value.region().dimensions()[1];
   for (auto row = y.offset; row < y.offset + y.extent; ++row)
@@ -167,11 +197,14 @@ inline void check(const Scene& s, const ps::Value& value) {
 inline std::uint64_t all_operations(
     ps::ExecutionContext& execution,
     const std::shared_ptr<ps::OperationRegistry>& operations,
-    ps::ExecutionMode mode) {
+    ps::ExecutionMode mode, std::uint64_t* fallback_count = nullptr) {
   ps::Compiler compiler(operations);
+  if (fallback_count)
+    *fallback_count = 0;
   std::uint64_t dispatches = 0;
-  for (unsigned kind = 0; kind < 8; ++kind) {
-    auto s = scene(kind);
+  for (unsigned scenario = 0; scenario < 16; ++scenario) {
+    const auto kind = scenario % 8;
+    auto s = scene(kind, 2, 1.25, 4, scenario >= 8);
     ps::GraphContext graph(s.document);
     for (bool tiled : {false, true}) {
       ps::PlanningOptions options;
@@ -198,6 +231,8 @@ inline std::uint64_t all_operations(
                 "unexpected numeric fallback");
       }
       dispatches += result.value().diagnostics.native_dispatch_count;
+      if (fallback_count)
+        *fallback_count += result.value().diagnostics.fallback_reasons.size();
     }
   }
   return dispatches;

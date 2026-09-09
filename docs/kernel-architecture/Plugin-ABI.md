@@ -209,13 +209,14 @@ known typed semantic guarantees; unrelated opaque generic facets retain their
 existing publication rules. Complete constraints and output rules enter v7
 compiler identities and v3 result-region keys.
 
-#289 supplies the shared contract. Existing eight-op numeric migration and
-signed Metal eligibility are completed separately by #290; snapshot/cache
-representation expansion is #291, computed bounded scalars are #292, and
-operation-specific transformations follow with their operation slices. At this
-stage bounded scalar ports still require direct workflow bindings; existing
-RGBA-specific callbacks retain their prior numeric acceptance. New typed image
-validation and its signed/straight/coverage rules are tested independently.
+The shared contract and the eight existing operations now support image-v2
+signed/HDR RGB with canonical coverage-premultiplied D65 semantics, including
+eligible native Metal execution. The eight operations explicitly preserve the
+first input's semantic facet. Snapshot/cache representation expansion remains
+#291, computed bounded scalars remain #292, and operation-specific conversions
+follow with their operation slices. Bounded scalar ports still require direct
+workflow bindings. The general typed image validator also accepts straight
+representations; the eight existing operation ports require canonical RGBA.
 
 ## S3 scaled ports
 

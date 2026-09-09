@@ -13,9 +13,10 @@
 图像声明必须为 dense Float32 {H,W,4}，H/W 为正，whole Region，零 offset，canonical
 row-major stride；运行视图带有显式 origin、stride 和有效 Region。两者精确包含一个 facet：key `photospider.image`，version 2，payload 由
 `encode_semantic(rgba_semantics())` 生成；拒绝 image-v1 元数据，调用者使用公开 typed helper。
-RGB 必须 finite 且非负，alpha 必须 finite 且位于 [0,1]，alpha 为零时 RGB 必须全零。
-HDR RGB 可以超过 1 或 alpha，接受 signed zero。Caller 提供已转换为 linear-sRGB
-premultiplied 的值；不执行 color conversion、gamma、clamp 或 unpremultiplication。
+RGB 必须 finite，允许 signed，alpha 必须 finite 且位于 [0,1]，alpha 为零时 RGB 必须全零。
+HDR RGB 可以超过 1 或 alpha，接受 signed zero。Caller 提供 linear sRGB/Rec.709、
+D65、scene-referred relative RGB 与 dimensionless coverage alpha，使用
+coverage-premultiplied association；不执行 color conversion、gamma、clamp 或 unpremultiplication。
 
 Scalar input 必须直接引用 workflow declaration：Float32 {1}、whole Region、零 offset、
 stride {4}、四字节且无 facet。每次运行的 gain/opacity byte 不属于 source parameter，
@@ -34,10 +35,10 @@ profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/
 数值域错误返回 InvalidArgument：scalar 在执行前检查，pixel 在消费 callback 前检查，
 未读取像素不扫描。
 
-#289 迁移共享元数据与 ABI，已有 RGBA 专用数值范围按上文保持，直至 #290 完成全部
-八算子的 CPU/C/Metal 路径。通用 typed image validator 已支持 signed/HDR、straight
-和 coverage-premultiplied 描述；这不表示每个既有算子接受全部颜色模型。
-Computed scalar 支持由 #292 完成。
+八算子的 C++、C 与 Metal 均实现本 image-v2 契约，显式声明 PreserveInput 语义并发布
+首输入的精确 facet；box 算子仅改变逻辑 H/W。端口要求 canonical RGBA 或 typed
+coverage mask。Straight alpha、RGB-only、重排通道及其他颜色模型须先显式转换。
+Computed scalar 支持仍由 #292 完成。
 
 ## 可复用算子包与可执行示例
 
@@ -149,7 +150,7 @@ binary32。因子 1 保留数值。不转换 gamma 或解除预乘。应用代�
 image.brush_circle 输入依次为 image、x、y、radius、red、green、blue、alpha；后七项
 均为必需运行期 Float32 {1} 绑定，无静态参数。输出保持图像形状，使用 Elementwise。
 x/y 为任意有限 Float32，radius 为正 normal Float32 至 FLT_MAX；非预乘线性 RGB 为
-[0,FLT_MAX]，alpha 为 [0,1]。使用 binary64 平方距离判断闭圆内像素中心；圆内 RGB
+[-FLT_MAX,FLT_MAX]，alpha 为 [0,1]。使用 binary64 平方距离判断闭圆内像素中心；圆内 RGB
 先以 binary32 乘 alpha，再无融合地对预乘背景执行 source-over；圆外保留原位。
 一事件一硬边圆章，不抗锯齿、不补点、不处理压力或设备。应用规划裁剪包围 ROI
 并将结果作为快照 patch。
@@ -177,7 +178,26 @@ FLT_MAX/1024；mask 乘数、gain/opacity、圆章颜色/alpha 非零值至少 1
 oracle 的 atol=1e-6、rtol=1e-5 不构成 CPU 位相同或与图规模无关的总误差保证。
 圆章由宿主 double 行区间保持大坐标覆盖，GPU 颜色计算保留圆外像素位型。
 
-test_metal_images 与插件版本覆盖八算子、whole/tile/非零 ROI、radius 64、factor 16、
+test_metal_images 与插件版本覆盖八算子正值与 signed/HDR whole/tile/非零 ROI、
+alpha 0/1/1e-10、非法数值/facet/association、radius 64、factor 16、
 HDR/subnormal 回退和大坐标圆章。公开 fixture 位于 examples/s4_gpu_workflow/image_fixture.hpp。
 运行对应构建目标后，以 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 执行 ctest
 -R '^test_metal_images'。无硬件明确 skip，不宣称原生验收成功。CPU 精确默认保持。
+
+可独立安装消费的 examples/s4_gpu_workflow 通过公开 WorkflowDocument、compile、execute
+运行同一 signed 场景：
+
+```sh
+cmake --build build/issue257-static --target photospider_s4_gpu_workflow -j 8
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend cpu
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend metal --require-native
+```
+
+追加 `--module /absolute/path/to/libphotospider_rgba32f_ops.so` 使用 C 包。预期输出包含
+`operations=8`、`signed_hdr=passed`、`oracle=passed`。CPU 和符合资格的原生执行
+报告 `fallback_count=0`，原生执行必须报告非零 dispatches。无设备时 Metal 模式报告
+真实正数 fallback count；传入 `--require-native` 还会以 77 退出。每个场景检查所有需求样本和 typed facet。例如 signed exposure
+在 `(y=0,x=1)` 将 `[-2.125,4,-.125,.5]` 以 gain 2 转为 `[-4.25,8,-.25,.5]`。
+修改 image_fixture.hpp 的 foreground、background、brush 输入或 scene() 参数即可组合
+其他实验，同时更新独立 oracle。整图与 2x3 tile 的非零 ROI 共用数学 oracle；RGB
+结果不会仅因负号被夹紧或回退 CPU。

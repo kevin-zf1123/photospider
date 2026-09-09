@@ -129,15 +129,21 @@ int main(int argc, char** argv) {
           std::cout << "fallback " << reason << '\n';
         }
       } else if (scenario == "all-operations") {
+        std::uint64_t fallbacks = 0;
         const auto dispatches =
-            s4_fixture::all_operations(execution, registry, mode);
+            s4_fixture::all_operations(execution, registry, mode, &fallbacks);
         std::cout << "S4Gpu.AllOperations operations=8 dispatches="
-                  << dispatches << " oracle=passed\n";
+                  << dispatches
+                  << " signed_hdr=passed fallback_count=" << fallbacks
+                  << " oracle=passed\n";
       } else if (scenario == "fallback") {
         s4_fixture::numeric_edges(execution, registry);
         ps::ExecutionContext disabled(registry);
-        s4_fixture::all_operations(disabled, registry,
-                                   ps::ExecutionMode::MetalFp32);
+        std::uint64_t fallbacks = 0;
+        const auto dispatches = s4_fixture::all_operations(
+            disabled, registry, ps::ExecutionMode::MetalFp32, &fallbacks);
+        s3::require(dispatches == 0 && fallbacks > 0,
+                    "disabled device must report real CPU fallbacks");
         std::cout
             << "S4Gpu.Fallback disabled_device=passed numeric_edges=passed "
                "circle_coverage=exact oracle=passed\n";

@@ -282,7 +282,7 @@ int binding_failures() {
     std::vector<float> pixels(16, 0);
     pixels[3] = 1;
     if (mode == 0)
-      pixels[0] = -1;
+      pixels[0] = -std::numeric_limits<float>::infinity();
     if (mode == 1)
       pixels[1] = std::numeric_limits<float>::infinity();
     if (mode == 2)

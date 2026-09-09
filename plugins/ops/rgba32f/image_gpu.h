@@ -210,13 +210,15 @@ static int ps_execute_gpu_image(
       return PS_OPERATION_RESULT_CANCELLED_V7;
     float pixel[4] = {0};
     memcpy(pixel, output + offset, p.geometry[4] * 4);
+    /* RGB may be signed/HDR; only coverage and alpha are bounded. */
     for (uint64_t c = 0; c < p.geometry[4]; ++c)
-      if (!isfinite(pixel[c]) || pixel[c] < 0)
+      if (!isfinite(pixel[c]))
         return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7;
-    if ((p.geometry[4] == 1 && pixel[0] > 1) ||
+    if ((p.geometry[4] == 1 && (pixel[0] < 0 || pixel[0] > 1)) ||
         (p.geometry[4] == 4 &&
-         (pixel[3] > 1 || (pixel[3] == 0 &&
-                           (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)))))
+         (pixel[3] < 0 || pixel[3] > 1 ||
+          (pixel[3] == 0 &&
+           (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)))))
       return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7;
   }
   return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V7,

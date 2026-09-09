@@ -511,11 +511,10 @@ Status validate_port_value(const OperationPortConstraint& port,
                     sizeof(float));
       }
       for (float channel : rgba) {
-        if (!std::isfinite(channel) || channel < 0)
-          return failure(numeric_failure,
-                         "image channel is negative or nonfinite");
+        if (!std::isfinite(channel))
+          return failure(numeric_failure, "image channel is nonfinite");
       }
-      if (rgba[3] > 1 ||
+      if (rgba[3] < 0 || rgba[3] > 1 ||
           (rgba[3] == 0 && (rgba[0] != 0 || rgba[1] != 0 || rgba[2] != 0)))
         return failure(numeric_failure,
                        "image violates premultiplied alpha domain");

@@ -385,6 +385,9 @@ int main() {
   mask_traits.output_element_type = ElementType::Float32;
   mask_traits.shape_rule = OperationShapeRule::Fixed;
   mask_traits.fixed_output_shape = {5, 7};
+  mask_traits.output_semantic_rule = OperationSemanticRule::Establish;
+  mask_traits.output_facets = {
+      encode_semantic(coverage_semantics()).take_value()};
   float computed_mask = -1;
   PS_CHECK(whole_registry
                ->register_operation(
@@ -399,7 +402,8 @@ int main() {
                       for (std::size_t offset = 0; offset < writer.size();
                            offset += 4)
                         std::memcpy(writer.data() + offset, &computed_mask, 4);
-                      return std::move(writer).publish();
+                      return std::move(writer).publish(
+                          mask_traits.output_facets);
                     }})
                .ok());
   PS_CHECK(whole_registry->freeze().ok());

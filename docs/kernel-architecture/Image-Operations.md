@@ -15,9 +15,10 @@ zero and canonical row-major strides. Runtime views have explicit origin, stride
 and valid Region. Both carry exactly one facet: key `photospider.image`,
 version 2, the canonical payload from `encode_semantic(rgba_semantics())`.
 Image-v1 metadata is rejected; callers use the public typed helper.
-RGB is finite and nonnegative; alpha is finite in [0,1], and alpha zero requires
+RGB is finite and signed; alpha is finite in [0,1], and alpha zero requires
 RGB zero. HDR RGB may exceed one or alpha. Signed zero is accepted. The caller
-supplies already linear-sRGB premultiplied values; no color conversion, gamma,
+supplies linear sRGB/Rec.709, D65, scene-referred relative RGB with dimensionless
+coverage alpha and coverage-premultiplied association; no color conversion, gamma,
 clamp or unpremultiplication occurs.
 
 Scalar inputs are direct workflow declarations with Float32 {1}, whole Region,
@@ -39,11 +40,12 @@ pixels, invalid profile or alpha-zero/nonzero-RGB output fail OperationFailed.
 Bound scalar errors fail InvalidArgument before work; pixel errors fail before
 the consuming callback. Unread pixels are not scanned.
 
-#289 migrates the shared metadata and ABI. The existing RGBA-specific numeric
-ranges described above remain until #290 completes all eight CPU/C/Metal paths.
-The general typed image validator already supports signed/HDR, straight and
-coverage-premultiplied descriptions; this does not imply every existing image
-operation accepts every typed color model. Computed scalar support is #292.
+All eight operations implement this image-v2 contract in C++, C and Metal.
+Each declares PreserveInput semantics and publishes the first input's exact facet;
+box operations change only the logical H/W. Their ports require canonical RGBA
+or typed coverage masks. Straight alpha, RGB-only, reordered channels and other
+color models require explicit conversion before these operations. Computed
+scalar support remains #292.
 
 ## Reusable operation package and executable example
 
@@ -187,7 +189,7 @@ Factor one preserves numeric values. No gamma conversion or unpremultiplication
 occurs. The application preview defaults to factor four.
 
 Brush x/y accept all finite Float32; radius accepts positive normal Float32
-through FLT_MAX; linear unassociated RGB accepts [0,FLT_MAX], alpha [0,1]. Every
+through FLT_MAX; linear unassociated RGB accepts [-FLT_MAX,FLT_MAX], alpha [0,1]. Every
 input is required. The closed circle tests pixel centers using binary64 squared
 distance. Inside, source RGB is multiplied by alpha in binary32 and composited
 with the premultiplied background using source-over without contraction;
@@ -230,7 +232,9 @@ error bound. Circle coverage uses host double row spans, including large logical
 coordinates; GPU color computation preserves outside pixel bits.
 
 `test_metal_images` and `test_metal_images_plugin` cover all eight operations,
-whole/tiled/nonzero ROI, radius 64, factor 16, HDR/subnormal fallback and exact
+positive and signed/HDR whole/tiled/nonzero ROI scenes, alpha 0/1/1e-10,
+invalid numeric/facet/association inputs, radius 64, factor 16, HDR/subnormal
+fallback and exact
 large-coordinate stamp coverage. The public fixture is
 [`examples/s4_gpu_workflow/image_fixture.hpp`](../../examples/s4_gpu_workflow/image_fixture.hpp).
 Use Xcode's command-line validation on actual hardware:
@@ -244,3 +248,26 @@ MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static
 Unavailable hardware returns an explicit CTest skip; it is not a successful
 native execution result. The image CPU implementations and prior numerical
 contracts remain the exact default.
+
+The independently installable `examples/s4_gpu_workflow` consumer exposes the
+same signed scenes through public WorkflowDocument, compile and execute APIs:
+
+```sh
+cmake --build build/issue257-static --target photospider_s4_gpu_workflow -j 8
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend cpu
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend metal --require-native
+```
+
+Append `--module /absolute/path/to/libphotospider_rgba32f_ops.so` for the C
+package. Expected output includes `operations=8 signed_hdr=passed` (with the
+`dispatches` field between them) and `oracle=passed`. CPU and eligible native
+runs report `fallback_count=0`; native runs must report nonzero dispatches.
+Without a device, Metal mode reports the actual positive fallback count;
+`--require-native` additionally exits 77. Each scene checks every demanded sample and its
+typed facet. For example, signed exposure at `(y=0,x=1)` transforms
+`[-2.125,4,-.125,.5]` with gain 2 into `[-4.25,8,-.25,.5]`. In
+`image_fixture.hpp`, modify `foreground`, `background`, brush inputs or
+`scene()` parameters to compose another experiment, and update the independent
+oracle accordingly. Whole execution and the nonzero ROI with 2x3 tiles use the
+same mathematical oracle; no negative RGB result is clipped or sent to CPU
+solely because of its sign.

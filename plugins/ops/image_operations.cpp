@@ -207,7 +207,7 @@ Result<Value> execute_image(const OperationInvocation& invocation,
       }
     }
   }
-  return std::move(output).publish({input_internal::image_facet()});
+  return std::move(output).publish(invocation.inputs[0].facets());
 }
 // Validated region coverage makes every sample address representable.
 float sample(const Value& value, std::uint64_t y, std::uint64_t x,
@@ -314,7 +314,7 @@ Result<Value> gaussian(const OperationInvocation& invocation) {
         std::memcpy(output.data() + index * 4, &rounded, 4);
       }
   }
-  return std::move(output).publish({input_internal::image_facet()});
+  return std::move(output).publish(invocation.inputs[0].facets());
 }
 Result<Value> combine(const OperationInvocation& invocation, bool mask) {
   if (invocation.backend == Backend::Gpu)
@@ -347,7 +347,7 @@ Result<Value> combine(const OperationInvocation& invocation, bool mask) {
       }
     }
   }
-  return std::move(output).publish({input_internal::image_facet()});
+  return std::move(output).publish(invocation.inputs[0].facets());
 }
 /** @brief Averages clipped integer boxes in fixed row/column sample order. */
 Result<Value> downsample(const OperationInvocation& invocation) {
@@ -439,6 +439,8 @@ Result<Value> brush_circle(const OperationInvocation& invocation) {
 Status register_image_operations(OperationRegistry* registry) {
   for (bool opacity : {false, true}) {
     OperationDefinition operation;
+    operation.traits.output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
     operation.key = opacity ? "image.opacity" : "image.exposure_gain";
     operation.traits.input_count = 2;
@@ -458,6 +460,8 @@ Status register_image_operations(OperationRegistry* registry) {
   }
   for (int kind = 0; kind < 3; ++kind) {
     OperationDefinition operation;
+    operation.traits.output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
     operation.key = kind == 0   ? "image.gaussian_blur"
                     : kind == 1 ? "image.mask"
@@ -494,6 +498,8 @@ Status register_image_operations(OperationRegistry* registry) {
   }
   for (bool mask : {false, true}) {
     OperationDefinition operation;
+    operation.traits.output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
     operation.key = mask ? "mask.downsample_box" : "image.downsample_box";
     auto& traits = operation.traits;
@@ -514,6 +520,7 @@ Status register_image_operations(OperationRegistry* registry) {
   }
   OperationDefinition brush;
   brush.key = "image.brush_circle";
+  brush.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
   brush.callback = brush_circle;
   auto& traits = brush.traits;
   traits.supports_gpu = traits.allows_cpu_fallback = true;
@@ -529,9 +536,9 @@ Status register_image_operations(OperationRegistry* registry) {
                          {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar,
                           std::numeric_limits<float>::min(), maximum},
-                         {OperationPortKind::Float32Scalar, 0, maximum},
-                         {OperationPortKind::Float32Scalar, 0, maximum},
-                         {OperationPortKind::Float32Scalar, 0, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar, 0, 1}};
   auto status = registry->register_operation(std::move(brush));
   if (!status.ok())
