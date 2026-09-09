@@ -1,23 +1,39 @@
 # Cache Model
 
-The current kernel exposes one cache identity type and no cache service.
+`PlanCacheKey` remains a non-security physical-plan identity and excludes input
+payload. It does not validate stale plans or identify execution results.
 
-`ExecutionPlan::cache_key()` returns a domain-separated `PlanCacheKey` derived
-from the complete physical-plan digest. The key is a non-security lookup aid.
-It does not grant validity: an embedding that keeps plans must still require a
-current graph revision and must rebuild on a missing, malformed, or stale
-entry.
+Package 0.5 additionally provides opt-in ExecutionContext result retention with
+`result_cache_bytes`, a sublimit of `maximum_live_bytes`. Copies share immutable
+allocation leases, eviction releases only cache references, and strict working
+admission reclaims optional entries first. `clear_result_cache()` invalidates
+retention epochs; active readers remain valid and old producers cannot refill
+a cleared epoch. Cache statistics expose hits, misses, evictions, sharing,
+entries and retained capacity. Zero cache bytes preserves uncached execution.
 
-The active tree has no graph-local runtime cache, filesystem cache, serialized
-Value format, cache codec, retention policy, or recovery path. A caller may
-discard every derived plan and compile again from `WorkflowDocument` plus the
-frozen operation set.
+InputSnapshotStore owns independently bounded immutable image/mask blocks.
+Import validates the profile; patch copies intersecting blocks and preserves
+old snapshots. `content_identity(region)` is canonical SHA-256 over metadata
+and demanded sample bits, independent of block geometry and allocation. Exact
+signed-zero bits remain distinct. Snapshot bindings provide regional reads.
 
-Every schema-valid Float64 parameter contributes the exact bits present in the
-copied IEEE-754 binary64 value. In particular, `+0.0` and `-0.0` produce
-different semantic/optimized/plan digests and therefore different
-`PlanCacheKey` values; a cache cannot reuse one signed-zero workflow for the
-other.
+Result keys recursively cover each consumer's demanded producer regions,
+operation semantics/parameters and stable input content. Unrelated graph edits
+and node identifiers do not invalidate unchanged content. Whole dependencies
+remain conservative; scalar changes invalidate dependent output. Generic
+unproven input sources remain executable but disable cross-Run reuse for their
+descendants. Only deterministic, side-effect-free, cacheable CPU work qualifies.
 
-Plan/result digests and timing are ordinary reproducibility diagnostics. They
-are not signatures, durable identities, receipts, or release evidence.
+Bounded shared coordinators merge identical in-flight regional computations;
+CPU work stays in the existing callback pool. Each waiting caller independently
+observes its own cancellation/currentness. Last-subscriber cancellation drains
+the producer before returning. Explicit producer snapshots own their inputs
+and registry independently of caller stack and editable graph state.
+
+FrozenExecution captures a current plan and immutable Value/snapshot bindings.
+Its lifetime is independent of graph replacement/destruction. Ordinary plan
+execution retains stale checks. `for_region` derives a pinned output tile.
+Custom RegionalSource callbacks must be imported before freeze.
+
+The S3 disk contract is accepted in [ADR 0018](../adr/0018-local-result-caches-and-frozen-execution.md);
+its implementation and restart acceptance remain tracked by #276.
