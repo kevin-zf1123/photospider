@@ -186,3 +186,7 @@ consumers and existing protected CI. Daemon migration only consumes the public
 installed 0.4 package and adapts affected calls/codec without adding wire
 features. Coordinate the breaking kernel and daemon PRs. No OpenSpec, feedback,
 C++20, release archive or unrelated optimization is part of this decision.
+
+## S3 target amendment
+
+[ADR 0018](0018-local-result-caches-and-frozen-execution.md) explicitly permits bounded disposable disk-derived data and frozen execution, and replaces the operation/trait and scaled-region target. Its acceptance does not establish implementation completion.

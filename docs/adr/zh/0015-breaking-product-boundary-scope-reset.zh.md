@@ -210,3 +210,7 @@ description。
 - 文档、Issue、Project、test、CI inventory 与 package export 必须描述同一边界。
 - 未来任何重新引入已删领域的提案，必须先产生一个明确取代本决策的新
   product-boundary ADR。
+
+## S3 目标修订
+
+[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md) 明确允许有界可丢弃磁盘派生数据与冻结执行，并替换算子版本及缩放区域目标；接受不代表实现完成。
