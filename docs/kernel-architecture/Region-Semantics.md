@@ -2,7 +2,8 @@
 
 A Value's bounds-checked Region is logical coverage in its complete descriptor,
 independent of its origin-relative storage view. S2 provides CPU regional
-execution; cross-run dirty propagation and result caches are not implemented.
+execution. S3 adds explicit dirty mapping, immutable snapshots and opt-in result
+caching under ADR 0018.
 
 ## Planning
 
@@ -97,3 +98,9 @@ executes a 5x7 ROI of a logical 64 GiB image without full allocation, verifies
 9 ordered tiles and exact resource bounds, and covers concurrent snapshots,
 backpressure, source/sink failures, cancellation/stale, Whole/effect single
 execution and multiple outputs. Gaussian/composition acceptance is #266.
+
+## S3 additions
+
+Shrink shape/Region traits map ceil-divided spatial output to clipped integer input boxes. operation_dirty_region maps edits forward, including Halo expansion and Whole/scalar fallback. Immutable snapshot bindings preserve old versions. Explicit FrozenExecution replaces editable graph currentness with pinned validity; ordinary execute retains stale checks. See [Cache Model](Cache-Model.md) and [S3 Workflow](S3-Workflow.md).
+
+Shared producer allocation peaks are reported separately in shared_peak_live_bytes; peak_live_bytes retains caller-local allocation meaning. The context budget charges shared owners once.

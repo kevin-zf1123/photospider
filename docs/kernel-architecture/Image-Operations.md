@@ -102,7 +102,7 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 The isolated installed consumer builds this same operation source package
 against the installed SDK, runs A/B through its shared bridge, and runs the
 same executable with built-ins and the module. Static and shared kernel builds
-exercise this path and package 0.4/rejected 0.3 requests; see
+exercise this path and package 0.5/rejected 0.4 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
 
 ## S2 Gaussian, mask and composition
@@ -156,7 +156,7 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-The example directory is also an independent `find_package(Photospider 0.4)`
+The example directory is also an independent `find_package(Photospider 0.5)`
 consumer. `test_installed_consumer` builds and runs it against isolated static
 and shared installations, both with built-ins and with the separately built C
 module. Pass the trusted module's exact path as the sole optional argument.

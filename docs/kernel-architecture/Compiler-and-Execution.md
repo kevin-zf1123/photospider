@@ -111,7 +111,7 @@ does not expose a native GPU handle or persistent residency registry.
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v4 input views receive that exact
+transfer or callback entry; callbacks and ABI v5 input views receive that exact
 demand. Image and regional-source Runs lazily materialize only demanded tiles;
 Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
 The execution context must use the same frozen registry that produced the
@@ -124,7 +124,7 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v4 callback can distinguish ordinary failure from backend
+An operation ABI v5 callback can distinguish ordinary failure from backend
 unavailability without changing its C signature or descriptor layout. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits

@@ -2038,6 +2038,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         *into = sum.value();
         return Status::success();
       };
+      if (!shared_producer)
+        diagnostics.shared_peak_live_bytes = std::max(
+            diagnostics.shared_peak_live_bytes,
+            std::max(part.shared_peak_live_bytes, part.peak_live_bytes));
       diagnostics.cache_hits += part.cache_hits;
       diagnostics.shared_computations += part.shared_computations;
       diagnostics.source_read_count += part.source_read_count;

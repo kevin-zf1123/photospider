@@ -2,7 +2,7 @@
 
 Photospider 安装两份 narrow same-trust extension header：
 
-- operation ABI v4：copied semantic trait、closed typed parameter schema、
+- operation ABI v5：copied semantic trait、closed typed parameter schema、
   plan-derived input demand 与一个 synchronous Value callback；
 - data-provider ABI v1：copied schema key、element type 与 maximum rank。
 
@@ -72,7 +72,7 @@ C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Regist
 dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
 layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
 `estimated_bytes` 是独立的 modeled admission estimate。C DSO Fixed descriptor 更严格，
-因为 ABI v4 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
+因为 ABI v5 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
 byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last
 byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上，UInt8
 `{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被
@@ -135,7 +135,7 @@ certificate、package admission 或 process isolation。
 不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
 ABI 不构造 Value，也不提供 storage。
 
-## Version-four port schema
+## Version-five port schema
 
 `input_schema_count` 必须等于 input_count <= 1024；pointer 当且仅当 count 为零时为空，
 否则必须 naturally aligned。每个 input 和 inline output constraint 具有精确 struct_size、
@@ -147,16 +147,22 @@ Host 复制所有 constraint，在 atomic publication 前拒绝未知 kind、错
 或 profile inference。
 
 Host 在查找 get_api_v3 前检查 ABI version 3，无 v2 alias 或 adapter。Float32 在 operation
-ABI4 和布局不变的 provider ABI1 schema 中均为 code 4；provider code 1..3 保持原义。
+ABI5 和布局不变的 provider ABI1 schema 中均为 code 4；provider code 1..3 保持原义。
 Host image validation 和 callback scope 恢复 embedding 的浮点环境，参见
 [图像算子](Image-Operations.zh.md)。
 
-## ABI 4 区域视图与宿主分配
+## ABI 5 区域视图与宿主分配
 
-ABI 4 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
+ABI 5 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
 输出 sink 提供精确 descriptor/Region 和 packed 字节数，allocate_output 返回宿主输出，
 allocate_scratch 返回回调局部临时缓冲区。发布宿主输出直接冻结；发布栈/调用方数据则
 通过相同宿主分配器复制。指针只在回调期间有效，禁止自行释放或保留。通用输入允许
 backing padding，只能按 origin/stride 访问有效区域。首个发布即占用 sink，重复发布
 不能替换结果并返回 OperationFailed，宿主取消优先；资源失败保留分类。旧整图 dense
-输入/复制输出说明由本节替换，宿主在 API table 查询前拒绝 ABI 3。
+输入/复制输出说明由本节替换，宿主在 API table 查询前拒绝 ABI 4。
+
+## S3 缩放端口
+
+ABI 5 增加 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。
+有界 Int64 参数解析为 [1,16]，输出 H/W 向上取整，输入需求为裁剪 box。允许蒙版
+输出。未知布局、指针/数量失配、非法范围和旧 ABI 4 在发布前拒绝。

@@ -1,8 +1,8 @@
 # 当前开发计划
 
 - 快照日期：2026-09-09
-- 已审计实现 baseline：`d85e7b8`（S2），前序 main 为 `70b760f`
-- 当前 milestone：S2 CPU 区域执行与 daemon 安装消费
+- 已审计基础：main@54d57f3（已结算 S2）；S3 交付由 #268 跟踪
+- 当前 milestone：S3 缓存、冻结执行与交互图像 workflow
 
 ## 角色与权威
 
@@ -39,38 +39,19 @@ compiler 与 execution contract，因此进入 Project #8。
 
 ## 当前 milestone
 
-S1 已在 main@70b760f 结算。S2 按已接受的
-[ADR 0017](../../adr/zh/0017-cpu-regional-execution-and-storage.zh.md)
-实现 kernel 0.4.0、OperationTraits 4 和 operation ABI 4，保留 C++17、schema 2 和
-provider ABI 1。按顺序的本地提交如下：
+S2 已由 [kernel PR #267](https://github.com/kevin-zf1123/photospider/pull/267)
+在 main@54d57f3 结算，配套 daemon PR #16。区域存储、有界分配和 Gaussian/蒙版/
+合成 fixture 是 S3 基础。
 
-| Issue | 实现 | Commit |
-| --- | --- | --- |
-| [#263](https://github.com/kevin-zf1123/photospider/issues/263) | 接受研究与存储/执行契约 | f0c1ae0 |
-| [#264](https://github.com/kevin-zf1123/photospider/issues/264) | 区域 Value、宿主缓冲区、ABI4 和安装消费 | cd9bdcc |
-| [#210](https://github.com/kevin-zf1123/photospider/issues/210) | 按完成释放及受限 workspace | b3cbc52 |
-| [#211](https://github.com/kevin-zf1123/photospider/issues/211) | 惰性 tile 与静态 halo | 40dfd69 |
-| [#265](https://github.com/kevin-zf1123/photospider/issues/265) | 区域源、结果收集和有序流式执行 | d9f4032 |
-| [#266](https://github.com/kevin-zf1123/photospider/issues/266) | Gaussian/曝光/蒙版/source-over 公开场景 | 3b08b41 |
-| [daemon #15](https://github.com/kevin-zf1123/photospider-daemon/issues/15) | 消费安装的 kernel 0.4，保留 IPC 子集 | 53ec2ca（daemon） |
+[S3 #268](https://github.com/kevin-zf1123/photospider/issues/268) 实现已接受的
+[ADR 0018](../../adr/0018-local-result-caches-and-frozen-execution.md)：package 0.5、
+ABI/traits 5、不可变分块输入、冻结导出、区域结果共享、box/圆章算子、应用预览及
+跨重启可丢弃磁盘区域。C++17、schema 2、provider ABI 1 保持。叶子 #269–#277 按序
+推进，daemon #17 消费安装包并保持 IPC 子集。
 
-独立全面审查修复位于 d85e7b8，固定 fuzz seed 迁移修复位于 921ad5c。直接调用共享受检查
-的需求推导，Whole 链及时释放祖先，C 图像地址/clamp 有独立回归，计算产生的蒙版错误
-保持 OperationFailed 分类。本地复核未发现剩余 blocker/required。
-
-S2Image.RegionAndTiles 通过 C++ 和受维护 C module 的公开入口运行，整图/分块逐位一致，
-匹配独立二维 oracle。65536² 程序化源以九个 tile 处理 5x7 ROI，读取 9900 字节，实际
-峰值 1808 字节，保守预留 3840 字节。Focused 覆盖精确/少一字节预算、非法视图、Whole
-链、fan-out、并发快照、源/sink 失败、取消和 currentness。
-
-本地 static/shared kernel 整合及修复重跑覆盖全部 15 项注册测试，含隔离安装消费者；
-daemon 两种安装形态各覆盖 15 项。C module 的专项 UBSAN no-recover 示例也通过。
-受保护 Linux/macOS static/shared、ASAN/TSAN、Codex bot、合并和最终结算记录在相关
-Issue/PR；本地测试不单独构成交付 gate。
-
-Project #9 同步 CPU 叶子，daemon #15 同步 Project #15。#152 保持原生设备范围开放，
-#209 机器成本标定及 #153/#154 不属于本轮 CPU 场景。S2 CPU 子集不会关闭 HEX/MED 父任务。
-S3 缓存/交互与原生 GPU 继续由后续独立范围推进。
+[S3 workflow 指南](../../kernel-architecture/zh/S3-Workflow.zh.md) 记录公开入口和
+独立 oracle。Issue 记录本地验证、独立审查、CI/bot 修复与受保护合并状态；接受和
+本地提交不等于远端结算。原生 GPU 和增量编译 #203 保持独立；S3 不关闭更广 HEX/MED。
 
 ## 当前 milestone 以外的 active backlog
 
