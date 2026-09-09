@@ -64,15 +64,13 @@ static int execute_image(void* state, const ps_operation_value_view_v7* inputs,
   (void)diagnostic_capacity;
   if (count != 2 || parameter_count != 0 || backend != 1 || !inputs || !sink ||
       inputs[0].rank != 3 || inputs[0].shape[2] != 4 || inputs[1].rank != 1 ||
-      inputs[1].byte_size != 4 || inputs[0].demand_offsets[2] != 0 ||
-      inputs[0].demand_extents[2] != 4 || inputs[1].demand_offsets[0] != 0 ||
-      inputs[1].demand_extents[0] != 1)
+      inputs[0].demand_offsets[2] != 0 || inputs[0].demand_extents[2] != 4 ||
+      inputs[1].demand_offsets[0] != 0 || inputs[1].demand_extents[0] != 1)
     return PS_OPERATION_RESULT_FAILURE_V7;
   uint8_t* bytes = sink->allocate_output(sink->context);
   if (!bytes)
     return PS_OPERATION_RESULT_FAILURE_V7;
-  float factor = 0;
-  memcpy(&factor, inputs[1].data + inputs[1].byte_offset, sizeof(factor));
+  const float factor = ps_image_scalar(&inputs[1]);
   size_t target = 0;
   for (uint64_t y = sink->output_offsets[0];
        y < sink->output_offsets[0] + sink->output_extents[0]; ++y) {
@@ -266,7 +264,7 @@ static int execute_s3(void* state, const ps_operation_value_view_v7* inputs,
   float args[7] = {0};
   if (brush) {
     for (uint32_t i = 0; i < 7; ++i)
-      memcpy(&args[i], inputs[i + 1].data + inputs[i + 1].byte_offset, 4);
+      args[i] = ps_image_scalar(&inputs[i + 1]);
   }
   size_t target = 0;
   for (uint64_t y = sink->output_offsets[0];

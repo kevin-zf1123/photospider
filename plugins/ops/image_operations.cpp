@@ -179,7 +179,10 @@ Result<Value> execute_image(const OperationInvocation& invocation,
   }
   const Value& input = invocation.inputs[0];
   float factor = 0;
-  std::memcpy(&factor, invocation.inputs[1].bytes().data(), sizeof(factor));
+  std::memcpy(&factor,
+              invocation.inputs[1].bytes().data() +
+                  invocation.inputs[1].byte_address({0}).value(),
+              sizeof(factor));
   auto allocated = MutableValue::allocate(
       input.descriptor(), invocation.output_region, invocation.allocator);
   if (!allocated.ok())
@@ -401,7 +404,10 @@ Result<Value> brush_circle(const OperationInvocation& invocation) {
   const auto& input = invocation.inputs[0];
   float args[7];
   for (std::size_t i = 0; i < 7; ++i)
-    std::memcpy(&args[i], invocation.inputs[i + 1].bytes().data(), 4);
+    std::memcpy(&args[i],
+                invocation.inputs[i + 1].bytes().data() +
+                    invocation.inputs[i + 1].byte_address({0}).value(),
+                4);
   const double cx = args[0], cy = args[1], radius = args[2];
   const float alpha = args[6], remaining = 1.0F - alpha;
   auto made = MutableValue::allocate(

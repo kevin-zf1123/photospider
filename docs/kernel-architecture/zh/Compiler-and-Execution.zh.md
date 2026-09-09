@@ -120,13 +120,17 @@ plan digest 与 result digest。它们是 observation，不是 verdict 或 relea
 
 Schema 2 在 semantic publication 前验证所有 input declaration，将 canonical table
 复制到 semantic IR、optimized IR 和 plan。Ordered source 保留 node/declaration tag。
-Scalar port 要求直接 Float32 {1} workflow input、精确空 facet 和 finite inclusive
-interval；analyze 检查所有消费 interval 的交集非空。Image consumer 要求 declaration
+Scalar port 接受 declaration 或兼容 producer 的 Float32 `{1}`：generic、dimensionless
+Scalar 或 dimensionless 单样本 Signal。Analyze 检查 dtype/shape/已知 facet，并继续检查
+直接 declaration 的消费 interval 交集非空。Image consumer 要求 declaration
 的精确 profile 或 producer 的 image output guarantee，通用 producer 不隐式获得该保证。
 
 `execute(plan, bindings, cancellation, options)` 复制 input name 和 Value metadata，
 先检查 name multiset，再按 declaration id 检查 Value，最后检查全部直接 scalar
-约束，之后才允许首个 callback 或 transfer。图像/蒙版像素仅检查消费区域，检查先于其消费 callback。Entry 在读取 binding/token 前将 default、
+约束，之后才允许首个 callback 或 transfer。图像/蒙版像素仅检查消费区域，检查先于其消费 callback。
+Computed scalar 在依赖/缓存查询之后、消费 callback 之前检查 metadata、完整 coverage
+及 finite/range；数值错误为 OperationFailed，metadata 失配为 TypeMismatch，直接绑定
+数值错误仍为 InvalidArgument。Entry 在读取 binding/token 前将 default、
 stale 或 foreign-registry plan 判为 Stale。Entry 后 cancellation 优先于 Stale 和普通
 binding failure。长数值扫描周期检查 cancellation 与 graph currentness。
 Run-owned snapshot 保留到全部已准入 callback 退场；返回 Value 独立拥有 immutable
@@ -164,4 +168,5 @@ S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收�
 中的真实 output facets。新增 axes/typed contract 使用 Whole，不增加 G4 映射。完整约束/
 推断 facets 进入 v7 compiler domain 和 v3 result-region key，no-op optimizer 保持 v5。
 公开 helper 和阶段限制见 [Plugin ABI](Plugin-ABI.zh.md)。Computed bounded scalar 消费与
-通用 snapshot/cache 存储仍是 #292/#291 独立实现切片，描述支持不表示这些能力已经交付。
+受支持 image-v2 snapshot/cache 已实现。采样域元数据与样本值单位分别保留，并进入符合
+资格的 result key；其他算子族继续按各自切片交付。

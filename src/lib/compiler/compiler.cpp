@@ -818,11 +818,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       ValueDescriptor descriptor;
       std::vector<ValueFacet> facets;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
-        if (port.kind == OperationPortKind::Float32Scalar) {
-          return Result<SemanticGraphIR>(Status::failure(
-              ErrorCode::InvalidArgument,
-              "bounded scalar port requires a direct workflow input"));
-        }
         descriptor = output_by_node.at(producer->source_node);
         facets = output_facets.at(producer->source_node);
       } else {

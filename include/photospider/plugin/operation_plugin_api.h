@@ -395,7 +395,11 @@ typedef int (*ps_operation_execute_v7)(
 
 /** @brief Generic Value port with existing Region rules. */
 #define PS_OPERATION_PORT_VALUE_V7 1U
-/** @brief Direct workflow Float32 scalar constrained by a finite interval. */
+/** @brief Complete Float32 {1} constrained by a finite interval.
+ * @note Accepts generic or dimensionless scalar/single-sample signal semantics.
+ * Computed views may be padded/unaligned/strided; use the logical sample
+ * address.
+ */
 #define PS_OPERATION_PORT_FLOAT32_SCALAR_V7 2U
 /** @brief Dense HWC Float32 RGBA with exact linear premultiplied profile. */
 #define PS_OPERATION_PORT_RGBA_FLOAT32_V7 3U

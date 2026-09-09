@@ -154,9 +154,10 @@ not verdicts or release evidence.
 
 Schema 2 validates every input declaration before semantic publication and
 copies its canonical table through semantic IR, optimized IR and plan. Ordered
-sources retain node/declaration tags. Scalar ports require direct Float32 {1}
-workflow inputs, exact empty facets and finite inclusive intervals; all
-consuming intervals must have nonempty intersection during analyze. Image
+sources retain node/declaration tags. Scalar ports accept Float32 `{1}` from
+declarations or compatible producers: generic, dimensionless Scalar, or a
+dimensionless single-sample Signal. Analyze checks dtype/shape/known facets and
+retains the nonempty interval-intersection check for direct declarations. Image
 consumers require the exact profile from a declaration or a producer's image
 output guarantee. Generic producers do not implicitly acquire that guarantee.
 
@@ -164,6 +165,10 @@ output guarantee. Generic producers do not implicitly acquire that guarantee.
 metadata, checks the name multiset, then Values in declaration-id order, then
 all direct scalar constraints before the first callback or transfer. Image and
 mask pixels are validated only in consumed regions, before their consuming callback.
+Computed scalar consumers validate metadata, complete coverage and finite/range
+constraints after dependency/cache lookup and before callback entry. Numeric
+errors are OperationFailed; metadata conflicts are TypeMismatch. Direct binding
+numeric errors remain InvalidArgument.
 Entry rejects default/stale/foreign-registry plans as Stale before observing
 bindings or the token. After entry, cancellation precedes Stale and ordinary
 binding failure. Long numeric scans periodically check cancellation and graph
@@ -216,5 +221,7 @@ input inference and actual output facets in IR/plan. New axes and typed contract
 use Whole; no G4 mapping is added. Complete constraints and inferred facets enter
 v7 compiler domains and v3 result-region keys; the no-op optimizer remains v5.
 See [Plugin ABI](Plugin-ABI.md) for the exposed helpers and staged limits.
-Computed bounded scalar consumption and generalized snapshots/cache storage are
-still separate #292/#291 implementation slices, not implied by descriptor support.
+Computed bounded scalar consumption and supported image-v2 snapshots/cache
+storage are implemented. Sampling-domain metadata remains distinct from scalar
+value units and enters eligible result keys. Other operation families retain
+their separate delivery slices.

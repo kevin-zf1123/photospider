@@ -19,6 +19,19 @@ typedef struct ps_image_gpu_parameters {
   uint32_t kind, radius, factor, pass;
 } ps_image_gpu_parameters;
 
+/* The host proves this complete scalar view address, including signed strides
+ * and origins beyond INT64_MAX. Scalar parameters are read on the CPU. */
+static float ps_image_scalar(const ps_operation_value_view_v7* value) {
+  const int64_t stride = value->byte_strides[0];
+  const uint64_t magnitude =
+      stride < 0 ? UINT64_C(0) - (uint64_t)stride : (uint64_t)stride;
+  const uint64_t span = value->storage_origin[0] * magnitude;
+  const uint64_t address =
+      stride < 0 ? value->byte_offset + span : value->byte_offset - span;
+  float number;
+  memcpy(&number, value->data + address, 4);
+  return number;
+}
 /* Host validation has established positive native view strides and coverage. */
 static float ps_gpu_image_sample(const ps_operation_value_view_v7* v,
                                  uint64_t y, uint64_t x, uint64_t c) {
@@ -96,13 +109,13 @@ static int ps_execute_gpu_image(
   if (kind == 3 || kind == 4)
     ps_gpu_image_geometry(&p, 15, &inputs[1]);
   if (kind == 0 || kind == 1) {
-    memcpy(&p.values[0], inputs[1].data + inputs[1].byte_offset, 4);
+    p.values[0] = ps_image_scalar(&inputs[1]);
     if (!ps_gpu_number_supported(p.values[0], 1e-8F))
       return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7;
   }
   if (kind == 7) {
     for (uint32_t i = 0; i < 7; ++i)
-      memcpy(&p.values[i], inputs[i + 1].data + inputs[i + 1].byte_offset, 4);
+      p.values[i] = ps_image_scalar(&inputs[i + 1]);
     for (uint32_t i = 3; i < 7; ++i)
       if (!ps_gpu_number_supported(p.values[i], 1e-8F))
         return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7;

@@ -21,9 +21,16 @@ supplies linear sRGB/Rec.709, D65, scene-referred relative RGB with dimensionles
 coverage alpha and coverage-premultiplied association; no color conversion, gamma,
 clamp or unpremultiplication occurs.
 
-Scalar inputs are direct workflow declarations with Float32 {1}, whole Region,
-offset zero, stride {4}, four bytes and no facets. Per-run gain/opacity bytes
-are not source parameters and do not change compiler identities.
+Scalar inputs may be direct workflow declarations or upstream Float32 `{1}`
+results. Allowed facets are none, one dimensionless Scalar, or one dimensionless
+single-sample SampledSignal. The sampling-axis unit/domain is independent of the
+sample value unit and remains intact. Other typed or opaque facets are rejected.
+Direct bindings retain whole dense declarations (offset zero, stride `{4}`, four
+bytes). Computed views require complete `{1}` coverage and may be padded,
+unaligned, broadcast or negatively strided; C++, C and Metal marshalling read
+logical sample zero with byte-safe access. No cast or clamp occurs. Per-Run
+scalar bytes do not change compiled-plan identity; eligible result keys include
+both the bytes and allowed semantic facets.
 
 These operations are deterministic, side-effect-free, cacheable, PreserveFirstInput
 and Elementwise. Image input demand equals requested spatial output demand with
@@ -37,15 +44,16 @@ gradual underflow. Host schema/numeric validation and image callback scopes
 save and restore the thread's floating environment, preventing inherited
 rounding or flush-to-zero modes from changing the result. Computed non-finite
 pixels, invalid profile or alpha-zero/nonzero-RGB output fail OperationFailed.
-Bound scalar errors fail InvalidArgument before work; pixel errors fail before
-the consuming callback. Unread pixels are not scanned.
+Direct scalar errors fail InvalidArgument before work; invalid computed scalar
+numbers fail OperationFailed before each consuming callback, including cached
+and shared-producer results. Metadata mismatches are TypeMismatch. Pixel errors
+fail before the consuming callback. Unread pixels are not scanned.
 
 All eight operations implement this image-v2 contract in C++, C and Metal.
 Each declares PreserveInput semantics and publishes the first input's exact facet;
 box operations change only the logical H/W. Their ports require canonical RGBA
 or typed coverage masks. Straight alpha, RGB-only, reordered channels and other
-color models require explicit conversion before these operations. Computed
-scalar support remains #292.
+color models require explicit conversion before these operations.
 
 ## Reusable operation package and executable example
 
@@ -271,3 +279,26 @@ typed facet. For example, signed exposure at `(y=0,x=1)` transforms
 oracle accordingly. Whole execution and the nonzero ROI with 2x3 tiles use the
 same mathematical oracle; no negative RGB result is clipped or sent to CPU
 solely because of its sign.
+
+## Computed scalar composition
+
+[`test_computed_scalar.cpp`](../../tests/integration/test_computed_scalar.cpp)
+registers a small public `coefficient.scale` producer and connects its result to
+exposure, opacity or brush through WorkflowDocument. One compiled plan changes
+coefficient bindings between sequential/concurrent Runs. For exposure, coefficient
+1 generates gain 2; coefficient 3 generates gain 6, so the same source pixel's RGB
+triples while alpha stays unchanged. A cached value 1.5 is legal as gain and
+rejected as opacity. Generic NaN results remain valid standalone Values but cannot
+enter either bounded consumer. The fixture demonstrates Scalar/Signal metadata,
+five layouts, field/opaque rejection and independent shared cancellation.
+
+```sh
+cmake --build build/issue257-static --target test_computed_scalar -j 8
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_computed_scalar' --output-on-failure
+```
+
+Both C++ and C consumer runs report `layouts=5 semantic_kinds=3` and
+`oracle=passed`; available native hardware must execute 45 dispatches. Without
+native hardware the same test verifies CPU/fallback behavior and reports zero
+native dispatches. Change the fixture's coefficient binding or the pure producer
+callback to continue composing; expression parsing is a later operation slice.

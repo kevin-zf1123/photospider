@@ -214,9 +214,11 @@ signed/HDR RGB with canonical coverage-premultiplied D65 semantics, including
 eligible native Metal execution. The eight operations explicitly preserve the
 first input's semantic facet. Snapshots and memory/native/disk caches retain
 supported image-v2 representations and real canonical facets; disk format 2
-rejects old formats. Computed bounded scalars remain #292, and operation-specific conversions
-follow with their operation slices. Bounded scalar ports still require direct
-workflow bindings. The general typed image validator also accepts straight
+rejects old formats. Bounded scalars accept compatible computed Float32 `{1}` results, including
+dimensionless Scalar/single-sample Signal facets. Each consumer validates its
+range before callback entry, including cache hits; direct bindings retain
+preflight checks. Logical scalar addresses support padded and strided views.
+Operation-specific conversions follow with their operation slices. The general typed image validator also accepts straight
 representations; the eight existing operation ports require canonical RGBA.
 
 ## S3 scaled ports

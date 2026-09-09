@@ -367,7 +367,7 @@ int compile_failures_and_identity() {
   PS_CHECK(analyze_code(doc) == ErrorCode::Cycle);
   doc = s1_fixture::document();
   doc.nodes[1].inputs[1] = WorkflowNodeOutput{10, "value"};
-  PS_CHECK(analyze_code(doc) == ErrorCode::InvalidArgument);
+  PS_CHECK(analyze_code(doc) == ErrorCode::TypeMismatch);
   doc = s1_fixture::document();
   doc.inputs[0].facets.clear();
   PS_CHECK(analyze_code(doc) == ErrorCode::TypeMismatch);

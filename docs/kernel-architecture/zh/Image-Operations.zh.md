@@ -18,9 +18,13 @@ HDR RGB 可以超过 1 或 alpha，接受 signed zero。Caller 提供 linear sRG
 D65、scene-referred relative RGB 与 dimensionless coverage alpha，使用
 coverage-premultiplied association；不执行 color conversion、gamma、clamp 或 unpremultiplication。
 
-Scalar input 必须直接引用 workflow declaration：Float32 {1}、whole Region、零 offset、
-stride {4}、四字节且无 facet。每次运行的 gain/opacity byte 不属于 source parameter，
-也不改变 compiler identity。
+Scalar input 可以直接引用 workflow declaration，也可连接上游 Float32 `{1}`。
+允许无 facet、一个 dimensionless Scalar 或一个 dimensionless 单样本 SampledSignal。
+采样轴单位/域与样本值单位独立并完整保留；拒绝其他 typed/opaque facet。直接绑定继续
+要求 whole dense declaration（零 offset、stride `{4}`、四字节）。Computed view 要求
+完整 `{1}` coverage，可使用 padding、非对齐、broadcast 或负 stride；C++、C 与 Metal
+参数转换均按逻辑样本零安全读取字节，不隐式 cast/clamp。逐 Run 标量字节不改变编译计划
+身份，符合缓存资格的 result key 同时包含数值字节与允许的语义 facet。
 
 两者为 deterministic、side-effect-free、cacheable、PreserveFirstInput 和 Elementwise。
 Image input demand 为请求的空间 output demand，完整包含四个 channel；scalar demand
@@ -32,13 +36,13 @@ Image input demand 为请求的空间 output demand，完整包含四个 channel
 Host schema/numeric validation 和 image callback scope 保存并恢复 thread 浮点环境，
 避免继承的 rounding 或 flush-to-zero 模式改变结果。计算出的 non-finite pixel、错误
 profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/scalar
-数值域错误返回 InvalidArgument：scalar 在执行前检查，pixel 在消费 callback 前检查，
-未读取像素不扫描。
+数值域错误返回 InvalidArgument：直接 scalar 在执行前检查；computed scalar 数值错误
+在每个消费 callback 前返回 OperationFailed，包含缓存与共享生产者结果。元数据失配为
+TypeMismatch。Pixel 在消费 callback 前检查，未读取像素不扫描。
 
 八算子的 C++、C 与 Metal 均实现本 image-v2 契约，显式声明 PreserveInput 语义并发布
 首输入的精确 facet；box 算子仅改变逻辑 H/W。端口要求 canonical RGBA 或 typed
 coverage mask。Straight alpha、RGB-only、重排通道及其他颜色模型须先显式转换。
-Computed scalar 支持仍由 #292 完成。
 
 ## 可复用算子包与可执行示例
 
@@ -201,3 +205,22 @@ build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --sce
 修改 image_fixture.hpp 的 foreground、background、brush 输入或 scene() 参数即可组合
 其他实验，同时更新独立 oracle。整图与 2x3 tile 的非零 ROI 共用数学 oracle；RGB
 结果不会仅因负号被夹紧或回退 CPU。
+
+## Computed scalar 组合
+
+[test_computed_scalar.cpp](../../../tests/integration/test_computed_scalar.cpp) 注册公开
+coefficient.scale producer，并通过 WorkflowDocument 把输出接到 exposure、opacity 或
+brush。同一编译计划在顺序/并发 Run 中改变 coefficient binding。Exposure 中 coefficient
+1 生成 gain 2，coefficient 3 生成 gain 6，因此同一源像素 RGB 变为三倍，alpha 保持。
+缓存值 1.5 可作 gain，但不能作 opacity；generic NaN 仍是合法独立 Value，却不能进入
+bounded consumer。Fixture 覆盖 Scalar/Signal、五种布局、field/opaque 拒绝和独立共享取消。
+
+```sh
+cmake --build build/issue257-static --target test_computed_scalar -j 8
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_computed_scalar' --output-on-failure
+```
+
+C++ 与 C consumer 均报告 layouts=5 semantic_kinds=3、oracle=passed；原生硬件可用时
+必须执行 45 次 dispatch。无硬件时验证 CPU/fallback 并报告零 native dispatch。修改
+fixture 的 coefficient binding 或纯 producer callback 可继续组合，expression 解析由后续
+算子切片完成。

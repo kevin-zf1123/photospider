@@ -413,9 +413,21 @@ Status validate_port_metadata(const OperationPortConstraint& port,
     return Status::success();
   }
   if (port.kind == OperationPortKind::Float32Scalar) {
-    if (descriptor.shape != std::vector<std::uint64_t>{1} || !facets.empty()) {
-      return failure(ErrorCode::TypeMismatch,
-                     "scalar requires shape one and no facets");
+    if (descriptor.shape != std::vector<std::uint64_t>{1})
+      return failure(ErrorCode::TypeMismatch, "scalar requires shape one");
+    if (!facets.empty()) {
+      if (facets.size() != 1 || facets[0].key != "photospider.semantic")
+        return failure(ErrorCode::TypeMismatch,
+                       "scalar facets are not compatible");
+      auto semantic = decode_semantic(facets[0]);
+      if (!semantic.ok())
+        return semantic.status();
+      if ((semantic.value().kind != SemanticKind::Scalar &&
+           semantic.value().kind != SemanticKind::SampledSignal) ||
+          semantic.value().unit != "dimensionless")
+        return failure(
+            ErrorCode::TypeMismatch,
+            "scalar requires dimensionless scalar or single-sample signal");
     }
   } else if (descriptor.shape.size() != 3 || descriptor.shape[0] == 0 ||
              descriptor.shape[1] == 0 || descriptor.shape[2] != 4 ||
@@ -458,18 +470,25 @@ Status validate_port_value(const OperationPortConstraint& port,
   if (value.region().empty())
     return failure(ErrorCode::TypeMismatch, "port requires nonempty coverage");
   if (port.kind == OperationPortKind::Float32Scalar &&
-      (!whole_region(value.region(), {1}) || value.bytes().size() != 4 ||
-       value.layout().byte_offset != 0 ||
-       value.layout().byte_strides != std::vector<std::int64_t>{4}))
+      !whole_region(value.region(), {1}))
     return failure(ErrorCode::TypeMismatch,
-                   "scalar requires exact dense coverage");
+                   "scalar requires complete single-sample coverage");
   Float32Environment environment;
   if (!environment.active())
     return failure(ErrorCode::OperationFailed,
                    "cannot set binary32 environment");
   if (port.kind == OperationPortKind::Float32Scalar) {
+    if (stop) {
+      const auto code = stop();
+      if (code != ErrorCode::Ok)
+        return failure(code, "scalar validation stopped");
+    }
+    const auto address = value.byte_address({0});
+    if (!address.ok())
+      return address.status();
     float scalar = 0;
-    std::memcpy(&scalar, value.bytes().data(), sizeof(scalar));
+    std::memcpy(&scalar, value.bytes().data() + address.value(),
+                sizeof(scalar));
     if (!std::isfinite(scalar) || scalar < port.minimum ||
         scalar > port.maximum) {
       return failure(numeric_failure,

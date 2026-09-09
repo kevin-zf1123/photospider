@@ -1612,12 +1612,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         inputs[input_index] = transferred.take_value();
       }
 
-      // Generic producers may supply masks without an image output guarantee.
-      // Attribute invalid computed samples to that operation, not the caller.
+      // Validate bounded computed values after every predecessor/cache path,
+      // before the consuming callback; direct bindings retain preflight errors.
       for (std::size_t port = 0; port < step.inputs.size(); ++port) {
         if (!std::holds_alternative<PlanStepInput>(step.inputs[port]) ||
-            step.traits.input_schema[port].kind !=
-                OperationPortKind::Float32Mask)
+            (step.traits.input_schema[port].kind !=
+                 OperationPortKind::Float32Mask &&
+             step.traits.input_schema[port].kind !=
+                 OperationPortKind::Float32Scalar))
           continue;
         const auto valid = input_internal::validate_port_value(
             step.traits.input_schema[port], inputs[port],

@@ -128,6 +128,7 @@ inline std::vector<std::string> result_keys(
           std::uint32_t bits;
           std::memcpy(&bits, input.value.bytes().data(), 4);
           hash.integer(bits);
+          contract_internal::append_facets(&hash, input.value.facets());
         } else {
           valid = false;
           break;

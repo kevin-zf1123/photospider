@@ -101,7 +101,10 @@ struct PHOTOSPIDER_API OperationParameterSpec final {
 enum class OperationPortKind : std::uint32_t {
   /** @brief Generic Value with ordinary shape and Region rules. */
   Value = 1,
-  /** @brief Direct whole Float32 {1} declaration with no facets. */
+  /** @brief Complete Float32 {1}, generic or dimensionless scalar/signal.
+   * @note Runtime bounds apply before each consumer. Computed views may have
+   * any valid layout; direct workflow bindings retain dense declarations.
+   */
   Float32Scalar = 2,
   /** @brief Dense Float32 {H,W,4} with exact linear premultiplied profile. */
   RgbaFloat32 = 3,
@@ -112,14 +115,17 @@ enum class OperationPortKind : std::uint32_t {
 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
- * @note Scalars require a direct Float32 {1} workflow input, no facets and a
- * finite inclusive interval. Other kinds require positive-zero bound bits.
- * RgbaFloat32 uses the canonical photospider.image v2 descriptor returned by
- * rgba_semantics(); Float32Mask uses typed coverage_semantics(). Typed ports
- * constrain kind/exact facets, dtype and rank, conservatively with Whole
- * demand. Output facets are inferred independently from dtype/shape. Scalar
- * consumption remains direct-only until the computed-scalar execution slice is
- * implemented.
+ * @note Scalars require Float32 {1} and a finite inclusive interval. Facets
+ * are absent or exactly one dimensionless Scalar/single-sample Signal; the
+ * signal's sampling-axis domain/unit is retained independently of sample units.
+ * Direct bindings retain dense preflight; computed views use logical
+ * addressing. Other kinds require positive-zero bound bits. RgbaFloat32 uses
+ * the canonical photospider.image v2 descriptor returned by rgba_semantics();
+ * Float32Mask uses typed coverage_semantics(). Typed ports constrain kind/exact
+ * facets, dtype and rank, conservatively with Whole demand. Output facets are
+ * inferred independently from dtype/shape. Invalid computed numbers fail
+ * OperationFailed before consumer entry, including cache hits; direct numeric
+ * binding errors remain InvalidArgument.
  */
 struct PHOTOSPIDER_API OperationPortConstraint final {
   /** @brief Closed port kind; scalar output is unsupported. */
