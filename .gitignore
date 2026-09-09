@@ -48,6 +48,10 @@
 !examples/image_vertical/*.cpp
 !examples/image_vertical/*.hpp
 !examples/image_vertical/CMakeLists.txt
+!examples/s3_image_workflow/
+!examples/s3_image_workflow/*.cpp
+!examples/s3_image_workflow/*.hpp
+!examples/s3_image_workflow/CMakeLists.txt
 !examples/regional_image_vertical/
 !examples/regional_image_vertical/*.cpp
 !examples/regional_image_vertical/CMakeLists.txt
