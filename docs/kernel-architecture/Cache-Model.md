@@ -37,6 +37,17 @@ remain conservative; scalar changes invalidate dependent output. Generic
 unproven input sources remain executable but disable cross-Run reuse for their
 descendants. Only deterministic, side-effect-free, cacheable work with a proven implementation qualifies.
 
+Regional result keys also accept preflight-validated dense, offset-zero direct
+Values up to 2048 bytes when the derived demand covers the complete Whole value.
+Snapshot, bounded-scalar and compact whole-Value sources have distinct category
+tags. Compact keys include dtype, rank/shape, exact facets, byte length and raw
+bytes, including signed-zero bits and unused coefficients. Larger/partial direct
+inputs remain unproven. This qualification applies to regional execution and
+execute_stream; pure generic/scalar ordinary execute keeps its existing fast
+path. No new snapshot/disk types are introduced. The public expression workflow
+checks 2048/2049+ boundaries, dtype/shape/facet separation, concurrent coefficients
+and cached invalid bounded consumers.
+
 Bounded shared coordinators merge identical in-flight regional computations;
 CPU work stays in the existing callback pool. Each waiting caller independently
 observes its own cancellation/currentness. Last-subscriber cancellation drains

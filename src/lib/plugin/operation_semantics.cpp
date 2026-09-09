@@ -1,10 +1,14 @@
 #include "plugin/operation_semantics.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "data/input_validation.hpp"
+#include "plugin/expression.hpp"
 
 namespace ps::contract_internal {
 namespace {
@@ -83,6 +87,87 @@ Facets infer_transformed_facets(
   if (t.output_semantic_input >= inputs.size())
     return Facets(mismatch("semantic source input absent"));
   const auto& input = inputs[t.output_semantic_input];
+  if (rule == OperationSemanticRule::SampleExpression) {
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Facets(
+          Status::failure(ErrorCode::OperationFailed,
+                          "expression metadata environment unavailable"));
+    if (input.descriptor.element_type != ElementType::Float64 ||
+        input.descriptor.shape.size() != 1 || input.descriptor.shape[0] < 1 ||
+        input.descriptor.shape[0] > 256 || !input.facets.empty() ||
+        output.element_type != ElementType::Float32 ||
+        output.shape.size() != 1 || output.shape[0] < 1 ||
+        output.shape[0] > 1048576)
+      return Facets(
+          mismatch("expression coefficient/output descriptor outside limits"));
+    const auto expression = parameters.find(t.output_semantic_parameter);
+    const auto start = parameters.find("start"), step = parameters.find("step");
+    if (expression == parameters.end() ||
+        !std::holds_alternative<std::string>(expression->second) ||
+        start == parameters.end() ||
+        !std::holds_alternative<double>(start->second) ||
+        step == parameters.end() ||
+        !std::holds_alternative<double>(step->second))
+      return Facets(invalid("missing expression/domain parameters"));
+    const double origin = std::get<double>(start->second),
+                 delta = std::get<double>(step->second);
+    const double end =
+        std::fma(static_cast<double>(output.shape[0] - 1), delta, origin);
+    if (!std::isfinite(origin) || !std::isfinite(delta) || delta <= 0 ||
+        !std::isfinite(end) || (output.shape[0] > 1 && end <= origin))
+      return Facets(
+          invalid("expression sampling endpoint is not representable"));
+    auto parsed = expression_internal::parse(
+        std::get<std::string>(expression->second), input.descriptor.shape[0]);
+    if (!parsed.ok())
+      return Facets(parsed.status());
+    SemanticDescriptor result;
+    result.kind = SemanticKind::SampledSignal;
+    result.channels = {{"value", "value", "dimensionless"}};
+    result.sample_origin = origin;
+    result.sample_step = delta;
+    result.sample_axis_unit = "dimensionless";
+    return encode(result);
+  }
+  if (rule == OperationSemanticRule::ApplyLut1d) {
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Facets(Status::failure(ErrorCode::OperationFailed,
+                                    "LUT metadata environment unavailable"));
+    if (inputs.size() != 2 || t.output_semantic_input ||
+        input.descriptor.element_type != ElementType::Float32 ||
+        output.element_type != ElementType::Float32 ||
+        output.shape != input.descriptor.shape ||
+        inputs[1].descriptor.element_type != ElementType::Float32 ||
+        inputs[1].descriptor.shape.size() != 1 ||
+        inputs[1].descriptor.shape[0] < 2)
+      return Facets(mismatch(
+          "LUT requires Float32 query and at least two table samples"));
+    auto query = typed(input), table = typed(inputs[1]);
+    if (!query.ok())
+      return Facets(query.status());
+    if (!table.ok())
+      return Facets(table.status());
+    const auto& s = table.value();
+    if (query.value().kind != SemanticKind::SampledSignal ||
+        (s.kind != SemanticKind::SampledSignal &&
+         s.kind != SemanticKind::Lut) ||
+        s.channels.size() != 1 || query.value().unit != s.sample_axis_unit)
+      return Facets(mismatch("LUT query samples must use the table axis unit"));
+    const auto policy = parameters.find(t.output_semantic_parameter);
+    if (policy == parameters.end() ||
+        !std::holds_alternative<std::string>(policy->second) ||
+        (std::get<std::string>(policy->second) != "reject" &&
+         std::get<std::string>(policy->second) != "clip"))
+      return Facets(invalid("LUT out-of-domain policy must be reject or clip"));
+    const double end =
+        std::fma(static_cast<double>(inputs[1].descriptor.shape[0] - 1),
+                 s.sample_step, s.sample_origin);
+    if (!std::isfinite(end) || end <= s.sample_origin)
+      return Facets(mismatch("LUT sampling endpoint is not representable"));
+    return Facets(std::vector<ValueFacet>{});
+  }
   if (rule == OperationSemanticRule::SwizzleChannels) {
     if (input.descriptor.shape.size() != 3)
       return Facets(mismatch("swizzle requires HWC"));

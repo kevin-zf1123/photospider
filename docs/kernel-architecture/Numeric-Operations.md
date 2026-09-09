@@ -127,5 +127,6 @@ next node instead of supplying another source. To reconnect a single generic
 Float32 result to `image.exposure_gain`, keep shape `{1}` and the gain range
 `[0,16]`; the bounded consumer validates every computed result before use.
 The [channel/color operations](Channel-and-Color-Operations.md) provide this
-explicit composition. Expression generators and the combined standalone
-foundations example follow in subsequent tracked slices.
+explicit composition. [Expression and LUT operations](Expression-and-LUT-Operations.md)
+provide sampled generators with dynamic coefficients. The combined standalone
+foundations example follows in a subsequent tracked slice.

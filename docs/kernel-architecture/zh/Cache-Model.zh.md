@@ -27,6 +27,14 @@ result-region v3 键递归覆盖各消费者实际需要的上游区域、算子
 稳定的通用输入仍可执行，其后代不跨 Run 复用。只缓存确定、无副作用、cacheable
 的 CPU 工作。
 
+区域结果 key 也接受经过 preflight 的 dense、offset-zero 直接 Value：最多 2048 bytes，
+派生 demand 必须覆盖完整 Whole 值。Snapshot、bounded-scalar、compact Whole Value 有
+独立类别 tag；compact key 包含 dtype、rank/shape、精确 facet、byte 长度与原始 bytes，
+包括负零和未使用系数。更大或局部直接输入无资格。该规则用于区域执行与 execute_stream；
+纯 generic/scalar 的普通 execute 保持既有快速路径，未扩展 snapshot/disk 类型。公开
+expression workflow 检查 2048/2049+ 边界、dtype/shape/facet 分离、并发系数及缓存非法
+bounded 消费者拒绝。
+
 有界协调线程合并相同在途区域计算；CPU 工作仍在原回调池。调用方分别观察取消与
 图当前性。最后一个订阅者取消后，等待生产者退出才返回。生产者快照独立持有输入
 和 registry，不依赖调用方栈或可编辑图。

@@ -220,6 +220,9 @@ inline std::uint64_t all_operations(
       }
       auto compiled = compiler.compile(graph, options);
       require(compiled.ok(), compiled.status().message);
+      // Each case proves a cold dispatch, including repeated compact mask
+      // inputs.
+      execution.clear_result_cache();
       auto result = execution.execute(compiled.value().plan, s.bindings);
       require(result.ok(), result.status().message);
       check(s, result.value().values.at("result"));

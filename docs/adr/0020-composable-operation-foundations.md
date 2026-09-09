@@ -208,6 +208,16 @@ channel names, including alpha `A`, while preserving alpha sample bits.
 The unreleased ABI/Traits 7 vocabulary and existing identities include these rules;
 WorkflowDocument schema 2 and provider ABI 1 remain unchanged.
 
+The closed `SampleExpression`/`ApplyLut1d` rules share bounded expression parsing
+and uniform-domain validation across compiler, direct calls and C declarations.
+SampleExpression consumes generic Float64 `[K]` (1..256), requires finite start
+and positive finite step, and validates resolved Float32 `[count]` (1..1048576).
+Its output has dimensionless value/axis units; a multi-sample endpoint must be
+finite and greater than start. ApplyLut1d accepts a SampledSignal query and
+SampledSignal/Lut table with N>=2, matches query sample units to table axis units,
+and drops output semantics. Both use Whole. See
+[expression and LUT operations](../kernel-architecture/Expression-and-LUT-Operations.md).
+
 ## G5: computed scalars and reusable operation subset
 
 An upstream generic Float32 `{1}` may feed a bounded scalar port. Compile-time
@@ -237,14 +247,15 @@ All new operations use Whole in this first implementation.
 | `alpha.associate/unassociate`, `color.assign` | Association changes only color channels and the descriptor; alpha bits preserved. Assign has an explicit target descriptor, preserves sample bytes and validates its declared domain. |
 | `color.rgb_to_xyz/xyz_to_rgb/xyz_to_lab/lab_to_xyz` | Float32 HWC RGB/XYZ/Lab, optionally straight alpha; binary64 coefficients/intermediates, Float32 output, unchanged alpha. Same declared reference white, signed/out-of-gamut values preserved. |
 | `numeric.sample_expression` | Static bounded expression, Float64 start/step and Int64 count>=1; step>0, Float32 `[count]` output with sampled-signal semantics. Dynamic coefficients are Float64 `[K]`, K>=1; no per-run shape changes. |
-| `lut.apply_1d` | Float32 sampled signal plus Float32 `[N]` table with uniform sample-axis semantics (N>=2); linear interpolation, out-of-domain `reject` default or explicit `clip`; result keeps query shape and drops input semantics. No 3D LUT or channel-coupled interpolation. |
+| `lut.apply_1d` | Float32 sampled signal plus Float32 `[N]` SampledSignal/Lut table with uniform sample-axis semantics (N>=2); linear interpolation, out-of-domain `reject` default or explicit `clip`; result keeps query shape and drops input semantics. No 3D LUT or channel-coupled interpolation. |
 | `mask.threshold` | Finite Float32 HW scalar field to typed coverage mask; threshold .5 explicitly supplied, comparison `>=`. |
 | `mask.components`, `component.count/area/bbox` | Binary typed mask to Int64 HW labels, then separate count/area/bbox nodes. Four-connectivity, row-major first-pixel labels 1..Kcap, background 0. Capacity Kcap>=1 is static; overflow fails. Count Int64 `{1}` counts foreground components; area Int64 `[Kcap+1]`, bbox Int64 `[Kcap+1,4]` in x_min,y_min,x_max_exclusive,y_max_exclusive order. Background and unused records are zero. |
 
-Expression grammar is limited to numeric literals, x, `c[index]`, parentheses,
+Expression grammar is limited to decimal/scientific numeric literals (no hex,
+NaN or infinity names), x, `c[index]`, parentheses,
 unary +/- and binary +,-,*,/,^, with pure `abs`, `sqrt`, `exp`, `log`, `sin`,
 `cos`, `min`, `max` calls. Exponentiation is right-associative and binds above
-unary negation. Limit UTF-8 source to 4096 bytes, AST to 256 nodes/depth 32,
+unary negation; `0^0=1`. Every subexpression must be finite. Limit UTF-8 source to 4096 bytes, AST to 256 nodes/depth 32,
 coefficients to 256 and count to 1,048,576; validate coefficient indices against
 the declared table. Reject domain errors/non-finite results with a sample index;
 no loops, scripts, filesystem or hidden mutable state. Reuse one bounded parser
@@ -267,6 +278,17 @@ descriptors/facets, operation implementation, exact input content/dependencies,
 requested coverage, numeric mode and backend/device identity where applicable.
 Bounds or output meaning cannot change while retaining a reusable key. Runtime
 binding order, native pointers, times and allocation ids remain excluded.
+
+Regional result keys also accept preflight-validated dense, offset-zero direct
+Values up to 2048 bytes when the derived demand covers the complete Whole value.
+Snapshot, bounded-scalar and compact whole-Value sources have distinct category
+tags. Compact keys include dtype, rank/shape, exact facets, byte length and raw
+bytes, including signed-zero bits and unused coefficients. Larger/partial direct
+inputs remain unproven. This qualification applies to regional execution and
+execute_stream; pure generic/scalar ordinary execute keeps its existing fast
+path. No new snapshot/disk types are introduced. The public expression workflow
+checks 2048/2049+ boundaries, dtype/shape/facet separation, concurrent coefficients
+and cached invalid bounded consumers.
 
 Memory/native/disk cache entries preserve actual output facets. Validate stored
 metadata against expected output semantics and validate numerical consumer

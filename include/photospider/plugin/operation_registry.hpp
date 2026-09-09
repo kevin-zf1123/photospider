@@ -199,7 +199,19 @@ enum class OperationSemanticRule : std::uint32_t {
   /** @brief XYZ to canonical Lab, retaining the explicit reference white. */
   XyzToLab = 11,
   /** @brief Lab to canonical XYZ, retaining the explicit reference white. */
-  LabToXyz = 12
+  LabToXyz = 12,
+  /** @brief Bounded expression -> dimensionless Float32 sampled signal.
+   * Requires generic Float64[K], K in [1,256], and required Float64 start/step
+   * parameters. The expression String uses output_semantic_parameter; the
+   * inferred rank-one output count is in [1,1048576].
+   */
+  SampleExpression = 13,
+  /** @brief Validates Float32 query Signal + one-channel Signal/Lut table.
+   * Query samples use the table axis unit; table N>=2 and representable
+   * increasing domain. The String parameter selects reject/clip outside it.
+   * Output preserves query shape and drops semantic guarantees.
+   */
+  ApplyLut1d = 14
 };
 
 /**
@@ -292,7 +304,8 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::uint32_t output_semantic_input = 0;
   std::vector<ValueFacet> output_facets = {};
   /** @brief Required parameter for Parameter/Merge (semantic String),
-   * Extract (Int64 index), or Swizzle (canonical index-list String).
+   * Extract (Int64 index), Swizzle (canonical index-list String),
+   * SampleExpression (expression String) or ApplyLut1d (reject/clip String).
    * Empty for parameter-free transforms; no operation-key-specific inference.
    */
   std::string output_semantic_parameter = {};

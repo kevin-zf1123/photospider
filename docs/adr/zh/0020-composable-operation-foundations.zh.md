@@ -149,6 +149,13 @@ role/unit 逐通道匹配，name 不必相同。图像 alpha 提取使用 canoni
 这些规则属于尚未发布的 ABI/Traits 7 词汇及既有 identity；WorkflowDocument schema 2、
 provider ABI 1 保持。
 
+闭集 `SampleExpression`/`ApplyLut1d` 在编译器、直接调用及 C 声明中共享有界 parser
+与均匀域校验。前者输入 generic Float64 `[K]` (1..256)，要求有限 start、有限正 step，
+验证已解析 Float32 `[count]` (1..1048576)，输出值/轴单位 dimensionless；多样本端点
+有限且大于 start。后者接受 SampledSignal query 及 N>=2 的 SampledSignal/Lut 表，
+query 值单位匹配 table 轴单位，输出 Drop。两者 Whole，见
+[表达式与 LUT](../../kernel-architecture/zh/Expression-and-LUT-Operations.zh.md)。
+
 ## G5：计算标量与可复用算子子集
 
 Generic Float32 `{1}` 上游可以连接 bounded scalar。编译检查 dtype/shape 和已知语义。
@@ -172,12 +179,12 @@ callback 前拒绝和不发布部分结果保持现有优先级。Gain `[0,16]`�
 | `alpha.associate/unassociate`、`color.assign` | Association 仅改变颜色通道及描述，保持 alpha bits；assign 显式目标 descriptor，保持样本 bytes 并验证目标域。 |
 | `color.rgb_to_xyz/xyz_to_rgb/xyz_to_lab/lab_to_xyz` | Float32 HWC RGB/XYZ/Lab，可带 straight alpha；binary64 系数/中间值、Float32 输出、alpha 不变；同声明白点，保留 signed/超色域值。 |
 | `numeric.sample_expression` | 静态有界 expression、Float64 start/step、Int64 count>=1，step>0；Float32 `[count]`、sampled-signal 语义。动态 coefficients 为 Float64 `[K]`，K>=1，不改变每 Run shape。 |
-| `lut.apply_1d` | Float32 sampled signal 加有均匀采样轴语义的 Float32 `[N]` 表，N>=2；线性插值，越域默认 `reject` 或显式 `clip`；保持 query shape，移除输入语义；不含 3D LUT 或跨通道耦合插值。 |
+| `lut.apply_1d` | Float32 sampled signal 加有均匀采样轴语义的 Float32 `[N]` SampledSignal/Lut 表，N>=2；线性插值，越域默认 `reject` 或显式 `clip`；保持 query shape，移除输入语义；不含 3D LUT 或跨通道耦合插值。 |
 | `mask.threshold` | Finite Float32 HW scalar field 输出 typed coverage mask；显式 threshold .5，比较 `>=`。 |
 | `mask.components`、`component.count/area/bbox` | Binary typed mask 输出 Int64 HW labels，之后用独立 count/area/bbox 节点；四连通，按 row-major 首像素编号 1..Kcap，背景 0；静态容量 Kcap>=1，超容量失败。Count Int64 `{1}` 只计前景；area Int64 `[Kcap+1]`；bbox Int64 `[Kcap+1,4]`，顺序 x_min,y_min,x_max_exclusive,y_max_exclusive；背景与未用记录为零。 |
 
-表达式限数字、x、`c[index]`、括号、一元 +/-、二元 +,-,*,/,^ 及纯函数
-`abs`、`sqrt`、`exp`、`log`、`sin`、`cos`、`min`、`max`。幂右结合且优先于一元负号。
+表达式限十进制/科学计数数字（无 hex、NaN/infinity 名称）、x、`c[index]`、括号、一元 +/-、二元 +,-,*,/,^ 及纯函数
+`abs`、`sqrt`、`exp`、`log`、`sin`、`cos`、`min`、`max`。幂右结合且优先于一元负号；`0^0=1`，每个子表达式必须有限。
 UTF-8 源长度最多 4096 bytes、AST 最多 256 节点/深度 32、coefficients 最多 256、
 count 最多 1,048,576；按声明表检查系数下标。Domain error/非有限结果带样本下标失败；
 不支持循环、脚本、文件系统或隐式可变状态。验证与求值复用有界 parser，AST/参数进入
@@ -196,6 +203,14 @@ rule、重复组上下界/解析数量和静态参数。Result-region key 还包
 descriptor/facets、算子实现、精确输入内容/依赖、请求 coverage、numeric mode，以及适用的
 backend/device identity。Bounds 或输出含义改变必须改变可复用 key；binding 顺序、
 native pointer、time、allocation id 仍排除。
+
+区域结果 key 也接受经过 preflight 的 dense、offset-zero 直接 Value：最多 2048 bytes，
+派生 demand 必须覆盖完整 Whole 值。Snapshot、bounded-scalar、compact Whole Value 有
+独立类别 tag；compact key 包含 dtype、rank/shape、精确 facet、byte 长度与原始 bytes，
+包括负零和未使用系数。更大或局部直接输入无资格。该规则用于区域执行与 execute_stream；
+纯 generic/scalar 的普通 execute 保持既有快速路径，未扩展 snapshot/disk 类型。公开
+expression workflow 检查 2048/2049+ 边界、dtype/shape/facet 分离、并发系数及缓存非法
+bounded 消费者拒绝。
 
 Memory/native/disk entry 保留真实输出 facets；用预期输出语义验证存储元数据，在 hit
 消费前验证数值约束，不重新构造旧固定 image facet。错误 disk format/checksum/metadata

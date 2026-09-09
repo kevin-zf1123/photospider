@@ -215,6 +215,16 @@ before publication and never dispatch inference by operation key. See
 [channel and color operations](Channel-and-Color-Operations.md) for exact role,
 white-point, alpha-removal and generic-output behavior.
 
+The closed `SampleExpression`/`ApplyLut1d` rules share bounded expression parsing
+and uniform-domain validation across compiler, direct calls and C declarations.
+SampleExpression consumes generic Float64 `[K]` (1..256), requires finite start
+and positive finite step, and validates resolved Float32 `[count]` (1..1048576).
+Its output has dimensionless value/axis units; a multi-sample endpoint must be
+finite and greater than start. ApplyLut1d accepts a SampledSignal query and
+SampledSignal/Lut table with N>=2, matches query sample units to table axis units,
+and drops output semantics. Both use Whole. See
+[expression and LUT operations](Expression-and-LUT-Operations.md).
+
 SemanticNode and PlanStep retain real output facets. The C sink supplies the
 same resolved dtype/shape/facets to callbacks. Published output is validated
 against these facts; a typed facet mismatch is OperationFailed. Drop removes

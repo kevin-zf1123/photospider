@@ -47,7 +47,7 @@ skip. Ordinary example runs still validate and report their fallback result.
 | `resident-chain --backend metal --no-cache` | Whole 17x13 fixture: 5 dispatches in 4 submissions, 4 input copies / 7960 bytes, 3536 collected result-copy bytes, zero fallback, `oracle=passed` |
 | `resident-chain --layout tiled` | Bounded 4x4 tiles, including clipped edges, compared with the whole-image oracle |
 | `resident-chain --layout roi` | Requested Region y=[2,9), x=[3,12), all RGBA channels; correct regional samples |
-| `all-operations` | All eight operations, whole and tiled nonzero ROI, positive native dispatches when supported, `oracle=passed` |
+| `all-operations` | All eight operations, whole and tiled nonzero ROI; clear result retention before each cold dispatch oracle, positive native dispatches when supported, `oracle=passed` |
 | `cache-edits` | Warm dispatches/uploads zero; gain change preserves blur; local stamp recomputes fewer than 20 blur tiles; unrelated edit has no callbacks; bounded native retained bytes |
 | `preview-export` | Nine ordered stamps, 20 frozen export tiles, full-quality latest preview, three rejected stale/quality/target publications, independent input/output oracles |
 | `fallback` | Disabled-device execution and conservative numeric fallback preserve CPU results/errors; large-coordinate circle coverage stays exact |

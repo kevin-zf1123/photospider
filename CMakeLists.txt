@@ -74,6 +74,7 @@ set(
   plugins/ops/image_operations.cpp
   plugins/ops/numeric_operations.cpp
   plugins/ops/color_operations.cpp
+  plugins/ops/expression_operations.cpp
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
@@ -82,6 +83,7 @@ set(
   src/lib/data/semantic.cpp
   src/lib/plugin/operation_contract.cpp
   src/lib/plugin/operation_semantics.cpp
+  src/lib/plugin/expression.cpp
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
@@ -100,6 +102,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   set_source_files_properties(plugins/ops/image_operations.cpp
     plugins/ops/numeric_operations.cpp
     plugins/ops/color_operations.cpp
+    plugins/ops/expression_operations.cpp
+    src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
@@ -107,6 +111,8 @@ elseif(MSVC)
   set_source_files_properties(plugins/ops/image_operations.cpp
     plugins/ops/numeric_operations.cpp
     plugins/ops/color_operations.cpp
+    plugins/ops/expression_operations.cpp
+    src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -456,6 +462,12 @@ if(BUILD_TESTING)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
+  photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
+  add_library(expression_contract_fixture MODULE tests/fixtures/expression_contract_fixture.c)
+  target_link_libraries(expression_contract_fixture PRIVATE Photospider::operation_sdk)
+  set_target_properties(expression_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
+  add_dependencies(test_expression_operations expression_contract_fixture)
   photospider_add_test(test_color_operations Photospider::kernel tests/integration/test_color_operations.cpp)
   foreach(_case RANGE 0 2)
     add_library(channel_contract_${_case} MODULE tests/fixtures/channel_contract_fixture.c)

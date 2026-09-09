@@ -124,28 +124,9 @@ bool write_cast(Source input, ElementType target, std::uint8_t* output,
   }
   return false;
 }
-// Error-free addition for finite operands whose sum is representable.
-struct Split {
-  double high;
-  double low;
-};
-Split two_sum(double a, double b) {
-  const double high = a + b;
-  if (!std::isfinite(high))
-    return {high, 0};
-  const double b_virtual = high - a;
-  return {high, (a - (high - b_virtual)) + (b - b_virtual)};
-}
-// Accumulate a finite term into two components, returning only the magnitude
-// of the third component that cannot be retained.
-double add_split(Split* accumulator, double term) {
-  const auto high = two_sum(accumulator->high, term);
-  const auto low = two_sum(accumulator->low, high.low);
-  const auto merged = two_sum(high.high, low.high);
-  const auto tail = two_sum(merged.low, low.low);
-  *accumulator = two_sum(merged.high, tail.high);
-  return std::abs(tail.low);
-}
+using numeric_internal::add_split;
+using numeric_internal::Split;
+using numeric_internal::two_sum;
 struct Range {
   double src_min = 0, src_max = 1, dst_min = 0, dst_max = 1;
   bool identity() const { return src_min == dst_min && src_max == dst_max; }

@@ -168,6 +168,13 @@ minimum>=1、maximum 有界，总输入<=1024。Loader 在原子发布前复制�
 拒绝非法组合，不按 operation key 分派推断。精确 role、参考白、去 alpha 和 generic
 输出行为见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。
 
+闭集 `SampleExpression`/`ApplyLut1d` 在编译器、直接调用及 C 声明中共享有界 parser
+与均匀域校验。前者输入 generic Float64 `[K]` (1..256)，要求有限 start、有限正 step，
+验证已解析 Float32 `[count]` (1..1048576)，输出值/轴单位 dimensionless；多样本端点
+有限且大于 start。后者接受 SampledSignal query 及 N>=2 的 SampledSignal/Lut 表，
+query 值单位匹配 table 轴单位，输出 Drop。两者 Whole，见
+[表达式与 LUT](Expression-and-LUT-Operations.zh.md)。
+
 SemanticNode/PlanStep 保留真实 output facets，C sink 向 callback 提供相同的已解析
 类型/shape/facets，并据此检查结果；typed facet 失配为 OperationFailed。Drop 移除已知
 typed 语义保证，无关 opaque generic facet 保持既有发布规则。完整约束及输出规则进入

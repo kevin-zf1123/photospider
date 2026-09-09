@@ -121,14 +121,30 @@ inline std::vector<std::string> result_keys(
             valid = false;
             break;
           }
+          hash.text("snapshot");
           hash.text(key.value());
         } else if (input.value.valid() &&
                    t.input_schema[port].kind ==
                        OperationPortKind::Float32Scalar) {
+          hash.text("bounded-scalar");
           std::uint32_t bits;
           std::memcpy(&bits, input.value.bytes().data(), 4);
           hash.integer(bits);
           contract_internal::append_facets(&hash, input.value.facets());
+        } else if (input.value.valid() && input.value.bytes().size() <= 2048 &&
+                   input_internal::whole_region(
+                       demand, input.value.descriptor().shape)) {
+          // Binding preflight proves whole dense offset-zero storage. Bound the
+          // work and hash every interpretation field plus exact sample bits.
+          hash.text("whole-direct-value");
+          const auto& descriptor = input.value.descriptor();
+          hash.integer(static_cast<std::uint32_t>(descriptor.element_type));
+          hash.integer(descriptor.shape.size());
+          for (auto extent : descriptor.shape)
+            hash.integer(extent);
+          contract_internal::append_facets(&hash, input.value.facets());
+          hash.integer(input.value.bytes().size());
+          hash.bytes(input.value.bytes().data(), input.value.bytes().size());
         } else {
           valid = false;
           break;

@@ -230,7 +230,9 @@ Result<OperationMetadata> infer_operation_output(
     case OperationSemanticRule::RgbToXyz:
     case OperationSemanticRule::XyzToRgb:
     case OperationSemanticRule::XyzToLab:
-    case OperationSemanticRule::LabToXyz: {
+    case OperationSemanticRule::LabToXyz:
+    case OperationSemanticRule::SampleExpression:
+    case OperationSemanticRule::ApplyLut1d: {
       auto transformed = contract_internal::infer_transformed_facets(
           t, inputs, parameters, result.descriptor);
       if (!transformed.ok())
@@ -352,7 +354,9 @@ Status validate_operation_contract(const OperationTraits& t) {
     case OperationSemanticRule::RgbToXyz:
     case OperationSemanticRule::XyzToRgb:
     case OperationSemanticRule::XyzToLab:
-    case OperationSemanticRule::LabToXyz: {
+    case OperationSemanticRule::LabToXyz:
+    case OperationSemanticRule::SampleExpression:
+    case OperationSemanticRule::ApplyLut1d: {
       const auto rule = t.output_semantic_rule;
       if (t.region_rule != OperationRegionRule::Whole ||
           !t.output_facets.empty() || t.output_semantic_input >= maximum ||
@@ -363,12 +367,22 @@ Status validate_operation_contract(const OperationTraits& t) {
         if (!spec(t.output_semantic_parameter, OperationParameterType::Int64))
           return invalid("extract requires an Int64 index parameter");
       } else if (rule == OperationSemanticRule::SwizzleChannels ||
-                 rule == OperationSemanticRule::MergeChannelsParameter) {
+                 rule == OperationSemanticRule::MergeChannelsParameter ||
+                 rule == OperationSemanticRule::SampleExpression ||
+                 rule == OperationSemanticRule::ApplyLut1d) {
         if (!spec(t.output_semantic_parameter, OperationParameterType::String))
           return invalid("channel transform requires a String parameter");
       } else if (!t.output_semantic_parameter.empty()) {
         return invalid("unexpected color transform parameter");
       }
+      if (rule == OperationSemanticRule::SampleExpression &&
+          (!spec("start", OperationParameterType::Float64) ||
+           !spec("step", OperationParameterType::Float64)))
+        return invalid(
+            "expression domain requires Float64 start/step parameters");
+      if (rule == OperationSemanticRule::ApplyLut1d &&
+          (maximum != 2 || t.output_semantic_input || t.repeated_maximum))
+        return invalid("LUT contract requires ordered query/table inputs");
       break;
     }
     default:

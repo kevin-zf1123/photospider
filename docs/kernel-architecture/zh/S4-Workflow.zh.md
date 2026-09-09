@@ -36,7 +36,7 @@ macOS 的 CMake MODULE 同样生成 .so，以实际路径为准。SDK 为纯 C�
 | resident-chain --backend metal --no-cache | whole 17x13：5 dispatch、4 submission、4 次输入复制共 7960 字节、结果收集复制 3536 字节、零回退、oracle=passed |
 | resident-chain --layout tiled | 4x4 tile，包含截断边缘，对 whole oracle |
 | resident-chain --layout roi | y=[2,9)、x=[3,12)，完整 RGBA，区域样本正确 |
-| all-operations | 八算子、whole/非零 ROI 分块，支持时有真实 dispatch |
+| all-operations | 八算子、whole/非零 ROI 分块，每例先清结果缓存以验证冷 dispatch，支持时有真实 dispatch |
 | cache-edits | 热运行零 dispatch/上传，gain 保留 blur，局部圆章重算少于 20 个 blur tile，无关编辑零回调，原生保留容量有界 |
 | preview-export | 9 个有序圆章、20 个固定导出 tile、最新全质量预览、3 次拒绝过期/质量降级/目标不符发布、独立输入与输出 oracle |
 | fallback | 设备关闭与数值回退保持 CPU 结果/错误，大坐标圆章覆盖精确 |

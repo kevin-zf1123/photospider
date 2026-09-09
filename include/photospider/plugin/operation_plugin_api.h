@@ -452,6 +452,15 @@ typedef struct ps_operation_semantic_constraint_v7 {
 #define PS_OPERATION_SEMANTIC_XYZ_TO_RGB_V7 10U
 #define PS_OPERATION_SEMANTIC_XYZ_TO_LAB_V7 11U
 #define PS_OPERATION_SEMANTIC_LAB_TO_XYZ_V7 12U
+/** @brief Requires start/step Float64 and an expression String parameter;
+ * generic Float64 coefficient input [K], K=1..256; Float32 output [1..1048576].
+ */
+#define PS_OPERATION_SEMANTIC_SAMPLE_EXPRESSION_V7 13U
+/** @brief Float32 Signal query + Signal/Lut [N>=2] table; parameter
+ * reject/clip. Query sample units match table axis units; output semantics are
+ * dropped.
+ */
+#define PS_OPERATION_SEMANTIC_APPLY_LUT_1D_V7 14U
 
 /** @brief Checked static extent; parameter pointer/count is null/zero when
  * unused. */
