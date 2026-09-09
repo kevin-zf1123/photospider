@@ -232,3 +232,7 @@ restore a removed domain without a new explicit breaking product decision.
   must describe the same boundary.
 - Any future proposal that reintroduces a removed domain first requires a new
   product-boundary ADR that explicitly supersedes this decision.
+
+## S3 target amendment
+
+[ADR 0018](0018-local-result-caches-and-frozen-execution.md) explicitly permits bounded disposable disk-derived data and frozen execution, and replaces the operation/trait and scaled-region target. Its acceptance does not establish implementation completion.

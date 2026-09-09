@@ -135,3 +135,7 @@ stale、清理及 context 销毁后的结果所有权。内置与安装 C 插件
 执行独立局部代码/契约审核、受影响 static/shared 安装消费验证和既有保护 CI。
 daemon 只消费安装后的公开 0.4 包，适配调用/codec，不添加协议功能；协调两仓 PR。
 不包含 OpenSpec、feedback、C++20、发布归档或无关优化。
+
+## S3 目标修订
+
+[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md) 明确允许有界可丢弃磁盘派生数据与冻结执行，并替换算子版本及缩放区域目标；接受不代表实现完成。
