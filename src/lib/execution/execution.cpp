@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "data/input_validation.hpp"
+#include "execution/disk_cache.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/result_identity.hpp"
@@ -680,6 +681,15 @@ struct ExecutionContext::Impl final {
     }
     if (requested.result_cache_bytes > requested.maximum_live_bytes)
       throw std::invalid_argument("cache limit exceeds execution budget");
+    if (requested.disk_cache) {
+      if (requested.result_cache_bytes == 0)
+        throw std::invalid_argument(
+            "disk cache requires positive result cache capacity");
+      disk = std::make_unique<execution_internal::DiskCache>(
+          *requested.disk_cache,
+          operation_registry->persistent_cache_identity(), budget,
+          requested.result_cache_bytes);
+    }
     if (requested.result_cache_bytes != 0)
       cache = std::make_unique<execution_internal::ResultCache>(
           requested.result_cache_bytes, budget,
@@ -706,6 +716,7 @@ struct ExecutionContext::Impl final {
   ThreadPool cpu_pool;
   /** @brief Optional single local GPU callback lane. */
   std::unique_ptr<ThreadPool> gpu_pool;
+  std::unique_ptr<execution_internal::DiskCache> disk;
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
 };
@@ -1776,6 +1787,17 @@ ExecutionContext::ExecutionContext(
  * @copydetails ExecutionContext::~ExecutionContext
  */
 ExecutionContext::~ExecutionContext() noexcept = default;
+void ExecutionContext::clear_disk_cache() {
+  if (impl_->disk)
+    impl_->disk->clear();
+}
+void ExecutionContext::flush_disk_cache() {
+  if (impl_->disk)
+    impl_->disk->flush();
+}
+DiskCacheStatistics ExecutionContext::disk_cache_statistics() const {
+  return impl_->disk ? impl_->disk->statistics() : DiskCacheStatistics{};
+}
 void ExecutionContext::clear_result_cache() {
   if (impl_->cache)
     impl_->cache->clear();
@@ -2083,6 +2105,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return failure(sum.status());
         bytes = sum.value();
       }
+      if (impl_->disk && impl_->budget->available() < bytes)
+        impl_->disk->drop_pending();
       if (impl_->cache)
         impl_->cache->reclaim_for(bytes);
       auto reserved = impl_->budget->reserve(bytes, stop, observation);
@@ -2123,6 +2147,14 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
             continue;
           auto hit = impl_->cache->get(keys[i]);
+          if (!hit.valid() && impl_->disk) {
+            const auto& step = tile.steps()[i];
+            hit = impl_->disk->get(keys[i], step.output_descriptor,
+                                   step.output_demand,
+                                   step.traits.output_schema.kind);
+            if (hit.valid())
+              impl_->cache->put(keys[i], hit, cache_epoch);
+          }
           if (hit.valid()) {
             tile_cached[tile.steps()[i].node_id] = std::move(hit);
             tile_backends[tile.steps()[i].node_id] = Backend::Cpu;
@@ -2231,6 +2263,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return Result<ExecutionResult>(total.status());
         working = total.value();
       }
+      if (impl_->disk && impl_->budget->available() < working)
+        impl_->disk->drop_pending();
       if (impl_->cache)
         impl_->cache->reclaim_for(working);
       auto reserved = impl_->budget->reserve(working, stop, observation);
@@ -2341,10 +2375,14 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           },
           &tile, std::move(values), cancellation, parallelism, true,
           tile_cached, tile_backends,
-          [this, keys, cache_epoch](std::size_t index, const Value& value,
-                                    Backend backend) {
+          [this, keys, cache_epoch, &tile](
+              std::size_t index, const Value& value, Backend backend) {
             if (impl_->cache && backend == Backend::Cpu && index < keys.size())
               impl_->cache->put(keys[index], value, cache_epoch);
+            if (impl_->disk && index < keys.size() &&
+                impl_->cache->epoch() == cache_epoch)
+              impl_->disk->put(keys[index], value,
+                               tile.steps()[index].traits.output_schema.kind);
           });
       return coordinator->run();
     };

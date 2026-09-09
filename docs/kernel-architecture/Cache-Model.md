@@ -35,5 +35,32 @@ Its lifetime is independent of graph replacement/destruction. Ordinary plan
 execution retains stale checks. `for_region` derives a pinned output tile.
 Custom RegionalSource callbacks must be imported before freeze.
 
-The S3 disk contract is accepted in [ADR 0018](../adr/0018-local-result-caches-and-frozen-execution.md);
-its implementation and restart acceptance remain tracked by #276.
+## Disposable disk regions
+
+An explicit `ExecutionContextConfig::disk_cache` requires positive result cache
+capacity. DiskCacheConfig sets the directory, total byte/entry limits and a
+bounded write queue. One context exclusively locks the directory. The cache
+contains only `.pscache` files named by canonical SHA-256 keys and disposable
+`.tmp` writes; unrelated names are ignored. Bytes include an active write
+reservation. Pending writes retain the original accounted immutable buffers
+and can be dropped under computation pressure.
+
+Persistent eligibility is restricted to `make_default_operation_registry()`.
+Its implementation fingerprint covers maintained source/headers, compiler,
+platform and build options. Custom and C-module registries retain process-local
+cache support but publish no persistent implementation identity. This is a
+correctness identity, not native-code trust or a security signature.
+
+The finite format stores Float32 HW masks or profiled HWC RGBA regions, a
+version, exact expected metadata and key, and SHA-256 over metadata plus packed
+little-endian sample bits. Allocation size comes from the validated plan, never
+file-supplied lengths. Header/size/hash/numeric mismatch is a disposable miss.
+Writes complete in a temporary file before rename; no durable commit/recovery
+claim is made. Write failure/queue pressure skips retention without failing the
+computed result. `flush_disk_cache()` is an explicit caller operation outside
+publication; destruction also joins the writer. `clear_disk_cache()` removes
+entries and invalidates pending write epochs.
+
+`test_disk_cache` runs separate processes for initial write, reuse, header,
+length, checksum and version corruption, deletion/rebuild, failed writes and
+strict quota/queue-pressure cases. See [ADR 0018](../adr/0018-local-result-caches-and-frozen-execution.md).
