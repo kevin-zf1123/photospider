@@ -177,6 +177,32 @@ struct PHOTOSPIDER_API ExecutionResult final {
 };
 
 /**
+ * @brief Explicitly pinned plan, immutable input snapshot and operation owner.
+ * @note Survives original graph replacement/destruction. Copies are safe for
+ * concurrent execution; default objects fail Stale. No work starts on capture.
+ */
+class PHOTOSPIDER_API FrozenExecution final {
+ public:
+  FrozenExecution() = default;
+  bool valid() const noexcept { return operations_ != nullptr; }
+  /** @brief Borrowed immutable pinned plan, valid for this object's lifetime.
+   */
+  const ExecutionPlan& plan() const noexcept { return plan_; }
+  /** @brief Derives a frozen named-output tile without recompilation.
+   * @return Pinned tile or Stale/InvalidArgument for invalid/outside demand.
+   * @throws std::bad_alloc For copied metadata.
+   */
+  Result<FrozenExecution> for_region(const std::string& output,
+                                     const Region& region) const;
+
+ private:
+  friend class ExecutionContext;
+  ExecutionPlan plan_;
+  ExecutionBindings bindings_;
+  std::shared_ptr<OperationRegistry> operations_;
+};
+
+/**
  * @brief Explicit owner of bounded local CPU/GPU execution resources.
  *
  * @note Independent contexts may run concurrently. Destruction requests stop,
@@ -284,6 +310,30 @@ class PHOTOSPIDER_API ExecutionContext final {
       const ExecutionPlan& plan, ExecutionBindings bindings,
       const ExecutionSink& sink,
       const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+
+  /**
+   * @brief Pins a current matching plan and immutable Value/snapshot bindings.
+   * @return Frozen work or Stale/typed binding validation error.
+   * @throws std::bad_alloc For snapshot metadata.
+   * @note Custom RegionalSource callbacks must first be imported into kernel
+   * snapshots. Capture rechecks graph currentness before returning. No callback
+   * executes, and frozen work never observes later edits.
+   */
+  Result<FrozenExecution> freeze(const ExecutionPlan& plan,
+                                 ExecutionBindings bindings = {}) const;
+  /** @brief Executes pinned work, independently cancellable per call.
+   * @return Named result or typed failure; callbacks retire before return.
+   * @throws std::bad_alloc For metadata allocation.
+   */
+  Result<ExecutionResult> execute(const FrozenExecution& frozen,
+                                  const CancellationToken& cancellation = {},
+                                  const ExecutionOptions& options = {});
+  /** @brief Streams pinned work under the ordinary synchronous sink contract.
+   */
+  Result<ExecutionDiagnostics> execute_stream(
+      const FrozenExecution& frozen, const ExecutionSink& sink,
+      const CancellationToken& cancellation = {},
       const ExecutionOptions& options = {});
 
   /**

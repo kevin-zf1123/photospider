@@ -1765,6 +1765,57 @@ ExecutionContext::~ExecutionContext() noexcept = default;
  * @brief Implements one bounded local execution Run.
  * @copydetails ExecutionContext::execute
  */
+Result<FrozenExecution> FrozenExecution::for_region(
+    const std::string& output, const Region& region) const {
+  if (!valid())
+    return Result<FrozenExecution>(
+        Status::failure(ErrorCode::Stale, "invalid frozen execution"));
+  auto tile = plan_.tile_plan(output, region);
+  if (!tile.ok())
+    return Result<FrozenExecution>(tile.status());
+  auto result = *this;
+  result.plan_ = tile.take_value();
+  return Result<FrozenExecution>(std::move(result));
+}
+
+Result<FrozenExecution> ExecutionContext::freeze(
+    const ExecutionPlan& plan, ExecutionBindings bindings) const {
+  if (!impl_ || !plan.current() ||
+      plan.operation_registry_.lock().get() != impl_->operation_registry.get())
+    return Result<FrozenExecution>(
+        Status::failure(ErrorCode::Stale, "invalid stale or foreign plan"));
+  for (const auto& binding : bindings.inputs)
+    if (binding.source)
+      return Result<FrozenExecution>(Status::failure(
+          ErrorCode::InvalidArgument,
+          "freeze requires immutable Values or kernel snapshots"));
+  auto validated = preflight_regional_bindings(plan, bindings, {});
+  if (!validated.ok())
+    return Result<FrozenExecution>(validated.status());
+  FrozenExecution frozen;
+  frozen.plan_ = plan;
+  frozen.bindings_ = std::move(bindings);
+  frozen.operations_ = impl_->operation_registry;
+  // The explicit owner keeps registry and input lifetimes independent of the
+  // editable graph. Ordinary plan predicates are never changed in place.
+  frozen.plan_.current_check_ = [] { return true; };
+  if (!plan.current())
+    return Result<FrozenExecution>(
+        Status::failure(ErrorCode::Stale, "graph changed during freeze"));
+  return Result<FrozenExecution>(std::move(frozen));
+}
+Result<ExecutionResult> ExecutionContext::execute(
+    const FrozenExecution& frozen, const CancellationToken& cancellation,
+    const ExecutionOptions& options) {
+  return execute(frozen.plan_, frozen.bindings_, cancellation, options);
+}
+Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
+    const FrozenExecution& frozen, const ExecutionSink& sink,
+    const CancellationToken& cancellation, const ExecutionOptions& options) {
+  return execute_stream(frozen.plan_, frozen.bindings_, sink, cancellation,
+                        options);
+}
+
 Result<ExecutionResult> ExecutionContext::execute(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
