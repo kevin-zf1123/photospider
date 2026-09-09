@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(PhotospiderRgba32fOperations VERSION 1.0.0 LANGUAGES C)
 
 if(NOT TARGET Photospider::operation_sdk)
-  find_package(Photospider 0.5 CONFIG REQUIRED COMPONENTS operation_sdk)
+  find_package(Photospider 0.6 CONFIG REQUIRED COMPONENTS operation_sdk)
 endif()
 
 add_library(photospider_rgba32f_ops MODULE image_plugin.c)

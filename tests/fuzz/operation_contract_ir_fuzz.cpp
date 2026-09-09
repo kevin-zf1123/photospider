@@ -82,7 +82,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ps::OperationTraits traits;
   traits.version = reader.next() % 6U;
   traits.output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V5);
+      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V6);
   traits.shape_rule =
       static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
   traits.region_rule =

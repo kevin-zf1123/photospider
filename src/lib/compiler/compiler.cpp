@@ -249,7 +249,7 @@ void append_declarations(
 
 /**
  * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-five semantic traits.
+ * @param traits Complete version-six semantic traits.
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
@@ -259,7 +259,7 @@ void append_declarations(
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 5U || inputs.size() != traits.input_count ||
+  if (traits.version != 6U || inputs.size() != traits.input_count ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.region_rule == OperationRegionRule::Halo &&
@@ -348,7 +348,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v5");
+  digest.text("semantic-graph-ir-v6");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -418,7 +418,7 @@ std::string physical_digest(
     const std::map<std::string, Region>& output_regions,
     std::uint64_t tile_height, std::uint64_t tile_width) {
   DigestBuilder digest;
-  digest.text("physical-plan-v5");
+  digest.text("physical-plan-v6");
   digest.integer(tile_height);
   digest.integer(tile_width);
   digest.integer(output_regions.size());
@@ -474,7 +474,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v5");
+  digest.text("plan-cache-key-v6");
   digest.text(plan);
   return digest.finish();
 }
