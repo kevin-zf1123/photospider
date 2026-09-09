@@ -36,6 +36,10 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
     std::lock_guard<std::mutex> lock(mutex_);
     return {observation->peak, observation->peak_reserved};
   }
+  std::uint64_t available() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return maximum_ - reserved_;
+  }
   std::uint64_t live() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return live_;

@@ -34,6 +34,9 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint32_t maximum_queued_tasks = 1024;
   /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
+  /** @brief Optional result retention sublimit; zero disables all cache work.
+   */
+  std::uint64_t result_cache_bytes = 0;
 };
 
 /**
@@ -125,6 +128,12 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t computed_elements = 0;
 };
 
+/** @brief Cumulative context-local cache observations, synchronized on read. */
+struct ResultCacheStatistics final {
+  std::uint64_t hits = 0, misses = 0, evictions = 0, shared_computations = 0;
+  std::uint64_t retained_bytes = 0, entries = 0, in_flight = 0;
+};
+
 /**
  * @brief Raw local execution diagnostics.
  *
@@ -151,6 +160,8 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint64_t tile_count = 0;
   /** @brief Successful regional source reads and bytes; Value bindings are
    * separate. */
+  std::uint64_t cache_hits = 0;
+  std::uint64_t shared_computations = 0;
   std::uint64_t source_read_count = 0;
   std::uint64_t source_read_bytes = 0;
   /** @brief Human-readable CPU fallback reasons in occurrence order. */
@@ -336,6 +347,13 @@ class PHOTOSPIDER_API ExecutionContext final {
       const CancellationToken& cancellation = {},
       const ExecutionOptions& options = {});
 
+  /** @brief Drops optional retained results; active readers remain valid.
+   * @note Concurrent-safe; active producers cannot refill the cleared epoch.
+   */
+  void clear_result_cache();
+  /** @brief Thread-safe cumulative optional cache statistics. */
+  ResultCacheStatistics cache_statistics() const;
+
   /**
    * @brief Returns the fixed resolved CPU worker count.
    * @return Positive worker count.
@@ -353,11 +371,11 @@ class PHOTOSPIDER_API ExecutionContext final {
   [[nodiscard]] bool gpu_enabled() const noexcept;
 
  private:
-  Result<ExecutionResult> execute_regions(const ExecutionPlan& plan,
-                                          ExecutionBindings bindings,
-                                          const ExecutionSink* sink,
-                                          const CancellationToken& cancellation,
-                                          const ExecutionOptions& options);
+  Result<ExecutionResult> execute_regions(
+      const ExecutionPlan& plan, ExecutionBindings bindings,
+      const ExecutionSink* sink, const CancellationToken& cancellation,
+      const ExecutionOptions& options, bool shared_producer = false,
+      std::uint64_t producer_epoch = UINT64_MAX);
   /** @brief Opaque pools, shared waiting admission, and resource ledger. */
   struct Impl;
   /** @brief Unique local execution ownership. */

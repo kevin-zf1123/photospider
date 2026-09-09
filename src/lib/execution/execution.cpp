@@ -26,6 +26,8 @@
 
 #include "data/input_validation.hpp"
 #include "execution/memory_budget.hpp"
+#include "execution/result_cache.hpp"
+#include "execution/result_identity.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -676,6 +678,13 @@ struct ExecutionContext::Impl final {
       throw std::invalid_argument(
           "ExecutionContext requires a frozen operation registry");
     }
+    if (requested.result_cache_bytes > requested.maximum_live_bytes)
+      throw std::invalid_argument("cache limit exceeds execution budget");
+    if (requested.result_cache_bytes != 0)
+      cache = std::make_unique<execution_internal::ResultCache>(
+          requested.result_cache_bytes, budget,
+          std::min<std::uint32_t>(cpu_worker_count, 4),
+          maximum_waiting_callbacks);
     if (gpu_available) {
       gpu_pool = std::make_unique<ThreadPool>(1U, Backend::Gpu);
     }
@@ -697,6 +706,8 @@ struct ExecutionContext::Impl final {
   ThreadPool cpu_pool;
   /** @brief Optional single local GPU callback lane. */
   std::unique_ptr<ThreadPool> gpu_pool;
+  // Destroy coordinators before callback pools and their allocation budget.
+  std::unique_ptr<execution_internal::ResultCache> cache;
 };
 
 namespace {
@@ -920,17 +931,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @throws std::bad_alloc If per-execution state allocation fails.
    * @note No callback is submitted during construction.
    */
-  ExecutionRun(ThreadPool* cpu_pool, ThreadPool* gpu_pool,
-               WaitingAdmission* waiting_admission,
-               std::shared_ptr<MemoryReservation> reservation,
-               std::function<Result<Value>(const std::string&,
-                                           const OperationInvocation&)>
-                   invoke,
-               const ExecutionPlan* plan, std::vector<Value> bindings,
-               CancellationToken cancellation,
-               std::uint32_t maximum_parallelism, bool regional = false,
-               const std::map<std::uint64_t, Value>& cached = {},
-               const std::map<std::uint64_t, Backend>& cached_backends = {})
+  ExecutionRun(
+      ThreadPool* cpu_pool, ThreadPool* gpu_pool,
+      WaitingAdmission* waiting_admission,
+      std::shared_ptr<MemoryReservation> reservation,
+      std::function<Result<Value>(const std::string&,
+                                  const OperationInvocation&)>
+          invoke,
+      const ExecutionPlan* plan, std::vector<Value> bindings,
+      CancellationToken cancellation, std::uint32_t maximum_parallelism,
+      bool regional = false, const std::map<std::uint64_t, Value>& cached = {},
+      const std::map<std::uint64_t, Backend>& cached_backends = {},
+      std::function<void(std::size_t, const Value&, Backend)> retain = {})
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
@@ -941,6 +953,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         cancellation_(std::move(cancellation)),
         maximum_parallelism_(maximum_parallelism),
         regional_(regional),
+        retain_(std::move(retain)),
         values_(plan->steps().size()),
         value_backends_(plan->steps().size(), Backend::Cpu),
         completed_(plan->steps().size(), false),
@@ -1533,6 +1546,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     }
 
     values_[step_index] = result.take_value();
+    if (retain_)
+      retain_(step_index, values_[step_index], backend);
     for (const auto& input : plan_->steps()[step_index].inputs) {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         auto& readers = remaining_readers_[producer->step_index];
@@ -1710,6 +1725,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   /** @brief Positive per-execution callback bound. */
   std::uint32_t maximum_parallelism_;
   bool regional_;
+  std::function<void(std::size_t, const Value&, Backend)> retain_;
   /** @brief Serializes every per-execution state transition. */
   std::mutex mutex_;
   /** @brief Wakes the scheduling loop after a state transition. */
@@ -1760,6 +1776,13 @@ ExecutionContext::ExecutionContext(
  * @copydetails ExecutionContext::~ExecutionContext
  */
 ExecutionContext::~ExecutionContext() noexcept = default;
+void ExecutionContext::clear_result_cache() {
+  if (impl_->cache)
+    impl_->cache->clear();
+}
+ResultCacheStatistics ExecutionContext::cache_statistics() const {
+  return impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
+}
 
 /**
  * @brief Implements one bounded local execution Run.
@@ -1938,7 +1961,8 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
 Result<ExecutionResult> ExecutionContext::execute_regions(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const ExecutionSink* sink, const CancellationToken& cancellation,
-    const ExecutionOptions& options) {
+    const ExecutionOptions& options, bool shared_producer,
+    std::uint64_t producer_epoch) {
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<ExecutionResult>(Status::failure(
@@ -1991,6 +2015,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         *into = sum.value();
         return Status::success();
       };
+      diagnostics.cache_hits += part.cache_hits;
+      diagnostics.shared_computations += part.shared_computations;
+      diagnostics.source_read_count += part.source_read_count;
+      diagnostics.source_read_bytes += part.source_read_bytes;
       auto status = add(&diagnostics.transfer_count, part.transfer_count);
       if (!status.ok())
         return status;
@@ -2041,7 +2069,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     };
     std::map<std::string, MutableValue> collected;
     std::map<std::string, std::vector<ValueFacet>> collected_facets;
-    if (!sink) {
+    std::map<std::string, Value> shared_values;
+    if (!sink && !shared_producer) {
       std::uint64_t bytes = 0;
       for (const auto& output : plan.outputs()) {
         auto size = region_bytes(plan.steps()[output.second].output_descriptor,
@@ -2053,6 +2082,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return failure(sum.status());
         bytes = sum.value();
       }
+      if (impl_->cache)
+        impl_->cache->reclaim_for(bytes);
       auto reserved = impl_->budget->reserve(bytes, stop, observation);
       if (!reserved.ok())
         return failure(reserved.status());
@@ -2075,12 +2106,66 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                                           : options.maximum_parallelism;
     const auto materialize =
         [&](const ExecutionPlan& tile) -> Result<ExecutionResult> {
-      const auto required = required_steps(tile, cached);
+      auto tile_cached = cached;
+      auto tile_backends = cached_backends;
+      std::vector<std::string> keys;
+      const auto cache_epoch = producer_epoch != UINT64_MAX
+                                   ? producer_epoch
+                                   : (impl_->cache ? impl_->cache->epoch() : 0);
+      if (impl_->cache) {
+        keys = execution_internal::result_keys(tile, snapshot);
+        std::vector<bool> needed(keys.size(), false);
+        for (const auto& output : tile.outputs())
+          needed[output.second] = true;
+        for (std::size_t reverse = keys.size(); reverse > 0; --reverse) {
+          const auto i = reverse - 1;
+          if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
+            continue;
+          auto hit = impl_->cache->get(keys[i]);
+          if (hit.valid()) {
+            tile_cached[tile.steps()[i].node_id] = std::move(hit);
+            tile_backends[tile.steps()[i].node_id] = Backend::Cpu;
+            ++diagnostics.cache_hits;
+          } else {
+            for (const auto& input : tile.steps()[i].inputs)
+              if (const auto* producer = std::get_if<PlanStepInput>(&input))
+                needed[producer->step_index] = true;
+          }
+        }
+        const auto target = tile.outputs().begin()->second;
+        if (!shared_producer && tile.outputs().size() == 1 &&
+            !keys[target].empty() &&
+            !tile_cached.count(tile.steps()[target].node_id)) {
+          // Producers own copies, never a waiting caller's stack or stop token.
+          auto pinned = tile;
+          pinned.current_check_ = [] { return true; };
+          pinned.tile_height_ = UINT64_MAX;
+          pinned.tile_width_ = UINT64_MAX;
+          auto result = impl_->cache->compute(
+              keys[target], stop,
+              [this, pinned, bindings, options,
+               cache_epoch](const CancellationToken& token) {
+                return execute_regions(pinned, bindings, nullptr, token,
+                                       options, true, cache_epoch);
+              });
+          if (result.ok() && result.value().values.begin()->first !=
+                                 tile.outputs().begin()->first) {
+            auto renamed = result.take_value();
+            auto value = renamed.values.begin()->second;
+            renamed.values.clear();
+            renamed.values.emplace(tile.outputs().begin()->first,
+                                   std::move(value));
+            return Result<ExecutionResult>(std::move(renamed));
+          }
+          return result;
+        }
+      }
+      const auto required = required_steps(tile, tile_cached);
       std::vector<std::optional<Region>> input_demands(snapshot.size());
       std::uint64_t working = 0;
       for (std::size_t i = 0; i < tile.steps().size(); ++i) {
         const auto& step = tile.steps()[i];
-        if (!required[i] || cached.count(step.node_id))
+        if (!required[i] || tile_cached.count(step.node_id))
           continue;
         auto sum = checked_add(working, step.planned_bytes);
         if (!sum.ok())
@@ -2145,6 +2230,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return Result<ExecutionResult>(total.status());
         working = total.value();
       }
+      if (impl_->cache)
+        impl_->cache->reclaim_for(working);
       auto reserved = impl_->budget->reserve(working, stop, observation);
       if (!reserved.ok())
         return Result<ExecutionResult>(reserved.status());
@@ -2251,8 +2338,13 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             return operations->invoke_current(
                 key, invocation, [&tile] { return tile.current(); });
           },
-          &tile, std::move(values), cancellation, parallelism, true, cached,
-          cached_backends);
+          &tile, std::move(values), cancellation, parallelism, true,
+          tile_cached, tile_backends,
+          [this, keys, cache_epoch](std::size_t index, const Value& value,
+                                    Backend backend) {
+            if (impl_->cache && backend == Backend::Cpu && index < keys.size())
+              impl_->cache->put(keys[index], value, cache_epoch);
+          });
       return coordinator->run();
     };
     // Materialize Whole/effect boundaries once in source-topological order.
@@ -2337,6 +2429,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           const auto& value = result.value().values.at(output.first);
           if (sink) {
             status = (*sink)(output.first, ValueView(value));
+          } else if (shared_producer) {
+            shared_values.emplace(output.first, value);
           } else {
             auto found = collected_facets.find(output.first);
             if (found == collected_facets.end())
@@ -2373,6 +2467,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     }
     cached.clear();
     ExecutionResult result;
+    result.values = std::move(shared_values);
     for (auto& output : collected) {
       auto value = std::move(output.second)
                        .publish(std::move(collected_facets.at(output.first)));
