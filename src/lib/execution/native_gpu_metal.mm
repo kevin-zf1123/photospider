@@ -100,9 +100,13 @@ Result<MutableBuffer> Device::allocate(std::uint64_t size,
                                    options:MTLResourceStorageModeShared];
     if (!owner->buffer || !owner->buffer.contents ||
         owner->buffer.allocatedSize > capacity)
-      return Result<MutableBuffer>(
-          Status::failure(ErrorCode::ResourceExhausted,
-                          "native allocation failed capacity check"));
+      return Result<MutableBuffer>(Status::failure(
+          ErrorCode::ResourceExhausted,
+          "native allocation failed capacity check: device=" +
+              std::string(impl_->device.name.UTF8String) +
+              " requested=" + std::to_string(capacity) +
+              " allocated=" + std::to_string(owner->buffer.allocatedSize) +
+              " mapped=" + std::to_string(owner->buffer.contents != nullptr)));
     storage.domain_ = std::move(domain);
     storage.native_domain_ = impl_->domain;
     storage.native_bytes_ = static_cast<std::uint8_t*>(owner->buffer.contents);
