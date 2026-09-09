@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.4.0
+  VERSION 0.5.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -364,6 +364,7 @@ if(BUILD_TESTING)
   target_include_directories(test_regional_execution PRIVATE examples)
   add_dependencies(test_regional_execution photospider_rgba32f_ops)
   target_compile_definitions(test_regional_execution PRIVATE PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
+  photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
   photospider_add_test(test_tile_plan Photospider::kernel tests/unit/test_tile_plan.cpp)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)

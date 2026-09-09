@@ -4,13 +4,13 @@
 
 /**
  * @brief Returns an intentionally unsupported operation ABI version.
- * @return Three, rejected before the v4 API lookup.
+ * @return Four, rejected before the v5 API lookup.
  * @throws Nothing.
  * @note Version validation must reject before reading an API table.
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return 3U;
+  return 4U;
 }
 
 /**
@@ -19,7 +19,7 @@ ps_operation_plugin_get_abi_version(void) {
  * @throws Nothing.
  * @note A correct host never calls this after the version mismatch.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v4*
-ps_operation_plugin_get_api_v4(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v5*
+ps_operation_plugin_get_api_v5(void) {
   return nullptr;
 }

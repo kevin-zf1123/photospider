@@ -80,20 +80,20 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ByteReader reader(data, size);
   auto operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits traits;
-  traits.version = reader.next() % 5U;
+  traits.version = reader.next() % 6U;
   traits.output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 5U) + PS_OPERATION_ELEMENT_UINT8_V4);
+      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V5);
   traits.shape_rule =
       static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
   traits.region_rule =
-      static_cast<ps::OperationRegionRule>((reader.next() % 5U) + 1U);
+      static_cast<ps::OperationRegionRule>((reader.next() % 6U) + 1U);
   traits.halo_radius = reader.next();
   if (traits.shape_rule == ps::OperationShapeRule::Fixed) {
     traits.fixed_output_shape = {
         static_cast<std::uint64_t>(reader.next() % 16U)};
   }
   bool duplicate_schema = false;
-  const std::uint8_t schema_count = reader.next() % 5U;
+  const std::uint8_t schema_count = reader.next() % 6U;
   for (std::uint8_t index = 0U; index < schema_count; ++index) {
     const std::uint8_t key_selector = reader.next() % 4U;
     const std::string key =
@@ -125,7 +125,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ps::WorkflowNode node;
   node.id = reader.next() % 2U == 0U ? 1U : 0U;
   node.operation = reader.next() % 3U == 0U ? "unknown" : "fuzz.operation";
-  const std::uint8_t parameter_count = reader.next() % 5U;
+  const std::uint8_t parameter_count = reader.next() % 6U;
   for (std::uint8_t index = 0U; index < parameter_count; ++index) {
     const std::string key = reader.next() % 2U == 0U ? "value" : "unknown";
     node.parameters.insert_or_assign(key,

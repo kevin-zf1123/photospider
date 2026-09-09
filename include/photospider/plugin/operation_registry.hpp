@@ -41,6 +41,8 @@ enum class OperationShapeRule : std::uint32_t {
    * publish a valid strided or zero-stride broadcast Value.
    */
   Fixed = 4U,
+  /** @brief Ceil-divide the first spatial input by a static factor. */
+  Shrink = 5U,
 };
 
 /** @brief Closed compiler-visible Region propagation rule. */
@@ -51,6 +53,8 @@ enum class OperationRegionRule : std::uint32_t {
   Elementwise = 2U,
   /** @brief Output Region reads an explicit symmetric input halo. */
   Halo = 3U,
+  /** @brief Map output cells to their clipped factor-sized input boxes. */
+  Shrink = 4U,
 };
 
 /** @brief Closed source-parameter type vocabulary published by an operation. */
@@ -146,7 +150,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 4U;
+  std::uint32_t version = 5U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -176,7 +180,27 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief Required bounded Int64 parameter resolving a positive spatial halo.
    */
   std::string halo_radius_parameter = {};
+  /** @brief Required bounded Int64 parameter for Shrink shape/Region rules. */
+  std::string spatial_factor_parameter = {};
+  /** @brief Resolved factor, 1..16; registry definitions must leave it one. */
+  std::uint32_t spatial_factor = 1;
 };
+
+/**
+ * @brief Maps an input edit to a conservative output dirty Region.
+ * @param traits Resolved traits from the compiled node/plan step.
+ * @param dirty Nonempty valid input edit Region.
+ * @param input_shape Complete input shape.
+ * @param output_shape Complete inferred output shape.
+ * @param kind Ordered input port kind.
+ * @return Checked output coverage or InvalidArgument/TypeMismatch.
+ * @throws std::bad_alloc For metadata or diagnostic allocation.
+ * @note Pure metadata; thread-safe. Whole/scalar changes dirty the full output.
+ */
+PHOTOSPIDER_API Result<Region> operation_dirty_region(
+    const OperationTraits& traits, const Region& dirty,
+    const std::vector<std::uint64_t>& input_shape,
+    const std::vector<std::uint64_t>& output_shape, OperationPortKind kind);
 
 /**
  * @brief Validates source parameters against one published operation schema.
@@ -328,7 +352,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v4 carries no output strides.
+   * must be densely representable because ABI v5 carries no output strides.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);

@@ -73,3 +73,7 @@ photospider.result-digest.v2，包含显式 storage origin；流式 tile 借用�
 #211 在 v4 semantic framing 中增加静态数值边界（bound flag、精确 binary64 endpoint bits）
 和带长度 halo 参数名。physical v4 包含 tile 高/宽及各排序输出名称的精确 Region；即使
 合并的 producer demand 相同，不同区域的输出别名也具有不同 physical identity。
+
+## S3 缩放契约
+
+#270 实现 package 0.5.0、OperationTraits 5 和 operation ABI 5；C++17、schema 2、provider ABI 1 保持。拒绝 0.4 软件包消费者与 ABI 4，C++ 消费者重建。新增 [1,16] 整数 box 缩小形状/区域规则及蒙版输出；静态 factor 参数名和解析值进入 v5 编译身份。运行内容身份独立。参见 ADR 0018。

@@ -190,20 +190,21 @@ Status validate_port_schema(const OperationTraits& traits) {
   if (traits.input_count > 1024 ||
       traits.input_schema.size() != traits.input_count ||
       !valid_constraint(traits.output_schema) ||
-      (traits.output_schema.kind == OperationPortKind::Float32Scalar ||
-       traits.output_schema.kind == OperationPortKind::Float32Mask)) {
+      traits.output_schema.kind == OperationPortKind::Float32Scalar) {
     return failure(ErrorCode::InvalidArgument,
                    "invalid port schema count or output");
   }
   const bool image_output = traits.output_schema.kind ==
                             OperationPortKind::LinearPremultipliedRgbaFloat32;
-  if (image_output &&
+  const bool mask_output =
+      traits.output_schema.kind == OperationPortKind::Float32Mask;
+  if ((image_output || mask_output) &&
       (traits.output_element_type != ElementType::Float32 ||
        (traits.shape_rule != OperationShapeRule::PreserveFirstInput &&
-        traits.shape_rule != OperationShapeRule::MatchAllInputs) ||
+        traits.shape_rule != OperationShapeRule::MatchAllInputs &&
+        traits.shape_rule != OperationShapeRule::Shrink) ||
        traits.input_schema.empty() ||
-       traits.input_schema.front().kind !=
-           OperationPortKind::LinearPremultipliedRgbaFloat32)) {
+       traits.input_schema.front().kind != traits.output_schema.kind)) {
     return failure(ErrorCode::InvalidArgument,
                    "image output must preserve first image");
   }
@@ -216,7 +217,8 @@ Status validate_port_schema(const OperationTraits& traits) {
            traits.shape_rule == OperationShapeRule::PreserveFirstInput))) ||
         ((port.kind == OperationPortKind::LinearPremultipliedRgbaFloat32 ||
           port.kind == OperationPortKind::Float32Mask) &&
-         traits.region_rule != OperationRegionRule::Whole && !image_output)) {
+         traits.region_rule != OperationRegionRule::Whole && !image_output &&
+         !mask_output)) {
       return failure(ErrorCode::InvalidArgument,
                      "invalid input port combination");
     }
@@ -247,8 +249,34 @@ Result<Region> derive_input_demand(
   if (kind == OperationPortKind::Float32Scalar) {
     return Result<Region>(Region::whole(input_shape));
   }
+  if (traits.region_rule == OperationRegionRule::Shrink) {
+    if (input_shape.size() < 2 || input_shape.size() != output_shape.size() ||
+        traits.spatial_factor < 1 || traits.spatial_factor > 16)
+      return Result<Region>(
+          Status::failure(ErrorCode::TypeMismatch, "invalid shrink shapes"));
+    auto dimensions = output_demand.dimensions();
+    const std::uint64_t f = traits.spatial_factor;
+    for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
+      if (axis >= 2) {
+        if (input_shape[axis] != output_shape[axis])
+          return Result<Region>(Status::failure(ErrorCode::TypeMismatch,
+                                                "shrink channel mismatch"));
+        continue;
+      }
+      const auto n = input_shape[axis];
+      if (output_shape[axis] != n / f + (n % f != 0))
+        return Result<Region>(Status::failure(ErrorCode::TypeMismatch,
+                                              "shrink dimension mismatch"));
+      const auto start = dimensions[axis].offset * f;
+      const auto end_cell = dimensions[axis].offset + dimensions[axis].extent;
+      const auto end = end_cell > n / f ? n : end_cell * f;
+      dimensions[axis] = {start, end - start};
+    }
+    return Result<Region>(Region(std::move(dimensions)));
+  }
   if (kind == OperationPortKind::Float32Mask &&
-      traits.region_rule != OperationRegionRule::Whole) {
+      traits.region_rule != OperationRegionRule::Whole &&
+      output_shape.size() == 3) {
     if (input_shape.size() != 2 || output_shape.size() != 3 ||
         input_shape[0] != output_shape[0] || input_shape[1] != output_shape[1])
       return Result<Region>(Status::failure(
@@ -259,6 +287,8 @@ Result<Region> derive_input_demand(
         input_shape, input_shape, OperationPortKind::Value);
   }
   switch (traits.region_rule) {
+    case OperationRegionRule::Shrink:
+      break;
     case OperationRegionRule::Whole:
       return Result<Region>(Region::whole(input_shape));
     case OperationRegionRule::Elementwise:
@@ -415,3 +445,43 @@ Status validate_port_value(const OperationPortConstraint& port,
   return Status::success();
 }
 }  // namespace ps::input_internal
+
+namespace ps {
+Result<Region> operation_dirty_region(
+    const OperationTraits& traits, const Region& dirty,
+    const std::vector<std::uint64_t>& input_shape,
+    const std::vector<std::uint64_t>& output_shape, OperationPortKind kind) {
+  if (dirty.empty() || !dirty.validate(input_shape).ok() ||
+      !Region::whole(output_shape).validate(output_shape).ok())
+    return Result<Region>(
+        Status::failure(ErrorCode::InvalidArgument, "invalid dirty Region"));
+  auto proof = input_internal::derive_input_demand(
+      traits, Region::whole(output_shape), output_shape, input_shape, kind);
+  if (!proof.ok())
+    return Result<Region>(proof.status());
+  if (kind == OperationPortKind::Float32Scalar ||
+      traits.region_rule == OperationRegionRule::Whole)
+    return Result<Region>(Region::whole(output_shape));
+  auto dims = dirty.dimensions();
+  if (traits.region_rule == OperationRegionRule::Shrink) {
+    const std::uint64_t f = traits.spatial_factor;
+    for (std::size_t a = 0; a < 2; ++a) {
+      const auto end = dims[a].offset + dims[a].extent;
+      const auto start = dims[a].offset / f;
+      dims[a] = {start, end / f + (end % f != 0) - start};
+    }
+  } else if (traits.region_rule == OperationRegionRule::Halo) {
+    for (std::size_t a = 0; a < dims.size(); ++a) {
+      if (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 && a == 2)
+        continue;
+      const std::uint64_t radius = traits.halo_radius;
+      const auto start = dims[a].offset > radius ? dims[a].offset - radius : 0;
+      const auto end = dims[a].offset + dims[a].extent;
+      dims[a] = {start, end + std::min(radius, input_shape[a] - end) - start};
+    }
+  }
+  if (dims.size() == 2 && output_shape.size() == 3)
+    dims.push_back({0, 4});
+  return Result<Region>(Region(std::move(dims)));
+}
+}  // namespace ps
