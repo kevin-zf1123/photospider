@@ -186,7 +186,8 @@ Status Device::execute(const std::vector<BufferView>& views,
         indexes |= 1U << b.index;
         const auto& v = views[b.token - 1];
         if (!owns(*v.storage) || b.offset > v.size || b.byte_size == 0 ||
-            b.byte_size > v.size - b.offset || (b.writable && !v.writable) ||
+            b.byte_size > v.size - b.offset ||
+            (b.writable && (!v.writable || !v.storage->native_writable_)) ||
             (v.offset + b.offset) % 4)
           return Status::failure(ErrorCode::InvalidArgument,
                                  "native view out of bounds");

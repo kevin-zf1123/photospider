@@ -41,6 +41,9 @@
 !plugins/ops/*.cpp
 !plugins/ops/rgba32f/
 !plugins/ops/rgba32f/*.c
+!plugins/ops/rgba32f/*.h
+!plugins/ops/rgba32f/*.metal
+!plugins/ops/rgba32f/*.h.in
 !plugins/ops/rgba32f/CMakeLists.txt
 
 # Maintained public-API image example and shared acceptance fixture.
@@ -49,6 +52,10 @@
 !examples/image_vertical/*.cpp
 !examples/image_vertical/*.hpp
 !examples/image_vertical/CMakeLists.txt
+!examples/s4_gpu_workflow/
+!examples/s4_gpu_workflow/*.cpp
+!examples/s4_gpu_workflow/*.hpp
+!examples/s4_gpu_workflow/CMakeLists.txt
 !examples/s3_image_workflow/
 !examples/s3_image_workflow/*.cpp
 !examples/s3_image_workflow/*.hpp

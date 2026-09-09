@@ -41,9 +41,9 @@ the consuming callback. Unread pixels are not scanned.
 ## Reusable operation package and executable example
 
 [`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
-maintained ABI4 C module `photospider_rgba32f_ops` using only
+maintained ABI6 C module `photospider_rgba32f_ops` using only
 `Photospider::operation_sdk`. It implements the same image operations and profile
-as the built-ins above, with strict floating-point compilation. The ABI4 host
+as the built-ins above, with strict floating-point compilation. The ABI6 host
 validates ports and establishes nearest/gradual-underflow arithmetic before
 entry. The callback requests its output from the host allocator and publishes that
 same buffer; success freezes it, and failure releases it without publication. Load this
@@ -107,7 +107,7 @@ exercise this path and package 0.5/rejected 0.4 requests; see
 
 ## S2 Gaussian, mask and composition
 
-The built-in registry and maintained ABI4 C package also provide:
+The built-in registry and maintained ABI6 C package also provide:
 
 | Operation | Ordered inputs | Required static parameters | Region rule |
 | --- | --- | --- | --- |
@@ -192,3 +192,44 @@ the clipped bounding ROI and applies its result as a snapshot patch.
 independent box-distribution and circle oracles, including odd sizes, edge ROIs,
 factors 1/2/4/16 and invalid scalar inputs. The reusable interactive example is
 tracked by #275/#277.
+
+## S4 native Metal implementations
+
+Package 0.6 / operation ABI 6 implements all eight operations with the same
+trusted pure C host GPU service. The built-in adapter and independently built
+C11 module share the maintained `plugins/ops/rgba32f/image.metal` program and
+host marshalling. CMake embeds shader text in a generated build header; installed
+consumers need no source-tree shader path or Objective-C++ toolchain settings.
+
+`PlanningOptions::execution_mode` defaults to `ExecutionMode::CpuExact`.
+`MetalFp32` explicitly permits the approximate native implementation;
+`ExecutionContextConfig::gpu_enabled=true` attempts actual Apple Silicon device
+creation. Unsupported builds/hardware retain per-operation CPU fallback.
+
+The native domain is conservative: image/mask samples must be zero or have
+magnitude at least 1e-20 and at most FLT_MAX/1024; mask multipliers, ordinary
+gain/opacity, and brush color/alpha use a nonzero minimum of 1e-8. Positive
+Gaussian coefficients below 1e-8 also select CPU. Logical spatial dimensions
+must fit uint32. These restrictions only select an implementation; legal values
+outside them retain the full CPU contract. Malformed inputs remain errors.
+Safe Metal math and no contraction, compensated sums and host double weights
+are checked against independent per-operation and representative-chain oracles
+with atol=1e-6 and rtol=1e-5. This is not CPU bit identity or a graph-size-independent
+error bound. Circle coverage uses host double row spans, including large logical
+coordinates; GPU color computation preserves outside pixel bits.
+
+`test_metal_images` and `test_metal_images_plugin` cover all eight operations,
+whole/tiled/nonzero ROI, radius 64, factor 16, HDR/subnormal fallback and exact
+large-coordinate stamp coverage. The public fixture is
+[`examples/s4_gpu_workflow/image_fixture.hpp`](../../examples/s4_gpu_workflow/image_fixture.hpp).
+Use Xcode's command-line validation on actual hardware:
+
+```sh
+cmake --build build/issue257-static --target test_metal_images -j 8
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static \
+  -R '^test_metal_images' --output-on-failure
+```
+
+Unavailable hardware returns an explicit CTest skip; it is not a successful
+native execution result. The image CPU implementations and prior numerical
+contracts remain the exact default.

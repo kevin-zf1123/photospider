@@ -152,3 +152,25 @@ x/y 为任意有限 Float32，radius 为正 normal Float32 至 FLT_MAX；非预�
 test_s3_operations [trusted-module] 通过公开 compile/execute 使用独立 box 分配
 和圆公式验证，覆盖奇数尺寸、边缘 ROI、因子 1/2/4/16 与无效标量。可复用交互
 示例由 #275/#277 跟踪。
+
+## S4 原生 Metal 实现
+
+package 0.6 / operation ABI 6 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
+八个算子，共用 image.metal 与参数转换。CMake 在构建目录生成 shader 字符串头；
+安装消费者不依赖源码路径或 Objective-C++ 配置。
+
+PlanningOptions::execution_mode 默认 CpuExact；显式 MetalFp32 允许近似原生实现。
+ExecutionContextConfig::gpu_enabled=true 尝试建立真实 Apple Silicon 设备；不支持时
+按算子回退 CPU。原生数值域保守：图像/mask 非零样本绝对值至少 1e-20、至多
+FLT_MAX/1024；mask 乘数、gain/opacity、圆章颜色/alpha 非零值至少 1e-8；Gaussian
+正系数低于 1e-8 回退。空间尺寸须适合 uint32。这些规则只选择实现，其他合法输入
+继续使用完整 CPU 契约，非法输入仍失败。
+
+关闭 fast-math/contraction，使用补偿累加、宿主 double 系数。每算子和代表链对独立
+oracle 的 atol=1e-6、rtol=1e-5 不构成 CPU 位相同或与图规模无关的总误差保证。
+圆章由宿主 double 行区间保持大坐标覆盖，GPU 颜色计算保留圆外像素位型。
+
+test_metal_images 与插件版本覆盖八算子、whole/tile/非零 ROI、radius 64、factor 16、
+HDR/subnormal 回退和大坐标圆章。公开 fixture 位于 examples/s4_gpu_workflow/image_fixture.hpp。
+运行对应构建目标后，以 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 执行 ctest
+-R '^test_metal_images'。无硬件明确 skip，不宣称原生验收成功。CPU 精确默认保持。

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "image_gpu.h"  // NOLINT(build/include_subdir)
 #include "photospider/plugin/operation_plugin_api.h"
 
 static const ps_operation_port_constraint_v6 ports_gain[] = {
@@ -54,6 +55,10 @@ static int execute_image(void* state, const ps_operation_value_view_v6* inputs,
                          void* cancellation_context,
                          const ps_operation_output_sink_v6* sink,
                          char* diagnostic, size_t diagnostic_capacity) {
+  if (backend == 2)
+    return ps_execute_gpu_image(state ? 1 : 0, inputs, count, parameters,
+                                parameter_count, cancelled,
+                                cancellation_context, sink);
   (void)parameters;
   (void)diagnostic;
   (void)diagnostic_capacity;
@@ -123,6 +128,12 @@ static int execute_regional(
     uint32_t backend, ps_operation_cancelled_v6 cancelled,
     void* cancellation_context, const ps_operation_output_sink_v6* sink,
     char* diagnostic, size_t diagnostic_capacity) {
+  if (backend == 2)
+    return ps_execute_gpu_image(!state                 ? 2
+                                : state == &mask_state ? 3
+                                                       : 4,
+                                inputs, count, parameters, parameter_count,
+                                cancelled, cancellation_context, sink);
   (void)diagnostic;
   (void)diagnostic_capacity;
   if (!inputs || !sink || backend != 1 || count != (state ? 2U : 1U) ||
@@ -235,6 +246,12 @@ static int execute_s3(void* state, const ps_operation_value_view_v6* inputs,
                       void* cancellation_context,
                       const ps_operation_output_sink_v6* sink, char* diagnostic,
                       size_t diagnostic_capacity) {
+  if (backend == 2)
+    return ps_execute_gpu_image(state                    ? 7
+                                : sink->output_rank == 3 ? 5
+                                                         : 6,
+                                inputs, count, parameters, parameter_count,
+                                cancelled, cancellation_context, sink);
   (void)diagnostic;
   (void)diagnostic_capacity;
   const int brush = state != NULL;
@@ -323,7 +340,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      "image.exposure_gain",
      19,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
      PS_OPERATION_ELEMENT_FLOAT32_V6,
@@ -351,7 +369,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      "image.opacity",
      13,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
      PS_OPERATION_ELEMENT_FLOAT32_V6,
@@ -379,7 +398,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      "image.gaussian_blur",
      19,
      1,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
      PS_OPERATION_ELEMENT_FLOAT32_V6,
@@ -407,7 +427,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      "image.mask",
      10,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
      PS_OPERATION_ELEMENT_FLOAT32_V6,
@@ -435,7 +456,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      "image.source_over",
      17,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
      PS_OPERATION_ELEMENT_FLOAT32_V6,
@@ -463,7 +485,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      .key = "image.downsample_box",
      .key_size = 20,
      .input_count = 1,
-     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+              PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
               PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V6,
      .shape_rule = PS_OPERATION_SHAPE_SHRINK_V6,
@@ -484,7 +507,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      .key = "mask.downsample_box",
      .key_size = 19,
      .input_count = 1,
-     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+              PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
               PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V6,
      .shape_rule = PS_OPERATION_SHAPE_SHRINK_V6,
@@ -504,7 +528,8 @@ static const ps_operation_descriptor_v6 operations[] = {
      .key = "image.brush_circle",
      .key_size = 18,
      .input_count = 8,
-     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+              PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
               PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V6,
      .shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V6,
@@ -519,6 +544,7 @@ static const ps_operation_descriptor_v6 operations[] = {
                        0, 0},
      .execute = execute_s3,
      .user_data = &brush_state,
+     .workspace_input_multiplier = 1,
      .spatial_factor_parameter = NULL,
      .spatial_factor_parameter_size = 0}};
 static void destroy(const ps_operation_descriptor_v6* records, uint32_t count) {

@@ -160,7 +160,8 @@ function(photospider_configure_kernel_target target)
     ${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
+      ${CMAKE_CURRENT_BINARY_DIR}/plugins/ops/rgba32f)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
   target_compile_definitions(${target} PRIVATE PHOTOSPIDER_BUILD)
@@ -430,6 +431,11 @@ if(BUILD_TESTING)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
   photospider_add_test(test_tile_plan Photospider::kernel tests/unit/test_tile_plan.cpp)
+  photospider_add_test(test_metal_images Photospider::kernel tests/integration/test_metal_images.cpp)
+  target_include_directories(test_metal_images PRIVATE examples)
+  add_dependencies(test_metal_images photospider_rgba32f_ops)
+  add_test(NAME test_metal_images_plugin COMMAND test_metal_images $<TARGET_FILE:photospider_rgba32f_ops>)
+  set_tests_properties(test_metal_images test_metal_images_plugin PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_gpu photospider_test_kernel tests/unit/test_native_gpu.cpp)
