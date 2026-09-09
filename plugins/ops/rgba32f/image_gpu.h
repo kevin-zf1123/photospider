@@ -77,7 +77,8 @@ static int ps_execute_gpu_image(
         v->shape[1] > UINT32_MAX)
       return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6;
     for (uint32_t axis = 0; axis < v->rank; ++axis)
-      if (v->byte_strides[axis] < 0 || v->byte_strides[axis] % 4)
+      if (v->byte_strides[axis] < 0 || v->byte_strides[axis] % 4 ||
+          v->storage_origin[axis] > v->demand_offsets[axis])
         return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6;
     for (uint64_t y = v->demand_offsets[0];
          y < v->demand_offsets[0] + v->demand_extents[0]; ++y) {

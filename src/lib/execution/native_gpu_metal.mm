@@ -45,6 +45,14 @@ std::shared_ptr<Device> Device::create() {
     if (!device || !device.hasUnifiedMemory ||
         ![device supportsFamily:MTLGPUFamilyApple1])
       return {};
+    // A device can expose Apple-family shared memory while rounding even tiny
+    // buffers to full pages (for example Apple's paravirtual device). S4 plans
+    // require exact small-buffer capacity; probe that prerequisite before
+    // advertising native availability, retaining CPU fallback otherwise.
+    id<MTLBuffer> probe =
+        [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    if (!probe || !probe.contents || probe.allocatedSize > 4)
+      return {};
     auto impl = std::make_unique<Impl>();
     impl->device = device;
     impl->queue = [device newCommandQueue];

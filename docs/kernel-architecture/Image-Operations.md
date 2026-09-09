@@ -211,7 +211,9 @@ magnitude at least 1e-20 and at most FLT_MAX/1024; mask multipliers, ordinary
 gain/opacity, and brush color/alpha use a nonzero minimum of 1e-8. Positive
 Gaussian coefficients below 1e-8 also select CPU. Logical spatial dimensions
 must fit uint32; native views need nonnegative strides and four-byte-aligned
-byte offsets/strides. Unaligned native predecessors fall back per invocation.
+byte offsets/strides. Storage origins must not exceed demand offsets on any
+axis (the image channel origin is zero). Other legal native predecessors fall
+back per invocation.
 These restrictions only select an implementation; legal values
 outside them retain the full CPU contract. Malformed inputs remain errors.
 Safe Metal math and no contraction, compensated sums and host double weights

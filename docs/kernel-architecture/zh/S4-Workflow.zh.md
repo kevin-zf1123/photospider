@@ -71,3 +71,8 @@ Capture 是按问题选择的调试工具，不自动生成交付 artifact。
 每个 context 一个原生队列，包含取消在内均在退役前等待已提交工作结束。
 S4 仍逐算子等待并由 CPU 验证共享像素；减少这些成本、device-private storage、
 其他后端和实测自动选址留到后续工作。
+
+原生可用性包含 shared buffer 容量探针。S4 要求小 buffer 实际容量等于请求、较大
+分配符合页面容量界限；其他分配模型走 CPU 回退。例如 macOS CI 的 Apple Paravirtual
+设备对 3536 字节请求实际分配 16384 字节。其硬件用例在检查 CPU 回退后明确跳过；
+真实 M5 dispatch 仍是原生验收依据。CPU 回退通过不表示支持这种不同的原生分配模型。

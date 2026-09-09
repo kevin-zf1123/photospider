@@ -164,7 +164,8 @@ ExecutionContextConfig::gpu_enabled=true 尝试建立真实 Apple Silicon 设备
 按算子回退 CPU。原生数值域保守：图像/mask 非零样本绝对值至少 1e-20、至多
 FLT_MAX/1024；mask 乘数、gain/opacity、圆章颜色/alpha 非零值至少 1e-8；Gaussian
 正系数低于 1e-8 回退。空间尺寸须适合 uint32；原生视图须有非负步长，byte offset
-与步长须按四字节对齐。非对齐原生前驱按次调用回退。这些规则只选择实现，其他合法输入
+与步长须按四字节对齐，各轴 storage origin 不得超过 demand offset（图像通道 origin
+为零）。其他合法原生前驱按次调用回退。这些规则只选择实现，其他合法输入
 继续使用完整 CPU 契约，非法输入仍失败。
 
 关闭 fast-math/contraction，使用补偿累加、宿主 double 系数。每算子和代表链对独立

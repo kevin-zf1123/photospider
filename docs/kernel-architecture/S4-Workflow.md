@@ -115,3 +115,11 @@ Each context has one native queue and drains submitted work before retirement,
 including cancellation. S4 still waits per operation and validates shared pixels
 on the CPU. Reducing those costs, device-private resources, additional backends
 and measured automatic placement remain later work.
+
+Native availability includes a shared-buffer capacity probe. S4 requires exact
+small-buffer capacity and page-bounded larger allocations. Devices with a
+different allocation model use CPU fallback: the macOS CI Apple Paravirtual
+device, for example, allocates 16384 bytes for a 3536-byte request. Its hardware
+cases explicitly skip after fallback checks; real M5 dispatches remain the
+native acceptance evidence. Supporting that different allocation model is not
+claimed by a successful CPU fallback.
