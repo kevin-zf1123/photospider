@@ -226,6 +226,97 @@ static int execute_regional(
              : PS_OPERATION_RESULT_FAILURE_V5;
 }
 
+/* S3 callbacks use only host-validated region views and host output buffers. */
+static int execute_s3(void* state, const ps_operation_value_view_v5* inputs,
+                      uint32_t count,
+                      const ps_operation_parameter_value_v5* parameters,
+                      uint32_t parameter_count, uint32_t backend,
+                      ps_operation_cancelled_v5 cancelled,
+                      void* cancellation_context,
+                      const ps_operation_output_sink_v5* sink, char* diagnostic,
+                      size_t diagnostic_capacity) {
+  (void)diagnostic;
+  (void)diagnostic_capacity;
+  const int brush = state != NULL;
+  if (!inputs || !sink || backend != 1 || count != (brush ? 8U : 1U) ||
+      parameter_count != (brush ? 0U : 1U))
+    return PS_OPERATION_RESULT_FAILURE_V5;
+  uint8_t* output = sink->allocate_output(sink->context);
+  if (!output)
+    return PS_OPERATION_RESULT_FAILURE_V5;
+  const uint64_t channels = sink->output_rank == 3 ? 4 : 1;
+  const uint64_t factor = brush ? 1 : (uint64_t)parameters[0].int64_value;
+  float args[7] = {0};
+  if (brush) {
+    for (uint32_t i = 0; i < 7; ++i)
+      memcpy(&args[i], inputs[i + 1].data + inputs[i + 1].byte_offset, 4);
+  }
+  size_t target = 0;
+  for (uint64_t y = sink->output_offsets[0];
+       y < sink->output_offsets[0] + sink->output_extents[0]; ++y) {
+    if (cancelled && cancelled(cancellation_context))
+      return PS_OPERATION_RESULT_CANCELLED_V5;
+    for (uint64_t x = sink->output_offsets[1];
+         x < sink->output_offsets[1] + sink->output_extents[1]; ++x) {
+      const double dx = (double)x + .5 - args[0], dy = (double)y + .5 - args[1];
+      const int inside =
+          brush && dx * dx + dy * dy <= (double)args[2] * args[2];
+      const uint64_t y0 = y * factor, x0 = x * factor;
+      const uint64_t h =
+          factor < inputs[0].shape[0] - y0 ? factor : inputs[0].shape[0] - y0;
+      const uint64_t w =
+          factor < inputs[0].shape[1] - x0 ? factor : inputs[0].shape[1] - x0;
+      for (uint64_t c = 0; c < channels; ++c) {
+        float number;
+        if (brush) {
+          number = sample(&inputs[0], y, x, c);
+          if (inside) {
+            const float source = c == 3 ? args[6] : args[3 + c] * args[6];
+            const float back = number * (1.0F - args[6]);
+            number = source + back;
+          }
+        } else {
+          double sum = 0;
+          for (uint64_t row = y0; row < y0 + h; ++row)
+            for (uint64_t col = x0; col < x0 + w; ++col)
+              sum += sample(&inputs[0], row, col, c);
+          number = (float)(sum / (double)(h * w));
+        }
+        memcpy(output + target, &number, 4);
+        target += 4;
+      }
+    }
+  }
+  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V5,
+                       sink->output_shape, sink->output_rank, inputs[0].facets,
+                       inputs[0].facet_count, output, sink->output_byte_size)
+             ? PS_OPERATION_RESULT_SUCCESS_V5
+             : PS_OPERATION_RESULT_FAILURE_V5;
+}
+static const ps_operation_port_constraint_v5 ports_mask_only[] = {
+    {sizeof(ps_operation_port_constraint_v5), PS_OPERATION_PORT_FLOAT32_MASK_V5,
+     0, 0}};
+static const ps_operation_port_constraint_v5 ports_brush[] = {
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0xff7fffffU, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0xff7fffffU, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0x00800000U, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v5),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x3f800000U}};
+static const ps_operation_parameter_descriptor_v5 shrink_parameters[] = {
+    {sizeof(ps_operation_parameter_descriptor_v5), "factor", 6,
+     PS_OPERATION_PARAMETER_INT64_V5, 1, 1, 1, 16}};
+static int brush_state;
 static int opacity_state;
 static const ps_operation_descriptor_v5 operations[] = {
     {sizeof(ps_operation_descriptor_v5),
@@ -367,13 +458,76 @@ static const ps_operation_descriptor_v5 operations[] = {
      NULL,
      0,
      NULL,
-     0}};
+     0},
+    {.struct_size = sizeof(ps_operation_descriptor_v5),
+     .key = "image.downsample_box",
+     .key_size = 20,
+     .input_count = 1,
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+              PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
+     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V5,
+     .shape_rule = PS_OPERATION_SHAPE_SHRINK_V5,
+     .region_rule = PS_OPERATION_REGION_SHRINK_V5,
+     .cacheable = 1,
+     .parameter_count = 1,
+     .parameters = shrink_parameters,
+     .input_schema_count = 1,
+     .input_schema = ports_image,
+     .output_schema = {sizeof(ps_operation_port_constraint_v5),
+                       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5,
+                       0, 0},
+     .execute = execute_s3,
+     .user_data = NULL,
+     .spatial_factor_parameter = "factor",
+     .spatial_factor_parameter_size = 6},
+    {.struct_size = sizeof(ps_operation_descriptor_v5),
+     .key = "mask.downsample_box",
+     .key_size = 19,
+     .input_count = 1,
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+              PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
+     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V5,
+     .shape_rule = PS_OPERATION_SHAPE_SHRINK_V5,
+     .region_rule = PS_OPERATION_REGION_SHRINK_V5,
+     .cacheable = 1,
+     .parameter_count = 1,
+     .parameters = shrink_parameters,
+     .input_schema_count = 1,
+     .input_schema = ports_mask_only,
+     .output_schema = {sizeof(ps_operation_port_constraint_v5),
+                       PS_OPERATION_PORT_FLOAT32_MASK_V5, 0, 0},
+     .execute = execute_s3,
+     .user_data = NULL,
+     .spatial_factor_parameter = "factor",
+     .spatial_factor_parameter_size = 6},
+    {.struct_size = sizeof(ps_operation_descriptor_v5),
+     .key = "image.brush_circle",
+     .key_size = 18,
+     .input_count = 8,
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+              PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
+     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V5,
+     .shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V5,
+     .region_rule = PS_OPERATION_REGION_ELEMENTWISE_V5,
+     .cacheable = 1,
+     .parameter_count = 0,
+     .parameters = NULL,
+     .input_schema_count = 8,
+     .input_schema = ports_brush,
+     .output_schema = {sizeof(ps_operation_port_constraint_v5),
+                       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5,
+                       0, 0},
+     .execute = execute_s3,
+     .user_data = &brush_state,
+     .spatial_factor_parameter = NULL,
+     .spatial_factor_parameter_size = 0}};
 static void destroy(const ps_operation_descriptor_v5* records, uint32_t count) {
   (void)records;
   (void)count;
 }
 static const ps_operation_plugin_api_v5 api = {
-    sizeof(ps_operation_plugin_api_v5), 5, operations, destroy};
+    sizeof(ps_operation_plugin_api_v5),
+    sizeof(operations) / sizeof(operations[0]), operations, destroy};
 PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void) {
   return PS_OPERATION_ABI_VERSION_5;
 }
