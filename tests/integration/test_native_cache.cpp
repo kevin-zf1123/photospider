@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "photospider/photospider.hpp"
 #include "s4_gpu_workflow/image_fixture.hpp"
@@ -119,6 +121,92 @@ void sharing(const std::shared_ptr<ps::OperationRegistry>& base) {
   s3::require(execution.execute(plan, scene.bindings).ok(),
               "context did not recover after cancellation");
 }
+/** @brief A GPU Whole boundary must carry its CPU fallback ancestry to tiles.
+ */
+void whole_fallback(const std::shared_ptr<ps::OperationRegistry>& base) {
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  auto gain = base->find_traits("image.exposure_gain").take_value();
+  s3::require(registry
+                  ->register_operation(
+                      {"test.fallback", gain,
+                       [base](const ps::OperationInvocation& call) {
+                         if (call.backend == ps::Backend::Gpu)
+                           return ps::Result<ps::Value>(ps::Status::failure(
+                               ps::ErrorCode::BackendUnavailable,
+                               "intentional native fallback"));
+                         return base->invoke("image.exposure_gain", call);
+                       }})
+                  .ok(),
+              "fallback registration");
+  auto whole = base->find_traits("image.opacity").take_value();
+  whole.region_rule = ps::OperationRegionRule::Whole;
+  s3::require(
+      registry
+          ->register_operation({"test.whole", whole,
+                                [base](const ps::OperationInvocation& call) {
+                                  return base->invoke("image.opacity", call);
+                                }})
+          .ok(),
+      "whole registration");
+  s3::require(registry
+                  ->register_operation(
+                      {"test.final", gain,
+                       [base](const ps::OperationInvocation& call) {
+                         return base->invoke("image.exposure_gain", call);
+                       }})
+                  .ok(),
+              "final registration");
+  s3::require(registry->freeze().ok(), "whole fallback freeze");
+  auto image = s1_fixture::value(std::vector<float>(4 * 4 * 4, .5F), {4, 4, 4});
+  auto factor = s1_fixture::scalar(.5F);
+  ps::WorkflowDocument document;
+  document.inputs = {s1_fixture::declaration(1, "image", image),
+                     s1_fixture::declaration(2, "factor", factor)};
+  document.nodes = {
+      {1,
+       "test.fallback",
+       {ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2}},
+       {}},
+      {2,
+       "test.whole",
+       {ps::WorkflowNodeOutput{1, "value"}, ps::WorkflowInputReference{2}},
+       {}},
+      {3,
+       "test.final",
+       {ps::WorkflowNodeOutput{2, "value"}, ps::WorkflowInputReference{2}},
+       {}}};
+  document.outputs = {{"result", 3, "value"}};
+  ps::GraphContext graph(document);
+  ps::PlanningOptions planning;
+  planning.execution_mode = ps::ExecutionMode::MetalFp32;
+  planning.tile_height = planning.tile_width = 2;
+  auto plan = s3::take(ps::Compiler(registry).compile(graph, planning)).plan;
+  ps::InputSnapshotStore store;
+  auto snapshot =
+      std::make_shared<ps::InputSnapshot>(s3::take(store.import_value(image)));
+  ps::ExecutionBindings bindings{
+      {{"image", {}, {}, snapshot}, {"factor", factor}}};
+  ps::ExecutionContext context(registry,
+                               s4::config(ps::ExecutionMode::MetalFp32));
+  for (int run = 0; run < 2; ++run) {
+    auto result = s3::take(context.execute(plan, bindings));
+    unsigned final_calls = 0;
+    for (const auto& timing : result.diagnostics.operation_timings)
+      if (timing.node_id == 3)
+        final_calls += timing.invocation_count;
+    s3::require(final_calls == 4 && result.diagnostics.cache_hits == 0 &&
+                    result.diagnostics.fallback_reasons.size() == 1 &&
+                    result.diagnostics.native_dispatch_count == 5,
+                "Whole fallback ancestry entered Metal result cache");
+    const auto& value = result.values.at("result");
+    for (std::size_t offset = 0; offset < value.bytes().size(); offset += 4) {
+      float actual;
+      std::memcpy(&actual, value.bytes().data() + offset, 4);
+      s3::require(actual == (offset % 16 == 12 ? .25F : .0625F),
+                  "Whole fallback oracle mismatch");
+    }
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -132,6 +220,7 @@ int main(int argc, char** argv) {
     if (!s4::cache_edits(registry, ps::ExecutionMode::MetalFp32))
       return 77;
     sharing(registry);
+    whole_fallback(registry);
     if (!registry->persistent_cache_identity().empty()) {
       const auto directory =
           std::filesystem::temp_directory_path() /

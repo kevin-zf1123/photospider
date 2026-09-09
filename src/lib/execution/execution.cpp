@@ -670,12 +670,16 @@ std::string upload_view_key(const Value& value) {
   std::ostringstream key;
   key << value.storage().get() << ':' << value.layout().byte_offset << ':'
       << static_cast<unsigned>(value.descriptor().element_type);
+  key << ':' << value.descriptor().shape.size();
   for (auto n : value.descriptor().shape)
     key << ':' << n;
+  key << ':' << value.layout().origin.size();
   for (auto n : value.layout().origin)
     key << ':' << n;
+  key << ':' << value.layout().byte_strides.size();
   for (auto n : value.layout().byte_strides)
     key << ':' << n;
+  key << ':' << value.region().rank();
   for (auto d : value.region().dimensions())
     key << ':' << d.offset << ':' << d.extent;
   return key.str();
@@ -1523,7 +1527,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (native_device_) {
           const auto found = native_inputs_.find(key);
           if (found != native_inputs_.end()) {
-            inputs[input_index] = found->second.second;
+            // Reuse bytes, not semantic metadata: Values sharing an allocation
+            // and layout may carry different valid facets in this same Run.
+            const auto& uploaded = found->second.second;
+            auto reused = Value::from_storage(
+                uploaded.descriptor(), uploaded.region(), uploaded.layout(),
+                uploaded.storage(), inputs[input_index].facets());
+            if (!reused.ok()) {
+              finish_failure(reused.status());
+              return;
+            }
+            inputs[input_index] = reused.take_value();
             continue;
           }
         }
@@ -2256,6 +2270,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         std::make_shared<execution_internal::MemoryObservation>();
     std::map<std::uint64_t, Value> cached;
     std::map<std::uint64_t, Backend> cached_backends;
+    // Whole values survive separate materializations within this Run. Their
+    // actual backend alone cannot describe fallback ancestry/cache eligibility.
+    std::set<std::uint64_t> uncacheable_whole;
     ExecutionDiagnostics diagnostics;
     diagnostics.plan_digest = plan.digest().value;
     if (impl_->cache && impl_->native_device &&
@@ -2634,6 +2651,16 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             impl_->native_device && impl_->native_device->available()
                 ? impl_->native_device->identity()
                 : std::string{});
+        // Invalidate before lookup: a cached Whole value may be GPU-backed
+        // while still derived from a CPU fallback earlier in this Run.
+        for (std::size_t i = 0; i < tile.steps().size(); ++i) {
+          if (uncacheable_whole.count(tile.steps()[i].node_id))
+            keys[i].clear();
+          for (const auto& source : tile.steps()[i].inputs)
+            if (const auto* producer = std::get_if<PlanStepInput>(&source))
+              if (keys[producer->step_index].empty())
+                keys[i].clear();
+        }
         std::vector<bool> needed(keys.size(), false);
         for (const auto& output : tile.outputs())
           needed[output.second] = true;
@@ -2727,6 +2754,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             tile_backends.erase(tile.steps()[j].node_id);
           }
       }
+      for (const auto& output : tile.outputs())
+        if (tile.steps()[output.second].whole_boundary &&
+            keys[output.second].empty())
+          uncacheable_whole.insert(tile.steps()[output.second].node_id);
       ExecutionResult result;
       for (const auto& output : tile.outputs())
         result.values.emplace(

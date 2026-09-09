@@ -213,7 +213,9 @@ typedef struct ps_gpu_buffer_binding_v6 {
   uint32_t index;
   /** @brief Nonzero token returned by this invocation's buffer service. */
   uint64_t token;
-  /** @brief Byte offset relative to the acquired view, with 4-byte alignment.
+  /** @brief Byte offset relative to the acquired view.
+   * @note The resulting offset into the underlying buffer must align to 4
+   * bytes.
    */
   uint64_t offset;
   /** @brief Positive accessible byte count within the acquired view. */

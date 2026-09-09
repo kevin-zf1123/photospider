@@ -17,7 +17,7 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
     return ps::Result<ps::Value>(allocated.status());
   auto output = allocated.take_value();
   if (call.backend == ps::Backend::Cpu) {
-    for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < output.size() / 4; ++i) {
       float number;
       std::memcpy(&number, call.inputs[0].bytes().data() + i * 4, 4);
       number *= .5F;
@@ -34,14 +34,15 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::BackendUnavailable, "no native service"));
     std::uint64_t input = 0, result = 0;
-    if (api->buffer(api->context, call.inputs[0].bytes().data(), 16, 0,
-                    &input) ||
-        api->buffer(api->context, output.data(), 16, 1, &result))
+    if (api->buffer(api->context, call.inputs[0].bytes().data(),
+                    call.inputs[0].bytes().size(), 0, &input) ||
+        api->buffer(api->context, output.data(), output.size(), 1, &result))
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::OperationFailed, "native binding failed"));
     ps_gpu_buffer_binding_v6 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v6), 0, input, 0, 16, 0},
-        {sizeof(ps_gpu_buffer_binding_v6), 1, result, 0, 16, 1}};
+        {sizeof(ps_gpu_buffer_binding_v6), 0, input, 0,
+         call.inputs[0].bytes().size(), 0},
+        {sizeof(ps_gpu_buffer_binding_v6), 1, result, 0, output.size(), 1}};
     ps_gpu_dispatch_v6 command{};
     command.struct_size = sizeof(command);
     command.source = source;
@@ -50,13 +51,13 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
     command.entry_size = 5;
     command.buffers = buffers;
     command.buffer_count = 2;
-    command.grid[0] = 4;
+    command.grid[0] = output.size() / 4;
     command.grid[1] = command.grid[2] = 1;
     if (api->execute(api->context, &command, 1))
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::OperationFailed, "native execution failed"));
   }
-  return std::move(output).publish();
+  return std::move(output).publish(call.inputs[0].facets());
 }
 }  // namespace
 
@@ -169,6 +170,93 @@ int main() {
     PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
     PS_CHECK(bounded.cache_statistics().retained_bytes == 16);
   }
+  // One uploaded allocation can back two Values with distinct semantic facets.
+  auto first = ps::Value::from_storage(value.descriptor(), value.region(),
+                                       value.layout(), value.storage(),
+                                       {{"variant", 1, {1}}})
+                   .take_value();
+  auto second = ps::Value::from_storage(value.descriptor(), value.region(),
+                                        value.layout(), value.storage(),
+                                        {{"variant", 1, {2}}})
+                    .take_value();
+  document.inputs = {{1, "first", first.descriptor(), first.region(),
+                      first.layout(), first.facets()},
+                     {2, "second", second.descriptor(), second.region(),
+                      second.layout(), second.facets()}};
+  document.nodes = {{1, "native.scale", {ps::WorkflowInputReference{1}}, {}},
+                    {2, "native.scale", {ps::WorkflowInputReference{2}}, {}}};
+  document.outputs = {{"first", 1, "value"}, {"second", 2, "value"}};
+  ps::GraphContext facets_graph(document);
+  auto facets_plan = ps::Compiler(registry).compile(facets_graph, options);
+  PS_CHECK(facets_plan.ok());
+  config.maximum_live_bytes = 4096;
+  config.result_cache_bytes = 0;
+  ps::ExecutionContext facets_context(registry, config);
+  auto facets_result = facets_context.execute(
+      facets_plan.value().plan, {{{"first", first}, {"second", second}}});
+  PS_CHECK(facets_result.ok());
+  PS_CHECK(facets_result.value().diagnostics.transfer_count == 1);
+  PS_CHECK(facets_result.value().values.at("first").facets()[0].payload[0] ==
+           1);
+  PS_CHECK(facets_result.value().values.at("second").facets()[0].payload[0] ==
+           2);
+  // Length prefixes prevent shape/origin/stride field-boundary collisions.
+  auto rank_five =
+      ps::Value::from_storage({ps::ElementType::Float32, {1, 1, 1, 1, 1}},
+                              ps::Region::whole({1, 1, 1, 1, 1}),
+                              {0, {0, 0, 0, 0, 0}}, value.storage())
+          .take_value();
+  auto rank_four =
+      ps::Value::from_storage({ps::ElementType::Float32, {1, 1, 1, 1}},
+                              ps::Region::whole({1, 1, 1, 1}),
+                              {0, {0, 0, 0, 1}, {1, 0, 0, 0}}, value.storage())
+          .take_value();
+  auto ranks_registry = std::make_shared<ps::OperationRegistry>();
+  auto source_traits = ps::OperationTraits{};
+  source_traits.estimated_bytes = value.storage()->capacity();
+  source_traits.output_element_type = ps::ElementType::Float32;
+  source_traits.shape_rule = ps::OperationShapeRule::Fixed;
+  source_traits.fixed_output_shape = rank_five.descriptor().shape;
+  PS_CHECK(
+      ranks_registry
+          ->register_operation({"source.five", source_traits,
+                                [rank_five](const ps::OperationInvocation&) {
+                                  return ps::Result<ps::Value>(rank_five);
+                                }})
+          .ok());
+  source_traits.fixed_output_shape = rank_four.descriptor().shape;
+  PS_CHECK(
+      ranks_registry
+          ->register_operation({"source.four", source_traits,
+                                [rank_four](const ps::OperationInvocation&) {
+                                  return ps::Result<ps::Value>(rank_four);
+                                }})
+          .ok());
+  PS_CHECK(ranks_registry
+               ->register_operation(
+                   {"native.scale",
+                    registry->find_traits("native.scale").take_value(), scale})
+               .ok());
+  PS_CHECK(ranks_registry->freeze().ok());
+  document.inputs.clear();
+  document.nodes = {
+      {1, "source.five", {}, {}},
+      {2, "source.four", {}, {}},
+      {3, "native.scale", {ps::WorkflowNodeOutput{1, "value"}}, {}},
+      {4, "native.scale", {ps::WorkflowNodeOutput{2, "value"}}, {}}};
+  document.outputs = {{"first", 3, "value"}, {"second", 4, "value"}};
+  ps::GraphContext ranks_graph(document);
+  auto ranks_plan = ps::Compiler(ranks_registry).compile(ranks_graph, options);
+  PS_CHECK(ranks_plan.ok());
+  ps::ExecutionContext ranks_context(ranks_registry, config);
+  auto ranks_result = ranks_context.execute(ranks_plan.value().plan, {});
+  if (!ranks_result.ok())
+    std::cerr << ranks_result.status().message << '\n';
+  PS_CHECK(ranks_result.ok());
+  PS_CHECK(ranks_result.value().values.at("first").descriptor().shape.size() ==
+           5);
+  PS_CHECK(ranks_result.value().values.at("second").descriptor().shape.size() ==
+           4);
   std::cout << "native chain: dispatches=2 uploads=1 bytes=16 host_access=1 "
                "oracle=passed\n";
   return 0;

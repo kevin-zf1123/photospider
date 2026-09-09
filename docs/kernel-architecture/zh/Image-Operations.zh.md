@@ -37,8 +37,8 @@ profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/
 ## 可复用算子包与可执行示例
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
-`Photospider::operation_sdk` 构建受维护的 ABI4 C module `photospider_rgba32f_ops`。
-它实现相同图像算子和 profile，使用严格浮点编译选项。ABI4 host 在进入 callback
+`Photospider::operation_sdk` 构建受维护的 ABI6 C module `photospider_rgba32f_ops`。
+它实现相同图像算子和 profile，使用严格浮点编译选项。ABI6 host 在进入 callback
 之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 向宿主申请输出并发布同一 buffer；成功后冻结为只读，失败时释放且不发布。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
 
@@ -90,7 +90,7 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 
 ## S2 Gaussian、蒙版与合成
 
-默认 registry 和受维护 ABI4 C 包还提供：
+默认 registry 和受维护 ABI6 C 包还提供：
 
 | Operation | 有序输入 | 必填静态参数 | Region 规则 |
 | --- | --- | --- | --- |
