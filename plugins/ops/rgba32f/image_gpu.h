@@ -206,6 +206,8 @@ static int ps_execute_gpu_image(
     return code;
   for (uint64_t offset = 0; offset < sink->output_byte_size;
        offset += p.geometry[4] * 4) {
+    if ((offset % 4096) == 0 && cancelled && cancelled(cancellation_context))
+      return PS_OPERATION_RESULT_CANCELLED_V6;
     float pixel[4] = {0};
     memcpy(pixel, output + offset, p.geometry[4] * 4);
     for (uint64_t c = 0; c < p.geometry[4]; ++c)
