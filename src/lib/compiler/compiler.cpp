@@ -173,6 +173,8 @@ void append_traits(DigestBuilder* digest,
   digest->integer(static_cast<std::uint32_t>(traits.region_rule));
   digest->integer(traits.halo_radius);
   digest->text(traits.halo_radius_parameter);
+  digest->text(traits.spatial_factor_parameter);
+  digest->integer(traits.spatial_factor);
   digest->integer(traits.parameter_schema.size());
   for (const OperationParameterSpec& parameter : traits.parameter_schema) {
     digest->text(parameter.key);
@@ -247,7 +249,7 @@ void append_declarations(
 
 /**
  * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-four semantic traits.
+ * @param traits Complete version-five semantic traits.
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
@@ -257,7 +259,7 @@ void append_declarations(
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 4U || inputs.size() != traits.input_count ||
+  if (traits.version != 5U || inputs.size() != traits.input_count ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.region_rule == OperationRegionRule::Halo &&
@@ -276,6 +278,18 @@ Result<ValueDescriptor> infer_output_descriptor(
                         "operation semantic output element type is unknown"));
   }
   switch (traits.shape_rule) {
+    case OperationShapeRule::Shrink: {
+      if (inputs.empty() || inputs.front().shape.size() < 2 ||
+          traits.spatial_factor < 1 || traits.spatial_factor > 16)
+        return Result<ValueDescriptor>(
+            Status::failure(ErrorCode::TypeMismatch, "invalid shrink input"));
+      auto output = inputs.front();
+      for (std::size_t axis = 0; axis < 2; ++axis) {
+        const std::uint64_t n = output.shape[axis], f = traits.spatial_factor;
+        output.shape[axis] = n / f + (n % f != 0);
+      }
+      return Result<ValueDescriptor>(std::move(output));
+    }
     case OperationShapeRule::Scalar:
       return Result<ValueDescriptor>(
           ValueDescriptor{traits.output_element_type, {1U}});
@@ -334,7 +348,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v4");
+  digest.text("semantic-graph-ir-v5");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -382,7 +396,7 @@ std::string optimized_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("optimizer-v4-canonical-noop");
+  digest.text("optimizer-v5-canonical-noop");
   digest.text(semantic);
   digest.text(semantic_digest(nodes, outputs, declarations));
   return digest.finish();
@@ -404,7 +418,7 @@ std::string physical_digest(
     const std::map<std::string, Region>& output_regions,
     std::uint64_t tile_height, std::uint64_t tile_width) {
   DigestBuilder digest;
-  digest.text("physical-plan-v4");
+  digest.text("physical-plan-v5");
   digest.integer(tile_height);
   digest.integer(tile_width);
   digest.integer(output_regions.size());
@@ -460,7 +474,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v4");
+  digest.text("plan-cache-key-v5");
   digest.text(plan);
   return digest.finish();
 }
@@ -803,6 +817,10 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       node.traits.halo_radius =
           static_cast<std::uint32_t>(std::get<std::int64_t>(
               node.parameters.at(node.traits.halo_radius_parameter)));
+    if (!node.traits.spatial_factor_parameter.empty())
+      node.traits.spatial_factor =
+          static_cast<std::uint32_t>(std::get<std::int64_t>(
+              node.parameters.at(node.traits.spatial_factor_parameter)));
     node.inputs.reserve(source.inputs.size());
     std::vector<ValueDescriptor> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
@@ -854,24 +872,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     }
     node.output_descriptor = output.take_value();
     for (std::size_t i = 0; i < input_descriptors.size(); ++i) {
-      if (node.traits.input_schema[i].kind == OperationPortKind::Float32Mask &&
-          node.traits.region_rule != OperationRegionRule::Whole) {
-        if (node.output_descriptor.shape.size() != 3 ||
-            input_descriptors[i].shape.size() != 2 ||
-            input_descriptors[i].shape[0] != node.output_descriptor.shape[0] ||
-            input_descriptors[i].shape[1] != node.output_descriptor.shape[1])
-          return Result<SemanticGraphIR>(Status::failure(
-              ErrorCode::TypeMismatch, "mask/image spatial shapes differ"));
-        continue;
-      }
-      if (node.traits.input_schema[i].kind !=
-              OperationPortKind::Float32Scalar &&
-          node.traits.region_rule != OperationRegionRule::Whole &&
-          input_descriptors[i].shape != node.output_descriptor.shape) {
-        return Result<SemanticGraphIR>(
-            Status::failure(ErrorCode::TypeMismatch,
-                            "spatial port input/output shapes differ"));
-      }
+      auto demand = input_internal::derive_input_demand(
+          node.traits, Region::whole(node.output_descriptor.shape),
+          node.output_descriptor.shape, input_descriptors[i].shape,
+          node.traits.input_schema[i].kind);
+      if (!demand.ok())
+        return Result<SemanticGraphIR>(demand.status());
     }
     output_kinds.emplace(node.id, node.traits.output_schema.kind);
     output_by_node.emplace(node.id, node.output_descriptor);

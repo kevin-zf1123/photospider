@@ -86,3 +86,7 @@ v4 semantic framing (bound flag, exact binary64 endpoint bits, length-framed
 halo key). Physical v4 framing also includes tile height/width and each sorted
 output name's exact Region. Aliased names with different Regions now have
 different physical identities even when their merged producer demand agrees.
+
+## S3 scaled contracts
+
+#270 implements package 0.5.0, OperationTraits 5 and operation ABI 5. C++17, schema 2 and provider ABI 1 remain. Package 0.4 consumers and operation ABI 4 are rejected; C++ consumers rebuild. Integer box-shrink shape/Region rules support factors [1,16] and mask outputs. Static factor parameter names and resolved factors enter v5 compiler identities. Runtime content identity remains separate. See ADR 0018.

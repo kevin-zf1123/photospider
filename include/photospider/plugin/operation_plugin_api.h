@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 /** @brief Numeric version of the operation DSO ABI. */
-#define PS_OPERATION_ABI_VERSION_4 4U
+#define PS_OPERATION_ABI_VERSION_5 5U
 /** @brief Operation has deterministic output for equal inputs/parameters. */
 #define PS_OPERATION_FLAG_DETERMINISTIC (1U << 0U)
 /** @brief Operation has no externally visible side effect. */
@@ -32,74 +32,78 @@ extern "C" {
 #define PS_OPERATION_FLAG_CPU_FALLBACK (1U << 4U)
 
 /** @brief Output shape is one scalar element. */
-#define PS_OPERATION_SHAPE_SCALAR_V4 1U
+#define PS_OPERATION_SHAPE_SCALAR_V5 1U
 /** @brief Output descriptor preserves the first input descriptor. */
-#define PS_OPERATION_SHAPE_PRESERVE_FIRST_V4 2U
+#define PS_OPERATION_SHAPE_PRESERVE_FIRST_V5 2U
 /** @brief All input descriptors match and output preserves them. */
-#define PS_OPERATION_SHAPE_MATCH_INPUTS_V4 3U
+#define PS_OPERATION_SHAPE_MATCH_INPUTS_V5 3U
 /**
  * @brief Output uses an explicit descriptor-owned fixed dense shape.
- * @note ABI v4 carries no output strides, so the host rejects fixed shapes
+ * @note ABI v5 carries no output strides, so the host rejects fixed shapes
  * whose contiguous strides or byte count are not representable.
  */
-#define PS_OPERATION_SHAPE_FIXED_V4 4U
+#define PS_OPERATION_SHAPE_FIXED_V5 4U
+/** @brief Ceil-divided spatial first input. */
+#define PS_OPERATION_SHAPE_SHRINK_V5 5U
 
 /** @brief Operation consumes and produces whole logical coverage. */
-#define PS_OPERATION_REGION_WHOLE_V4 1U
+#define PS_OPERATION_REGION_WHOLE_V5 1U
 /** @brief Region propagation is elementwise. */
-#define PS_OPERATION_REGION_ELEMENTWISE_V4 2U
+#define PS_OPERATION_REGION_ELEMENTWISE_V5 2U
 /** @brief Region propagation uses a symmetric nonzero halo. */
-#define PS_OPERATION_REGION_HALO_V4 3U
+#define PS_OPERATION_REGION_HALO_V5 3U
+/** @brief Clipped integer box footprint. */
+#define PS_OPERATION_REGION_SHRINK_V5 4U
 
 /** @brief C ABI scalar representation values matching the public C++ model. */
-typedef enum ps_operation_element_type_v4 {
-  PS_OPERATION_ELEMENT_UINT8_V4 = 1,
-  PS_OPERATION_ELEMENT_INT64_V4 = 2,
-  PS_OPERATION_ELEMENT_FLOAT64_V4 = 3,
-  PS_OPERATION_ELEMENT_FLOAT32_V4 = 4
-} ps_operation_element_type_v4;
+typedef enum ps_operation_element_type_v5 {
+  PS_OPERATION_ELEMENT_UINT8_V5 = 1,
+  PS_OPERATION_ELEMENT_INT64_V5 = 2,
+  PS_OPERATION_ELEMENT_FLOAT64_V5 = 3,
+  PS_OPERATION_ELEMENT_FLOAT32_V5 = 4
+} ps_operation_element_type_v5;
 
-/** @brief Closed source-parameter type values for operation ABI v4. */
-typedef enum ps_operation_parameter_type_v4 {
-  PS_OPERATION_PARAMETER_INT64_V4 = 1,
-  PS_OPERATION_PARAMETER_FLOAT64_V4 = 2,
-  PS_OPERATION_PARAMETER_BOOL_V4 = 3,
-  PS_OPERATION_PARAMETER_STRING_V4 = 4
-} ps_operation_parameter_type_v4;
+/** @brief Closed source-parameter type values for operation ABI v5. */
+typedef enum ps_operation_parameter_type_v5 {
+  PS_OPERATION_PARAMETER_INT64_V5 = 1,
+  PS_OPERATION_PARAMETER_FLOAT64_V5 = 2,
+  PS_OPERATION_PARAMETER_BOOL_V5 = 3,
+  PS_OPERATION_PARAMETER_STRING_V5 = 4
+} ps_operation_parameter_type_v5;
 
 /**
- * @brief Closed synchronous callback result values for operation ABI v4.
+ * @brief Closed synchronous callback result values for operation ABI v5.
  *
  * @note Unknown nonzero integers fail closed as ordinary operation failures.
  * This enum does not change the `int` callback signature or descriptor layout.
  */
-typedef enum ps_operation_result_v4 {
+typedef enum ps_operation_result_v5 {
   /** @brief Callback completed and the output sink accepted one Value. */
-  PS_OPERATION_RESULT_SUCCESS_V4 = 0,
+  PS_OPERATION_RESULT_SUCCESS_V5 = 0,
   /** @brief Ordinary nonrecoverable operation failure. */
-  PS_OPERATION_RESULT_FAILURE_V4 = 1,
+  PS_OPERATION_RESULT_FAILURE_V5 = 1,
   /** @brief Cooperative cancellation was observed by the callback. */
-  PS_OPERATION_RESULT_CANCELLED_V4 = 2,
+  PS_OPERATION_RESULT_CANCELLED_V5 = 2,
   /**
    * @brief Selected local backend cannot execute this invocation.
    * @note Valid only when the callback has not invoked the output sink.
    */
-  PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V4 = 3
-} ps_operation_result_v4;
+  PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V5 = 3
+} ps_operation_result_v5;
 
 /**
  * @brief One immutable parameter declaration published by an operation.
  *
  * @note Key bytes remain plugin-owned until the API destroy callback.
  */
-typedef struct ps_operation_parameter_descriptor_v4 {
+typedef struct ps_operation_parameter_descriptor_v5 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Nonempty bounded UTF-8 parameter key. */
   const char* key;
   /** @brief Exact key byte count excluding any terminator. */
   uint32_t key_size;
-  /** @brief One `ps_operation_parameter_type_v4` value. */
+  /** @brief One `ps_operation_parameter_type_v5` value. */
   uint32_t type;
   /** @brief Zero for optional or one for required. */
   uint32_t required;
@@ -113,7 +117,7 @@ typedef struct ps_operation_parameter_descriptor_v4 {
   double minimum;
   double maximum;
 #endif
-} ps_operation_parameter_descriptor_v4;
+} ps_operation_parameter_descriptor_v5;
 
 /**
  * @brief One canonical source parameter supplied to a callback.
@@ -121,14 +125,14 @@ typedef struct ps_operation_parameter_descriptor_v4 {
  * @note Exactly the field selected by `type` is meaningful; every pointer is
  * callback-local and must not be retained.
  */
-typedef struct ps_operation_parameter_value_v4 {
+typedef struct ps_operation_parameter_value_v5 {
   /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
   /** @brief Nonempty schema-declared UTF-8 parameter key. */
   const char* key;
   /** @brief Exact key byte count excluding any terminator. */
   uint32_t key_size;
-  /** @brief One `ps_operation_parameter_type_v4` value. */
+  /** @brief One `ps_operation_parameter_type_v5` value. */
   uint32_t type;
   /** @brief Value when type is `INT64`. */
   int64_t int64_value;
@@ -140,14 +144,14 @@ typedef struct ps_operation_parameter_value_v4 {
   const char* string_value;
   /** @brief Exact string byte count, otherwise zero. */
   uint32_t string_size;
-} ps_operation_parameter_value_v4;
+} ps_operation_parameter_value_v5;
 
 /**
  * @brief One bounded immutable semantic facet visible to an operation.
  *
  * @note Key and payload pointers remain valid only for the callback duration.
  */
-typedef struct ps_operation_facet_view_v4 {
+typedef struct ps_operation_facet_view_v5 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Nonempty printable-ASCII facet key. */
@@ -160,17 +164,17 @@ typedef struct ps_operation_facet_view_v4 {
   const uint8_t* payload;
   /** @brief Bounded opaque payload byte count. */
   uint32_t payload_size;
-} ps_operation_facet_view_v4;
+} ps_operation_facet_view_v5;
 
 /**
  * @brief Immutable validated input Value view for one callback invocation.
  *
  * @note Every pointer remains valid only for the duration of the callback.
  */
-typedef struct ps_operation_value_view_v4 {
+typedef struct ps_operation_value_view_v5 {
   /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
-  /** @brief One `ps_operation_element_type_v4` value. */
+  /** @brief One `ps_operation_element_type_v5` value. */
   uint32_t element_type;
   /** @brief Rank in the inclusive range 1..8. */
   uint32_t rank;
@@ -187,7 +191,7 @@ typedef struct ps_operation_value_view_v4 {
   /** @brief Number of bounded records in `facets`. */
   uint32_t facet_count;
   /** @brief Immutable facet array or null only when facet_count is zero. */
-  const ps_operation_facet_view_v4* facets;
+  const ps_operation_facet_view_v5* facets;
   /** @brief Rank-sized logical storage origin and signed byte strides. */
   const uint64_t* storage_origin;
   const int64_t* byte_strides;
@@ -196,14 +200,14 @@ typedef struct ps_operation_value_view_v4 {
   const uint64_t* region_extents;
   /** @brief Byte offset of storage_origin from data (allocation start). */
   uint64_t byte_offset;
-} ps_operation_value_view_v4;
+} ps_operation_value_view_v5;
 
 /**
  * @brief Host-owned sink used to publish the requested output Region.
  *
  * @note Publication freezes host output or copies external data synchronously.
  */
-typedef struct ps_operation_output_sink_v4 {
+typedef struct ps_operation_output_sink_v5 {
   /** @brief Exact structure byte size supplied by the host. */
   uint32_t struct_size;
   /** @brief Opaque host state returned unchanged to `publish`. */
@@ -211,7 +215,7 @@ typedef struct ps_operation_output_sink_v4 {
   /**
    * @brief Validates and freezes/copies the requested output Region.
    * @param context Opaque host state.
-   * @param element_type One `ps_operation_element_type_v4` value.
+   * @param element_type One `ps_operation_element_type_v5` value.
    * @param shape Rank-sized nonzero shape array.
    * @param rank Rank in 1..8.
    * @param facets Bounded facet array, null only when facet_count is zero.
@@ -228,7 +232,7 @@ typedef struct ps_operation_output_sink_v4 {
    * rejected result.
    */
   int (*publish)(void* context, uint32_t element_type, const uint64_t* shape,
-                 uint32_t rank, const ps_operation_facet_view_v4* facets,
+                 uint32_t rank, const ps_operation_facet_view_v5* facets,
                  uint32_t facet_count, const uint8_t* data, uint64_t byte_size);
   /** @brief Requested output descriptor and coverage; borrowed until return. */
   uint32_t output_rank;
@@ -244,7 +248,7 @@ typedef struct ps_operation_output_sink_v4 {
   uint8_t* (*allocate_output)(void* context);
   /** @brief Allocates invocation-local scratch; null on failure, never free. */
   uint8_t* (*allocate_scratch)(void* context, uint64_t byte_size);
-} ps_operation_output_sink_v4;
+} ps_operation_output_sink_v5;
 
 /**
  * @brief Callback that reports whether cooperative cancellation was requested.
@@ -252,7 +256,7 @@ typedef struct ps_operation_output_sink_v4 {
  * @return Nonzero after cancellation is requested; zero otherwise.
  * @note The plugin must not retain the context or throw across the C boundary.
  */
-typedef int (*ps_operation_cancelled_v4)(void* context);
+typedef int (*ps_operation_cancelled_v5)(void* context);
 
 /**
  * @brief Synchronous operation execution callback.
@@ -267,12 +271,12 @@ typedef int (*ps_operation_cancelled_v4)(void* context);
  * @param sink Host-owned single-output sink.
  * @param diagnostic Writable diagnostic buffer.
  * @param diagnostic_capacity Writable buffer size including terminator.
- * @return One closed `ps_operation_result_v4` value. Unknown nonzero values
- * are treated as `PS_OPERATION_RESULT_FAILURE_V4` by the host.
+ * @return One closed `ps_operation_result_v5` value. Unknown nonzero values
+ * are treated as `PS_OPERATION_RESULT_FAILURE_V5` by the host.
  * @throws Nothing; plugins must not let exceptions cross this pure-C ABI
  * callback boundary.
  * @note The callback must not throw across the C boundary or retain pointers.
- * `PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V4` requests CPU fallback only for
+ * `PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V5` requests CPU fallback only for
  * a GPU attempt whose copied traits permit it; the output sink must not be
  * invoked for that result. If it was invoked, a rejected output keeps its
  * exact sink failure and an accepted output becomes a terminal ordinary
@@ -281,45 +285,45 @@ typedef int (*ps_operation_cancelled_v4)(void* context);
  * the callback result and never requests fallback. Host cancellation remains
  * authoritative over the callback result and sink state.
  */
-typedef int (*ps_operation_execute_v4)(
-    void* user_data, const ps_operation_value_view_v4* inputs,
-    uint32_t input_count, const ps_operation_parameter_value_v4* parameters,
+typedef int (*ps_operation_execute_v5)(
+    void* user_data, const ps_operation_value_view_v5* inputs,
+    uint32_t input_count, const ps_operation_parameter_value_v5* parameters,
     uint32_t parameter_count, uint32_t backend,
-    ps_operation_cancelled_v4 cancelled, void* cancellation_context,
-    const ps_operation_output_sink_v4* sink, char* diagnostic,
+    ps_operation_cancelled_v5 cancelled, void* cancellation_context,
+    const ps_operation_output_sink_v5* sink, char* diagnostic,
     size_t diagnostic_capacity);
 
 /** @brief Generic Value port with existing Region rules. */
-#define PS_OPERATION_PORT_VALUE_V4 1U
+#define PS_OPERATION_PORT_VALUE_V5 1U
 /** @brief Direct workflow Float32 scalar constrained by a finite interval. */
-#define PS_OPERATION_PORT_FLOAT32_SCALAR_V4 2U
+#define PS_OPERATION_PORT_FLOAT32_SCALAR_V5 2U
 /** @brief Dense HWC Float32 RGBA with exact linear premultiplied profile. */
-#define PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V4 3U
+#define PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5 3U
 /** @brief Float32 {H,W} mask with no facets and finite [0,1] samples. */
-#define PS_OPERATION_PORT_FLOAT32_MASK_V4 4U
+#define PS_OPERATION_PORT_FLOAT32_MASK_V5 4U
 
 /**
  * @brief Immutable copied port schema record, never retained by the compiler.
  * @note Unknown kinds or invalid combinations reject the complete plugin.
  * Scalars require finite inclusive endpoints; other kinds require zero bits.
  */
-typedef struct ps_operation_port_constraint_v4 {
+typedef struct ps_operation_port_constraint_v5 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
-  /** @brief One PS_OPERATION_PORT_*_V4 kind. */
+  /** @brief One PS_OPERATION_PORT_*_V5 kind. */
   uint32_t kind;
   /** @brief Numeric uint32 binary32 lower-bound bits, decoded with memcpy. */
   uint32_t minimum_bits;
   /** @brief Numeric uint32 binary32 upper-bound bits, decoded with memcpy. */
   uint32_t maximum_bits;
-} ps_operation_port_constraint_v4;
+} ps_operation_port_constraint_v5;
 
 /**
  * @brief One immutable operation descriptor published by a plugin.
  *
  * @note `key` and user_data remain valid until the plugin API destroy callback.
  */
-typedef struct ps_operation_descriptor_v4 {
+typedef struct ps_operation_descriptor_v5 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Nonempty UTF-8 operation key. */
@@ -342,15 +346,15 @@ typedef struct ps_operation_descriptor_v4 {
   uint32_t output_rank;
   /**
    * @brief Rank-sized dense fixed shape, null when output_rank is zero.
-   * @note Since ABI v4 carries no strides, the loader derives a contiguous
+   * @note Since ABI v5 carries no strides, the loader derives a contiguous
    * stride chain with checked uint64 products. Every stored stride must fit
    * int64, and complete byte count B must satisfy `B > 0`,
    * `B - 1 <= INT64_MAX`, and `B <= SIZE_MAX` before publication.
    */
   const uint64_t* output_shape;
-  /** @brief One `PS_OPERATION_SHAPE_*_V4` inference rule. */
+  /** @brief One `PS_OPERATION_SHAPE_*_V5` inference rule. */
   uint32_t shape_rule;
-  /** @brief One `PS_OPERATION_REGION_*_V4` propagation rule. */
+  /** @brief One `PS_OPERATION_REGION_*_V5` propagation rule. */
   uint32_t region_rule;
   /** @brief Symmetric halo, nonzero only for REGION_HALO. */
   uint32_t halo_radius;
@@ -359,7 +363,7 @@ typedef struct ps_operation_descriptor_v4 {
   /** @brief Number of records in `parameters`, bounded by 128. */
   uint32_t parameter_count;
   /** @brief Parameter declarations, null only when count is zero. */
-  const ps_operation_parameter_descriptor_v4* parameters;
+  const ps_operation_parameter_descriptor_v5* parameters;
   /** @brief Must equal input_count, at most 1024. */
   uint32_t input_schema_count;
   /**
@@ -367,11 +371,11 @@ typedef struct ps_operation_descriptor_v4 {
    * @note Records and array remain valid until destroy. Host copies every
    * constraint before atomic registry publication; no callback may mutate it.
    */
-  const ps_operation_port_constraint_v4* input_schema;
+  const ps_operation_port_constraint_v5* input_schema;
   /** @brief Exact-sized Value or image output constraint; scalar forbidden. */
-  ps_operation_port_constraint_v4 output_schema;
+  ps_operation_port_constraint_v5 output_schema;
   /** @brief Required synchronous callback. */
-  ps_operation_execute_v4 execute;
+  ps_operation_execute_v5 execute;
   /** @brief Descriptor-owned opaque callback state, possibly null. */
   void* user_data;
   /** @brief Fixed scratch bound and additional bytes per demanded input byte.
@@ -381,50 +385,54 @@ typedef struct ps_operation_descriptor_v4 {
   uint32_t workspace_input_multiplier = 0;
   const char* halo_radius_parameter = nullptr;
   uint32_t halo_radius_parameter_size = 0;
+  const char* spatial_factor_parameter = nullptr;
+  uint32_t spatial_factor_parameter_size = 0;
 #else
   uint64_t workspace_bytes;
   uint32_t workspace_input_multiplier;
   const char* halo_radius_parameter;
   uint32_t halo_radius_parameter_size;
+  const char* spatial_factor_parameter;
+  uint32_t spatial_factor_parameter_size;
 #endif
-} ps_operation_descriptor_v4;
+} ps_operation_descriptor_v5;
 
 /**
- * @brief Complete version-four plugin table.
+ * @brief Complete version-five plugin table.
  *
  * @note The host validates and copies all descriptors before publication.
  */
-typedef struct ps_operation_plugin_api_v4 {
+typedef struct ps_operation_plugin_api_v5 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
   /** @brief Number of descriptors in `operations`. */
   uint32_t operation_count;
   /** @brief Immutable descriptor array. */
-  const ps_operation_descriptor_v4* operations;
+  const ps_operation_descriptor_v5* operations;
   /**
    * @brief Releases plugin-owned descriptor/user state exactly once.
    * @param operations Original descriptor array.
    * @param operation_count Original count.
    * @note The host calls this only after every invocation lease is released.
    */
-  void (*destroy)(const ps_operation_descriptor_v4* operations,
+  void (*destroy)(const ps_operation_descriptor_v5* operations,
                   uint32_t operation_count);
-} ps_operation_plugin_api_v4;
+} ps_operation_plugin_api_v5;
 
 /**
  * @brief Returns the plugin ABI version without side effects.
- * @return `PS_OPERATION_ABI_VERSION_4` for this header.
+ * @return `PS_OPERATION_ABI_VERSION_5` for this header.
  * @note The function must not throw across the C boundary.
  */
 PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void);
 
 /**
- * @brief Returns the immutable version-four plugin table.
+ * @brief Returns the immutable version-five plugin table.
  * @return Nonnull table whose `struct_size` is exact.
  * @note The table remains valid until the host invokes its destroy callback.
  */
-PS_OPERATION_EXPORT const ps_operation_plugin_api_v4*
-ps_operation_plugin_get_api_v4(void);
+PS_OPERATION_EXPORT const ps_operation_plugin_api_v5*
+ps_operation_plugin_get_api_v5(void);
 
 #ifdef __cplusplus
 }
