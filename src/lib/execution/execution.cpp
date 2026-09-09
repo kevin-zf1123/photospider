@@ -829,6 +829,8 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
   for (const auto& declaration : plan.input_declarations()) {
     auto binding = *named.at(declaration.name)[0];
     if (binding.snapshot) {
+      binding.snapshot =
+          std::make_shared<const InputSnapshot>(*binding.snapshot);
       if (binding.source || binding.value.valid() || !binding.snapshot->valid())
         return Result<std::vector<ExecutionBinding>>(
             Status::failure(ErrorCode::InvalidArgument,
@@ -1829,11 +1831,15 @@ Result<FrozenExecution> ExecutionContext::freeze(
       plan.operation_registry_.lock().get() != impl_->operation_registry.get())
     return Result<FrozenExecution>(
         Status::failure(ErrorCode::Stale, "invalid stale or foreign plan"));
-  for (const auto& binding : bindings.inputs)
+  for (auto& binding : bindings.inputs) {
     if (binding.source)
       return Result<FrozenExecution>(Status::failure(
           ErrorCode::InvalidArgument,
           "freeze requires immutable Values or kernel snapshots"));
+    if (binding.snapshot)
+      binding.snapshot =
+          std::make_shared<const InputSnapshot>(*binding.snapshot);
+  }
   auto validated = preflight_regional_bindings(plan, bindings, {});
   if (!validated.ok())
     return Result<FrozenExecution>(validated.status());
@@ -2113,7 +2119,13 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         impl_->disk->drop_pending();
       if (impl_->cache)
         impl_->cache->reclaim_for(bytes);
-      auto reserved = impl_->budget->reserve(bytes, stop, observation);
+      auto reserved =
+          impl_->budget->reserve(bytes, stop, observation, [this, bytes] {
+            if (impl_->disk)
+              impl_->disk->drop_pending();
+            if (impl_->cache)
+              impl_->cache->reclaim_for(bytes);
+          });
       if (!reserved.ok())
         return failure(reserved.status());
       Seal seal{reserved.take_value()};
@@ -2133,70 +2145,17 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     const std::uint32_t parallelism = options.maximum_parallelism == 0
                                           ? impl_->cpu_worker_count
                                           : options.maximum_parallelism;
-    const auto materialize =
-        [&](const ExecutionPlan& tile) -> Result<ExecutionResult> {
-      auto tile_cached = cached;
-      auto tile_backends = cached_backends;
-      std::vector<std::string> keys;
-      const auto cache_epoch = producer_epoch != UINT64_MAX
-                                   ? producer_epoch
-                                   : (impl_->cache ? impl_->cache->epoch() : 0);
-      if (impl_->cache) {
-        keys = execution_internal::result_keys(tile, snapshot);
-        std::vector<bool> needed(keys.size(), false);
-        for (const auto& output : tile.outputs())
-          needed[output.second] = true;
-        for (std::size_t reverse = keys.size(); reverse > 0; --reverse) {
-          const auto i = reverse - 1;
-          if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
-            continue;
-          auto hit = impl_->cache->get(keys[i]);
-          if (!hit.valid() && impl_->disk) {
-            const auto& step = tile.steps()[i];
-            hit = impl_->disk->get(keys[i], step.output_descriptor,
-                                   step.output_demand,
-                                   step.traits.output_schema.kind);
-            if (hit.valid())
-              impl_->cache->put(keys[i], hit, cache_epoch);
-          }
-          if (hit.valid()) {
-            tile_cached[tile.steps()[i].node_id] = std::move(hit);
-            tile_backends[tile.steps()[i].node_id] = Backend::Cpu;
-            ++diagnostics.cache_hits;
-          } else {
-            for (const auto& input : tile.steps()[i].inputs)
-              if (const auto* producer = std::get_if<PlanStepInput>(&input))
-                needed[producer->step_index] = true;
-          }
-        }
-        const auto target = tile.outputs().begin()->second;
-        if (!shared_producer && tile.outputs().size() == 1 &&
-            !keys[target].empty() &&
-            !tile_cached.count(tile.steps()[target].node_id)) {
-          // Producers own copies, never a waiting caller's stack or stop token.
-          auto pinned = tile;
-          pinned.current_check_ = [] { return true; };
-          pinned.tile_height_ = UINT64_MAX;
-          pinned.tile_width_ = UINT64_MAX;
-          auto result = impl_->cache->compute(
-              keys[target], stop,
-              [this, pinned, bindings, options,
-               cache_epoch](const CancellationToken& token) {
-                return execute_regions(pinned, bindings, nullptr, token,
-                                       options, true, cache_epoch);
-              });
-          if (result.ok() && result.value().values.begin()->first !=
-                                 tile.outputs().begin()->first) {
-            auto renamed = result.take_value();
-            auto value = renamed.values.begin()->second;
-            renamed.values.clear();
-            renamed.values.emplace(tile.outputs().begin()->first,
-                                   std::move(value));
-            return Result<ExecutionResult>(std::move(renamed));
-          }
-          return result;
-        }
-      }
+    // Shared coordinators execute one ready node. Dependency traversal stays on
+    // the caller, so bounded coordinators never wait for another coordinator.
+    const auto run_tile =
+        [this, snapshot, observation, parallelism](
+            const ExecutionPlan& tile,
+            const std::map<std::uint64_t, Value>& tile_cached,
+            const std::map<std::uint64_t, Backend>& tile_backends,
+            const std::vector<std::string>& keys, std::uint64_t cache_epoch,
+            const CancellationToken& token) -> Result<ExecutionResult> {
+      const auto stop = [&] { return binding_stop(tile, token); };
+      ExecutionDiagnostics diagnostics;
       const auto required = required_steps(tile, tile_cached);
       std::vector<std::optional<Region>> input_demands(snapshot.size());
       std::uint64_t working = 0;
@@ -2271,7 +2230,13 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         impl_->disk->drop_pending();
       if (impl_->cache)
         impl_->cache->reclaim_for(working);
-      auto reserved = impl_->budget->reserve(working, stop, observation);
+      auto reserved =
+          impl_->budget->reserve(working, stop, observation, [this, working] {
+            if (impl_->disk)
+              impl_->disk->drop_pending();
+            if (impl_->cache)
+              impl_->cache->reclaim_for(working);
+          });
       if (!reserved.ok())
         return Result<ExecutionResult>(reserved.status());
       Seal seal{reserved.take_value()};
@@ -2321,9 +2286,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                   completion->result = Result<Region>(status);
                   return;
                 }
-                completion->result =
-                    source->read(demand, writer.data(), writer.size(), scratch,
-                                 cancellation);
+                completion->result = source->read(
+                    demand, writer.data(), writer.size(), scratch, token);
               } catch (const std::bad_alloc&) {
                 Status status;
                 status.code = ErrorCode::ResourceExhausted;
@@ -2377,8 +2341,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             return operations->invoke_current(
                 key, invocation, [&tile] { return tile.current(); });
           },
-          &tile, std::move(values), cancellation, parallelism, true,
-          tile_cached, tile_backends,
+          &tile, std::move(values), token, parallelism, true, tile_cached,
+          tile_backends,
           [this, keys, cache_epoch, &tile](
               std::size_t index, const Value& value, Backend backend) {
             if (impl_->cache && backend == Backend::Cpu && index < keys.size())
@@ -2388,7 +2352,116 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               impl_->disk->put(keys[index], value,
                                tile.steps()[index].traits.output_schema.kind);
           });
-      return coordinator->run();
+      auto result = coordinator->run();
+      if (result.ok()) {
+        auto completed = result.take_value();
+        completed.diagnostics.source_read_count +=
+            diagnostics.source_read_count;
+        completed.diagnostics.source_read_bytes +=
+            diagnostics.source_read_bytes;
+        return Result<ExecutionResult>(std::move(completed));
+      }
+      return result;
+    };
+    const auto materialize =
+        [&](const ExecutionPlan& tile) -> Result<ExecutionResult> {
+      auto tile_cached = cached;
+      auto tile_backends = cached_backends;
+      std::vector<std::string> keys;
+      const auto cache_epoch = producer_epoch != UINT64_MAX
+                                   ? producer_epoch
+                                   : (impl_->cache ? impl_->cache->epoch() : 0);
+      if (impl_->cache) {
+        keys = execution_internal::result_keys(tile, snapshot);
+        std::vector<bool> needed(keys.size(), false);
+        for (const auto& output : tile.outputs())
+          needed[output.second] = true;
+        for (std::size_t reverse = keys.size(); reverse > 0; --reverse) {
+          const auto i = reverse - 1;
+          if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
+            continue;
+          auto hit = impl_->cache->get(keys[i]);
+          if (!hit.valid() && impl_->disk) {
+            const auto& step = tile.steps()[i];
+            hit = impl_->disk->get(keys[i], step.output_descriptor,
+                                   step.output_demand,
+                                   step.traits.output_schema.kind);
+            if (hit.valid())
+              impl_->cache->put(keys[i], hit, cache_epoch);
+          }
+          if (hit.valid()) {
+            tile_cached[tile.steps()[i].node_id] = std::move(hit);
+            tile_backends[tile.steps()[i].node_id] = Backend::Cpu;
+            ++diagnostics.cache_hits;
+          } else {
+            for (const auto& input : tile.steps()[i].inputs)
+              if (const auto* producer = std::get_if<PlanStepInput>(&input))
+                needed[producer->step_index] = true;
+          }
+        }
+      }
+      if (!impl_->cache)
+        return run_tile(tile, tile_cached, tile_backends, keys, cache_epoch,
+                        cancellation);
+      const auto required = required_steps(tile, tile_cached);
+      for (std::size_t i = 0; i < tile.steps().size(); ++i) {
+        const auto& step = tile.steps()[i];
+        if (!required[i] || tile_cached.count(step.node_id))
+          continue;
+        auto node = tile;
+        const std::string name = "__shared_node";
+        node.outputs_ = {{name, i}};
+        node.output_regions_ = {{name, step.output_demand}};
+        const bool share = !keys[i].empty();
+        if (share)
+          node.current_check_ = [] { return true; };
+        auto work = [this, run_tile, node, tile_cached, tile_backends, keys,
+                     cache_epoch, i, name](const CancellationToken& token) {
+          // A flight can finish between the initial lookup and subscription.
+          auto hit = impl_->cache->get(keys[i]);
+          if (hit.valid()) {
+            ExecutionResult result;
+            result.values.emplace(name, std::move(hit));
+            result.diagnostics.cache_hits = 1;
+            return Result<ExecutionResult>(std::move(result));
+          }
+          return run_tile(node, tile_cached, tile_backends, keys, cache_epoch,
+                          token);
+        };
+        auto result =
+            share ? impl_->cache->compute(keys[i], stop, std::move(work))
+                  : work(cancellation);
+        if (!result.ok())
+          return result;
+        auto completed = result.take_value();
+        if (share && !completed.diagnostics.selected_backends.empty()) {
+          const auto selected =
+              completed.diagnostics.selected_backends.begin()->second;
+          completed.diagnostics.selected_backends = {{step.node_id, selected}};
+        }
+        auto status = accumulate(completed.diagnostics);
+        if (!status.ok())
+          return Result<ExecutionResult>(status);
+        tile_cached[step.node_id] = completed.values.at(name);
+        const auto backend =
+            completed.diagnostics.selected_backends.find(step.node_id);
+        tile_backends[step.node_id] =
+            backend == completed.diagnostics.selected_backends.end()
+                ? step.backend
+                : backend->second;
+        // Keep only ancestors still read by an unfinished node or output.
+        const auto remaining = required_steps(tile, tile_cached);
+        for (std::size_t j = 0; j < tile.steps().size(); ++j)
+          if (!remaining[j]) {
+            tile_cached.erase(tile.steps()[j].node_id);
+            tile_backends.erase(tile.steps()[j].node_id);
+          }
+      }
+      ExecutionResult result;
+      for (const auto& output : tile.outputs())
+        result.values.emplace(
+            output.first, tile_cached.at(tile.steps()[output.second].node_id));
+      return Result<ExecutionResult>(std::move(result));
     };
     // Materialize Whole/effect boundaries once in source-topological order.
     for (std::size_t i = 0; i < plan.steps().size(); ++i) {

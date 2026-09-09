@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -41,12 +43,18 @@ namespace ps::execution_internal {
  */
 class DiskCache final {
  public:
+  struct WriteHooks {
+    std::function<void()> before_payload;
+    std::function<void()> before_index;
+  };
   DiskCache(DiskCacheConfig config, std::string implementation,
-            std::shared_ptr<MemoryBudget> budget, std::uint64_t queue_bytes)
+            std::shared_ptr<MemoryBudget> budget, std::uint64_t queue_bytes,
+            WriteHooks hooks = {})
       : config_(std::move(config)),
         implementation_(std::move(implementation)),
         budget_(std::move(budget)),
-        queue_limit_(queue_bytes) {
+        queue_limit_(queue_bytes),
+        hooks_(std::move(hooks)) {
     if (config_.directory.empty() || config_.maximum_bytes == 0 ||
         config_.maximum_entries == 0 || config_.maximum_entries > 1000000 ||
         config_.maximum_queued_writes == 0 ||
@@ -121,6 +129,8 @@ class DiskCache final {
   void clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     ++epoch_;
+    if (active_pending_)
+      active_pending_->value = {};
     queue_.clear();
     queued_keys_.clear();
     queued_bytes_ = 0;
@@ -130,6 +140,8 @@ class DiskCache final {
   }
   void drop_pending() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (active_pending_)
+      active_pending_->value = {};
     queue_.clear();
     queued_keys_.clear();
     queued_bytes_ = 0;
@@ -327,33 +339,87 @@ class DiskCache final {
     result += key;
     return result;
   }
-  /** @brief Converts packed host Float32 samples to canonical little endian. */
-  template <class Sink>
-  static void payload(const Value& value, Sink sink) {
-    std::array<std::uint8_t, 4096> buffer{};
-    std::size_t used = 0;
-    const auto& r = value.region().dimensions();
-    const std::uint64_t channels = r.size() == 3 ? 4 : 1;
-    for (std::uint64_t y = r[0].offset; y < r[0].offset + r[0].extent; ++y)
-      for (std::uint64_t x = r[1].offset; x < r[1].offset + r[1].extent; ++x)
-        for (std::uint64_t c = 0; c < channels; ++c) {
-          std::vector<std::uint64_t> coord{y, x};
-          if (channels == 4)
-            coord.push_back(c);
-          std::uint32_t bits;
-          std::memcpy(&bits,
-                      value.bytes().data() + value.byte_address(coord).value(),
-                      4);
-          for (unsigned i = 0; i < 4; ++i)
-            buffer[used++] = static_cast<std::uint8_t>(bits >> (8 * i));
-          if (used == buffer.size()) {
-            sink(buffer.data(), used);
-            used = 0;
-          }
-        }
-    if (used)
-      sink(buffer.data(), used);
-  }
+  /** @brief Owns only an exclusively created temporary file; never follows
+   * links. */
+  class TemporaryFile final {
+   public:
+    explicit TemporaryFile(std::filesystem::path path)
+        : path_(std::move(path)) {
+#if defined(_WIN32)
+      handle_ = CreateFileW(path_.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (handle_ == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("cannot create cache temporary file");
+#else
+      handle_ =
+          ::open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+      if (handle_ < 0)
+        throw std::runtime_error("cannot create cache temporary file");
+#endif
+    }
+    ~TemporaryFile() {
+      close();
+      if (!published_) {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+      }
+    }
+    void write(const void* bytes, std::size_t size) {
+      auto data = static_cast<const char*>(bytes);
+      while (size) {
+#if defined(_WIN32)
+        DWORD written = 0;
+        if (!WriteFile(handle_, data, static_cast<DWORD>(size), &written,
+                       nullptr) ||
+            !written)
+          throw std::runtime_error("cache write failed");
+#else
+        const auto written = ::write(handle_, data, size);
+        if (written < 0 && errno == EINTR)
+          continue;
+        if (written <= 0)
+          throw std::runtime_error("cache write failed");
+#endif
+        data += written;
+        size -= static_cast<std::size_t>(written);
+      }
+    }
+    void seek(std::uint64_t offset) {
+#if defined(_WIN32)
+      LARGE_INTEGER position;
+      position.QuadPart = static_cast<LONGLONG>(offset);
+      if (!SetFilePointerEx(handle_, position, nullptr, FILE_BEGIN))
+        throw std::runtime_error("cache seek failed");
+#else
+      if (::lseek(handle_, static_cast<off_t>(offset), SEEK_SET) < 0)
+        throw std::runtime_error("cache seek failed");
+#endif
+    }
+    bool close() noexcept {
+#if defined(_WIN32)
+      if (handle_ == INVALID_HANDLE_VALUE)
+        return true;
+      const auto result = CloseHandle(handle_) != 0;
+      handle_ = INVALID_HANDLE_VALUE;
+#else
+      if (handle_ < 0)
+        return true;
+      const auto result = ::close(handle_) == 0;
+      handle_ = -1;
+#endif
+      return result;
+    }
+    void published() noexcept { published_ = true; }
+
+   private:
+    std::filesystem::path path_;
+    bool published_ = false;
+#if defined(_WIN32)
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    int handle_ = -1;
+#endif
+  };
   void invalidate(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     ++stats_.invalid_entries;
@@ -378,47 +444,88 @@ class DiskCache final {
     entries_.erase(oldest);
   }
   void write(const Pending& pending) {
-    const auto prefix = header(pending.key, pending.value.descriptor(),
-                               pending.value.region(), pending.kind);
-    const auto bytes = byte_count(pending.value.region());
-    if (bytes > config_.maximum_bytes ||
-        prefix.size() + 64 > config_.maximum_bytes - bytes)
-      return;
-    const auto total = bytes + prefix.size() + 64;
-    const auto temporary = root_ / (pending.key + ".tmp");
+    std::string prefix;
+    Region region;
+    std::uint64_t bytes = 0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (pending.epoch != epoch_)
+      if (!pending.value.valid() || pending.epoch != epoch_ ||
+          entries_.count(pending.key))
         return;
+      region = pending.value.region();
+      prefix =
+          header(pending.key, pending.value.descriptor(), region, pending.kind);
+      bytes = byte_count(region);
+      if (bytes > config_.maximum_bytes ||
+          prefix.size() + 64 > config_.maximum_bytes - bytes)
+        return;
+      const auto total = bytes + prefix.size() + 64;
       while (!entries_.empty() && (entries_.size() >= config_.maximum_entries ||
                                    bytes_ > config_.maximum_bytes - total))
         evict_locked();
       reserved_ = total;
     }
+    if (hooks_.before_payload)
+      hooks_.before_payload();
+    const auto temporary = root_ / (pending.key + ".tmp");
+    TemporaryFile file(temporary);
     content_internal::Sha256 hash;
     hash.bytes(prefix.data(), prefix.size());
-    payload(pending.value,
-            [&](const auto* data, std::size_t n) { hash.bytes(data, n); });
-    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-    file.write(prefix.data(), static_cast<std::streamsize>(prefix.size()));
-    const auto checksum = hash.finish();
-    file.write(checksum.data(), 64);
-    payload(pending.value, [&](const auto* data, std::size_t n) {
-      file.write(reinterpret_cast<const char*>(data),
-                 static_cast<std::streamsize>(n));
-    });
-    file.close();
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!file || pending.epoch != epoch_) {
-      std::filesystem::remove(temporary);
-      if (!file)
-        ++stats_.write_failures;
-      return;
+    file.write(prefix.data(), prefix.size());
+    std::array<char, 64> placeholder{};
+    file.write(placeholder.data(), placeholder.size());
+    const auto& r = region.dimensions();
+    const std::uint64_t channels = r.size() == 3 ? 4 : 1;
+    for (std::uint64_t offset = 0; offset < bytes;) {
+      std::array<std::uint8_t, 4096> buffer{};
+      const auto count = static_cast<std::size_t>(
+          std::min<std::uint64_t>(buffer.size(), bytes - offset));
+      {
+        // Only this short CPU copy pins the Value. Admission can discard the
+        // active write without waiting for any file I/O or retaining its lease.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!pending.value.valid() || pending.epoch != epoch_)
+          return;
+        for (std::size_t at = 0; at < count; at += 4) {
+          const auto sample = (offset + at) / 4;
+          std::vector<std::uint64_t> coord{
+              r[0].offset + sample / channels / r[1].extent,
+              r[1].offset + sample / channels % r[1].extent};
+          if (channels == 4)
+            coord.push_back(sample % channels);
+          std::uint32_t bits;
+          std::memcpy(&bits,
+                      pending.value.bytes().data() +
+                          pending.value.byte_address(coord).value(),
+                      4);
+          for (unsigned j = 0; j < 4; ++j)
+            buffer[at + j] = static_cast<std::uint8_t>(bits >> (8 * j));
+        }
+      }
+      hash.bytes(buffer.data(), count);
+      file.write(buffer.data(), count);
+      offset += count;
     }
+    const auto checksum = hash.finish();
+    file.seek(prefix.size());
+    file.write(checksum.data(), checksum.size());
+    if (!file.close())
+      throw std::runtime_error("cache close failed");
+    // Allocate index metadata before publishing. A failed allocation leaves
+    // only our temporary file, whose owner removes it during unwinding.
+    if (hooks_.before_index)
+      hooks_.before_index();
+    std::map<std::string, Entry> staged;
+    staged.emplace(pending.key, Entry{bytes + prefix.size() + 64, 0});
+    auto entry = staged.extract(staged.begin());
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pending.value.valid() || pending.epoch != epoch_)
+      return;
     std::filesystem::rename(temporary, root_ / (pending.key + ".pscache"));
-    auto inserted = entries_.emplace(pending.key, Entry{total, ++clock_});
-    if (inserted.second)
-      bytes_ += total;
+    file.published();
+    entry.mapped().age = ++clock_;
+    bytes_ += entry.mapped().bytes;
+    entries_.insert(std::move(entry));
     reserved_ = 0;
   }
   void worker() noexcept {
@@ -433,18 +540,18 @@ class DiskCache final {
         queued_bytes_ -= pending->value.storage()->capacity();
         queue_.pop_front();
         active_ = true;
+        active_pending_ = &*pending;
       }
       try {
         write(*pending);
       } catch (...) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++stats_.write_failures;
-        std::error_code ec;
-        std::filesystem::remove(root_ / (pending->key + ".tmp"), ec);
       }
       {
         std::lock_guard<std::mutex> lock(mutex_);
         queued_keys_.erase(pending->key);
+        active_pending_ = nullptr;
         pending.reset();
         active_ = false;
         reserved_ = 0;
@@ -485,5 +592,7 @@ class DiskCache final {
   std::deque<Pending> queue_;
   std::set<std::string> queued_keys_;
   DiskCacheStatistics stats_;
+  WriteHooks hooks_;
+  Pending* active_pending_ = nullptr;
 };
 }  // namespace ps::execution_internal

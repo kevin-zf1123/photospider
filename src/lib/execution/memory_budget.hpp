@@ -30,7 +30,8 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
   }
   Result<std::shared_ptr<MemoryReservation>> reserve(
       std::uint64_t bytes, const std::function<ErrorCode()>& stop = {},
-      std::shared_ptr<MemoryObservation> observation = {});
+      std::shared_ptr<MemoryObservation> observation = {},
+      const std::function<void()>& reclaim = {});
   std::pair<std::uint64_t, std::uint64_t> peaks(
       const std::shared_ptr<MemoryObservation>& observation) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -52,6 +53,7 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
   std::uint64_t reserved_ = 0;
   std::uint64_t live_ = 0;
   std::size_t active_ = 0;
+  std::uint64_t admission_epoch_ = 0;
   std::condition_variable changed_;
 };
 
@@ -111,6 +113,7 @@ class MemoryReservation final
       capacity_ = used_;
       sealed_ = true;
       --budget_->active_;
+      ++budget_->admission_epoch_;
       budget_->changed_.notify_all();
     }
   }
@@ -171,7 +174,8 @@ class MemoryReservation final
 
 inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
     std::uint64_t bytes, const std::function<ErrorCode()>& stop,
-    std::shared_ptr<MemoryObservation> observation) {
+    std::shared_ptr<MemoryObservation> observation,
+    const std::function<void()>& reclaim) {
   auto reservation = std::shared_ptr<MemoryReservation>(
       new MemoryReservation(shared_from_this(), 0));
   reservation->observation_ = observation
@@ -182,6 +186,19 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
     return Result<std::shared_ptr<MemoryReservation>>(Status::failure(
         ErrorCode::ResourceExhausted, "minimum working set exceeds budget"));
   while (reserved_ > maximum_ - bytes) {
+    if (reclaim) {
+      const auto epoch = admission_epoch_;
+      lock.unlock();
+      reclaim();
+      lock.lock();
+      if (reserved_ <= maximum_ - bytes)
+        break;
+      // A producer can publish a new cache entry while reclamation runs.
+      // Revisit it after its admission/seal transition before declaring
+      // failure.
+      if (epoch != admission_epoch_)
+        continue;
+    }
     if (stop) {
       const auto code = stop();
       if (code != ErrorCode::Ok) {
@@ -205,6 +222,7 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
       std::max(reservation->observation_->peak_reserved,
                reservation->observation_->reserved);
   ++active_;
+  ++admission_epoch_;
   return Result<std::shared_ptr<MemoryReservation>>(std::move(reservation));
 }
 }  // namespace ps::execution_internal
