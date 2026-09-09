@@ -162,6 +162,12 @@ input、establish facets 或静态 semantic 参数。固定前缀后可有一个
 minimum>=1、maximum 有界，总输入<=1024。Loader 在原子发布前复制全部 record，lowering
 展开精确有序表。新增 axes、typed ports 和重复组使用 Whole，不引入 G4。
 
+闭集 semantic 词汇还会根据输入元数据推断通道提取/选择/合并、alpha 关联和 RGB/XYZ/Lab
+变换。`IndexListCount` 与 swizzle 共享公开 canonical indices parser：1..64 个 [0,63]
+十进制索引，逗号分隔，无空格或前导零。规则复用既有 source/parameter 字段，发布前
+拒绝非法组合，不按 operation key 分派推断。精确 role、参考白、去 alpha 和 generic
+输出行为见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。
+
 SemanticNode/PlanStep 保留真实 output facets，C sink 向 callback 提供相同的已解析
 类型/shape/facets，并据此检查结果；typed facet 失配为 OperationFailed。Drop 移除已知
 typed 语义保证，无关 opaque generic facet 保持既有发布规则。完整约束及输出规则进入

@@ -6,6 +6,7 @@
 
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/operation_semantics.hpp"
 
 namespace ps {
 namespace {
@@ -152,6 +153,18 @@ Result<OperationMetadata> infer_operation_output(
               return mismatch("output axis references absent input axis");
             n = inputs[axis.input].descriptor.shape[axis.axis];
             break;
+          case OperationExtentSource::IndexListCount: {
+            const auto* value =
+                parameter<std::string>(parameters, axis.parameter);
+            if (!value)
+              return Result<OperationMetadata>(
+                  invalid("missing index-list extent parameter"));
+            auto indices = channel_indices_from_parameter(*value);
+            if (!indices.ok())
+              return Result<OperationMetadata>(indices.status());
+            n = indices.value().size();
+            break;
+          }
           case OperationExtentSource::Parameter: {
             const auto* value =
                 parameter<std::int64_t>(parameters, axis.parameter);
@@ -207,6 +220,22 @@ Result<OperationMetadata> infer_operation_output(
       if (!facet.ok())
         return Result<OperationMetadata>(facet.status());
       result.facets.push_back(facet.take_value());
+      break;
+    }
+    case OperationSemanticRule::ExtractChannel:
+    case OperationSemanticRule::SwizzleChannels:
+    case OperationSemanticRule::MergeChannelsParameter:
+    case OperationSemanticRule::AssociateAlpha:
+    case OperationSemanticRule::UnassociateAlpha:
+    case OperationSemanticRule::RgbToXyz:
+    case OperationSemanticRule::XyzToRgb:
+    case OperationSemanticRule::XyzToLab:
+    case OperationSemanticRule::LabToXyz: {
+      auto transformed = contract_internal::infer_transformed_facets(
+          t, inputs, parameters, result.descriptor);
+      if (!transformed.ok())
+        return Result<OperationMetadata>(transformed.status());
+      result.facets = transformed.take_value();
       break;
     }
     default:
@@ -269,12 +298,14 @@ Status validate_operation_contract(const OperationTraits& t) {
     return invalid("unexpected output axes");
   }
   for (const auto& axis : t.output_axes) {
-    if (static_cast<std::uint32_t>(axis.source) > 3 ||
+    if (static_cast<std::uint32_t>(axis.source) > 4 ||
         (axis.source == OperationExtentSource::Constant && !axis.constant) ||
         (axis.source != OperationExtentSource::Constant &&
          axis.constant != 1) ||
         (axis.source == OperationExtentSource::Parameter
              ? !spec(axis.parameter, OperationParameterType::Int64)
+         : axis.source == OperationExtentSource::IndexListCount
+             ? !spec(axis.parameter, OperationParameterType::String)
              : !axis.parameter.empty()) ||
         (axis.source == OperationExtentSource::InputAxis
              ? axis.input >= maximum || axis.axis >= 8
@@ -313,6 +344,33 @@ Status validate_operation_contract(const OperationTraits& t) {
           !spec(t.output_semantic_parameter, OperationParameterType::String))
         return invalid("invalid semantic parameter");
       break;
+    case OperationSemanticRule::ExtractChannel:
+    case OperationSemanticRule::SwizzleChannels:
+    case OperationSemanticRule::MergeChannelsParameter:
+    case OperationSemanticRule::AssociateAlpha:
+    case OperationSemanticRule::UnassociateAlpha:
+    case OperationSemanticRule::RgbToXyz:
+    case OperationSemanticRule::XyzToRgb:
+    case OperationSemanticRule::XyzToLab:
+    case OperationSemanticRule::LabToXyz: {
+      const auto rule = t.output_semantic_rule;
+      if (t.region_rule != OperationRegionRule::Whole ||
+          !t.output_facets.empty() || t.output_semantic_input >= maximum ||
+          (rule == OperationSemanticRule::MergeChannelsParameter &&
+           t.output_semantic_input))
+        return invalid("invalid semantic transform source/region");
+      if (rule == OperationSemanticRule::ExtractChannel) {
+        if (!spec(t.output_semantic_parameter, OperationParameterType::Int64))
+          return invalid("extract requires an Int64 index parameter");
+      } else if (rule == OperationSemanticRule::SwizzleChannels ||
+                 rule == OperationSemanticRule::MergeChannelsParameter) {
+        if (!spec(t.output_semantic_parameter, OperationParameterType::String))
+          return invalid("channel transform requires a String parameter");
+      } else if (!t.output_semantic_parameter.empty()) {
+        return invalid("unexpected color transform parameter");
+      }
+      break;
+    }
     default:
       return invalid("unknown semantic inference rule");
   }

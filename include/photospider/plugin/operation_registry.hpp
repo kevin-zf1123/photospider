@@ -161,7 +161,9 @@ enum class OperationExtentSource : std::uint32_t {
   Constant = 0,
   Parameter = 1,
   InputAxis = 2,
-  InputCount = 3
+  InputCount = 3,
+  /** @brief Length of a canonical channel-index String parameter. */
+  IndexListCount = 4
 };
 /** @brief Checked positive extent plus a nonnegative constant offset. */
 struct PHOTOSPIDER_API OperationExtent final {
@@ -178,7 +180,26 @@ enum class OperationSemanticRule : std::uint32_t {
   Drop = 0,
   PreserveInput = 1,
   Establish = 2,
-  Parameter = 3
+  Parameter = 3,
+  /** @brief Select one HWC channel as HW field/coverage; Int64 parameter. */
+  ExtractChannel = 4,
+  /** @brief Select HWC channels by canonical index-list String. */
+  SwizzleChannels = 5,
+  /** @brief Establish explicit HWC semantics from HW channels; String target.
+   */
+  MergeChannelsParameter = 6,
+  /** @brief RGB straight to coverage-premultiplied, retaining channel order. */
+  AssociateAlpha = 7,
+  /** @brief RGB coverage-premultiplied to straight, retaining channel order. */
+  UnassociateAlpha = 8,
+  /** @brief Linear sRGB D65 to canonical XYZ with the same white/alpha. */
+  RgbToXyz = 9,
+  /** @brief D65 XYZ to canonical linear sRGB with the same white/alpha. */
+  XyzToRgb = 10,
+  /** @brief XYZ to canonical Lab, retaining the explicit reference white. */
+  XyzToLab = 11,
+  /** @brief Lab to canonical XYZ, retaining the explicit reference white. */
+  LabToXyz = 12
 };
 
 /**
@@ -231,7 +252,7 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::vector<std::uint64_t> fixed_output_shape;
   /** @brief Ordered constraints; a repeated template has prefix+one record. */
   std::vector<OperationPortConstraint> input_schema;
-  /** @brief Value or image guarantee; image preserves the first image input. */
+  /** @brief Resolved output constraint; facets are inferred independently. */
   OperationPortConstraint output_schema;
   /** @brief Fixed maximum scratch bytes per invocation, excluding output. */
   std::uint64_t workspace_bytes = 0;
@@ -263,8 +284,17 @@ struct PHOTOSPIDER_API OperationTraits final {
   bool repeated_match = true;
   /** @brief Output semantic inference, copied into every compiler identity. */
   OperationSemanticRule output_semantic_rule = OperationSemanticRule::Drop;
+  /** @brief Source for preserve/extract/swizzle/alpha/color transformations.
+   * @note Transformations require Whole and statically known compatible
+   * metadata. Swizzle emits generic output when selected roles cannot form a
+   * valid descriptor.
+   */
   std::uint32_t output_semantic_input = 0;
   std::vector<ValueFacet> output_facets = {};
+  /** @brief Required parameter for Parameter/Merge (semantic String),
+   * Extract (Int64 index), or Swizzle (canonical index-list String).
+   * Empty for parameter-free transforms; no operation-key-specific inference.
+   */
   std::string output_semantic_parameter = {};
   /** @brief Require resolved Fixed/Whole output dense representability.
    * @note Regional C outputs check their actual demand at the sink instead.

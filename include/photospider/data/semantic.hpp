@@ -104,6 +104,24 @@ PHOTOSPIDER_API Result<std::string> semantic_parameter(
  */
 PHOTOSPIDER_API Result<SemanticDescriptor> semantic_from_parameter(
     const std::string& parameter);
+/** @brief Encodes a static channel-selection list without manual String
+ * assembly.
+ * @param indices Ordered 1..64 indices, each in [0,63]; repetitions are
+ * allowed.
+ * @return Canonical comma-separated decimal String or InvalidArgument.
+ * @throws std::bad_alloc On allocation. Pure, thread-safe; no values are
+ * retained.
+ */
+PHOTOSPIDER_API Result<std::string> channel_indices_parameter(
+    const std::vector<std::uint32_t>& indices);
+/** @brief Parses a canonical static channel-selection String.
+ * @param parameter 1..191 ASCII bytes, no spaces/signs/leading zeros.
+ * @return Owned 1..64 indices in [0,63], or InvalidArgument. Actual channel
+ * bounds are checked during descriptor inference, before callbacks.
+ * @throws std::bad_alloc On allocation. Pure and thread-safe.
+ */
+PHOTOSPIDER_API Result<std::vector<std::uint32_t>>
+channel_indices_from_parameter(const std::string& parameter);
 /** @brief Checks a typed description against dtype and nonzero logical shape.
  * @param semantic Borrowed descriptor.
  * @param descriptor Borrowed Value descriptor.

@@ -174,9 +174,21 @@ target_compile_options(photospider_semantic_consumer PRIVATE ${_photospider_cons
 target_link_options(photospider_semantic_consumer PRIVATE ${_photospider_consumer_link_options})
 add_dependencies(photospider_semantic_consumer photospider_contract_fixture)
 
+add_library(photospider_channel_contract MODULE ../fixtures/channel_contract_fixture.c)
+target_link_libraries(photospider_channel_contract PRIVATE Photospider::operation_sdk)
+set_target_properties(photospider_channel_contract PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_executable(photospider_color_consumer ../integration/test_color_operations.cpp)
+target_include_directories(photospider_color_consumer PRIVATE ..)
+target_link_libraries(photospider_color_consumer PRIVATE Photospider::kernel)
+target_compile_definitions(photospider_color_consumer PRIVATE PS_CHANNEL_CONTRACT_FIXTURE="$<TARGET_FILE:photospider_channel_contract>")
+target_compile_options(photospider_color_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_color_consumer PRIVATE ${_photospider_consumer_link_options})
+add_dependencies(photospider_color_consumer photospider_channel_contract)
+
 add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_color_consumer>"
   COMMAND "$<TARGET_FILE:photospider_semantic_consumer>"
   COMMAND "$<TARGET_FILE:photospider_image_vertical>"
   COMMAND "$<TARGET_FILE:photospider_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
@@ -194,6 +206,6 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  DEPENDS photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

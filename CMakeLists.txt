@@ -73,6 +73,7 @@ set(
   PHOTOSPIDER_KERNEL_SOURCES
   plugins/ops/image_operations.cpp
   plugins/ops/numeric_operations.cpp
+  plugins/ops/color_operations.cpp
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
@@ -80,6 +81,7 @@ set(
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
   src/lib/plugin/operation_contract.cpp
+  src/lib/plugin/operation_semantics.cpp
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
@@ -97,12 +99,14 @@ endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   set_source_files_properties(plugins/ops/image_operations.cpp
     plugins/ops/numeric_operations.cpp
+    plugins/ops/color_operations.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 elseif(MSVC)
   set_source_files_properties(plugins/ops/image_operations.cpp
     plugins/ops/numeric_operations.cpp
+    plugins/ops/color_operations.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -111,6 +115,7 @@ file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.mm" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.metal" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.cpp")
 list(APPEND _cache_identity_inputs "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
 list(SORT _cache_identity_inputs)
@@ -451,6 +456,18 @@ if(BUILD_TESTING)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
+  photospider_add_test(test_color_operations Photospider::kernel tests/integration/test_color_operations.cpp)
+  foreach(_case RANGE 0 2)
+    add_library(channel_contract_${_case} MODULE tests/fixtures/channel_contract_fixture.c)
+    target_link_libraries(channel_contract_${_case} PRIVATE Photospider::operation_sdk)
+    set_target_properties(channel_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_compile_definitions(channel_contract_${_case} PRIVATE PS_CHANNEL_BAD_CASE=${_case})
+    add_dependencies(test_color_operations channel_contract_${_case})
+  endforeach()
+  target_compile_definitions(test_color_operations PRIVATE
+    PS_CHANNEL_CONTRACT_FIXTURE="$<TARGET_FILE:channel_contract_0>"
+    PS_BAD_CHANNEL_1="$<TARGET_FILE:channel_contract_1>"
+    PS_BAD_CHANNEL_2="$<TARGET_FILE:channel_contract_2>")
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
   target_include_directories(test_computed_scalar PRIVATE examples)

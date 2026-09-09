@@ -2,6 +2,8 @@
 
 已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：typed image v2 完整替换 v1，通道 extract/merge/swizzle、alpha associate/unassociate、显式 assign、同白点 linear-sRGB D65↔XYZ↔Lab。允许 signed/HDR；零 alpha 和极小 alpha 规则显式，无隐式白点适应/gamut clamp。ICC/OCIO、其他颜色模型与完整 transfer 目录继续 Proposed。
 
+当前通道、alpha、assign 和 RGB/XYZ/Lab 实现及可运行公开示例见[通道与颜色算子](../../kernel-architecture/zh/Channel-and-Color-Operations.zh.md)。下表扩展目录继续 Proposed，参数以实现文档为准。
+
 状态 Proposed。基础通道/数值/矩阵转换为D1；ICC/OCIO/profile、通用图像描述为D2。CPU Float32/Float64为参考，整数主要用于输入输出编码。逐像素数学多为E，但跨通道shape、完整profile/LUT辅助输入与当前端口的限制见G1..G5。
 
 ## 算子目录

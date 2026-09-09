@@ -133,6 +133,22 @@ Semantic lowering 将模板展开为精确有序输入表；直接调用执行�
 Descriptor 与 C ABI 区分模板和已解析表。Shape 引用须指向实际存在的输入轴；
 重复数量、静态轴参数及 checked allocation product 不合法时在 callback/IR 发布前失败。
 
+闭集 `OperationSemanticRule` 也包含通道提取、选择、合并、alpha 关联变化和 RGB/XYZ/Lab
+变换，均为与 operation key/callback 无关的共享描述规则。`MergeChannelsParameter`
+接受 dtype/shape 合法的 Image/VectorField/ComplexField HWC 目标；已知 HW 源的
+role/unit 逐通道匹配，name 不必相同。图像 alpha 提取使用 canonical coverage，
+可直接组合既有 exact mask 端口。
+
+`channel_indices_parameter` / `channel_indices_from_parameter` 编解码 canonical
+逗号分隔十进制 String：1..64 项，各项 0..63，无空格/符号/前导零，最多 191 字节。
+`IndexListCount` 通过同一 parser 扩展 extent 来源，该 String 同时驱动 swizzle 元数据。
+完整合法角色的选择保留变换后的 typed 语义；重复/缺失角色、alpha 不在末位或其他
+无法表示的选择输出 generic。去除 straight alpha 可保留 unassociated Image；
+去除 premul alpha 必须移除 image facet，因为 RGB 仍被缩放。颜色转换按 role 读取
+任意合法顺序，规范化全部输出通道名（含 alpha `A`），保持 alpha 样本 bits。
+这些规则属于尚未发布的 ABI/Traits 7 词汇及既有 identity；WorkflowDocument schema 2、
+provider ABI 1 保持。
+
 ## G5：计算标量与可复用算子子集
 
 Generic Float32 `{1}` 上游可以连接 bounded scalar。编译检查 dtype/shape 和已知语义。

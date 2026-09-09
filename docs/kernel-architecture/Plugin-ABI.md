@@ -206,6 +206,15 @@ copies all records before atomic publication. Lowering expands a template to
 its exact ordered input table. New axes, typed ports and repeated groups use
 Whole. No per-port G4 spatial inference is introduced.
 
+The closed semantic vocabulary additionally infers channel extraction/selection/
+merging, alpha association and RGB/XYZ/Lab transformations from input metadata.
+`IndexListCount` shares the public canonical index-list parser with swizzle:
+1..64 decimal indices in [0,63], comma-separated without spaces or leading zeros.
+These rules use the existing source/parameter fields, reject malformed combinations
+before publication and never dispatch inference by operation key. See
+[channel and color operations](Channel-and-Color-Operations.md) for exact role,
+white-point, alpha-removal and generic-output behavior.
+
 SemanticNode and PlanStep retain real output facets. The C sink supplies the
 same resolved dtype/shape/facets to callbacks. Published output is validated
 against these facts; a typed facet mismatch is OperationFailed. Drop removes

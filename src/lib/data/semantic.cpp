@@ -324,6 +324,48 @@ Result<SemanticDescriptor> semantic_from_parameter(
   }
   return decode_semantic(facet);
 }
+Result<std::string> channel_indices_parameter(
+    const std::vector<std::uint32_t>& indices) {
+  if (indices.empty() || indices.size() > 64)
+    return Result<std::string>(invalid("channel index count outside [1,64]"));
+  std::string result;
+  for (auto index : indices) {
+    if (index > 63)
+      return Result<std::string>(invalid("channel index outside [0,63]"));
+    if (!result.empty())
+      result += ',';
+    result += std::to_string(index);
+  }
+  return Result<std::string>(std::move(result));
+}
+Result<std::vector<std::uint32_t>> channel_indices_from_parameter(
+    const std::string& parameter) {
+  if (parameter.empty() || parameter.size() > 191)
+    return Result<std::vector<std::uint32_t>>(
+        invalid("invalid channel index String size"));
+  std::vector<std::uint32_t> result;
+  std::size_t position = 0;
+  while (position < parameter.size()) {
+    const auto start = position;
+    std::uint32_t value = 0;
+    while (position < parameter.size() && parameter[position] >= '0' &&
+           parameter[position] <= '9') {
+      value = value * 10 + static_cast<unsigned>(parameter[position++] - '0');
+      if (value > 63 || (position - start > 1 && parameter[start] == '0'))
+        return Result<std::vector<std::uint32_t>>(
+            invalid("noncanonical channel index"));
+    }
+    if (position == start || result.size() == 64 ||
+        (position < parameter.size() &&
+         (parameter[position] != ',' || position + 1 == parameter.size())))
+      return Result<std::vector<std::uint32_t>>(
+          invalid("invalid channel index list"));
+    result.push_back(value);
+    if (position < parameter.size())
+      ++position;
+  }
+  return Result<std::vector<std::uint32_t>>(std::move(result));
+}
 Status validate_semantic_descriptor(const SemanticDescriptor& s,
                                     const ValueDescriptor& d) {
   auto encoded = encode_semantic(s);

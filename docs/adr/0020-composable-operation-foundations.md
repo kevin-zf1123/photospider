@@ -187,6 +187,27 @@ and C ABI distinguish the template from the resolved table. Shape references
 must resolve to a present input axis; repeated arity, static axis parameters,
 and checked allocation products fail before callback/IR publication when invalid.
 
+The closed `OperationSemanticRule` vocabulary also includes channel extraction,
+selection, merging, alpha association changes and RGB/XYZ/Lab transformations.
+These are shared descriptor rules, independent of operation keys or callbacks.
+`MergeChannelsParameter` accepts explicit Image/VectorField/ComplexField targets
+when the resulting HWC dtype/shape is valid. Known HW source roles/units match
+corresponding target channels; names need not match. Image alpha extraction uses
+canonical coverage metadata so it composes with existing exact mask ports.
+
+`channel_indices_parameter` / `channel_indices_from_parameter` encode/decode a
+canonical comma-separated decimal String: 1..64 indices, each 0..63, no spaces,
+signs or leading zeros, at most 191 bytes. `IndexListCount` extends the extent
+vocabulary using this shared parser; the same String drives swizzle metadata.
+Selections preserving complete valid roles retain transformed typed semantics.
+Repeated/missing roles, misplaced alpha or otherwise unrepresentable selections
+produce generic output. Dropping straight alpha may preserve an unassociated
+Image; dropping premul alpha must drop the image facet because RGB remains scaled.
+Color conversion reads roles in any valid order and canonicalizes all output
+channel names, including alpha `A`, while preserving alpha sample bits.
+The unreleased ABI/Traits 7 vocabulary and existing identities include these rules;
+WorkflowDocument schema 2 and provider ABI 1 remain unchanged.
+
 ## G5: computed scalars and reusable operation subset
 
 An upstream generic Float32 `{1}` may feed a bounded scalar port. Compile-time

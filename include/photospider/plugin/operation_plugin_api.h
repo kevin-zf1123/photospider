@@ -436,12 +436,22 @@ typedef struct ps_operation_semantic_constraint_v7 {
 #define PS_OPERATION_EXTENT_PARAMETER_V7 1U
 #define PS_OPERATION_EXTENT_INPUT_AXIS_V7 2U
 #define PS_OPERATION_EXTENT_INPUT_COUNT_V7 3U
+#define PS_OPERATION_EXTENT_INDEX_LIST_COUNT_V7 4U
 /** @brief Semantic inference: drop, preserve input, establish facets,
  * parameter. */
 #define PS_OPERATION_SEMANTIC_DROP_V7 0U
 #define PS_OPERATION_SEMANTIC_PRESERVE_V7 1U
 #define PS_OPERATION_SEMANTIC_ESTABLISH_V7 2U
 #define PS_OPERATION_SEMANTIC_PARAMETER_V7 3U
+#define PS_OPERATION_SEMANTIC_EXTRACT_CHANNEL_V7 4U
+#define PS_OPERATION_SEMANTIC_SWIZZLE_CHANNELS_V7 5U
+#define PS_OPERATION_SEMANTIC_MERGE_CHANNELS_PARAMETER_V7 6U
+#define PS_OPERATION_SEMANTIC_ASSOCIATE_ALPHA_V7 7U
+#define PS_OPERATION_SEMANTIC_UNASSOCIATE_ALPHA_V7 8U
+#define PS_OPERATION_SEMANTIC_RGB_TO_XYZ_V7 9U
+#define PS_OPERATION_SEMANTIC_XYZ_TO_RGB_V7 10U
+#define PS_OPERATION_SEMANTIC_XYZ_TO_LAB_V7 11U
+#define PS_OPERATION_SEMANTIC_LAB_TO_XYZ_V7 12U
 
 /** @brief Checked static extent; parameter pointer/count is null/zero when
  * unused. */
@@ -458,10 +468,15 @@ typedef struct ps_operation_extent_v7 {
 
 /** @brief Optional declarative output and repeated-input contract.
  * @note Exact size/alignment and pointer/count bounds are checked before copy.
- * Dtype/semantic parameters are required String schema entries. axes has 1..8
- * records only for AXES. A repeated group follows input_count fixed inputs;
- * input_schema then has prefix+one template and actual inputs are <=1024.
- * All members of a homogeneous group must share dtype and shape.
+ * Dtype/semantic parameters are required String schema entries, except
+ * extract's required Int64 index. Swizzle and INDEX_LIST_COUNT use canonical
+ * comma-separated decimal indices (1..64 entries, each 0..63, no spaces/leading
+ * zeroes). Alpha/color transforms have no semantic parameter. New transforms
+ * are Whole; their metadata checks and output facets are shared with C++
+ * inference. axes has 1..8 records only for AXES. A repeated group follows
+ * input_count fixed inputs; input_schema then has prefix+one template and
+ * actual inputs are <=1024. All members of a homogeneous group must share dtype
+ * and shape.
  */
 typedef struct ps_operation_contract_v7 {
   uint32_t struct_size;

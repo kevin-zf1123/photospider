@@ -69,5 +69,5 @@ typed mask 语义移除；非有限、溢出、shape/dtype、分配与取消错�
 
 修改 `run()` 的 key/参数，或将前一结果节点直接连接到后一节点。单个 generic Float32
 结果连接 `image.exposure_gain` 时，保持 `{1}` 和 gain `[0,16]`；bounded consumer
-每次消费前检查结果。Expression、通道/颜色以及独立安装的 foundations 组合示例由后续
-已追踪切片交付。
+每次消费前检查结果。[通道/颜色算子](Channel-and-Color-Operations.zh.md) 提供显式组合。
+Expression 以及独立安装的 foundations 组合示例由后续已追踪切片交付。
