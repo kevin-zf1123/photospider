@@ -191,3 +191,10 @@ outputs, insufficient halo, mismatched mask spatial shape and Value coverage
 shorter than the claimed demand before callback allocation. Whole caches retire
 after their final remaining boundary/output reader, including chains of Whole
 operations; `test_regional_execution` checks a three-node chain at 16/15 bytes.
+
+Run completion waits for queue callback ownership to retire as well as the
+logical in-flight steps. A final scope clears all Run-held Value/binding owners
+on success, cancellation and failure. Releasing the caller's returned result
+therefore immediately returns its payload capacity even if queue metadata is
+still retiring. The private callback-body gate in `test_memory_liveness` checks
+this boundary for successful and cancelled calls with an eight-byte budget.

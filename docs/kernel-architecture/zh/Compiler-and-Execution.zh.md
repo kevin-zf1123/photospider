@@ -146,3 +146,8 @@ workspace 上限。RawBenchmarkOptions.bindings 在入口复制一次，供每�
 不完整 RGBA 输出、非整图 Whole 输出、不足 halo、蒙版空间 shape 不匹配和 Value 未覆盖
 其声明需求。Whole 缓存在最后剩余边界/输出 reader 完成后释放，包括连续 Whole 链；
 test_regional_execution 验证三节点链的 16/15 字节预算。
+
+Run 完成同时等待队列 callback 所有者和逻辑 in-flight step 退场。最终作用域在成功、
+取消和失败时清理 Run 持有的 Value/binding，因此调用方释放返回结果后立即退回其
+payload 容量。test_memory_liveness 的私有 callback-body gate 使用八字节预算验证
+成功/取消边界，队列元数据退场不再延长结果缓冲区的保留。

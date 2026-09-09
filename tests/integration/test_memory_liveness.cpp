@@ -1,4 +1,5 @@
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <future>
@@ -8,6 +9,7 @@
 #include <string>
 #include <utility>
 
+#include "execution/execution_test_hooks.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -23,9 +25,82 @@ ps::Result<ps::Value> scalar(const ps::OperationInvocation& invocation,
   std::memcpy(writer.data(), &number, sizeof(number));
   return std::move(writer).publish();
 }
+std::mutex retirement_mutex;
+std::condition_variable retirement_changed;
+bool body_finished = false, release_body = false;
+void hold_callback_owner() noexcept {
+  std::unique_lock<std::mutex> lock(retirement_mutex);
+  body_finished = true;
+  retirement_changed.notify_all();
+  retirement_changed.wait(lock, [] { return release_body; });
+}
+int callback_retirement() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  auto registry = std::make_shared<OperationRegistry>();
+  std::weak_ptr<const CpuStorage> storage;
+  PS_CHECK(
+      registry
+          ->register_operation({"scalar",
+                                {},
+                                [&](const OperationInvocation& invocation) {
+                                  auto result = scalar(invocation, 1);
+                                  if (result.ok())
+                                    storage = result.value().storage();
+                                  return result;
+                                }})
+          .ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument document;
+  document.nodes = {{1, "scalar", {}, {}}};
+  document.outputs = {{"result", 1, "value"}};
+  GraphContext graph(document);
+  Compiler compiler(registry);
+  auto compiled = compiler.compile(graph);
+  PS_CHECK(compiled.ok());
+  ExecutionContext execution(registry, {1, false, 4, 8});
+  for (bool cancel : {false, true}) {
+    body_finished = release_body = false;
+    execution_testing::ExecutionTestHooks hooks;
+    hooks.callback_body_finished = hold_callback_owner;
+    execution_testing::install_execution_test_hooks(&hooks);
+    CancellationSource cancellation;
+    auto pending = std::async(std::launch::async, [&] {
+      return execution.execute(compiled.value().plan, {}, cancellation.token());
+    });
+    {
+      std::unique_lock<std::mutex> lock(retirement_mutex);
+      retirement_changed.wait(lock, [] { return body_finished; });
+    }
+    const bool returned_early =
+        pending.wait_for(std::chrono::milliseconds(20)) ==
+        std::future_status::ready;
+    if (cancel)
+      cancellation.cancel();
+    {
+      std::lock_guard<std::mutex> lock(retirement_mutex);
+      release_body = true;
+    }
+    retirement_changed.notify_all();
+    auto result = pending.get();
+    execution_testing::install_execution_test_hooks(nullptr);
+    PS_CHECK(!returned_early);
+    PS_CHECK(cancel ? result.status().code == ErrorCode::Cancelled
+                    : result.ok());
+    result = Result<ExecutionResult>(ExecutionResult{});
+    PS_CHECK(storage.expired());
+    auto recovered = execution.execute(compiled.value().plan);
+    PS_CHECK(recovered.ok());
+  }
+  for (unsigned i = 0; i < 100; ++i) {
+    auto result = execution.execute(compiled.value().plan);
+    PS_CHECK(result.ok());
+  }
+  return 0;
+}
 }  // namespace
 
 int main() {
+  PS_CHECK(callback_retirement() == 0);
   using namespace ps;  // NOLINT(build/namespaces)
   auto registry = std::make_shared<OperationRegistry>();
   std::weak_ptr<const CpuStorage> source_storage;

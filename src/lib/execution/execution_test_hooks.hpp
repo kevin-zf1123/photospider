@@ -129,6 +129,8 @@ struct ExecutionTestHooks final {
   FinalResultReadyHook final_result_ready = nullptr;
   /** @brief Optional post-submit external-stop observation boundary hook. */
   PostSubmitObservationHook post_submit_observation = nullptr;
+  /** @brief Called after the callback body, before queue ownership retires. */
+  FinalResultReadyHook callback_body_finished = nullptr;
 };
 
 /**
@@ -198,5 +200,10 @@ void notify_final_result_ready() noexcept;
  * noninstalled test-kernel variant invokes this function.
  */
 void notify_post_submit_observation() noexcept;
+
+/** @brief Observes a returned callback body before its queue owner retires.
+ * @note Private test-only point, outside queue and Run locks; hook is noexcept.
+ */
+void notify_callback_body_finished() noexcept;
 
 }  // namespace ps::execution_testing

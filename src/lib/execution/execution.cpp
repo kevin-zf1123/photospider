@@ -329,6 +329,9 @@ class ThreadPool final {
         // Execution callbacks have their own status fence. This final fence
         // preserves pool liveness if a future callback violates that contract.
       }
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+      execution_testing::notify_callback_body_finished();
+#endif
       if (callback.retired)
         callback.retired();
     }
@@ -1011,8 +1014,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @return Complete result or first typed failure.
    * @throws std::bad_alloc If final publication allocation fails.
    * @note Failure stops new admission while already started callbacks drain.
-   * Complete result assembly and its final stop recheck both occur under the
-   * Run mutex; passing that recheck is the sole success-publication
+   * Queue callback owners retire before result assembly, and Run-held Value
+   * owners are cleared on every return. Complete assembly and stop checks occur
+   * under the Run mutex; passing that recheck is the sole success-publication
    * linearization point.
    */
   [[nodiscard]] Result<ExecutionResult> run() {
@@ -1038,11 +1042,20 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       }
 
       if ((failure_.has_value() || completed_count_ == values_.size()) &&
-          in_flight_ == 0U) {
+          in_flight_ == 0U && pending_callbacks_ == 0U) {
         break;
       }
       state_changed_.wait(lock);
     }
+
+    struct ReleaseValues {
+      std::vector<Value>* values;
+      std::vector<Value>* bindings;
+      ~ReleaseValues() {
+        values->clear();
+        bindings->clear();
+      }
+    } release_values{&values_, &bindings_};
 
     if (failure_.has_value()) {
       return Result<ExecutionResult>(*failure_);
@@ -1192,8 +1205,25 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         return;
       }
       auto self = shared_from_this();
-      std::function<void()> callback = [self, step_index, backend] {
-        self->execute_attempt(step_index, backend);
+      // Completion includes destruction of the queue's callback ownership, on
+      // both normal retirement and submission failure. The ticket also covers
+      // a fallback attempt while its predecessor is still returning.
+      struct CallbackLifetime {
+        explicit CallbackLifetime(std::shared_ptr<ExecutionRun> value)
+            : owner(std::move(value)) {
+          std::lock_guard<std::mutex> lock(owner->mutex_);
+          ++owner->pending_callbacks_;
+        }
+        ~CallbackLifetime() {
+          std::lock_guard<std::mutex> lock(owner->mutex_);
+          --owner->pending_callbacks_;
+          owner->state_changed_.notify_all();
+        }
+        std::shared_ptr<ExecutionRun> owner;
+      };
+      auto lifetime = std::make_shared<CallbackLifetime>(self);
+      std::function<void()> callback = [lifetime, step_index, backend] {
+        lifetime->owner->execute_attempt(step_index, backend);
       };
       auto admission = waiting_admission_->try_acquire();
       if (!admission.has_value()) {
@@ -1684,6 +1714,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       ready_;
   /** @brief Number of callbacks/fallback chains not yet terminal. */
   std::uint32_t in_flight_ = 0U;
+  /** @brief Queue callback owners still alive, including finished bodies. */
+  std::size_t pending_callbacks_ = 0;
   /** @brief Number of successfully published physical steps. */
   std::size_t completed_count_ = 0U;
   /** @brief First terminal failure, if any. */
