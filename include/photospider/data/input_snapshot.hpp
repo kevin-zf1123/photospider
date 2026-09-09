@@ -14,8 +14,9 @@ struct InputSnapshotStoreConfig final {
   std::uint32_t block_size = 128;
 };
 /**
- * @brief Immutable complete Float32 image/mask represented by shared blocks.
- * @note Copies/reads are concurrent-safe. Captured storage outlives its store.
+ * @brief Immutable Float32 image-v2 or coverage mask stored in shared blocks.
+ * @note RGB/RGBA/XYZ/Lab channel roles and association are retained exactly.
+ * Copies/reads are concurrent-safe. Captured storage outlives its store.
  * Default snapshots are invalid; metadata access throws logic_error for them.
  */
 class PHOTOSPIDER_API InputSnapshot final {
@@ -59,7 +60,7 @@ class PHOTOSPIDER_API InputSnapshotStore final {
    */
   explicit InputSnapshotStore(InputSnapshotStoreConfig config = {});
   ~InputSnapshotStore();
-  /** @brief Imports complete valid Float32 image/mask, copying into owned
+  /** @brief Imports complete valid Float32 image-v2 or coverage mask into owned
    * blocks.
    * @return Immutable snapshot or typed validation/budget error.
    * @throws std::bad_alloc For metadata allocation; no partial publication.
@@ -68,7 +69,8 @@ class PHOTOSPIDER_API InputSnapshotStore final {
   /**
    * @brief Creates a new version by exact-region replacement in input order.
    * @param base Valid snapshot from this store.
-   * @param replacement Matching descriptor/profile and nonempty valid Region.
+   * @param replacement Matching descriptor/facets and nonempty Region with all
+   * channels.
    * @return New snapshot or typed failure, leaving base unchanged.
    * @throws std::bad_alloc For metadata allocation.
    * @note Only intersecting blocks are copied; all old references remain valid.

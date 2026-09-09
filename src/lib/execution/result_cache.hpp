@@ -20,6 +20,33 @@
 #include "photospider/execution/execution.hpp"
 
 namespace ps::execution_internal {
+/** @brief Tracks only opaque metadata that a generic Drop producer may publish.
+ * @note Declarations and explicit semantic rules have known facets. Following
+ * PreserveInput cannot introduce typed guarantees absent from the compiled IR.
+ */
+inline bool dynamic_opaque_output(const ExecutionPlan& plan,
+                                  std::size_t index) {
+  for (std::size_t remaining = plan.steps().size(); remaining; --remaining) {
+    if (index >= plan.steps().size())
+      return false;
+    const auto& step = plan.steps()[index];
+    const auto& traits = step.traits;
+    if (traits.output_schema.kind != OperationPortKind::Value ||
+        !step.output_facets.empty())
+      return false;
+    if (traits.output_semantic_rule == OperationSemanticRule::Drop)
+      return true;
+    if (traits.output_semantic_rule != OperationSemanticRule::PreserveInput ||
+        traits.output_semantic_input >= step.inputs.size())
+      return false;
+    const auto* producer =
+        std::get_if<PlanStepInput>(&step.inputs[traits.output_semantic_input]);
+    if (!producer)
+      return false;
+    index = producer->step_index;
+  }
+  return false;
+}
 /**
  * @brief Context-owned LRU and bounded coordinators for shared regional work.
  * @note Coordinators wait for the existing CPU callbacks, never occupy CPU
@@ -92,6 +119,63 @@ class ResultCache final {
     ++stats_.hits;
     lru_.splice(lru_.end(), lru_, found->second.order);
     return found->second.value;
+  }
+  /** @brief Revalidates a completed result against its resolved output
+   * contract.
+   * @note Generic Drop outputs retain their existing opaque-facet behavior.
+   * Typed sample failures remain computed OperationFailed errors on hits.
+   */
+  Result<Value> get_output(const std::string& key, const PlanStep& step,
+                           const std::function<ErrorCode()>& stop,
+                           bool dynamic_opaque = false) {
+    if (stop) {
+      const auto code = stop();
+      if (code != ErrorCode::Ok)
+        return Result<Value>(Status::failure(code, "cached output stopped"));
+    }
+    auto value = get(key);
+    if (!value.valid())
+      return Result<Value>(Value{});
+    const bool allow_opaque =
+        dynamic_opaque && step.output_facets.empty() &&
+        step.traits.output_schema.kind == OperationPortKind::Value;
+    const bool exact =
+        !allow_opaque &&
+        (step.traits.output_schema.kind != OperationPortKind::Value ||
+         step.traits.output_semantic_rule != OperationSemanticRule::Drop);
+    const bool facets_match =
+        exact ? value.facets().size() == step.output_facets.size() &&
+                    std::equal(value.facets().begin(), value.facets().end(),
+                               step.output_facets.begin(),
+                               [](const auto& a, const auto& b) {
+                                 return a.key == b.key &&
+                                        a.version == b.version &&
+                                        a.payload == b.payload;
+                               })
+              : std::none_of(value.facets().begin(), value.facets().end(),
+                             [](const auto& f) {
+                               return f.key == "photospider.image" ||
+                                      f.key == "photospider.semantic";
+                             });
+    if (value.descriptor().element_type !=
+            step.output_descriptor.element_type ||
+        value.descriptor().shape != step.output_descriptor.shape ||
+        !value.view(step.output_demand).ok() || !facets_match)
+      return Result<Value>(Status::failure(ErrorCode::OperationFailed,
+                                           "cached output contract mismatch"));
+    for (const auto& facet : value.facets()) {
+      if (facet.key != "photospider.image" &&
+          facet.key != "photospider.semantic")
+        continue;
+      auto semantic = decode_semantic(facet);
+      if (!semantic.ok())
+        return Result<Value>(semantic.status());
+      auto status = validate_semantic_value(semantic.value(), value,
+                                            ErrorCode::OperationFailed, stop);
+      if (!status.ok())
+        return Result<Value>(status);
+    }
+    return Result<Value>(std::move(value));
   }
   /** @brief Optional retention is fenced; allocation failure cannot fail work.
    */

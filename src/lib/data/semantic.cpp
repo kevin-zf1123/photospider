@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "data/input_validation.hpp"
 #include "plugin/utf8_validation.hpp"
 
 namespace ps {
@@ -384,6 +385,12 @@ Status validate_semantic_value(const SemanticDescriptor& s, const Value& value,
                                const std::function<ErrorCode()>& stop) {
   if (!value.valid())
     return invalid("invalid semantic Value");
+  // Float32-to-Float64 conversion can flush subnormals on the caller's thread.
+  // Validate exact stored samples under the same environment as image ports.
+  input_internal::Float32Environment environment;
+  if (!environment.active())
+    return Status::failure(ErrorCode::OperationFailed,
+                           "cannot set typed sample numeric environment");
   auto status = validate_semantic_descriptor(s, value.descriptor());
   if (!status.ok())
     return status;

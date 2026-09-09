@@ -3,17 +3,26 @@
 PlanCacheKey 仍是非安全物理计划身份，不包含输入像素，也不能验证过期计划或标识
 执行结果。
 
-package 0.6 通过 ExecutionContext.result_cache_bytes 显式启用结果保留，它是
+package 0.7 通过 ExecutionContext.result_cache_bytes 显式启用结果保留，它是
 maximum_live_bytes 的子限额。副本共享不可变分配租约；驱逐只释放缓存引用，严格
 工作集接纳前优先回收可选条目。clear_result_cache() 推进保留 epoch，活动读取者
 仍有效，旧生产者不能重新填充已清空 epoch。统计报告命中、未命中、驱逐、共享、
 条目数和容量。零缓存额度保留无缓存执行。
 
-InputSnapshotStore 独立限额管理不可变图像/蒙版块。导入校验 profile；patch 只复制
-相交块并保留旧版本。content_identity(region) 使用规范 SHA-256 对元数据与需求样本
+InputSnapshotStore 独立限额管理不可变 Float32 image-v2 与 canonical coverage-mask 块。
+RGB/RGBA/XYZ/Lab 保留有序通道角色、参考白、单位和 alpha association，HWC C 取自
+描述符。导入和 patch 校验完整图像通道与有限样本，支持 signed/HDR 和 straight 隐藏色。
+Patch 要求精确 descriptor/facets，只复制相交块并保留旧版本。content_identity(region) 使用规范 SHA-256 对元数据与需求样本
 位求身份，与分块尺寸和分配地址无关；有符号零保持不同。快照绑定提供区域读取。
 
-结果键递归覆盖各消费者实际需要的上游区域、算子语义/参数和稳定输入内容。无关
+内存和 native 完成值保留真实 facet。结果命中在复用前核对解析后的 descriptor、需求
+coverage、输出语义规则和 typed 样本约束，包含 flight 完成竞态中的二次查询。数值验证
+建立 nearest/gradual-underflow 并恢复调用方浮点环境。Generic Drop 输出可发布 opaque
+facet；由该动态边界开始的 PreserveInput 链保持此能力，仍拒绝未推断 typed facet。
+已知 declaration 和显式输出语义要求精确 facet 相等。非法计算
+typed 值仍为 OperationFailed。输入副本键已包含完整元数据，native 发布保留这些信息。
+
+result-region v3 键递归覆盖各消费者实际需要的上游区域、算子语义/参数和稳定输入内容。无关
 图编辑及节点编号不影响相同内容。Whole 依赖保守；标量变化影响相关输出。未证明
 稳定的通用输入仍可执行，其后代不跨 Run 复用。只缓存确定、无副作用、cacheable
 的 CPU 工作。
@@ -22,7 +31,9 @@ InputSnapshotStore 独立限额管理不可变图像/蒙版块。导入校验 pr
 图当前性。最后一个订阅者取消后，等待生产者退出才返回。生产者快照独立持有输入
 和 registry，不依赖调用方栈或可编辑图。
 
-FrozenExecution 捕获当前计划及不可变 Value/快照绑定，允许原图替换/销毁。普通
+FrozenExecution 是内存中的拥有者对象，无序列化 plan reader；捕获当前计划及不可变
+Value/快照绑定，允许原图替换/销毁。捕获复制快照句柄，调用方之后替换句柄不改变
+冻结输入。普通
 执行仍检查 stale。for_region 派生冻结输出 tile。自定义 RegionalSource 须先导入
 再冻结。
 
@@ -37,15 +48,22 @@ FrozenExecution 捕获当前计划及不可变 Value/快照绑定，允许原图
 平台和构建参数。自定义与 C 模块 registry 支持进程内缓存，不发布持久实现身份。
 该身份用于正确性，不构成原生代码信任或安全签名。
 
-有限格式保存 Float32 HW 蒙版或 HWC RGBA 区域、版本、精确预期元数据/键，以及
-元数据和 little-endian 样本位的 SHA-256。分配尺寸来自已验证计划，不来自文件
+磁盘格式 2（PSCACHE2、disk-result key domain v2）保存 Float32 HW coverage 蒙版或
+受支持的 HWC image-v2 区域。头编码 dtype、shape、Region、精确 canonical facet 的
+key/version/payload、字节数和 key；SHA-256 覆盖头与 packed little-endian Float32
+样本位。旧格式 1 为 miss。读取比较完整预期头，发布已验证 facet 并复验 typed 样本，
+不重建默认 RGBA facet。分配尺寸来自已验证计划，不来自文件
 长度声明。头、尺寸、摘要或数值失配均作为 miss。临时文件完整后 rename，不提供
 持久提交/恢复保证。写入失败或队列压力跳过保留，不使计算结果失败。
 flush_disk_cache() 是发布路径之外的显式等待；销毁也等待写线程。
 clear_disk_cache() 删除条目并作废待写 epoch。
 
 test_disk_cache 使用独立进程覆盖写入、复用、头/长度/摘要/版本损坏、删除重建、
-写失败与严格配额/队列压力。参见 ADR 0018。
+写失败与严格配额/队列压力。test_input_snapshot 和 typed disk 回归覆盖 RGB/BGR、
+straight/premul RGBA、XYZ/XYZA、Lab/LabA，包含 D65/D50 元数据隔离、三通道 patch、
+冻结旧输入、冷/热复用和重启。tests/support/typed_images.hpp 提供公开
+WorkflowDocument/compile/execute identity 示例与可检查的 signed/HDR/负零样本。
+参见 ADR 0018。
 
 ## S4 原生驻留
 
@@ -64,3 +82,14 @@ native_retained_bytes 是 retained_bytes 内唯一原生 owner 容量，native_u
 本实现磁盘读写仅允许 CpuExact，即使 Metal 请求回退也不写磁盘。CPU 磁盘行为保持。
 原生源码和 shader 输入进入实现身份，生成头留在构建目录。test_native_cache 及 C
 插件版本验证复用、编辑、模式/回退隔离、取消、clear race 和保留容量。
+
+使用既有构建目录执行 focused 验证：
+
+```sh
+cmake --build build/issue257-static --target test_input_snapshot test_disk_cache test_result_cache test_frozen_execution test_native_cache -j 8
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_(input_snapshot|disk_cache|result_cache|frozen_execution|native_cache(_plugin)?)$' --output-on-failure
+```
+
+Typed native 驻留使用公开纯字节复制操作：九种描述符均须保留精确 bytes/facets，冷运行
+一次 dispatch，缓存命中零 dispatch。此处验证存储与复用，不新增颜色转换算子。
+既有 native 取消与预算用例继续保留。

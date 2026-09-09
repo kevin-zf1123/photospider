@@ -166,8 +166,8 @@ v7 compiler identity 和 v3 result-region key。
 
 共享契约与八个既有算子现已支持 image-v2 signed/HDR RGB、canonical
 coverage-premultiplied D65 语义，包含符合资格的原生 Metal 执行。八算子显式保留
-首输入的语义 facet。Snapshot/cache 表示扩展仍为 #291，computed bounded scalar
-仍为 #292，算子专用转换随对应切片推进。Bounded scalar 仍要求直接 workflow binding。
+首输入的语义 facet。快照与 memory/native/disk cache 保留受支持 image-v2 表示和真实
+canonical facet；磁盘格式 2 拒绝旧格式。Computed bounded scalar 仍为 #292，算子专用转换随对应切片推进。Bounded scalar 仍要求直接 workflow binding。
 通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
 
 ## ABI 7 区域视图与宿主分配
