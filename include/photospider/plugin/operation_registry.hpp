@@ -424,9 +424,17 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @note Keys remain process configuration, not IPC values.
    */
   [[nodiscard]] std::vector<std::string> keys() const;
+  /** @brief Verifiable built-in build identity, empty for custom/DSO
+   * registries.
+   * @note Immutable after construction; does not grant trust or sandboxing.
+   * @throws std::bad_alloc For the returned copied string.
+   */
+  std::string persistent_cache_identity() const;
 
  private:
   friend class ExecutionContext;
+  friend std::shared_ptr<OperationRegistry> make_default_operation_registry();
+  bool builtins_ = false;
   /**
    * @brief Internal Run entry with periodic graph-currentness observation.
    * @param key Registered key.

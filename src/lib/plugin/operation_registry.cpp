@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 #include "plugin/dense_layout_validation.hpp"
@@ -1941,8 +1942,13 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   status = plugin_internal::register_image_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
+  registry->builtins_ = true;
   registry->freeze();
   return registry;
+}
+
+std::string OperationRegistry::persistent_cache_identity() const {
+  return builtins_ ? PHOTOSPIDER_CACHE_BUILD_ID : "";
 }
 
 }  // namespace ps

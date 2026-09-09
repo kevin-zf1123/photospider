@@ -26,5 +26,23 @@ FrozenExecution 捕获当前计划及不可变 Value/快照绑定，允许原图
 执行仍检查 stale。for_region 派生冻结输出 tile。自定义 RegionalSource 须先导入
 再冻结。
 
-磁盘缓存契约见 [ADR 0018](../../adr/0018-local-result-caches-and-frozen-execution.md)，
-实现及重启验收由 #276 跟踪。
+## 可丢弃磁盘区域
+
+显式 ExecutionContextConfig::disk_cache 要求正结果缓存容量。DiskCacheConfig 指定
+目录、总字节/条目上限和有界写队列；一个 context 独占锁定目录。只管理 SHA-256
+文件名的 .pscache 与可丢弃 .tmp，忽略无关名字。磁盘容量包含活动写入预留；待写
+结果继续持有原受控分配，计算压力下可丢弃待写队列。
+
+持久复用限定 make_default_operation_registry()；指纹覆盖维护源码/头文件、编译器、
+平台和构建参数。自定义与 C 模块 registry 支持进程内缓存，不发布持久实现身份。
+该身份用于正确性，不构成原生代码信任或安全签名。
+
+有限格式保存 Float32 HW 蒙版或 HWC RGBA 区域、版本、精确预期元数据/键，以及
+元数据和 little-endian 样本位的 SHA-256。分配尺寸来自已验证计划，不来自文件
+长度声明。头、尺寸、摘要或数值失配均作为 miss。临时文件完整后 rename，不提供
+持久提交/恢复保证。写入失败或队列压力跳过保留，不使计算结果失败。
+flush_disk_cache() 是发布路径之外的显式等待；销毁也等待写线程。
+clear_disk_cache() 删除条目并作废待写 epoch。
+
+test_disk_cache 使用独立进程覆盖写入、复用、头/长度/摘要/版本损坏、删除重建、
+写失败与严格配额/队列压力。参见 ADR 0018。

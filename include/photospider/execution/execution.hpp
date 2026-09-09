@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,22 @@
 #include "photospider/execution/cancellation.hpp"
 
 namespace ps {
+
+/** @brief Explicit local disposable cache directory and storage/queue limits.
+ */
+struct DiskCacheConfig final {
+  std::string directory;
+  std::uint64_t maximum_bytes = 1024U * 1024U * 1024U;
+  std::uint32_t maximum_entries = 4096;
+  std::uint32_t maximum_queued_writes = 16;
+};
+/** @brief Synchronized disk observations; bytes include active write
+ * reservation. */
+struct DiskCacheStatistics final {
+  std::uint64_t hits = 0, misses = 0, invalid_entries = 0;
+  std::uint64_t write_failures = 0, dropped_writes = 0;
+  std::uint64_t retained_bytes = 0, entries = 0, queued_writes = 0;
+};
 
 /**
  * @brief Fixed local resource configuration for one ExecutionContext.
@@ -37,6 +54,9 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   /** @brief Optional result retention sublimit; zero disables all cache work.
    */
   std::uint64_t result_cache_bytes = 0;
+  /** @brief Optional exclusive disk directory; requires positive result cache.
+   */
+  std::optional<DiskCacheConfig> disk_cache = {};
 };
 
 /**
@@ -351,6 +371,18 @@ class PHOTOSPIDER_API ExecutionContext final {
    * @note Concurrent-safe; active producers cannot refill the cleared epoch.
    */
   void clear_result_cache();
+  /** @brief Clears disk entries and pending writes; active old writes are
+   * discarded.
+   * @throws std::filesystem::filesystem_error or runtime_error For failed
+   * removal.
+   */
+  void clear_disk_cache();
+  /** @brief Explicitly waits for optional writes; never called by publication.
+   */
+  void flush_disk_cache();
+  /** @brief Thread-safe disk cache observations, zero when disabled. */
+  DiskCacheStatistics disk_cache_statistics() const;
+
   /** @brief Thread-safe cumulative optional cache statistics. */
   ResultCacheStatistics cache_statistics() const;
 

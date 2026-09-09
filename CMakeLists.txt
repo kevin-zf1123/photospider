@@ -90,6 +90,23 @@ elseif(MSVC)
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
+# Disposable disk entries are compatible only with this maintained implementation.
+file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.cpp")
+list(APPEND _cache_identity_inputs "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
+list(SORT _cache_identity_inputs)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _cache_config)
+set(_cache_identity "${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE}")
+foreach(_cache_input IN LISTS _cache_identity_inputs)
+  file(SHA256 "${_cache_input}" _cache_source_hash)
+  file(RELATIVE_PATH _cache_relative "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_input}")
+  string(APPEND _cache_identity ";${_cache_relative}:${_cache_source_hash}")
+endforeach()
+string(SHA256 PHOTOSPIDER_CACHE_BUILD_ID "${_cache_identity}")
+configure_file(cmake/cache_build_identity.hpp.in generated/cache_build_identity.hpp @ONLY)
 add_library(photospider ${PHOTOSPIDER_KERNEL_SOURCES})
 add_library(Photospider::kernel ALIAS photospider)
 
@@ -123,7 +140,7 @@ function(photospider_configure_kernel_target target)
     ${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_BINARY_DIR}/generated)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
   target_compile_definitions(${target} PRIVATE PHOTOSPIDER_BUILD)
@@ -368,6 +385,13 @@ if(BUILD_TESTING)
   target_include_directories(test_regional_execution PRIVATE examples)
   add_dependencies(test_regional_execution photospider_rgba32f_ops)
   target_compile_definitions(test_regional_execution PRIVATE PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
+  add_executable(test_disk_cache tests/integration/test_disk_cache.cpp)
+  target_link_libraries(test_disk_cache PRIVATE Photospider::kernel)
+  target_include_directories(test_disk_cache PRIVATE tests examples)
+  add_test(NAME test_disk_cache COMMAND ${CMAKE_COMMAND}
+    -DPHOTOSPIDER_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+    -DPHOTOSPIDER_DISK_TEST=$<TARGET_FILE:test_disk_cache>
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunDiskCache.cmake)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
