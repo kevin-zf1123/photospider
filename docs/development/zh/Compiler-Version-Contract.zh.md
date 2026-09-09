@@ -99,3 +99,7 @@ minor 请求，C++ consumer 重建。Daemon 0.6 迁移为独立任务。
 
 这些是 `ops-foundations` 上仅交付到 `ops` 的已接受目标。决策基线 `main@fba06270`
 仍为 package 0.6.0/ABI 6；本次文档修改不宣称已有 0.7 runtime 或实现已合入 main。
+
+#289 的共享契约实现现已在 ops-foundations 提供上述 0.7.0/ABI7 接口，包括 canonical
+typed facets 和完整约束/dense-output identity。这是本地分支实现；#290–#297 及验证后
+交付到 ops 是独立完成条件。Main 保持决策基线，后续变更需要独立授权工作。

@@ -78,8 +78,8 @@ CPU/GPU backend vocabulary、backend capability 与 static descriptor compatibil
 读取任何 input descriptor 前都必须先确认其 `Value` 合法。未知 backend representation
 返回 `InvalidArgument`，不进入 C++ 或 DSO code；已知但不支持的 backend 仍返回
 `BackendUnavailable`。Capability 通过后，registry 预计算唯一一份预期
-Scalar/Fixed/Preserve/Match output descriptor。Preserve 的首 input type 冲突以及 Match
-的 type/shape 冲突会在 callback entry 前返回 `TypeMismatch`。Callback 返回后复用同一
+output descriptor/facets，复用共享推断。Preserve/Match 独立于 dtype 检查 shape；显式
+input dtype、shape 和语义冲突在 callback entry 前返回 `TypeMismatch`。Callback 返回后复用同一
 descriptor 验证 output type、shape 与请求的 Region，包括 default-invalid output。这不会
 重复 Run 的 plan-derived demand coverage check，也不会重复 DSO adapter 的 contiguous-
 layout/facet view validation。
@@ -93,7 +93,7 @@ CPU 访问不强制再次复制。原生输入/输出/scratch/保留副本共用
 模式关闭磁盘读写。参见 Cache-Model 与 S4-Workflow。
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
-transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v6 input
+transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v7 input
 view 会接收该精确 demand。图像和区域源 Run 惰性物化需求 tile，Whole/副作用边界每个 Run
 完整物化一次，参见[区域语义](Region-Semantics.zh.md)。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
@@ -103,7 +103,7 @@ cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness 
 linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
 与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
-Operation ABI v6 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
+Operation ABI v7 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
 result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
 上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
@@ -157,3 +157,11 @@ payload 容量。test_memory_liveness 的私有 callback-body gate 使用八字�
 成功/取消边界，队列元数据退场不再延长结果缓冲区的保留。
 
 S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收集输出复制、shared host access 和原生缓存复用，均为实际观察。
+
+## 算子基础（共享契约切片）
+
+#289 实现 ABI/traits 7、`SemanticDescriptor`、静态 dtype/axis/重复输入推断及 IR/plan
+中的真实 output facets。新增 axes/typed contract 使用 Whole，不增加 G4 映射。完整约束/
+推断 facets 进入 v7 compiler domain 和 v3 result-region key，no-op optimizer 保持 v5。
+公开 helper 和阶段限制见 [Plugin ABI](Plugin-ABI.zh.md)。Computed bounded scalar 消费与
+通用 snapshot/cache 存储仍是 #292/#291 独立实现切片，描述支持不表示这些能力已经交付。

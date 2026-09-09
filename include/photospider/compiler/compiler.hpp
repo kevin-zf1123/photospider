@@ -72,6 +72,9 @@ struct PHOTOSPIDER_API SemanticNode final {
   OperationTraits traits;
   /** @brief Statically inferred output Value descriptor. */
   ValueDescriptor output_descriptor;
+  /** @brief Canonical inferred output facets, independent of runtime storage.
+   */
+  std::vector<ValueFacet> output_facets = {};
 };
 
 /**
@@ -360,6 +363,9 @@ struct PHOTOSPIDER_API PlanStep final {
   OperationTraits traits;
   /** @brief Statically validated output Value descriptor. */
   ValueDescriptor output_descriptor;
+  /** @brief Canonical inferred output facets, independent of runtime storage.
+   */
+  std::vector<ValueFacet> output_facets = {};
   /** @brief Selected local physical backend. */
   Backend backend = Backend::Cpu;
   /** @brief Estimated peak bytes reserved before invocation. */

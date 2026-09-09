@@ -37,12 +37,12 @@ int main() {
   float half = .5F;
   for (std::size_t i = 0; i < bytes.size(); i += 4)
     std::memcpy(bytes.data() + i, &half, 4);
-  const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
-  auto image = Value::create(
-                   {ElementType::Float32, shape}, Region::whole(shape),
-                   {0, {112, 16, 4}}, bytes,
-                   {{"photospider.image", 1, {profile.begin(), profile.end()}}})
-                   .take_value();
+
+  auto image =
+      Value::create({ElementType::Float32, shape}, Region::whole(shape),
+                    {0, {112, 16, 4}}, bytes,
+                    {ps::encode_semantic(ps::rgba_semantics()).take_value()})
+          .take_value();
   InputSnapshotStore store({8192, 2});
   auto snapshot = store.import_value(image).take_value();
   WorkflowDocument document;
@@ -121,8 +121,7 @@ int main() {
   traits.output_element_type = ElementType::Float32;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
-  traits.input_schema = {
-      {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0}};
+  traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
   traits.output_schema = traits.input_schema[0];
   PS_CHECK(gated
                ->register_operation(

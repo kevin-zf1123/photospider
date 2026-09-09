@@ -359,8 +359,7 @@ int main() {
   traits.input_count = 1;
   traits.output_element_type = ElementType::Float32;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.input_schema = {
-      {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0}};
+  traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
   traits.output_schema = traits.input_schema[0];
   std::atomic<unsigned int> whole_calls{0}, effects{0};
   PS_CHECK(

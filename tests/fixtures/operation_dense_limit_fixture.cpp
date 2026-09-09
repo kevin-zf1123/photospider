@@ -10,8 +10,8 @@
 namespace {
 
 /** @brief Explicit generic v3 port schema. */
-const ps_operation_port_constraint_v6 value_port = {
-    sizeof(ps_operation_port_constraint_v6), PS_OPERATION_PORT_VALUE_V6, 0U,
+const ps_operation_port_constraint_v7 value_port = {
+    sizeof(ps_operation_port_constraint_v7), PS_OPERATION_PORT_VALUE_V7, 0U,
     0U};  // NOLINT(whitespace/indent_namespace)
 
 /** @brief Maximum signed 64-bit value expressed without signed addition. */
@@ -76,13 +76,13 @@ constexpr char kSecondaryKey[] = "fixture.dense_multi_invalid";
  * @note These DSOs validate registration boundaries only.
  */
 int execute_unreachable(void* user_data,
-                        const ps_operation_value_view_v6* inputs,
+                        const ps_operation_value_view_v7* inputs,
                         std::uint32_t input_count,
-                        const ps_operation_parameter_value_v6* parameters,
+                        const ps_operation_parameter_value_v7* parameters,
                         std::uint32_t parameter_count, std::uint32_t backend,
-                        ps_operation_cancelled_v6 cancelled,
+                        ps_operation_cancelled_v7 cancelled,
                         void* cancellation_context,
-                        const ps_operation_output_sink_v6* sink,
+                        const ps_operation_output_sink_v7* sink,
                         char* diagnostic,
                         std::size_t diagnostic_capacity) noexcept {
   static_cast<void>(user_data);
@@ -97,7 +97,7 @@ int execute_unreachable(void* user_data,
   if (diagnostic && diagnostic_capacity != 0U) {
     diagnostic[0] = '\0';
   }
-  return PS_OPERATION_RESULT_FAILURE_V6;
+  return PS_OPERATION_RESULT_FAILURE_V7;
 }
 
 /**
@@ -109,22 +109,22 @@ int execute_unreachable(void* user_data,
  * @return Complete operation ABI v3 descriptor.
  * @throws Nothing.
  */
-ps_operation_descriptor_v6 make_descriptor(const char* key,
+ps_operation_descriptor_v7 make_descriptor(const char* key,
                                            std::uint32_t key_size,
                                            const std::uint64_t* shape,
                                            std::uint32_t rank) noexcept {
-  return {sizeof(ps_operation_descriptor_v6),
+  return {sizeof(ps_operation_descriptor_v7),
           key,
           key_size,
           0U,
           PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
               PS_OPERATION_FLAG_CPU,
           UINT64_C(1),
-          PS_OPERATION_ELEMENT_UINT8_V6,
+          PS_OPERATION_ELEMENT_UINT8_V7,
           rank,
           shape,
-          PS_OPERATION_SHAPE_FIXED_V6,
-          PS_OPERATION_REGION_WHOLE_V6,
+          PS_OPERATION_SHAPE_FIXED_V7,
+          PS_OPERATION_REGION_WHOLE_V7,
           0U,
           1U,
           0U,
@@ -139,13 +139,13 @@ ps_operation_descriptor_v6 make_descriptor(const char* key,
 #if PS_DENSE_LIMIT_CASE == 5
 /** @brief Two descriptors whose invalid suffix must roll back the valid prefix.
  */
-const ps_operation_descriptor_v6 descriptors[] = {
+const ps_operation_descriptor_v7 descriptors[] = {
     make_descriptor(kPrimaryKey, sizeof(kPrimaryKey) - 1U, primary_shape, 1U),
     make_descriptor(kSecondaryKey, sizeof(kSecondaryKey) - 1U, secondary_shape,
                     1U)};
 #else
 /** @brief Single descriptor for one exact dense-layout boundary case. */
-const ps_operation_descriptor_v6 descriptors[] = {
+const ps_operation_descriptor_v7 descriptors[] = {
     make_descriptor(kPrimaryKey, sizeof(kPrimaryKey) - 1U, primary_shape,
                     sizeof(primary_shape) / sizeof(primary_shape[0]))};
 #endif
@@ -160,7 +160,7 @@ constexpr std::uint32_t kCount = sizeof(descriptors) / sizeof(*descriptors);
  * @throws Nothing.
  * @note Static records require no allocation release.
  */
-void destroy_fixture(const ps_operation_descriptor_v6* operations,
+void destroy_fixture(const ps_operation_descriptor_v7* operations,
                      std::uint32_t operation_count) noexcept {
   if (operations == descriptors && operation_count == kCount) {
     destroy_count.fetch_add(1U, std::memory_order_relaxed);
@@ -172,24 +172,24 @@ void destroy_fixture(const ps_operation_descriptor_v6* operations,
  * @return Complete version-three API table for the selected case.
  * @throws Nothing.
  */
-ps_operation_plugin_api_v6 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v6), kCount, descriptors,
+ps_operation_plugin_api_v7 make_api() noexcept {
+  return {sizeof(ps_operation_plugin_api_v7), kCount, descriptors,
           destroy_fixture};
 }
 
 /** @brief Static API table owning the selected descriptor array. */
-const ps_operation_plugin_api_v6 api = make_api();
+const ps_operation_plugin_api_v7 api = make_api();
 
 }  // namespace
 
 /**
  * @brief Returns the supported operation ABI version.
- * @return `PS_OPERATION_ABI_VERSION_6`.
+ * @return `PS_OPERATION_ABI_VERSION_7`.
  * @throws Nothing.
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_6;
+  return PS_OPERATION_ABI_VERSION_7;
 }
 
 /**
@@ -197,8 +197,8 @@ ps_operation_plugin_get_abi_version(void) {
  * @return Process-lifetime immutable API table.
  * @throws Nothing.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v6*
-ps_operation_plugin_get_api_v6(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v7*
+ps_operation_plugin_get_api_v7(void) {
   return &api;
 }
 

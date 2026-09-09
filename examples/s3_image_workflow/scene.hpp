@@ -56,7 +56,8 @@ class Scene final {
     mask = take(store_.import_value(take(ps::Value::create(
         {ps::ElementType::Float32, {height, width}},
         ps::Region::whole({height, width}),
-        {0, {static_cast<std::int64_t>(width * 4), 4}}, std::move(bytes)))));
+        {0, {static_cast<std::int64_t>(width * 4), 4}}, std::move(bytes),
+        {ps::encode_semantic(ps::coverage_semantics()).take_value()}))));
     full_graph_ = std::make_unique<ps::GraphContext>(document(1));
     proxy_graph_ = std::make_unique<ps::GraphContext>(document(4));
     ps::PlanningOptions options;
@@ -198,7 +199,6 @@ class Scene final {
 
  private:
   static ps::Value make_image(bool back) {
-    const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
     std::vector<std::uint8_t> bytes(height * width * 16);
     for (std::size_t i = 0; i < bytes.size(); i += 4) {
       float number = i % 16 == 12 ? .5F : back ? .25F : .125F;
@@ -208,7 +208,7 @@ class Scene final {
         {ps::ElementType::Float32, {height, width, 4}},
         ps::Region::whole({height, width, 4}),
         {0, {static_cast<std::int64_t>(width * 16), 16, 4}}, std::move(bytes),
-        {{"photospider.image", 1, {profile.begin(), profile.end()}}}));
+        {ps::encode_semantic(ps::rgba_semantics()).take_value()}));
   }
   static ps::WorkflowInputDeclaration declaration(
       std::uint64_t id, const std::string& name,

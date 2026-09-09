@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.6.0
+  VERSION 0.7.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -77,6 +77,8 @@ set(
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
+  src/lib/data/semantic.cpp
+  src/lib/plugin/operation_contract.cpp
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
@@ -394,6 +396,21 @@ if(BUILD_TESTING)
   photospider_add_provider_utf8_fixture(
     data_provider_invalid_utf8_overlong_fixture 1)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
+
+  photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
+  add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
+  target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
+  set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_compile_definitions(test_semantic_contract PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
+  add_dependencies(test_semantic_contract operation_contract_fixture)
+  foreach(_case RANGE 1 7)
+    add_library(operation_bad_contract_${_case} MODULE tests/fixtures/operation_contract_fixture.c)
+    target_link_libraries(operation_bad_contract_${_case} PRIVATE Photospider::operation_sdk)
+    set_target_properties(operation_bad_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_compile_definitions(operation_bad_contract_${_case} PRIVATE PS_BAD_CONTRACT_CASE=${_case})
+    target_compile_definitions(test_semantic_contract PRIVATE PS_BAD_CONTRACT_${_case}="$<TARGET_FILE:operation_bad_contract_${_case}>")
+    add_dependencies(test_semantic_contract operation_bad_contract_${_case})
+  endforeach()
 
   photospider_add_test(test_bindings Photospider::kernel tests/integration/test_bindings.cpp)
   target_include_directories(test_bindings PRIVATE examples)

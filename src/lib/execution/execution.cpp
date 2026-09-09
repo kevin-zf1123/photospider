@@ -2101,7 +2101,7 @@ Result<ExecutionResult> ExecutionContext::execute(
   const bool spatial = std::any_of(
       plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
         return step.traits.output_schema.kind ==
-                   OperationPortKind::LinearPremultipliedRgbaFloat32 ||
+                   OperationPortKind::RgbaFloat32 ||
                step.traits.output_schema.kind == OperationPortKind::Float32Mask;
       });
   const bool regional_demand = std::any_of(

@@ -10,6 +10,7 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/execution.hpp"
+#include "plugin/operation_identity.hpp"
 
 namespace ps::execution_internal {
 /** @brief Hashes canonical local DAG semantics and exact demanded input bits.
@@ -41,12 +42,14 @@ inline std::vector<std::string> result_keys(
     if (prior != memo.end())
       return prior->second;
     content_internal::Sha256 hash;
-    hash.text("photospider.result-region.v2");
+    hash.text("photospider.result-region.v3");
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
     if (step.backend == Backend::Gpu)
       hash.text(native_identity);
     hash.text(step.operation);
+    contract_internal::append_traits(&hash, t);
+    contract_internal::append_facets(&hash, step.output_facets);
     hash.integer(t.version);
     hash.integer(static_cast<std::uint32_t>(t.shape_rule));
     hash.integer(static_cast<std::uint32_t>(t.region_rule));

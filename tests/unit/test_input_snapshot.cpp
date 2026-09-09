@@ -24,9 +24,11 @@ int main() {
   PS_CHECK(million.finish() ==
            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
   const std::vector<std::uint64_t> shape{3, 5};
-  auto full = Value::create({ElementType::Float32, shape}, Region::whole(shape),
-                            {0, {20, 4}}, std::vector<std::uint8_t>(60))
-                  .take_value();
+  auto full =
+      Value::create({ElementType::Float32, shape}, Region::whole(shape),
+                    {0, {20, 4}}, std::vector<std::uint8_t>(60),
+                    {encode_semantic(coverage_semantics()).take_value()})
+          .take_value();
   InputSnapshotStore store({76, 2});
   auto base = store.import_value(full);
   PS_CHECK(base.ok() && store.live_bytes() == 60);
@@ -34,7 +36,7 @@ int main() {
   float one = 1;
   std::memcpy(bytes.data(), &one, 4);
   auto patch = Value::create(full.descriptor(), Region({{0, 1}, {0, 1}}),
-                             {0, {4, 4}, {0, 0}}, bytes)
+                             {0, {4, 4}, {0, 0}}, bytes, full.facets())
                    .take_value();
   auto next = store.patch(base.value(), patch);
   PS_CHECK(next.ok() && store.live_bytes() == 76);
@@ -66,9 +68,9 @@ int main() {
            ErrorCode::ResourceExhausted);
   float bad = 2;
   std::memcpy(bytes.data(), &bad, 4);
-  auto invalid =
-      Value::create(full.descriptor(), patch.region(), patch.layout(), bytes)
-          .take_value();
+  auto invalid = Value::create(full.descriptor(), patch.region(),
+                               patch.layout(), bytes, full.facets())
+                     .take_value();
   PS_CHECK(!store.patch(store.import_value(full).value(), invalid).ok());
   auto retained = [&] {
     InputSnapshotStore temporary({60, 1});
@@ -94,8 +96,8 @@ int main() {
                .ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
-  document.inputs = {
-      {1, "mask", full.descriptor(), full.region(), full.layout(), {}}};
+  document.inputs = {{1, "mask", full.descriptor(), full.region(),
+                      full.layout(), full.facets()}};
   document.nodes = {{1, "identity", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"mask", 1, "value"}};
   GraphContext graph(document);

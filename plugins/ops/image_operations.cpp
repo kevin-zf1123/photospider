@@ -41,10 +41,10 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
           (output.descriptor.shape[axis] % factor != 0);
   }
   const auto count = call.inputs.size();
-  std::vector<ps_operation_value_view_v6> views(count);
+  std::vector<ps_operation_value_view_v7> views(count);
   std::vector<std::vector<std::uint64_t>> origins(count), offsets(count),
       extents(count), demands(count), demand_extents(count);
-  std::vector<std::vector<ps_operation_facet_view_v6>> facets(count);
+  std::vector<std::vector<ps_operation_facet_view_v7>> facets(count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto& input = call.inputs[i];
     auto& v = views[i];
@@ -74,24 +74,24 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
     v.demand_offsets = demands[i].data();
     v.demand_extents = demand_extents[i].data();
     for (const auto& f : input.facets())
-      facets[i].push_back({sizeof(ps_operation_facet_view_v6), f.key.data(),
+      facets[i].push_back({sizeof(ps_operation_facet_view_v7), f.key.data(),
                            static_cast<std::uint32_t>(f.key.size()), f.version,
                            f.payload.data(),
                            static_cast<std::uint32_t>(f.payload.size())});
     v.facets = facets[i].data();
     v.facet_count = facets[i].size();
   }
-  std::vector<ps_operation_parameter_value_v6> parameters;
+  std::vector<ps_operation_parameter_value_v7> parameters;
   for (const auto& entry : call.parameters) {
-    ps_operation_parameter_value_v6 p{};
+    ps_operation_parameter_value_v7 p{};
     p.struct_size = sizeof(p);
     p.key = entry.first.data();
     p.key_size = entry.first.size();
     if (const auto* number = std::get_if<double>(&entry.second)) {
-      p.type = PS_OPERATION_PARAMETER_FLOAT64_V6;
+      p.type = PS_OPERATION_PARAMETER_FLOAT64_V7;
       p.float64_value = *number;
     } else {
-      p.type = PS_OPERATION_PARAMETER_INT64_V6;
+      p.type = PS_OPERATION_PARAMETER_INT64_V7;
       p.int64_value = std::get<std::int64_t>(entry.second);
     }
     parameters.push_back(p);
@@ -101,7 +101,7 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
     out_offsets.push_back(d.offset);
     out_extents.push_back(d.extent);
   }
-  ps_operation_output_sink_v6 sink{};
+  ps_operation_output_sink_v7 sink{};
   sink.struct_size = sizeof(sink);
   sink.context = &output;
   sink.output_rank = output.descriptor.shape.size();
@@ -139,7 +139,7 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
     return state.scratch.back().data();
   };
   sink.publish = [](void* context, std::uint32_t, const std::uint64_t*,
-                    std::uint32_t, const ps_operation_facet_view_v6*,
+                    std::uint32_t, const ps_operation_facet_view_v7*,
                     std::uint32_t, const std::uint8_t* data, std::uint64_t) {
     auto& state = *static_cast<Output*>(context);
     if (!state.value || state.value->data() != data)
@@ -156,11 +156,11 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
       cancelled, const_cast<CancellationToken*>(&call.cancellation), &sink);
   if (!output.failure.ok())
     return Result<Value>(output.failure);
-  if (result == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6)
+  if (result == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7)
     return Result<Value>(
         Status::failure(ErrorCode::BackendUnavailable,
                         "Metal FP32 numeric or shape eligibility"));
-  if (result == PS_OPERATION_RESULT_CANCELLED_V6)
+  if (result == PS_OPERATION_RESULT_CANCELLED_V7)
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "native image cancelled"));
   return std::move(output.result);
@@ -446,7 +446,7 @@ Status register_image_operations(OperationRegistry* registry) {
     operation.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
     operation.traits.region_rule = OperationRegionRule::Elementwise;
     operation.traits.input_schema = {
-        {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0},
+        {OperationPortKind::RgbaFloat32, 0, 0},
         {OperationPortKind::Float32Scalar, 0, opacity ? 1.0F : 16.0F}};
     operation.traits.output_schema = operation.traits.input_schema.front();
     operation.callback = [opacity](const OperationInvocation& invocation) {
@@ -469,8 +469,7 @@ Status register_image_operations(OperationRegistry* registry) {
                                       : OperationShapeRule::PreserveFirstInput;
     operation.traits.region_rule = kind == 0 ? OperationRegionRule::Halo
                                              : OperationRegionRule::Elementwise;
-    operation.traits.input_schema = {
-        {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0}};
+    operation.traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
     operation.traits.output_schema = operation.traits.input_schema.front();
     if (kind == 0) {
       operation.traits.parameter_schema = {
@@ -483,7 +482,7 @@ Status register_image_operations(OperationRegistry* registry) {
     } else {
       operation.traits.input_schema.push_back(
           {kind == 1 ? OperationPortKind::Float32Mask
-                     : OperationPortKind::LinearPremultipliedRgbaFloat32,
+                     : OperationPortKind::RgbaFloat32,
            0, 0});
       operation.callback = [kind](const OperationInvocation& invocation) {
         return combine(invocation, kind == 1);
@@ -506,8 +505,7 @@ Status register_image_operations(OperationRegistry* registry) {
     traits.parameter_schema = {
         {"factor", OperationParameterType::Int64, true, true, 1, 16}};
     traits.output_schema.kind =
-        mask ? OperationPortKind::Float32Mask
-             : OperationPortKind::LinearPremultipliedRgbaFloat32;
+        mask ? OperationPortKind::Float32Mask : OperationPortKind::RgbaFloat32;
     traits.input_schema = {traits.output_schema};
     operation.callback = downsample;
     auto status = registry->register_operation(std::move(operation));
@@ -524,7 +522,7 @@ Status register_image_operations(OperationRegistry* registry) {
   traits.output_element_type = ElementType::Float32;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
-  traits.output_schema.kind = OperationPortKind::LinearPremultipliedRgbaFloat32;
+  traits.output_schema.kind = OperationPortKind::RgbaFloat32;
   const float maximum = std::numeric_limits<float>::max();
   traits.input_schema = {traits.output_schema,
                          {OperationPortKind::Float32Scalar, -maximum, maximum},

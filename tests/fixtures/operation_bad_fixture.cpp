@@ -19,7 +19,7 @@ ps_operation_plugin_get_abi_version(void) {
  * @throws Nothing.
  * @note A correct host never calls this after the version mismatch.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v6*
-ps_operation_plugin_get_api_v6(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v7*
+ps_operation_plugin_get_api_v7(void) {
   return nullptr;
 }

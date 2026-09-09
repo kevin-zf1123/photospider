@@ -49,7 +49,11 @@ sampled signal、LUT、byte resource）、有序通道名/角色/单位、颜色
 transfer、scene/display reference、总体单位、alpha association、坐标空间/方向及
 均匀采样起点/步长及轴单位。缺少语义的 generic Value 仍合法，不能只靠 shape 恰好匹配满足 typed port。
 Mask 区分 coverage/probability/membership；signed field 不使用 bounded mask kind。
-Complex field 使用显式 real/imaginary 分量轴，不新增 complex dtype 或 FFT runtime。
+Complex field 使用显式 real/imaginary 分量轴、完整未 shift 频谱/DC0、负号无归一化
+forward 和 inverse /N；coordinate_space/direction 固定为 `frequency_unshifted` /
+`forward_negative_inverse_1n`。Vector 坐标为 `pixel_displacement`、
+`normalized_displacement`、`pixel_position` 或 `normalized_position`，方向为
+forward/inverse。不新增 complex dtype 或 FFT runtime。
 Byte resource 是带有界 media-type 标签的 UInt8 `[N]`，不包含装载 API。
 
 Image 继续使用 `photospider.image` key，版本升为 **2**；其他 typed kind 使用
@@ -113,7 +117,7 @@ Output dtype 与 shape 独立。新增 dtype rule，选择声明 dtype、输入 
 按用途保留 Scalar/Fixed/Shrink；
 共同 helper 在 callback 前一次性求解 descriptor/facets，结果再验证。运行期样本不决定 shape。
 
-Registry 算子可有固定前缀和一个尾部同构重复输入组，显式声明最少/最多数量，总输入不超过
+Registry 算子可有固定前缀和一个尾部同构重复输入组，显式声明最少/最多数量（启用时 minimum>=1），总输入不超过
 1024；`channel.merge` 使用 1..64 个同 H/W、同 dtype 的 HW 输入；同构组约束 shape/dtype，
 组员允许 generic value、scalar field 或 coverage mask。
 Semantic lowering 将模板展开为精确有序输入表；直接调用执行相同 count/schema 展开。

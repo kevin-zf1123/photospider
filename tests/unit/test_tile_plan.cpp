@@ -15,8 +15,8 @@ ps::OperationTraits image_traits(std::uint32_t inputs) {
   traits.output_element_type = ps::ElementType::Float32;
   traits.shape_rule = ps::OperationShapeRule::PreserveFirstInput;
   traits.region_rule = ps::OperationRegionRule::Elementwise;
-  traits.input_schema.resize(
-      inputs, {ps::OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0});
+  traits.input_schema.resize(inputs,
+                             {ps::OperationPortKind::RgbaFloat32, 0, 0});
   traits.output_schema = traits.input_schema[0];
   return traits;
 }
@@ -61,10 +61,9 @@ int main() {
   generic.output_schema = {};
   PS_CHECK(registry->register_operation({"generic", generic, dummy}).ok());
   PS_CHECK(registry->freeze().ok());
-  const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
-  const ValueFacet facet{"photospider.image",
-                         1,
-                         {profile.begin(), profile.end()}};
+
+  const ValueFacet facet =
+      ps::encode_semantic(ps::rgba_semantics()).take_value();
   WorkflowDocument document;
   document.inputs = {{1,
                       "foreground",
@@ -83,7 +82,7 @@ int main() {
                       {ElementType::Float32, {7, 11}},
                       Region::whole({7, 11}),
                       {0, {44, 4}},
-                      {}},
+                      {encode_semantic(coverage_semantics()).take_value()}},
                      {4,
                       "background",
                       {ElementType::Float32, {7, 11, 4}},

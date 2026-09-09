@@ -119,3 +119,9 @@ consumers rebuild. Daemon 0.6 migration is a separate task.
 These are accepted targets on `ops-foundations`, destined only for `ops`.
 The decision baseline `main@fba06270` remains package 0.6.0/ABI 6; this document
 change does not claim a 0.7 runtime or an implementation merge into main.
+
+The shared-contract implementation in #289 now provides these 0.7.0/ABI7
+interfaces on ops-foundations, including canonical typed facets and complete
+constraint/dense-output identity. This remains local branch implementation;
+#290–#297 and verified delivery into ops are separate completion gates. Main
+remains at the decision baseline until independently authorized work changes it.

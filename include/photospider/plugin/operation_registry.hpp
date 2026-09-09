@@ -10,6 +10,7 @@
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
@@ -32,9 +33,11 @@ enum class Backend : std::uint32_t {
 enum class OperationShapeRule : std::uint32_t {
   /** @brief Output is one scalar with shape `{1}`. */
   Scalar = 1U,
-  /** @brief Output descriptor equals the first input descriptor. */
+  /** @brief Output shape equals the first input shape, independently of dtype.
+   */
   PreserveFirstInput = 2U,
-  /** @brief All input descriptors must match and output preserves them. */
+  /** @brief All input shapes must match; output dtype is inferred
+     independently. */
   MatchAllInputs = 3U,
   /**
    * @brief Output uses the descriptor's explicit bounded logical fixed shape.
@@ -44,6 +47,8 @@ enum class OperationShapeRule : std::uint32_t {
   Fixed = 4U,
   /** @brief Ceil-divide the first spatial input by a static factor. */
   Shrink = 5U,
+  /** @brief Independent static axis expressions, resolved before callbacks. */
+  Axes = 6U,
 };
 
 /** @brief Closed compiler-visible Region propagation rule. */
@@ -99,20 +104,22 @@ enum class OperationPortKind : std::uint32_t {
   /** @brief Direct whole Float32 {1} declaration with no facets. */
   Float32Scalar = 2,
   /** @brief Dense Float32 {H,W,4} with exact linear premultiplied profile. */
-  LinearPremultipliedRgbaFloat32 = 3,
-  /** @brief Float32 {H,W}, no facets, finite [0,1] spatial mask. */
+  RgbaFloat32 = 3,
+  /** @brief Float32 {H,W} with canonical typed coverage and finite [0,1]. */
   Float32Mask = 4,
+  /** @brief Generic typed semantic constraint; Whole in this version. */
+  Typed = 5,
 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
  * @note Scalars require a direct Float32 {1} workflow input, no facets and a
  * finite inclusive interval. Other kinds require positive-zero bound bits.
- * Image ports require dense Float32 HWC RGBA and the exact photospider.image
- * v1 payload rgba;linear-srgb;premultiplied;hwc (34 ASCII bytes, no NUL).
- * RGB is finite/nonnegative; alpha is finite in [0,1], and alpha zero requires
- * RGB zero. HDR RGB and signed zeros are accepted without normalization.
- * Registration validates combinations; image outputs preserve an image first
- * input, while scalar outputs and computed bounded scalar inputs are invalid.
+ * RgbaFloat32 uses the canonical photospider.image v2 descriptor returned by
+ * rgba_semantics(); Float32Mask uses typed coverage_semantics(). Typed ports
+ * constrain kind/exact facets, dtype and rank, conservatively with Whole
+ * demand. Output facets are inferred independently from dtype/shape. Scalar
+ * consumption remains direct-only until the computed-scalar execution slice is
+ * implemented.
  */
 struct PHOTOSPIDER_API OperationPortConstraint final {
   /** @brief Closed port kind; scalar output is unsupported. */
@@ -121,6 +128,45 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
   float minimum = 0.0F;
   /** @brief Finite inclusive binary32 upper bound for scalar ports. */
   float maximum = 0.0F;
+  /** @brief Required semantic kind for Typed; zero accepts any typed kind. */
+  std::uint32_t semantic_kind = 0;
+  /** @brief Exact semantic payload for Typed; empty accepts its kind. */
+  std::vector<ValueFacet> facets = {};
+  /** @brief Required dtype when nonzero; zero accepts any valid dtype. */
+  std::uint32_t element_type = 0;
+  /** @brief Required rank when nonzero. */
+  std::uint32_t rank = 0;
+};
+
+/** @brief Output dtype selection, independent of output shape. */
+enum class OperationDtypeRule : std::uint32_t {
+  Declared = 0,
+  Input = 1,
+  Parameter = 2
+};
+/** @brief Statically available axis-length sources. */
+enum class OperationExtentSource : std::uint32_t {
+  Constant = 0,
+  Parameter = 1,
+  InputAxis = 2,
+  InputCount = 3
+};
+/** @brief Checked positive extent plus a nonnegative constant offset. */
+struct PHOTOSPIDER_API OperationExtent final {
+  OperationExtentSource source = OperationExtentSource::Constant;
+  std::uint64_t constant = 1;
+  std::string parameter;
+  std::uint32_t input = 0;
+  std::uint32_t axis = 0;
+  std::uint64_t offset = 0;
+};
+/** @brief Explicit output semantic behavior; transformations use static
+ * metadata. */
+enum class OperationSemanticRule : std::uint32_t {
+  Drop = 0,
+  PreserveInput = 1,
+  Establish = 2,
+  Parameter = 3
 };
 
 /**
@@ -129,7 +175,8 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
-  /** @brief Exact ordered input count. */
+  /** @brief Exact input count, or fixed prefix count for a repeated template.
+   */
   std::uint32_t input_count = 0;
   /** @brief Equal inputs/parameters produce equal output bytes. */
   bool deterministic = true;
@@ -151,7 +198,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 6U;
+  std::uint32_t version = 7U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -170,7 +217,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    * layout, including a zero-stride broadcast whose dense product overflows.
    */
   std::vector<std::uint64_t> fixed_output_shape;
-  /** @brief Exactly input_count ordered constraints, at most 1024. */
+  /** @brief Ordered constraints; a repeated template has prefix+one record. */
   std::vector<OperationPortConstraint> input_schema;
   /** @brief Value or image guarantee; image preserves the first image input. */
   OperationPortConstraint output_schema;
@@ -185,7 +232,63 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::string spatial_factor_parameter = {};
   /** @brief Resolved factor, 1..16; registry definitions must leave it one. */
   std::uint32_t spatial_factor = 1;
+  /** @brief Dtype rule and selected input or required String parameter. */
+  OperationDtypeRule output_dtype_rule = OperationDtypeRule::Declared;
+  std::uint32_t output_dtype_input = 0;
+  std::string output_dtype_parameter = {};
+  /** @brief Rank-1..8 axis expressions, present only for Axes. */
+  std::vector<OperationExtent> output_axes = {};
+  /** @brief Optional trailing homogeneous group; input_count is fixed prefix.
+   * @note With maximum>0, input_schema has prefix+one template. Lowering
+   * expands it and sets repeated_resolved; the published registry keeps its
+   * template.
+   */
+  /** @brief Active groups require minimum>=1; zero means no group. */
+  std::uint32_t repeated_minimum = 0;
+  std::uint32_t repeated_maximum = 0;
+  std::uint32_t repeated_resolved = 0;
+  /** @brief Require repeated inputs to share dtype and logical shape. */
+  bool repeated_match = true;
+  /** @brief Output semantic inference, copied into every compiler identity. */
+  OperationSemanticRule output_semantic_rule = OperationSemanticRule::Drop;
+  std::uint32_t output_semantic_input = 0;
+  std::vector<ValueFacet> output_facets = {};
+  std::string output_semantic_parameter = {};
+  /** @brief Require resolved Fixed/Whole output dense representability.
+   * @note Regional C outputs check their actual demand at the sink instead.
+   * Always true for the stride-free C ABI; C++ Fixed broadcast callbacks
+   * may leave it false. This semantic requirement participates in identities.
+   */
+  bool requires_dense_output = false;
 };
+
+/** @brief Owned static Value metadata shared by compiler and direct invocation.
+ */
+struct PHOTOSPIDER_API OperationMetadata final {
+  ValueDescriptor descriptor;
+  std::vector<ValueFacet> facets;
+};
+/** @brief Expands an operation template and resolves its static parameters.
+ * @param traits Validated registry template, copied and never modified.
+ * @param input_count Actual input count, at most 1024.
+ * @param parameters Exact validated static parameter values.
+ * @return Resolved traits or InvalidArgument/TypeMismatch; no callback runs.
+ * @throws std::bad_alloc On metadata allocation. Pure and thread-safe.
+ */
+PHOTOSPIDER_API Result<OperationTraits> resolve_operation_traits(
+    const OperationTraits& traits, std::size_t input_count,
+    const std::map<std::string, ParameterValue>& parameters);
+/** @brief Infers output dtype, shape and semantics through one shared contract.
+ * @param traits Resolved traits returned by resolve_operation_traits.
+ * @param inputs Complete statically known ordered input metadata.
+ * @param parameters Validated static parameters, never retained.
+ * @return Owned output metadata or typed validation/overflow failure.
+ * @throws std::bad_alloc On metadata allocation. Pure and thread-safe.
+ * @note Neither runtime bytes nor callback-specific inference affects shape.
+ */
+PHOTOSPIDER_API Result<OperationMetadata> infer_operation_output(
+    const OperationTraits& traits, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters);
 
 /**
  * @brief Maps an input edit to a conservative output dirty Region.
@@ -257,7 +360,7 @@ struct PHOTOSPIDER_API OperationInvocation final {
    */
   BufferAllocator allocator;
   /** @brief Borrowed native services; valid only during this invocation. */
-  const ps_gpu_service_v6* gpu = nullptr;
+  const ps_gpu_service_v7* gpu = nullptr;
 };
 
 /** @brief Function signature for one synchronous operation invocation. */
@@ -355,7 +458,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v6 carries no output strides.
+   * must be densely representable because ABI v7 carries no output strides.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);

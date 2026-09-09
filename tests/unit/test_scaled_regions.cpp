@@ -19,8 +19,7 @@ int main() {
     traits.parameter_schema = {
         {"factor", OperationParameterType::Int64, true, true, 1, 16}};
     traits.output_schema.kind =
-        image ? OperationPortKind::LinearPremultipliedRgbaFloat32
-              : OperationPortKind::Float32Mask;
+        image ? OperationPortKind::RgbaFloat32 : OperationPortKind::Float32Mask;
     traits.input_schema = {traits.output_schema};
     auto registry = std::make_shared<OperationRegistry>();
     PS_CHECK(registry
@@ -38,7 +37,7 @@ int main() {
                                         }})
                   .ok());
     PS_CHECK(registry->freeze().ok());
-    const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
+
     WorkflowDocument document;
     const std::vector<std::uint64_t> shape =
         image ? std::vector<std::uint64_t>{7, 11, 4}
@@ -49,10 +48,12 @@ int main() {
          {ElementType::Float32, shape},
          Region::whole(shape),
          image ? StridedLayout{0, {176, 16, 4}} : StridedLayout{0, {44, 4}},
-         image ? std::vector<ValueFacet>{{"photospider.image",
-                                          1,
-                                          {profile.begin(), profile.end()}}}
-               : std::vector<ValueFacet>{}}};
+         image
+             ? std::vector<ValueFacet>{ps::encode_semantic(ps::rgba_semantics())
+                                           .take_value()}
+             : std::vector<ValueFacet>{
+                   ps::encode_semantic(ps::coverage_semantics())
+                       .take_value()}}};
     document.nodes = {
         {1, "shrink", {WorkflowInputReference{1}}, {{"factor", INT64_C(4)}}}};
     document.outputs = {{"result", 1, "value"}};

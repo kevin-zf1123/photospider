@@ -54,7 +54,7 @@ Status validate(const Value& value) {
                            "invalid snapshot input");
   OperationPortConstraint port;
   port.kind = value.descriptor().shape.size() == 3
-                  ? OperationPortKind::LinearPremultipliedRgbaFloat32
+                  ? OperationPortKind::RgbaFloat32
                   : OperationPortKind::Float32Mask;
   return input_internal::validate_port_value(port, value,
                                              ErrorCode::InvalidArgument, {});

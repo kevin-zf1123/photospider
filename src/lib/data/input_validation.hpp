@@ -54,6 +54,9 @@ Status validate_binding(const WorkflowInputDeclaration& declaration,
                         const Value& value);
 /** @brief Checks all closed port schema combinations before registration. */
 Status validate_port_schema(const OperationTraits& traits);
+/** @brief Checks declarative output/repeated-input records before publication.
+ */
+Status validate_operation_contract(const OperationTraits& traits);
 /** @brief Checks scalar/image descriptors and exact profile facet metadata. */
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
@@ -65,7 +68,7 @@ Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
     const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
-/** @brief Returns the exact S1 image profile facet. */
+/** @brief Returns the canonical image-v2 RGBA facet. */
 ValueFacet image_facet();
 /**
  * @brief Checks dense port metadata and numeric domain without coercion.

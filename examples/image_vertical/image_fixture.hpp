@@ -11,8 +11,7 @@
 
 namespace s1_fixture {
 inline ps::ValueFacet profile() {
-  const std::string text = "rgba;linear-srgb;premultiplied;hwc";
-  return {"photospider.image", 1, {text.begin(), text.end()}};
+  return ps::encode_semantic(ps::rgba_semantics()).take_value();
 }
 inline ps::Value value(std::vector<float> pixels,
                        std::vector<std::uint64_t> shape = {2, 2, 4},
@@ -25,11 +24,15 @@ inline ps::Value value(std::vector<float> pixels,
   }
   std::vector<std::uint8_t> bytes(pixels.size() * sizeof(float));
   std::memcpy(bytes.data(), pixels.data(), bytes.size());
-  auto result = ps::Value::create({ps::ElementType::Float32, shape},
-                                  ps::Region::whole(shape), {0, strides},
-                                  std::move(bytes),
-                                  image ? std::vector<ps::ValueFacet>{profile()}
-                                        : std::vector<ps::ValueFacet>{});
+  auto result = ps::Value::create(
+      {ps::ElementType::Float32, shape}, ps::Region::whole(shape), {0, strides},
+      std::move(bytes),
+      image ? std::vector<ps::ValueFacet>{profile()}
+      : shape.size() == 2
+          ? std::vector<ps::ValueFacet>{ps::encode_semantic(
+                                            ps::coverage_semantics())
+                                            .take_value()}
+          : std::vector<ps::ValueFacet>{});
   if (!result.ok())
     throw std::runtime_error(result.status().message);
   return result.take_value();

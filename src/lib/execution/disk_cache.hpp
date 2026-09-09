@@ -229,7 +229,8 @@ class DiskCache final {
       }
       auto result = std::move(value).publish(
           kind == OperationPortKind::Float32Mask
-              ? std::vector<ValueFacet>{}
+              ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
+                                            .take_value()}
               : std::vector<ValueFacet>{input_internal::image_facet()});
       if (!result.ok()) {
         invalidate(key);
@@ -306,7 +307,7 @@ class DiskCache final {
     return descriptor.element_type == ElementType::Float32 &&
            ((kind == OperationPortKind::Float32Mask &&
              descriptor.shape.size() == 2) ||
-            (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+            (kind == OperationPortKind::RgbaFloat32 &&
              descriptor.shape.size() == 3 && descriptor.shape[2] == 4));
   }
   static std::uint64_t byte_count(const Region& region) {

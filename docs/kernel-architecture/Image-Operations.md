@@ -13,7 +13,8 @@ implicit defaults, and one regional image output named by the workflow.
 An image declaration is dense Float32 {H,W,4}, H/W positive, whole Region, offset
 zero and canonical row-major strides. Runtime views have explicit origin, strides
 and valid Region. Both carry exactly one facet: key `photospider.image`,
-version 1, payload `rgba;linear-srgb;premultiplied;hwc` (34 ASCII bytes, no NUL).
+version 2, the canonical payload from `encode_semantic(rgba_semantics())`.
+Image-v1 metadata is rejected; callers use the public typed helper.
 RGB is finite and nonnegative; alpha is finite in [0,1], and alpha zero requires
 RGB zero. HDR RGB may exceed one or alpha. Signed zero is accepted. The caller
 supplies already linear-sRGB premultiplied values; no color conversion, gamma,
@@ -38,12 +39,18 @@ pixels, invalid profile or alpha-zero/nonzero-RGB output fail OperationFailed.
 Bound scalar errors fail InvalidArgument before work; pixel errors fail before
 the consuming callback. Unread pixels are not scanned.
 
+#289 migrates the shared metadata and ABI. The existing RGBA-specific numeric
+ranges described above remain until #290 completes all eight CPU/C/Metal paths.
+The general typed image validator already supports signed/HDR, straight and
+coverage-premultiplied descriptions; this does not imply every existing image
+operation accepts every typed color model. Computed scalar support is #292.
+
 ## Reusable operation package and executable example
 
 [`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
-maintained ABI6 C module `photospider_rgba32f_ops` using only
+maintained ABI7 C module `photospider_rgba32f_ops` using only
 `Photospider::operation_sdk`. It implements the same image operations and profile
-as the built-ins above, with strict floating-point compilation. The ABI6 host
+as the built-ins above, with strict floating-point compilation. The ABI7 host
 validates ports and establishes nearest/gradual-underflow arithmetic before
 entry. The callback requests its output from the host allocator and publishes that
 same buffer; success freezes it, and failure releases it without publication. Load this
@@ -102,12 +109,12 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 The isolated installed consumer builds this same operation source package
 against the installed SDK, runs A/B through its shared bridge, and runs the
 same executable with built-ins and the module. Static and shared kernel builds
-exercise this path and package 0.6/rejected 0.5 requests; see
+exercise this path and package 0.7/rejected 0.6 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
 
 ## S2 Gaussian, mask and composition
 
-The built-in registry and maintained ABI6 C package also provide:
+The built-in registry and maintained ABI7 C package also provide:
 
 | Operation | Ordered inputs | Required static parameters | Region rule |
 | --- | --- | --- | --- |
@@ -116,7 +123,7 @@ The built-in registry and maintained ABI6 C package also provide:
 | `image.source_over` | Foreground RGBA, background RGBA of identical shape | None | Elementwise; MatchAllInputs |
 
 All operations are CPU, deterministic and side-effect-free. Images preserve
-logical shape and the profile above. Masks have no facets and finite samples
+logical shape and the profile above. Masks carry `encode_semantic(coverage_semantics())` and finite samples
 in `[0,1]`; each mask sample multiplies all foreground RGBA channels. Source-over
 computes `F + B * (1 - F.alpha)` separately for each channel using premultiplied
 values, following the [W3C formula](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover).
@@ -156,14 +163,14 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-The example directory is also an independent `find_package(Photospider 0.6)`
+The example directory is also an independent `find_package(Photospider 0.7)`
 consumer. `test_installed_consumer` builds and runs it against isolated static
 and shared installations, both with built-ins and with the separately built C
 module. Pass the trusted module's exact path as the sole optional argument.
 
 ## S3 box shrink and circle stamp
 
-Package 0.6 / operation ABI 6 exposes the following built-ins and the same C
+Package 0.7 / operation ABI 7 exposes the following built-ins and the same C
 module operations. These use existing Float32 linear-sRGB premultiplied RGBA
 and finite [0,1] Float32 HW masks. All parameters listed as scalar inputs are
 ordinary Float32 `{1}` bindings, not compile-time node parameters.
@@ -195,7 +202,7 @@ tracked by #275/#277.
 
 ## S4 native Metal implementations
 
-Package 0.6 / operation ABI 6 implements all eight operations with the same
+Package 0.7 / operation ABI 7 implements all eight operations with the same
 trusted pure C host GPU service. The built-in adapter and independently built
 C11 module share the maintained `plugins/ops/rgba32f/image.metal` program and
 host marshalling. CMake embeds shader text in a generated build header; installed

@@ -66,7 +66,12 @@ axis unit.
 Absent semantics remains a valid generic Value; it cannot satisfy a typed port
 by shape coincidence. Mask roles distinguish coverage, probability and membership;
 signed fields do not use the bounded mask kind. Complex fields use an explicit
-real/imaginary component axis, without adding a complex dtype or FFT runtime.
+real/imaginary component axis, with full unshifted spectrum/DC at index zero,
+negative-sign unnormalized forward transform and inverse divided by N. The
+closed tokens are `frequency_unshifted` and `forward_negative_inverse_1n` in
+coordinate_space/direction. Vector coordinates are `pixel_displacement`,
+`normalized_displacement`, `pixel_position` or `normalized_position`, with
+forward/inverse direction. No complex dtype or FFT runtime is added.
 Byte resources are UInt8 `[N]` with a bounded media-type label; no loading API.
 
 Image semantics use the existing key `photospider.image`, version **2**.
@@ -157,7 +162,7 @@ resolved descriptors, including facets, are computed once by a shared helper
 before callbacks and revalidated on results. No runtime sample decides shape.
 
 A registry operation may have a fixed prefix followed by one homogeneous
-repeated input group with explicit minimum/maximum counts. Total inputs stay
+repeated input group with explicit minimum/maximum counts (active minimum>=1). Total inputs stay
 within 1024; `channel.merge` uses 1..64 HW inputs of equal H/W and dtype. This
 homogeneous group constrains shape/dtype; its members may be generic values,
 scalar fields or coverage masks. Semantic lowering expands the group to the

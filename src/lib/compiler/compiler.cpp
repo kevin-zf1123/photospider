@@ -19,6 +19,7 @@
 
 #include "data/input_validation.hpp"
 #include "execution/native_gpu.hpp"
+#include "plugin/operation_identity.hpp"
 
 namespace ps {
 namespace {
@@ -134,66 +135,6 @@ void append_parameter(DigestBuilder* digest,
   }
 }
 
-/** @brief Appends the exact binary32 port contract as uint64 fields. */
-void append_port(DigestBuilder* digest,
-                 const OperationPortConstraint& port) noexcept {
-  digest->integer(static_cast<std::uint32_t>(port.kind));
-  std::uint32_t minimum = 0, maximum = 0;
-  std::memcpy(&minimum, &port.minimum, sizeof(minimum));
-  std::memcpy(&maximum, &port.maximum, sizeof(maximum));
-  digest->integer(minimum);
-  digest->integer(maximum);
-}
-
-/**
- * @brief Appends compiler-visible operation traits.
- * @param digest Destination builder.
- * @param traits Copied semantic traits.
- * @throws Nothing.
- * @note Callback/library identity is intentionally excluded.
- */
-void append_traits(DigestBuilder* digest,
-                   const OperationTraits& traits) noexcept {
-  digest->integer(traits.input_count);
-  digest->integer(traits.input_schema.size());
-  for (const auto& port : traits.input_schema)
-    append_port(digest, port);
-  append_port(digest, traits.output_schema);
-  digest->integer(traits.deterministic ? 1U : 0U);
-  digest->integer(traits.side_effect_free ? 1U : 0U);
-  digest->integer(traits.supports_cpu ? 1U : 0U);
-  digest->integer(traits.supports_gpu ? 1U : 0U);
-  digest->integer(traits.allows_cpu_fallback ? 1U : 0U);
-  digest->integer(traits.estimated_bytes);
-  digest->integer(traits.workspace_bytes);
-  digest->integer(traits.workspace_input_multiplier);
-  digest->integer(traits.version);
-  digest->integer(traits.cacheable ? 1U : 0U);
-  digest->integer(static_cast<std::uint32_t>(traits.output_element_type));
-  digest->integer(static_cast<std::uint32_t>(traits.shape_rule));
-  digest->integer(static_cast<std::uint32_t>(traits.region_rule));
-  digest->integer(traits.halo_radius);
-  digest->text(traits.halo_radius_parameter);
-  digest->text(traits.spatial_factor_parameter);
-  digest->integer(traits.spatial_factor);
-  digest->integer(traits.parameter_schema.size());
-  for (const OperationParameterSpec& parameter : traits.parameter_schema) {
-    digest->text(parameter.key);
-    digest->integer(static_cast<std::uint32_t>(parameter.type));
-    digest->integer(parameter.required ? 1U : 0U);
-    digest->integer(parameter.bounded ? 1U : 0U);
-    std::uint64_t minimum = 0, maximum = 0;
-    std::memcpy(&minimum, &parameter.minimum, sizeof(minimum));
-    std::memcpy(&maximum, &parameter.maximum, sizeof(maximum));
-    digest->integer(minimum);
-    digest->integer(maximum);
-  }
-  digest->integer(traits.fixed_output_shape.size());
-  for (std::uint64_t extent : traits.fixed_output_shape) {
-    digest->integer(extent);
-  }
-}
-
 /**
  * @brief Appends one rank-general logical Region to stage identity.
  * @param digest Destination builder.
@@ -249,93 +190,6 @@ void append_declarations(
 }
 
 /**
- * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-six semantic traits.
- * @param inputs Dependency output descriptors in invocation order.
- * @return Statically known output descriptor or a typed trait/type failure.
- * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
- * @note Fixed inference validates only logical rank/extents. Dense byte count
- * is not evaluated because a C++ callback may publish a valid broadcast or
- * otherwise strided Value for that descriptor.
- */
-Result<ValueDescriptor> infer_output_descriptor(
-    const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 6U || inputs.size() != traits.input_count ||
-      (traits.cacheable &&
-       (!traits.deterministic || !traits.side_effect_free)) ||
-      (traits.region_rule == OperationRegionRule::Halo &&
-       traits.halo_radius == 0U) ||
-      (traits.region_rule != OperationRegionRule::Halo &&
-       traits.halo_radius != 0U)) {
-    return Result<ValueDescriptor>(
-        Status::failure(ErrorCode::InvalidArgument,
-                        "operation semantic trait record is inconsistent"));
-  }
-  try {
-    static_cast<void>(Value::element_size(traits.output_element_type));
-  } catch (const std::invalid_argument&) {
-    return Result<ValueDescriptor>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "operation semantic output element type is unknown"));
-  }
-  switch (traits.shape_rule) {
-    case OperationShapeRule::Shrink: {
-      if (inputs.empty() || inputs.front().shape.size() < 2 ||
-          traits.spatial_factor < 1 || traits.spatial_factor > 16)
-        return Result<ValueDescriptor>(
-            Status::failure(ErrorCode::TypeMismatch, "invalid shrink input"));
-      auto output = inputs.front();
-      for (std::size_t axis = 0; axis < 2; ++axis) {
-        const std::uint64_t n = output.shape[axis], f = traits.spatial_factor;
-        output.shape[axis] = n / f + (n % f != 0);
-      }
-      return Result<ValueDescriptor>(std::move(output));
-    }
-    case OperationShapeRule::Scalar:
-      return Result<ValueDescriptor>(
-          ValueDescriptor{traits.output_element_type, {1U}});
-    case OperationShapeRule::PreserveFirstInput:
-      if (inputs.empty() ||
-          inputs.front().element_type != traits.output_element_type) {
-        return Result<ValueDescriptor>(Status::failure(
-            ErrorCode::TypeMismatch,
-            "preserving operation has no compatible first input"));
-      }
-      return Result<ValueDescriptor>(inputs.front());
-    case OperationShapeRule::MatchAllInputs:
-      if (inputs.empty() ||
-          inputs.front().element_type != traits.output_element_type) {
-        return Result<ValueDescriptor>(Status::failure(
-            ErrorCode::TypeMismatch,
-            "matching operation has no compatible first input"));
-      }
-      for (const ValueDescriptor& input : inputs) {
-        if (input.element_type != inputs.front().element_type ||
-            input.shape != inputs.front().shape) {
-          return Result<ValueDescriptor>(
-              Status::failure(ErrorCode::TypeMismatch,
-                              "matching operation input descriptors differ"));
-        }
-      }
-      return Result<ValueDescriptor>(inputs.front());
-    case OperationShapeRule::Fixed:
-      if (traits.fixed_output_shape.empty() ||
-          traits.fixed_output_shape.size() > 8U ||
-          std::any_of(traits.fixed_output_shape.begin(),
-                      traits.fixed_output_shape.end(),
-                      [](std::uint64_t extent) { return extent == 0U; })) {
-        return Result<ValueDescriptor>(Status::failure(
-            ErrorCode::TypeMismatch,
-            "fixed-shape operation has an invalid output descriptor"));
-      }
-      return Result<ValueDescriptor>(ValueDescriptor{
-          traits.output_element_type, traits.fixed_output_shape});
-  }
-  return Result<ValueDescriptor>(Status::failure(
-      ErrorCode::InvalidArgument, "operation shape rule is unknown"));
-}
-
-/**
  * @brief Builds the canonical semantic digest.
  * @param nodes Deterministic topological semantic nodes.
  * @param outputs Exact requested outputs.
@@ -349,7 +203,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v6");
+  digest.text("semantic-graph-ir-v7");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -371,8 +225,9 @@ std::string semantic_digest(
       digest.text(parameter.first);
       append_parameter(&digest, parameter.second);
     }
-    append_traits(&digest, node.traits);
+    contract_internal::append_traits(&digest, node.traits);
     append_descriptor(&digest, node.output_descriptor);
+    contract_internal::append_facets(&digest, node.output_facets);
   }
   digest.integer(outputs.size());
   for (const WorkflowOutput& output : outputs) {
@@ -420,7 +275,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v6");
+  digest.text("physical-plan-v7");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -466,8 +321,9 @@ std::string physical_digest(
     }
     digest.integer(static_cast<std::uint32_t>(step.backend));
     digest.integer(step.planned_bytes);
-    append_traits(&digest, step.traits);
+    contract_internal::append_traits(&digest, step.traits);
     append_descriptor(&digest, step.output_descriptor);
+    contract_internal::append_facets(&digest, step.output_facets);
     append_region(&digest, step.output_demand);
     digest.integer(step.input_demands.size());
     for (const Region& demand : step.input_demands) {
@@ -598,7 +454,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v6");
+  digest.text("plan-cache-key-v7");
   digest.text(plan);
   return digest.finish();
 }
@@ -675,7 +531,7 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
           ErrorCode::InvalidArgument, "tile exceeds requested output"));
   }
   if (steps_[named->second].traits.output_schema.kind ==
-          OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+          OperationPortKind::RgbaFloat32 &&
       !input_internal::image_demand(region))
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument, "tile must contain all RGBA channels"));
@@ -687,8 +543,7 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     if (!demands[i])
       continue;
     auto& step = tile.steps_[i];
-    if (step.traits.output_schema.kind ==
-            OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+    if (step.traits.output_schema.kind == OperationPortKind::RgbaFloat32 &&
         !input_internal::image_demand(*demands[i]))
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -727,8 +582,8 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
       packed.shape[axis] = step.output_demand.dimensions()[axis].extent;
     auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok() && step.traits.output_schema.kind ==
-                           OperationPortKind::LinearPremultipliedRgbaFloat32)
+    if (!dense.ok() &&
+        step.traits.output_schema.kind == OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
     step.planned_bytes =
         std::max(step.traits.estimated_bytes,
@@ -869,7 +724,13 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!traits.ok()) {
       return Result<SemanticGraphIR>(traits.status());
     }
-    if (traits.value().input_count != node.inputs.size()) {
+    if ((!traits.value().repeated_maximum &&
+         traits.value().input_count != node.inputs.size()) ||
+        (traits.value().repeated_maximum &&
+         (node.inputs.size() <
+              traits.value().input_count + traits.value().repeated_minimum ||
+          node.inputs.size() >
+              traits.value().input_count + traits.value().repeated_maximum))) {
       return Result<SemanticGraphIR>(Status::failure(
           ErrorCode::TypeMismatch, "workflow operation input count mismatch"));
     }
@@ -924,7 +785,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   SemanticGraphIR semantic;
   semantic.revision_ = snapshot.revision();
   semantic.input_declarations_ = declarations;
-  std::map<std::uint64_t, OperationPortKind> output_kinds;
+  std::map<std::uint64_t, std::vector<ValueFacet>> output_facets;
   std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::unordered_map<std::uint64_t, ValueDescriptor> output_by_node;
@@ -941,17 +802,13 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     node.id = source.id;
     node.operation = source.operation;
     node.parameters = source.parameters;
-    node.traits = traits.value();
-    if (!node.traits.halo_radius_parameter.empty())
-      node.traits.halo_radius =
-          static_cast<std::uint32_t>(std::get<std::int64_t>(
-              node.parameters.at(node.traits.halo_radius_parameter)));
-    if (!node.traits.spatial_factor_parameter.empty())
-      node.traits.spatial_factor =
-          static_cast<std::uint32_t>(std::get<std::int64_t>(
-              node.parameters.at(node.traits.spatial_factor_parameter)));
+    auto resolved = resolve_operation_traits(
+        traits.value(), source.inputs.size(), source.parameters);
+    if (!resolved.ok())
+      return Result<SemanticGraphIR>(resolved.status());
+    node.traits = resolved.take_value();
     node.inputs.reserve(source.inputs.size());
-    std::vector<ValueDescriptor> input_descriptors;
+    std::vector<OperationMetadata> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
     for (std::size_t position = 0; position < source.inputs.size();
          ++position) {
@@ -967,10 +824,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
               "bounded scalar port requires a direct workflow input"));
         }
         descriptor = output_by_node.at(producer->source_node);
-        if (output_kinds.at(producer->source_node) ==
-            OperationPortKind::LinearPremultipliedRgbaFloat32) {
-          facets.push_back(input_internal::image_facet());
-        }
+        facets = output_facets.at(producer->source_node);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
@@ -993,22 +847,24 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
           input_internal::validate_port_metadata(port, descriptor, facets);
       if (!status.ok())
         return Result<SemanticGraphIR>(status);
-      input_descriptors.push_back(std::move(descriptor));
+      input_descriptors.push_back({std::move(descriptor), std::move(facets)});
     }
-    auto output = infer_output_descriptor(node.traits, input_descriptors);
+    auto output =
+        infer_operation_output(node.traits, input_descriptors, node.parameters);
     if (!output.ok()) {
       return Result<SemanticGraphIR>(output.status());
     }
-    node.output_descriptor = output.take_value();
+    node.output_descriptor = output.value().descriptor;
+    node.output_facets = output.value().facets;
     for (std::size_t i = 0; i < input_descriptors.size(); ++i) {
       auto demand = input_internal::derive_input_demand(
           node.traits, Region::whole(node.output_descriptor.shape),
-          node.output_descriptor.shape, input_descriptors[i].shape,
+          node.output_descriptor.shape, input_descriptors[i].descriptor.shape,
           node.traits.input_schema[i].kind);
       if (!demand.ok())
         return Result<SemanticGraphIR>(demand.status());
     }
-    output_kinds.emplace(node.id, node.traits.output_schema.kind);
+    output_facets.emplace(node.id, node.output_facets);
     output_by_node.emplace(node.id, node.output_descriptor);
     semantic.nodes_.push_back(std::move(node));
     for (std::uint64_t dependent : dependents[id]) {
@@ -1120,6 +976,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         node.traits.region_rule == OperationRegionRule::Whole ||
         !node.traits.deterministic || !node.traits.side_effect_free;
     step.output_descriptor = node.output_descriptor;
+    step.output_facets = node.output_facets;
     step.backend = options.execution_mode == ExecutionMode::MetalFp32 &&
                            node.traits.supports_gpu
                        ? Backend::Gpu
@@ -1131,8 +988,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     }
     auto dense_output = input_internal::dense_metadata(step.output_descriptor);
     if (!dense_output.ok() &&
-        node.traits.output_schema.kind ==
-            OperationPortKind::LinearPremultipliedRgbaFloat32)
+        node.traits.output_schema.kind == OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense_output.status());
     step.planned_bytes = std::max(
         node.traits.estimated_bytes,
@@ -1191,8 +1047,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             "planned workflow output Region is empty or out of bounds"));
       }
       demand = requested->second;
-      if (step.traits.output_schema.kind ==
-              OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+      if (step.traits.output_schema.kind == OperationPortKind::RgbaFloat32 &&
           !input_internal::image_demand(demand)) {
         return Result<ExecutionPlan>(
             Status::failure(ErrorCode::InvalidArgument,
@@ -1217,8 +1072,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
     }
     step.output_demand = demand_by_step[step_index].value();
-    if (step.traits.output_schema.kind ==
-            OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+    if (step.traits.output_schema.kind == OperationPortKind::RgbaFloat32 &&
         !input_internal::image_demand(step.output_demand)) {
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -1263,8 +1117,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
       packed.shape[axis] = coverage.dimensions()[axis].extent;
     auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok() && step.traits.output_schema.kind ==
-                           OperationPortKind::LinearPremultipliedRgbaFloat32)
+    if (!dense.ok() &&
+        step.traits.output_schema.kind == OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
     step.planned_bytes =
         std::max(step.traits.estimated_bytes,

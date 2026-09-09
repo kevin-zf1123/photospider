@@ -19,8 +19,7 @@ void require(bool condition, const std::string& detail) {
     throw std::runtime_error(detail);
 }
 ValueFacet profile() {
-  const std::string payload = "rgba;linear-srgb;premultiplied;hwc";
-  return {"photospider.image", 1, {payload.begin(), payload.end()}};
+  return ps::encode_semantic(ps::rgba_semantics()).take_value();
 }
 Value value(const std::vector<float>& pixels,
             const std::vector<std::uint64_t>& shape, bool image) {
@@ -35,7 +34,11 @@ Value value(const std::vector<float>& pixels,
   auto made = Value::create(
       {ElementType::Float32, shape}, Region::whole(shape), {0, strides},
       std::move(bytes),
-      image ? std::vector<ValueFacet>{profile()} : std::vector<ValueFacet>{});
+      image ? std::vector<ValueFacet>{profile()}
+      : shape.size() == 2
+          ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
+                                        .take_value()}
+          : std::vector<ValueFacet>{});
   require(made.ok(), made.status().message);
   return made.take_value();
 }

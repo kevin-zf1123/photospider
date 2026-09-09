@@ -944,6 +944,8 @@ int verify_cpp_invocation_prevalidation() {
   OperationTraits preserve_traits;
   preserve_traits.input_count = 1U;
   preserve_traits.input_schema.resize(1);
+  preserve_traits.input_schema[0].element_type =
+      static_cast<std::uint32_t>(ElementType::Float64);
   preserve_traits.output_element_type = ElementType::Float64;
   preserve_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   PS_CHECK(
@@ -962,6 +964,8 @@ int verify_cpp_invocation_prevalidation() {
   OperationTraits match_traits;
   match_traits.input_count = 2U;
   match_traits.input_schema.resize(2);
+  for (auto& port : match_traits.input_schema)
+    port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
   match_traits.output_element_type = ElementType::Float64;
   match_traits.shape_rule = OperationShapeRule::MatchAllInputs;
   PS_CHECK(
@@ -1391,7 +1395,7 @@ int main() {
     auto traits = registry.find_traits("fixture.double");
     PS_CHECK(traits.ok());
     PS_CHECK(traits.value().input_count == 1U);
-    PS_CHECK(traits.value().version == 6U);
+    PS_CHECK(traits.value().version == 7U);
     PS_CHECK(traits.value().parameter_schema.size() == 1U);
     PS_CHECK(traits.value().parameter_schema.front().key == "scale");
     PS_CHECK(traits.value().parameter_schema.front().type ==
