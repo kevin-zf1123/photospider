@@ -73,6 +73,7 @@ set(
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
   src/lib/data/input_validation.cpp
+  src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
@@ -364,6 +365,8 @@ if(BUILD_TESTING)
   target_include_directories(test_regional_execution PRIVATE examples)
   add_dependencies(test_regional_execution photospider_rgba32f_ops)
   target_compile_definitions(test_regional_execution PRIVATE PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
+  photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
+  target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
   photospider_add_test(test_tile_plan Photospider::kernel tests/unit/test_tile_plan.cpp)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
