@@ -144,3 +144,7 @@ deterministic synchronization. Ship examples/s3_image_workflow through installed
 public APIs. Static/shared C/C++ consumers and daemon 0.5 consumption remain
 required. Each leaf has a separate commit; comprehensive independent review and
 required CI/bot fixes precede protected merge and Issue settlement.
+
+## S4 target amendment
+
+[ADR 0019](0019-metal-resident-image-workflows.md) adds explicitly selected Metal execution, native shared storage and operation ABI 6. Its acceptance defines a target, not implementation completion. All other boundaries remain.

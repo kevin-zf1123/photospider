@@ -362,3 +362,7 @@ CI 通过后的合并及 #256 结算。决策接受不表示实现完成，也�
 ## S2 修订
 
 [ADR 0017](0017-cpu-regional-execution-and-storage.zh.md) 为 S2 替换完整存储/输出、整图像素预检、ABI 3 和估算预算条款。其他 S1 语义保留；Issue 区分已接受目标与实际交付。
+
+## S4 目标修订
+
+[ADR 0019](0019-metal-resident-image-workflows.zh.md) 增加显式 Metal 执行、原生 shared storage 和 operation ABI 6。接受定义目标，不代表实现完成；其余边界保持。

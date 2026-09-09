@@ -214,3 +214,7 @@ description。
 ## S3 目标修订
 
 [ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md) 明确允许有界可丢弃磁盘派生数据与冻结执行，并替换算子版本及缩放区域目标；接受不代表实现完成。
+
+## S4 目标修订
+
+[ADR 0019](0019-metal-resident-image-workflows.zh.md) 增加显式 Metal 执行、原生 shared storage 和 operation ABI 6。接受定义目标，不代表实现完成；其余边界保持。
