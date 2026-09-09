@@ -264,9 +264,16 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
  *
  * @note Options select local capabilities only and contain no plugin paths.
  */
+/** @brief Explicit arithmetic and placement policy; CPU exact is the default.
+ */
+enum class ExecutionMode : std::uint32_t { CpuExact = 1, MetalFp32 = 2 };
+
 struct PHOTOSPIDER_API PlanningOptions final {
-  /** @brief Whether the optional local GPU lane may be selected. */
-  bool allow_gpu = false;
+  /** @brief MetalFp32 permits native FP32 implementations and typed CPU
+   * fallback.
+   * @note This changes physical identity, not source parameters or input bits.
+   */
+  ExecutionMode execution_mode = ExecutionMode::CpuExact;
   /**
    * @brief Optional bounded logical demand per named workflow output.
    *
@@ -293,6 +300,47 @@ struct PHOTOSPIDER_API PlanWorkflowInput final {
 };
 /** @brief Tagged physical producer reference in input-port order. */
 using PlanInput = std::variant<PlanStepInput, PlanWorkflowInput>;
+
+/** @brief Physical action on local shared storage; HostAccess need not copy. */
+enum class PhysicalStepKind : std::uint32_t {
+  Upload = 1,
+  Operation = 2,
+  HostAccess = 3
+};
+
+/** @brief Explicit access/operation step with checked packed Region bounds.
+ * @note step_index identifies the operation consumer (producer for a named
+ * output). input_index is meaningful for unnamed access steps. Native addresses
+ * are excluded. Runtime fallback can require a reported additional upload.
+ */
+struct PHOTOSPIDER_API PhysicalStep final {
+  /** @brief Upload, operation execution or completed shared host access. */
+  PhysicalStepKind kind = PhysicalStepKind::Operation;
+  /** @brief Index in steps(); consumer for input access, producer for output.
+   */
+  std::size_t step_index = 0;
+  /** @brief Ordered consumer input port; unused for operation/named output. */
+  std::size_t input_index = 0;
+  /** @brief Typed producer; operation records refer to their own step. */
+  PlanInput source = PlanStepInput{};
+  /** @brief Expected producer implementation before runtime fallback. */
+  Backend source_backend = Backend::Cpu;
+  /** @brief Planned consumer access domain; host access selects Cpu. */
+  Backend destination_backend = Backend::Cpu;
+  /** @brief Full logical type/shape independent of packed storage. */
+  ValueDescriptor descriptor;
+  /** @brief Exact bounded logical demand, retaining complete image channels. */
+  Region region;
+  /** @brief Packed payload byte count; zero only for non-dense CPU metadata. */
+  std::uint64_t packed_bytes = 0;
+  /** @brief Upload capacity or operation output/workspace bound; access is
+   * zero. */
+  std::uint64_t allocation_bytes = 0;
+  /** @brief Named result for a terminal host access; empty otherwise. */
+  std::string output_name;
+  /** @brief Canonical packed target view, with logical Region origin. */
+  StridedLayout packed_layout = {};
+};
 
 /**
  * @brief One validated local physical plan step.
@@ -421,6 +469,13 @@ class PHOTOSPIDER_API ExecutionPlan final {
   /** @brief Returns positive spatial tile geometry fixed by planning. */
   std::uint64_t tile_height() const noexcept { return tile_height_; }
   std::uint64_t tile_width() const noexcept { return tile_width_; }
+  /** @brief Ordered uploads, operations and host access for this exact demand.
+   */
+  const std::vector<PhysicalStep>& physical_steps() const noexcept {
+    return physical_steps_;
+  }
+  /** @brief Explicit numeric policy retained when deriving tile plans. */
+  ExecutionMode execution_mode() const noexcept { return execution_mode_; }
   /**
    * @brief Derives one demand-local plan without reanalyzing or enumerating
    * tiles.
@@ -440,6 +495,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
   friend class ExecutionContext;
 
   std::map<std::string, Region> output_regions_;
+  ExecutionMode execution_mode_ = ExecutionMode::CpuExact;
+  std::vector<PhysicalStep> physical_steps_;
   std::uint64_t tile_height_ = 128;
   std::uint64_t tile_width_ = 128;
   /** @brief Canonical copied input metadata, with no runtime owners. */

@@ -1,0 +1,2 @@
+/* Generated from image.metal during CMake configuration. */
+static const char ps_image_shader[] = @PS_IMAGE_SHADER_LITERAL@;

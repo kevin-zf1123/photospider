@@ -236,3 +236,7 @@ restore a removed domain without a new explicit breaking product decision.
 ## S3 target amendment
 
 [ADR 0018](0018-local-result-caches-and-frozen-execution.md) explicitly permits bounded disposable disk-derived data and frozen execution, and replaces the operation/trait and scaled-region target. Its acceptance does not establish implementation completion.
+
+## S4 target amendment
+
+[ADR 0019](0019-metal-resident-image-workflows.md) adds explicitly selected Metal execution, native shared storage and operation ABI 6. Its acceptance defines a target, not implementation completion. All other boundaries remain.

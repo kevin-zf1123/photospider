@@ -104,3 +104,7 @@ S3Cache.LocalInvalidation 比较缓存开关输出及曝光、圆章、无关分
 清空竞态及精确/不足预算。examples/s3_image_workflow 使用安装公开 API。验证静态/
 共享 C/C++ 和 daemon 0.5 消费。逐叶提交；独立全面审查及 CI/bot 修复后受保护合并
 并结算 Issue。
+
+## S4 目标修订
+
+[ADR 0019](0019-metal-resident-image-workflows.zh.md) 增加显式 Metal 执行、原生 shared storage 和 operation ABI 6。接受定义目标，不代表实现完成；其余边界保持。

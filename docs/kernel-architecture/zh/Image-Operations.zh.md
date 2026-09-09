@@ -37,8 +37,8 @@ profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/
 ## 可复用算子包与可执行示例
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
-`Photospider::operation_sdk` 构建受维护的 ABI4 C module `photospider_rgba32f_ops`。
-它实现相同图像算子和 profile，使用严格浮点编译选项。ABI4 host 在进入 callback
+`Photospider::operation_sdk` 构建受维护的 ABI6 C module `photospider_rgba32f_ops`。
+它实现相同图像算子和 profile，使用严格浮点编译选项。ABI6 host 在进入 callback
 之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 向宿主申请输出并发布同一 buffer；成功后冻结为只读，失败时释放且不发布。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
 
@@ -86,11 +86,11 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 
 隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
-0.5 消费及 0.4 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+0.6 消费及 0.5 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
 
 ## S2 Gaussian、蒙版与合成
 
-默认 registry 和受维护 ABI4 C 包还提供：
+默认 registry 和受维护 ABI6 C 包还提供：
 
 | Operation | 有序输入 | 必填静态参数 | Region 规则 |
 | --- | --- | --- | --- |
@@ -129,13 +129,13 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-示例目录也可作为独立 find_package(Photospider 0.5) 消费者。test_installed_consumer
+示例目录也可作为独立 find_package(Photospider 0.6) 消费者。test_installed_consumer
 针对隔离 static/shared 安装构建并运行它，分别使用内置算子和单独构建的 C module。
 唯一可选参数为可信 module 的精确路径。
 
 ## S3 box 缩小与圆章
 
-package 0.5 / operation ABI 5 的内建与 C 模块提供 image.downsample_box、
+package 0.6 / operation ABI 6 的内建与 C 模块提供 image.downsample_box、
 mask.downsample_box、image.brush_circle。前两者分别接收既有 RGBA 图像和 HW 蒙版，
 必需静态 Int64 factor 为 [1,16]，无隐式默认。输出 H/W 除以 factor 向上取整，
 反向需求为裁剪后的整数 box。按行/列 binary64 累加，以实际覆盖样本数平均并舍入
@@ -152,3 +152,27 @@ x/y 为任意有限 Float32，radius 为正 normal Float32 至 FLT_MAX；非预�
 test_s3_operations [trusted-module] 通过公开 compile/execute 使用独立 box 分配
 和圆公式验证，覆盖奇数尺寸、边缘 ROI、因子 1/2/4/16 与无效标量。可复用交互
 示例由 #275/#277 跟踪。
+
+## S4 原生 Metal 实现
+
+package 0.6 / operation ABI 6 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
+八个算子，共用 image.metal 与参数转换。CMake 在构建目录生成 shader 字符串头；
+安装消费者不依赖源码路径或 Objective-C++ 配置。
+
+PlanningOptions::execution_mode 默认 CpuExact；显式 MetalFp32 允许近似原生实现。
+ExecutionContextConfig::gpu_enabled=true 尝试建立真实 Apple Silicon 设备；不支持时
+按算子回退 CPU。原生数值域保守：图像/mask 非零样本绝对值至少 1e-20、至多
+FLT_MAX/1024；mask 乘数、gain/opacity、圆章颜色/alpha 非零值至少 1e-8；Gaussian
+正系数低于 1e-8 回退。空间尺寸须适合 uint32；原生视图须有非负步长，byte offset
+与步长须按四字节对齐，各轴 storage origin 不得超过 demand offset（图像通道 origin
+为零）。其他合法原生前驱按次调用回退。这些规则只选择实现，其他合法输入
+继续使用完整 CPU 契约，非法输入仍失败。
+
+关闭 fast-math/contraction，使用补偿累加、宿主 double 系数。每算子和代表链对独立
+oracle 的 atol=1e-6、rtol=1e-5 不构成 CPU 位相同或与图规模无关的总误差保证。
+圆章由宿主 double 行区间保持大坐标覆盖，GPU 颜色计算保留圆外像素位型。
+
+test_metal_images 与插件版本覆盖八算子、whole/tile/非零 ROI、radius 64、factor 16、
+HDR/subnormal 回退和大坐标圆章。公开 fixture 位于 examples/s4_gpu_workflow/image_fixture.hpp。
+运行对应构建目标后，以 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 执行 ctest
+-R '^test_metal_images'。无硬件明确 skip，不宣称原生验收成功。CPU 精确默认保持。

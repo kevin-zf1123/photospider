@@ -2,13 +2,18 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.5.0
+  VERSION 0.6.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
 include(CMakePackageConfigHelpers)
 include(CTest)
 include(GNUInstallDirs)
+
+option(PHOTOSPIDER_ENABLE_METAL "Build the optional Apple Silicon Metal backend" ${APPLE})
+if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
+  enable_language(OBJCXX)
+endif()
 
 option(PHOTOSPIDER_ENABLE_ASAN "Enable AddressSanitizer for local validation" OFF)
 option(PHOTOSPIDER_ENABLE_TSAN "Enable ThreadSanitizer for local validation" OFF)
@@ -75,10 +80,16 @@ set(
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
+  src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
   src/lib/plugin/operation_registry.cpp
   src/lib/plugin/utf8_validation.cpp)
+if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
+  list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_metal.mm)
+  set_source_files_properties(src/lib/execution/native_gpu_metal.mm PROPERTIES
+    COMPILE_OPTIONS "-fobjc-arc")
+endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   set_source_files_properties(plugins/ops/image_operations.cpp
@@ -94,7 +105,8 @@ endif()
 file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.hpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.mm" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.metal" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.cpp")
 list(APPEND _cache_identity_inputs "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
 list(SORT _cache_identity_inputs)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
@@ -148,10 +160,16 @@ function(photospider_configure_kernel_target target)
     ${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
+      ${CMAKE_CURRENT_BINARY_DIR}/plugins/ops/rgba32f)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
   target_compile_definitions(${target} PRIVATE PHOTOSPIDER_BUILD)
+  if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
+    target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_METAL)
+    target_link_libraries(${target} PRIVATE "-framework Metal" "-framework Foundation")
+    set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED ON)
+  endif()
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -236,8 +254,15 @@ add_subdirectory(plugins/ops/rgba32f EXCLUDE_FROM_ALL)
 add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
+  foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
+    add_test(NAME test_s4_${_scenario} COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native)
+    add_test(NAME test_s4_${_scenario}_plugin COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native --module $<TARGET_FILE:photospider_rgba32f_ops>)
+    set_tests_properties(test_s4_${_scenario} test_s4_${_scenario}_plugin PROPERTIES SKIP_RETURN_CODE 77)
+  endforeach()
+  add_test(NAME test_s4_cpu COMMAND photospider_s4_gpu_workflow --backend cpu --layout roi --no-cache)
   add_test(NAME test_s3_cache COMMAND photospider_s3_image_workflow --scenario cache)
   add_test(NAME test_s3_cache_plugin COMMAND photospider_s3_image_workflow --scenario cache --module $<TARGET_FILE:photospider_rgba32f_ops>)
   add_test(NAME test_s3_preview COMMAND photospider_s3_image_workflow)
@@ -413,6 +438,21 @@ if(BUILD_TESTING)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
   photospider_add_test(test_tile_plan Photospider::kernel tests/unit/test_tile_plan.cpp)
+  photospider_add_test(test_native_cache Photospider::kernel tests/integration/test_native_cache.cpp)
+  target_include_directories(test_native_cache PRIVATE examples)
+  add_dependencies(test_native_cache photospider_rgba32f_ops)
+  add_test(NAME test_native_cache_plugin COMMAND test_native_cache $<TARGET_FILE:photospider_rgba32f_ops>)
+  set_tests_properties(test_native_cache test_native_cache_plugin PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_metal_images Photospider::kernel tests/integration/test_metal_images.cpp)
+  target_include_directories(test_metal_images PRIVATE examples)
+  add_dependencies(test_metal_images photospider_rgba32f_ops photospider_s4_gpu_workflow)
+  add_test(NAME test_metal_images_plugin COMMAND test_metal_images $<TARGET_FILE:photospider_rgba32f_ops>)
+  set_tests_properties(test_metal_images test_metal_images_plugin PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
+  set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_native_gpu photospider_test_kernel tests/unit/test_native_gpu.cpp)
+  target_include_directories(test_native_gpu PRIVATE src/lib)
+  set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)

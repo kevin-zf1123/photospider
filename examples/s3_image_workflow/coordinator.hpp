@@ -63,14 +63,18 @@ class Coordinator final {
       restart_preview();
     }
     if (export_ && (!preview_ || export_turn_)) {
+      const auto before = export_->native_dispatches;
       export_->step(execution_);
+      native_dispatches += export_->native_dispatches - before;
       ++export_tiles;
       if (export_->done) {
         exported = std::move(export_->frame);
         export_.reset();
       }
     } else if (preview_) {
+      const auto before = preview_->native_dispatches;
       preview_->step(execution_);
+      native_dispatches += preview_->native_dispatches - before;
       ++preview_tiles;
       if (preview_->done) {
         publish(version, preview_quality_, "viewer", preview_->frame);
@@ -103,6 +107,7 @@ class Coordinator final {
     ++published;
     return true;
   }
+  std::uint64_t native_dispatches = 0;
   std::uint64_t version = 1, displayed_version = 0, applied_stamps = 0;
   std::uint64_t export_tiles = 0, preview_tiles = 0, published = 0,
                 rejected = 0;

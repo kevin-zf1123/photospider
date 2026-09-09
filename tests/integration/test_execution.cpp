@@ -197,7 +197,8 @@ ps::CompiledWorkflow compile_or_throw(ps::Compiler* compiler,
                                       const ps::GraphContext& graph,
                                       bool allow_gpu = false) {
   ps::PlanningOptions options;
-  options.allow_gpu = allow_gpu;
+  options.execution_mode =
+      allow_gpu ? ps::ExecutionMode::MetalFp32 : ps::ExecutionMode::CpuExact;
   auto compiled = compiler->compile(graph, options);
   if (!compiled.ok()) {
     throw std::runtime_error(compiled.status().message);

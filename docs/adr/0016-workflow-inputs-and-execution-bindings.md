@@ -535,3 +535,7 @@ automatically start #257.
 ## S2 amendment
 
 [ADR 0017](0017-cpu-regional-execution-and-storage.md) replaces the whole-only storage/output, full-image numeric preflight, ABI 3 and modeled-budget clauses for S2. Other S1 semantics remain; Issues distinguish accepted target from delivered implementation.
+
+## S4 target amendment
+
+[ADR 0019](0019-metal-resident-image-workflows.md) adds explicitly selected Metal execution, native shared storage and operation ABI 6. Its acceptance defines a target, not implementation completion. All other boundaries remain.

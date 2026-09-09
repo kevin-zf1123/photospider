@@ -55,13 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.4 CONFIG QUIET COMPONENTS kernel)
+find_package(Photospider 0.5 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.5 must reject a 0.4 consumer")
+  message(FATAL_ERROR "Photospider 0.6 must reject a 0.5 consumer")
 endif()
 
 find_package(
-  Photospider 0.5 CONFIG REQUIRED
+  Photospider 0.6 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -115,6 +115,9 @@ add_subdirectory(../../plugins/ops/rgba32f rgba32f)
 add_subdirectory(../../examples/image_vertical image_vertical)
 add_subdirectory(../../examples/regional_image_vertical regional_image_vertical)
 add_subdirectory(../../examples/s3_image_workflow s3_image_workflow)
+add_subdirectory(../../examples/s4_gpu_workflow s4_gpu_workflow)
+target_compile_options(photospider_s4_gpu_workflow PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_s4_gpu_workflow PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_s3_image_workflow PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_s3_image_workflow PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_regional_image_vertical PRIVATE ${_photospider_consumer_compile_options})
@@ -173,6 +176,12 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario preview --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario disk-write --cache-dir "${CMAKE_CURRENT_BINARY_DIR}/s3-cache"
   COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario disk-read --cache-dir "${CMAKE_CURRENT_BINARY_DIR}/s3-cache"
-  DEPENDS photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend cpu --layout roi --no-cache
+  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --no-cache
+  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations
+  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
+  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
+  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
+  DEPENDS photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

@@ -90,3 +90,16 @@ different physical identities even when their merged producer demand agrees.
 ## S3 scaled contracts
 
 #270 implements package 0.5.0, OperationTraits 5 and operation ABI 5. C++17, schema 2 and provider ABI 1 remain. Package 0.4 consumers and operation ABI 4 are rejected; C++ consumers rebuild. Integer box-shrink shape/Region rules support factors [1,16] and mask outputs. Static factor parameter names and resolved factors enter v5 compiler identities. Runtime content identity remains separate. See ADR 0018.
+
+## S4 native contracts
+
+Package 0.6.0 and operation ABI/traits 6 add synchronous pure C host GPU services,
+native-backed CPU-accessible storage and explicit CpuExact/MetalFp32 planning.
+Operation ABI 5 and package 0.5 are rejected. C++17, schema 2, provider ABI 1 and
+daemon IPC v3 remain. Semantic encoding uses semantic-graph-ir-v6; physical and
+plan-cache domains use v6 and include numeric mode and explicit access records.
+The unchanged conservative optimization rule remains optimizer-v5-canonical-noop;
+its digest changes through the new semantic input. Result region keys use v2
+and separate numeric/backend/device/implementation identity. Native upload keys
+hash actual logical bytes under their own domain. No native pointer or timing
+enters compiler identity. See ADR 0019 and the installed S4 workflow guide.

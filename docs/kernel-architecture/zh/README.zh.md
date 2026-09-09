@@ -29,3 +29,5 @@ Kernel 是 session-agnostic 的，不拥有 daemon Job、network service、durab
 process supervisor、policy DSO、plugin security product、durable result object 或
 release evidence。重置前文档只能从 Git 历史和
 `pre-breaking-scope-reset-2026-09-01` 取得。
+
+- [S4 原生 Metal 工作流](S4-Workflow.zh.md)：安装示例、数值模式、驻留和验证。

@@ -7,18 +7,27 @@
 
 namespace ps {
 ByteView CpuStorage::bytes() const noexcept {
+  if (native_owner_)
+    return ByteView(native_bytes_, static_cast<std::size_t>(byte_size_));
   if (adopted_)
     return ByteView(adopted_->data(), adopted_->size());
   return ByteView(allocated_.get(), static_cast<std::size_t>(capacity_));
 }
 CpuStorage::~CpuStorage() noexcept = default;
 std::uint8_t* MutableBuffer::data() noexcept {
-  return storage_ ? storage_->allocated_.get() : nullptr;
+  return storage_ ? (storage_->native_owner_ ? storage_->native_bytes_
+                                             : storage_->allocated_.get())
+                  : nullptr;
 }
 std::size_t MutableBuffer::size() const noexcept {
-  return storage_ ? static_cast<std::size_t>(storage_->capacity_) : 0;
+  return storage_ ? static_cast<std::size_t>(storage_->native_owner_
+                                                 ? storage_->byte_size_
+                                                 : storage_->capacity_)
+                  : 0;
 }
 std::shared_ptr<const CpuStorage> MutableBuffer::freeze() && noexcept {
+  if (storage_)
+    storage_->native_writable_ = false;
   return std::move(storage_);
 }
 BufferAllocator::BufferAllocator(Reserve reserve,
@@ -28,6 +37,8 @@ bool BufferAllocator::owns(const CpuStorage& storage) const noexcept {
   return domain_ && domain_ == storage.domain_;
 }
 Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
+  if (native_allocate_)
+    return native_allocate_(size, reserve_, domain_);
   if (size == 0 || size > static_cast<std::uint64_t>(INT64_MAX) ||
       size > std::numeric_limits<std::size_t>::max()) {
     return Result<MutableBuffer>(

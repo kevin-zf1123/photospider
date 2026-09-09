@@ -92,3 +92,5 @@ can execute one current plan repeatedly or concurrently.
 Float32 uses element code 4 and preserves all IEEE binary32 bit patterns in a
 generic Value. Image/scalar port constraints add their own finite domain checks;
 see [Image operations](Image-Operations.md) and [ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md).
+
+CpuStorage denotes CPU-accessible immutable storage and may own a completed Metal shared buffer. Its bytes are readable after publication; native owners and reservation leases can outlive ExecutionContext. Device handles remain private.

@@ -77,3 +77,12 @@ photospider.result-digest.v2，包含显式 storage origin；流式 tile 借用�
 ## S3 缩放契约
 
 #270 实现 package 0.5.0、OperationTraits 5 和 operation ABI 5；C++17、schema 2、provider ABI 1 保持。拒绝 0.4 软件包消费者与 ABI 4，C++ 消费者重建。新增 [1,16] 整数 box 缩小形状/区域规则及蒙版输出；静态 factor 参数名和解析值进入 v5 编译身份。运行内容身份独立。参见 ADR 0018。
+
+## S4 原生契约
+
+package 0.6.0、operation ABI/traits 6 增加纯 C 宿主 GPU 服务、CPU 可访问原生存储与
+显式 CpuExact/MetalFp32；拒绝 ABI 5 和 package 0.5。C++17、schema 2、provider ABI 1、
+IPC v3 保持。semantic-graph-ir-v6、physical-plan-v6、plan-cache-key-v6 编码新 trait、
+数值模式及显式访问。优化规则仍为 optimizer-v5-canonical-noop，摘要由新语义输入改变。
+结果区域键 v2 区分数值/后端/设备/实现，上传键单独散列实际逻辑字节；句柄与耗时不进入
+编译身份。参见 ADR 0019 与 S4 安装示例。

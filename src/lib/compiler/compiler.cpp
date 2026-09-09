@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "data/input_validation.hpp"
+#include "execution/native_gpu.hpp"
 
 namespace ps {
 namespace {
@@ -249,7 +250,7 @@ void append_declarations(
 
 /**
  * @brief Infers and validates one operation's static output descriptor.
- * @param traits Complete version-five semantic traits.
+ * @param traits Complete version-six semantic traits.
  * @param inputs Dependency output descriptors in invocation order.
  * @return Statically known output descriptor or a typed trait/type failure.
  * @throws std::bad_alloc If diagnostic or descriptor allocation fails.
@@ -259,7 +260,7 @@ void append_declarations(
  */
 Result<ValueDescriptor> infer_output_descriptor(
     const OperationTraits& traits, const std::vector<ValueDescriptor>& inputs) {
-  if (traits.version != 5U || inputs.size() != traits.input_count ||
+  if (traits.version != 6U || inputs.size() != traits.input_count ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.region_rule == OperationRegionRule::Halo &&
@@ -348,7 +349,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v5");
+  digest.text("semantic-graph-ir-v6");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -416,9 +417,30 @@ std::string physical_digest(
     const std::map<std::string, std::size_t>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations,
     const std::map<std::string, Region>& output_regions,
-    std::uint64_t tile_height, std::uint64_t tile_width) {
+    std::uint64_t tile_height, std::uint64_t tile_width,
+    ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v5");
+  digest.text("physical-plan-v6");
+  digest.integer(static_cast<std::uint32_t>(execution_mode));
+  digest.integer(physical.size());
+  for (const auto& access : physical) {
+    digest.integer(static_cast<std::uint32_t>(access.kind));
+    digest.integer(access.step_index);
+    digest.integer(access.input_index);
+    digest.integer(static_cast<std::uint32_t>(access.source_backend));
+    digest.integer(static_cast<std::uint32_t>(access.destination_backend));
+    append_descriptor(&digest, access.descriptor);
+    append_region(&digest, access.region);
+    digest.integer(access.packed_bytes);
+    digest.integer(access.allocation_bytes);
+    digest.text(access.output_name);
+    digest.integer(access.packed_layout.byte_offset);
+    digest.integer(access.packed_layout.byte_strides.size());
+    for (auto stride : access.packed_layout.byte_strides)
+      digest.integer(static_cast<std::uint64_t>(stride));
+    for (auto origin : access.packed_layout.origin)
+      digest.integer(origin);
+  }
   digest.integer(tile_height);
   digest.integer(tile_width);
   digest.integer(output_regions.size());
@@ -465,6 +487,108 @@ std::string physical_digest(
   return digest.finish();
 }
 
+/** @brief Builds explicit native access steps from validated logical producers.
+ */
+Result<std::vector<PhysicalStep>> native_access_plan(
+    std::vector<PlanStep>* steps,
+    const std::vector<WorkflowInputDeclaration>& declarations,
+    const std::map<std::string, std::size_t>& outputs,
+    const std::map<std::string, Region>& output_regions) {
+  std::vector<PhysicalStep> result;
+  std::uint64_t complete = 0;
+  for (std::size_t i = 0; i < steps->size(); ++i) {
+    auto& step = (*steps)[i];
+    if (step.backend == Backend::Gpu) {
+      // Every native allocation rounds by less than twice its payload. This
+      // also bounds any split of declared scratch into multiple allocations.
+      if (step.planned_bytes > static_cast<std::uint64_t>(INT64_MAX) / 2)
+        return Result<std::vector<PhysicalStep>>(
+            Status::failure(ErrorCode::ResourceExhausted,
+                            "native workspace capacity overflows"));
+      step.planned_bytes *= 2;
+    }
+    if (step.planned_bytes > UINT64_MAX - complete)
+      return Result<std::vector<PhysicalStep>>(
+          Status::failure(ErrorCode::ResourceExhausted,
+                          "native complete working set overflows"));
+    complete += step.planned_bytes;
+    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+      const auto& input = step.inputs[port];
+      const auto* producer = std::get_if<PlanStepInput>(&input);
+      const auto backend =
+          producer ? (*steps)[producer->step_index].backend : Backend::Cpu;
+      if (backend == step.backend)
+        continue;
+      const auto& descriptor =
+          producer ? (*steps)[producer->step_index].output_descriptor
+                   : declarations[std::get<PlanWorkflowInput>(input)
+                                      .declaration_index]
+                         .descriptor;
+      auto count = step.input_demands[port].element_count();
+      const auto width = Value::element_size(descriptor.element_type);
+      if (!count.ok() || count.value() > UINT64_MAX / width)
+        return Result<std::vector<PhysicalStep>>(Status::failure(
+            ErrorCode::ResourceExhausted, "native transfer size overflows"));
+      const auto bytes = count.value() * width;
+      const auto capacity = step.backend == Backend::Gpu
+                                ? gpu_internal::allocation_capacity(bytes)
+                                : 0;
+      if (step.backend == Backend::Gpu && !capacity)
+        return Result<std::vector<PhysicalStep>>(
+            Status::failure(ErrorCode::ResourceExhausted,
+                            "native transfer is not addressable"));
+      result.push_back({step.backend == Backend::Gpu
+                            ? PhysicalStepKind::Upload
+                            : PhysicalStepKind::HostAccess,
+                        i,
+                        port,
+                        input,
+                        backend,
+                        step.backend,
+                        descriptor,
+                        step.input_demands[port],
+                        bytes,
+                        capacity,
+                        {}});
+    }
+    result.push_back({PhysicalStepKind::Operation,
+                      i,
+                      0,
+                      PlanStepInput{i},
+                      step.backend,
+                      step.backend,
+                      step.output_descriptor,
+                      step.output_demand,
+                      0,
+                      step.planned_bytes,
+                      {}});
+  }
+  for (const auto& output : outputs) {
+    const auto& step = (*steps)[output.second];
+    if (step.backend == Backend::Gpu)
+      result.push_back({PhysicalStepKind::HostAccess, output.second, 0,
+                        PlanStepInput{output.second}, Backend::Gpu,
+                        Backend::Cpu, step.output_descriptor,
+                        output_regions.at(output.first), 0, 0, output.first});
+  }
+  for (auto& action : result) {
+    auto packed = action.descriptor;
+    for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
+      packed.shape[axis] = action.region.dimensions()[axis].extent;
+    auto dense = input_internal::dense_metadata(packed);
+    if (!dense.ok()) {
+      if (action.destination_backend == Backend::Gpu)
+        return Result<std::vector<PhysicalStep>>(dense.status());
+      continue;
+    }
+    action.packed_bytes = dense.value().bytes;
+    action.packed_layout = dense.value().layout;
+    for (auto d : action.region.dimensions())
+      action.packed_layout.origin.push_back(d.offset);
+  }
+  return Result<std::vector<PhysicalStep>>(std::move(result));
+}
+
 /**
  * @brief Builds a domain-separated disposable plan-cache lookup key.
  * @param plan Canonical physical-plan digest text.
@@ -474,7 +598,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v5");
+  digest.text("plan-cache-key-v6");
   digest.text(plan);
   return digest.finish();
 }
@@ -650,10 +774,15 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
   tile.steps_ = std::move(pruned);
   tile.outputs_ = {{name, mapping[named->second]}};
   tile.output_regions_ = {{name, region}};
-  tile.digest_.value =
-      physical_digest(tile.optimized_digest_.value, tile.steps_, tile.outputs_,
-                      tile.input_declarations_, tile.output_regions_,
-                      tile.tile_height_, tile.tile_width_);
+  auto access = native_access_plan(&tile.steps_, tile.input_declarations_,
+                                   tile.outputs_, tile.output_regions_);
+  if (!access.ok())
+    return Result<ExecutionPlan>(access.status());
+  tile.physical_steps_ = access.take_value();
+  tile.digest_.value = physical_digest(
+      tile.optimized_digest_.value, tile.steps_, tile.outputs_,
+      tile.input_declarations_, tile.output_regions_, tile.tile_height_,
+      tile.tile_width_, tile.execution_mode_, tile.physical_steps_);
   tile.cache_key_.value = plan_cache_key(tile.digest_.value);
   if (!current())
     return Result<ExecutionPlan>(
@@ -954,6 +1083,10 @@ Result<OptimizedGraphIR> Compiler::optimize(
  */
 Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                                      const PlanningOptions& options) const {
+  if (options.execution_mode != ExecutionMode::CpuExact &&
+      options.execution_mode != ExecutionMode::MetalFp32)
+    return Result<ExecutionPlan>(Status::failure(
+        ErrorCode::InvalidArgument, "unknown execution numeric mode"));
   if (options.tile_height == 0 || options.tile_width == 0)
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument, "tile extents must be positive"));
@@ -968,6 +1101,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   std::unordered_map<std::uint64_t, std::size_t> step_by_node;
   step_by_node.reserve(optimized.nodes().size());
   ExecutionPlan plan;
+  plan.execution_mode_ = options.execution_mode;
   plan.tile_height_ = options.tile_height;
   plan.tile_width_ = options.tile_width;
   plan.revision_ = optimized.revision();
@@ -986,8 +1120,10 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         node.traits.region_rule == OperationRegionRule::Whole ||
         !node.traits.deterministic || !node.traits.side_effect_free;
     step.output_descriptor = node.output_descriptor;
-    step.backend = options.allow_gpu && node.traits.supports_gpu ? Backend::Gpu
-                                                                 : Backend::Cpu;
+    step.backend = options.execution_mode == ExecutionMode::MetalFp32 &&
+                           node.traits.supports_gpu
+                       ? Backend::Gpu
+                       : Backend::Cpu;
     if (step.backend == Backend::Cpu && !node.traits.supports_cpu) {
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::BackendUnavailable,
@@ -1171,11 +1307,16 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             ? Region::whole(plan.steps_[output.second].output_descriptor.shape)
             : requested->second);
   }
+  auto access = native_access_plan(&plan.steps_, plan.input_declarations_,
+                                   plan.outputs_, plan.output_regions_);
+  if (!access.ok())
+    return Result<ExecutionPlan>(access.status());
+  plan.physical_steps_ = access.take_value();
   plan.optimized_digest_ = optimized.digest();
-  plan.digest_.value =
-      physical_digest(plan.optimized_digest_.value, plan.steps_, plan.outputs_,
-                      plan.input_declarations_, plan.output_regions_,
-                      plan.tile_height_, plan.tile_width_);
+  plan.digest_.value = physical_digest(
+      plan.optimized_digest_.value, plan.steps_, plan.outputs_,
+      plan.input_declarations_, plan.output_regions_, plan.tile_height_,
+      plan.tile_width_, plan.execution_mode_, plan.physical_steps_);
   plan.cache_key_.value = plan_cache_key(plan.digest_.value);
   plan.current_check_ = optimized.current_check_;
   plan.operation_registry_ = operations_;

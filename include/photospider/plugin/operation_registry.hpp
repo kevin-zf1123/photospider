@@ -12,6 +12,7 @@
 #include "photospider/core/status.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
+#include "photospider/plugin/operation_plugin_api.h"
 
 namespace ps {
 
@@ -150,7 +151,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 5U;
+  std::uint32_t version = 6U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -255,6 +256,8 @@ struct PHOTOSPIDER_API OperationInvocation final {
   /** @brief Host allocator for output and scratch, valid for callback duration.
    */
   BufferAllocator allocator;
+  /** @brief Borrowed native services; valid only during this invocation. */
+  const ps_gpu_service_v6* gpu = nullptr;
 };
 
 /** @brief Function signature for one synchronous operation invocation. */
@@ -352,7 +355,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v5 carries no output strides.
+   * must be densely representable because ABI v6 carries no output strides.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);

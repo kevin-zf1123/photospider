@@ -10,6 +10,9 @@
 #include "photospider/core/status.hpp"
 
 namespace ps {
+namespace gpu_internal {
+class Device;
+}
 
 /** @brief Borrowed immutable bytes; lifetime is bounded by the storage owner.
  */
@@ -63,6 +66,7 @@ class PHOTOSPIDER_API CpuStorage final {
   ~CpuStorage() noexcept;
 
  private:
+  friend class gpu_internal::Device;
   friend class BufferAllocator;
   friend class MutableBuffer;
   friend class Value;
@@ -70,6 +74,12 @@ class PHOTOSPIDER_API CpuStorage final {
   CpuStorage() = default;
   // Declaration order makes bytes retire before their accounting lease.
   std::shared_ptr<void> lease_;
+  // Native resources retire before their reservation, including after teardown.
+  std::shared_ptr<void> native_owner_;
+  std::shared_ptr<const void> native_domain_;
+  std::uint8_t* native_bytes_ = nullptr;
+  std::uint64_t byte_size_ = 0;
+  bool native_writable_ = false;
   std::shared_ptr<const std::vector<std::uint8_t>> adopted_;
   std::unique_ptr<std::uint8_t[]> allocated_;
   std::uint64_t capacity_ = 0;
@@ -96,6 +106,7 @@ class PHOTOSPIDER_API MutableBuffer final {
   std::shared_ptr<const CpuStorage> freeze() && noexcept;
 
  private:
+  friend class gpu_internal::Device;
   friend class BufferAllocator;
   std::shared_ptr<CpuStorage> storage_;
 };
@@ -122,6 +133,10 @@ class PHOTOSPIDER_API BufferAllocator final {
   Result<MutableBuffer> allocate(std::uint64_t size) const;
 
  private:
+  friend class gpu_internal::Device;
+  std::function<Result<MutableBuffer>(std::uint64_t, const Reserve&,
+                                      std::shared_ptr<const void>)>
+      native_allocate_;
   Reserve reserve_;
   std::shared_ptr<const void> domain_;
 };

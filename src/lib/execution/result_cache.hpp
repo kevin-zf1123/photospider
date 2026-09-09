@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -62,6 +63,11 @@ class ResultCache final {
     stats.retained_bytes = bytes_;
     stats.entries = entries_.size();
     stats.in_flight = pending_;
+    std::set<const CpuStorage*> native_owners;
+    for (const auto& entry : entries_)
+      if (entry.second.native &&
+          native_owners.insert(entry.second.value.storage().get()).second)
+        stats.native_retained_bytes += entry.second.value.storage()->capacity();
     return stats;
   }
   std::uint64_t epoch() const {
@@ -89,8 +95,8 @@ class ResultCache final {
   }
   /** @brief Optional retention is fenced; allocation failure cannot fail work.
    */
-  void put(const std::string& key, const Value& value,
-           std::uint64_t epoch) noexcept {
+  void put(const std::string& key, const Value& value, std::uint64_t epoch,
+           bool native = false) noexcept {
     if (key.empty() || !value.valid())
       return;
     try {
@@ -107,7 +113,7 @@ class ResultCache final {
         evict();
       lru_.push_back(key);
       try {
-        entries_.emplace(key, Entry{value, std::prev(lru_.end())});
+        entries_.emplace(key, Entry{value, std::prev(lru_.end()), native});
       } catch (...) {
         lru_.pop_back();
         throw;
@@ -200,6 +206,15 @@ class ResultCache final {
     auto result = flight->result->value();
     if (shared) {
       result.diagnostics.operation_timings.clear();
+      result.diagnostics.native_dispatch_count = 0;
+      result.diagnostics.native_submission_count = 0;
+      result.diagnostics.native_compute_us = 0;
+      result.diagnostics.native_constant_bytes = 0;
+      result.diagnostics.transfer_count = 0;
+      result.diagnostics.transfer_bytes = 0;
+      result.diagnostics.host_access_count = 0;
+      result.diagnostics.result_copy_bytes = 0;
+      result.diagnostics.native_upload_hits = 0;
       result.diagnostics.source_read_count = 0;
       result.diagnostics.source_read_bytes = 0;
       result.diagnostics.shared_computations = 1;
@@ -211,6 +226,7 @@ class ResultCache final {
   struct Entry {
     Value value;
     std::list<std::string>::iterator order;
+    bool native = false;
   };
   struct Flight {
     std::string key;

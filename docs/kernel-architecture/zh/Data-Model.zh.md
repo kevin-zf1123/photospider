@@ -76,3 +76,5 @@ Plan 不保留 binding 或 payload address。同一 current plan 可重复或并
 Float32 使用 element code 4，通用 Value 保留全部 IEEE binary32 bit pattern。
 图像/标量 port 增加各自的 finite domain 检查，参见
 [图像算子](Image-Operations.zh.md) 和 [ADR 0016](../../adr/0016-workflow-inputs-and-execution-bindings.md)。
+
+CpuStorage 表示 CPU 可访问的不可变存储，可持有已完成的 Metal shared buffer。发布后 bytes 可读，原生 owner 与预算 lease 可超过 ExecutionContext 寿命；设备句柄保持私有。

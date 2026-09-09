@@ -3,23 +3,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "image_gpu.h"  // NOLINT(build/include_subdir)
 #include "photospider/plugin/operation_plugin_api.h"
 
-static const ps_operation_port_constraint_v5 ports_gain[] = {
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x41800000U}};
-static const ps_operation_port_constraint_v5 ports_opacity[] = {
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x3f800000U}};
+static const ps_operation_port_constraint_v6 ports_gain[] = {
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0, 0x41800000U}};
+static const ps_operation_port_constraint_v6 ports_opacity[] = {
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0, 0x3f800000U}};
 
 /* Host validation proves each requested coordinate is inside valid coverage.
  * Match its unsigned distance arithmetic: a broadcast origin may exceed
  * INT64_MAX. */
-static float sample(const ps_operation_value_view_v5* value, uint64_t y,
+static float sample(const ps_operation_value_view_v6* value, uint64_t y,
                     uint64_t x, uint64_t c) {
   const uint64_t coordinate[] = {y, x, c};
   uint64_t positive = value->byte_offset, negative = 0;
@@ -46,14 +47,18 @@ static float sample(const ps_operation_value_view_v5* value, uint64_t y,
 /* The ABI4 host validates regional views and supplies nearest/gradual
  * arithmetic. All pointers are callback-local; output and scratch are owned by
  * the host. */
-static int execute_image(void* state, const ps_operation_value_view_v5* inputs,
+static int execute_image(void* state, const ps_operation_value_view_v6* inputs,
                          uint32_t count,
-                         const ps_operation_parameter_value_v5* parameters,
+                         const ps_operation_parameter_value_v6* parameters,
                          uint32_t parameter_count, uint32_t backend,
-                         ps_operation_cancelled_v5 cancelled,
+                         ps_operation_cancelled_v6 cancelled,
                          void* cancellation_context,
-                         const ps_operation_output_sink_v5* sink,
+                         const ps_operation_output_sink_v6* sink,
                          char* diagnostic, size_t diagnostic_capacity) {
+  if (backend == 2)
+    return ps_execute_gpu_image(state ? 1 : 0, inputs, count, parameters,
+                                parameter_count, cancelled,
+                                cancellation_context, sink);
   (void)parameters;
   (void)diagnostic;
   (void)diagnostic_capacity;
@@ -62,17 +67,17 @@ static int execute_image(void* state, const ps_operation_value_view_v5* inputs,
       inputs[1].byte_size != 4 || inputs[0].demand_offsets[2] != 0 ||
       inputs[0].demand_extents[2] != 4 || inputs[1].demand_offsets[0] != 0 ||
       inputs[1].demand_extents[0] != 1)
-    return PS_OPERATION_RESULT_FAILURE_V5;
+    return PS_OPERATION_RESULT_FAILURE_V6;
   uint8_t* bytes = sink->allocate_output(sink->context);
   if (!bytes)
-    return PS_OPERATION_RESULT_FAILURE_V5;
+    return PS_OPERATION_RESULT_FAILURE_V6;
   float factor = 0;
   memcpy(&factor, inputs[1].data + inputs[1].byte_offset, sizeof(factor));
   size_t target = 0;
   for (uint64_t y = sink->output_offsets[0];
        y < sink->output_offsets[0] + sink->output_extents[0]; ++y) {
     if (cancelled && cancelled(cancellation_context))
-      return PS_OPERATION_RESULT_CANCELLED_V5;
+      return PS_OPERATION_RESULT_CANCELLED_V6;
     for (uint64_t x = sink->output_offsets[1];
          x < sink->output_offsets[1] + sink->output_extents[1]; ++x) {
       for (uint64_t c = 0; c < 4; ++c) {
@@ -85,31 +90,31 @@ static int execute_image(void* state, const ps_operation_value_view_v5* inputs,
     }
   }
   const int accepted =
-      sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V5,
+      sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V6,
                     sink->output_shape, sink->output_rank, inputs[0].facets,
                     inputs[0].facet_count, bytes, sink->output_byte_size);
-  return accepted ? PS_OPERATION_RESULT_SUCCESS_V5
-                  : PS_OPERATION_RESULT_FAILURE_V5;
+  return accepted ? PS_OPERATION_RESULT_SUCCESS_V6
+                  : PS_OPERATION_RESULT_FAILURE_V6;
 }
 
-static const ps_operation_port_constraint_v5 ports_image[] = {
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0}};
-static const ps_operation_port_constraint_v5 ports_mask[] = {
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
-    {sizeof(ps_operation_port_constraint_v5), PS_OPERATION_PORT_FLOAT32_MASK_V5,
+static const ps_operation_port_constraint_v6 ports_image[] = {
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0}};
+static const ps_operation_port_constraint_v6 ports_mask[] = {
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
+    {sizeof(ps_operation_port_constraint_v6), PS_OPERATION_PORT_FLOAT32_MASK_V6,
      0, 0}};
-static const ps_operation_port_constraint_v5 ports_over[] = {
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0}};
-static const ps_operation_parameter_descriptor_v5 gaussian_parameters[] = {
-    {sizeof(ps_operation_parameter_descriptor_v5), "radius", 6,
-     PS_OPERATION_PARAMETER_INT64_V5, 1, 1, 1, 64},
-    {sizeof(ps_operation_parameter_descriptor_v5), "sigma", 5,
-     PS_OPERATION_PARAMETER_FLOAT64_V5, 1, 1, 0.1, 64}};
+static const ps_operation_port_constraint_v6 ports_over[] = {
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0}};
+static const ps_operation_parameter_descriptor_v6 gaussian_parameters[] = {
+    {sizeof(ps_operation_parameter_descriptor_v6), "radius", 6,
+     PS_OPERATION_PARAMETER_INT64_V6, 1, 1, 1, 64},
+    {sizeof(ps_operation_parameter_descriptor_v6), "sigma", 5,
+     PS_OPERATION_PARAMETER_FLOAT64_V6, 1, 1, 0.1, 64}};
 static uint64_t clamp_axis(uint64_t coordinate, int tap, uint64_t length) {
   if (tap < 0)
     return coordinate < (uint64_t)-tap ? 0 : coordinate - (uint64_t)-tap;
@@ -118,19 +123,25 @@ static uint64_t clamp_axis(uint64_t coordinate, int tap, uint64_t length) {
 }
 static int mask_state, over_state;
 static int execute_regional(
-    void* state, const ps_operation_value_view_v5* inputs, uint32_t count,
-    const ps_operation_parameter_value_v5* parameters, uint32_t parameter_count,
-    uint32_t backend, ps_operation_cancelled_v5 cancelled,
-    void* cancellation_context, const ps_operation_output_sink_v5* sink,
+    void* state, const ps_operation_value_view_v6* inputs, uint32_t count,
+    const ps_operation_parameter_value_v6* parameters, uint32_t parameter_count,
+    uint32_t backend, ps_operation_cancelled_v6 cancelled,
+    void* cancellation_context, const ps_operation_output_sink_v6* sink,
     char* diagnostic, size_t diagnostic_capacity) {
+  if (backend == 2)
+    return ps_execute_gpu_image(!state                 ? 2
+                                : state == &mask_state ? 3
+                                                       : 4,
+                                inputs, count, parameters, parameter_count,
+                                cancelled, cancellation_context, sink);
   (void)diagnostic;
   (void)diagnostic_capacity;
   if (!inputs || !sink || backend != 1 || count != (state ? 2U : 1U) ||
       parameter_count != (state ? 0U : 2U))
-    return PS_OPERATION_RESULT_FAILURE_V5;
+    return PS_OPERATION_RESULT_FAILURE_V6;
   uint8_t* output = sink->allocate_output(sink->context);
   if (!output)
-    return PS_OPERATION_RESULT_FAILURE_V5;
+    return PS_OPERATION_RESULT_FAILURE_V6;
   const uint64_t y0 = sink->output_offsets[0], x0 = sink->output_offsets[1];
   const uint64_t height = sink->output_extents[0],
                  width = sink->output_extents[1];
@@ -143,7 +154,7 @@ static int execute_regional(
     uint8_t* scratch = sink->allocate_scratch(
         sink->context, inputs[0].demand_extents[0] * width * 16);
     if (!weights || !scratch)
-      return PS_OPERATION_RESULT_FAILURE_V5;
+      return PS_OPERATION_RESULT_FAILURE_V6;
     double total = 0;
     for (int tap = -radius; tap <= radius; ++tap) {
       const double weight = exp(-(double)(tap * tap) / (2.0 * sigma * sigma));
@@ -159,7 +170,7 @@ static int execute_regional(
     for (uint64_t y = first_row; y < first_row + inputs[0].demand_extents[0];
          ++y) {
       if (cancelled && cancelled(cancellation_context))
-        return PS_OPERATION_RESULT_CANCELLED_V5;
+        return PS_OPERATION_RESULT_CANCELLED_V6;
       for (uint64_t x = x0; x < x0 + width; ++x)
         for (uint64_t c = 0; c < 4; ++c) {
           double sum = 0;
@@ -179,7 +190,7 @@ static int execute_regional(
     }
     for (uint64_t y = y0; y < y0 + height; ++y) {
       if (cancelled && cancelled(cancellation_context))
-        return PS_OPERATION_RESULT_CANCELLED_V5;
+        return PS_OPERATION_RESULT_CANCELLED_V6;
       for (uint64_t x = x0; x < x0 + width; ++x)
         for (uint64_t c = 0; c < 4; ++c) {
           double sum = 0;
@@ -202,7 +213,7 @@ static int execute_regional(
   } else {
     for (uint64_t y = y0; y < y0 + height; ++y) {
       if (cancelled && cancelled(cancellation_context))
-        return PS_OPERATION_RESULT_CANCELLED_V5;
+        return PS_OPERATION_RESULT_CANCELLED_V6;
       for (uint64_t x = x0; x < x0 + width; ++x) {
         const float factor = state == &mask_state
                                  ? sample(&inputs[1], y, x, 0)
@@ -219,31 +230,37 @@ static int execute_regional(
       }
     }
   }
-  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V5,
+  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V6,
                        sink->output_shape, sink->output_rank, inputs[0].facets,
                        inputs[0].facet_count, output, sink->output_byte_size)
-             ? PS_OPERATION_RESULT_SUCCESS_V5
-             : PS_OPERATION_RESULT_FAILURE_V5;
+             ? PS_OPERATION_RESULT_SUCCESS_V6
+             : PS_OPERATION_RESULT_FAILURE_V6;
 }
 
 /* S3 callbacks use only host-validated region views and host output buffers. */
-static int execute_s3(void* state, const ps_operation_value_view_v5* inputs,
+static int execute_s3(void* state, const ps_operation_value_view_v6* inputs,
                       uint32_t count,
-                      const ps_operation_parameter_value_v5* parameters,
+                      const ps_operation_parameter_value_v6* parameters,
                       uint32_t parameter_count, uint32_t backend,
-                      ps_operation_cancelled_v5 cancelled,
+                      ps_operation_cancelled_v6 cancelled,
                       void* cancellation_context,
-                      const ps_operation_output_sink_v5* sink, char* diagnostic,
+                      const ps_operation_output_sink_v6* sink, char* diagnostic,
                       size_t diagnostic_capacity) {
+  if (backend == 2)
+    return ps_execute_gpu_image(state                    ? 7
+                                : sink->output_rank == 3 ? 5
+                                                         : 6,
+                                inputs, count, parameters, parameter_count,
+                                cancelled, cancellation_context, sink);
   (void)diagnostic;
   (void)diagnostic_capacity;
   const int brush = state != NULL;
   if (!inputs || !sink || backend != 1 || count != (brush ? 8U : 1U) ||
       parameter_count != (brush ? 0U : 1U))
-    return PS_OPERATION_RESULT_FAILURE_V5;
+    return PS_OPERATION_RESULT_FAILURE_V6;
   uint8_t* output = sink->allocate_output(sink->context);
   if (!output)
-    return PS_OPERATION_RESULT_FAILURE_V5;
+    return PS_OPERATION_RESULT_FAILURE_V6;
   const uint64_t channels = sink->output_rank == 3 ? 4 : 1;
   const uint64_t factor = brush ? 1 : (uint64_t)parameters[0].int64_value;
   float args[7] = {0};
@@ -255,7 +272,7 @@ static int execute_s3(void* state, const ps_operation_value_view_v5* inputs,
   for (uint64_t y = sink->output_offsets[0];
        y < sink->output_offsets[0] + sink->output_extents[0]; ++y) {
     if (cancelled && cancelled(cancellation_context))
-      return PS_OPERATION_RESULT_CANCELLED_V5;
+      return PS_OPERATION_RESULT_CANCELLED_V6;
     for (uint64_t x = sink->output_offsets[1];
          x < sink->output_offsets[1] + sink->output_extents[1]; ++x) {
       const double dx = (double)x + .5 - args[0], dy = (double)y + .5 - args[1];
@@ -287,58 +304,59 @@ static int execute_s3(void* state, const ps_operation_value_view_v5* inputs,
       }
     }
   }
-  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V5,
+  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V6,
                        sink->output_shape, sink->output_rank, inputs[0].facets,
                        inputs[0].facet_count, output, sink->output_byte_size)
-             ? PS_OPERATION_RESULT_SUCCESS_V5
-             : PS_OPERATION_RESULT_FAILURE_V5;
+             ? PS_OPERATION_RESULT_SUCCESS_V6
+             : PS_OPERATION_RESULT_FAILURE_V6;
 }
-static const ps_operation_port_constraint_v5 ports_mask_only[] = {
-    {sizeof(ps_operation_port_constraint_v5), PS_OPERATION_PORT_FLOAT32_MASK_V5,
+static const ps_operation_port_constraint_v6 ports_mask_only[] = {
+    {sizeof(ps_operation_port_constraint_v6), PS_OPERATION_PORT_FLOAT32_MASK_V6,
      0, 0}};
-static const ps_operation_port_constraint_v5 ports_brush[] = {
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0xff7fffffU, 0x7f7fffffU},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0xff7fffffU, 0x7f7fffffU},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0x00800000U, 0x7f7fffffU},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x7f7fffffU},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x7f7fffffU},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x7f7fffffU},
-    {sizeof(ps_operation_port_constraint_v5),
-     PS_OPERATION_PORT_FLOAT32_SCALAR_V5, 0, 0x3f800000U}};
-static const ps_operation_parameter_descriptor_v5 shrink_parameters[] = {
-    {sizeof(ps_operation_parameter_descriptor_v5), "factor", 6,
-     PS_OPERATION_PARAMETER_INT64_V5, 1, 1, 1, 16}};
+static const ps_operation_port_constraint_v6 ports_brush[] = {
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0xff7fffffU, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0xff7fffffU, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0x00800000U, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0, 0x7f7fffffU},
+    {sizeof(ps_operation_port_constraint_v6),
+     PS_OPERATION_PORT_FLOAT32_SCALAR_V6, 0, 0x3f800000U}};
+static const ps_operation_parameter_descriptor_v6 shrink_parameters[] = {
+    {sizeof(ps_operation_parameter_descriptor_v6), "factor", 6,
+     PS_OPERATION_PARAMETER_INT64_V6, 1, 1, 1, 16}};
 static int brush_state;
 static int opacity_state;
-static const ps_operation_descriptor_v5 operations[] = {
-    {sizeof(ps_operation_descriptor_v5),
+static const ps_operation_descriptor_v6 operations[] = {
+    {sizeof(ps_operation_descriptor_v6),
      "image.exposure_gain",
      19,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
-     PS_OPERATION_ELEMENT_FLOAT32_V5,
+     PS_OPERATION_ELEMENT_FLOAT32_V6,
      0,
      NULL,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V5,
-     PS_OPERATION_REGION_ELEMENTWISE_V5,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V6,
+     PS_OPERATION_REGION_ELEMENTWISE_V6,
      0,
      1,
      0,
      NULL,
      2,
      ports_gain,
-     {sizeof(ps_operation_port_constraint_v5),
-      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
+     {sizeof(ps_operation_port_constraint_v6),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
      execute_image,
      NULL,
      0,
@@ -347,26 +365,27 @@ static const ps_operation_descriptor_v5 operations[] = {
      0,
      NULL,
      0},
-    {sizeof(ps_operation_descriptor_v5),
+    {sizeof(ps_operation_descriptor_v6),
      "image.opacity",
      13,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
-     PS_OPERATION_ELEMENT_FLOAT32_V5,
+     PS_OPERATION_ELEMENT_FLOAT32_V6,
      0,
      NULL,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V5,
-     PS_OPERATION_REGION_ELEMENTWISE_V5,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V6,
+     PS_OPERATION_REGION_ELEMENTWISE_V6,
      0,
      1,
      0,
      NULL,
      2,
      ports_opacity,
-     {sizeof(ps_operation_port_constraint_v5),
-      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
+     {sizeof(ps_operation_port_constraint_v6),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
      execute_image,
      &opacity_state,
      0,
@@ -375,26 +394,27 @@ static const ps_operation_descriptor_v5 operations[] = {
      0,
      NULL,
      0},
-    {sizeof(ps_operation_descriptor_v5),
+    {sizeof(ps_operation_descriptor_v6),
      "image.gaussian_blur",
      19,
      1,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
-     PS_OPERATION_ELEMENT_FLOAT32_V5,
+     PS_OPERATION_ELEMENT_FLOAT32_V6,
      0,
      NULL,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V5,
-     PS_OPERATION_REGION_HALO_V5,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V6,
+     PS_OPERATION_REGION_HALO_V6,
      0,
      1,
      2,
      gaussian_parameters,
      1,
      ports_image,
-     {sizeof(ps_operation_port_constraint_v5),
-      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
+     {sizeof(ps_operation_port_constraint_v6),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
      execute_regional,
      NULL,
      1032,
@@ -403,26 +423,27 @@ static const ps_operation_descriptor_v5 operations[] = {
      6,
      NULL,
      0},
-    {sizeof(ps_operation_descriptor_v5),
+    {sizeof(ps_operation_descriptor_v6),
      "image.mask",
      10,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
-     PS_OPERATION_ELEMENT_FLOAT32_V5,
+     PS_OPERATION_ELEMENT_FLOAT32_V6,
      0,
      NULL,
-     PS_OPERATION_SHAPE_PRESERVE_FIRST_V5,
-     PS_OPERATION_REGION_ELEMENTWISE_V5,
+     PS_OPERATION_SHAPE_PRESERVE_FIRST_V6,
+     PS_OPERATION_REGION_ELEMENTWISE_V6,
      0,
      1,
      0,
      NULL,
      2,
      ports_mask,
-     {sizeof(ps_operation_port_constraint_v5),
-      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
+     {sizeof(ps_operation_port_constraint_v6),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
      execute_regional,
      &mask_state,
      0,
@@ -431,26 +452,27 @@ static const ps_operation_descriptor_v5 operations[] = {
      0,
      NULL,
      0},
-    {sizeof(ps_operation_descriptor_v5),
+    {sizeof(ps_operation_descriptor_v6),
      "image.source_over",
      17,
      2,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+         PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
          PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
      0,
-     PS_OPERATION_ELEMENT_FLOAT32_V5,
+     PS_OPERATION_ELEMENT_FLOAT32_V6,
      0,
      NULL,
-     PS_OPERATION_SHAPE_MATCH_INPUTS_V5,
-     PS_OPERATION_REGION_ELEMENTWISE_V5,
+     PS_OPERATION_SHAPE_MATCH_INPUTS_V6,
+     PS_OPERATION_REGION_ELEMENTWISE_V6,
      0,
      1,
      0,
      NULL,
      2,
      ports_over,
-     {sizeof(ps_operation_port_constraint_v5),
-      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5, 0, 0},
+     {sizeof(ps_operation_port_constraint_v6),
+      PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6, 0, 0},
      execute_regional,
      &over_state,
      0,
@@ -459,79 +481,83 @@ static const ps_operation_descriptor_v5 operations[] = {
      0,
      NULL,
      0},
-    {.struct_size = sizeof(ps_operation_descriptor_v5),
+    {.struct_size = sizeof(ps_operation_descriptor_v6),
      .key = "image.downsample_box",
      .key_size = 20,
      .input_count = 1,
-     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+              PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
               PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
-     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V5,
-     .shape_rule = PS_OPERATION_SHAPE_SHRINK_V5,
-     .region_rule = PS_OPERATION_REGION_SHRINK_V5,
+     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V6,
+     .shape_rule = PS_OPERATION_SHAPE_SHRINK_V6,
+     .region_rule = PS_OPERATION_REGION_SHRINK_V6,
      .cacheable = 1,
      .parameter_count = 1,
      .parameters = shrink_parameters,
      .input_schema_count = 1,
      .input_schema = ports_image,
-     .output_schema = {sizeof(ps_operation_port_constraint_v5),
-                       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5,
+     .output_schema = {sizeof(ps_operation_port_constraint_v6),
+                       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6,
                        0, 0},
      .execute = execute_s3,
      .user_data = NULL,
      .spatial_factor_parameter = "factor",
      .spatial_factor_parameter_size = 6},
-    {.struct_size = sizeof(ps_operation_descriptor_v5),
+    {.struct_size = sizeof(ps_operation_descriptor_v6),
      .key = "mask.downsample_box",
      .key_size = 19,
      .input_count = 1,
-     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+              PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
               PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
-     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V5,
-     .shape_rule = PS_OPERATION_SHAPE_SHRINK_V5,
-     .region_rule = PS_OPERATION_REGION_SHRINK_V5,
+     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V6,
+     .shape_rule = PS_OPERATION_SHAPE_SHRINK_V6,
+     .region_rule = PS_OPERATION_REGION_SHRINK_V6,
      .cacheable = 1,
      .parameter_count = 1,
      .parameters = shrink_parameters,
      .input_schema_count = 1,
      .input_schema = ports_mask_only,
-     .output_schema = {sizeof(ps_operation_port_constraint_v5),
-                       PS_OPERATION_PORT_FLOAT32_MASK_V5, 0, 0},
+     .output_schema = {sizeof(ps_operation_port_constraint_v6),
+                       PS_OPERATION_PORT_FLOAT32_MASK_V6, 0, 0},
      .execute = execute_s3,
      .user_data = NULL,
      .spatial_factor_parameter = "factor",
      .spatial_factor_parameter_size = 6},
-    {.struct_size = sizeof(ps_operation_descriptor_v5),
+    {.struct_size = sizeof(ps_operation_descriptor_v6),
      .key = "image.brush_circle",
      .key_size = 18,
      .input_count = 8,
-     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+     .flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_GPU |
+              PS_OPERATION_FLAG_CPU_FALLBACK | PS_OPERATION_FLAG_DETERMINISTIC |
               PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
-     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V5,
-     .shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V5,
-     .region_rule = PS_OPERATION_REGION_ELEMENTWISE_V5,
+     .output_element_type = PS_OPERATION_ELEMENT_FLOAT32_V6,
+     .shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V6,
+     .region_rule = PS_OPERATION_REGION_ELEMENTWISE_V6,
      .cacheable = 1,
      .parameter_count = 0,
      .parameters = NULL,
      .input_schema_count = 8,
      .input_schema = ports_brush,
-     .output_schema = {sizeof(ps_operation_port_constraint_v5),
-                       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V5,
+     .output_schema = {sizeof(ps_operation_port_constraint_v6),
+                       PS_OPERATION_PORT_LINEAR_PREMULTIPLIED_RGBA_FLOAT32_V6,
                        0, 0},
      .execute = execute_s3,
      .user_data = &brush_state,
+     .workspace_input_multiplier = 1,
      .spatial_factor_parameter = NULL,
      .spatial_factor_parameter_size = 0}};
-static void destroy(const ps_operation_descriptor_v5* records, uint32_t count) {
+static void destroy(const ps_operation_descriptor_v6* records, uint32_t count) {
   (void)records;
   (void)count;
 }
-static const ps_operation_plugin_api_v5 api = {
-    sizeof(ps_operation_plugin_api_v5),
+static const ps_operation_plugin_api_v6 api = {
+    sizeof(ps_operation_plugin_api_v6),
     sizeof(operations) / sizeof(operations[0]), operations, destroy};
 PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_5;
+  return PS_OPERATION_ABI_VERSION_6;
 }
-PS_OPERATION_EXPORT const ps_operation_plugin_api_v5*
-ps_operation_plugin_get_api_v5(void) {
+PS_OPERATION_EXPORT const ps_operation_plugin_api_v6*
+ps_operation_plugin_get_api_v6(void) {
   return &api;
 }
