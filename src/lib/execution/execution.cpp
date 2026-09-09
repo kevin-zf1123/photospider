@@ -806,6 +806,26 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
   std::vector<ExecutionBinding> result;
   for (const auto& declaration : plan.input_declarations()) {
     auto binding = *named.at(declaration.name)[0];
+    if (binding.snapshot) {
+      if (binding.source || binding.value.valid() || !binding.snapshot->valid())
+        return Result<std::vector<ExecutionBinding>>(
+            Status::failure(ErrorCode::InvalidArgument,
+                            "binding must select exactly one input"));
+      auto source = std::make_shared<RegionalSource>();
+      source->descriptor = binding.snapshot->descriptor();
+      source->facets = binding.snapshot->facets();
+      source->read = [snapshot = binding.snapshot](
+                         const Region& r, std::uint8_t* bytes,
+                         std::uint64_t size, const BufferAllocator&,
+                         const CancellationToken& token) {
+        if (token.cancelled())
+          return Result<Region>(
+              Status::failure(ErrorCode::Cancelled, "snapshot read cancelled"));
+        auto status = snapshot->read(r, bytes, size);
+        return status.ok() ? Result<Region>(r) : Result<Region>(status);
+      };
+      binding.source = std::move(source);
+    }
     if (binding.source) {
       if (binding.value.valid() || !binding.source->read)
         return Result<std::vector<ExecutionBinding>>(
@@ -1759,9 +1779,11 @@ Result<ExecutionResult> ExecutionContext::execute(
             plan.output_regions().at(output.first),
             plan.steps()[output.second].output_descriptor.shape);
       });
-  const bool sourced = std::any_of(
-      bindings.inputs.begin(), bindings.inputs.end(),
-      [](const ExecutionBinding& input) { return input.source != nullptr; });
+  const bool sourced =
+      std::any_of(bindings.inputs.begin(), bindings.inputs.end(),
+                  [](const ExecutionBinding& input) {
+                    return input.source != nullptr || input.snapshot != nullptr;
+                  });
   if (spatial || sourced || regional_demand)
     return execute_regions(plan, std::move(bindings), nullptr, cancellation,
                            options);

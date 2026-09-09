@@ -9,6 +9,7 @@
 
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
 
@@ -77,6 +78,8 @@ struct PHOTOSPIDER_API ExecutionBinding final {
   /** @brief Alternative source; exactly one of a valid Value or source is
    * required. */
   std::shared_ptr<const RegionalSource> source = {};
+  /** @brief Alternative immutable kernel snapshot; select exactly one input. */
+  std::shared_ptr<const InputSnapshot> snapshot = {};
 };
 /**
  * @brief Per-call input snapshot; duplicate entries remain visible to

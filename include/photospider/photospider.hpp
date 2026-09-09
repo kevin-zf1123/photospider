@@ -11,6 +11,7 @@
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/region.hpp"
 #include "photospider/data/storage.hpp"
 #include "photospider/data/value.hpp"
