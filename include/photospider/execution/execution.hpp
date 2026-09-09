@@ -146,6 +146,9 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t invocation_count = 1;
   /** @brief Total logical output elements computed by these attempts. */
   std::uint64_t computed_elements = 0;
+  /** @brief Actual native work for this attempt, zero for CPU/cache hits. */
+  std::uint64_t native_dispatch_count = 0;
+  std::uint64_t native_compute_us = 0;
 };
 
 /** @brief Cumulative context-local cache observations, synchronized on read. */

@@ -39,8 +39,11 @@ class Scene final {
  public:
   static constexpr std::uint64_t height = 13, width = 17;
   explicit Scene(std::shared_ptr<ps::OperationRegistry> registry,
-                 ps::ExecutionMode mode = ps::ExecutionMode::CpuExact)
+                 ps::ExecutionMode mode = ps::ExecutionMode::CpuExact,
+                 std::uint64_t tile_height = 4, std::uint64_t tile_width = 4)
       : mode_(mode),
+        tile_height_(tile_height),
+        tile_width_(tile_width),
         registry_(std::move(registry)),
         compiler_(registry_),
         store_({1024 * 1024, 4}) {
@@ -58,7 +61,8 @@ class Scene final {
     proxy_graph_ = std::make_unique<ps::GraphContext>(document(4));
     ps::PlanningOptions options;
     options.execution_mode = mode_;
-    options.tile_height = options.tile_width = 4;
+    options.tile_height = tile_height_;
+    options.tile_width = tile_width_;
     full_ = take(compiler_.compile(*full_graph_, options)).plan;
     proxy_ = take(compiler_.compile(*proxy_graph_, options)).plan;
     auto brush_doc = brush_document();
@@ -130,7 +134,8 @@ class Scene final {
     full_graph_->replace(std::move(edited));
     ps::PlanningOptions options;
     options.execution_mode = mode_;
-    options.tile_height = options.tile_width = 4;
+    options.tile_height = tile_height_;
+    options.tile_width = tile_width_;
     full_ = take(compiler_.compile(*full_graph_, options)).plan;
   }
   /** @brief Independent full-image 2D convolution/composition oracle. */
@@ -292,6 +297,7 @@ class Scene final {
     return d;
   }
   ps::ExecutionMode mode_;
+  std::uint64_t tile_height_, tile_width_;
   std::shared_ptr<ps::OperationRegistry> registry_;
   ps::Compiler compiler_;
   ps::InputSnapshotStore store_;
@@ -334,7 +340,7 @@ class TileRun final {
     frame = Frame(shape[0], shape[1]);
   }
   Frame frame;
-  std::uint64_t tiles = 0;
+  std::uint64_t tiles = 0, native_dispatches = 0;
   bool done = false;
   void step(ps::ExecutionContext& execution) {
     if (done)
@@ -345,6 +351,7 @@ class TileRun final {
         frozen_.for_region("result", ps::Region({{y_, h}, {x_, w}, {0, 4}})));
     auto result = take(execution.execute(tile));
     frame.blit(result.values.at("result"));
+    native_dispatches += result.diagnostics.native_dispatch_count;
     ++tiles;
     x_ += w;
     if (x_ == frame.width) {

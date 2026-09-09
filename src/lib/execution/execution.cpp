@@ -1543,13 +1543,42 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             continue;
           }
         }
-        auto transferred =
-            transfer_value(inputs[input_index], allocator, regional_);
+        auto transferred = transfer_value(inputs[input_index], allocator,
+                                          native_device_ ? true : regional_);
         if (!transferred.ok()) {
           finish_failure(transferred.status());
           return;
         }
         if (native_device_) {
+          const auto action = std::find_if(
+              plan_->physical_steps().begin(), plan_->physical_steps().end(),
+              [&](const PhysicalStep& p) {
+                return p.kind == PhysicalStepKind::Upload &&
+                       p.step_index == step_index &&
+                       p.input_index == input_index;
+              });
+          // Missing planned uploads are permitted only for a predecessor that
+          // was planned on GPU and actually fell back before this invocation.
+          if (action != plan_->physical_steps().end()) {
+            if (transferred.value().bytes().size() != action->packed_bytes ||
+                transferred.value().storage()->capacity() >
+                    action->allocation_bytes) {
+              finish_failure(Status::failure(
+                  ErrorCode::Internal,
+                  "native upload contradicts physical access bounds"));
+              return;
+            }
+          } else if (!std::holds_alternative<PlanStepInput>(
+                         step.inputs[input_index]) ||
+                     plan_->steps()[std::get<PlanStepInput>(
+                                        step.inputs[input_index])
+                                        .step_index]
+                             .backend != Backend::Gpu) {
+            finish_failure(
+                Status::failure(ErrorCode::Internal,
+                                "native upload has no physical plan action"));
+            return;
+          }
           ++transfer_count;
           auto total =
               checked_add(transfer_bytes, transferred.value().bytes().size());
@@ -1632,6 +1661,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           diagnostics_.native_compute_us += native->statistics().device_us;
           diagnostics_.native_constant_bytes +=
               native->statistics().constant_bytes;
+          diagnostics_.operation_timings.back().native_dispatch_count =
+              native->statistics().dispatches;
+          diagnostics_.operation_timings.back().native_compute_us =
+              native->statistics().device_us;
         }
         auto elements = step.output_demand.element_count();
         if (elements.ok())
@@ -2277,7 +2310,11 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                 std::make_pair(&found->invocation_count,
                                timing.invocation_count),
                 std::make_pair(&found->computed_elements,
-                               timing.computed_elements)}) {
+                               timing.computed_elements),
+                std::make_pair(&found->native_dispatch_count,
+                               timing.native_dispatch_count),
+                std::make_pair(&found->native_compute_us,
+                               timing.native_compute_us)}) {
             status = add(pair.first, pair.second);
             if (!status.ok())
               return status;
@@ -2607,6 +2644,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           if (hit.valid()) {
             tile_cached[tile.steps()[i].node_id] = std::move(hit);
             tile_backends[tile.steps()[i].node_id] = tile.steps()[i].backend;
+            diagnostics.selected_backends[tile.steps()[i].node_id] =
+                tile.steps()[i].backend;
             ++diagnostics.cache_hits;
           } else {
             for (const auto& input : tile.steps()[i].inputs)

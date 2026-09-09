@@ -314,16 +314,29 @@ enum class PhysicalStepKind : std::uint32_t {
  * are excluded. Runtime fallback can require a reported additional upload.
  */
 struct PHOTOSPIDER_API PhysicalStep final {
+  /** @brief Upload, operation execution or completed shared host access. */
   PhysicalStepKind kind = PhysicalStepKind::Operation;
+  /** @brief Index in steps(); consumer for input access, producer for output.
+   */
   std::size_t step_index = 0;
+  /** @brief Ordered consumer input port; unused for operation/named output. */
   std::size_t input_index = 0;
+  /** @brief Typed producer; operation records refer to their own step. */
   PlanInput source = PlanStepInput{};
+  /** @brief Expected producer implementation before runtime fallback. */
   Backend source_backend = Backend::Cpu;
+  /** @brief Planned consumer access domain; host access selects Cpu. */
   Backend destination_backend = Backend::Cpu;
+  /** @brief Full logical type/shape independent of packed storage. */
   ValueDescriptor descriptor;
+  /** @brief Exact bounded logical demand, retaining complete image channels. */
   Region region;
+  /** @brief Packed payload byte count; zero only for non-dense CPU metadata. */
   std::uint64_t packed_bytes = 0;
+  /** @brief Upload capacity or operation output/workspace bound; access is
+   * zero. */
   std::uint64_t allocation_bytes = 0;
+  /** @brief Named result for a terminal host access; empty otherwise. */
   std::string output_name;
   /** @brief Canonical packed target view, with logical Region origin. */
   StridedLayout packed_layout = {};

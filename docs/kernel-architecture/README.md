@@ -30,3 +30,5 @@ The kernel is session-agnostic and owns no daemon Job, network service,
 durable work, process supervisor, policy DSO, plugin security product, durable
 result object, or release evidence. Pre-reset documents are available only
 through Git history and `pre-breaking-scope-reset-2026-09-01`.
+
+- [S4 native Metal workflow](S4-Workflow.md): installed examples, numeric modes, residency and validation.
