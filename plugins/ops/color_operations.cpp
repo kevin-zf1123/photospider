@@ -266,8 +266,8 @@ Status register_color_operations(OperationRegistry* registry) {
         port.kind = OperationPortKind::Value;
         port.rank = 2;
         t.input_count = 0;
-        t.repeated_minimum = 1;
-        t.repeated_maximum = 64;
+        t.repeated_minimum = 2;
+        t.repeated_maximum = 4;
         t.output_semantic_parameter = "semantic";
         t.parameter_schema = {
             {"semantic", OperationParameterType::String, true}};

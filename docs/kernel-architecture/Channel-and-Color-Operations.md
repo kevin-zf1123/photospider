@@ -11,7 +11,7 @@ assumptions. There is no implicit resize, dtype conversion or GPU implementation
 | Key | Input → output | Required static parameters and meaning |
 | --- | --- | --- |
 | `channel.extract` | Typed Float32/64 Image/VectorField/ComplexField HWC → same-dtype HW | Int64 `index`, 0..63 and below input C. Output is a ScalarField with the selected role/unit. Image alpha produces canonical `coverage_semantics()` for existing mask ports. |
-| `channel.merge` | 1..64 equal-dtype/equal-shape Float32/64 HW inputs → HWC | String `semantic`, produced by `semantic_parameter(target)`. Target may be Image, VectorField or ComplexField and must match output dtype/C. Inputs are unfaceted generic arrays, ScalarFields or coverage masks; known role/unit must match each target channel. Names need not match. |
+| `channel.merge` | 2..4 equal-dtype/equal-shape Float32/64 HW inputs → HWC | String `semantic`, produced by `semantic_parameter(target)`. Target is Image (Float32, C=3/4), VectorField (Float32/64, C=2/3) or ComplexField (Float32/64, C=2). Inputs are unfaceted generic arrays, ScalarFields or coverage masks; known role/unit must match each target channel. Names need not match. |
 | `channel.swizzle` | Float32/64 HWC → HWC with selected C | String `indices`, produced by `channel_indices_parameter({2,1,0,3})`. Repetitions are allowed; no implicit constants. Output metadata follows the selection rules below. |
 | `alpha.associate` | Straight RGB Float32 HWC → coverage-premultiplied RGB | None. Multiply RGB by alpha; zero alpha yields zero RGB. |
 | `alpha.unassociate` | Coverage-premultiplied RGB Float32 HWC → straight RGB | None. Divide RGB by every positive alpha; zero alpha yields zero RGB. No epsilon. |
@@ -20,6 +20,10 @@ assumptions. There is no implicit resize, dtype conversion or GPU implementation
 | `color.xyz_to_lab`, `color.lab_to_xyz` | XYZ ↔ Lab Float32 HWC | None. The input's explicitly declared positive XYZ white, normalized to Y=1, is retained. D65 and explicitly supplied D50 are supported without adaptation. |
 
 All parameters shown are required; constructors supply choices explicitly.
+Built-in merge rejects input counts outside 2..4 before callback entry or IR
+publication: direct invocation returns `InvalidArgument`, and compilation returns
+`TypeMismatch` under the existing arity checks. This bound applies to the built-in operation;
+custom repeated groups retain their separately declared bounds within 1024.
 Extraction/merging/assignment establish only their inferred typed facet and remove
 unrelated annotations. Generic merge inputs with opaque interpretation are
 rejected. Generic numeric arithmetic can remove a field's guarantees before an
@@ -99,6 +103,8 @@ consumer. Exit zero checks these independent expectations:
 - Linear red converts to XYZ approximately `[.4123908,.2126390,.01933082]`;
   signed/HDR colors round-trip. Each declared D65/D50 white maps to Lab `[100,0,0]`,
   black maps to zero, and signed XYZ returns within the stated test tolerance.
+- Merge metadata reports 2..4 inputs; valid 2/3/4-channel targets execute through
+  direct and compiled calls, while counts 1/5 enter no callback.
 - Float64 vector and Float32 complex fields use the same merge/extract contracts;
   padded, unaligned reversed-channel producers are read correctly.
 - Invalid semantics, associations, parameters, role/unit assignments, dense

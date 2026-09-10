@@ -127,7 +127,7 @@ Output dtype 与 shape 独立。新增 dtype rule，选择声明 dtype、输入 
 共同 helper 在 callback 前一次性求解 descriptor/facets，结果再验证。运行期样本不决定 shape。
 
 Registry 算子可有固定前缀和一个尾部同构重复输入组，显式声明最少/最多数量（启用时 minimum>=1），总输入不超过
-1024；`channel.merge` 使用 1..64 个同 H/W、同 dtype 的 HW 输入；同构组约束 shape/dtype，
+1024；内建 `channel.merge` 使用 2..4 个同 H/W、同 dtype 的 HW 输入；同构组约束 shape/dtype，
 组员允许 generic value、scalar field 或 coverage mask。
 Semantic lowering 将模板展开为精确有序输入表；直接调用执行相同 count/schema 展开。
 Descriptor 与 C ABI 区分模板和已解析表。Shape 引用须指向实际存在的输入轴；
@@ -135,9 +135,11 @@ Descriptor 与 C ABI 区分模板和已解析表。Shape 引用须指向实际�
 
 闭集 `OperationSemanticRule` 也包含通道提取、选择、合并、alpha 关联变化和 RGB/XYZ/Lab
 变换，均为与 operation key/callback 无关的共享描述规则。`MergeChannelsParameter`
-接受 dtype/shape 合法的 Image/VectorField/ComplexField HWC 目标；已知 HW 源的
-role/unit 逐通道匹配，name 不必相同。图像 alpha 提取使用 canonical coverage，
-可直接组合既有 exact mask 端口。
+接受 dtype/shape 合法的 Image/VectorField/ComplexField HWC 目标：Image 要求 Float32
+和 3 或 4 通道；VectorField 接受 Float32/64 和 2 或 3 通道；ComplexField 接受
+Float32/64 和 2 通道。内建 merge 的输入数量对应这些受支持目标；共享重复输入契约
+仍使用 1024 范围内显式声明的数量边界。已知 HW 源的 role/unit 逐通道匹配，name 不必
+相同。图像 alpha 提取使用 canonical coverage，可直接组合既有 exact mask 端口。
 
 `channel_indices_parameter` / `channel_indices_from_parameter` 编解码 canonical
 逗号分隔十进制 String：1..64 项，各项 0..63，无空格/符号/前导零，最多 191 字节。

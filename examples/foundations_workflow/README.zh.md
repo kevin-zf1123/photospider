@@ -66,7 +66,9 @@ WorkflowNodeOutput 接上游 value；doc.outputs 指定命名结果。
 独立，未用槽全零。
 
 Cast 显式 dtype/rounding=ties_even/overflow=reject 或 clip；range 增加递增的源/目标
-端点；算术 Float32/64 同 dtype/shape，无隐式 broadcast。Merge 显式 target descriptor，
+端点；算术 Float32/64 同 dtype/shape，无隐式 broadcast。内建 merge 接受 2..4 个同
+dtype/shape 的 HW 输入并显式建立 target descriptor：Image 要求 Float32 和 3/4 通道，
+VectorField 接受 Float32/64 和 2/3 通道，ComplexField 接受 Float32/64 和 2 通道。
 expression 必填 expression/count/start/step，LUT 必填 out_of_domain=reject 或 clip。
 Threshold 显式 .5；capacity 为 Int64 `[1,2^53-1]`，registry 不补默认。
 

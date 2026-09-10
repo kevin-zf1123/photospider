@@ -178,7 +178,7 @@ before callbacks and revalidated on results. No runtime sample decides shape.
 
 A registry operation may have a fixed prefix followed by one homogeneous
 repeated input group with explicit minimum/maximum counts (active minimum>=1). Total inputs stay
-within 1024; `channel.merge` uses 1..64 HW inputs of equal H/W and dtype. This
+within 1024; built-in `channel.merge` uses 2..4 HW inputs of equal H/W and dtype. This
 homogeneous group constrains shape/dtype; its members may be generic values,
 scalar fields or coverage masks. Semantic lowering expands the group to the
 exact ordered input table;
@@ -191,7 +191,11 @@ The closed `OperationSemanticRule` vocabulary also includes channel extraction,
 selection, merging, alpha association changes and RGB/XYZ/Lab transformations.
 These are shared descriptor rules, independent of operation keys or callbacks.
 `MergeChannelsParameter` accepts explicit Image/VectorField/ComplexField targets
-when the resulting HWC dtype/shape is valid. Known HW source roles/units match
+when the resulting HWC dtype/shape is valid: Image requires Float32 with 3 or 4
+channels; VectorField accepts Float32/64 with 2 or 3 channels; ComplexField accepts
+Float32/64 with 2 channels. Built-in merge arity follows these supported targets;
+the shared repeated-input contract retains its declared bounds within 1024.
+Known HW source roles/units match
 corresponding target channels; names need not match. Image alpha extraction uses
 canonical coverage metadata so it composes with existing exact mask ports.
 

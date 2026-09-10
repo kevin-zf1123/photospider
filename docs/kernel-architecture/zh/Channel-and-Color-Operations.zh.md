@@ -9,7 +9,7 @@
 | Key | 输入 → 输出 | 必填静态参数与含义 |
 | --- | --- | --- |
 | `channel.extract` | typed Float32/64 Image/VectorField/ComplexField HWC → 同 dtype HW | Int64 `index`，0..63 且小于输入 C；输出保留所选 role/unit 的 ScalarField；图像 alpha 输出 canonical `coverage_semantics()`，可连接既有 mask 端口。 |
-| `channel.merge` | 1..64 个同 dtype/shape 的 Float32/64 HW → HWC | String `semantic`，用 `semantic_parameter(target)` 生成。Target 为符合 dtype/C 的 Image、VectorField 或 ComplexField；输入为无 facet generic、ScalarField 或 coverage mask，已有 role/unit 必须逐通道匹配，name 不必相同。 |
+| `channel.merge` | 2..4 个同 dtype/shape 的 Float32/64 HW → HWC | String `semantic`，用 `semantic_parameter(target)` 生成。Target 为 Image（Float32，C=3/4）、VectorField（Float32/64，C=2/3）或 ComplexField（Float32/64，C=2）；输入为无 facet generic、ScalarField 或 coverage mask，已有 role/unit 必须逐通道匹配，name 不必相同。 |
 | `channel.swizzle` | Float32/64 HWC → 指定 C 的 HWC | String `indices`，用 `channel_indices_parameter({2,1,0,3})` 生成，可重复，无隐式常量；语义按下述选择规则处理。 |
 | `alpha.associate` | straight RGB Float32 HWC → coverage-premultiplied RGB | 无参数，RGB 乘 alpha，alpha=0 时输出零 RGB。 |
 | `alpha.unassociate` | coverage-premultiplied RGB Float32 HWC → straight RGB | 无参数，对所有正 alpha 直接除法；零 alpha 返回零 RGB，无 epsilon。 |
@@ -17,7 +17,10 @@
 | `color.rgb_to_xyz`、`color.xyz_to_rgb` | linear sRGB ↔ XYZ Float32 HWC | 无参数，使用 `rgba_semantics().white` 的精确 canonical D65；association 必须 none 或 straight。 |
 | `color.xyz_to_lab`、`color.lab_to_xyz` | XYZ ↔ Lab Float32 HWC | 无参数，保留输入显式声明的正 XYZ 参考白（Y=1）；支持 D65 和显式 D50，不进行适应。 |
 
-列出的参数均必填，构造端显式选择。Extract/merge/assign 仅建立推断出的 typed facet，
+列出的参数均必填，构造端显式选择。内建 merge 对 2..4 之外的输入数量在 callback
+进入或 IR 发布前拒绝：直接调用返回 `InvalidArgument`，编译遵循既有数量检查返回
+`TypeMismatch`。此边界只属于内建算子；自定义重复输入组
+继续使用 1024 范围内独立声明的数量边界。Extract/merge/assign 仅建立推断出的 typed facet，
 移除无关注释；带 opaque 解释的 generic merge 输入被拒绝。通用 numeric 运算可先移除
 field 保证，随后显式 merge 建立目标并检查样本，因此可组合 extract→multiply→merge，
 无须保留失效的 mask/image facet。
@@ -76,6 +79,7 @@ ctest --test-dir build/issue257-static -R '^test_installed_consumer$' --output-o
 - RGB↔BGR 字节往返；重复索引正常执行并输出 generic；premul/straight 去 alpha 语义按约定区分。
 - straight `[-2,.5,4,.5]` 关联为 `[-1,.25,2,.5]`；极小正 alpha 可使 `1,-1,0` 往返，零 alpha 隐藏颜色丢失，alpha bits 不变。
 - linear red 的 XYZ 约为 `[.4123908,.2126390,.01933082]`；signed/HDR 往返。各自声明的 D65/D50 白点映射为 Lab `[100,0,0]`，黑色为零，signed XYZ 在测试容差内恢复。
+- Merge 元数据公布 2..4 输入；合法 2/3/4 通道目标通过直接和编译调用执行，1/5 输入均不进入 callback。
 - Float64 vector、Float32 complex 使用相同 merge/extract 契约；带 padding、非对齐、反转通道的 producer 读取正确。
 - 非法语义、association、参数、role/unit、dense 分配边界和取消失败且不发布部分成功值。
 

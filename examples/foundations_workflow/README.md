@@ -88,7 +88,10 @@ plan and ExecutionContext, then replace only same-descriptor bound Values.
 Required cast parameters are `dtype`, `rounding="ties_even"`, and
 `overflow="reject"` or explicit `clip`; range adds increasing source/destination
 endpoints. Arithmetic uses equal Float32/64 dtype/shape without broadcasting.
-Channel merge establishes its explicit target descriptor. Expressions require
+Built-in channel merge takes 2..4 equal-dtype/equal-shape HW inputs and establishes
+its explicit target: Image requires Float32 and 3/4 channels, VectorField accepts
+Float32/64 and 2/3 channels, and ComplexField accepts Float32/64 and 2 channels.
+Expressions require
 `expression/count/start/step`; LUT requires `out_of_domain="reject"` or `clip`.
 Threshold explicitly supplies `.5`; component capacities are Int64 `[1,2^53-1]`.
 No constructor defaults are silently inserted by the registry.

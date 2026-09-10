@@ -122,6 +122,80 @@ Result<ExecutionResult> producer_run(const std::string& key, const Value& input,
                 {2, key, {WorkflowNodeOutput{1, "value"}}, parameters}},
                registry);
 }
+int merge_arity() {
+  auto base = make_default_operation_registry();
+  const auto traits = base->find_traits("channel.merge").take_value();
+  PS_CHECK(traits.input_count == 0 && traits.repeated_minimum == 2 &&
+           traits.repeated_maximum == 4);
+  unsigned callbacks = 0;
+  auto registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(registry
+               ->register_operation({"channel.merge", traits,
+                                     [&](const OperationInvocation& call) {
+                                       ++callbacks;
+                                       return base->invoke("channel.merge",
+                                                           call);
+                                     }})
+               .ok());
+  PS_CHECK(registry->freeze().ok());
+  SemanticDescriptor vector;
+  vector.kind = SemanticKind::VectorField;
+  vector.unit = "pixels";
+  vector.channels = {{"dx", "x", "pixels"}, {"dy", "y", "pixels"}};
+  vector.coordinate_space = "pixel_displacement";
+  vector.direction = "forward";
+  auto vector3 = vector;
+  vector3.channels.push_back({"dz", "z", "pixels"});
+  SemanticDescriptor complex;
+  complex.kind = SemanticKind::ComplexField;
+  complex.channels = {{"real", "real", "dimensionless"},
+                      {"imag", "imaginary", "dimensionless"}};
+  complex.coordinate_space = "frequency_unshifted";
+  complex.direction = "forward_negative_inverse_1n";
+  for (const auto& target : {vector, vector3, complex, rgb(false), rgb()}) {
+    const auto count = target.channels.size();
+    const std::vector<Value> inputs(count, value({1, 1}, {.5F}));
+    const std::vector<Region> demands(count, Region::whole({1, 1}));
+    const Parameters parameters{
+        {"semantic", semantic_parameter(target).take_value()}};
+    std::vector<WorkflowInput> references;
+    for (std::size_t i = 0; i < count; ++i)
+      references.push_back(WorkflowInputReference{i + 1});
+    callbacks = 0;
+    auto direct =
+        registry->invoke("channel.merge", {inputs, demands, parameters});
+    PS_CHECK(direct.ok() && callbacks == 1);
+    auto compiled =
+        graph(inputs, {{1, "channel.merge", references, parameters}}, registry);
+    PS_CHECK(compiled.ok() && callbacks == 2);
+    PS_CHECK(close(output(compiled), std::vector<float>(count, .5F), 0));
+    PS_CHECK(output(compiled).facets()[0].payload ==
+             encode_semantic(target).value().payload);
+    PS_CHECK(direct.value().copy_bytes() == output(compiled).copy_bytes());
+  }
+  const Parameters parameters{
+      {"semantic", semantic_parameter(rgb(false)).take_value()}};
+  for (const std::size_t count : {1U, 5U}) {
+    const std::vector<Value> inputs(count, value({1, 1}, {.5F}));
+    const std::vector<Region> demands(count, Region::whole({1, 1}));
+    std::vector<WorkflowInput> references;
+    for (std::size_t i = 0; i < count; ++i)
+      references.push_back(WorkflowInputReference{i + 1});
+    callbacks = 0;
+    PS_CHECK(
+        resolve_operation_traits(traits, count, parameters).status().code ==
+        ErrorCode::InvalidArgument);
+    PS_CHECK(registry->invoke("channel.merge", {inputs, demands, parameters})
+                 .status()
+                 .code == ErrorCode::InvalidArgument);
+    PS_CHECK(
+        graph(inputs, {{1, "channel.merge", references, parameters}}, registry)
+            .status()
+            .code == ErrorCode::TypeMismatch);
+    PS_CHECK(callbacks == 0);
+  }
+  return 0;
+}
 int composition() {
   auto source = image(rgba_semantics(), {-2, .5F, 4, .5F, 1, 2, 3, 1});
   for (float factor : {1.F, 2.F}) {
@@ -348,6 +422,11 @@ int contracts() {
                          {0, {8, 8}}, Value::from_float64(sample).copy_bytes())
         .take_value();
   };
+  PS_CHECK(run("channel.merge",
+               {double_field(1), double_field(2), double_field(3)},
+               {{"semantic", semantic_parameter(rgb(false)).take_value()}})
+               .status()
+               .code == ErrorCode::TypeMismatch);
   auto double_vector =
       run("channel.merge", {double_field(-2), double_field(3)},
           {{"semantic", semantic_parameter(vector).take_value()}});
@@ -456,6 +535,7 @@ int c_contract() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(merge_arity() == 0);
   PS_CHECK(composition() == 0);
   PS_CHECK(alpha() == 0);
   PS_CHECK(colors() == 0);
