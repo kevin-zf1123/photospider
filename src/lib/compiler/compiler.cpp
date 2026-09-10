@@ -530,11 +530,11 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::InvalidArgument, "tile exceeds requested output"));
   }
-  if (steps_[named->second].traits.output_schema.kind ==
-          OperationPortKind::RgbaFloat32 &&
-      !input_internal::image_demand(region))
+  if (!input_internal::complete_image_channels(
+          steps_[named->second].output_descriptor,
+          steps_[named->second].output_facets, region))
     return Result<ExecutionPlan>(Status::failure(
-        ErrorCode::InvalidArgument, "tile must contain all RGBA channels"));
+        ErrorCode::InvalidArgument, "tile must contain all image channels"));
   ExecutionPlan tile = *this;
   std::vector<std::optional<Region>> demands(steps_.size());
   demands[named->second] = region;
@@ -543,11 +543,11 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     if (!demands[i])
       continue;
     auto& step = tile.steps_[i];
-    if (step.traits.output_schema.kind == OperationPortKind::RgbaFloat32 &&
-        !input_internal::image_demand(*demands[i]))
+    if (!input_internal::complete_image_channels(
+            step.output_descriptor, step.output_facets, *demands[i]))
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
-                          "propagated tile demand omits RGBA channels"));
+                          "propagated tile demand omits image channels"));
     step.output_demand = step.whole_boundary
                              ? Region::whole(step.output_descriptor.shape)
                              : *demands[i];
@@ -1042,11 +1042,11 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             "planned workflow output Region is empty or out of bounds"));
       }
       demand = requested->second;
-      if (step.traits.output_schema.kind == OperationPortKind::RgbaFloat32 &&
-          !input_internal::image_demand(demand)) {
+      if (!input_internal::complete_image_channels(
+              step.output_descriptor, step.output_facets, demand)) {
         return Result<ExecutionPlan>(
             Status::failure(ErrorCode::InvalidArgument,
-                            "image demand must include all four channels"));
+                            "image demand must include all channels"));
       }
     }
     if (demand_by_step[output.second].has_value()) {
@@ -1067,8 +1067,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
     }
     step.output_demand = demand_by_step[step_index].value();
-    if (step.traits.output_schema.kind == OperationPortKind::RgbaFloat32 &&
-        !input_internal::image_demand(step.output_demand)) {
+    if (!input_internal::complete_image_channels(
+            step.output_descriptor, step.output_facets, step.output_demand)) {
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
                           "propagated image demand must include all channels"));

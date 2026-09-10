@@ -177,7 +177,13 @@ query 值单位匹配 table 轴单位，输出 Drop。两者 Whole，见
 
 SemanticNode/PlanStep 保留真实 output facets，C sink 向 callback 提供相同的已解析
 类型/shape/facets，并据此检查结果；typed facet 失配为 OperationFailed。Drop 移除已知
-typed 语义保证，无关 opaque generic facet 保持既有发布规则。完整约束及输出规则进入
+typed 语义保证；注册时拒绝 Drop（包含 NULL C contract 的默认规则）搭配
+RgbaFloat32、Float32Mask 或 Typed 输出端口。此类输出必须显式选择 preserve、
+establish 或 transform；端口种类本身不建立语义。无关 opaque generic facet
+保持既有发布规则。规划与 tile 派生从推导后的 output facets 识别 image，要求完整
+逻辑 C 通道覆盖，包含 generic 端口和 Whole 输出。RGB/XYZ/Lab 的三或四通道图像
+仍允许 HW 空间 Region。直接调用在 callback 前应用同一通道覆盖检查；执行、
+frozen Region 与 stream 继承规划的覆盖要求。完整约束及输出规则进入
 v7 compiler identity 和 v3 result-region key。
 
 共享契约与八个既有算子现已支持 image-v2 signed/HDR RGB、canonical

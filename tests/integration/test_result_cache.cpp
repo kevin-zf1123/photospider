@@ -206,6 +206,7 @@ int main() {
   OperationTraits traits;
   traits.input_count = 1;
   traits.output_element_type = ElementType::Float32;
+  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
   traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};

@@ -1739,12 +1739,11 @@ Result<Value> OperationRegistry::invoke_current(
              .ok())
       return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                            "invalid operation output demand"));
-    if (definition->traits.output_schema.kind ==
-            OperationPortKind::RgbaFloat32 &&
-        !input_internal::image_demand(normalized.output_region))
-      return Result<Value>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "image output requires all RGBA channels"));
+    if (!input_internal::complete_image_channels(
+            expected_output.value().descriptor, expected_output.value().facets,
+            normalized.output_region))
+      return Result<Value>(Status::failure(
+          ErrorCode::InvalidArgument, "image output requires all channels"));
     auto resolved = resolved_shape;
     if (!resolved.halo_radius_parameter.empty())
       resolved.halo_radius = static_cast<std::uint32_t>(std::get<std::int64_t>(

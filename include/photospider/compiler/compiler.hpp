@@ -282,7 +282,9 @@ struct PHOTOSPIDER_API PlanningOptions final {
    *
    * Missing names default to whole-output demand. Unknown names, rank/shape
    * mismatch, empty/out-of-bounds Regions and partial-channel image demand
-   * fail before plan publication. Changed demand replans optimized IR.
+   * fail before plan publication. Image coverage uses inferred facets and the
+   * full logical channel extent, including generic ports and Whole outputs.
+   * Changed demand replans optimized IR.
    */
   std::map<std::string, Region> output_regions;
   /** @brief Positive spatial tile extents; changing them only replans optimized
@@ -486,7 +488,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
    * @brief Derives one demand-local plan without reanalyzing or enumerating
    * tiles.
    * @param output_name Existing named output.
-   * @param region Nonempty subset of that name's requested Region.
+   * @param region Nonempty subset of that name's requested Region; inferred
+   * image outputs require every logical channel, with spatial ROI allowed.
    * @return A dependency-pruned tile plan or Stale/InvalidArgument/overflow.
    * @throws std::bad_alloc For graph metadata allocation.
    * @note Whole boundaries retain complete demand. No runtime Value is

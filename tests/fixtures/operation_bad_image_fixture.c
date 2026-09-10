@@ -69,6 +69,9 @@ static int execute_image(void* state, const ps_operation_value_view_v7* inputs,
   return PS_OPERATION_RESULT_SUCCESS_V7;
 }
 
+static const ps_operation_contract_v7 preserve_contract = {
+    .struct_size = sizeof(ps_operation_contract_v7),
+    .semantic_rule = PS_OPERATION_SEMANTIC_PRESERVE_V7};
 static int opacity_state;
 static const ps_operation_descriptor_v7 operations[] = {
     {sizeof(ps_operation_descriptor_v7),
@@ -99,7 +102,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      0,
      NULL,
      0,
-     NULL},
+     &preserve_contract},
     {sizeof(ps_operation_descriptor_v7),
      "image.opacity",
      13,
@@ -128,7 +131,7 @@ static const ps_operation_descriptor_v7 operations[] = {
      0,
      NULL,
      0,
-     NULL}};
+     &preserve_contract}};
 static void destroy(const ps_operation_descriptor_v7* records, uint32_t count) {
   (void)records;
   (void)count;

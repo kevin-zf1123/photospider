@@ -117,5 +117,11 @@ inline Status validate_image_storage_value(
 }
 /** @brief Checks nonempty image demand including complete channel coverage. */
 bool image_demand(const Region& region) noexcept;
+/** @brief Requires full logical C when validated facets describe an image.
+ * @note Generic and other typed kinds add no channel-coverage restriction.
+ */
+bool complete_image_channels(const ValueDescriptor& descriptor,
+                             const std::vector<ValueFacet>& facets,
+                             const Region& region) noexcept;
 
 }  // namespace ps::input_internal

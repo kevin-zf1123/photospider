@@ -177,6 +177,9 @@ struct PHOTOSPIDER_API OperationExtent final {
 /** @brief Explicit output semantic behavior; transformations use static
  * metadata. */
 enum class OperationSemanticRule : std::uint32_t {
+  /** @brief Remove typed semantics; incompatible with a typed output port.
+   * @note Registration rejects Drop with RgbaFloat32, Float32Mask or Typed.
+   */
   Drop = 0,
   PreserveInput = 1,
   Establish = 2,

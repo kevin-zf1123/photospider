@@ -243,12 +243,6 @@ Result<OperationMetadata> infer_operation_output(
     default:
       return Result<OperationMetadata>(invalid("unknown output semantic rule"));
   }
-  if (t.output_semantic_rule == OperationSemanticRule::Drop &&
-      t.output_schema.kind == OperationPortKind::RgbaFloat32)
-    result.facets = {encode_semantic(rgba_semantics()).take_value()};
-  else if (t.output_semantic_rule == OperationSemanticRule::Drop &&
-           t.output_schema.kind == OperationPortKind::Float32Mask)
-    result.facets = {encode_semantic(coverage_semantics()).take_value()};
   auto status = input_internal::validate_port_metadata(
       t.output_schema, result.descriptor, result.facets);
   if (!status.ok())
@@ -328,6 +322,10 @@ Status validate_operation_contract(const OperationTraits& t) {
     return invalid("invalid canonical output facets");
   switch (t.output_semantic_rule) {
     case OperationSemanticRule::Drop:
+      if (t.output_schema.kind == OperationPortKind::RgbaFloat32 ||
+          t.output_schema.kind == OperationPortKind::Float32Mask ||
+          t.output_schema.kind == OperationPortKind::Typed)
+        return invalid("typed output requires an explicit semantic rule");
       if (t.output_semantic_input || !t.output_facets.empty() ||
           !t.output_semantic_parameter.empty())
         return invalid("unexpected dropped semantic fields");

@@ -152,6 +152,7 @@ int binding_failures() {
   OperationTraits traits;
   traits.input_count = 2;
   traits.output_element_type = ElementType::Float32;
+  traits.output_semantic_rule = ps::OperationSemanticRule::PreserveInput;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
   traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0},

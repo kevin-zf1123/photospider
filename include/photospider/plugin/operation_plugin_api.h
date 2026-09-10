@@ -605,7 +605,11 @@ typedef struct ps_operation_descriptor_v7 {
   const char* spatial_factor_parameter;
   uint32_t spatial_factor_parameter_size;
 #endif
-  /** @brief Optional declarative contract, owned until plugin destroy. */
+  /** @brief Optional declarative contract, owned until plugin destroy.
+   * @note NULL selects Drop semantics. Drop with RGBA_FLOAT32, FLOAT32_MASK or
+   * TYPED output rejects registration; these ports need an explicit semantic
+   * rule and never synthesize facets from their kind.
+   */
 #ifdef __cplusplus
   const ps_operation_contract_v7* contract = nullptr;
 #else

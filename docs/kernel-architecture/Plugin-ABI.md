@@ -228,9 +228,18 @@ and drops output semantics. Both use Whole. See
 SemanticNode and PlanStep retain real output facets. The C sink supplies the
 same resolved dtype/shape/facets to callbacks. Published output is validated
 against these facts; a typed facet mismatch is OperationFailed. Drop removes
-known typed semantic guarantees; unrelated opaque generic facets retain their
-existing publication rules. Complete constraints and output rules enter v7
-compiler identities and v3 result-region keys.
+known typed semantic guarantees; registration rejects Drop (including the
+implicit rule of a null C contract) with RgbaFloat32, Float32Mask or Typed output
+ports. Such outputs require an explicit preserve, establish or transform rule;
+port kind alone never establishes semantics. Unrelated opaque generic facets
+retain their existing publication rules.
+Planning and tile derivation identify images from inferred output facets and
+require all logical C channels, including generic ports and Whole outputs.
+Spatial HW Regions remain valid for RGB/XYZ/Lab images with three or four
+channels. Direct invocation applies the same channel-coverage check before the
+callback; execution, frozen Regions and streaming inherit planned coverage.
+Complete constraints and output rules enter v7 compiler identities and v3
+result-region keys.
 
 The shared contract and the eight existing operations now support image-v2
 signed/HDR RGB with canonical coverage-premultiplied D65 semantics, including

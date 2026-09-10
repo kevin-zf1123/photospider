@@ -448,6 +448,17 @@ bool image_demand(const Region& region) noexcept {
          region.dimensions()[2].extent == 4;
 }
 
+bool complete_image_channels(const ValueDescriptor& descriptor,
+                             const std::vector<ValueFacet>& facets,
+                             const Region& region) noexcept {
+  const bool image =
+      std::any_of(facets.begin(), facets.end(),
+                  [](const auto& f) { return f.key == "photospider.image"; });
+  return !image || (descriptor.shape.size() == 3 && region.rank() == 3 &&
+                    !region.empty() && region.dimensions()[2].offset == 0 &&
+                    region.dimensions()[2].extent == descriptor.shape[2]);
+}
+
 Status validate_port_value(const OperationPortConstraint& port,
                            const Value& value, ErrorCode numeric_failure,
                            const std::function<ErrorCode()>& stop) {

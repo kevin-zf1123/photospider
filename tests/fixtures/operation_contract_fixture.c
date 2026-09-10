@@ -131,6 +131,26 @@ const ps_operation_plugin_api_v7* ps_operation_plugin_get_api_v7(void) {
   input_constraint.element_type_mask = 16;
 #elif PS_BAD_CONTRACT_CASE == 9
   input_constraint.element_type = PS_OPERATION_ELEMENT_FLOAT64_V7;
+#elif PS_BAD_CONTRACT_CASE >= 10
+  /* A typed output cannot recover semantics from Drop or a NULL contract. */
+  memset(&contract, 0, sizeof(contract));
+  contract.struct_size = sizeof(contract);
+  static ps_operation_port_constraint_v7 drop_port = {
+      sizeof(ps_operation_port_constraint_v7), PS_OPERATION_PORT_TYPED_V7, 0, 0,
+      NULL};
+  drop_port.kind =
+      PS_BAD_CONTRACT_CASE == 10   ? PS_OPERATION_PORT_RGBA_FLOAT32_V7
+      : PS_BAD_CONTRACT_CASE == 11 ? PS_OPERATION_PORT_FLOAT32_MASK_V7
+                                   : PS_OPERATION_PORT_TYPED_V7;
+  operations[0].input_count = 1;
+  operations[0].input_schema_count = 1;
+  operations[0].input_schema = &drop_port;
+  operations[0].parameter_count = 0;
+  operations[0].parameters = NULL;
+  operations[0].shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V7;
+  operations[0].output_schema = drop_port;
+  if (PS_BAD_CONTRACT_CASE == 11)
+    operations[0].contract = NULL;
 #endif
   return &api;
 }

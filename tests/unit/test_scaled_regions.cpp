@@ -13,6 +13,7 @@ int main() {
     OperationTraits traits;
     traits.input_count = 1;
     traits.output_element_type = ElementType::Float32;
+    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
     traits.shape_rule = OperationShapeRule::Shrink;
     traits.region_rule = OperationRegionRule::Shrink;
     traits.spatial_factor_parameter = "factor";

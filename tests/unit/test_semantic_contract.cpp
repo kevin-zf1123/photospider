@@ -218,6 +218,71 @@ int inference() {
                .code == ErrorCode::TypeMismatch);
   return 0;
 }
+int explicit_drop() {
+  for (const auto kind :
+       {OperationPortKind::RgbaFloat32, OperationPortKind::Float32Mask,
+        OperationPortKind::Typed}) {
+    const bool mask = kind == OperationPortKind::Float32Mask;
+    const auto semantic = mask ? coverage_semantics() : rgba_semantics();
+    OperationMetadata input{
+        {ElementType::Float32, mask ? std::vector<std::uint64_t>{1, 1}
+                                    : std::vector<std::uint64_t>{1, 1, 4}},
+        {encode_semantic(semantic).take_value()}};
+    OperationTraits traits;
+    traits.input_count = 1;
+    traits.input_schema.resize(1);
+    traits.output_element_type = ElementType::Float32;
+    traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+    traits.input_schema[0].kind = kind;
+    traits.output_schema.kind = kind;
+    traits.output_semantic_rule = OperationSemanticRule::Drop;
+    PS_CHECK(infer_operation_output(traits, {input}, {}).status().code ==
+             ErrorCode::TypeMismatch);
+    OperationRegistry invalid;
+    auto rejected = invalid.register_operation(
+        {"drop", traits, [](const OperationInvocation& call) {
+           return Result<Value>(call.inputs[0]);
+         }});
+    PS_CHECK(rejected.code == ErrorCode::InvalidArgument);
+    PS_CHECK(invalid.keys().empty());
+    auto preserved = traits;
+    preserved.output_semantic_rule = OperationSemanticRule::PreserveInput;
+    PS_CHECK(invalid
+                 .register_operation({"preserve", preserved,
+                                      [](const OperationInvocation& call) {
+                                        return Result<Value>(call.inputs[0]);
+                                      }})
+                 .ok());
+    traits.output_schema = {};
+    auto dropped = infer_operation_output(traits, {input}, {});
+    PS_CHECK(dropped.ok() && dropped.value().facets.empty());
+    auto registry = std::make_shared<OperationRegistry>();
+    const auto callback = [](const OperationInvocation& call) {
+      return Result<Value>(call.inputs[0]);
+    };
+    PS_CHECK(registry->register_operation({"drop", traits, callback}).ok());
+    traits.input_schema[0].kind = kind;
+    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+    PS_CHECK(registry->register_operation({"typed", traits, callback}).ok());
+    PS_CHECK(registry->freeze().ok());
+    auto typed =
+        Value::create(
+            input.descriptor, Region::whole(input.descriptor.shape),
+            mask ? StridedLayout{0, {4, 4}} : StridedLayout{0, {16, 16, 4}},
+            std::vector<std::uint8_t>(mask ? 4 : 16), input.facets)
+            .take_value();
+    WorkflowDocument doc;
+    doc.inputs = {{1, "input", typed.descriptor(), typed.region(),
+                   typed.layout(), typed.facets()}};
+    doc.nodes = {{1, "drop", {WorkflowInputReference{1}}, {}},
+                 {2, "typed", {WorkflowNodeOutput{1, "value"}}, {}}};
+    doc.outputs = {{"output", 2, "value"}};
+    GraphContext graph(doc);
+    Compiler compiler(registry);
+    PS_CHECK(compiler.compile(graph).status().code == ErrorCode::TypeMismatch);
+  }
+  return 0;
+}
 int dtype_masks() {
   OperationDefinition definition;
   definition.key = "test.floating";
@@ -380,6 +445,13 @@ int c_contract() {
     PS_CHECK(!malformed.load_plugin(path).ok());
     PS_CHECK(malformed.keys().empty());
   }
+  for (const auto* path :
+       {PS_BAD_CONTRACT_10, PS_BAD_CONTRACT_11, PS_BAD_CONTRACT_12}) {
+    OperationRegistry dropped;
+    auto rejected = dropped.load_plugin(path);
+    PS_CHECK(rejected.code == ErrorCode::InvalidArgument);
+    PS_CHECK(dropped.keys().empty());
+  }
   auto wide = std::make_shared<OperationRegistry>();
   PS_CHECK(wide->load_plugin(PS_BAD_CONTRACT_7).ok());
   PS_CHECK(wide->freeze().ok());
@@ -401,6 +473,7 @@ int c_contract() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(explicit_drop() == 0);
   PS_CHECK(codec() == 0);
   PS_CHECK(inference() == 0);
   PS_CHECK(c_contract() == 0);
