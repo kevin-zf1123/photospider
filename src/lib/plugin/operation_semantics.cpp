@@ -263,16 +263,19 @@ Facets infer_transformed_facets(
   s.primaries = rgb ? "srgb" : "";
   s.transfer = lab ? "identity" : "linear";
   s.unit = lab ? "lab" : "relative";
-  s.channels =
-      rgb   ? std::vector<SemanticChannel>{{"R", "red", "relative"},
-                                           {"G", "green", "relative"},
-                                           {"B", "blue", "relative"}}
-      : lab ? std::vector<SemanticChannel>{{"L", "lightness", "lab_lightness"},
-                                           {"a", "a", "lab_opponent"},
-                                           {"b", "b", "lab_opponent"}}
-            : std::vector<SemanticChannel>{{"X", "x", "relative"},
-                                           {"Y", "y", "relative"},
-                                           {"Z", "z", "relative"}};
+  if (rgb) {
+    s.channels = {{"R", "red", "relative"},
+                  {"G", "green", "relative"},
+                  {"B", "blue", "relative"}};
+  } else if (lab) {
+    s.channels = {{"L", "lightness", "lab_lightness"},
+                  {"a", "a", "lab_opponent"},
+                  {"b", "b", "lab_opponent"}};
+  } else {
+    s.channels = {{"X", "x", "relative"},
+                  {"Y", "y", "relative"},
+                  {"Z", "z", "relative"}};
+  }
   if (s.association != "none")
     s.channels.push_back(alpha);
   return encode(s);
