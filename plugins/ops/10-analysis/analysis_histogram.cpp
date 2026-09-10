@@ -10,7 +10,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_analysis_histogram(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Histogram;
   OperationDefinition definition;
   definition.key = "analysis.histogram";
   auto& t = definition.traits;
@@ -35,7 +34,7 @@ Status register_analysis_histogram(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          histogram<T>(kind, call, output);
+          histogram<T>(Kind::Histogram, call, output);
         },
         traits, invocation);
   };

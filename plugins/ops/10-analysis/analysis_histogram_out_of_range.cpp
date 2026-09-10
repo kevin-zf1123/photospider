@@ -10,7 +10,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_analysis_histogram_out_of_range(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Outside;
   OperationDefinition definition;
   definition.key = "analysis.histogram_out_of_range";
   auto& t = definition.traits;
@@ -34,7 +33,7 @@ Status register_analysis_histogram_out_of_range(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          histogram<T>(kind, call, output);
+          histogram<T>(Kind::Outside, call, output);
         },
         traits, invocation);
   };

@@ -41,29 +41,21 @@ Result<Value> combine(const OperationInvocation& invocation, bool mask) {
 }
 }  // namespace
 Status register_image_mask(OperationRegistry* registry) {
-  constexpr int kind = 1;
   OperationDefinition operation;
   operation.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
   operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
-  operation.key = kind == 0   ? "image.gaussian_blur"
-                  : kind == 1 ? "image.mask"
-                              : "image.source_over";
-  operation.traits.input_count = kind == 0 ? 1 : 2;
+  operation.key = "image.mask";
+  operation.traits.input_count = 2;
   operation.traits.output_element_type = ElementType::Float32;
-  operation.traits.shape_rule = kind == 2
-                                    ? OperationShapeRule::MatchAllInputs
-                                    : OperationShapeRule::PreserveFirstInput;
-  operation.traits.region_rule =
-      kind == 0 ? OperationRegionRule::Halo : OperationRegionRule::Elementwise;
+  operation.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  operation.traits.region_rule = OperationRegionRule::Elementwise;
   operation.traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
   operation.traits.output_schema = operation.traits.input_schema.front();
 
-  operation.traits.input_schema.push_back({kind == 1
-                                               ? OperationPortKind::Float32Mask
-                                               : OperationPortKind::RgbaFloat32,
-                                           0, 0});
+  operation.traits.input_schema.push_back(
+      {OperationPortKind::Float32Mask, 0, 0});
   operation.callback = [](const OperationInvocation& invocation) {
-    return combine(invocation, kind == 1);
+    return combine(invocation, true);
   };
 
   return registry->register_operation(std::move(operation));

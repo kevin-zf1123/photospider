@@ -78,7 +78,6 @@ Result<Value> components(const OperationInvocation& call) {
 }
 }  // namespace
 Status register_mask_components(OperationRegistry* registry) {
-  constexpr unsigned kind = 1;
   OperationDefinition op;
   op.key = "mask.components";
   auto& t = op.traits;
@@ -87,17 +86,15 @@ Status register_mask_components(OperationRegistry* registry) {
   auto& port = t.input_schema[0];
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
-  port.element_type = static_cast<std::uint32_t>(kind < 2 ? ElementType::Float32
-                                                          : ElementType::Int64);
-  t.output_element_type = kind == 0 ? ElementType::Float32 : ElementType::Int64;
-  t.shape_rule = kind < 2 ? OperationShapeRule::PreserveFirstInput
-                          : OperationShapeRule::Scalar;
+  port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
+  t.output_element_type = ElementType::Int64;
+  t.shape_rule = OperationShapeRule::PreserveFirstInput;
   t.requires_dense_output = true;
 
   port.facets =
-      kind == 1 ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
-                                              .take_value()}
-                : label_facets();
+      true ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
+                                         .take_value()}
+           : label_facets();
   t.parameter_schema = {{"capacity", OperationParameterType::Int64, true, true,
                          1, 0x1fffffffffffffp0}};
 

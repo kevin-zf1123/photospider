@@ -9,7 +9,6 @@ using namespace color_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_color_assign(OperationRegistry* registry) {
-  constexpr std::size_t i = 9;
   OperationDefinition operation;
   operation.key = "color.assign";
   auto& t = operation.traits;
@@ -37,7 +36,7 @@ Status register_color_assign(OperationRegistry* registry) {
   t.parameter_schema = {{"semantic", OperationParameterType::String, true}};
 
   operation.callback = [traits = t,
-                        channel = i < 3](const OperationInvocation& call) {
+                        channel = false](const OperationInvocation& call) {
     return channel ? channels(call, traits) : colors(call, traits);
   };
   return registry->register_operation(std::move(operation));

@@ -9,7 +9,6 @@ using namespace color_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_color_xyz_to_rgb(OperationRegistry* registry) {
-  constexpr std::size_t i = 6;
   OperationDefinition operation;
   operation.key = "color.xyz_to_rgb";
   auto& t = operation.traits;
@@ -32,7 +31,7 @@ Status register_color_xyz_to_rgb(OperationRegistry* registry) {
       static_cast<std::uint32_t>(SemanticKind::Image);
 
   operation.callback = [traits = t,
-                        channel = i < 3](const OperationInvocation& call) {
+                        channel = false](const OperationInvocation& call) {
     return channel ? channels(call, traits) : colors(call, traits);
   };
   return registry->register_operation(std::move(operation));

@@ -9,7 +9,6 @@ using namespace color_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_channel_merge(OperationRegistry* registry) {
-  constexpr std::size_t i = 2;
   OperationDefinition operation;
   operation.key = "channel.merge";
   auto& t = operation.traits;
@@ -39,7 +38,7 @@ Status register_channel_merge(OperationRegistry* registry) {
   t.output_axes.push_back({OperationExtentSource::InputCount, 1, {}, 0, 0, 0});
 
   operation.callback = [traits = t,
-                        channel = i < 3](const OperationInvocation& call) {
+                        channel = true](const OperationInvocation& call) {
     return channel ? channels(call, traits) : colors(call, traits);
   };
   return registry->register_operation(std::move(operation));

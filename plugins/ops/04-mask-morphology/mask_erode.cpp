@@ -11,7 +11,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_mask_erode(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Erode;
   OperationDefinition definition;
   definition.key = "mask.erode";
   auto& t = definition.traits;
@@ -38,7 +37,7 @@ Status register_mask_erode(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          kernel_filter<T>(kind, call, output);
+          kernel_filter<T>(Kind::Erode, call, output);
         },
         traits, invocation);
   };

@@ -10,7 +10,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_field_gaussian_blur(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Gaussian;
   OperationDefinition definition;
   definition.key = "field.gaussian_blur";
   auto& t = definition.traits;
@@ -37,7 +36,7 @@ Status register_field_gaussian_blur(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          smooth<T>(kind, call, output);
+          smooth<T>(Kind::Gaussian, call, output);
         },
         traits, invocation);
   };

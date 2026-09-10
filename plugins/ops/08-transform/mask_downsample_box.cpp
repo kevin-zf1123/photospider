@@ -52,11 +52,10 @@ Result<Value> downsample(const OperationInvocation& invocation) {
 }
 }  // namespace
 Status register_mask_downsample_box(OperationRegistry* registry) {
-  constexpr bool mask = true;
   OperationDefinition operation;
   operation.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
   operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
-  operation.key = mask ? "mask.downsample_box" : "image.downsample_box";
+  operation.key = "mask.downsample_box";
   auto& traits = operation.traits;
   traits.input_count = 1;
   traits.output_element_type = ElementType::Float32;
@@ -65,8 +64,7 @@ Status register_mask_downsample_box(OperationRegistry* registry) {
   traits.spatial_factor_parameter = "factor";
   traits.parameter_schema = {
       {"factor", OperationParameterType::Int64, true, true, 1, 16}};
-  traits.output_schema.kind =
-      mask ? OperationPortKind::Float32Mask : OperationPortKind::RgbaFloat32;
+  traits.output_schema.kind = OperationPortKind::Float32Mask;
   traits.input_schema = {traits.output_schema};
   operation.callback = downsample;
   return registry->register_operation(std::move(operation));

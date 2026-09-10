@@ -9,7 +9,6 @@ using namespace color_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_channel_swizzle(OperationRegistry* registry) {
-  constexpr std::size_t i = 1;
   OperationDefinition operation;
   operation.key = "channel.swizzle";
   auto& t = operation.traits;
@@ -37,7 +36,7 @@ Status register_channel_swizzle(OperationRegistry* registry) {
       {OperationExtentSource::IndexListCount, 1, "indices", 0, 0, 0});
 
   operation.callback = [traits = t,
-                        channel = i < 3](const OperationInvocation& call) {
+                        channel = true](const OperationInvocation& call) {
     return channel ? channels(call, traits) : colors(call, traits);
   };
   return registry->register_operation(std::move(operation));

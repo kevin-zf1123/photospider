@@ -11,7 +11,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_curve_sample_linear(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Linear;
   OperationDefinition definition;
   definition.key = "curve.sample_linear";
   auto& t = definition.traits;
@@ -36,7 +35,7 @@ Status register_curve_sample_linear(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          curve<T>(kind, call, output);
+          curve<T>(Kind::Linear, call, output);
         },
         traits, invocation);
   };

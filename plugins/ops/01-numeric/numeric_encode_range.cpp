@@ -11,9 +11,8 @@ using namespace numeric_ops;  // NOLINT(build/namespaces)
 }  // namespace
 Status register_numeric_encode_range(OperationRegistry* registry) {
   const double maximum = std::numeric_limits<double>::max();
-  constexpr bool encode = true;
   OperationDefinition operation;
-  operation.key = encode ? "numeric.encode_range" : "numeric.cast";
+  operation.key = "numeric.encode_range";
   auto& t = operation.traits;
   t.input_count = 1;
   t.input_schema.resize(1);
@@ -28,7 +27,7 @@ Status register_numeric_encode_range(OperationRegistry* registry) {
     t.parameter_schema.push_back(
         {key, OperationParameterType::Float64, true, true, -maximum, maximum});
   operation.callback = [](const OperationInvocation& call) {
-    return cast(call, encode);
+    return cast(call, true);
   };
   return registry->register_operation(std::move(operation));
 }

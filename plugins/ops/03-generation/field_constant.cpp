@@ -11,7 +11,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_field_constant(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Constant;
   OperationDefinition definition;
   definition.key = "field.constant";
   auto& t = definition.traits;
@@ -34,7 +33,7 @@ Status register_field_constant(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          generator<T>(kind, call, output);
+          generator<T>(Kind::Constant, call, output);
         },
         traits, invocation);
   };

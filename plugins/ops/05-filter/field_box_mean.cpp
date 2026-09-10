@@ -10,7 +10,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_field_box_mean(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Box;
   OperationDefinition definition;
   definition.key = "field.box_mean";
   auto& t = definition.traits;
@@ -36,7 +35,7 @@ Status register_field_box_mean(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          smooth<T>(kind, call, output);
+          smooth<T>(Kind::Box, call, output);
         },
         traits, invocation);
   };

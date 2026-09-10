@@ -9,9 +9,8 @@ using namespace numeric_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_numeric_cast(OperationRegistry* registry) {
-  constexpr bool encode = false;
   OperationDefinition operation;
-  operation.key = encode ? "numeric.encode_range" : "numeric.cast";
+  operation.key = "numeric.cast";
   auto& t = operation.traits;
   t.input_count = 1;
   t.input_schema.resize(1);
@@ -24,7 +23,7 @@ Status register_numeric_cast(OperationRegistry* registry) {
                         {"overflow", OperationParameterType::String, true}};
 
   operation.callback = [](const OperationInvocation& call) {
-    return cast(call, encode);
+    return cast(call, false);
   };
   return registry->register_operation(std::move(operation));
 }

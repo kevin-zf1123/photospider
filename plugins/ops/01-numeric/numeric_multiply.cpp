@@ -9,7 +9,6 @@ using namespace numeric_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_numeric_multiply(OperationRegistry* registry) {
-  constexpr unsigned kind = 2;
   OperationDefinition operation;
   operation.key = "numeric.multiply";
   auto& t = operation.traits;
@@ -26,8 +25,7 @@ Status register_numeric_multiply(OperationRegistry* registry) {
   operation.callback = [](const OperationInvocation& call) {
     const bool fp32 =
         call.inputs[0].descriptor().element_type == ElementType::Float32;
-    return fp32 ? arithmetic<float>(call, kind)
-                : arithmetic<double>(call, kind);
+    return fp32 ? arithmetic<float>(call, 2) : arithmetic<double>(call, 2);
   };
   return registry->register_operation(std::move(operation));
 }

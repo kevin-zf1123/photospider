@@ -11,7 +11,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_curve_sample_monotone(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Monotone;
   OperationDefinition definition;
   definition.key = "curve.sample_monotone";
   auto& t = definition.traits;
@@ -37,7 +36,7 @@ Status register_curve_sample_monotone(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          curve<T>(kind, call, output);
+          curve<T>(Kind::Monotone, call, output);
         },
         traits, invocation);
   };

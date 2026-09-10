@@ -11,7 +11,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_field_coordinate(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Coordinate;
   OperationDefinition definition;
   definition.key = "field.coordinate";
   auto& t = definition.traits;
@@ -35,7 +34,7 @@ Status register_field_coordinate(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          generator<T>(kind, call, output);
+          generator<T>(Kind::Coordinate, call, output);
         },
         traits, invocation);
   };

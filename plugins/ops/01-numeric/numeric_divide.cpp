@@ -9,7 +9,6 @@ using namespace numeric_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_numeric_divide(OperationRegistry* registry) {
-  constexpr unsigned kind = 3;
   OperationDefinition operation;
   operation.key = "numeric.divide";
   auto& t = operation.traits;
@@ -26,8 +25,7 @@ Status register_numeric_divide(OperationRegistry* registry) {
   operation.callback = [](const OperationInvocation& call) {
     const bool fp32 =
         call.inputs[0].descriptor().element_type == ElementType::Float32;
-    return fp32 ? arithmetic<float>(call, kind)
-                : arithmetic<double>(call, kind);
+    return fp32 ? arithmetic<float>(call, 3) : arithmetic<double>(call, 3);
   };
   return registry->register_operation(std::move(operation));
 }

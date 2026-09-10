@@ -38,7 +38,6 @@ Result<Value> threshold(const OperationInvocation& call) {
 }
 }  // namespace
 Status register_mask_threshold(OperationRegistry* registry) {
-  constexpr unsigned kind = 0;
   OperationDefinition op;
   op.key = "mask.threshold";
   auto& t = op.traits;
@@ -47,11 +46,9 @@ Status register_mask_threshold(OperationRegistry* registry) {
   auto& port = t.input_schema[0];
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
-  port.element_type = static_cast<std::uint32_t>(kind < 2 ? ElementType::Float32
-                                                          : ElementType::Int64);
-  t.output_element_type = kind == 0 ? ElementType::Float32 : ElementType::Int64;
-  t.shape_rule = kind < 2 ? OperationShapeRule::PreserveFirstInput
-                          : OperationShapeRule::Scalar;
+  port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
+  t.output_element_type = ElementType::Float32;
+  t.shape_rule = OperationShapeRule::PreserveFirstInput;
   t.requires_dense_output = true;
 
   port.semantic_kind = static_cast<std::uint32_t>(SemanticKind::ScalarField);

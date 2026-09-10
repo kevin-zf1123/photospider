@@ -9,7 +9,6 @@ using namespace numeric_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_numeric_add(OperationRegistry* registry) {
-  constexpr unsigned kind = 0;
   OperationDefinition operation;
   operation.key = "numeric.add";
   auto& t = operation.traits;
@@ -26,8 +25,7 @@ Status register_numeric_add(OperationRegistry* registry) {
   operation.callback = [](const OperationInvocation& call) {
     const bool fp32 =
         call.inputs[0].descriptor().element_type == ElementType::Float32;
-    return fp32 ? arithmetic<float>(call, kind)
-                : arithmetic<double>(call, kind);
+    return fp32 ? arithmetic<float>(call, 0) : arithmetic<double>(call, 0);
   };
   return registry->register_operation(std::move(operation));
 }

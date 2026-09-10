@@ -10,7 +10,6 @@ using namespace component_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_component_count(OperationRegistry* registry) {
-  constexpr unsigned kind = 2;
   OperationDefinition op;
   op.key = "component.count";
   auto& t = op.traits;
@@ -19,23 +18,21 @@ Status register_component_count(OperationRegistry* registry) {
   auto& port = t.input_schema[0];
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
-  port.element_type = static_cast<std::uint32_t>(kind < 2 ? ElementType::Float32
-                                                          : ElementType::Int64);
-  t.output_element_type = kind == 0 ? ElementType::Float32 : ElementType::Int64;
-  t.shape_rule = kind < 2 ? OperationShapeRule::PreserveFirstInput
-                          : OperationShapeRule::Scalar;
+  port.element_type = static_cast<std::uint32_t>(ElementType::Int64);
+  t.output_element_type = ElementType::Int64;
+  t.shape_rule = OperationShapeRule::Scalar;
   t.requires_dense_output = true;
 
   port.facets =
-      kind == 1 ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
-                                              .take_value()}
-                : label_facets();
+      false ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
+                                          .take_value()}
+            : label_facets();
   t.parameter_schema = {{"capacity", OperationParameterType::Int64, true, true,
                          1, 0x1fffffffffffffp0}};
 
   t.workspace_input_multiplier = 4;
 
-  op.callback = [attribute = kind - 2](const OperationInvocation& call) {
+  op.callback = [attribute = 2 - 2](const OperationInvocation& call) {
     return attributes(call, attribute);
   };
 

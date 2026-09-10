@@ -11,7 +11,6 @@ using namespace basic_ops;  // NOLINT(build/namespaces)
 
 }  // namespace
 Status register_field_convolve(OperationRegistry* registry) {
-  constexpr Kind kind = Kind::Convolve;
   OperationDefinition definition;
   definition.key = "field.convolve";
   auto& t = definition.traits;
@@ -35,7 +34,7 @@ Status register_field_convolve(OperationRegistry* registry) {
         [](auto sample_type, const OperationInvocation& call,
            MutableValue* output) {
           using T = decltype(sample_type);
-          kernel_filter<T>(kind, call, output);
+          kernel_filter<T>(Kind::Convolve, call, output);
         },
         traits, invocation);
   };
