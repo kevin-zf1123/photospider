@@ -21,6 +21,7 @@ no public architecture or delivery authority.
 | [0015](0015-breaking-product-boundary-scope-reset.md) | The product boundary is an embeddable kernel and an ephemeral local daemon. |
 | [0016](0016-workflow-inputs-and-execution-bindings.md) | Accepted Float32 image/scalar and operation ABI v3 target; implementation pending. |
 | [0017](0017-cpu-regional-execution-and-storage.md) | Accepted CPU regional storage, bounded execution and operation ABI 4 target. |
+| [0020](0020-composable-operation-foundations.md) | Accepted G1/G2/G3/G5 composition, image v2 and operation ABI 7 target; implementation tracked by #287. |
 
 ADR 0015 is the highest active product-boundary authority. Pre-reset ADRs 0001,
 0004, 0009, 0010, 0011, and 0013 were deliberately retired from the active set

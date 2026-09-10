@@ -12,8 +12,73 @@
 #include "execution/disk_cache.hpp"
 #include "s3_image_workflow/scene.hpp"
 #include "support/test_support.hpp"
+#include "support/typed_images.hpp"
 
 namespace {
+int typed_regressions(const std::string& directory) {
+  using namespace ps;  // NOLINT(build/namespaces)
+  std::filesystem::remove_all(directory);
+  auto operations = make_default_operation_registry();
+  Compiler compiler(operations);
+  InputSnapshotStore store;
+  ExecutionContextConfig config{1, false, 8, 65536, 8192};
+  config.disk_cache = DiskCacheConfig{directory, 65536, 64, 8};
+  for (bool restart : {false, true}) {
+    ExecutionContext execution(operations, config);
+    for (const auto& semantic : typed_images::descriptions()) {
+      auto original = typed_images::value(semantic);
+      GraphContext graph(typed_images::document(original));
+      auto plan = compiler.compile(graph).take_value().plan;
+      ExecutionBindings bindings{
+          {{"image",
+            {},
+            {},
+            std::make_shared<InputSnapshot>(
+                store.import_value(original).take_value())}}};
+      const auto before = execution.disk_cache_statistics().hits;
+      auto result = execution.execute(plan, bindings);
+      PS_CHECK(
+          result.ok() &&
+          typed_images::same(result.value().values.at("result"), original));
+      PS_CHECK(restart ? execution.disk_cache_statistics().hits > before
+                       : result.value().diagnostics.cache_hits == 0);
+      execution.flush_disk_cache();
+      auto warm = execution.execute(plan, bindings);
+      PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits > 0 &&
+               typed_images::same(warm.value().values.at("result"), original));
+      CancellationSource cancellation;
+      cancellation.cancel();
+      PS_CHECK(execution.execute(plan, bindings, cancellation.token())
+                   .status()
+                   .code == ErrorCode::Cancelled);
+    }
+  }
+  // Metadata/old-format corruption becomes a miss, never a fabricated facet.
+  for (const auto& file : std::filesystem::directory_iterator(directory)) {
+    if (file.path().extension() != ".pscache")
+      continue;
+    std::fstream bytes(file.path(),
+                       std::ios::in | std::ios::out | std::ios::binary);
+    bytes.write("PSCACHE1", 8);
+  }
+  {
+    ExecutionContext execution(operations, config);
+    auto original = typed_images::value(typed_images::descriptions().front());
+    GraphContext graph(typed_images::document(original));
+    auto plan = compiler.compile(graph).take_value().plan;
+    auto result = execution.execute(
+        plan, {{{"image",
+                 {},
+                 {},
+                 std::make_shared<InputSnapshot>(
+                     store.import_value(original).take_value())}}});
+    PS_CHECK(result.ok() &&
+             execution.disk_cache_statistics().invalid_entries > 0 &&
+             typed_images::same(result.value().values.at("result"), original));
+  }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
 int internal_regressions(const std::string& directory) {
   using namespace ps;  // NOLINT(build/namespaces)
   using execution_internal::DiskCache;
@@ -45,9 +110,11 @@ int internal_regressions(const std::string& directory) {
   float half = .5F;
   std::memcpy(writer.data(), &half, 4);
   auto value =
-      std::move(writer).publish({{"photospider.mask", 1, {}}}).take_value();
+      std::move(writer)
+          .publish({encode_semantic(coverage_semantics()).take_value()})
+          .take_value();
   reservation->seal();
-  cache.put("active", value, OperationPortKind::Float32Mask);
+  cache.put("active", value);
   value = {};
   {
     std::unique_lock<std::mutex> lock(mutex);
@@ -73,10 +140,13 @@ int internal_regressions(const std::string& directory) {
           .take_value();
   std::memcpy(unaccounted.data(), &half, 4);
   value = std::move(unaccounted)
-              .publish({{"photospider.mask", 1, {}}})
+              .publish({encode_semantic(coverage_semantics()).take_value()})
               .take_value();
+  cache.put("cancelled", value, [] { return ErrorCode::Cancelled; });
+  cache.flush();
+  PS_CHECK(cache.statistics().entries == 0);
   fail_index = true;
-  cache.put("allocation-failure", value, OperationPortKind::Float32Mask);
+  cache.put("allocation-failure", value);
   cache.flush();
   PS_CHECK(cache.statistics().write_failures == 1 &&
            cache.statistics().entries == 0);
@@ -98,7 +168,7 @@ int internal_regressions(const std::string& directory) {
   PS_CHECK(!ec);
 #endif
   if (!ec) {
-    cache.put("symlink", value, OperationPortKind::Float32Mask);
+    cache.put("symlink", value);
     cache.flush();
     std::ifstream file(sentinel);
     std::string text;
@@ -108,7 +178,7 @@ int internal_regressions(const std::string& directory) {
   }
   std::filesystem::remove(sentinel);
   for (const auto& key : {"first", "second"}) {
-    cache.put(key, value, OperationPortKind::Float32Mask);
+    cache.put(key, value);
     cache.flush();
     std::uint64_t actual_bytes = 0, actual_entries = 0;
     for (const auto& file : std::filesystem::directory_iterator(directory))
@@ -131,6 +201,7 @@ int main(int argc, char** argv) {
   PS_CHECK(argc == 3);
   const std::string mode = argv[1], directory = argv[2];
   if (mode == "internal") {
+    PS_CHECK(typed_regressions(directory + "-typed") == 0);
     return internal_regressions(directory);
   }
   auto registry = make_default_operation_registry();

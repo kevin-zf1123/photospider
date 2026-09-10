@@ -29,8 +29,8 @@ void print_value(const std::string& label, const ps::Value& value) {
     std::cout << stride << ',';
   std::cout << " facets=" << value.facets().size();
   for (const auto& facet : value.facets())
-    std::cout << ' ' << facet.key << '@' << facet.version << '='
-              << std::string(facet.payload.begin(), facet.payload.end());
+    std::cout << ' ' << facet.key << '@' << facet.version
+              << " payload_bytes=" << facet.payload.size();
   std::cout << " bytes=" << value.bytes().size() << " values=";
   for (std::size_t offset = 0; offset < value.bytes().size(); offset += 4) {
     float number = 0;

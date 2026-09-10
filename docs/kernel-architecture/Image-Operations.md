@@ -13,15 +13,24 @@ implicit defaults, and one regional image output named by the workflow.
 An image declaration is dense Float32 {H,W,4}, H/W positive, whole Region, offset
 zero and canonical row-major strides. Runtime views have explicit origin, strides
 and valid Region. Both carry exactly one facet: key `photospider.image`,
-version 1, payload `rgba;linear-srgb;premultiplied;hwc` (34 ASCII bytes, no NUL).
-RGB is finite and nonnegative; alpha is finite in [0,1], and alpha zero requires
+version 2, the canonical payload from `encode_semantic(rgba_semantics())`.
+Image-v1 metadata is rejected; callers use the public typed helper.
+RGB is finite and signed; alpha is finite in [0,1], and alpha zero requires
 RGB zero. HDR RGB may exceed one or alpha. Signed zero is accepted. The caller
-supplies already linear-sRGB premultiplied values; no color conversion, gamma,
+supplies linear sRGB/Rec.709, D65, scene-referred relative RGB with dimensionless
+coverage alpha and coverage-premultiplied association; no color conversion, gamma,
 clamp or unpremultiplication occurs.
 
-Scalar inputs are direct workflow declarations with Float32 {1}, whole Region,
-offset zero, stride {4}, four bytes and no facets. Per-run gain/opacity bytes
-are not source parameters and do not change compiler identities.
+Scalar inputs may be direct workflow declarations or upstream Float32 `{1}`
+results. Allowed facets are none, one dimensionless Scalar, or one dimensionless
+single-sample SampledSignal. The sampling-axis unit/domain is independent of the
+sample value unit and remains intact. Other typed or opaque facets are rejected.
+Direct bindings retain whole dense declarations (offset zero, stride `{4}`, four
+bytes). Computed views require complete `{1}` coverage and may be padded,
+unaligned, broadcast or negatively strided; C++, C and Metal marshalling read
+logical sample zero with byte-safe access. No cast or clamp occurs. Per-Run
+scalar bytes do not change compiled-plan identity; eligible result keys include
+both the bytes and allowed semantic facets.
 
 These operations are deterministic, side-effect-free, cacheable, PreserveFirstInput
 and Elementwise. Image input demand equals requested spatial output demand with
@@ -35,15 +44,23 @@ gradual underflow. Host schema/numeric validation and image callback scopes
 save and restore the thread's floating environment, preventing inherited
 rounding or flush-to-zero modes from changing the result. Computed non-finite
 pixels, invalid profile or alpha-zero/nonzero-RGB output fail OperationFailed.
-Bound scalar errors fail InvalidArgument before work; pixel errors fail before
-the consuming callback. Unread pixels are not scanned.
+Direct scalar errors fail InvalidArgument before work; invalid computed scalar
+numbers fail OperationFailed before each consuming callback, including cached
+and shared-producer results. Metadata mismatches are TypeMismatch. Pixel errors
+fail before the consuming callback. Unread pixels are not scanned.
+
+All eight operations implement this image-v2 contract in C++, C and Metal.
+Each declares PreserveInput semantics and publishes the first input's exact facet;
+box operations change only the logical H/W. Their ports require canonical RGBA
+or typed coverage masks. Straight alpha, RGB-only, reordered channels and other
+color models require explicit conversion before these operations.
 
 ## Reusable operation package and executable example
 
 [`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
-maintained ABI6 C module `photospider_rgba32f_ops` using only
+maintained ABI7 C module `photospider_rgba32f_ops` using only
 `Photospider::operation_sdk`. It implements the same image operations and profile
-as the built-ins above, with strict floating-point compilation. The ABI6 host
+as the built-ins above, with strict floating-point compilation. The ABI7 host
 validates ports and establishes nearest/gradual-underflow arithmetic before
 entry. The callback requests its output from the host allocator and publishes that
 same buffer; success freezes it, and failure releases it without publication. Load this
@@ -102,12 +119,12 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 The isolated installed consumer builds this same operation source package
 against the installed SDK, runs A/B through its shared bridge, and runs the
 same executable with built-ins and the module. Static and shared kernel builds
-exercise this path and package 0.6/rejected 0.5 requests; see
+exercise this path and package 0.7/rejected 0.6 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
 
 ## S2 Gaussian, mask and composition
 
-The built-in registry and maintained ABI6 C package also provide:
+The built-in registry and maintained ABI7 C package also provide:
 
 | Operation | Ordered inputs | Required static parameters | Region rule |
 | --- | --- | --- | --- |
@@ -116,7 +133,7 @@ The built-in registry and maintained ABI6 C package also provide:
 | `image.source_over` | Foreground RGBA, background RGBA of identical shape | None | Elementwise; MatchAllInputs |
 
 All operations are CPU, deterministic and side-effect-free. Images preserve
-logical shape and the profile above. Masks have no facets and finite samples
+logical shape and the profile above. Masks carry `encode_semantic(coverage_semantics())` and finite samples
 in `[0,1]`; each mask sample multiplies all foreground RGBA channels. Source-over
 computes `F + B * (1 - F.alpha)` separately for each channel using premultiplied
 values, following the [W3C formula](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover).
@@ -156,14 +173,14 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-The example directory is also an independent `find_package(Photospider 0.6)`
+The example directory is also an independent `find_package(Photospider 0.7)`
 consumer. `test_installed_consumer` builds and runs it against isolated static
 and shared installations, both with built-ins and with the separately built C
 module. Pass the trusted module's exact path as the sole optional argument.
 
 ## S3 box shrink and circle stamp
 
-Package 0.6 / operation ABI 6 exposes the following built-ins and the same C
+Package 0.7 / operation ABI 7 exposes the following built-ins and the same C
 module operations. These use existing Float32 linear-sRGB premultiplied RGBA
 and finite [0,1] Float32 HW masks. All parameters listed as scalar inputs are
 ordinary Float32 `{1}` bindings, not compile-time node parameters.
@@ -180,7 +197,7 @@ Factor one preserves numeric values. No gamma conversion or unpremultiplication
 occurs. The application preview defaults to factor four.
 
 Brush x/y accept all finite Float32; radius accepts positive normal Float32
-through FLT_MAX; linear unassociated RGB accepts [0,FLT_MAX], alpha [0,1]. Every
+through FLT_MAX; linear unassociated RGB accepts [-FLT_MAX,FLT_MAX], alpha [0,1]. Every
 input is required. The closed circle tests pixel centers using binary64 squared
 distance. Inside, source RGB is multiplied by alpha in binary32 and composited
 with the premultiplied background using source-over without contraction;
@@ -195,7 +212,7 @@ tracked by #275/#277.
 
 ## S4 native Metal implementations
 
-Package 0.6 / operation ABI 6 implements all eight operations with the same
+Package 0.7 / operation ABI 7 implements all eight operations with the same
 trusted pure C host GPU service. The built-in adapter and independently built
 C11 module share the maintained `plugins/ops/rgba32f/image.metal` program and
 host marshalling. CMake embeds shader text in a generated build header; installed
@@ -223,7 +240,9 @@ error bound. Circle coverage uses host double row spans, including large logical
 coordinates; GPU color computation preserves outside pixel bits.
 
 `test_metal_images` and `test_metal_images_plugin` cover all eight operations,
-whole/tiled/nonzero ROI, radius 64, factor 16, HDR/subnormal fallback and exact
+positive and signed/HDR whole/tiled/nonzero ROI scenes, alpha 0/1/1e-10,
+invalid numeric/facet/association inputs, radius 64, factor 16, HDR/subnormal
+fallback and exact
 large-coordinate stamp coverage. The public fixture is
 [`examples/s4_gpu_workflow/image_fixture.hpp`](../../examples/s4_gpu_workflow/image_fixture.hpp).
 Use Xcode's command-line validation on actual hardware:
@@ -237,3 +256,49 @@ MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static
 Unavailable hardware returns an explicit CTest skip; it is not a successful
 native execution result. The image CPU implementations and prior numerical
 contracts remain the exact default.
+
+The independently installable `examples/s4_gpu_workflow` consumer exposes the
+same signed scenes through public WorkflowDocument, compile and execute APIs:
+
+```sh
+cmake --build build/issue257-static --target photospider_s4_gpu_workflow -j 8
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend cpu
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend metal --require-native
+```
+
+Append `--module /absolute/path/to/libphotospider_rgba32f_ops.so` for the C
+package. Expected output includes `operations=8 signed_hdr=passed` (with the
+`dispatches` field between them) and `oracle=passed`. CPU and eligible native
+runs report `fallback_count=0`; native runs must report nonzero dispatches.
+Without a device, Metal mode reports the actual positive fallback count;
+`--require-native` additionally exits 77. Each scene checks every demanded sample and its
+typed facet. For example, signed exposure at `(y=0,x=1)` transforms
+`[-2.125,4,-.125,.5]` with gain 2 into `[-4.25,8,-.25,.5]`. In
+`image_fixture.hpp`, modify `foreground`, `background`, brush inputs or
+`scene()` parameters to compose another experiment, and update the independent
+oracle accordingly. Whole execution and the nonzero ROI with 2x3 tiles use the
+same mathematical oracle; no negative RGB result is clipped or sent to CPU
+solely because of its sign.
+
+## Computed scalar composition
+
+[`test_computed_scalar.cpp`](../../tests/integration/test_computed_scalar.cpp)
+registers a small public `coefficient.scale` producer and connects its result to
+exposure, opacity or brush through WorkflowDocument. One compiled plan changes
+coefficient bindings between sequential/concurrent Runs. For exposure, coefficient
+1 generates gain 2; coefficient 3 generates gain 6, so the same source pixel's RGB
+triples while alpha stays unchanged. A cached value 1.5 is legal as gain and
+rejected as opacity. Generic NaN results remain valid standalone Values but cannot
+enter either bounded consumer. The fixture demonstrates Scalar/Signal metadata,
+five layouts, field/opaque rejection and independent shared cancellation.
+
+```sh
+cmake --build build/issue257-static --target test_computed_scalar -j 8
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_computed_scalar' --output-on-failure
+```
+
+Both C++ and C consumer runs report `layouts=5 semantic_kinds=3` and
+`oracle=passed`; available native hardware must execute 45 dispatches. Without
+native hardware the same test verifies CPU/fallback behavior and reports zero
+native dispatches. Change the fixture's coefficient binding or the pure producer
+callback to continue composing; expression parsing is a later operation slice.

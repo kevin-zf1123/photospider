@@ -2,7 +2,7 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v6: copied semantic traits, closed typed parameter schema,
+- operation ABI v7: copied semantic traits, closed typed parameter schema,
   ordered scalar/image port constraints, plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
@@ -52,7 +52,7 @@ Generic input views may include backing padding; callbacks address only valid
 coverage via the supplied origin and strides.
 
 The synchronous callback retains its `int` signature but returns one closed
-version-six result: success, ordinary failure, cancellation, or backend
+version-seven result: success, ordinary failure, cancellation, or backend
 unavailable. Backend unavailable is distinct from ordinary failure and may
 request CPU fallback only from a GPU attempt whose copied traits allow it.
 Unknown nonzero integers are ordinary `OperationFailed` results. A callback
@@ -74,11 +74,11 @@ cancellation, rejects any backend value other than CPU or GPU, and then checks
 backend capability. A known but unsupported backend remains
 `BackendUnavailable`; an unknown numeric backend is `InvalidArgument` and is
 never translated to GPU by the DSO adapter. After those higher-priority
-checks, the registry computes the expected Scalar/Fixed/Preserve/Match output
-descriptor exactly once. Preserve rejects a first-input element type that
-contradicts the declared output type, while Match rejects any valid input type
-or shape disagreement. Both are pre-callback `TypeMismatch` results, so even a
-side-effecting or failing callback is not entered. Callback output validation
+checks, the registry uses `resolve_operation_traits` and `infer_operation_output`
+to compute dtype, shape and canonical output facets through the same implementation
+as semantic lowering. Preserve/Match compare shapes independently of dtype;
+input dtype restrictions are explicit port constraints. A mismatch is rejected
+before callbacks. Callback output validation
 reuses the precomputed descriptor; a successful callback that returns a
 default-invalid generic `Value` remains a safe `TypeMismatch`; invalid image
 output is `OperationFailed`. Direct invocation and physical planning share
@@ -93,14 +93,16 @@ type/rules, and the ordinary trait combinations without evaluating a dense
 element or byte product. The callback may return any Value layout that passes
 normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
-admission estimate. A C DSO Fixed descriptor is stricter because ABI v6 carries
+admission estimate. A C DSO Fixed descriptor is stricter because ABI v7 carries
 no output strides: loading separately requires representable contiguous
 signed strides and uint64 byte count. For total dense bytes `B`, the loader
 also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
 `B <= SIZE_MAX`. Thus a UInt8 `{INT64_MAX + 1}` descriptor and
 `{2, 2^62}` are representable on a 64-bit host, while adding one element to
-either boundary is rejected. This distinction adds no ABI field and does not
-change Preserve or Match inference.
+either boundary is rejected. The copied `requires_dense_output` trait also checks the complete output using
+the resolved dtype before semantic IR publication, including Fixed outputs
+whose dtype comes from an input or static parameter. C++ Fixed broadcast
+semantics remain available when that requirement is false.
 
 ## Validation
 
@@ -170,31 +172,94 @@ certificate, package-admission, or process-isolation system.
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
 
-## Version-six port schemas
+## Version-seven semantic and output contracts
 
-`input_schema_count` equals input_count <= 1024; its pointer is null exactly for
-zero count and otherwise naturally aligned. Each input and the inline output
-constraint has exact struct_size, a closed port kind and numeric uint32
-binary32 minimum/maximum bits. Scalar intervals are finite/inclusive; other
-kinds require positive-zero bound bits. Host copies every constraint and rejects
-unknown kinds, bad counts/structure sizes/bounds or incompatible shape/Region
-combinations before atomic publication. Output kinds are Value, image or mask. Image/mask outputs preserve their first
-input or use the explicit integer box-shrink rule. Scalar ports require direct
-workflow inputs; no implicit scalar broadcasting or profile inference exists.
+Package 0.7.0/operation ABI and traits 7 replace 0.6/6. The host checks version
+before `get_api_v7`; no old table, symbol alias or image-v1 reader remains.
+WorkflowDocument schema 2/provider ABI 1/C++17 remain.
 
-Host checks ABI version 6 before looking up get_api_v6. No v5 aliases or
-adapters remain. Float32 has code 4 in both operation ABI6 and the unchanged
-provider ABI1 schema layout. Provider codes 1..3 retain meaning. Host image
-validation and callback scopes restore the embedding's floating environment;
-see [Image Operations](Image-Operations.md).
+`SemanticDescriptor` in `data/semantic.hpp` encodes image-v2 and semantic-v1
+facets with a 4096-byte canonical payload. Helpers construct RGBA/coverage
+semantics, validate metadata and regional samples, and convert to/from the
+8192-character lowercase-hex static `semantic` parameter. Callers use typed
+helpers rather than writing hex. Channel names/roles/units, color/white/transfer/
+reference/association and sampling axis/value units are separate. Images are
+Float32 HWC; finite signed/HDR values are supported by typed image validation.
+Vector coordinate tokens distinguish pixel/normalized displacement/position;
+complex fields declare full unshifted spectra, DC zero, negative unnormalized
+forward transform and inverse /N. This describes data without implementing FFT.
+Generic opaque facets and unrestricted generic floating bytes remain available.
+Malformed known typed facets are rejected when constructing Value metadata.
+
+Each C port has an optional exact-sized semantic constraint record for kind,
+facets, dtype and rank. `element_type_mask` optionally accepts a dtype set:
+low bits 0..3 mean UInt8/Int64/Float64/Float32, zero is unrestricted, and it is
+mutually exclusive with nonzero exact `element_type`. Unknown bits and conflicting
+fields reject registration. The copied mask enters compiler and result identities.
+An optional operation contract selects declared/input/
+static-parameter dtype, rank-1..8 axes (constant, positive Int64 parameter,
+input axis or actual input count) with checked nonnegative offset, and output
+semantics (drop, preserve input, establish facets or static semantic parameter).
+The fixed input prefix may be followed by one homogeneous group; active groups
+have minimum>=1 and bounded maximum, with total input count <=1024. The loader
+copies all records before atomic publication. Lowering expands a template to
+its exact ordered input table. New axes, typed ports and repeated groups use
+Whole. No per-port G4 spatial inference is introduced.
+
+The closed semantic vocabulary additionally infers channel extraction/selection/
+merging, alpha association and RGB/XYZ/Lab transformations from input metadata.
+`IndexListCount` shares the public canonical index-list parser with swizzle:
+1..64 decimal indices in [0,63], comma-separated without spaces or leading zeros.
+These rules use the existing source/parameter fields, reject malformed combinations
+before publication and never dispatch inference by operation key. See
+[channel and color operations](Channel-and-Color-Operations.md) for exact role,
+white-point, alpha-removal and generic-output behavior.
+
+The closed `SampleExpression`/`ApplyLut1d` rules share bounded expression parsing
+and uniform-domain validation across compiler, direct calls and C declarations.
+SampleExpression consumes generic Float64 `[K]` (1..256), requires finite start
+and positive finite step, and validates resolved Float32 `[count]` (1..1048576).
+Its output has dimensionless value/axis units; a multi-sample endpoint must be
+finite and greater than start. ApplyLut1d accepts a SampledSignal query and
+SampledSignal/Lut table with N>=2, matches query sample units to table axis units,
+and drops output semantics. Both use Whole. See
+[expression and LUT operations](Expression-and-LUT-Operations.md).
+
+SemanticNode and PlanStep retain real output facets. The C sink supplies the
+same resolved dtype/shape/facets to callbacks. Published output is validated
+against these facts; a typed facet mismatch is OperationFailed. Drop removes
+known typed semantic guarantees; registration rejects Drop (including the
+implicit rule of a null C contract) with RgbaFloat32, Float32Mask or Typed output
+ports. Such outputs require an explicit preserve, establish or transform rule;
+port kind alone never establishes semantics. Unrelated opaque generic facets
+retain their existing publication rules.
+Planning and tile derivation identify images from inferred output facets and
+require all logical C channels, including generic ports and Whole outputs.
+Spatial HW Regions remain valid for RGB/XYZ/Lab images with three or four
+channels. Direct invocation applies the same channel-coverage check before the
+callback; execution, frozen Regions and streaming inherit planned coverage.
+Complete constraints and output rules enter v7 compiler identities and v3
+result-region keys.
+
+The shared contract and the eight existing operations now support image-v2
+signed/HDR RGB with canonical coverage-premultiplied D65 semantics, including
+eligible native Metal execution. The eight operations explicitly preserve the
+first input's semantic facet. Snapshots and memory/native/disk caches retain
+supported image-v2 representations and real canonical facets; disk format 2
+rejects old formats. Bounded scalars accept compatible computed Float32 `{1}` results, including
+dimensionless Scalar/single-sample Signal facets. Each consumer validates its
+range before callback entry, including cache hits; direct bindings retain
+preflight checks. Logical scalar addresses support padded and strided views.
+The default registry also supplies the CPU Whole [numeric operations](Numeric-Operations.md). The general typed image validator also accepts straight
+representations; the eight existing operation ports require canonical RGBA.
 
 ## S3 scaled ports
 
-ABI 6 includes the S3 Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 5 fail before publication.
+ABI 7 includes the S3 Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 6 fail before publication.
 
 ## S4 host GPU service
 
-The ABI 6 output sink carries an invocation-local ps_gpu_service_v6 pointer,
+The ABI 7 output sink carries an invocation-local ps_gpu_service_v7 pointer,
 null on CPU. buffer() creates a bounded token for host allocation and cannot
 promote frozen inputs to writable. execute() validates source/entry, bindings,
 constants and grid, and returns only after native completion. Failures are

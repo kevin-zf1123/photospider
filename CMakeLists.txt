@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.6.0
+  VERSION 0.7.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -72,11 +72,19 @@ find_package(Threads REQUIRED)
 set(
   PHOTOSPIDER_KERNEL_SOURCES
   plugins/ops/image_operations.cpp
+  plugins/ops/numeric_operations.cpp
+  plugins/ops/color_operations.cpp
+  plugins/ops/expression_operations.cpp
+  plugins/ops/component_operations.cpp
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
+  src/lib/data/semantic.cpp
+  src/lib/plugin/operation_contract.cpp
+  src/lib/plugin/operation_semantics.cpp
+  src/lib/plugin/expression.cpp
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
@@ -93,11 +101,21 @@ endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   set_source_files_properties(plugins/ops/image_operations.cpp
+    plugins/ops/numeric_operations.cpp
+    plugins/ops/color_operations.cpp
+    plugins/ops/expression_operations.cpp
+    plugins/ops/component_operations.cpp
+    src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 elseif(MSVC)
   set_source_files_properties(plugins/ops/image_operations.cpp
+    plugins/ops/numeric_operations.cpp
+    plugins/ops/color_operations.cpp
+    plugins/ops/expression_operations.cpp
+    plugins/ops/component_operations.cpp
+    src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -106,6 +124,7 @@ file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.mm" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.metal" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.cpp")
 list(APPEND _cache_identity_inputs "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
 list(SORT _cache_identity_inputs)
@@ -255,6 +274,7 @@ add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
   foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
@@ -395,6 +415,21 @@ if(BUILD_TESTING)
     data_provider_invalid_utf8_overlong_fixture 1)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
 
+  photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
+  add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
+  target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
+  set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_compile_definitions(test_semantic_contract PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:operation_contract_fixture>")
+  add_dependencies(test_semantic_contract operation_contract_fixture)
+  foreach(_case RANGE 1 12)
+    add_library(operation_bad_contract_${_case} MODULE tests/fixtures/operation_contract_fixture.c)
+    target_link_libraries(operation_bad_contract_${_case} PRIVATE Photospider::operation_sdk)
+    set_target_properties(operation_bad_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_compile_definitions(operation_bad_contract_${_case} PRIVATE PS_BAD_CONTRACT_CASE=${_case})
+    target_compile_definitions(test_semantic_contract PRIVATE PS_BAD_CONTRACT_${_case}="$<TARGET_FILE:operation_bad_contract_${_case}>")
+    add_dependencies(test_semantic_contract operation_bad_contract_${_case})
+  endforeach()
+
   photospider_add_test(test_bindings Photospider::kernel tests/integration/test_bindings.cpp)
   target_include_directories(test_bindings PRIVATE examples)
   add_dependencies(test_bindings photospider_image_vertical photospider_regional_image_vertical)
@@ -431,6 +466,34 @@ if(BUILD_TESTING)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
+  foreach(_scenario cast-range channels alpha-color expression-lut generator-gain components all)
+    add_test(NAME test_foundations_${_scenario} COMMAND photospider_foundations_workflow --scenario ${_scenario})
+  endforeach()
+  photospider_add_test(test_component_operations Photospider::kernel tests/integration/test_component_operations.cpp)
+  add_dependencies(test_component_operations photospider_foundations_workflow)
+  photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
+  add_library(expression_contract_fixture MODULE tests/fixtures/expression_contract_fixture.c)
+  target_link_libraries(expression_contract_fixture PRIVATE Photospider::operation_sdk)
+  set_target_properties(expression_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
+  add_dependencies(test_expression_operations expression_contract_fixture)
+  photospider_add_test(test_color_operations Photospider::kernel tests/integration/test_color_operations.cpp)
+  foreach(_case RANGE 0 2)
+    add_library(channel_contract_${_case} MODULE tests/fixtures/channel_contract_fixture.c)
+    target_link_libraries(channel_contract_${_case} PRIVATE Photospider::operation_sdk)
+    set_target_properties(channel_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_compile_definitions(channel_contract_${_case} PRIVATE PS_CHANNEL_BAD_CASE=${_case})
+    add_dependencies(test_color_operations channel_contract_${_case})
+  endforeach()
+  target_compile_definitions(test_color_operations PRIVATE
+    PS_CHANNEL_CONTRACT_FIXTURE="$<TARGET_FILE:channel_contract_0>"
+    PS_BAD_CHANNEL_1="$<TARGET_FILE:channel_contract_1>"
+    PS_BAD_CHANNEL_2="$<TARGET_FILE:channel_contract_2>")
+  photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
+  photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
+  target_include_directories(test_computed_scalar PRIVATE examples)
+  add_dependencies(test_computed_scalar photospider_rgba32f_ops)
+  add_test(NAME test_computed_scalar_plugin COMMAND test_computed_scalar $<TARGET_FILE:photospider_rgba32f_ops>)
   photospider_add_test(test_result_cache Photospider::kernel tests/integration/test_result_cache.cpp)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)

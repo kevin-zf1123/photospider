@@ -41,10 +41,10 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
           (output.descriptor.shape[axis] % factor != 0);
   }
   const auto count = call.inputs.size();
-  std::vector<ps_operation_value_view_v6> views(count);
+  std::vector<ps_operation_value_view_v7> views(count);
   std::vector<std::vector<std::uint64_t>> origins(count), offsets(count),
       extents(count), demands(count), demand_extents(count);
-  std::vector<std::vector<ps_operation_facet_view_v6>> facets(count);
+  std::vector<std::vector<ps_operation_facet_view_v7>> facets(count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto& input = call.inputs[i];
     auto& v = views[i];
@@ -74,24 +74,24 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
     v.demand_offsets = demands[i].data();
     v.demand_extents = demand_extents[i].data();
     for (const auto& f : input.facets())
-      facets[i].push_back({sizeof(ps_operation_facet_view_v6), f.key.data(),
+      facets[i].push_back({sizeof(ps_operation_facet_view_v7), f.key.data(),
                            static_cast<std::uint32_t>(f.key.size()), f.version,
                            f.payload.data(),
                            static_cast<std::uint32_t>(f.payload.size())});
     v.facets = facets[i].data();
     v.facet_count = facets[i].size();
   }
-  std::vector<ps_operation_parameter_value_v6> parameters;
+  std::vector<ps_operation_parameter_value_v7> parameters;
   for (const auto& entry : call.parameters) {
-    ps_operation_parameter_value_v6 p{};
+    ps_operation_parameter_value_v7 p{};
     p.struct_size = sizeof(p);
     p.key = entry.first.data();
     p.key_size = entry.first.size();
     if (const auto* number = std::get_if<double>(&entry.second)) {
-      p.type = PS_OPERATION_PARAMETER_FLOAT64_V6;
+      p.type = PS_OPERATION_PARAMETER_FLOAT64_V7;
       p.float64_value = *number;
     } else {
-      p.type = PS_OPERATION_PARAMETER_INT64_V6;
+      p.type = PS_OPERATION_PARAMETER_INT64_V7;
       p.int64_value = std::get<std::int64_t>(entry.second);
     }
     parameters.push_back(p);
@@ -101,7 +101,7 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
     out_offsets.push_back(d.offset);
     out_extents.push_back(d.extent);
   }
-  ps_operation_output_sink_v6 sink{};
+  ps_operation_output_sink_v7 sink{};
   sink.struct_size = sizeof(sink);
   sink.context = &output;
   sink.output_rank = output.descriptor.shape.size();
@@ -139,7 +139,7 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
     return state.scratch.back().data();
   };
   sink.publish = [](void* context, std::uint32_t, const std::uint64_t*,
-                    std::uint32_t, const ps_operation_facet_view_v6*,
+                    std::uint32_t, const ps_operation_facet_view_v7*,
                     std::uint32_t, const std::uint8_t* data, std::uint64_t) {
     auto& state = *static_cast<Output*>(context);
     if (!state.value || state.value->data() != data)
@@ -156,11 +156,11 @@ Result<Value> gpu_image(const OperationInvocation& call, std::uint32_t kind) {
       cancelled, const_cast<CancellationToken*>(&call.cancellation), &sink);
   if (!output.failure.ok())
     return Result<Value>(output.failure);
-  if (result == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6)
+  if (result == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7)
     return Result<Value>(
         Status::failure(ErrorCode::BackendUnavailable,
                         "Metal FP32 numeric or shape eligibility"));
-  if (result == PS_OPERATION_RESULT_CANCELLED_V6)
+  if (result == PS_OPERATION_RESULT_CANCELLED_V7)
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "native image cancelled"));
   return std::move(output.result);
@@ -179,7 +179,10 @@ Result<Value> execute_image(const OperationInvocation& invocation,
   }
   const Value& input = invocation.inputs[0];
   float factor = 0;
-  std::memcpy(&factor, invocation.inputs[1].bytes().data(), sizeof(factor));
+  std::memcpy(&factor,
+              invocation.inputs[1].bytes().data() +
+                  invocation.inputs[1].byte_address({0}).value(),
+              sizeof(factor));
   auto allocated = MutableValue::allocate(
       input.descriptor(), invocation.output_region, invocation.allocator);
   if (!allocated.ok())
@@ -207,7 +210,7 @@ Result<Value> execute_image(const OperationInvocation& invocation,
       }
     }
   }
-  return std::move(output).publish({input_internal::image_facet()});
+  return std::move(output).publish(invocation.inputs[0].facets());
 }
 // Validated region coverage makes every sample address representable.
 float sample(const Value& value, std::uint64_t y, std::uint64_t x,
@@ -314,7 +317,7 @@ Result<Value> gaussian(const OperationInvocation& invocation) {
         std::memcpy(output.data() + index * 4, &rounded, 4);
       }
   }
-  return std::move(output).publish({input_internal::image_facet()});
+  return std::move(output).publish(invocation.inputs[0].facets());
 }
 Result<Value> combine(const OperationInvocation& invocation, bool mask) {
   if (invocation.backend == Backend::Gpu)
@@ -347,7 +350,7 @@ Result<Value> combine(const OperationInvocation& invocation, bool mask) {
       }
     }
   }
-  return std::move(output).publish({input_internal::image_facet()});
+  return std::move(output).publish(invocation.inputs[0].facets());
 }
 /** @brief Averages clipped integer boxes in fixed row/column sample order. */
 Result<Value> downsample(const OperationInvocation& invocation) {
@@ -401,7 +404,10 @@ Result<Value> brush_circle(const OperationInvocation& invocation) {
   const auto& input = invocation.inputs[0];
   float args[7];
   for (std::size_t i = 0; i < 7; ++i)
-    std::memcpy(&args[i], invocation.inputs[i + 1].bytes().data(), 4);
+    std::memcpy(&args[i],
+                invocation.inputs[i + 1].bytes().data() +
+                    invocation.inputs[i + 1].byte_address({0}).value(),
+                4);
   const double cx = args[0], cy = args[1], radius = args[2];
   const float alpha = args[6], remaining = 1.0F - alpha;
   auto made = MutableValue::allocate(
@@ -439,6 +445,8 @@ Result<Value> brush_circle(const OperationInvocation& invocation) {
 Status register_image_operations(OperationRegistry* registry) {
   for (bool opacity : {false, true}) {
     OperationDefinition operation;
+    operation.traits.output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
     operation.key = opacity ? "image.opacity" : "image.exposure_gain";
     operation.traits.input_count = 2;
@@ -446,7 +454,7 @@ Status register_image_operations(OperationRegistry* registry) {
     operation.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
     operation.traits.region_rule = OperationRegionRule::Elementwise;
     operation.traits.input_schema = {
-        {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0},
+        {OperationPortKind::RgbaFloat32, 0, 0},
         {OperationPortKind::Float32Scalar, 0, opacity ? 1.0F : 16.0F}};
     operation.traits.output_schema = operation.traits.input_schema.front();
     operation.callback = [opacity](const OperationInvocation& invocation) {
@@ -458,6 +466,8 @@ Status register_image_operations(OperationRegistry* registry) {
   }
   for (int kind = 0; kind < 3; ++kind) {
     OperationDefinition operation;
+    operation.traits.output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
     operation.key = kind == 0   ? "image.gaussian_blur"
                     : kind == 1 ? "image.mask"
@@ -469,8 +479,7 @@ Status register_image_operations(OperationRegistry* registry) {
                                       : OperationShapeRule::PreserveFirstInput;
     operation.traits.region_rule = kind == 0 ? OperationRegionRule::Halo
                                              : OperationRegionRule::Elementwise;
-    operation.traits.input_schema = {
-        {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0}};
+    operation.traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
     operation.traits.output_schema = operation.traits.input_schema.front();
     if (kind == 0) {
       operation.traits.parameter_schema = {
@@ -483,7 +492,7 @@ Status register_image_operations(OperationRegistry* registry) {
     } else {
       operation.traits.input_schema.push_back(
           {kind == 1 ? OperationPortKind::Float32Mask
-                     : OperationPortKind::LinearPremultipliedRgbaFloat32,
+                     : OperationPortKind::RgbaFloat32,
            0, 0});
       operation.callback = [kind](const OperationInvocation& invocation) {
         return combine(invocation, kind == 1);
@@ -495,6 +504,8 @@ Status register_image_operations(OperationRegistry* registry) {
   }
   for (bool mask : {false, true}) {
     OperationDefinition operation;
+    operation.traits.output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
     operation.key = mask ? "mask.downsample_box" : "image.downsample_box";
     auto& traits = operation.traits;
@@ -506,8 +517,7 @@ Status register_image_operations(OperationRegistry* registry) {
     traits.parameter_schema = {
         {"factor", OperationParameterType::Int64, true, true, 1, 16}};
     traits.output_schema.kind =
-        mask ? OperationPortKind::Float32Mask
-             : OperationPortKind::LinearPremultipliedRgbaFloat32;
+        mask ? OperationPortKind::Float32Mask : OperationPortKind::RgbaFloat32;
     traits.input_schema = {traits.output_schema};
     operation.callback = downsample;
     auto status = registry->register_operation(std::move(operation));
@@ -516,6 +526,7 @@ Status register_image_operations(OperationRegistry* registry) {
   }
   OperationDefinition brush;
   brush.key = "image.brush_circle";
+  brush.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
   brush.callback = brush_circle;
   auto& traits = brush.traits;
   traits.supports_gpu = traits.allows_cpu_fallback = true;
@@ -524,16 +535,16 @@ Status register_image_operations(OperationRegistry* registry) {
   traits.output_element_type = ElementType::Float32;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
-  traits.output_schema.kind = OperationPortKind::LinearPremultipliedRgbaFloat32;
+  traits.output_schema.kind = OperationPortKind::RgbaFloat32;
   const float maximum = std::numeric_limits<float>::max();
   traits.input_schema = {traits.output_schema,
                          {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar,
                           std::numeric_limits<float>::min(), maximum},
-                         {OperationPortKind::Float32Scalar, 0, maximum},
-                         {OperationPortKind::Float32Scalar, 0, maximum},
-                         {OperationPortKind::Float32Scalar, 0, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
+                         {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar, 0, 1}};
   auto status = registry->register_operation(std::move(brush));
   if (!status.ok())

@@ -152,11 +152,11 @@ int binding_failures() {
   OperationTraits traits;
   traits.input_count = 2;
   traits.output_element_type = ElementType::Float32;
+  traits.output_semantic_rule = ps::OperationSemanticRule::PreserveInput;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
-  traits.input_schema = {
-      {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0},
-      {OperationPortKind::Float32Scalar, 0, 16}};
+  traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0},
+                         {OperationPortKind::Float32Scalar, 0, 16}};
   traits.output_schema = traits.input_schema[0];
   PS_CHECK(
       operations
@@ -251,8 +251,16 @@ int binding_failures() {
       ++facets[0].version;
     if (mode == 4)
       facets[0].payload.push_back(0);
-    PS_CHECK(check_value(original.descriptor(), original.region(),
-                         original.layout(), original.copy_bytes(), facets));
+    if (mode >= 3) {
+      auto rejected =
+          Value::create(original.descriptor(), original.region(),
+                        original.layout(), original.copy_bytes(), facets);
+      PS_CHECK(!rejected.ok() &&
+               rejected.status().code == ErrorCode::InvalidArgument);
+    } else {
+      PS_CHECK(check_value(original.descriptor(), original.region(),
+                           original.layout(), original.copy_bytes(), facets));
+    }
   }
   for (std::size_t port : {1U, 2U}) {
     for (float number : {-1.F, 17.F, std::numeric_limits<float>::infinity(),
@@ -275,7 +283,7 @@ int binding_failures() {
     std::vector<float> pixels(16, 0);
     pixels[3] = 1;
     if (mode == 0)
-      pixels[0] = -1;
+      pixels[0] = -std::numeric_limits<float>::infinity();
     if (mode == 1)
       pixels[1] = std::numeric_limits<float>::infinity();
     if (mode == 2)
@@ -360,7 +368,7 @@ int compile_failures_and_identity() {
   PS_CHECK(analyze_code(doc) == ErrorCode::Cycle);
   doc = s1_fixture::document();
   doc.nodes[1].inputs[1] = WorkflowNodeOutput{10, "value"};
-  PS_CHECK(analyze_code(doc) == ErrorCode::InvalidArgument);
+  PS_CHECK(analyze_code(doc) == ErrorCode::TypeMismatch);
   doc = s1_fixture::document();
   doc.inputs[0].facets.clear();
   PS_CHECK(analyze_code(doc) == ErrorCode::TypeMismatch);

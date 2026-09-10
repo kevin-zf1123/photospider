@@ -44,10 +44,10 @@ int main() {
         "kernel void scale(device const float* a [[buffer(0)]], "
         "device float* b [[buffer(1)]], uint i [[thread_position_in_grid]])"
         "{b[i]=a[i]*.5f;}";
-    ps_gpu_buffer_binding_v6 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v6), 0, source, 0, 16, 0},
-        {sizeof(ps_gpu_buffer_binding_v6), 1, destination, 0, 16, 1}};
-    ps_gpu_dispatch_v6 command{};
+    ps_gpu_buffer_binding_v7 buffers[] = {
+        {sizeof(ps_gpu_buffer_binding_v7), 0, source, 0, 16, 0},
+        {sizeof(ps_gpu_buffer_binding_v7), 1, destination, 0, 16, 1}};
+    ps_gpu_dispatch_v7 command{};
     command.struct_size = sizeof(command);
     command.source = shader;
     command.source_size = sizeof(shader) - 1;

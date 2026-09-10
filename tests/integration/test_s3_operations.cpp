@@ -60,11 +60,13 @@ int main(int argc, char** argv) {
                                : static_cast<float>(i % 11) / 4;
     std::vector<std::uint8_t> bytes(pixels.size() * 4);
     std::memcpy(bytes.data(), pixels.data(), bytes.size());
-    const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
+
     const std::vector<ValueFacet> facets =
-        mask ? std::vector<ValueFacet>{}
+        mask ? std::vector<ValueFacet>{ps::encode_semantic(
+                                           ps::coverage_semantics())
+                                           .take_value()}
              : std::vector<ValueFacet>{
-                   {"photospider.image", 1, {profile.begin(), profile.end()}}};
+                   ps::encode_semantic(ps::rgba_semantics()).take_value()};
     auto image =
         Value::create(
             {ElementType::Float32, shape}, Region::whole(shape),

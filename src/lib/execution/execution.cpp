@@ -1612,12 +1612,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         inputs[input_index] = transferred.take_value();
       }
 
-      // Generic producers may supply masks without an image output guarantee.
-      // Attribute invalid computed samples to that operation, not the caller.
+      // Validate bounded computed values after every predecessor/cache path,
+      // before the consuming callback; direct bindings retain preflight errors.
       for (std::size_t port = 0; port < step.inputs.size(); ++port) {
         if (!std::holds_alternative<PlanStepInput>(step.inputs[port]) ||
-            step.traits.input_schema[port].kind !=
-                OperationPortKind::Float32Mask)
+            (step.traits.input_schema[port].kind !=
+                 OperationPortKind::Float32Mask &&
+             step.traits.input_schema[port].kind !=
+                 OperationPortKind::Float32Scalar))
           continue;
         const auto valid = input_internal::validate_port_value(
             step.traits.input_schema[port], inputs[port],
@@ -2101,7 +2103,7 @@ Result<ExecutionResult> ExecutionContext::execute(
   const bool spatial = std::any_of(
       plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
         return step.traits.output_schema.kind ==
-                   OperationPortKind::LinearPremultipliedRgbaFloat32 ||
+                   OperationPortKind::RgbaFloat32 ||
                step.traits.output_schema.kind == OperationPortKind::Float32Mask;
       });
   const bool regional_demand = std::any_of(
@@ -2608,7 +2610,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           },
           &tile, std::move(values), token, parallelism, true, tile_cached,
           tile_backends,
-          [this, keys, cache_epoch, &tile](
+          [this, keys, cache_epoch, &tile, token](
               std::size_t index, const Value& value, Backend backend) {
             if (impl_->cache && index < keys.size() &&
                 backend == tile.steps()[index].backend)
@@ -2620,7 +2622,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                 tile.execution_mode() == ExecutionMode::CpuExact &&
                 index < keys.size() && impl_->cache->epoch() == cache_epoch)
               impl_->disk->put(keys[index], value,
-                               tile.steps()[index].traits.output_schema.kind);
+                               [&] { return binding_stop(tile, token); });
           },
           impl_->native_device, impl_->cache.get(), cache_epoch);
       auto result = coordinator->run();
@@ -2668,13 +2670,18 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           const auto i = reverse - 1;
           if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
             continue;
-          auto hit = impl_->cache->get(keys[i]);
+          auto retained = impl_->cache->get_output(
+              keys[i], tile.steps()[i], stop,
+              execution_internal::dynamic_opaque_output(tile, i));
+          if (!retained.ok())
+            return Result<ExecutionResult>(retained.status());
+          auto hit = retained.take_value();
           if (!hit.valid() && impl_->disk &&
               tile.execution_mode() == ExecutionMode::CpuExact) {
             const auto& step = tile.steps()[i];
-            hit = impl_->disk->get(keys[i], step.output_descriptor,
-                                   step.output_demand,
-                                   step.traits.output_schema.kind);
+            hit =
+                impl_->disk->get(keys[i], step.output_descriptor,
+                                 step.output_demand, step.output_facets, stop);
             if (hit.valid())
               impl_->cache->put(keys[i], hit, cache_epoch);
           }
@@ -2713,7 +2720,13 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         auto work = [this, run_tile, node, tile_cached, tile_backends, keys,
                      cache_epoch, i, name](const CancellationToken& token) {
           // A flight can finish between the initial lookup and subscription.
-          auto hit = impl_->cache->get(keys[i]);
+          auto retained = impl_->cache->get_output(
+              keys[i], node.steps()[i],
+              [&] { return binding_stop(node, token); },
+              execution_internal::dynamic_opaque_output(node, i));
+          if (!retained.ok())
+            return Result<ExecutionResult>(retained.status());
+          auto hit = retained.take_value();
           if (hit.valid()) {
             ExecutionResult result;
             result.values.emplace(name, std::move(hit));

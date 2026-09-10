@@ -151,7 +151,7 @@ class DiskCache final {
     if (key.empty() || implementation_.empty())
       return {};
     content_internal::Sha256 hash;
-    hash.text("photospider.disk-result.v1");
+    hash.text("photospider.disk-result.v2");
     hash.text(implementation_);
     hash.text(key);
     return hash.finish();
@@ -161,9 +161,13 @@ class DiskCache final {
    * does.
    */
   Value get(const std::string& logical, const ValueDescriptor& descriptor,
-            const Region& region, OperationPortKind kind) noexcept {
+            const Region& region, const std::vector<ValueFacet>& facets,
+            const std::function<ErrorCode()>& stop = {}) noexcept {
     try {
-      if (!supported(descriptor, kind))
+      if (!input_internal::validate_image_storage_metadata(descriptor, facets)
+               .ok() ||
+          !region.validate(descriptor.shape).ok() || region.empty() ||
+          (stop && stop() != ErrorCode::Ok))
         return {};
       const auto key = disk_key(logical);
       if (key.empty())
@@ -176,11 +180,12 @@ class DiskCache final {
         }
       }
       const auto path = root_ / (key + ".pscache");
-      const auto prefix = header(key, descriptor, region, kind);
+      const auto prefix = header(key, descriptor, region, facets);
       const auto count = byte_count(region);
       if (!std::filesystem::is_regular_file(
               std::filesystem::symlink_status(path)) ||
           count > config_.maximum_bytes ||
+          prefix.size() + 64 > config_.maximum_bytes - count ||
           std::filesystem::file_size(path) != prefix.size() + 64 + count) {
         invalidate(key);
         return {};
@@ -207,6 +212,8 @@ class DiskCache final {
       std::array<std::uint8_t, 4096> buffer{};
       std::uint64_t offset = 0;
       while (offset < count) {
+        if (stop && stop() != ErrorCode::Ok)
+          return {};
         const auto n = std::min<std::uint64_t>(buffer.size(), count - offset);
         file.read(reinterpret_cast<char*>(buffer.data()),
                   static_cast<std::streamsize>(n));
@@ -227,18 +234,18 @@ class DiskCache final {
         invalidate(key);
         return {};
       }
-      auto result = std::move(value).publish(
-          kind == OperationPortKind::Float32Mask
-              ? std::vector<ValueFacet>{}
-              : std::vector<ValueFacet>{input_internal::image_facet()});
+      auto result = std::move(value).publish(facets);
       if (!result.ok()) {
         invalidate(key);
         return {};
       }
       auto published = result.take_value();
-      auto valid = input_internal::validate_port_value(
-          {kind, 0, 0}, published, ErrorCode::InvalidArgument, {});
+      auto valid =
+          input_internal::validate_image_storage_value(published, stop);
       if (!valid.ok()) {
+        if (valid.code == ErrorCode::Cancelled ||
+            valid.code == ErrorCode::Stale)
+          return {};
         invalidate(key);
         return {};
       }
@@ -257,9 +264,9 @@ class DiskCache final {
   }
   /** @brief Optional queue admission never throws or waits for file writes. */
   void put(const std::string& logical, const Value& value,
-           OperationPortKind kind) noexcept {
+           const std::function<ErrorCode()>& stop = {}) noexcept {
     try {
-      if (!supported(value.descriptor(), kind))
+      if (!input_internal::validate_image_storage_value(value, stop).ok())
         return;
       auto key = disk_key(logical);
       if (key.empty())
@@ -275,7 +282,7 @@ class DiskCache final {
       }
       queued_keys_.insert(key);
       try {
-        queue_.push_back({key, value, kind, epoch_});
+        queue_.push_back({key, value, epoch_});
       } catch (...) {
         queued_keys_.erase(key);
         throw;
@@ -293,21 +300,12 @@ class DiskCache final {
   struct Pending {
     std::string key;
     Value value;
-    OperationPortKind kind;
     std::uint64_t epoch;
   };
   static bool valid_key(const std::string& key) {
     return key.size() == 64 && std::all_of(key.begin(), key.end(), [](char c) {
              return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
            });
-  }
-  static bool supported(const ValueDescriptor& descriptor,
-                        OperationPortKind kind) {
-    return descriptor.element_type == ElementType::Float32 &&
-           ((kind == OperationPortKind::Float32Mask &&
-             descriptor.shape.size() == 2) ||
-            (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
-             descriptor.shape.size() == 3 && descriptor.shape[2] == 4));
   }
   static std::uint64_t byte_count(const Region& region) {
     std::uint64_t bytes = 4;
@@ -320,14 +318,15 @@ class DiskCache final {
   }
   static std::string header(const std::string& key,
                             const ValueDescriptor& descriptor,
-                            const Region& region, OperationPortKind kind) {
-    std::string result = "PSCACHE1";
+                            const Region& region,
+                            const std::vector<ValueFacet>& facets) {
+    std::string result = "PSCACHE2";
     const auto integer = [&](std::uint64_t value) {
       for (unsigned i = 0; i < 8; ++i)
         result.push_back(static_cast<char>(value >> (8 * i)));
     };
-    integer(1);
-    integer(static_cast<std::uint32_t>(kind));
+    integer(2);
+    integer(static_cast<std::uint32_t>(descriptor.element_type));
     integer(descriptor.shape.size());
     for (auto n : descriptor.shape)
       integer(n);
@@ -336,6 +335,15 @@ class DiskCache final {
       integer(d.extent);
     }
     integer(byte_count(region));
+    integer(facets.size());
+    for (const auto& facet : facets) {
+      integer(facet.key.size());
+      result += facet.key;
+      integer(facet.version);
+      integer(facet.payload.size());
+      result.append(reinterpret_cast<const char*>(facet.payload.data()),
+                    facet.payload.size());
+    }
     result += key;
     return result;
   }
@@ -453,8 +461,8 @@ class DiskCache final {
           entries_.count(pending.key))
         return;
       region = pending.value.region();
-      prefix =
-          header(pending.key, pending.value.descriptor(), region, pending.kind);
+      prefix = header(pending.key, pending.value.descriptor(), region,
+                      pending.value.facets());
       bytes = byte_count(region);
       if (bytes > config_.maximum_bytes ||
           prefix.size() + 64 > config_.maximum_bytes - bytes)
@@ -475,7 +483,7 @@ class DiskCache final {
     std::array<char, 64> placeholder{};
     file.write(placeholder.data(), placeholder.size());
     const auto& r = region.dimensions();
-    const std::uint64_t channels = r.size() == 3 ? 4 : 1;
+    const std::uint64_t channels = r.size() == 3 ? r[2].extent : 1;
     for (std::uint64_t offset = 0; offset < bytes;) {
       std::array<std::uint8_t, 4096> buffer{};
       const auto count = static_cast<std::size_t>(
@@ -491,7 +499,7 @@ class DiskCache final {
           std::vector<std::uint64_t> coord{
               r[0].offset + sample / channels / r[1].extent,
               r[1].offset + sample / channels % r[1].extent};
-          if (channels == 4)
+          if (r.size() == 3)
             coord.push_back(sample % channels);
           std::uint32_t bits;
           std::memcpy(&bits,

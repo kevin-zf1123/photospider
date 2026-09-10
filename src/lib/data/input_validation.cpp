@@ -24,11 +24,22 @@ std::uint32_t float_bits(float value) noexcept {
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
-bool valid_constraint(const OperationPortConstraint& port) noexcept {
+bool valid_constraint(const OperationPortConstraint& port) {
+  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 9 ||
+      (port.element_type_mask & ~UINT32_C(15)) ||
+      (port.element_type && port.element_type_mask))
+    return false;
+  if (port.kind != OperationPortKind::Typed &&
+      (port.semantic_kind || !port.facets.empty()))
+    return false;
+  auto facets = port.facets;
+  if (!canonicalize_facets(&facets).ok() || !same_facets(facets, port.facets))
+    return false;
   switch (port.kind) {
     case OperationPortKind::Value:
+    case OperationPortKind::Typed:
     case OperationPortKind::Float32Mask:
-    case OperationPortKind::LinearPremultipliedRgbaFloat32:
+    case OperationPortKind::RgbaFloat32:
       return float_bits(port.minimum) == 0 && float_bits(port.maximum) == 0;
     case OperationPortKind::Float32Scalar:
       return std::isfinite(port.minimum) && std::isfinite(port.maximum) &&
@@ -93,6 +104,7 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
   }
   std::set<std::string> keys;
   std::size_t total = 0;
+  unsigned typed_count = 0;
   for (const auto& facet : *facets) {
     if (facet.key.empty() || facet.key.size() > 256 || facet.version == 0 ||
         std::any_of(
@@ -105,6 +117,14 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
         facet.payload.size() > 1024 * 1024 - total) {
       return failure(ErrorCode::ResourceExhausted,
                      "facet payload bound exceeded");
+    }
+    if (facet.key == "photospider.image" ||
+        facet.key == "photospider.semantic") {
+      if (++typed_count > 1)
+        return failure(ErrorCode::InvalidArgument, "multiple typed semantics");
+      auto semantic = decode_semantic(facet);
+      if (!semantic.ok())
+        return semantic.status();
     }
     total += facet.payload.size();
   }
@@ -188,14 +208,17 @@ Status validate_port_schema(const OperationTraits& traits) {
     return failure(ErrorCode::OperationFailed,
                    "cannot set binary32 environment");
   if (traits.input_count > 1024 ||
-      traits.input_schema.size() != traits.input_count ||
+      traits.input_schema.size() !=
+          traits.input_count +
+              (traits.repeated_maximum && !traits.repeated_resolved ? 1U
+                                                                    : 0U) ||
       !valid_constraint(traits.output_schema) ||
       traits.output_schema.kind == OperationPortKind::Float32Scalar) {
     return failure(ErrorCode::InvalidArgument,
                    "invalid port schema count or output");
   }
-  const bool image_output = traits.output_schema.kind ==
-                            OperationPortKind::LinearPremultipliedRgbaFloat32;
+  const bool image_output =
+      traits.output_schema.kind == OperationPortKind::RgbaFloat32;
   const bool mask_output =
       traits.output_schema.kind == OperationPortKind::Float32Mask;
   if ((image_output || mask_output) &&
@@ -215,7 +238,7 @@ Status validate_port_schema(const OperationTraits& traits) {
          (traits.shape_rule == OperationShapeRule::MatchAllInputs ||
           (i == 0 &&
            traits.shape_rule == OperationShapeRule::PreserveFirstInput))) ||
-        ((port.kind == OperationPortKind::LinearPremultipliedRgbaFloat32 ||
+        ((port.kind == OperationPortKind::RgbaFloat32 ||
           port.kind == OperationPortKind::Float32Mask) &&
          traits.region_rule != OperationRegionRule::Whole && !image_output &&
          !mask_output)) {
@@ -311,8 +334,7 @@ Result<Region> derive_input_demand(
   const std::uint64_t radius = traits.halo_radius;
   for (std::size_t axis = 0U; axis < input_shape.size(); ++axis) {
     const RegionDimension& requested = output_demand.dimensions()[axis];
-    if (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
-        axis == 2) {
+    if (kind == OperationPortKind::RgbaFloat32 && axis == 2) {
       dimensions.push_back(RegionDimension{0, 4});
       continue;
     }
@@ -327,28 +349,89 @@ Result<Region> derive_input_demand(
 }
 
 ValueFacet image_facet() {
-  const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
-  return ValueFacet{"photospider.image", 1, {profile.begin(), profile.end()}};
+  return encode_semantic(rgba_semantics()).take_value();
 }
 
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
                               const std::vector<ValueFacet>& facets) {
+  const auto element = static_cast<std::uint32_t>(descriptor.element_type);
+  if (element < 1 || element > 4 || descriptor.shape.empty() ||
+      descriptor.shape.size() > 8 ||
+      std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
+                  [](auto n) { return n == 0; }))
+    return failure(ErrorCode::TypeMismatch, "invalid port descriptor");
+  auto canonical = facets;
+  auto canonical_status = canonicalize_facets(&canonical);
+  if (!canonical_status.ok())
+    return canonical_status;
+  if (!same_facets(canonical, facets))
+    return failure(ErrorCode::InvalidArgument, "port facets are not canonical");
+  if ((port.element_type &&
+       port.element_type !=
+           static_cast<std::uint32_t>(descriptor.element_type)) ||
+      (port.rank && port.rank != descriptor.shape.size()) ||
+      (port.element_type_mask &&
+       !(port.element_type_mask & (1U << (element - 1)))))
+    return failure(ErrorCode::TypeMismatch, "port dtype/rank mismatch");
+  for (const auto& facet : facets) {
+    if (facet.key != "photospider.image" && facet.key != "photospider.semantic")
+      continue;
+    auto semantic = decode_semantic(facet);
+    if (!semantic.ok())
+      return semantic.status();
+    auto status = validate_semantic_descriptor(semantic.value(), descriptor);
+    if (!status.ok())
+      return status;
+  }
   if (port.kind == OperationPortKind::Value)
     return Status::success();
+  if (port.kind == OperationPortKind::Typed) {
+    const auto found =
+        std::find_if(facets.begin(), facets.end(), [](const auto& f) {
+          return f.key == "photospider.image" ||
+                 f.key == "photospider.semantic";
+        });
+    if (found == facets.end())
+      return failure(ErrorCode::TypeMismatch, "typed port requires semantics");
+    auto semantic = decode_semantic(*found);
+    if (!semantic.ok())
+      return semantic.status();
+    if ((port.semantic_kind &&
+         port.semantic_kind !=
+             static_cast<std::uint32_t>(semantic.value().kind)) ||
+        (!port.facets.empty() && !same_facets(port.facets, facets)))
+      return failure(ErrorCode::TypeMismatch, "typed port semantic mismatch");
+    return Status::success();
+  }
   if (descriptor.element_type != ElementType::Float32) {
     return failure(ErrorCode::TypeMismatch, "port requires Float32");
   }
   if (port.kind == OperationPortKind::Float32Mask) {
     if (descriptor.shape.size() != 2 || descriptor.shape[0] == 0 ||
-        descriptor.shape[1] == 0 || !facets.empty())
-      return failure(ErrorCode::TypeMismatch, "mask requires HW and no facets");
+        descriptor.shape[1] == 0 ||
+        !same_facets(facets,
+                     {encode_semantic(coverage_semantics()).take_value()}))
+      return failure(ErrorCode::TypeMismatch,
+                     "mask requires HW coverage semantics");
     return Status::success();
   }
   if (port.kind == OperationPortKind::Float32Scalar) {
-    if (descriptor.shape != std::vector<std::uint64_t>{1} || !facets.empty()) {
-      return failure(ErrorCode::TypeMismatch,
-                     "scalar requires shape one and no facets");
+    if (descriptor.shape != std::vector<std::uint64_t>{1})
+      return failure(ErrorCode::TypeMismatch, "scalar requires shape one");
+    if (!facets.empty()) {
+      if (facets.size() != 1 || facets[0].key != "photospider.semantic")
+        return failure(ErrorCode::TypeMismatch,
+                       "scalar facets are not compatible");
+      auto semantic = decode_semantic(facets[0]);
+      if (!semantic.ok())
+        return semantic.status();
+      if ((semantic.value().kind != SemanticKind::Scalar &&
+           semantic.value().kind != SemanticKind::SampledSignal) ||
+          semantic.value().unit != "dimensionless")
+        return failure(
+            ErrorCode::TypeMismatch,
+            "scalar requires dimensionless scalar or single-sample signal");
     }
   } else if (descriptor.shape.size() != 3 || descriptor.shape[0] == 0 ||
              descriptor.shape[1] == 0 || descriptor.shape[2] != 4 ||
@@ -365,32 +448,62 @@ bool image_demand(const Region& region) noexcept {
          region.dimensions()[2].extent == 4;
 }
 
+bool complete_image_channels(const ValueDescriptor& descriptor,
+                             const std::vector<ValueFacet>& facets,
+                             const Region& region) noexcept {
+  const bool image =
+      std::any_of(facets.begin(), facets.end(),
+                  [](const auto& f) { return f.key == "photospider.image"; });
+  return !image || (descriptor.shape.size() == 3 && region.rank() == 3 &&
+                    !region.empty() && region.dimensions()[2].offset == 0 &&
+                    region.dimensions()[2].extent == descriptor.shape[2]);
+}
+
 Status validate_port_value(const OperationPortConstraint& port,
                            const Value& value, ErrorCode numeric_failure,
                            const std::function<ErrorCode()>& stop) {
   if (!value.valid())
     return failure(ErrorCode::InvalidArgument, "invalid port Value");
-  if (port.kind == OperationPortKind::Value)
-    return Status::success();
   auto status =
       validate_port_metadata(port, value.descriptor(), value.facets());
   if (!status.ok())
     return status;
+  if (port.kind == OperationPortKind::Value ||
+      port.kind == OperationPortKind::Typed) {
+    for (const auto& facet : value.facets()) {
+      if (facet.key != "photospider.image" &&
+          facet.key != "photospider.semantic")
+        continue;
+      auto semantic = decode_semantic(facet);
+      if (!semantic.ok())
+        return semantic.status();
+      return validate_semantic_value(semantic.value(), value, numeric_failure,
+                                     stop);
+    }
+    return Status::success();
+  }
   if (value.region().empty())
     return failure(ErrorCode::TypeMismatch, "port requires nonempty coverage");
   if (port.kind == OperationPortKind::Float32Scalar &&
-      (!whole_region(value.region(), {1}) || value.bytes().size() != 4 ||
-       value.layout().byte_offset != 0 ||
-       value.layout().byte_strides != std::vector<std::int64_t>{4}))
+      !whole_region(value.region(), {1}))
     return failure(ErrorCode::TypeMismatch,
-                   "scalar requires exact dense coverage");
+                   "scalar requires complete single-sample coverage");
   Float32Environment environment;
   if (!environment.active())
     return failure(ErrorCode::OperationFailed,
                    "cannot set binary32 environment");
   if (port.kind == OperationPortKind::Float32Scalar) {
+    if (stop) {
+      const auto code = stop();
+      if (code != ErrorCode::Ok)
+        return failure(code, "scalar validation stopped");
+    }
+    const auto address = value.byte_address({0});
+    if (!address.ok())
+      return address.status();
     float scalar = 0;
-    std::memcpy(&scalar, value.bytes().data(), sizeof(scalar));
+    std::memcpy(&scalar, value.bytes().data() + address.value(),
+                sizeof(scalar));
     if (!std::isfinite(scalar) || scalar < port.minimum ||
         scalar > port.maximum) {
       return failure(numeric_failure,
@@ -432,11 +545,10 @@ Status validate_port_value(const OperationPortConstraint& port,
                     sizeof(float));
       }
       for (float channel : rgba) {
-        if (!std::isfinite(channel) || channel < 0)
-          return failure(numeric_failure,
-                         "image channel is negative or nonfinite");
+        if (!std::isfinite(channel))
+          return failure(numeric_failure, "image channel is nonfinite");
       }
-      if (rgba[3] > 1 ||
+      if (rgba[3] < 0 || rgba[3] > 1 ||
           (rgba[3] == 0 && (rgba[0] != 0 || rgba[1] != 0 || rgba[2] != 0)))
         return failure(numeric_failure,
                        "image violates premultiplied alpha domain");
@@ -472,7 +584,7 @@ Result<Region> operation_dirty_region(
     }
   } else if (traits.region_rule == OperationRegionRule::Halo) {
     for (std::size_t a = 0; a < dims.size(); ++a) {
-      if (kind == OperationPortKind::LinearPremultipliedRgbaFloat32 && a == 2)
+      if (kind == OperationPortKind::RgbaFloat32 && a == 2)
         continue;
       const std::uint64_t radius = traits.halo_radius;
       const auto start = dims[a].offset > radius ? dims[a].offset - radius : 0;

@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -11,8 +12,10 @@
 #include <vector>
 
 #include "execution/memory_budget.hpp"
+#include "execution/result_cache.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
+#include "support/typed_images.hpp"
 
 namespace {
 ps::Value scalar(float number) {
@@ -29,20 +32,104 @@ std::uint64_t calls(const ps::ExecutionResult& result, std::uint64_t id) {
       n += t.invocation_count;
   return n;
 }
+int dynamic_opaque_preservation() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  auto operations = std::make_shared<OperationRegistry>();
+  OperationTraits producer;
+  producer.input_count = 1;
+  producer.input_schema.resize(1);
+  const auto opaque =
+      Value::create({ElementType::Float64, {1}}, Region::whole({1}), {0, {8}},
+                    Value::from_float64(2).copy_bytes(),
+                    {{"vendor.test", 1, {42}}})
+          .take_value();
+  PS_CHECK(operations
+               ->register_operation({"source", producer,
+                                     [opaque](const OperationInvocation&) {
+                                       return Result<Value>(opaque);
+                                     }})
+               .ok());
+  auto identity = make_default_operation_registry()
+                      ->find_traits("core.identity")
+                      .take_value();
+  PS_CHECK(operations
+               ->register_operation({"identity", identity,
+                                     [](const OperationInvocation& call) {
+                                       return Result<Value>(call.inputs[0]);
+                                     }})
+               .ok());
+  PS_CHECK(operations->freeze().ok());
+  auto image = typed_images::value(typed_images::descriptions().front());
+  auto document = typed_images::document(image);
+  document.nodes = {{1, "source", {WorkflowInputReference{1}}, {}},
+                    {2, "identity", {WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"result", 2, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(operations).compile(graph).take_value().plan;
+  InputSnapshotStore store;
+  ExecutionBindings bindings{{{"image",
+                               {},
+                               {},
+                               std::make_shared<InputSnapshot>(
+                                   store.import_value(image).take_value())}}};
+  ExecutionContext execution(operations, {1, false, 8, 65536, 8192});
+  for (bool warm : {false, true}) {
+    auto result = execution.execute(plan, bindings);
+    PS_CHECK(result.ok());
+    PS_CHECK(typed_images::same(result.value().values.at("result"), opaque));
+    PS_CHECK(warm ? result.value().diagnostics.cache_hits > 0
+                  : result.value().diagnostics.cache_hits == 0);
+  }
+  return 0;
+}
+int stored_contract() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  auto budget = std::make_shared<execution_internal::MemoryBudget>(65536);
+  execution_internal::ResultCache cache(8192, budget, 1, 4);
+  auto semantic = typed_images::descriptions().front();
+  auto image = typed_images::value(semantic);
+  PlanStep step;
+  step.output_descriptor = image.descriptor();
+  step.output_demand = image.region();
+  step.output_facets = image.facets();
+  step.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  cache.put("image", image, cache.epoch());
+  auto retained = cache.get_output("image", step, {});
+  PS_CHECK(retained.ok() && typed_images::same(retained.value(), image));
+  auto cancelled =
+      cache.get_output("image", step, [] { return ErrorCode::Cancelled; });
+  PS_CHECK(cancelled.status().code == ErrorCode::Cancelled);
+  semantic.reference = "display";
+  cache.put("wrong-facet", typed_images::value(semantic), cache.epoch());
+  PS_CHECK(cache.get_output("wrong-facet", step, {}).status().code ==
+           ErrorCode::OperationFailed);
+  auto bytes = image.copy_bytes();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  std::memcpy(bytes.data(), &nan, 4);
+  auto invalid = Value::create(image.descriptor(), image.region(),
+                               image.layout(), bytes, image.facets())
+                     .take_value();
+  cache.put("invalid-sample", invalid, cache.epoch());
+  PS_CHECK(cache.get_output("invalid-sample", step, {}).status().code ==
+           ErrorCode::OperationFailed);
+  return 0;
+}
 }  // namespace
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
+  PS_CHECK(stored_contract() == 0);
+  PS_CHECK(dynamic_opaque_preservation() == 0);
   const std::vector<std::uint64_t> shape{5, 7, 4};
   std::vector<std::uint8_t> bytes(5 * 7 * 16);
   float half = .5F;
   for (std::size_t i = 0; i < bytes.size(); i += 4)
     std::memcpy(bytes.data() + i, &half, 4);
-  const std::string profile = "rgba;linear-srgb;premultiplied;hwc";
-  auto image = Value::create(
-                   {ElementType::Float32, shape}, Region::whole(shape),
-                   {0, {112, 16, 4}}, bytes,
-                   {{"photospider.image", 1, {profile.begin(), profile.end()}}})
-                   .take_value();
+
+  auto image =
+      Value::create({ElementType::Float32, shape}, Region::whole(shape),
+                    {0, {112, 16, 4}}, bytes,
+                    {ps::encode_semantic(ps::rgba_semantics()).take_value()})
+          .take_value();
   InputSnapshotStore store({8192, 2});
   auto snapshot = store.import_value(image).take_value();
   WorkflowDocument document;
@@ -119,10 +206,10 @@ int main() {
   OperationTraits traits;
   traits.input_count = 1;
   traits.output_element_type = ElementType::Float32;
+  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
   traits.shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.region_rule = OperationRegionRule::Elementwise;
-  traits.input_schema = {
-      {OperationPortKind::LinearPremultipliedRgbaFloat32, 0, 0}};
+  traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
   traits.output_schema = traits.input_schema[0];
   PS_CHECK(gated
                ->register_operation(
@@ -350,15 +437,12 @@ int main() {
 
   auto tiny_mask =
       Value::create({ElementType::Float32, {1, 1}}, Region::whole({1, 1}),
-                    {0, {4, 4}}, scalar(.5F).copy_bytes())
+                    {0, {4, 4}}, scalar(.5F).copy_bytes(),
+                    {encode_semantic(coverage_semantics()).take_value()})
           .take_value();
   WorkflowDocument tiny;
-  tiny.inputs = {{1,
-                  "mask",
-                  tiny_mask.descriptor(),
-                  tiny_mask.region(),
-                  tiny_mask.layout(),
-                  {}}};
+  tiny.inputs = {{1, "mask", tiny_mask.descriptor(), tiny_mask.region(),
+                  tiny_mask.layout(), tiny_mask.facets()}};
   tiny.nodes = {{1,
                  "mask.downsample_box",
                  {WorkflowInputReference{1}},

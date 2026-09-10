@@ -10,6 +10,7 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/execution.hpp"
+#include "plugin/operation_identity.hpp"
 
 namespace ps::execution_internal {
 /** @brief Hashes canonical local DAG semantics and exact demanded input bits.
@@ -41,12 +42,14 @@ inline std::vector<std::string> result_keys(
     if (prior != memo.end())
       return prior->second;
     content_internal::Sha256 hash;
-    hash.text("photospider.result-region.v2");
+    hash.text("photospider.result-region.v3");
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
     if (step.backend == Backend::Gpu)
       hash.text(native_identity);
     hash.text(step.operation);
+    contract_internal::append_traits(&hash, t);
+    contract_internal::append_facets(&hash, step.output_facets);
     hash.integer(t.version);
     hash.integer(static_cast<std::uint32_t>(t.shape_rule));
     hash.integer(static_cast<std::uint32_t>(t.region_rule));
@@ -118,13 +121,30 @@ inline std::vector<std::string> result_keys(
             valid = false;
             break;
           }
+          hash.text("snapshot");
           hash.text(key.value());
         } else if (input.value.valid() &&
                    t.input_schema[port].kind ==
                        OperationPortKind::Float32Scalar) {
+          hash.text("bounded-scalar");
           std::uint32_t bits;
           std::memcpy(&bits, input.value.bytes().data(), 4);
           hash.integer(bits);
+          contract_internal::append_facets(&hash, input.value.facets());
+        } else if (input.value.valid() && input.value.bytes().size() <= 2048 &&
+                   input_internal::whole_region(
+                       demand, input.value.descriptor().shape)) {
+          // Binding preflight proves whole dense offset-zero storage. Bound the
+          // work and hash every interpretation field plus exact sample bits.
+          hash.text("whole-direct-value");
+          const auto& descriptor = input.value.descriptor();
+          hash.integer(static_cast<std::uint32_t>(descriptor.element_type));
+          hash.integer(descriptor.shape.size());
+          for (auto extent : descriptor.shape)
+            hash.integer(extent);
+          contract_internal::append_facets(&hash, input.value.facets());
+          hash.integer(input.value.bytes().size());
+          hash.bytes(input.value.bytes().data(), input.value.bytes().size());
         } else {
           valid = false;
           break;

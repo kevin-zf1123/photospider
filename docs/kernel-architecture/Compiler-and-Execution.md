@@ -5,8 +5,8 @@
 `Compiler::analyze` checks a current `GraphSnapshot`, bounded document counts
 and text, unique node/output ids, references, ports, operation availability,
 input counts, each operation's closed required typed parameter schema,
-deterministic acyclic topology, and static scalar/preserve/match/fixed output
-descriptor inference. Unknown, missing, or wrong-type parameters fail before
+deterministic acyclic topology, static output dtype/shape/facet inference and
+bounded repeated-input expansion through the shared operation contract. Unknown, missing, or wrong-type parameters fail before
 IR publication; built-ins do not synthesize defaults. Analysis publishes
 immutable `SemanticGraphIR` in node-id-tiebroken
 topological order plus `SemanticGraphDigest`.
@@ -97,9 +97,9 @@ capability, and static descriptor compatibility. No input descriptor is read
 before its `Value` is valid. Unknown backend representations are
 `InvalidArgument` and enter neither C++ nor DSO code; known unsupported
 backends remain `BackendUnavailable`. After capability succeeds, the registry
-precomputes one expected Scalar/Fixed/Preserve/Match output descriptor.
-Preserve first-input type conflicts and Match type/shape conflicts return
-`TypeMismatch` before callback entry. The same descriptor is reused after the
+precomputes one expected output descriptor and facets through shared inference.
+Preserve/Match validate shapes independently of dtype; explicit input dtype,
+shape and semantic conflicts return `TypeMismatch` before callback entry. The same descriptor is reused after the
 callback to validate output type, shape, and requested Region, including a
 default-invalid output. This does not duplicate the Run's plan-derived demand
 coverage checks or the DSO adapter's contiguous-layout/facet views.
@@ -119,7 +119,7 @@ and [S4 Workflow](S4-Workflow.md).
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v6 input views receive that exact
+transfer or callback entry; callbacks and ABI v7 input views receive that exact
 demand. Image and regional-source Runs lazily materialize only demanded tiles;
 Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
 The execution context must use the same frozen registry that produced the
@@ -132,8 +132,8 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v6 callback can distinguish ordinary failure from backend
-unavailability. ABI 6 additionally provides host-owned synchronous native services. The
+An operation ABI v7 callback can distinguish ordinary failure from backend
+unavailability. ABI 7 additionally provides host-owned synchronous native services. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits
 allow fallback. An output-publication attempt makes backend unavailability
@@ -154,9 +154,10 @@ not verdicts or release evidence.
 
 Schema 2 validates every input declaration before semantic publication and
 copies its canonical table through semantic IR, optimized IR and plan. Ordered
-sources retain node/declaration tags. Scalar ports require direct Float32 {1}
-workflow inputs, exact empty facets and finite inclusive intervals; all
-consuming intervals must have nonempty intersection during analyze. Image
+sources retain node/declaration tags. Scalar ports accept Float32 `{1}` from
+declarations or compatible producers: generic, dimensionless Scalar, or a
+dimensionless single-sample Signal. Analyze checks dtype/shape/known facets and
+retains the nonempty interval-intersection check for direct declarations. Image
 consumers require the exact profile from a declaration or a producer's image
 output guarantee. Generic producers do not implicitly acquire that guarantee.
 
@@ -164,6 +165,10 @@ output guarantee. Generic producers do not implicitly acquire that guarantee.
 metadata, checks the name multiset, then Values in declaration-id order, then
 all direct scalar constraints before the first callback or transfer. Image and
 mask pixels are validated only in consumed regions, before their consuming callback.
+Computed scalar consumers validate metadata, complete coverage and finite/range
+constraints after dependency/cache lookup and before callback entry. Numeric
+errors are OperationFailed; metadata conflicts are TypeMismatch. Direct binding
+numeric errors remain InvalidArgument.
 Entry rejects default/stale/foreign-registry plans as Stale before observing
 bindings or the token. After entry, cancellation precedes Stale and ordinary
 binding failure. Long numeric scans periodically check cancellation and graph
@@ -208,3 +213,16 @@ on success, cancellation and failure. Releasing the caller's returned result
 therefore immediately returns its payload capacity even if queue metadata is
 still retiring. The private callback-body gate in `test_memory_liveness` checks
 this boundary for successful and cancelled calls with an eight-byte budget.
+
+## Operation foundations (shared contract slice)
+
+#289 implements ABI/traits 7, `SemanticDescriptor`, static dtype/axis/repeated-
+input inference and actual output facets in IR/plan. New axes and typed contracts
+use Whole; no G4 mapping is added. Complete constraints and inferred facets enter
+v7 compiler domains and v3 result-region keys; the no-op optimizer remains v5.
+See [Plugin ABI](Plugin-ABI.md) for the exposed helpers and staged limits.
+Computed bounded scalar consumption and supported image-v2 snapshots/cache
+storage are implemented. Sampling-domain metadata remains distinct from scalar
+value units and enters eligible result keys. Numeric, channel/color, expression/
+LUT and component families now use these contracts. The self-contained
+[foundations workflow](Foundations-Workflow.md) runs their public compositions.

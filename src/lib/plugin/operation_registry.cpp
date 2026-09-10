@@ -18,8 +18,12 @@
 #include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
+#include "plugin/color_operations.hpp"
+#include "plugin/component_operations.hpp"
 #include "plugin/dense_layout_validation.hpp"
+#include "plugin/expression_operations.hpp"
 #include "plugin/image_operations.hpp"
+#include "plugin/numeric_operations.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -141,7 +145,7 @@ class OperationLibrary final {
    * @throws Nothing.
    * @note A nonnull destroy callback becomes part of rollback immediately.
    */
-  void attach_api(const ps_operation_plugin_api_v6* api) noexcept {
+  void attach_api(const ps_operation_plugin_api_v7* api) noexcept {
     api_ = api;
   }
 
@@ -149,7 +153,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_operation_plugin_api_v6* api_ = nullptr;
+  const ps_operation_plugin_api_v7* api_ = nullptr;
 };
 
 /**
@@ -217,13 +221,13 @@ void* find_symbol(void* handle, const char* name) noexcept {
  */
 Result<ElementType> decode_element_type(std::uint32_t type) {
   switch (type) {
-    case PS_OPERATION_ELEMENT_UINT8_V6:
+    case PS_OPERATION_ELEMENT_UINT8_V7:
       return Result<ElementType>(ElementType::UInt8);
-    case PS_OPERATION_ELEMENT_INT64_V6:
+    case PS_OPERATION_ELEMENT_INT64_V7:
       return Result<ElementType>(ElementType::Int64);
-    case PS_OPERATION_ELEMENT_FLOAT32_V6:
+    case PS_OPERATION_ELEMENT_FLOAT32_V7:
       return Result<ElementType>(ElementType::Float32);
-    case PS_OPERATION_ELEMENT_FLOAT64_V6:
+    case PS_OPERATION_ELEMENT_FLOAT64_V7:
       return Result<ElementType>(ElementType::Float64);
     default:
       return Result<ElementType>(Status::failure(
@@ -233,22 +237,24 @@ Result<ElementType> decode_element_type(std::uint32_t type) {
 
 /**
  * @brief Decodes one closed C ABI output-shape inference rule.
- * @param value Numeric version-six rule.
+ * @param value Numeric version-seven rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_SHAPE_SHRINK_V6:
+    case PS_OPERATION_SHAPE_AXES_V7:
+      return Result<OperationShapeRule>(OperationShapeRule::Axes);
+    case PS_OPERATION_SHAPE_SHRINK_V7:
       return Result<OperationShapeRule>(OperationShapeRule::Shrink);
-    case PS_OPERATION_SHAPE_SCALAR_V6:
+    case PS_OPERATION_SHAPE_SCALAR_V7:
       return Result<OperationShapeRule>(OperationShapeRule::Scalar);
-    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V6:
+    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V7:
       return Result<OperationShapeRule>(OperationShapeRule::PreserveFirstInput);
-    case PS_OPERATION_SHAPE_MATCH_INPUTS_V6:
+    case PS_OPERATION_SHAPE_MATCH_INPUTS_V7:
       return Result<OperationShapeRule>(OperationShapeRule::MatchAllInputs);
-    case PS_OPERATION_SHAPE_FIXED_V6:
+    case PS_OPERATION_SHAPE_FIXED_V7:
       return Result<OperationShapeRule>(OperationShapeRule::Fixed);
     default:
       return Result<OperationShapeRule>(
@@ -259,20 +265,20 @@ Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI Region propagation rule.
- * @param value Numeric version-six rule.
+ * @param value Numeric version-seven rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_REGION_SHRINK_V6:
+    case PS_OPERATION_REGION_SHRINK_V7:
       return Result<OperationRegionRule>(OperationRegionRule::Shrink);
-    case PS_OPERATION_REGION_WHOLE_V6:
+    case PS_OPERATION_REGION_WHOLE_V7:
       return Result<OperationRegionRule>(OperationRegionRule::Whole);
-    case PS_OPERATION_REGION_ELEMENTWISE_V6:
+    case PS_OPERATION_REGION_ELEMENTWISE_V7:
       return Result<OperationRegionRule>(OperationRegionRule::Elementwise);
-    case PS_OPERATION_REGION_HALO_V6:
+    case PS_OPERATION_REGION_HALO_V7:
       return Result<OperationRegionRule>(OperationRegionRule::Halo);
     default:
       return Result<OperationRegionRule>(
@@ -283,20 +289,20 @@ Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI source-parameter type.
- * @param value Numeric operation ABI v6 parameter type.
+ * @param value Numeric operation ABI v7 parameter type.
  * @return Typed parameter kind or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown numeric values fail before registry publication.
  */
 Result<OperationParameterType> decode_parameter_type(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_PARAMETER_INT64_V6:
+    case PS_OPERATION_PARAMETER_INT64_V7:
       return Result<OperationParameterType>(OperationParameterType::Int64);
-    case PS_OPERATION_PARAMETER_FLOAT64_V6:
+    case PS_OPERATION_PARAMETER_FLOAT64_V7:
       return Result<OperationParameterType>(OperationParameterType::Float64);
-    case PS_OPERATION_PARAMETER_BOOL_V6:
+    case PS_OPERATION_PARAMETER_BOOL_V7:
       return Result<OperationParameterType>(OperationParameterType::Bool);
-    case PS_OPERATION_PARAMETER_STRING_V6:
+    case PS_OPERATION_PARAMETER_STRING_V7:
       return Result<OperationParameterType>(OperationParameterType::String);
     default:
       return Result<OperationParameterType>(
@@ -380,7 +386,7 @@ bool parameter_type_matches(const ParameterValue& value,
 }
 
 /**
- * @brief Validates one complete version-six semantic trait record.
+ * @brief Validates one complete version-seven semantic trait record.
  * @param traits Candidate copied record.
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
@@ -395,6 +401,7 @@ Status validate_traits(const OperationTraits& traits) {
     case OperationShapeRule::PreserveFirstInput:
     case OperationShapeRule::MatchAllInputs:
     case OperationShapeRule::Fixed:
+    case OperationShapeRule::Axes:
     case OperationShapeRule::Shrink:
       known_shape = true;
       break;
@@ -424,20 +431,21 @@ Status validate_traits(const OperationTraits& traits) {
                           traits.fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 6U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 7U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       ((traits.shape_rule == OperationShapeRule::PreserveFirstInput ||
         traits.shape_rule == OperationShapeRule::MatchAllInputs) &&
-       traits.input_count == 0U) ||
+       traits.input_count == 0U && traits.repeated_minimum == 0U) ||
       (traits.region_rule == OperationRegionRule::Halo &&
        traits.halo_radius == 0U && traits.halo_radius_parameter.empty()) ||
       (traits.region_rule != OperationRegionRule::Halo &&
        traits.halo_radius != 0U) ||
       !schema_status.ok() || !fixed_shape_valid ||
-      !input_internal::validate_port_schema(traits).ok()) {
+      !input_internal::validate_port_schema(traits).ok() ||
+      !input_internal::validate_operation_contract(traits).ok()) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation semantic traits are inconsistent");
   }
@@ -490,63 +498,17 @@ Status validate_traits(const OperationTraits& traits) {
  * validation. Preserve/Match registration already forbids zero inputs; this
  * helper still fails closed if that private invariant is violated.
  */
-Result<ValueDescriptor> expected_callback_output_descriptor(
-    const OperationTraits& traits, const std::vector<Value>& inputs) {
-  switch (traits.shape_rule) {
-    case OperationShapeRule::Scalar:
-      return Result<ValueDescriptor>(
-          ValueDescriptor{traits.output_element_type, {1U}});
-    case OperationShapeRule::Fixed:
-      return Result<ValueDescriptor>(ValueDescriptor{
-          traits.output_element_type, traits.fixed_output_shape});
-    case OperationShapeRule::Shrink:
-    case OperationShapeRule::PreserveFirstInput:
-    case OperationShapeRule::MatchAllInputs:
-      break;
+Result<OperationMetadata> expected_callback_output_descriptor(
+    const OperationTraits& traits, const std::vector<Value>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) {
+  std::vector<OperationMetadata> metadata;
+  for (const auto& value : inputs) {
+    if (!value.valid())
+      return Result<OperationMetadata>(
+          Status::failure(ErrorCode::InvalidArgument, "invalid input Value"));
+    metadata.push_back({value.descriptor(), value.facets()});
   }
-  if (traits.shape_rule != OperationShapeRule::PreserveFirstInput &&
-      traits.shape_rule != OperationShapeRule::MatchAllInputs &&
-      traits.shape_rule != OperationShapeRule::Shrink) {
-    return Result<ValueDescriptor>(Status::failure(
-        ErrorCode::Internal, "registered operation shape rule is unknown"));
-  }
-  if (inputs.empty()) {
-    return Result<ValueDescriptor>(Status::failure(
-        ErrorCode::Internal, "typed operation has no inferred input"));
-  }
-  if (!inputs.front().valid()) {
-    return Result<ValueDescriptor>(Status::failure(
-        ErrorCode::InvalidArgument, "operation input Value is invalid"));
-  }
-  ValueDescriptor expected = inputs.front().descriptor();
-  if (traits.shape_rule == OperationShapeRule::Shrink) {
-    if (expected.shape.size() < 2)
-      return Result<ValueDescriptor>(Status::failure(
-          ErrorCode::TypeMismatch, "shrink requires spatial input"));
-    for (std::size_t a = 0; a < 2; ++a)
-      expected.shape[a] = expected.shape[a] / traits.spatial_factor +
-                          (expected.shape[a] % traits.spatial_factor != 0);
-  }
-  if (expected.element_type != traits.output_element_type) {
-    return Result<ValueDescriptor>(Status::failure(
-        ErrorCode::TypeMismatch, "operation input type contradicts traits"));
-  }
-  if (traits.shape_rule == OperationShapeRule::MatchAllInputs) {
-    for (const Value& input : inputs) {
-      if (!input.valid()) {
-        return Result<ValueDescriptor>(Status::failure(
-            ErrorCode::InvalidArgument, "operation input Value is invalid"));
-      }
-      const ValueDescriptor& descriptor = input.descriptor();
-      if (descriptor.element_type != expected.element_type ||
-          descriptor.shape != expected.shape) {
-        return Result<ValueDescriptor>(
-            Status::failure(ErrorCode::TypeMismatch,
-                            "operation input descriptors do not match"));
-      }
-    }
-  }
-  return Result<ValueDescriptor>(expected);
+  return infer_operation_output(traits, metadata, parameters);
 }
 
 /**
@@ -713,7 +675,7 @@ std::uint8_t* allocate_plugin_scratch(void* context,
  */
 int publish_plugin_output(void* context, std::uint32_t element_type,
                           const std::uint64_t* shape, std::uint32_t rank,
-                          const ps_operation_facet_view_v6* facets,
+                          const ps_operation_facet_view_v7* facets,
                           std::uint32_t facet_count, const std::uint8_t* data,
                           std::uint64_t byte_size) noexcept {
   auto* state = static_cast<OutputSinkState*>(context);
@@ -732,7 +694,7 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
         rank == 0U || rank > 8U || facet_count > 64U ||
         (facet_count != 0U &&
          (!facets || reinterpret_cast<std::uintptr_t>(facets) %
-                             alignof(ps_operation_facet_view_v6) !=
+                             alignof(ps_operation_facet_view_v7) !=
                          0U)) ||
         (byte_size != 0U && !data) ||
         byte_size > static_cast<std::uint64_t>(
@@ -784,8 +746,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     std::vector<ValueFacet> owned_facets;
     owned_facets.reserve(facet_count);
     for (std::uint32_t index = 0U; index < facet_count; ++index) {
-      const ps_operation_facet_view_v6& facet = facets[index];
-      if (facet.struct_size != sizeof(ps_operation_facet_view_v6) ||
+      const ps_operation_facet_view_v7& facet = facets[index];
+      if (facet.struct_size != sizeof(ps_operation_facet_view_v7) ||
           !facet.key || facet.key_size == 0U || facet.key_size > 256U ||
           facet.version == 0U || facet.payload_size > 64U * 1024U ||
           (facet.payload_size != 0U && !facet.payload)) {
@@ -1027,6 +989,73 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   return Status::success();
 }
 
+namespace {
+template <class T>
+bool records(const T* pointer, std::uint32_t count, std::uint32_t limit) {
+  return count <= limit && ((count == 0) == (pointer == nullptr)) &&
+         (!pointer ||
+          reinterpret_cast<std::uintptr_t>(pointer) % alignof(T) == 0);
+}
+bool copy_text(const char* pointer, std::uint32_t size, std::string* output) {
+  if (!records(pointer, size, 1024))
+    return false;
+  if (pointer)
+    output->assign(pointer, size);
+  return true;
+}
+bool copy_facets(const ps_operation_facet_view_v7* pointer, std::uint32_t count,
+                 std::vector<ValueFacet>* output) {
+  if (!records(pointer, count, 64))
+    return false;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const auto& f = pointer[i];
+    if (f.struct_size != sizeof(f) || !records(f.key, f.key_size, 256) ||
+        !f.key_size || !records(f.payload, f.payload_size, 65536))
+      return false;
+    ValueFacet result{std::string(f.key, f.key_size), f.version, {}};
+    if (f.payload_size)
+      result.payload.assign(f.payload, f.payload + f.payload_size);
+    output->push_back(std::move(result));
+  }
+  return input_internal::canonicalize_facets(output).ok();
+}
+bool copy_contract(const ps_operation_contract_v7* c, OperationTraits* t) {
+  if (!c)
+    return true;
+  if (reinterpret_cast<std::uintptr_t>(c) % alignof(ps_operation_contract_v7) ||
+      c->struct_size != sizeof(*c) || c->repeated_match > 1 ||
+      !records(c->axes, c->axis_count, 8) ||
+      !copy_text(c->dtype_parameter, c->dtype_parameter_size,
+                 &t->output_dtype_parameter) ||
+      !copy_text(c->semantic_parameter, c->semantic_parameter_size,
+                 &t->output_semantic_parameter) ||
+      !copy_facets(c->output_facets, c->output_facet_count, &t->output_facets))
+    return false;
+  t->output_dtype_rule = static_cast<OperationDtypeRule>(c->dtype_rule);
+  t->output_dtype_input = c->dtype_input;
+  t->repeated_minimum = c->repeated_minimum;
+  t->repeated_maximum = c->repeated_maximum;
+  t->repeated_match = c->repeated_match != 0;
+  t->output_semantic_rule =
+      static_cast<OperationSemanticRule>(c->semantic_rule);
+  t->output_semantic_input = c->semantic_input;
+  for (std::uint32_t i = 0; i < c->axis_count; ++i) {
+    const auto& a = c->axes[i];
+    OperationExtent axis;
+    if (a.struct_size != sizeof(a) ||
+        !copy_text(a.parameter, a.parameter_size, &axis.parameter))
+      return false;
+    axis.source = static_cast<OperationExtentSource>(a.source);
+    axis.constant = a.constant;
+    axis.input = a.input;
+    axis.axis = a.axis;
+    axis.offset = a.offset;
+    t->output_axes.push_back(std::move(axis));
+  }
+  return true;
+}
+}  // namespace
+
 /**
  * @brief Implements validated transactional operation DSO loading.
  * @copydetails OperationRegistry::load_plugin
@@ -1046,7 +1075,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   OperationLibrary pending_library(opened.value());
 
   using VersionFunction = std::uint32_t (*)();
-  using ApiFunction = const ps_operation_plugin_api_v6* (*)();
+  using ApiFunction = const ps_operation_plugin_api_v7* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
   void* version_symbol = find_symbol(pending_library.handle(),
@@ -1058,14 +1087,14 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin ABI version is unsupported");
   }
-  const ps_operation_plugin_api_v6* api = nullptr;
+  const ps_operation_plugin_api_v7* api = nullptr;
   try {
-    if (version() != PS_OPERATION_ABI_VERSION_6) {
+    if (version() != PS_OPERATION_ABI_VERSION_7) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin ABI version is unsupported");
     }
     void* api_symbol =
-        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v6");
+        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v7");
     std::memcpy(&get_api, &api_symbol, sizeof(get_api));
     if (!get_api)
       return Status::failure(ErrorCode::InvalidArgument,
@@ -1080,9 +1109,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-              alignof(ps_operation_plugin_api_v6) !=
+              alignof(ps_operation_plugin_api_v7) !=
           0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v6)) {
+      api->struct_size != sizeof(ps_operation_plugin_api_v7)) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin API table is malformed");
   }
@@ -1090,7 +1119,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   if (api->operation_count == 0U || api->operation_count > 1024U ||
       !api->operations ||
       reinterpret_cast<std::uintptr_t>(api->operations) %
-              alignof(ps_operation_descriptor_v6) !=
+              alignof(ps_operation_descriptor_v7) !=
           0U ||
       !api->destroy) {
     return Status::failure(ErrorCode::InvalidArgument,
@@ -1107,17 +1136,17 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v6& descriptor = api->operations[index];
-    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v6) ||
+    const ps_operation_descriptor_v7& descriptor = api->operations[index];
+    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v7) ||
         !descriptor.key || descriptor.key_size == 0U ||
         descriptor.key_size > 1024U || !descriptor.execute ||
         descriptor.input_count > 1024U || descriptor.cacheable > 1U ||
-        descriptor.input_schema_count != descriptor.input_count ||
+        descriptor.input_schema_count > 1024 ||
         ((descriptor.input_schema_count == 0) !=
          (descriptor.input_schema == nullptr)) ||
         (descriptor.input_schema &&
          reinterpret_cast<std::uintptr_t>(descriptor.input_schema) %
-                 alignof(ps_operation_port_constraint_v6) !=
+                 alignof(ps_operation_port_constraint_v7) !=
              0) ||
         descriptor.output_rank > 8U ||
         ((descriptor.output_rank == 0U) !=
@@ -1131,7 +1160,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.parameters == nullptr)) ||
         (descriptor.parameters &&
          reinterpret_cast<std::uintptr_t>(descriptor.parameters) %
-                 alignof(ps_operation_parameter_descriptor_v6) !=
+                 alignof(ps_operation_parameter_descriptor_v7) !=
              0U) ||
         (descriptor.flags &
          ~(PS_OPERATION_FLAG_DETERMINISTIC |
@@ -1149,13 +1178,24 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin key is invalid or duplicated");
     }
-    auto copy_port = [](const ps_operation_port_constraint_v6& source,
+    auto copy_port = [](const ps_operation_port_constraint_v7& source,
                         OperationPortConstraint* target) {
-      if (source.struct_size != sizeof(ps_operation_port_constraint_v6))
+      if (source.struct_size != sizeof(ps_operation_port_constraint_v7))
         return false;
       target->kind = static_cast<OperationPortKind>(source.kind);
       std::memcpy(&target->minimum, &source.minimum_bits, sizeof(float));
       std::memcpy(&target->maximum, &source.maximum_bits, sizeof(float));
+      if (const auto* m = source.semantic) {
+        if (reinterpret_cast<std::uintptr_t>(m) %
+                alignof(ps_operation_semantic_constraint_v7) ||
+            m->struct_size != sizeof(*m) ||
+            !copy_facets(m->facets, m->facet_count, &target->facets))
+          return false;
+        target->semantic_kind = m->semantic_kind;
+        target->element_type = m->element_type;
+        target->rank = m->rank;
+        target->element_type_mask = m->element_type_mask;
+      }
       return true;
     };
     if (!copy_port(descriptor.output_schema, &definition.traits.output_schema))
@@ -1169,6 +1209,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                                "invalid input port size");
     }
     definition.traits.input_count = descriptor.input_count;
+    definition.traits.requires_dense_output = true;
+    if (!copy_contract(descriptor.contract, &definition.traits))
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "malformed declarative contract");
     definition.traits.deterministic =
         (descriptor.flags & PS_OPERATION_FLAG_DETERMINISTIC) != 0U;
     definition.traits.side_effect_free =
@@ -1221,10 +1265,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     definition.traits.parameter_schema.reserve(descriptor.parameter_count);
     for (std::uint32_t parameter_index = 0U;
          parameter_index < descriptor.parameter_count; ++parameter_index) {
-      const ps_operation_parameter_descriptor_v6& parameter =
+      const ps_operation_parameter_descriptor_v7& parameter =
           descriptor.parameters[parameter_index];
       if (parameter.struct_size !=
-              sizeof(ps_operation_parameter_descriptor_v6) ||
+              sizeof(ps_operation_parameter_descriptor_v7) ||
           !parameter.key || parameter.key_size == 0U ||
           parameter.key_size > 1024U || parameter.required > 1U ||
           parameter.bounded > 1U) {
@@ -1270,14 +1314,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v6* descriptor = &api->operations[index];
+    const ps_operation_descriptor_v7* descriptor = &api->operations[index];
     staged[index]->callback =
         [library, descriptor, traits = staged[index]->traits,
          image_output = staged[index]->traits.output_schema.kind ==
-                        OperationPortKind::LinearPremultipliedRgbaFloat32](
+                        OperationPortKind::RgbaFloat32](
             const OperationInvocation& invocation) -> Result<Value> {
-      if (invocation.inputs.size() != descriptor->input_count ||
-          invocation.input_demands.size() != invocation.inputs.size()) {
+      if (invocation.input_demands.size() != invocation.inputs.size()) {
         return Result<Value>(
             Status::failure(ErrorCode::InvalidArgument,
                             "plugin invocation input/demand count mismatch"));
@@ -1295,8 +1338,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
               Status::failure(ErrorCode::InvalidArgument,
                               "plugin invocation backend is unknown"));
       }
-      std::vector<ps_operation_value_view_v6> views;
-      std::vector<std::vector<ps_operation_facet_view_v6>> facet_views;
+      std::vector<ps_operation_value_view_v7> views;
+      std::vector<std::vector<ps_operation_facet_view_v7>> facet_views;
       std::vector<std::vector<std::uint64_t>> demand_offsets;
       std::vector<std::vector<std::uint64_t>> storage_origins;
       std::vector<std::vector<std::uint64_t>> region_offsets, region_extents;
@@ -1322,13 +1365,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         auto& input_facets = facet_views.emplace_back();
         input_facets.reserve(input.facets().size());
         for (const ValueFacet& facet : input.facets()) {
-          input_facets.push_back(ps_operation_facet_view_v6{
-              sizeof(ps_operation_facet_view_v6), facet.key.data(),
+          input_facets.push_back(ps_operation_facet_view_v7{
+              sizeof(ps_operation_facet_view_v7), facet.key.data(),
               static_cast<std::uint32_t>(facet.key.size()), facet.version,
               facet.payload.empty() ? nullptr : facet.payload.data(),
               static_cast<std::uint32_t>(facet.payload.size())});
         }
-        ps_operation_value_view_v6 view{};
+        ps_operation_value_view_v7 view{};
         view.struct_size = sizeof(view);
         view.element_type =
             static_cast<std::uint32_t>(input_descriptor.element_type);
@@ -1364,43 +1407,42 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         view.facets = input_facets.empty() ? nullptr : input_facets.data();
         views.push_back(view);
       }
-      std::vector<ps_operation_parameter_value_v6> parameter_views;
+      std::vector<ps_operation_parameter_value_v7> parameter_views;
       parameter_views.reserve(invocation.parameters.size());
       for (const auto& parameter : invocation.parameters) {
-        ps_operation_parameter_value_v6 view{};
+        ps_operation_parameter_value_v7 view{};
         view.struct_size = sizeof(view);
         view.key = parameter.first.data();
         view.key_size = static_cast<std::uint32_t>(parameter.first.size());
         if (const auto* value = std::get_if<std::int64_t>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_INT64_V6;
+          view.type = PS_OPERATION_PARAMETER_INT64_V7;
           view.int64_value = *value;
         } else if (const auto* value = std::get_if<double>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_FLOAT64_V6;
+          view.type = PS_OPERATION_PARAMETER_FLOAT64_V7;
           view.float64_value = *value;
         } else if (const auto* value = std::get_if<bool>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_BOOL_V6;
+          view.type = PS_OPERATION_PARAMETER_BOOL_V7;
           view.bool_value = *value ? 1U : 0U;
         } else {
           const std::string& string_value =
               std::get<std::string>(parameter.second);
-          view.type = PS_OPERATION_PARAMETER_STRING_V6;
+          view.type = PS_OPERATION_PARAMETER_STRING_V7;
           view.string_value = string_value.data();
           view.string_size = static_cast<std::uint32_t>(string_value.size());
         }
         parameter_views.push_back(view);
       }
       OutputSinkState output;
-      auto resolved = traits;
-      if (!resolved.spatial_factor_parameter.empty())
-        resolved.spatial_factor =
-            static_cast<std::uint32_t>(std::get<std::int64_t>(
-                invocation.parameters.at(resolved.spatial_factor_parameter)));
-      auto expected =
-          expected_callback_output_descriptor(resolved, invocation.inputs);
+      auto resolved = resolve_operation_traits(traits, invocation.inputs.size(),
+                                               invocation.parameters);
+      if (!resolved.ok())
+        return Result<Value>(resolved.status());
+      auto expected = expected_callback_output_descriptor(
+          resolved.value(), invocation.inputs, invocation.parameters);
 
       if (!expected.ok())
         return Result<Value>(expected.status());
-      output.descriptor = expected.value();
+      output.descriptor = expected.value().descriptor;
       output.region = invocation.output_region;
       output.allocator = invocation.allocator;
       std::vector<std::uint64_t> output_offsets, output_extents;
@@ -1412,7 +1454,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
           output_extents, Value::element_size(output.descriptor.element_type));
       if (!packed.ok())
         return Result<Value>(packed.status());
-      ps_operation_output_sink_v6 sink{};
+      ps_operation_output_sink_v7 sink{};
       sink.struct_size = sizeof(sink);
       sink.context = &output;
       sink.publish = publish_plugin_output;
@@ -1425,6 +1467,19 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       sink.allocate_output = allocate_plugin_output;
       sink.allocate_scratch = allocate_plugin_scratch;
       sink.gpu = invocation.gpu;
+      std::vector<ps_operation_facet_view_v7> output_facets;
+      for (const auto& f : expected.value().facets)
+        output_facets.push_back(
+            {sizeof(ps_operation_facet_view_v7), f.key.data(),
+             static_cast<std::uint32_t>(f.key.size()), f.version,
+             f.payload.empty() ? nullptr : f.payload.data(),
+             static_cast<std::uint32_t>(f.payload.size())});
+      sink.output_element_type =
+          static_cast<std::uint32_t>(output.descriptor.element_type);
+      sink.output_facet_count =
+          static_cast<std::uint32_t>(output_facets.size());
+      sink.output_facets =
+          output_facets.empty() ? nullptr : output_facets.data();
       char diagnostic[4097]{};
       const int code = descriptor->execute(
           descriptor->user_data, views.data(),
@@ -1441,7 +1496,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
       if (!output.allocation_failure.ok())
         return Result<Value>(output.allocation_failure);
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V6 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V7 &&
           output.published && !output.result.ok() &&
           output.result.status().code != ErrorCode::ResourceExhausted &&
           output.result.status().code != ErrorCode::Cancelled) {
@@ -1454,12 +1509,12 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             ErrorCode::OperationFailed,
             "operation plugin violated output sink at-most-once contract"));
       }
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V6 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V7 &&
           output.published && !output.result.ok() &&
           output.result.status().code == ErrorCode::ResourceExhausted) {
         return output.result;
       }
-      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6 &&
+      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7 &&
           output.published) {
         if (!output.result.ok()) {
           return output.result;
@@ -1469,13 +1524,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             "operation plugin published output before reporting backend "
             "unavailable"));
       }
-      if (code != PS_OPERATION_RESULT_SUCCESS_V6) {
+      if (code != PS_OPERATION_RESULT_SUCCESS_V7) {
         ErrorCode error_code = ErrorCode::OperationFailed;
         const char* default_diagnostic = "operation plugin callback failed";
-        if (code == PS_OPERATION_RESULT_CANCELLED_V6) {
+        if (code == PS_OPERATION_RESULT_CANCELLED_V7) {
           error_code = ErrorCode::Cancelled;
           default_diagnostic = "operation plugin callback was cancelled";
-        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V6) {
+        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7) {
           error_code = ErrorCode::BackendUnavailable;
           default_diagnostic = "operation plugin backend is unavailable";
         }
@@ -1575,7 +1630,13 @@ Result<Value> OperationRegistry::invoke_current(
     }
     definition = iterator->second;
   }
-  if (invocation.inputs.size() != definition->traits.input_count) {
+  if ((!definition->traits.repeated_maximum &&
+       invocation.inputs.size() != definition->traits.input_count) ||
+      (definition->traits.repeated_maximum &&
+       (invocation.inputs.size() < definition->traits.input_count +
+                                       definition->traits.repeated_minimum ||
+        invocation.inputs.size() > definition->traits.input_count +
+                                       definition->traits.repeated_maximum))) {
     return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                          "operation input count mismatch"));
   }
@@ -1629,13 +1690,13 @@ Result<Value> OperationRegistry::invoke_current(
     return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
                                          "operation backend is unavailable"));
   }
-  auto resolved_shape = definition->traits;
-  if (!resolved_shape.spatial_factor_parameter.empty())
-    resolved_shape.spatial_factor =
-        static_cast<std::uint32_t>(std::get<std::int64_t>(
-            invocation.parameters.at(resolved_shape.spatial_factor_parameter)));
-  auto expected_output =
-      expected_callback_output_descriptor(resolved_shape, invocation.inputs);
+  auto resolved_result = resolve_operation_traits(
+      definition->traits, invocation.inputs.size(), invocation.parameters);
+  if (!resolved_result.ok())
+    return Result<Value>(resolved_result.status());
+  auto resolved_shape = resolved_result.take_value();
+  auto expected_output = expected_callback_output_descriptor(
+      resolved_shape, invocation.inputs, invocation.parameters);
   if (!expected_output.ok()) {
     return Result<Value>(expected_output.status());
   }
@@ -1645,14 +1706,14 @@ Result<Value> OperationRegistry::invoke_current(
     return current && !current() ? ErrorCode::Stale : ErrorCode::Ok;
   };
   for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
-    const auto& port = definition->traits.input_schema[i];
+    const auto& port = resolved_shape.input_schema[i];
     const auto status = input_internal::validate_port_value(
         port, invocation.inputs[i], ErrorCode::InvalidArgument, stop);
     if (!status.ok())
       return Result<Value>(status);
     if ((port.kind == OperationPortKind::Float32Scalar &&
          !input_internal::whole_region(invocation.input_demands[i], {1})) ||
-        (port.kind == OperationPortKind::LinearPremultipliedRgbaFloat32 &&
+        (port.kind == OperationPortKind::RgbaFloat32 &&
          !input_internal::image_demand(invocation.input_demands[i]))) {
       return Result<Value>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -1670,29 +1731,32 @@ Result<Value> OperationRegistry::invoke_current(
     }
     OperationInvocation normalized = invocation;
     if (normalized.output_region.rank() == 0)
-      normalized.output_region = Region::whole(expected_output.value().shape);
+      normalized.output_region =
+          Region::whole(expected_output.value().descriptor.shape);
     if (normalized.output_region.empty() ||
-        !normalized.output_region.validate(expected_output.value().shape).ok())
+        !normalized.output_region
+             .validate(expected_output.value().descriptor.shape)
+             .ok())
       return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                            "invalid operation output demand"));
-    if (definition->traits.output_schema.kind ==
-            OperationPortKind::LinearPremultipliedRgbaFloat32 &&
-        !input_internal::image_demand(normalized.output_region))
-      return Result<Value>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "image output requires all RGBA channels"));
+    if (!input_internal::complete_image_channels(
+            expected_output.value().descriptor, expected_output.value().facets,
+            normalized.output_region))
+      return Result<Value>(Status::failure(
+          ErrorCode::InvalidArgument, "image output requires all channels"));
     auto resolved = resolved_shape;
     if (!resolved.halo_radius_parameter.empty())
       resolved.halo_radius = static_cast<std::uint32_t>(std::get<std::int64_t>(
           invocation.parameters.at(resolved.halo_radius_parameter)));
     if (resolved.region_rule == OperationRegionRule::Whole &&
         !input_internal::whole_region(normalized.output_region,
-                                      expected_output.value().shape))
+                                      expected_output.value().descriptor.shape))
       return Result<Value>(Status::failure(
           ErrorCode::InvalidArgument, "Whole operation requires whole output"));
     for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
       const auto required = input_internal::derive_input_demand(
-          resolved, normalized.output_region, expected_output.value().shape,
+          resolved, normalized.output_region,
+          expected_output.value().descriptor.shape,
           invocation.inputs[i].descriptor().shape,
           resolved.input_schema[i].kind);
       if (!required.ok())
@@ -1711,9 +1775,28 @@ Result<Value> OperationRegistry::invoke_current(
     if (!result.ok()) {
       return result;
     }
-    Status output_status = validate_callback_output(
-        expected_output.value(), result.value(), normalized.output_region);
-    if (definition->traits.output_schema.kind != OperationPortKind::Value) {
+    Status output_status =
+        validate_callback_output(expected_output.value().descriptor,
+                                 result.value(), normalized.output_region);
+    const bool exact_facets =
+        resolved_shape.output_schema.kind != OperationPortKind::Value ||
+        resolved_shape.output_semantic_rule != OperationSemanticRule::Drop;
+    const bool facets_match =
+        !output_status.ok() ||
+        (exact_facets
+             ? input_internal::same_facets(expected_output.value().facets,
+                                           result.value().facets())
+             : std::none_of(result.value().facets().begin(),
+                            result.value().facets().end(), [](const auto& f) {
+                              return f.key == "photospider.image" ||
+                                     f.key == "photospider.semantic";
+                            }));
+    if (output_status.ok() && !facets_match)
+      output_status =
+          Status::failure(ErrorCode::OperationFailed,
+                          "output facets contradict inferred semantics");
+    if (definition->traits.output_schema.kind != OperationPortKind::Value ||
+        !expected_output.value().facets.empty()) {
       if (output_status.ok())
         output_status = input_internal::validate_port_value(
             definition->traits.output_schema, result.value(),
@@ -1780,6 +1863,17 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   constexpr bool simulated_gpu = false;
 #endif
 
+  const auto preserving = [](OperationTraits traits) {
+    traits.output_dtype_rule = OperationDtypeRule::Input;
+    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+    return traits;
+  };
+  const auto float64_inputs = [](OperationTraits traits) {
+    for (auto& port : traits.input_schema)
+      port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
+    return traits;
+  };
+
   Status status = registry->register_operation(OperationDefinition{
       "core.constant",
       OperationTraits{0U,
@@ -1789,7 +1883,7 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
                       simulated_gpu,
                       simulated_gpu,
                       sizeof(double),
-                      6U,
+                      7U,
                       true,
                       ElementType::Float64,
                       OperationShapeRule::Scalar,
@@ -1813,23 +1907,23 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "core.identity",
-      OperationTraits{1U,
-                      true,
-                      true,
-                      true,
-                      simulated_gpu,
-                      simulated_gpu,
-                      0U,
-                      6U,
-                      true,
-                      ElementType::Float64,
-                      OperationShapeRule::PreserveFirstInput,
-                      OperationRegionRule::Elementwise,
-                      0U,
-                      {},
-                      {},
-                      std::vector<OperationPortConstraint>(1),
-                      {/* output Value */}},
+      preserving(OperationTraits{1U,
+                                 true,
+                                 true,
+                                 true,
+                                 simulated_gpu,
+                                 simulated_gpu,
+                                 0U,
+                                 7U,
+                                 true,
+                                 ElementType::Float64,
+                                 OperationShapeRule::PreserveFirstInput,
+                                 OperationRegionRule::Elementwise,
+                                 0U,
+                                 {},
+                                 {},
+                                 std::vector<OperationPortConstraint>(1),
+                                 {/* output Value */}}),
       [](const OperationInvocation& invocation) -> Result<Value> {
         return Result<Value>(invocation.inputs.front());
       }});
@@ -1839,23 +1933,23 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "math.add",
-      OperationTraits{2U,
-                      true,
-                      true,
-                      true,
-                      simulated_gpu,
-                      simulated_gpu,
-                      sizeof(double),
-                      6U,
-                      true,
-                      ElementType::Float64,
-                      OperationShapeRule::MatchAllInputs,
-                      OperationRegionRule::Elementwise,
-                      0U,
-                      {},
-                      {},
-                      std::vector<OperationPortConstraint>(2),
-                      {/* output Value */}},
+      float64_inputs(OperationTraits{2U,
+                                     true,
+                                     true,
+                                     true,
+                                     simulated_gpu,
+                                     simulated_gpu,
+                                     sizeof(double),
+                                     7U,
+                                     true,
+                                     ElementType::Float64,
+                                     OperationShapeRule::MatchAllInputs,
+                                     OperationRegionRule::Elementwise,
+                                     0U,
+                                     {},
+                                     {},
+                                     std::vector<OperationPortConstraint>(2),
+                                     {/* output Value */}}),
       [](const OperationInvocation& invocation) -> Result<Value> {
         auto left = invocation.inputs[0].as_float64();
         auto right = invocation.inputs[1].as_float64();
@@ -1874,24 +1968,25 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "core.delay",
-      OperationTraits{1U,
-                      true,
-                      true,
-                      true,
-                      false,
-                      false,
-                      0U,
-                      6U,
-                      false,
-                      ElementType::Float64,
-                      OperationShapeRule::PreserveFirstInput,
-                      OperationRegionRule::Whole,
-                      0U,
-                      {OperationParameterSpec{
-                          "milliseconds", OperationParameterType::Int64, true}},
-                      {},
-                      std::vector<OperationPortConstraint>(1),
-                      {/* output Value */}},
+      preserving(OperationTraits{
+          1U,
+          true,
+          true,
+          true,
+          false,
+          false,
+          0U,
+          7U,
+          false,
+          ElementType::Float64,
+          OperationShapeRule::PreserveFirstInput,
+          OperationRegionRule::Whole,
+          0U,
+          {OperationParameterSpec{"milliseconds", OperationParameterType::Int64,
+                                  true}},
+          {},
+          std::vector<OperationPortConstraint>(1),
+          {/* output Value */}}),
       [](const OperationInvocation& invocation) -> Result<Value> {
         auto milliseconds =
             integer_parameter(invocation.parameters, "milliseconds");
@@ -1917,23 +2012,23 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
 
   status = registry->register_operation(OperationDefinition{
       "core.gpu_fallback_probe",
-      OperationTraits{1U,
-                      true,
-                      true,
-                      true,
-                      true,
-                      true,
-                      0U,
-                      6U,
-                      true,
-                      ElementType::Float64,
-                      OperationShapeRule::PreserveFirstInput,
-                      OperationRegionRule::Elementwise,
-                      0U,
-                      {},
-                      {},
-                      std::vector<OperationPortConstraint>(1),
-                      {/* output Value */}},
+      preserving(OperationTraits{1U,
+                                 true,
+                                 true,
+                                 true,
+                                 true,
+                                 true,
+                                 0U,
+                                 7U,
+                                 true,
+                                 ElementType::Float64,
+                                 OperationShapeRule::PreserveFirstInput,
+                                 OperationRegionRule::Elementwise,
+                                 0U,
+                                 {},
+                                 {},
+                                 std::vector<OperationPortConstraint>(1),
+                                 {/* output Value */}}),
       [](const OperationInvocation& invocation) -> Result<Value> {
         if (invocation.backend == Backend::Gpu) {
           return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
@@ -1946,6 +2041,18 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   }
 
   status = plugin_internal::register_image_operations(registry.get());
+  if (!status.ok())
+    throw std::logic_error(status.message);
+  status = plugin_internal::register_numeric_operations(registry.get());
+  if (!status.ok())
+    throw std::logic_error(status.message);
+  status = plugin_internal::register_color_operations(registry.get());
+  if (!status.ok())
+    throw std::logic_error(status.message);
+  status = plugin_internal::register_expression_operations(registry.get());
+  if (!status.ok())
+    throw std::logic_error(status.message);
+  status = plugin_internal::register_component_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
   registry->builtins_ = true;

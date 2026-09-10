@@ -11,15 +11,20 @@
 | `image.opacity` | 图像 | Float32 opacity scalar，闭区间 [0,1] | 全部 RGBA channel 乘 opacity |
 
 图像声明必须为 dense Float32 {H,W,4}，H/W 为正，whole Region，零 offset，canonical
-row-major stride；运行视图带有显式 origin、stride 和有效 Region。两者精确包含一个 facet：key `photospider.image`，version 1，payload
-`rgba;linear-srgb;premultiplied;hwc`，共 34 个 ASCII byte，不含 NUL。
-RGB 必须 finite 且非负，alpha 必须 finite 且位于 [0,1]，alpha 为零时 RGB 必须全零。
-HDR RGB 可以超过 1 或 alpha，接受 signed zero。Caller 提供已转换为 linear-sRGB
-premultiplied 的值；不执行 color conversion、gamma、clamp 或 unpremultiplication。
+row-major stride；运行视图带有显式 origin、stride 和有效 Region。两者精确包含一个 facet：key `photospider.image`，version 2，payload 由
+`encode_semantic(rgba_semantics())` 生成；拒绝 image-v1 元数据，调用者使用公开 typed helper。
+RGB 必须 finite，允许 signed，alpha 必须 finite 且位于 [0,1]，alpha 为零时 RGB 必须全零。
+HDR RGB 可以超过 1 或 alpha，接受 signed zero。Caller 提供 linear sRGB/Rec.709、
+D65、scene-referred relative RGB 与 dimensionless coverage alpha，使用
+coverage-premultiplied association；不执行 color conversion、gamma、clamp 或 unpremultiplication。
 
-Scalar input 必须直接引用 workflow declaration：Float32 {1}、whole Region、零 offset、
-stride {4}、四字节且无 facet。每次运行的 gain/opacity byte 不属于 source parameter，
-也不改变 compiler identity。
+Scalar input 可以直接引用 workflow declaration，也可连接上游 Float32 `{1}`。
+允许无 facet、一个 dimensionless Scalar 或一个 dimensionless 单样本 SampledSignal。
+采样轴单位/域与样本值单位独立并完整保留；拒绝其他 typed/opaque facet。直接绑定继续
+要求 whole dense declaration（零 offset、stride `{4}`、四字节）。Computed view 要求
+完整 `{1}` coverage，可使用 padding、非对齐、broadcast 或负 stride；C++、C 与 Metal
+参数转换均按逻辑样本零安全读取字节，不隐式 cast/clamp。逐 Run 标量字节不改变编译计划
+身份，符合缓存资格的 result key 同时包含数值字节与允许的语义 facet。
 
 两者为 deterministic、side-effect-free、cacheable、PreserveFirstInput 和 Elementwise。
 Image input demand 为请求的空间 output demand，完整包含四个 channel；scalar demand
@@ -31,14 +36,19 @@ Image input demand 为请求的空间 output demand，完整包含四个 channel
 Host schema/numeric validation 和 image callback scope 保存并恢复 thread 浮点环境，
 避免继承的 rounding 或 flush-to-zero 模式改变结果。计算出的 non-finite pixel、错误
 profile 或 alpha-zero/nonzero-RGB output 返回 OperationFailed。绑定 pixel/scalar
-数值域错误返回 InvalidArgument：scalar 在执行前检查，pixel 在消费 callback 前检查，
-未读取像素不扫描。
+数值域错误返回 InvalidArgument：直接 scalar 在执行前检查；computed scalar 数值错误
+在每个消费 callback 前返回 OperationFailed，包含缓存与共享生产者结果。元数据失配为
+TypeMismatch。Pixel 在消费 callback 前检查，未读取像素不扫描。
+
+八算子的 C++、C 与 Metal 均实现本 image-v2 契约，显式声明 PreserveInput 语义并发布
+首输入的精确 facet；box 算子仅改变逻辑 H/W。端口要求 canonical RGBA 或 typed
+coverage mask。Straight alpha、RGB-only、重排通道及其他颜色模型须先显式转换。
 
 ## 可复用算子包与可执行示例
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
-`Photospider::operation_sdk` 构建受维护的 ABI6 C module `photospider_rgba32f_ops`。
-它实现相同图像算子和 profile，使用严格浮点编译选项。ABI6 host 在进入 callback
+`Photospider::operation_sdk` 构建受维护的 ABI7 C module `photospider_rgba32f_ops`。
+它实现相同图像算子和 profile，使用严格浮点编译选项。ABI7 host 在进入 callback
 之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 向宿主申请输出并发布同一 buffer；成功后冻结为只读，失败时释放且不发布。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
 
@@ -86,11 +96,11 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 
 隔离安装消费者通过 installed SDK 构建同一算子源码包，在 shared bridge 中运行 A/B，
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
-0.6 消费及 0.5 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+0.7 消费及 0.6 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
 
 ## S2 Gaussian、蒙版与合成
 
-默认 registry 和受维护 ABI6 C 包还提供：
+默认 registry 和受维护 ABI7 C 包还提供：
 
 | Operation | 有序输入 | 必填静态参数 | Region 规则 |
 | --- | --- | --- | --- |
@@ -98,7 +108,7 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 | `image.mask` | RGBA 图像、Float32 `{H,W}` 蒙版 | 无 | Elementwise，蒙版映射相同 H/W |
 | `image.source_over` | 前景 RGBA、相同 shape 的背景 RGBA | 无 | Elementwise、MatchAllInputs |
 
-三个算子均为 CPU、确定且无副作用，保留图像逻辑 shape 和上述 profile。蒙版无 facet，
+三个算子均为 CPU、确定且无副作用，保留图像逻辑 shape 和上述 profile。蒙版带有 `encode_semantic(coverage_semantics())`，
 样本有限且在 `[0,1]`，逐像素缩放前景全部 RGBA。Source-over 按预乘值对每个通道计算
 `F + B * (1 - F.alpha)`，遵循 [W3C 公式](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover)。
 减法、乘法和加法分别舍入到 Float32，不使用 FMA。
@@ -129,13 +139,13 @@ build/issue257-static/examples/regional_image_vertical/photospider_regional_imag
 ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
 ```
 
-示例目录也可作为独立 find_package(Photospider 0.6) 消费者。test_installed_consumer
+示例目录也可作为独立 find_package(Photospider 0.7) 消费者。test_installed_consumer
 针对隔离 static/shared 安装构建并运行它，分别使用内置算子和单独构建的 C module。
 唯一可选参数为可信 module 的精确路径。
 
 ## S3 box 缩小与圆章
 
-package 0.6 / operation ABI 6 的内建与 C 模块提供 image.downsample_box、
+package 0.7 / operation ABI 7 的内建与 C 模块提供 image.downsample_box、
 mask.downsample_box、image.brush_circle。前两者分别接收既有 RGBA 图像和 HW 蒙版，
 必需静态 Int64 factor 为 [1,16]，无隐式默认。输出 H/W 除以 factor 向上取整，
 反向需求为裁剪后的整数 box。按行/列 binary64 累加，以实际覆盖样本数平均并舍入
@@ -144,7 +154,7 @@ binary32。因子 1 保留数值。不转换 gamma 或解除预乘。应用代�
 image.brush_circle 输入依次为 image、x、y、radius、red、green、blue、alpha；后七项
 均为必需运行期 Float32 {1} 绑定，无静态参数。输出保持图像形状，使用 Elementwise。
 x/y 为任意有限 Float32，radius 为正 normal Float32 至 FLT_MAX；非预乘线性 RGB 为
-[0,FLT_MAX]，alpha 为 [0,1]。使用 binary64 平方距离判断闭圆内像素中心；圆内 RGB
+[-FLT_MAX,FLT_MAX]，alpha 为 [0,1]。使用 binary64 平方距离判断闭圆内像素中心；圆内 RGB
 先以 binary32 乘 alpha，再无融合地对预乘背景执行 source-over；圆外保留原位。
 一事件一硬边圆章，不抗锯齿、不补点、不处理压力或设备。应用规划裁剪包围 ROI
 并将结果作为快照 patch。
@@ -155,7 +165,7 @@ test_s3_operations [trusted-module] 通过公开 compile/execute 使用独立 bo
 
 ## S4 原生 Metal 实现
 
-package 0.6 / operation ABI 6 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
+package 0.7 / operation ABI 7 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
 八个算子，共用 image.metal 与参数转换。CMake 在构建目录生成 shader 字符串头；
 安装消费者不依赖源码路径或 Objective-C++ 配置。
 
@@ -172,7 +182,45 @@ FLT_MAX/1024；mask 乘数、gain/opacity、圆章颜色/alpha 非零值至少 1
 oracle 的 atol=1e-6、rtol=1e-5 不构成 CPU 位相同或与图规模无关的总误差保证。
 圆章由宿主 double 行区间保持大坐标覆盖，GPU 颜色计算保留圆外像素位型。
 
-test_metal_images 与插件版本覆盖八算子、whole/tile/非零 ROI、radius 64、factor 16、
+test_metal_images 与插件版本覆盖八算子正值与 signed/HDR whole/tile/非零 ROI、
+alpha 0/1/1e-10、非法数值/facet/association、radius 64、factor 16、
 HDR/subnormal 回退和大坐标圆章。公开 fixture 位于 examples/s4_gpu_workflow/image_fixture.hpp。
 运行对应构建目标后，以 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 执行 ctest
 -R '^test_metal_images'。无硬件明确 skip，不宣称原生验收成功。CPU 精确默认保持。
+
+可独立安装消费的 examples/s4_gpu_workflow 通过公开 WorkflowDocument、compile、execute
+运行同一 signed 场景：
+
+```sh
+cmake --build build/issue257-static --target photospider_s4_gpu_workflow -j 8
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend cpu
+build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend metal --require-native
+```
+
+追加 `--module /absolute/path/to/libphotospider_rgba32f_ops.so` 使用 C 包。预期输出包含
+`operations=8`、`signed_hdr=passed`、`oracle=passed`。CPU 和符合资格的原生执行
+报告 `fallback_count=0`，原生执行必须报告非零 dispatches。无设备时 Metal 模式报告
+真实正数 fallback count；传入 `--require-native` 还会以 77 退出。每个场景检查所有需求样本和 typed facet。例如 signed exposure
+在 `(y=0,x=1)` 将 `[-2.125,4,-.125,.5]` 以 gain 2 转为 `[-4.25,8,-.25,.5]`。
+修改 image_fixture.hpp 的 foreground、background、brush 输入或 scene() 参数即可组合
+其他实验，同时更新独立 oracle。整图与 2x3 tile 的非零 ROI 共用数学 oracle；RGB
+结果不会仅因负号被夹紧或回退 CPU。
+
+## Computed scalar 组合
+
+[test_computed_scalar.cpp](../../../tests/integration/test_computed_scalar.cpp) 注册公开
+coefficient.scale producer，并通过 WorkflowDocument 把输出接到 exposure、opacity 或
+brush。同一编译计划在顺序/并发 Run 中改变 coefficient binding。Exposure 中 coefficient
+1 生成 gain 2，coefficient 3 生成 gain 6，因此同一源像素 RGB 变为三倍，alpha 保持。
+缓存值 1.5 可作 gain，但不能作 opacity；generic NaN 仍是合法独立 Value，却不能进入
+bounded consumer。Fixture 覆盖 Scalar/Signal、五种布局、field/opaque 拒绝和独立共享取消。
+
+```sh
+cmake --build build/issue257-static --target test_computed_scalar -j 8
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_computed_scalar' --output-on-failure
+```
+
+C++ 与 C consumer 均报告 layouts=5 semantic_kinds=3、oracle=passed；原生硬件可用时
+必须执行 45 次 dispatch。无硬件时验证 CPU/fallback 并报告零 native dispatch。修改
+fixture 的 coefficient binding 或纯 producer callback 可继续组合，expression 解析由后续
+算子切片完成。

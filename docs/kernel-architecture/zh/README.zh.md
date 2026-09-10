@@ -31,3 +31,4 @@ release evidence。重置前文档只能从 Git 历史和
 `pre-breaking-scope-reset-2026-09-01` 取得。
 
 - [S4 原生 Metal 工作流](S4-Workflow.zh.md)：安装示例、数值模式、驻留和验证。
+- [可组合 foundations workflow](Foundations-Workflow.zh.md)：独立安装公开 API 场景与可复用算子。

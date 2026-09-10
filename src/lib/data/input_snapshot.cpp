@@ -18,7 +18,8 @@ namespace {
 template <class Function>
 Status visit(const Region& region, Function function) {
   const auto yd = region.dimensions()[0], xd = region.dimensions()[1];
-  const std::uint64_t channels = region.rank() == 3 ? 4 : 1;
+  const std::uint64_t channels =
+      region.rank() == 3 ? region.dimensions()[2].extent : 1;
   for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y)
     for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x)
       for (std::uint64_t c = 0; c < channels; ++c) {
@@ -47,18 +48,6 @@ bool intersects(const Region& a, const Region& b) {
   }
   return true;
 }
-/** @brief Validates numeric/profile meaning before importing or patching. */
-Status validate(const Value& value) {
-  if (!value.valid())
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "invalid snapshot input");
-  OperationPortConstraint port;
-  port.kind = value.descriptor().shape.size() == 3
-                  ? OperationPortKind::LinearPremultipliedRgbaFloat32
-                  : OperationPortKind::Float32Mask;
-  return input_internal::validate_port_value(port, value,
-                                             ErrorCode::InvalidArgument, {});
-}
 }  // namespace
 struct InputSnapshotStore::Impl {
   InputSnapshotStoreConfig config;
@@ -81,7 +70,9 @@ struct InputSnapshot::Impl {
   }
   Status coverage(const Region& region) const {
     if (region.empty() || !region.validate(descriptor.shape).ok() ||
-        (descriptor.shape.size() == 3 && !input_internal::image_demand(region)))
+        (descriptor.shape.size() == 3 &&
+         (region.dimensions()[2].offset != 0 ||
+          region.dimensions()[2].extent != descriptor.shape[2])))
       return Status::failure(ErrorCode::InvalidArgument,
                              "invalid snapshot coverage");
     return Status::success();
@@ -166,7 +157,7 @@ std::uint64_t InputSnapshotStore::live_bytes() const {
 }
 Result<InputSnapshot> InputSnapshotStore::import_value(
     const Value& value) const {
-  auto status = validate(value);
+  auto status = input_internal::validate_image_storage_value(value);
   if (!status.ok())
     return Result<InputSnapshot>(status);
   if (!input_internal::whole_region(value.region(), value.descriptor().shape))
@@ -227,7 +218,7 @@ Result<InputSnapshot> InputSnapshotStore::patch(
   if (!base.valid() || base.impl_->store.get() != impl_.get())
     return Result<InputSnapshot>(
         Status::failure(ErrorCode::InvalidArgument, "foreign snapshot"));
-  auto status = validate(replacement);
+  auto status = input_internal::validate_image_storage_value(replacement);
   if (!status.ok())
     return Result<InputSnapshot>(status);
   if (replacement.descriptor().shape != base.descriptor().shape ||

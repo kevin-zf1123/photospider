@@ -1,5 +1,9 @@
 # 数值与数组基础
 
+已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：四 dtype cast/range 分离，Float32/64 同 shape 基础算术和显式 clamp，全数组 Float64 mean/variance，有界单通道 expression（静态 start/step/count、动态 Float64 coefficients）及 linear 1D LUT。默认由 workflow 显式提交，全部新增算子首版 Whole；其他 unary/broadcast/scan/数组操作继续 Proposed。
+
+当前已实现的 cast/encode_range、四种二元算术、clamp、mean/variance 及公开运行示例见[数值算子实现](../../kernel-architecture/zh/Numeric-Operations.zh.md)。Expression/LUT 的首版实现与公开 workflow 见[实现文档](../../kernel-architecture/zh/Expression-and-LUT-Operations.zh.md)；下表扩展目录仍为 Proposed。
+
 状态 Proposed。本篇为 D1 数学核心，受 G1/G3/G5 数据与组合前置条件约束。建议 CPU Float32/Float64 参考实现；整数支持逐项定义，不能默认为所有张量运算有 Metal 后端。符号 E/W/S 和默认约定见[公共契约](../00-foundation/contracts.md)。
 
 ## 基础目录
@@ -36,4 +40,4 @@
 
 逐元素族建议共享循环、dtype dispatch、边界检查和向量化设施，同时保留各操作独立语义与参数校验。矩阵、scan、reduce 可复用经验证的数值库，但库的默认 NaN、rounding、归一化与线程策略必须适配。全局归约先用固定遍历或固定树，避免无序 atomic 造成结果漂移。
 
-概念工作流：`sample_expression → LUT apply`、`linspace → periodic noise → displacement field`、`channel extract → mean/variance → auto exposure`、`path arc length → width curve`。这些流程暂不是现有 registry 的可运行代码；落地时必须补公开入口最小样例。
+概念工作流：`sample_expression → LUT apply`、`linspace → periodic noise → displacement field`、`channel extract → mean/variance → auto exposure`、`path arc length → width curve`。其中 sample_expression → LUT apply 已有上述公开入口样例；其余概念流程的完整节点仍待实现。

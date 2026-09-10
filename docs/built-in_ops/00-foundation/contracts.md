@@ -1,5 +1,7 @@
 # 公共数据与执行约定
 
+2026-09-10：本轮已接受子集以英文 [ADR 0020](../../adr/0020-composable-operation-foundations.md) 为准。保留四种 dtype、采用 typed semantics/image v2、静态输出和 computed scalar；image v1 不保留。下面路径、时域、外部资产及更广泛颜色功能继续为 Proposed，不构成本轮实现范围。
+
 以下为 **Proposed** 的统一设计规则。当前实现仍按[现状页](current-state.md)执行。新算子默认继承本页；分类页的显式参数和例外优先。这些描述是语义目标，不是新的 C API 声明。
 
 ## 数据对象
