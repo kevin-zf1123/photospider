@@ -11,14 +11,26 @@ retention epochs; active readers remain valid and old producers cannot refill
 a cleared epoch. Cache statistics expose hits, misses, evictions, sharing,
 entries and retained capacity. Zero cache bytes preserves uncached execution.
 
-InputSnapshotStore owns independently bounded immutable Float32 image-v2 and
-canonical coverage-mask blocks. RGB/RGBA/XYZ/Lab images retain their ordered
-channel roles, reference white, units and alpha association; HWC C comes from
-the descriptor. Imports and patches validate complete image channels and finite
-samples, including signed/HDR and straight hidden colors. Patches require exact
-descriptor/facets, copy intersecting blocks and preserve old snapshots. `content_identity(region)` is canonical SHA-256 over metadata
-and demanded sample bits, independent of block geometry and allocation. Exact
-signed-zero bits remain distinct. Snapshot bindings provide regional reads.
+InputSnapshotStore owns independently bounded immutable rank-1..8 blocks for
+UInt8, Int64, Float32 and Float64 Values. Generic Values retain every valid raw
+bit pattern; typed imports and patches validate their semantic sample rules.
+Image-v2 RGB/RGBA/XYZ/Lab retains ordered channel roles, reference white, units
+and alpha association, and always validates/copies complete pixel channels.
+The configured block extent applies to every generic axis and to image H/W;
+image C stays complete. `maximum_blocks` bounds each version's directory before
+payload allocation. `maximum_bytes` counts actual retained blocks across all
+versions; directory metadata is separately bounded, not a process RSS limit.
+
+Patches require exact dtype, shape and facets, copy intersecting blocks and
+preserve old versions. `SnapshotAccessOptions` supplies cancellation and a sample
+bound for import/read/hash and for affected-block copying during patch. Cancelled
+reads may have partially filled the caller's buffer; only success validates it.
+`content_identity(region)` uses domain `photospider.input-region.v2` and canonical
+SHA-256 over dtype, shape, requested coordinates, facets and exact sample bits.
+Integer/IEEE samples are decoded at their native width and encoded as uint64
+little-endian fields. Block geometry, origin/stride and allocation are excluded.
+Signed zeros and NaN payloads remain distinct. Snapshot bindings supply regional
+reads with the Run cancellation token, including generic inputs.
 
 Memory and native completed Values retain their actual facets. Result hits
 revalidate resolved descriptor, demanded coverage, output semantic rules and
@@ -44,7 +56,7 @@ tags. Compact keys include dtype, rank/shape, exact facets, byte length and raw
 bytes, including signed-zero bits and unused coefficients. Larger/partial direct
 inputs remain unproven. This qualification applies to regional execution and
 execute_stream; pure generic/scalar ordinary execute keeps its existing fast
-path. No new snapshot/disk types are introduced. The public expression workflow
+path. Disk result eligibility remains restricted to supported image/mask Values. The public expression workflow
 checks 2048/2049+ boundaries, dtype/shape/facet separation, concurrent coefficients
 and cached invalid bounded consumers.
 

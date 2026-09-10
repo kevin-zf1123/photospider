@@ -931,7 +931,8 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
         if (token.cancelled())
           return Result<Region>(
               Status::failure(ErrorCode::Cancelled, "snapshot read cancelled"));
-        auto status = snapshot->read(r, bytes, size);
+        auto status = snapshot->read(r, bytes, size,
+                                     SnapshotAccessOptions{UINT64_MAX, token});
         return status.ok() ? Result<Region>(r) : Result<Region>(status);
       };
       binding.source = std::move(source);
@@ -2652,7 +2653,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             tile, snapshot,
             impl_->native_device && impl_->native_device->available()
                 ? impl_->native_device->identity()
-                : std::string{});
+                : std::string{},
+            cancellation);
         // Invalidate before lookup: a cached Whole value may be GPU-backed
         // while still derived from a CPU fallback earlier in this Run.
         for (std::size_t i = 0; i < tile.steps().size(); ++i) {

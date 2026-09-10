@@ -9,11 +9,20 @@ maximum_live_bytes 的子限额。副本共享不可变分配租约；驱逐只�
 仍有效，旧生产者不能重新填充已清空 epoch。统计报告命中、未命中、驱逐、共享、
 条目数和容量。零缓存额度保留无缓存执行。
 
-InputSnapshotStore 独立限额管理不可变 Float32 image-v2 与 canonical coverage-mask 块。
-RGB/RGBA/XYZ/Lab 保留有序通道角色、参考白、单位和 alpha association，HWC C 取自
-描述符。导入和 patch 校验完整图像通道与有限样本，支持 signed/HDR 和 straight 隐藏色。
-Patch 要求精确 descriptor/facets，只复制相交块并保留旧版本。content_identity(region) 使用规范 SHA-256 对元数据与需求样本
-位求身份，与分块尺寸和分配地址无关；有符号零保持不同。快照绑定提供区域读取。
+InputSnapshotStore 独立限额管理 rank 1–8 的 UInt8、Int64、Float32、Float64 不可变块。
+Generic Value 保留所有合法原始位模式；typed 导入与 patch 校验各自的语义样本规则。
+Image-v2 RGB/RGBA/XYZ/Lab 保留有序通道角色、参考白、单位和 alpha association，始终
+校验并复制完整像素通道。配置的 block_size 用于 generic 的每个轴及图像 H/W，图像 C
+保持完整。maximum_blocks 在像素分配前限制每个版本的目录条目；maximum_bytes 统计
+所有版本仍持有的实际块。目录元数据单独有界，该额度不是进程 RSS 上限。
+
+Patch 要求 dtype、shape、facets 完全一致，复制相交块并保留旧版本。
+SnapshotAccessOptions 提供取消与样本上限，约束导入、读取、hash 以及 patch 的受影响
+块复制。取消的 read 可能已经部分写入调用方缓冲区，只有成功返回才确认其内容。
+content_identity(region) 使用 photospider.input-region.v2 域及规范 SHA-256，包含 dtype、
+shape、需求坐标、facets 和精确样本位。整数/IEEE 样本按实际宽度解码，再编码为
+uint64 little-endian 字段；分块、origin/stride 和分配地址不进入身份。正负零及 NaN
+payload 保持不同。包括 generic 输入在内，快照绑定的区域读取传递 Run 取消令牌。
 
 内存和 native 完成值保留真实 facet。结果命中在复用前核对解析后的 descriptor、需求
 coverage、输出语义规则和 typed 样本约束，包含 flight 完成竞态中的二次查询。数值验证
@@ -31,7 +40,7 @@ result-region v3 键递归覆盖各消费者实际需要的上游区域、算子
 派生 demand 必须覆盖完整 Whole 值。Snapshot、bounded-scalar、compact Whole Value 有
 独立类别 tag；compact key 包含 dtype、rank/shape、精确 facet、byte 长度与原始 bytes，
 包括负零和未使用系数。更大或局部直接输入无资格。该规则用于区域执行与 execute_stream；
-纯 generic/scalar 的普通 execute 保持既有快速路径，未扩展 snapshot/disk 类型。公开
+纯 generic/scalar 的普通 execute 保持既有快速路径；磁盘结果仍仅支持既有图像/蒙版。公开
 expression workflow 检查 2048/2049+ 边界、dtype/shape/facet 分离、并发系数及缓存非法
 bounded 消费者拒绝。
 

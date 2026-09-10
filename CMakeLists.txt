@@ -139,6 +139,9 @@ set(
 
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
+  src/lib/data/dependency.cpp
+  src/lib/data/footprint.cpp
+  src/lib/data/value_fragments.cpp
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
@@ -330,6 +333,7 @@ add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
   foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
@@ -554,6 +558,13 @@ if(BUILD_TESTING)
   photospider_add_test(test_result_cache Photospider::kernel tests/integration/test_result_cache.cpp)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
+  photospider_add_test(test_dependency_dirty Photospider::kernel tests/unit/test_dependency_dirty.cpp)
+  target_include_directories(test_dependency_dirty PRIVATE src/lib)
+  photospider_add_test(test_dependency Photospider::kernel tests/unit/test_dependency.cpp)
+  add_dependencies(test_dependency photospider_g4_workflow)
+  add_test(NAME test_g4_data COMMAND photospider_g4_workflow)
+  photospider_add_test(test_footprint Photospider::kernel tests/unit/test_footprint.cpp)
+  photospider_add_test(test_value_fragments Photospider::kernel tests/unit/test_value_fragments.cpp)
   photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)

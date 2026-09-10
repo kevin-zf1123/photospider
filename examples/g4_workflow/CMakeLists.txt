@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+project(PhotospiderG4Workflow LANGUAGES CXX)
+if(NOT TARGET Photospider::kernel)
+  find_package(Photospider CONFIG REQUIRED COMPONENTS kernel)
+endif()
+add_executable(photospider_g4_workflow main.cpp)
+target_link_libraries(photospider_g4_workflow PRIVATE Photospider::kernel)
+target_compile_features(photospider_g4_workflow PRIVATE cxx_std_17)
