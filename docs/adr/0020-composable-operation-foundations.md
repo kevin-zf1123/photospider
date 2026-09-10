@@ -251,6 +251,16 @@ All new operations use Whole in this first implementation.
 | `mask.threshold` | Finite Float32 HW scalar field to typed coverage mask; threshold .5 explicitly supplied, comparison `>=`. |
 | `mask.components`, `component.count/area/bbox` | Binary typed mask to Int64 HW labels, then separate count/area/bbox nodes. Four-connectivity, row-major first-pixel labels 1..Kcap, background 0. Capacity Kcap>=1 is static; overflow fails. Count Int64 `{1}` counts foreground components; area Int64 `[Kcap+1]`, bbox Int64 `[Kcap+1,4]` in x_min,y_min,x_max_exclusive,y_max_exclusive order. Background and unused records are zero. |
 
+Component capacity is independently declared by each node in the existing exact
+bounded Int64 range `[1,2^53-1]`. Labels use canonical ScalarField metadata:
+Int64 HW, name/role `component_label`, dimensionless value/channel units, no
+capacity facet. Attribute ports require these exact facets and validate every
+label in `[0,capacity]`; sparse IDs are legal and count means distinct nonzero
+IDs. A producer with a larger declared capacity may feed a smaller consumer when
+actual IDs fit. Capacity limits final components, including merged bridges.
+Count's accounted deduplication workspace is bounded by input samples, not capacity.
+See [component operations](../kernel-architecture/Component-Operations.md).
+
 Expression grammar is limited to decimal/scientific numeric literals (no hex,
 NaN or infinity names), x, `c[index]`, parentheses,
 unary +/- and binary +,-,*,/,^, with pure `abs`, `sqrt`, `exp`, `log`, `sin`,

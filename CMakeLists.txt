@@ -75,6 +75,7 @@ set(
   plugins/ops/numeric_operations.cpp
   plugins/ops/color_operations.cpp
   plugins/ops/expression_operations.cpp
+  plugins/ops/component_operations.cpp
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
@@ -103,6 +104,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     plugins/ops/numeric_operations.cpp
     plugins/ops/color_operations.cpp
     plugins/ops/expression_operations.cpp
+    plugins/ops/component_operations.cpp
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
@@ -112,6 +114,7 @@ elseif(MSVC)
     plugins/ops/numeric_operations.cpp
     plugins/ops/color_operations.cpp
     plugins/ops/expression_operations.cpp
+    plugins/ops/component_operations.cpp
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
@@ -462,6 +465,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
+  photospider_add_test(test_component_operations Photospider::kernel tests/integration/test_component_operations.cpp)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
   add_library(expression_contract_fixture MODULE tests/fixtures/expression_contract_fixture.c)
   target_link_libraries(expression_contract_fixture PRIVATE Photospider::operation_sdk)

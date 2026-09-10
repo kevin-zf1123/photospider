@@ -2,6 +2,8 @@
 
 状态Proposed。基本mask代数/有限footprint/离散EDT为D1，连续轮廓offset与复杂区域重建为D2。mask为Float32 `[H,W]`，finite[0,1]；SDF为signed距离场，label为Int64且0表示背景。默认画布外0，扩大画布须显式pad。
 
+首版 threshold、四连通 labels、独立 count/area/bbox 已通过公开入口实现，范围、运行与结果见[组件算子](../../kernel-architecture/zh/Component-Operations.zh.md)；下述其余目录继续 Proposed。
+
 ## 软mask逻辑
 
 | algebra | AND | OR | XOR/对称差 | NOT |

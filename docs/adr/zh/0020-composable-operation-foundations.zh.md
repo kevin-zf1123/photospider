@@ -183,6 +183,14 @@ callback 前拒绝和不发布部分结果保持现有优先级。Gain `[0,16]`�
 | `mask.threshold` | Finite Float32 HW scalar field 输出 typed coverage mask；显式 threshold .5，比较 `>=`。 |
 | `mask.components`、`component.count/area/bbox` | Binary typed mask 输出 Int64 HW labels，之后用独立 count/area/bbox 节点；四连通，按 row-major 首像素编号 1..Kcap，背景 0；静态容量 Kcap>=1，超容量失败。Count Int64 `{1}` 只计前景；area Int64 `[Kcap+1]`；bbox Int64 `[Kcap+1,4]`，顺序 x_min,y_min,x_max_exclusive,y_max_exclusive；背景与未用记录为零。 |
 
+各组件节点独立声明 capacity，使用既有 exact bounded Int64 `[1,2^53-1]`。
+Labels 为 canonical ScalarField：Int64 HW、name/role `component_label`、整体/通道
+单位 dimensionless，无 capacity facet。属性端口要求精确 facets 并逐值检查
+`[0,capacity]`；允许编号空洞，count 是 distinct 非零 ID 数。较大声明容量的 producer
+可连接较小 consumer，只要实际 ID 符合范围。容量约束包含桥接后的最终组件数。
+Count 的受控去重 workspace 按输入样本数有界，不按 capacity 分配。
+参见[组件算子](../../kernel-architecture/zh/Component-Operations.zh.md)。
+
 表达式限十进制/科学计数数字（无 hex、NaN/infinity 名称）、x、`c[index]`、括号、一元 +/-、二元 +,-,*,/,^ 及纯函数
 `abs`、`sqrt`、`exp`、`log`、`sin`、`cos`、`min`、`max`。幂右结合且优先于一元负号；`0^0=1`，每个子表达式必须有限。
 UTF-8 源长度最多 4096 bytes、AST 最多 256 节点/深度 32、coefficients 最多 256、

@@ -19,6 +19,7 @@
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 #include "plugin/color_operations.hpp"
+#include "plugin/component_operations.hpp"
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/expression_operations.hpp"
 #include "plugin/image_operations.hpp"
@@ -2050,6 +2051,9 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   if (!status.ok())
     throw std::logic_error(status.message);
   status = plugin_internal::register_expression_operations(registry.get());
+  if (!status.ok())
+    throw std::logic_error(status.message);
+  status = plugin_internal::register_component_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
   registry->builtins_ = true;
