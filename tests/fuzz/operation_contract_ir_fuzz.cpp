@@ -80,9 +80,9 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ByteReader reader(data, size);
   auto operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits traits;
-  traits.version = reader.next() % (PS_OPERATION_ABI_VERSION_7 + 1U);
+  traits.version = reader.next() % (PS_OPERATION_ABI_VERSION_8 + 1U);
   traits.output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V7);
+      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V8);
   traits.shape_rule =
       static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
   traits.region_rule =

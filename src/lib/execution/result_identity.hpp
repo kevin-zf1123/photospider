@@ -45,7 +45,7 @@ inline std::vector<std::string> result_keys(
     if (prior != memo.end())
       return prior->second;
     content_internal::Sha256 hash;
-    hash.text("photospider.result-region.v3");
+    hash.text("photospider.result-region.v4");
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
     if (step.backend == Backend::Gpu)

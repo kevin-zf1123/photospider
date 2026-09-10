@@ -103,6 +103,11 @@ void append_traits(Digest* digest, const OperationTraits& traits) noexcept {
   append_facets(digest, traits.output_facets);
   digest->text(traits.output_semantic_parameter);
   digest->integer(traits.requires_dense_output);
+  digest->integer(static_cast<std::uint32_t>(traits.observation_kind));
+  digest->integer(static_cast<std::uint32_t>(traits.failure_delivery));
+  digest->integer(traits.dependency_version);
+  digest->integer(traits.continuation_bytes);
+  digest->integer(traits.maximum_dependency_stages);
 }
 
 }  // namespace ps::contract_internal

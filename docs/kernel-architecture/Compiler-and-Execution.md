@@ -119,7 +119,7 @@ and [S4 Workflow](S4-Workflow.md).
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v7 input views receive that exact
+transfer or callback entry; callbacks and ABI v8 input views receive that exact
 demand. Image and regional-source Runs lazily materialize only demanded tiles;
 Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
 The execution context must use the same frozen registry that produced the
@@ -132,8 +132,8 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v7 callback can distinguish ordinary failure from backend
-unavailability. ABI 7 additionally provides host-owned synchronous native services. The
+An operation ABI v8 callback can distinguish ordinary failure from backend
+unavailability. ABI 8 additionally provides host-owned synchronous native services. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits
 allow fallback. An output-publication attempt makes backend unavailability
@@ -226,3 +226,11 @@ storage are implemented. Sampling-domain metadata remains distinct from scalar
 value units and enters eligible result keys. Numeric, channel/color, expression/
 LUT and component families now use these contracts. The self-contained
 [foundations workflow](Foundations-Workflow.md) runs their public compositions.
+
+## G4 staged execution
+
+The current package 0.8/ABI and traits 8 adds dependency plan templates and the
+C++ start/poll/supply protocol. Whole inference rules remain available for
+synchronous implementations; dependency implementations can discover exact
+per-port fragments at run time. See [Dependency data and execution](Dependency-Data.md)
+for implemented behavior and the remaining integration work.

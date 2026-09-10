@@ -1,6 +1,7 @@
 #include "photospider/execution/execution.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -1016,6 +1017,704 @@ std::vector<bool> required_steps(const ExecutionPlan& plan,
  * stores itself in global state.
  */
 class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
+ public:
+  /** @brief Drives unresolved dependency records on the calling coordinator.
+   * @note Uses the context's existing worker/admission/allocator owners. No
+   * worker waits for an upstream record or holds unused stage reservations.
+   */
+  static Result<ExecutionResult> run_dependencies(
+      ThreadPool* pool, WaitingAdmission* admission,
+      const std::shared_ptr<MemoryBudget>& budget,
+      const std::shared_ptr<OperationRegistry>& operations,
+      const std::function<Result<Value>(const std::string&,
+                                        const OperationInvocation&)>& invoke,
+      const ExecutionPlan& plan, std::vector<ExecutionBinding> bindings,
+      const CancellationToken& cancellation, const ExecutionOptions& options,
+      const ExecutionSink* sink,
+      const std::function<void(std::uint64_t)>& reclaim) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto stop = [&] { return binding_stop(plan, cancellation); };
+    const auto fail = [&](Status status) {
+      const auto code = stop();
+      if (code != ErrorCode::Ok) {
+        status.code = code;
+        status.message.clear();
+      }
+      return Result<ExecutionResult>(std::move(status));
+    };
+    auto limits = options.dependencies.sets;
+    limits.cancellation = cancellation;
+    auto observation =
+        std::make_shared<execution_internal::MemoryObservation>();
+    ExecutionResult result;
+    auto& diagnostics = result.diagnostics;
+    diagnostics.plan_digest = plan.digest().value;
+    std::set<const CpuStorage*> external;
+    for (const auto& binding : bindings)
+      if (binding.value.valid() &&
+          external.insert(binding.value.storage().get()).second) {
+        auto bytes = checked_add(diagnostics.retained_input_bytes,
+                                 binding.value.storage()->capacity());
+        if (!bytes.ok())
+          return fail(bytes.status());
+        diagnostics.retained_input_bytes = bytes.value();
+      }
+    struct Seal {
+      std::shared_ptr<MemoryReservation> reservation;
+      ~Seal() {
+        if (reservation)
+          reservation->seal();
+      }
+    };
+    const auto reserve = [&](std::uint64_t bytes) {
+      if (reclaim)
+        reclaim(bytes);
+      // Deliberately omit the blocking stop callback. All already-live owners
+      // remain charged; an impossible minimum stage fails finitely.
+      return budget->reserve(bytes, {}, observation);
+    };
+    std::uint64_t work = options.maximum_dependency_work;
+    const auto consume = [&](std::uint64_t count = 1) -> Status {
+      if (stop() != ErrorCode::Ok)
+        return Status{stop(), {}};
+      if (count > work)
+        return Status::failure(ErrorCode::ResourceExhausted,
+                               "dependency Run work limit");
+      work -= count;
+      return Status::success();
+    };
+    static std::atomic<std::uint64_t> sequence{1};
+    auto nonce = sequence.load();
+    do {
+      if (nonce == UINT64_MAX)
+        return fail(Status::failure(ErrorCode::ResourceExhausted,
+                                    "dependency Run identities exhausted"));
+    } while (!sequence.compare_exchange_weak(nonce, nonce + 1));
+    const auto identity = "run-" + std::to_string(nonce);
+    const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
+      if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+        const auto& step = plan.steps().at(producer->step_index);
+        return {step.output_descriptor, step.output_facets};
+      }
+      const auto& declaration = plan.input_declarations().at(
+          std::get<PlanWorkflowInput>(input).declaration_index);
+      return {declaration.descriptor, declaration.facets};
+    };
+    struct Frame {
+      enum class State {
+        Initial,
+        Expand,
+        Waiting,
+        Poll,
+        Legacy,
+        Complete
+      } state = State::Initial;
+      PlanInput target;
+      Footprint outputs;
+      bool unit = false, terminal_allowed = false;
+      std::vector<Footprint> parts;
+      std::size_t next = 0;
+      std::vector<Value> values;
+      std::vector<ValueFragments> ready;
+      std::shared_ptr<DependencySession> session;
+      std::optional<ValueFragments> complete;
+      Frame(PlanInput target, Footprint outputs, bool unit = false,
+            bool terminal = false)
+          : target(std::move(target)),
+            outputs(std::move(outputs)),
+            unit(unit),
+            terminal_allowed(terminal) {}
+    };
+    // This explicit stack is a deterministic ready order. Parent frames in
+    // Waiting retain state and actual input owners, but no active reservation.
+    std::vector<Frame> frames;
+    struct Query {
+      std::size_t step;
+      std::string name;
+      Region region;
+      bool boundary;
+    };
+    std::vector<Query> queries;
+    std::map<std::size_t, ValueFragments> whole_records;
+    for (std::size_t i = 0; i < plan.steps().size(); ++i)
+      if (plan.steps()[i].whole_boundary &&
+          plan.steps()[i].traits.observation_kind !=
+              ObservationKind::RequestRecord)
+        queries.push_back(
+            {i,
+             {},
+             Region::whole(plan.steps()[i].output_descriptor.shape),
+             true});
+    for (const auto& named : plan.outputs()) {
+      const auto& step = plan.steps()[named.second];
+      const auto& region = plan.output_regions().at(named.first);
+      if (!sink ||
+          step.traits.observation_kind == ObservationKind::RequestRecord) {
+        queries.push_back({named.second, named.first, region, false});
+        continue;
+      }
+      const auto rank = region.rank();
+      std::vector<std::uint64_t> geometry(rank, 1), cursor;
+      const bool image = std::any_of(
+          step.output_facets.begin(), step.output_facets.end(),
+          [](const auto& facet) { return facet.key == "photospider.image"; });
+      if (image) {
+        geometry[0] = plan.tile_height();
+        geometry[1] = plan.tile_width();
+        geometry[2] = step.output_descriptor.shape[2];
+      } else {
+        geometry[rank - 1] = plan.tile_width();
+        if (rank > 1)
+          geometry[rank - 2] = plan.tile_height();
+      }
+      for (const auto& dimension : region.dimensions())
+        cursor.push_back(dimension.offset);
+      for (;;) {
+        auto status = consume();
+        if (!status.ok())
+          return fail(status);
+        std::vector<RegionDimension> dimensions;
+        for (std::size_t axis = 0; axis < rank; ++axis) {
+          const auto& extent = region.dimensions()[axis];
+          dimensions.push_back(
+              {cursor[axis],
+               std::min(geometry[axis],
+                        extent.offset + extent.extent - cursor[axis])});
+        }
+        queries.push_back(
+            {named.second, named.first, Region(dimensions), false});
+        std::size_t axis = rank;
+        while (axis) {
+          --axis;
+          cursor[axis] += dimensions[axis].extent;
+          if (cursor[axis] < region.dimensions()[axis].offset +
+                                 region.dimensions()[axis].extent)
+            break;
+          cursor[axis] = region.dimensions()[axis].offset;
+        }
+        if (axis == 0 && cursor[0] == region.dimensions()[0].offset)
+          break;
+      }
+    }
+    for (const auto& named : queries) {
+      auto original = Footprint::from_regions(
+          plan.steps()[named.step].output_descriptor.shape, {named.region},
+          limits);
+      if (!original.ok())
+        return fail(original.status());
+      frames.emplace_back(PlanStepInput{named.step}, original.take_value(),
+                          false, !named.boundary);
+      std::optional<ValueFragments> returned;
+      while (!frames.empty()) {
+        auto status = consume();
+        if (!status.ok())
+          return fail(status);
+        auto& frame = frames.back();
+        const auto output = metadata(frame.target);
+        if (returned) {
+          if (frame.state == Frame::State::Expand) {
+            frame.values.insert(frame.values.end(),
+                                returned->fragments().begin(),
+                                returned->fragments().end());
+          } else if (frame.state == Frame::State::Waiting) {
+            frame.ready.push_back(std::move(*returned));
+          } else {
+            return fail(Status::failure(
+                ErrorCode::Internal,
+                "dependency child returned to nonwaiting record"));
+          }
+          returned.reset();
+        }
+        if (frame.state == Frame::State::Complete) {
+          if (const auto* producer =
+                  std::get_if<PlanStepInput>(&frame.target)) {
+            const auto& step = plan.steps()[producer->step_index];
+            if (step.whole_boundary && frame.unit &&
+                step.traits.observation_kind !=
+                    ObservationKind::RequestRecord) {
+              auto whole = Footprint::all(step.output_descriptor.shape, limits);
+              if (!whole.ok())
+                return fail(whole.status());
+              if (frame.complete->coverage() != whole.value())
+                return fail(
+                    Status::failure(ErrorCode::Internal,
+                                    "incomplete Whole record publication"));
+              whole_records.emplace(producer->step_index, *frame.complete);
+            }
+          }
+          returned = std::move(frame.complete);
+          frames.pop_back();
+          continue;
+        }
+        if (frame.outputs.empty()) {
+          auto empty = ValueFragments::create(output.descriptor, output.facets,
+                                              frame.outputs, {}, limits);
+          if (!empty.ok())
+            return fail(empty.status());
+          frame.complete = empty.take_value();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        if (const auto* input = std::get_if<PlanWorkflowInput>(&frame.target)) {
+          const auto& binding = bindings.at(input->declaration_index);
+          if (binding.value.valid()) {
+            auto view =
+                ValueFragments::create(output.descriptor, output.facets,
+                                       frame.outputs, {binding.value}, limits);
+            if (!view.ok())
+              return fail(view.status());
+            frame.complete = view.take_value();
+            frame.state = Frame::State::Complete;
+            continue;
+          }
+          for (const auto& box : frame.outputs.boxes()) {
+            status = consume();
+            if (!status.ok())
+              return fail(status);
+            auto bytes = region_bytes(output.descriptor, box);
+            if (!bytes.ok())
+              return fail(bytes.status());
+            auto capacity =
+                checked_add(bytes.value(), binding.source->workspace_bytes);
+            if (!capacity.ok())
+              return fail(capacity.status());
+            auto reserved = reserve(capacity.value());
+            if (!reserved.ok())
+              return fail(reserved.status());
+            Seal seal{reserved.take_value()};
+            auto allocation = MutableValue::allocate(
+                output.descriptor, box, seal.reservation->allocator());
+            if (!allocation.ok())
+              return fail(allocation.status());
+            auto writer = allocation.take_value();
+            auto read = dependency_stage<Region>(pool, admission, [&] {
+              if (stop() != ErrorCode::Ok)
+                return Result<Region>(Status{stop(), {}});
+              return binding.source->read(
+                  box, writer.data(), writer.size(),
+                  seal.reservation->allocator(binding.source->workspace_bytes),
+                  cancellation);
+            });
+            if (!read.ok())
+              return fail(read.status());
+            if (!same_region(read.value(), box))
+              return fail(
+                  Status::failure(ErrorCode::TypeMismatch,
+                                  "source returned different coverage"));
+            if (stop() != ErrorCode::Ok)
+              return fail(Status{stop(), {}});
+            auto published = std::move(writer).publish(output.facets);
+            if (!published.ok())
+              return fail(published.status());
+            frame.values.push_back(published.take_value());
+            ++diagnostics.source_read_count;
+            auto total =
+                checked_add(diagnostics.source_read_bytes, bytes.value());
+            if (!total.ok())
+              return fail(total.status());
+            diagnostics.source_read_bytes = total.value();
+            diagnostics.peak_active_tasks = 1;
+          }
+          auto fragments =
+              ValueFragments::create(output.descriptor, output.facets,
+                                     frame.outputs, frame.values, limits);
+          if (!fragments.ok())
+            return fail(fragments.status());
+          frame.complete = fragments.take_value();
+          frame.values.clear();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        const auto step_index =
+            std::get<PlanStepInput>(frame.target).step_index;
+        const auto& step = plan.steps().at(step_index);
+        const auto retained = whole_records.find(step_index);
+        if (frame.state == Frame::State::Initial &&
+            retained != whole_records.end()) {
+          auto restricted = retained->second.restrict(frame.outputs, limits);
+          if (!restricted.ok())
+            return fail(restricted.status());
+          frame.complete = restricted.take_value();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        const bool terminal =
+            step.traits.observation_kind == ObservationKind::RequestRecord;
+        if (terminal && !frame.terminal_allowed)
+          return fail(
+              Status::failure(ErrorCode::InvalidArgument,
+                              "RequestRecord cannot supply a DAG input"));
+        if (!terminal && !step.effective_atomic)
+          return fail(
+              Status::failure(ErrorCode::InvalidArgument,
+                              "dependency producer has non-atomic ancestry"));
+        if (step.backend != Backend::Cpu)
+          return fail(Status::failure(
+              ErrorCode::BackendUnavailable,
+              "native dependency stage requires fragment access plan"));
+        if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
+          if (step.traits.dependency_version == 0 && step.whole_boundary) {
+            // The legacy Whole contract observes global validation for every
+            // request. Preserve that actual dependency; never relabel a tile.
+            auto whole = Footprint::all(output.descriptor.shape, limits);
+            if (!whole.ok())
+              return fail(whole.status());
+            frame.parts.push_back(whole.take_value());
+          } else {
+            auto observations =
+                operation_observations(output, frame.outputs, limits);
+            if (!observations.ok())
+              return fail(observations.status());
+            status = observations.value().visit(
+                [&](const auto& coordinate) {
+                  auto charged = consume();
+                  if (!charged.ok())
+                    return charged;
+                  std::vector<RegionDimension> dimensions;
+                  for (auto c : coordinate)
+                    dimensions.push_back({c, 1});
+                  auto atom = Footprint::from_regions(
+                      observations.value().shape(),
+                      {Region(std::move(dimensions))}, limits);
+                  if (!atom.ok())
+                    return atom.status();
+                  auto samples =
+                      observation_samples(output, atom.value(), limits);
+                  if (!samples.ok())
+                    return samples.status();
+                  frame.parts.push_back(samples.take_value());
+                  return Status::success();
+                },
+                work, cancellation);
+            if (!status.ok())
+              return fail(status);
+          }
+          frame.state = Frame::State::Expand;
+        }
+        if (frame.state == Frame::State::Expand) {
+          if (frame.next < frame.parts.size()) {
+            const auto query = frame.parts[frame.next++];
+            const auto target = frame.target;
+            frames.emplace_back(target, query, true);
+            continue;
+          }
+          auto fragments =
+              ValueFragments::create(output.descriptor, output.facets,
+                                     frame.outputs, frame.values, limits);
+          if (!fragments.ok())
+            return fail(fragments.status());
+          frame.complete = fragments.take_value();
+          frame.values.clear();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        if (frame.state == Frame::State::Initial) {
+          frame.parts.clear();
+          frame.next = 0;
+          if (step.traits.dependency_version == 1) {
+            DependencyRequest request;
+            for (const auto& input : step.inputs)
+              request.inputs.push_back(metadata(input));
+            request.parameters = step.parameters;
+            request.outputs = frame.outputs;
+            request.snapshot_identity = identity;
+            request.cancellation = cancellation;
+            request.limits = options.dependencies;
+            request.limits.maximum_work =
+                std::min(request.limits.maximum_work, work);
+            auto reserved =
+                reserve(std::min(step.traits.continuation_bytes,
+                                 options.dependencies.maximum_state_bytes));
+            if (!reserved.ok())
+              return fail(reserved.status());
+            Seal seal{reserved.take_value()};
+            auto session = dependency_stage<std::shared_ptr<DependencySession>>(
+                pool, admission, [&] {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<std::shared_ptr<DependencySession>>(
+                        Status{stop(), {}});
+                  return operations->start_dependency(
+                      step.operation, std::move(request),
+                      seal.reservation->allocator());
+                });
+            if (!session.ok())
+              return fail(session.status());
+            frame.session = session.take_value();
+            status = consume(frame.session->consumed_work());
+            if (!status.ok())
+              return fail(status);
+            frame.state = Frame::State::Poll;
+          } else {
+            if (frame.outputs.boxes().size() != 1)
+              return fail(Status::failure(ErrorCode::InvalidArgument,
+                                          "synchronous terminal requires a "
+                                          "rectangular complete request"));
+            for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+              auto demand = input_internal::derive_input_demand(
+                  step.traits, frame.outputs.boxes()[0],
+                  output.descriptor.shape,
+                  metadata(step.inputs[port]).descriptor.shape,
+                  step.traits.input_schema[port].kind);
+              if (!demand.ok())
+                return fail(demand.status());
+              auto footprint = Footprint::from_regions(
+                  metadata(step.inputs[port]).descriptor.shape,
+                  {demand.take_value()}, limits);
+              if (!footprint.ok())
+                return fail(footprint.status());
+              frame.parts.push_back(footprint.take_value());
+            }
+            frame.state = Frame::State::Waiting;
+          }
+        }
+        if (frame.state == Frame::State::Waiting) {
+          if (frame.next < frame.parts.size()) {
+            const auto port = frame.next++;
+            const auto query = frame.parts[port];
+            const auto target = step.inputs[port];
+            frames.emplace_back(target, query);
+            continue;
+          }
+          if (frame.session) {
+            status = frame.session->supply(std::move(frame.ready), identity);
+            if (!status.ok())
+              return fail(status);
+            frame.state = Frame::State::Poll;
+          } else {
+            frame.state = Frame::State::Legacy;
+          }
+        }
+        if (frame.state == Frame::State::Poll ||
+            frame.state == Frame::State::Legacy) {
+          auto elements = frame.outputs.element_count();
+          const auto width =
+              Value::element_size(output.descriptor.element_type);
+          if (!elements.ok() || elements.value() > UINT64_MAX / width)
+            return fail(Status::failure(ErrorCode::ResourceExhausted,
+                                        "dependency output bytes overflow"));
+          auto capacity = checked_add(
+              std::max(step.traits.estimated_bytes, elements.value() * width),
+              step.traits.workspace_bytes);
+          if (!capacity.ok())
+            return fail(capacity.status());
+          // The pending input footprint remains available after supply moved
+          // ready owners into the session. It describes exact stage scratch.
+          for (std::size_t port = 0; port < frame.parts.size(); ++port) {
+            auto count = frame.parts[port].element_count();
+            const auto scale =
+                Value::element_size(
+                    metadata(step.inputs[port]).descriptor.element_type) *
+                (step.traits.workspace_input_multiplier +
+                 (frame.session ? 0 : 1));
+            if (scale &&
+                (!count.ok() ||
+                 count.value() > (UINT64_MAX - capacity.value()) / scale))
+              return fail(
+                  Status::failure(ErrorCode::ResourceExhausted,
+                                  "dependency stage input bytes overflow"));
+            if (scale)
+              capacity = Result<std::uint64_t>(capacity.value() +
+                                               count.value() * scale);
+          }
+          auto reserved = reserve(capacity.value());
+          if (!reserved.ok())
+            return fail(reserved.status());
+          Seal seal{reserved.take_value()};
+          const auto stage_started = std::chrono::steady_clock::now();
+          if (frame.session) {
+            const auto charged_before = frame.session->consumed_work();
+            auto progress =
+                dependency_stage<DependencyProgress>(pool, admission, [&] {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<DependencyProgress>(Status{stop(), {}});
+                  return frame.session->poll(seal.reservation->allocator());
+                });
+            status = consume(frame.session->consumed_work() - charged_before);
+            if (!status.ok())
+              return fail(status);
+            if (!progress.ok())
+              return fail(progress.status());
+            if (stop() != ErrorCode::Ok)
+              return fail(Status{stop(), {}});
+            auto event = progress.take_value();
+            if (auto* complete = std::get_if<DependencyResult>(&event)) {
+              std::vector<Value> owned;
+              const auto allocator = seal.reservation->allocator();
+              for (const auto& fragment : complete->value.fragments()) {
+                if (allocator.owns(*fragment.storage()) ||
+                    external.count(fragment.storage().get())) {
+                  owned.push_back(fragment);
+                } else {
+                  auto imported = transfer_value(fragment, allocator, true);
+                  if (!imported.ok())
+                    return fail(imported.status());
+                  owned.push_back(imported.take_value());
+                }
+              }
+              auto fragments =
+                  ValueFragments::create(output.descriptor, output.facets,
+                                         frame.outputs, owned, limits);
+              if (!fragments.ok())
+                return fail(fragments.status());
+              frame.complete = fragments.take_value();
+              frame.session.reset();
+              frame.state = Frame::State::Complete;
+            } else {
+              auto pending = frame.session->pending_reads();
+              if (!pending.ok())
+                return fail(pending.status());
+              frame.parts.clear();
+              frame.ready.clear();
+              frame.next = 0;
+              for (const auto& input : step.inputs) {
+                auto none =
+                    Footprint::none(metadata(input).descriptor.shape, limits);
+                if (!none.ok())
+                  return fail(none.status());
+                frame.parts.push_back(none.take_value());
+              }
+              for (const auto& need : pending.value()) {
+                auto united =
+                    frame.parts.at(need.port).unite(need.samples, limits);
+                if (!united.ok())
+                  return fail(united.status());
+                frame.parts[need.port] = united.take_value();
+              }
+              frame.state = Frame::State::Waiting;
+            }
+          } else {
+            auto value = dependency_stage<Value>(
+                pool, admission, [&]() -> Result<Value> {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<Value>(Status{stop(), {}});
+                  std::vector<Value> inputs;
+                  std::vector<Region> demands;
+                  for (std::size_t port = 0; port < frame.parts.size();
+                       ++port) {
+                    const auto& box = frame.parts[port].boxes().at(0);
+                    auto dense = frame.ready[port].collect(
+                        box, seal.reservation->allocator(), limits);
+                    if (!dense.ok())
+                      return Result<Value>(dense.status());
+                    inputs.push_back(dense.take_value());
+                    demands.push_back(box);
+                  }
+                  OperationInvocation call{inputs,
+                                           demands,
+                                           step.parameters,
+                                           Backend::Cpu,
+                                           cancellation,
+                                           frame.outputs.boxes()[0],
+                                           seal.reservation->allocator()};
+                  auto computed = invoke(step.operation, call);
+                  if (!computed.ok())
+                    return computed;
+                  if (!call.allocator.owns(*computed.value().storage()))
+                    return transfer_value(computed.value(), call.allocator,
+                                          true);
+                  return computed;
+                });
+            if (!value.ok())
+              return fail(value.status());
+            auto fragments = ValueFragments::create(
+                output.descriptor, output.facets, frame.outputs,
+                {value.take_value()}, limits);
+            if (!fragments.ok())
+              return fail(fragments.status());
+            frame.complete = fragments.take_value();
+            frame.ready.clear();
+            frame.state = Frame::State::Complete;
+          }
+          diagnostics.peak_active_tasks = 1;
+          diagnostics.selected_backends[step.node_id] = Backend::Cpu;
+          diagnostics.operation_timings.push_back(OperationTiming{
+              step.node_id, Backend::Cpu, duration_us(stage_started),
+              ErrorCode::Ok, 1,
+              frame.state == Frame::State::Complete ? elements.value() : 0});
+        }
+      }
+      if (!returned)
+        return fail(Status::failure(ErrorCode::Internal,
+                                    "dependency output record missing"));
+      if (named.boundary)
+        continue;
+      const auto& region = named.region;
+      auto bytes = region_bytes(returned->descriptor(), region);
+      if (!bytes.ok())
+        return fail(bytes.status());
+      auto reserved = reserve(bytes.value());
+      if (!reserved.ok())
+        return fail(reserved.status());
+      Seal seal{reserved.take_value()};
+      auto value =
+          returned->collect(region, seal.reservation->allocator(), limits);
+      if (!value.ok())
+        return fail(value.status());
+      returned.reset();
+      if (stop() != ErrorCode::Ok)
+        return fail(Status{stop(), {}});
+      if (sink) {
+        auto status = (*sink)(named.name, ValueView(value.value()));
+        if (!status.ok())
+          return fail(status);
+      } else {
+        result.values.emplace(named.name, value.take_value());
+      }
+      ++diagnostics.tile_count;
+    }
+    const auto peaks = budget->peaks(observation);
+    diagnostics.peak_live_bytes = peaks.first;
+    diagnostics.planned_peak_bytes = peaks.second;
+    diagnostics.execute_us = duration_us(started);
+    if (!sink)
+      diagnostics.result_digest = result_digest(result.values);
+    if (stop() != ErrorCode::Ok)
+      return fail(Status{stop(), {}});
+    return Result<ExecutionResult>(std::move(result));
+  }
+
+ private:
+  /** @brief Runs exactly one ready stage and drains its callback ownership. */
+  template <class T>
+  static Result<T> dependency_stage(ThreadPool* pool,
+                                    WaitingAdmission* admission,
+                                    std::function<Result<T>()> work) {
+    struct Completion {
+      std::promise<Result<T>> promise;
+      Result<T> result{Status{ErrorCode::Internal, {}}};
+      std::function<Result<T>()> work;
+    };
+    auto completion = std::make_shared<Completion>();
+    completion->work = std::move(work);
+    auto future = completion->promise.get_future();
+    auto slot = admission->try_acquire();
+    if (!slot)
+      return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
+                                       "dependency waiting queue exhausted"));
+    QueuedCallback callback{
+        [completion] {
+          // The callable's owners retire before the completion notification.
+          auto work = std::move(completion->work);
+          try {
+            completion->result = work();
+          } catch (const std::bad_alloc&) {
+            completion->result =
+                Result<T>(Status{ErrorCode::ResourceExhausted, {}});
+          } catch (...) {
+            completion->result =
+                Result<T>(Status{ErrorCode::OperationFailed, {}});
+          }
+        },
+        std::move(*slot),
+        [completion] {
+          completion->promise.set_value(std::move(completion->result));
+        }};
+    if (!pool->submit(std::move(callback)))
+      return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
+                                       "dependency callback queue stopped"));
+    return future.get();
+  }
+
  public:
   /**
    * @brief Builds dependency counters and initial deterministic ready set.
@@ -2101,6 +2800,9 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
 Result<ExecutionResult> ExecutionContext::execute(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (plan.dependency_network())
+    return execute_regions(plan, std::move(bindings), nullptr, cancellation,
+                           options);
   const bool spatial = std::any_of(
       plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
         return step.traits.output_schema.kind ==
@@ -2269,6 +2971,22 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     if (!validated.ok())
       return failure(validated.status());
     auto snapshot = validated.take_value();
+    if (plan.dependency_network())
+      return ExecutionRun::run_dependencies(
+          &impl_->cpu_pool, &impl_->waiting_admission, impl_->budget,
+          impl_->operation_registry,
+          [operations = impl_->operation_registry, &plan](
+              const std::string& key, const OperationInvocation& call) {
+            return operations->invoke_current(
+                key, call, [&plan] { return plan.current(); });
+          },
+          plan, std::move(snapshot), cancellation, options, sink,
+          [this](std::uint64_t bytes) {
+            if (impl_->disk && impl_->budget->available() < bytes)
+              impl_->disk->drop_pending();
+            if (impl_->cache)
+              impl_->cache->reclaim_for(bytes);
+          });
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
     std::map<std::uint64_t, Value> cached;

@@ -18,7 +18,7 @@ Status register_core_gpu_fallback_probe(OperationRegistry* registry) {
                                  true,
                                  true,
                                  0U,
-                                 7U,
+                                 8U,
                                  true,
                                  ElementType::Float64,
                                  OperationShapeRule::PreserveFirstInput,

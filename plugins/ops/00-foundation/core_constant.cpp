@@ -18,7 +18,7 @@ Status register_core_constant(OperationRegistry* registry) {
                       simulated_gpu,
                       simulated_gpu,
                       sizeof(double),
-                      7U,
+                      8U,
                       true,
                       ElementType::Float64,
                       OperationShapeRule::Scalar,

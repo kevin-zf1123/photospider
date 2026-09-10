@@ -2,7 +2,7 @@
 
 Photospider 安装两份 narrow same-trust extension header：
 
-- operation ABI v7：copied semantic trait、closed typed parameter schema、
+- operation ABI v8：copied semantic trait、closed typed parameter schema、
   plan-derived input demand 与一个 synchronous Value callback；
 - data-provider ABI v1：copied schema key、element type 与 maximum rank。
 
@@ -72,7 +72,7 @@ C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Regist
 dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
 layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
 `estimated_bytes` 是独立的 modeled admission estimate。C DSO Fixed descriptor 更严格，
-因为 ABI v7 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
+因为 ABI v8 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
 byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last
 byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上，UInt8
 `{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被
@@ -137,10 +137,10 @@ certificate、package admission 或 process isolation。
 不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
 ABI 不构造 Value，也不提供 storage。
 
-## Version-seven 语义与输出契约
+## Version-eight 语义与输出契约
 
-Package 0.7.0、operation ABI/traits 7 替换 0.6/6。Host 先检查 version，再读取
-`get_api_v7`；无旧 table、symbol alias 或 image-v1 reader。WorkflowDocument schema 2、
+Package 0.8.0、operation ABI/traits 8 替换 0.7/7。Host 先检查 version，再读取
+`get_api_v8`；无旧 table、symbol alias 或 image-v1 reader。WorkflowDocument schema 2、
 provider ABI 1、C++17 保持。
 
 `data/semantic.hpp` 的 `SemanticDescriptor` 编码 image-v2/semantic-v1 facet，canonical
@@ -184,7 +184,7 @@ establish 或 transform；端口种类本身不建立语义。无关 opaque gene
 逻辑 C 通道覆盖，包含 generic 端口和 Whole 输出。RGB/XYZ/Lab 的三或四通道图像
 仍允许 HW 空间 Region。直接调用在 callback 前应用同一通道覆盖检查；执行、
 frozen Region 与 stream 继承规划的覆盖要求。完整约束及输出规则进入
-v7 compiler identity 和 v3 result-region key。
+v8 compiler identity 和 v4 result-region key。
 
 共享契约与八个既有算子现已支持 image-v2 signed/HDR RGB、canonical
 coverage-premultiplied D65 语义，包含符合资格的原生 Metal 执行。八算子显式保留
@@ -194,26 +194,36 @@ canonical facet；磁盘格式 2 拒绝旧格式。Bounded scalar 接受兼容 c
 使用逻辑地址，支持 padding/stride。默认 registry 也提供 CPU Whole [数值算子](Numeric-Operations.zh.md)。
 通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
 
-## ABI 7 区域视图与宿主分配
+## ABI 8 区域视图与宿主分配
 
-ABI 7 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
+ABI 8 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
 输出 sink 提供精确 descriptor/Region 和 packed 字节数，allocate_output 返回宿主输出，
 allocate_scratch 返回回调局部临时缓冲区。发布宿主输出直接冻结；发布栈/调用方数据则
 通过相同宿主分配器复制。指针只在回调期间有效，禁止自行释放或保留。通用输入允许
 backing padding，只能按 origin/stride 访问有效区域。首个发布即占用 sink，重复发布
 不能替换结果并返回 OperationFailed，宿主取消优先；资源失败保留分类。旧整图 dense
-输入/复制输出说明由本节替换，宿主在 API table 查询前拒绝 ABI 6。
+输入/复制输出说明由本节替换，宿主在 API table 查询前拒绝 ABI 7。
 
 ## S3 缩放端口
 
-ABI 7 包含 S3 引入的 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。
+ABI 8 包含 S3 引入的 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。
 有界 Int64 参数解析为 [1,16]，输出 H/W 向上取整，输入需求为裁剪 box。允许蒙版
-输出。未知布局、指针/数量失配、非法范围和旧 ABI 6 在发布前拒绝。
+输出。未知布局、指针/数量失配、非法范围和旧 ABI 7 在发布前拒绝。
 
 ## S4 宿主 GPU 服务
 
-ABI 7 输出 sink 的 gpu 指向调用内 ps_gpu_service_v7，CPU 时为空。buffer 创建宿主
+ABI 8 输出 sink 的 gpu 指向调用内 ps_gpu_service_v8，CPU 时为空。buffer 创建宿主
 分配的有界 token，禁止写入已冻结输入；execute 验证 shader、entry、bindings、常量及
 grid，完成后才返回。参数失败粘滞，不能由 callback 成功覆盖。Token/指针不跨回调
 保留，提交后错误终止 Run；无发布的数值/后端拒绝允许按 trait 回退。CPU 与 C 模块
 使用同一服务，SDK 不暴露 Objective-C 类型。详见公开头及 S4-Workflow。
+
+## G4 观察与 continuation 契约
+
+ABI/Traits 8 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C
+descriptor 复制并校验这些字段，同步调用继续可用；C 分阶段 service table 仍在本轮
+G4 实施范围。PerAtomOutcome 保留但拒绝注册，必须先具备完整逐观察 outcome 交付。
+
+C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply
+阶段执行。编译器检查全部输入祖先的 EffectiveAtomic，拒绝 RequestRecord 全部出边。
+协议、allocator 生命周期和 CPU Run 行为见 [依赖数据与执行](Dependency-Data.zh.md)。

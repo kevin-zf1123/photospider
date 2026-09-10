@@ -65,3 +65,71 @@ Focused checks are `test_footprint`, `test_value_fragments`, `test_dependency`,
 finite membership/reachability oracles, unknown rows, identity/swap, role/tag
 isolation, late dirty waves, dtype/stride/owner bounds and snapshot COW.
 See [Cache Model](Cache-Model.md) for generic snapshot identity and ownership.
+
+## Staged C++ programs and current Run integration
+
+OperationTraits 8 distinguishes local `Atomic` and terminal `RequestRecord`,
+request-only failure delivery, dependency protocol version, continuation byte
+bound and finite stage bound. Exactly one synchronous callback or staged start
+function is registered. Staged programs require deterministic, side-effect-free
+behavior. Version 1 requires RegionRule::Dependency; it permits
+static Typed/Axes/repeated inference without imposing Whole demand. Compilation
+rejects every declared edge out of RequestRecord, including unused paths, and
+computes EffectiveAtomic across all input ancestors. Dependency plans retain
+unresolved input demands instead of inventing a rectangular approximation.
+
+`start_dependency` copies validated metadata, parameters, original Q and the
+immutable input-bundle identity. Generic Atomic starts accept at most one sample;
+image-v2 starts accept at most one complete pixel. RequestRecord starts preserve
+the complete original query. PerAtomOutcome is reserved and rejected until an
+actual per-observation outcome protocol is implemented. Changing its flag cannot
+make a request-only callback batch-safe.
+
+A continuation is placement-constructed in its host allocation. `poll` consumes
+only supplied fragments and either returns exact associated Needs or a complete
+result. `supply` must match the transport union on every port and the captured
+bundle identity. Descriptor evidence remains in every atomic row even if no
+source pixels are requested. Terminal dependencies and original Q are retained
+separately and never published as an atomic certificate. The certificate identity
+includes the registry definition instance, backend, full traits, parameters,
+input/output metadata and bundle identity; different atomic queries can restrict
+or merge only under the same contract.
+
+Discovery work, poll count, continuation bytes and phase output/scratch have
+finite limits. Reads, explicit work charges and allocation failures are sticky
+even if the callback ignores their returned Status. Parent failure observers
+cannot prevent another observer from receiving the error. Accepted-call failures
+retire continuation state exactly once, release input owners and prioritize
+cancellation after cleanup. Rejected concurrent or reentrant calls leave the
+active call undisturbed. Borrowed phase/query/service references expire at return;
+concurrent destruction is forbidden. State must use the granted allocator.
+
+`ExecutionContext` currently drives dependency templates through an explicit
+record stack in ExecutionRun. Each start, poll and source callback uses the
+existing CPU worker queue and shared waiting admission. Waiting records hold no
+worker and no unused active reservation. Every stage performs nonblocking byte
+admission against the same MemoryBudget; sealing releases unused capacity while
+retained state/input/output leases stay charged. Requests beyond the realizable
+minimum working set fail ResourceExhausted. Source callbacks fill exact requested
+rectangles; sparse input ports remain ValueFragments. An unowned successful
+callback allocation is imported through the controlled allocator before escape.
+
+The default record path executes one Atomic observation at a time. Existing
+synchronous Whole implementations keep their complete global observation,
+including validation; this does not authorize broadening staged per-sample
+queries. A terminal request executes once at full original Q. The direct
+`OperationRegistry::invoke` convenience entry follows the same observation rule
+with already supplied immutable input Values. Frozen execution retains its
+captured graph and input owners. CPU dependency execution currently uses a
+serial ready order. Legacy Whole/effect boundaries run once per Run, including
+unconnected effects. Atomic streams deliver configured tiles and release each
+tile before advancing; terminal streams preserve full original Q. This respects the caller's maximum parallelism bound.
+
+The public progressive workflow and `test_dependency_program` exercise real
+source discovery, legacy-to-staged-to-legacy composition, full-Q terminal
+behavior, one-worker progress, finite admission, cancellation and frozen input
+ownership. This integration does not yet publish shared structural records or
+reuse dependency result-cache entries. Dirty propagation, shared Flights, dynamic
+built-ins, C staged services and native GPU fragment access remain part of the
+ongoing G4 implementation. The direct certificate API is implemented independently
+of those pending cache/scheduler integrations.

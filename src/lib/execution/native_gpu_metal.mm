@@ -158,7 +158,7 @@ Result<BufferView> Device::view(const std::uint8_t* bytes, std::uint64_t size,
                       "native token requires an owned bounded buffer"));
 }
 Status Device::execute(const std::vector<BufferView>& views,
-                       const ps_gpu_dispatch_v7* commands, std::uint32_t count,
+                       const ps_gpu_dispatch_v8* commands, std::uint32_t count,
                        const CancellationToken& cancellation,
                        Statistics* statistics) {
   @autoreleasepool {
@@ -171,7 +171,7 @@ Status Device::execute(const std::vector<BufferView>& views,
                              "Metal submission cancelled");
     if (!commands || count == 0 || count > 32 ||
         reinterpret_cast<std::uintptr_t>(commands) %
-            alignof(ps_gpu_dispatch_v7))
+            alignof(ps_gpu_dispatch_v8))
       return Status::failure(ErrorCode::InvalidArgument,
                              "invalid dispatch array");
     std::vector<id<MTLComputePipelineState>> pipelines;
@@ -182,7 +182,7 @@ Status Device::execute(const std::vector<BufferView>& views,
           c.entry_size > 128 || c.buffer_count > 31 ||
           (c.buffer_count != 0 && !c.buffers) ||
           (c.buffers && reinterpret_cast<std::uintptr_t>(c.buffers) %
-                            alignof(ps_gpu_buffer_binding_v7)) ||
+                            alignof(ps_gpu_buffer_binding_v8)) ||
           c.constant_size > 4096 || (c.constant_size && !c.constants) ||
           (c.constant_size && c.constant_index > 30))
         return Status::failure(ErrorCode::InvalidArgument,

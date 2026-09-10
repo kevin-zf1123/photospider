@@ -24,16 +24,16 @@ int Invocation::fail(Status status) noexcept {
   if (status_.ok())
     status_ = std::move(status);
   if (status_.code == ErrorCode::Cancelled)
-    return PS_OPERATION_RESULT_CANCELLED_V7;
+    return PS_OPERATION_RESULT_CANCELLED_V8;
   if (status_.code == ErrorCode::BackendUnavailable)
-    return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V7;
-  return PS_OPERATION_RESULT_FAILURE_V7;
+    return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V8;
+  return PS_OPERATION_RESULT_FAILURE_V8;
 }
 int Invocation::buffer(void* context, const std::uint8_t* bytes,
                        std::uint64_t size, std::uint32_t writable,
                        std::uint64_t* token) noexcept {
   if (!context)
-    return PS_OPERATION_RESULT_FAILURE_V7;
+    return PS_OPERATION_RESULT_FAILURE_V8;
   auto& self = *static_cast<Invocation*>(context);
   try {
     if (!self.status_.ok())
@@ -46,27 +46,27 @@ int Invocation::buffer(void* context, const std::uint8_t* bytes,
       return self.fail(view.status());
     self.views_.push_back(view.take_value());
     *token = self.views_.size();
-    return PS_OPERATION_RESULT_SUCCESS_V7;
+    return PS_OPERATION_RESULT_SUCCESS_V8;
   } catch (...) {
     self.status_.code = ErrorCode::ResourceExhausted;
-    return PS_OPERATION_RESULT_FAILURE_V7;
+    return PS_OPERATION_RESULT_FAILURE_V8;
   }
 }
-int Invocation::execute(void* context, const ps_gpu_dispatch_v7* commands,
+int Invocation::execute(void* context, const ps_gpu_dispatch_v8* commands,
                         std::uint32_t count) noexcept {
   if (!context)
-    return PS_OPERATION_RESULT_FAILURE_V7;
+    return PS_OPERATION_RESULT_FAILURE_V8;
   auto& self = *static_cast<Invocation*>(context);
   try {
     if (!self.status_.ok())
       return self.fail(self.status_);
     auto status = self.device_->execute(self.views_, commands, count,
                                         self.cancellation_, &self.statistics_);
-    return status.ok() ? PS_OPERATION_RESULT_SUCCESS_V7
+    return status.ok() ? PS_OPERATION_RESULT_SUCCESS_V8
                        : self.fail(std::move(status));
   } catch (...) {
     self.status_.code = ErrorCode::OperationFailed;
-    return PS_OPERATION_RESULT_FAILURE_V7;
+    return PS_OPERATION_RESULT_FAILURE_V8;
   }
 }
 #if !defined(PHOTOSPIDER_HAS_METAL)
@@ -93,7 +93,7 @@ Result<BufferView> Device::view(const std::uint8_t*, std::uint64_t, bool) {
       Status::failure(ErrorCode::BackendUnavailable, "Metal is unavailable"));
 }
 Status Device::execute(const std::vector<BufferView>&,
-                       const ps_gpu_dispatch_v7*, std::uint32_t,
+                       const ps_gpu_dispatch_v8*, std::uint32_t,
                        const CancellationToken&, Statistics*) {
   return Status::failure(ErrorCode::BackendUnavailable, "Metal is unavailable");
 }

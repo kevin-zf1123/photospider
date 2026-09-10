@@ -18,7 +18,7 @@ Status register_math_add(OperationRegistry* registry) {
                                      simulated_gpu,
                                      simulated_gpu,
                                      sizeof(double),
-                                     7U,
+                                     8U,
                                      true,
                                      ElementType::Float64,
                                      OperationShapeRule::MatchAllInputs,

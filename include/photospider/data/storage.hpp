@@ -71,6 +71,7 @@ class PHOTOSPIDER_API CpuStorage final {
   friend class MutableBuffer;
   friend class Value;
   std::shared_ptr<const void> domain_;
+  std::vector<std::shared_ptr<const void>> allocation_scopes_;
   CpuStorage() = default;
   // Declaration order makes bytes retire before their accounting lease.
   std::shared_ptr<void> lease_;
@@ -131,6 +132,25 @@ class PHOTOSPIDER_API BufferAllocator final {
   bool owns(const CpuStorage& storage) const noexcept;
   /** @brief Allocates exactly size zero-initialized bytes after reservation. */
   Result<MutableBuffer> allocate(std::uint64_t size) const;
+  /** @brief Allocation-failure notification; observer exceptions are fenced. */
+  using FailureObserver = std::function<void(ErrorCode)>;
+  /** @brief Creates an aggregate live-capacity sublimit retaining this domain.
+   * @note Copies of the returned allocator share its quota. Parent reservation
+   * and native allocation policies remain active; last-owner release returns
+   * capacity. Zero rejects every positive allocation. May throw bad_alloc.
+   * @param maximum_bytes Maximum aggregate live capacity under this scope.
+   * @param failure Optional failure observer; all parent/child observers run
+   * independently even if another observer throws.
+   * @return A quota-sharing allocator that retains the original services.
+   */
+  BufferAllocator limited(std::uint64_t maximum_bytes,
+                          FailureObserver failure = {}) const;
+  /** @brief Checks allocation provenance for a scoped allocator or descendant.
+   * @note Unscoped allocators return false. Scope identity is process-local and
+   * grants no content/cache identity. Safe after the original allocator
+   * retires.
+   */
+  bool owns_allocation(const MutableBuffer& buffer) const noexcept;
 
  private:
   friend class gpu_internal::Device;
@@ -139,5 +159,7 @@ class PHOTOSPIDER_API BufferAllocator final {
       native_allocate_;
   Reserve reserve_;
   std::shared_ptr<const void> domain_;
+  std::vector<std::shared_ptr<const void>> allocation_scopes_;
+  FailureObserver failure_;
 };
 }  // namespace ps

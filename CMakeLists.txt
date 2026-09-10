@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.7.0
+  VERSION 0.8.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -146,6 +146,8 @@ set(
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
+  src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_invocation.cpp
   src/lib/plugin/operation_contract.cpp
   src/lib/plugin/operation_semantics.cpp
   src/lib/plugin/expression.cpp
@@ -558,6 +560,8 @@ if(BUILD_TESTING)
   photospider_add_test(test_result_cache Photospider::kernel tests/integration/test_result_cache.cpp)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
+  photospider_add_test(test_dependency_program Photospider::kernel tests/integration/test_dependency_program.cpp)
+  target_include_directories(test_dependency_program PRIVATE src/lib)
   photospider_add_test(test_dependency_dirty Photospider::kernel tests/unit/test_dependency_dirty.cpp)
   target_include_directories(test_dependency_dirty PRIVATE src/lib)
   photospider_add_test(test_dependency Photospider::kernel tests/unit/test_dependency.cpp)

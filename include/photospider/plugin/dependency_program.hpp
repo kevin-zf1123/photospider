@@ -1,0 +1,227 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <new>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "photospider/compiler/workflow_document.hpp"
+#include "photospider/data/dependency.hpp"
+#include "photospider/data/value_fragments.hpp"
+#include "photospider/plugin/operation_types.hpp"
+
+namespace ps {
+struct OperationTraits;
+class OperationRegistry;
+/** @brief Execution-scoped bounds, separate from compile-time phase limits. */
+struct DependencyLimits final {
+  FootprintLimits sets;
+  std::uint64_t maximum_work = 1048576;
+  std::uint64_t maximum_state_bytes = 1048576;
+  std::uint32_t maximum_stages = 4096;
+};
+/** @brief Caller-owned metadata and exact requested sample set for direct
+ * start.
+ * @note Inputs and parameters are copied before callbacks. snapshot_identity
+ * denotes one immutable supplied input bundle; supply must name the same
+ * bundle. It is not a persistent content digest or a caller claim authorizing
+ * cache hits.
+ */
+struct DependencyRequest final {
+  std::vector<OperationMetadata> inputs;
+  std::map<std::string, ParameterValue> parameters;
+  Footprint outputs;
+  std::string snapshot_identity;
+  Backend backend = Backend::Cpu;
+  CancellationToken cancellation = {};
+  DependencyLimits limits = {};
+};
+/** @brief Validated borrowed query visible to start/poll, never retained by
+ * code.
+ * @note outputs uses descriptor coordinates; observations uses HW for image-v2
+ * pixels and the full logical shape for generic samples. RequestRecord retains
+ * complete original outputs throughout its invocation and never splits it.
+ */
+struct DependencyQuery final {
+  std::vector<OperationMetadata> inputs;
+  OperationMetadata output;
+  std::map<std::string, ParameterValue> parameters;
+  Footprint outputs;
+  Footprint observations;
+  std::string snapshot_identity;
+  ObservationKind kind = ObservationKind::Atomic;
+  Backend backend = Backend::Cpu;
+  CancellationToken cancellation = {};
+};
+/** @brief Declared next reads plus their output associations.
+ * @note Atomic programs emit associations; terminal RequestRecord programs emit
+ * request_needs. The host preserves rows separately from their transport union.
+ * A program may repeat/control reads, consuming execution fuel on every stage.
+ */
+struct DependencyNeedBatch final {
+  std::vector<AtomCertificate> associations;
+  std::vector<DependencyNeed> request_needs;
+};
+/** @brief A poll either suspends for declared inputs or completes its exact
+ * set.
+ * @note Failure is the enclosing Result status. Under RequestFailureOnly it
+ * belongs only to this single observation or identical terminal full request.
+ */
+using DependencyPoll = std::variant<DependencyNeedBatch, ValueFragments>;
+/** @brief Services borrowed only for one finite, nonblocking poll.
+ * @note inputs contains only this stage's ready authorized fragments. No read
+ * starts upstream execution. State must copy needed data through its accounted
+ * owner before returning; retaining borrowed phase/query pointers is invalid.
+ */
+struct PHOTOSPIDER_API DependencyPhase final {
+  const DependencyQuery& query;
+  const std::vector<ValueFragments>& inputs;
+  const BufferAllocator& allocator;
+  /** @brief Charges candidates before enumeration/allocation, including
+   * repeats. Trusted callbacks must charge non-read discovery work explicitly.
+   */
+  const std::function<Status(std::uint64_t)>& consume_work;
+  /** @brief Makes a service failure sticky even if callback code ignores it. */
+  const std::function<Status(Status)>& report_failure;
+  /** @brief Charged, bounds-checked sample read; no missing-page zero fallback.
+   */
+  Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,
+              void* destination, std::size_t size) const;
+};
+/** @brief Address-stable, move-only state allocated through the host allocator.
+ * @note Destruction runs exactly once before its storage lease retires. A state
+ * must finish each poll, use supplied allocators for payload/scratch, and avoid
+ * hidden external inputs. This trusted in-process contract is not a sandbox.
+ */
+class PHOTOSPIDER_API DependencyContinuation final {
+ public:
+  DependencyContinuation() = default;
+  ~DependencyContinuation() noexcept;
+  DependencyContinuation(DependencyContinuation&& other) noexcept;
+  DependencyContinuation& operator=(DependencyContinuation&& other) noexcept;
+  DependencyContinuation(const DependencyContinuation&) = delete;
+  DependencyContinuation& operator=(const DependencyContinuation&) = delete;
+  /** @brief Constructs State in host bytes; State implements poll(phase).
+   * @return Owned state or allocator/size failure; construction exceptions
+   * propagate to the registry's start fence. Overaligned state is unsupported.
+   */
+  template <class State, class... Args>
+  static Result<DependencyContinuation> make(const BufferAllocator& allocator,
+                                             Args&&... args) {
+    static_assert(alignof(State) <= alignof(std::max_align_t),
+                  "overaligned dependency state");
+    static_assert(std::is_nothrow_destructible<State>::value,
+                  "state destructor must not throw");
+    auto memory = allocator.allocate(sizeof(State));
+    if (!memory.ok())
+      return Result<DependencyContinuation>(memory.status());
+    DependencyContinuation result;
+    result.storage_ = memory.take_value();
+    new (result.storage_.data()) State(std::forward<Args>(args)...);
+    result.destroy_ = [](void* state) noexcept {
+      static_cast<State*>(state)->~State();
+    };
+    result.poll_ = [](void* state, const DependencyPhase& phase) {
+      return static_cast<State*>(state)->poll(phase);
+    };
+    return Result<DependencyContinuation>(std::move(result));
+  }
+  bool valid() const noexcept { return poll_ != nullptr; }
+  std::uint64_t state_bytes() const noexcept { return storage_.size(); }
+
+ private:
+  friend class DependencySession;
+  void reset() noexcept;
+  MutableBuffer storage_;
+  using Destroy = void (*)(void*) noexcept;  // NOLINT(readability/casting)
+  Destroy destroy_ = nullptr;
+  Result<DependencyPoll> (*poll_)(void*, const DependencyPhase&) = nullptr;
+};
+/** @brief Creates host-owned continuation without any upstream blocking call.
+ */
+using DependencyStart = std::function<Result<DependencyContinuation>(
+    const DependencyQuery&, const BufferAllocator&)>;
+/** @brief Successful complete request, with atomic or terminal evidence.
+ * @note Atomic results include a restrictable certificate. RequestRecord
+ * results have no atomic certificate and retain the complete request and
+ * dependency list.
+ */
+struct DependencyResult final {
+  ValueFragments value;
+  Footprint original_outputs;
+  ObservationKind kind = ObservationKind::Atomic;
+  std::optional<DependencyCertificate> certificate;
+  std::vector<DependencyNeed> request_dependencies;
+};
+/** @brief Poll result delivered by the validated direct protocol driver. */
+using DependencyProgress = std::variant<DependencyNeedBatch, DependencyResult>;
+/** @brief One owning start/poll/supply/retire lifecycle, with no worker
+ * ownership.
+ * @note Calls must not race destruction. Concurrent/reentrant poll or supply is
+ * rejected, never serialized behind an active callback. Borrowed phase objects
+ * expire on return; the owning registry/DSO definition survives state
+ * destruction. Accepted-call failures retire state with cancellation priority.
+ * A rejected concurrent/reentrant call leaves the active call and its state
+ * undisturbed.
+ */
+class PHOTOSPIDER_API DependencySession final {
+ public:
+  ~DependencySession() noexcept;
+  DependencySession(const DependencySession&) = delete;
+  DependencySession& operator=(const DependencySession&) = delete;
+  /** @brief Polls only with ready inputs; does not wait or execute upstream
+   * work.
+   * @return NeedBatch or complete result, or a fenced typed failure. Polling
+   * while waiting for supply or after a terminal result fails InvalidArgument.
+   * @param allocator Stage-local host output/scratch allocator.
+   * @throws std::bad_alloc For caller-side metadata copying.
+   */
+  Result<DependencyProgress> poll(
+      const BufferAllocator& allocator = BufferAllocator{});
+  /** @brief Supplies exactly the pending transport union for every input port.
+   * @param inputs Exact matching metadata and authorized sets, including empty
+   * entries for unused ports. Owners remain held only until the next poll
+   * returns.
+   * @param snapshot_identity Must equal the captured immutable bundle identity.
+   * @return Success or typed metadata/coverage/numeric/cancellation failure.
+   * Invalid supply is terminal and never enters the program callback.
+   */
+  Status supply(std::vector<ValueFragments> inputs,
+                const std::string& snapshot_identity);
+  /** @brief Exact grouped port/role projection of the current pending reads. */
+  Result<std::vector<DependencyNeed>> pending_reads() const;
+  /** @brief Read-only query, valid for the session lifetime; not mutable state.
+   */
+  const DependencyQuery& query() const noexcept;
+  /** @brief Total charged work and number of actual program polls. */
+  std::uint64_t consumed_work() const;
+  std::uint32_t poll_count() const;
+
+ private:
+  friend class OperationRegistry;
+  struct Impl;
+  explicit DependencySession(std::unique_ptr<Impl> impl);
+  static Result<std::shared_ptr<DependencySession>> create(
+      const std::string& operation, OperationTraits traits,
+      DependencyStart start, DependencyRequest request,
+      const BufferAllocator& allocator, std::shared_ptr<const void> definition);
+  std::unique_ptr<Impl> impl_;
+};
+/** @brief Resolves observation coordinates and complete-pixel closure metadata.
+ * @note Pure checked transformations; no pixel reads or storage allocation.
+ */
+PHOTOSPIDER_API Result<Footprint> operation_observations(
+    const OperationMetadata& output, const Footprint& samples,
+    const FootprintLimits& limits = {});
+PHOTOSPIDER_API Result<Footprint> observation_samples(
+    const OperationMetadata& output, const Footprint& observations,
+    const FootprintLimits& limits = {});
+}  // namespace ps

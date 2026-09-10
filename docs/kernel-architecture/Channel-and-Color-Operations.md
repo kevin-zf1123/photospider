@@ -1,7 +1,7 @@
 # Channel, alpha and color operations
 
 The default registry provides ten CPU Whole operations. They use the shared
-ABI/Traits 7 descriptor inference in [ADR 0020](../adr/0020-composable-operation-foundations.md),
+ABI/Traits 8 descriptor inference in [ADR 0020](../adr/0020-composable-operation-foundations.md),
 including public compile/execute, direct invocation and C contract loading.
 The [Chinese mirror](zh/Channel-and-Color-Operations.zh.md) follows this document.
 All outputs are packed, nonempty Values allocated through the host. Input reads

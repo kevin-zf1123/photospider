@@ -6,8 +6,14 @@ It requests coordinates 1 and 999999998 separately through the existing
 regional executor, constructs exact ValueFragments, checks that the middle hole
 cannot be read, checks a per-output certificate transpose, and imports a generic
 Int64 snapshot. Only two actual source samples are read. This scenario exercises
-the data foundation; staged scheduling scenarios are added with their runtime
-implementation.
+the data foundation.
+
+The `progressive` scenario registers a C++ staged operation through the public
+registry, compiles a billion-element workflow and executes it with one CPU worker
+and a 128-byte controlled allocation budget. Control samples 0, 1 and 3 discover
+a payload read at 999999999. The source callbacks reject every unexpected read;
+the independent expected result is 17.25 and exactly 32 source bytes.
+No full input materialization occurs.
 
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
@@ -18,6 +24,7 @@ Expected checked output:
 
 ```text
 data: values=[1,999999998], source_reads=2, hole=rejected, transpose={1}, generic_snapshot=ok
+progressive: value=17.25, controls=[0,1,3], payload=[999999999], source_bytes=32, budget=128
 ```
 
 It also builds as a standalone installed public package consumer:

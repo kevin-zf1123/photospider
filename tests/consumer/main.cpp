@@ -11,11 +11,11 @@ static_assert(__cplusplus >= 201703L,
               "the operation SDK target must propagate C++17");
 #endif
 static_assert(
-    ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V7) ==
-        PS_OPERATION_ELEMENT_FLOAT64_V7,
+    ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V8) ==
+        PS_OPERATION_ELEMENT_FLOAT64_V8,
     "the installed C++ operation wrapper must preserve ABI enum values");
 static_assert(
-    noexcept(ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V7)),
+    noexcept(ps::plugin::element_type_value(PS_OPERATION_ELEMENT_FLOAT64_V8)),
     "the installed C++ operation wrapper conversion must remain noexcept");
 
 /**
@@ -44,7 +44,7 @@ extern "C" int photospider_consumer_run_pipeline(void);
  */
 int main() {
   if (photospider_sdk_version_sum() !=
-      PS_OPERATION_ABI_VERSION_7 + PS_DATA_PROVIDER_ABI_VERSION_1) {
+      PS_OPERATION_ABI_VERSION_8 + PS_DATA_PROVIDER_ABI_VERSION_1) {
     return 4;
   }
   return photospider_consumer_run_pipeline();

@@ -203,7 +203,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v7");
+  digest.text("semantic-graph-ir-v8");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -226,6 +226,7 @@ std::string semantic_digest(
       append_parameter(&digest, parameter.second);
     }
     contract_internal::append_traits(&digest, node.traits);
+    digest.integer(node.effective_atomic);
     append_descriptor(&digest, node.output_descriptor);
     contract_internal::append_facets(&digest, node.output_facets);
   }
@@ -275,7 +276,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v7");
+  digest.text("physical-plan-v8");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -322,6 +323,7 @@ std::string physical_digest(
     digest.integer(static_cast<std::uint32_t>(step.backend));
     digest.integer(step.planned_bytes);
     contract_internal::append_traits(&digest, step.traits);
+    digest.integer(step.effective_atomic);
     append_descriptor(&digest, step.output_descriptor);
     contract_internal::append_facets(&digest, step.output_facets);
     append_region(&digest, step.output_demand);
@@ -454,7 +456,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v7");
+  digest.text("plan-cache-key-v8");
   digest.text(plan);
   return digest.finish();
 }
@@ -511,6 +513,13 @@ std::uint64_t microseconds(
 
 }  // namespace
 
+bool ExecutionPlan::dependency_network() const noexcept {
+  for (const auto& step : steps_)
+    if (step.traits.dependency_version || !step.effective_atomic)
+      return true;
+  return false;
+}
+
 Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
                                                const Region& region) const {
   if (!current() || operation_registry_.expired())
@@ -536,6 +545,21 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument, "tile must contain all image channels"));
   ExecutionPlan tile = *this;
+  if (dependency_network()) {
+    tile.outputs_ = {{name, named->second}};
+    tile.output_regions_ = {{name, region}};
+    tile.steps_[named->second].output_demand = region;
+    tile.physical_steps_.clear();
+    tile.digest_.value = physical_digest(
+        tile.optimized_digest_.value, tile.steps_, tile.outputs_,
+        tile.input_declarations_, tile.output_regions_, tile.tile_height_,
+        tile.tile_width_, tile.execution_mode_, tile.physical_steps_);
+    tile.cache_key_.value = plan_cache_key(tile.digest_.value);
+    if (!current())
+      return Result<ExecutionPlan>(
+          Status::failure(ErrorCode::Stale, "dependency template changed"));
+    return Result<ExecutionPlan>(std::move(tile));
+  }
   std::vector<std::optional<Region>> demands(steps_.size());
   demands[named->second] = region;
   for (std::size_t reverse = steps_.size(); reverse > 0; --reverse) {
@@ -703,6 +727,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
   nodes_by_id.reserve(document.nodes.size());
   std::unordered_map<std::uint64_t, std::size_t> indegree;
+  std::unordered_map<std::uint64_t, ObservationKind> local_observations;
   std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> dependents;
   for (const WorkflowNode& node : document.nodes) {
     if (node.id == 0U || !valid_text(node.operation, 1024U) ||
@@ -740,6 +765,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       return Result<SemanticGraphIR>(parameter_status);
     }
     indegree.emplace(node.id, 0);
+    local_observations.emplace(node.id, traits.value().observation_kind);
   }
 
   for (const WorkflowNode& node : document.nodes) {
@@ -751,6 +777,11 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
               Status::failure(ErrorCode::NotFound,
                               "workflow input references a missing producer"));
         }
+        if (local_observations.at(source->source_node) ==
+            ObservationKind::RequestRecord)
+          return Result<SemanticGraphIR>(Status::failure(
+              ErrorCode::InvalidArgument,
+              "RequestRecord output cannot feed any DAG consumer"));
         dependents[source->source_node].push_back(node.id);
         ++indegree[node.id];
       } else if (declaration_by_id.count(
@@ -786,6 +817,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   semantic.revision_ = snapshot.revision();
   semantic.input_declarations_ = declarations;
   std::map<std::uint64_t, std::vector<ValueFacet>> output_facets;
+  std::map<std::uint64_t, bool> effective_atomic;
   std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::unordered_map<std::uint64_t, ValueDescriptor> output_by_node;
@@ -807,6 +839,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!resolved.ok())
       return Result<SemanticGraphIR>(resolved.status());
     node.traits = resolved.take_value();
+    node.effective_atomic =
+        node.traits.observation_kind == ObservationKind::Atomic;
     node.inputs.reserve(source.inputs.size());
     std::vector<OperationMetadata> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
@@ -818,6 +852,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       ValueDescriptor descriptor;
       std::vector<ValueFacet> facets;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
+        if (!effective_atomic.at(producer->source_node))
+          return Result<SemanticGraphIR>(Status::failure(
+              ErrorCode::InvalidArgument,
+              "consumer requires EffectiveAtomic input ancestry"));
+        node.effective_atomic =
+            node.effective_atomic && effective_atomic.at(producer->source_node);
         descriptor = output_by_node.at(producer->source_node);
         facets = output_facets.at(producer->source_node);
       } else {
@@ -851,7 +891,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     }
     node.output_descriptor = output.value().descriptor;
     node.output_facets = output.value().facets;
-    for (std::size_t i = 0; i < input_descriptors.size(); ++i) {
+    for (std::size_t i = 0;
+         i < input_descriptors.size() && !node.traits.dependency_version; ++i) {
       auto demand = input_internal::derive_input_demand(
           node.traits, Region::whole(node.output_descriptor.shape),
           node.output_descriptor.shape, input_descriptors[i].descriptor.shape,
@@ -859,6 +900,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       if (!demand.ok())
         return Result<SemanticGraphIR>(demand.status());
     }
+    effective_atomic.emplace(node.id, node.effective_atomic);
     output_facets.emplace(node.id, node.output_facets);
     output_by_node.emplace(node.id, node.output_descriptor);
     semantic.nodes_.push_back(std::move(node));
@@ -967,6 +1009,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     step.operation = node.operation;
     step.parameters = node.parameters;
     step.traits = node.traits;
+    step.effective_atomic = node.effective_atomic;
     step.whole_boundary =
         node.traits.region_rule == OperationRegionRule::Whole ||
         !node.traits.deterministic || !node.traits.side_effect_free;
@@ -1020,6 +1063,45 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument,
         "planning options contain too many named output Regions"));
+  }
+  if (plan.dependency_network()) {
+    for (const auto& requested : options.output_regions)
+      if (!plan.outputs_.count(requested.first))
+        return Result<ExecutionPlan>(Status::failure(
+            ErrorCode::InvalidArgument, "unknown dependency output"));
+    for (auto& step : plan.steps_) {
+      step.output_demand = Region::whole(step.output_descriptor.shape);
+      step.input_demands.clear();
+      step.planned_bytes =
+          0;  // A template has no resolved live-set reservation.
+    }
+    for (const auto& output : plan.outputs_) {
+      auto& step = plan.steps_[output.second];
+      const auto requested = options.output_regions.find(output.first);
+      const auto region = requested == options.output_regions.end()
+                              ? Region::whole(step.output_descriptor.shape)
+                              : requested->second;
+      if (region.empty() ||
+          !region.validate(step.output_descriptor.shape).ok() ||
+          !input_internal::complete_image_channels(step.output_descriptor,
+                                                   step.output_facets, region))
+        return Result<ExecutionPlan>(Status::failure(
+            ErrorCode::InvalidArgument, "invalid dependency output region"));
+      plan.output_regions_.emplace(output.first, region);
+      step.output_demand = region;
+    }
+    plan.optimized_digest_ = optimized.digest();
+    plan.digest_.value = physical_digest(
+        plan.optimized_digest_.value, plan.steps_, plan.outputs_,
+        plan.input_declarations_, plan.output_regions_, plan.tile_height_,
+        plan.tile_width_, plan.execution_mode_, plan.physical_steps_);
+    plan.cache_key_.value = plan_cache_key(plan.digest_.value);
+    plan.current_check_ = optimized.current_check_;
+    plan.operation_registry_ = operations_;
+    if (!plan.current())
+      return Result<ExecutionPlan>(
+          Status::failure(ErrorCode::Stale, "dependency template changed"));
+    return Result<ExecutionPlan>(std::move(plan));
   }
   std::vector<std::optional<Region>> demand_by_step(plan.steps_.size());
   for (const auto& requested : options.output_regions) {

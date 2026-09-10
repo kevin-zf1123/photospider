@@ -2,7 +2,7 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v7: copied semantic traits, closed typed parameter schema,
+- operation ABI v8: copied semantic traits, closed typed parameter schema,
   ordered scalar/image port constraints, plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
@@ -93,7 +93,7 @@ type/rules, and the ordinary trait combinations without evaluating a dense
 element or byte product. The callback may return any Value layout that passes
 normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
-admission estimate. A C DSO Fixed descriptor is stricter because ABI v7 carries
+admission estimate. A C DSO Fixed descriptor is stricter because ABI v8 carries
 no output strides: loading separately requires representable contiguous
 signed strides and uint64 byte count. For total dense bytes `B`, the loader
 also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
@@ -172,10 +172,10 @@ certificate, package-admission, or process-isolation system.
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
 
-## Version-seven semantic and output contracts
+## Version-eight semantic and output contracts
 
-Package 0.7.0/operation ABI and traits 7 replace 0.6/6. The host checks version
-before `get_api_v7`; no old table, symbol alias or image-v1 reader remains.
+Package 0.8.0/operation ABI and traits 8 replace 0.7/7. The host checks version
+before `get_api_v8`; no old table, symbol alias or image-v1 reader remains.
 WorkflowDocument schema 2/provider ABI 1/C++17 remain.
 
 `SemanticDescriptor` in `data/semantic.hpp` encodes image-v2 and semantic-v1
@@ -238,7 +238,7 @@ require all logical C channels, including generic ports and Whole outputs.
 Spatial HW Regions remain valid for RGB/XYZ/Lab images with three or four
 channels. Direct invocation applies the same channel-coverage check before the
 callback; execution, frozen Regions and streaming inherit planned coverage.
-Complete constraints and output rules enter v7 compiler identities and v3
+Complete constraints and output rules enter v8 compiler identities and v4
 result-region keys.
 
 The shared contract and the eight existing operations now support image-v2
@@ -255,11 +255,11 @@ representations; the eight existing operation ports require canonical RGBA.
 
 ## S3 scaled ports
 
-ABI 7 includes the S3 Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 6 fail before publication.
+ABI 8 includes the S3 Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 7 fail before publication.
 
 ## S4 host GPU service
 
-The ABI 7 output sink carries an invocation-local ps_gpu_service_v7 pointer,
+The ABI 8 output sink carries an invocation-local ps_gpu_service_v8 pointer,
 null on CPU. buffer() creates a bounded token for host allocation and cannot
 promote frozen inputs to writable. execute() validates source/entry, bindings,
 constants and grid, and returns only after native completion. Failures are
@@ -268,3 +268,17 @@ return. Submitted device execution errors terminate the Run; unpublished numeric
 or backend rejection may use trait-permitted CPU fallback. Both built-ins and
 the independent C module use this service without exposing Objective-C types.
 See the public C header and [S4 Workflow](S4-Workflow.md).
+
+## G4 observation and continuation contract
+
+ABI/Traits 8 adds Atomic versus terminal RequestRecord and explicit
+RequestFailureOnly delivery. The current C descriptor copies and validates these
+fields; its synchronous invocation remains available. The C staged service table
+is pending in the G4 implementation. PerAtomOutcome is reserved and rejected
+until complete per-observation outcome delivery exists.
+
+The C++ registry accepts an alternative `start_dependency` with bounded host
+continuation, poll and supply phases. The compiler checks EffectiveAtomic on all
+input ancestors and forbids every outgoing RequestRecord edge. Actual protocol,
+allocator lifetime and CPU Run behavior are documented in
+[Dependency data and execution](Dependency-Data.md).

@@ -240,8 +240,9 @@ Status validate_port_schema(const OperationTraits& traits) {
            traits.shape_rule == OperationShapeRule::PreserveFirstInput))) ||
         ((port.kind == OperationPortKind::RgbaFloat32 ||
           port.kind == OperationPortKind::Float32Mask) &&
-         traits.region_rule != OperationRegionRule::Whole && !image_output &&
-         !mask_output)) {
+         traits.region_rule != OperationRegionRule::Whole &&
+         traits.region_rule != OperationRegionRule::Dependency &&
+         !image_output && !mask_output)) {
       return failure(ErrorCode::InvalidArgument,
                      "invalid input port combination");
     }
@@ -263,6 +264,10 @@ Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
     const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
+  if (traits.region_rule == OperationRegionRule::Dependency)
+    return Result<Region>(
+        Status::failure(ErrorCode::InvalidArgument,
+                        "dependency program requires runtime resolution"));
   const Status output_status = output_demand.validate(output_shape);
   if (!output_status.ok() || output_demand.empty()) {
     return Result<Region>(Status::failure(
@@ -310,6 +315,10 @@ Result<Region> derive_input_demand(
         input_shape, input_shape, OperationPortKind::Value);
   }
   switch (traits.region_rule) {
+    case OperationRegionRule::Dependency:
+      return Result<Region>(
+          failure(ErrorCode::InvalidArgument,
+                  "runtime dependency relation is unresolved"));
     case OperationRegionRule::Shrink:
       break;
     case OperationRegionRule::Whole:

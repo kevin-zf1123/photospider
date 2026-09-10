@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(PhotospiderRgba32fOperations VERSION 1.0.0 LANGUAGES C)
 
 if(NOT TARGET Photospider::operation_sdk)
-  find_package(Photospider 0.7 CONFIG REQUIRED COMPONENTS operation_sdk)
+  find_package(Photospider 0.8 CONFIG REQUIRED COMPONENTS operation_sdk)
 endif()
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/image.metal")

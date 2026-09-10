@@ -47,8 +47,8 @@ coverage mask。Straight alpha、RGB-only、重排通道及其他颜色模型须
 ## 可复用算子包与可执行示例
 
 [`plugins/ops/rgba32f`](../../../plugins/ops/rgba32f/CMakeLists.txt) 仅通过
-`Photospider::operation_sdk` 构建受维护的 ABI7 C module `photospider_rgba32f_ops`。
-它实现相同图像算子和 profile，使用严格浮点编译选项。ABI7 host 在进入 callback
+`Photospider::operation_sdk` 构建受维护的 ABI8 C module `photospider_rgba32f_ops`。
+它实现相同图像算子和 profile，使用严格浮点编译选项。ABI8 host 在进入 callback
 之前验证 port 并建立 nearest/gradual-underflow 浮点环境。Callback 向宿主申请输出并发布同一 buffer；成功后冻结为只读，失败时释放且不发布。将可信包加载到空
 registry，随后 freeze 再编译；default registry 已有相同 operation key。
 
@@ -100,7 +100,7 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 
 ## S2 Gaussian、蒙版与合成
 
-默认 registry 和受维护 ABI7 C 包还提供：
+默认 registry 和受维护 ABI8 C 包还提供：
 
 | Operation | 有序输入 | 必填静态参数 | Region 规则 |
 | --- | --- | --- | --- |
@@ -145,7 +145,7 @@ ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin
 
 ## S3 box 缩小与圆章
 
-package 0.7 / operation ABI 7 的内建与 C 模块提供 image.downsample_box、
+package 0.8 / operation ABI 8 的内建与 C 模块提供 image.downsample_box、
 mask.downsample_box、image.brush_circle。前两者分别接收既有 RGBA 图像和 HW 蒙版，
 必需静态 Int64 factor 为 [1,16]，无隐式默认。输出 H/W 除以 factor 向上取整，
 反向需求为裁剪后的整数 box。按行/列 binary64 累加，以实际覆盖样本数平均并舍入
@@ -165,7 +165,7 @@ test_s3_operations [trusted-module] 通过公开 compile/execute 使用独立 bo
 
 ## S4 原生 Metal 实现
 
-package 0.7 / operation ABI 7 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
+package 0.8 / operation ABI 8 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
 八个算子，共用 image.metal 与参数转换。CMake 在构建目录生成 shader 字符串头；
 安装消费者不依赖源码路径或 Objective-C++ 配置。
 

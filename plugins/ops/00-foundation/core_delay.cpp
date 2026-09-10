@@ -19,7 +19,7 @@ Status register_core_delay(OperationRegistry* registry) {
           false,
           false,
           0U,
-          7U,
+          8U,
           false,
           ElementType::Float64,
           OperationShapeRule::PreserveFirstInput,

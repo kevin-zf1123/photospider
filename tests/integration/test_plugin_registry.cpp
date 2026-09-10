@@ -1368,7 +1368,10 @@ int main() {
   {
     OperationRegistry registry;
     PS_CHECK(registry.load_plugin(PS_OPERATION_FIXTURE_PATH).ok());
+    LibraryObserver bad_version(PS_OPERATION_BAD_FIXTURE_PATH);
+    PS_CHECK(bad_version.counter("ps_bad_operation_api_calls") == 0);
     PS_CHECK(!registry.load_plugin(PS_OPERATION_BAD_FIXTURE_PATH).ok());
+    PS_CHECK(bad_version.counter("ps_bad_operation_api_calls") == 0);
     PS_CHECK(
         !registry.load_plugin(PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH)
              .ok());
@@ -1395,7 +1398,7 @@ int main() {
     auto traits = registry.find_traits("fixture.double");
     PS_CHECK(traits.ok());
     PS_CHECK(traits.value().input_count == 1U);
-    PS_CHECK(traits.value().version == 7U);
+    PS_CHECK(traits.value().version == 8U);
     PS_CHECK(traits.value().parameter_schema.size() == 1U);
     PS_CHECK(traits.value().parameter_schema.front().key == "scale");
     PS_CHECK(traits.value().parameter_schema.front().type ==

@@ -28,7 +28,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 7)
+  if (count > 1024 || traits.version != 8)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -262,6 +262,21 @@ Result<OperationMetadata> infer_operation_output(
 }
 namespace input_internal {
 Status validate_operation_contract(const OperationTraits& t) {
+  if (t.dependency_version && (!t.deterministic || !t.side_effect_free))
+    return invalid(
+        "staged programs require deterministic side-effect-free behavior");
+  if ((t.observation_kind != ObservationKind::Atomic &&
+       t.observation_kind != ObservationKind::RequestRecord) ||
+      t.failure_delivery != FailureDelivery::RequestFailureOnly ||
+      t.dependency_version > 1 ||
+      ((t.dependency_version == 1) !=
+       (t.region_rule == OperationRegionRule::Dependency)) ||
+      (t.dependency_version == 0 &&
+       (t.continuation_bytes || t.maximum_dependency_stages)) ||
+      (t.dependency_version == 1 &&
+       (!t.continuation_bytes || !t.maximum_dependency_stages ||
+        t.maximum_dependency_stages > 1048576)))
+    return invalid("invalid dependency observation/phase contract");
   const auto spec = [&](const std::string& name, OperationParameterType type) {
     return std::any_of(t.parameter_schema.begin(), t.parameter_schema.end(),
                        [&](const auto& p) {
@@ -288,7 +303,8 @@ Status validate_operation_contract(const OperationTraits& t) {
   }
   if (t.shape_rule == OperationShapeRule::Axes) {
     if (t.output_axes.empty() || t.output_axes.size() > 8 ||
-        t.region_rule != OperationRegionRule::Whole)
+        (t.region_rule != OperationRegionRule::Whole &&
+         t.region_rule != OperationRegionRule::Dependency))
       return invalid("axes require bounded rank and Whole region");
   } else if (!t.output_axes.empty()) {
     return invalid("unexpected output axes");
@@ -310,11 +326,13 @@ Status validate_operation_contract(const OperationTraits& t) {
   }
   if ((t.repeated_maximum ||
        t.output_schema.kind == OperationPortKind::Typed) &&
-      t.region_rule != OperationRegionRule::Whole)
+      (t.region_rule != OperationRegionRule::Whole &&
+       t.region_rule != OperationRegionRule::Dependency))
     return invalid("new typed/repeated contract requires Whole");
   for (const auto& port : t.input_schema)
     if (port.kind == OperationPortKind::Typed &&
-        t.region_rule != OperationRegionRule::Whole)
+        (t.region_rule != OperationRegionRule::Whole &&
+         t.region_rule != OperationRegionRule::Dependency))
       return invalid("typed inputs require Whole");
   auto facets = t.output_facets;
   if (!canonicalize_facets(&facets).ok() ||
@@ -356,7 +374,8 @@ Status validate_operation_contract(const OperationTraits& t) {
     case OperationSemanticRule::SampleExpression:
     case OperationSemanticRule::ApplyLut1d: {
       const auto rule = t.output_semantic_rule;
-      if (t.region_rule != OperationRegionRule::Whole ||
+      if ((t.region_rule != OperationRegionRule::Whole &&
+           t.region_rule != OperationRegionRule::Dependency) ||
           !t.output_facets.empty() || t.output_semantic_input >= maximum ||
           (rule == OperationSemanticRule::MergeChannelsParameter &&
            t.output_semantic_input))

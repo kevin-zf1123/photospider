@@ -125,3 +125,16 @@ interfaces on ops-foundations, including canonical typed facets and complete
 constraint/dense-output identity. This remains local branch implementation;
 #290–#297 and verified delivery into ops are separate completion gates. Main
 remains at the decision baseline until independently authorized work changes it.
+
+## G4 implementation versions
+
+The G4 development branch uses package 0.8.0, operation ABI/OperationTraits 8,
+semantic-graph-ir-v8, physical-plan-v8, plan-cache-key-v8 and result-region-key-v4.
+The five observation/failure/dependency fields and EffectiveAtomic participate in
+the applicable identities. Optimizer-v5-canonical-noop, result digest v2, disk
+framing v2, image facet v2, schema 2 and provider ABI 1 retain their meanings.
+Version 7 DSOs are rejected before reading get_api_v8. No old aliases or image-v1
+reader are provided. C++ consumers rebuild against 0.8. The prior foundations
+paragraphs above describe their historical implementation boundary. C++ staged
+protocol and CPU Run integration are implemented; the C staged table and
+structural shared-result integration remain work in this G4 delivery.

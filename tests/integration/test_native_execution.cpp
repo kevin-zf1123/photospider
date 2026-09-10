@@ -39,11 +39,11 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
         api->buffer(api->context, output.data(), output.size(), 1, &result))
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::OperationFailed, "native binding failed"));
-    ps_gpu_buffer_binding_v7 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v7), 0, input, 0,
+    ps_gpu_buffer_binding_v8 buffers[] = {
+        {sizeof(ps_gpu_buffer_binding_v8), 0, input, 0,
          call.inputs[0].bytes().size(), 0},
-        {sizeof(ps_gpu_buffer_binding_v7), 1, result, 0, output.size(), 1}};
-    ps_gpu_dispatch_v7 command{};
+        {sizeof(ps_gpu_buffer_binding_v8), 1, result, 0, output.size(), 1}};
+    ps_gpu_dispatch_v8 command{};
     command.struct_size = sizeof(command);
     command.source = source;
     command.source_size = sizeof(source) - 1;

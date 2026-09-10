@@ -11,7 +11,7 @@ The installed `Photospider::kernel` target provides:
 
 - schema-2 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v7 semantic traits with closed typed parameter schemas,
+- operation ABI v8 semantic traits with closed typed parameter schemas,
   optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - eight signed/HDR Float32 image-v2/mask operations with composable bounded scalars;

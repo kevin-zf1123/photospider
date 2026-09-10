@@ -13,21 +13,10 @@
 #include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
+#include "photospider/plugin/dependency_program.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 
 namespace ps {
-
-/**
- * @brief Local physical backend selected for one plan step.
- *
- * @note GPU names one optional in-process lane, never a remote device.
- * `OperationRegistry::invoke` rejects every unknown numeric representation
- * before capability selection or callback entry.
- */
-enum class Backend : std::uint32_t {
-  Cpu = 1,
-  Gpu = 2,
-};
 
 /** @brief Closed compile-time output-shape inference rule. */
 enum class OperationShapeRule : std::uint32_t {
@@ -61,6 +50,8 @@ enum class OperationRegionRule : std::uint32_t {
   Halo = 3U,
   /** @brief Map output cells to their clipped factor-sized input boxes. */
   Shrink = 4U,
+  /** @brief Exact per-port requirements are resolved by the staged protocol. */
+  Dependency = 5U,
 };
 
 /** @brief Closed source-parameter type vocabulary published by an operation. */
@@ -110,7 +101,8 @@ enum class OperationPortKind : std::uint32_t {
   RgbaFloat32 = 3,
   /** @brief Float32 {H,W} with canonical typed coverage and finite [0,1]. */
   Float32Mask = 4,
-  /** @brief Generic typed semantic constraint; Whole in this version. */
+  /** @brief Generic typed semantic constraint; Whole or staged dependency
+     demand. */
   Typed = 5,
 };
 /**
@@ -122,10 +114,10 @@ enum class OperationPortKind : std::uint32_t {
  * addressing. Other kinds require positive-zero bound bits. RgbaFloat32 uses
  * the canonical photospider.image v2 descriptor returned by rgba_semantics();
  * Float32Mask uses typed coverage_semantics(). Typed ports constrain kind/exact
- * facets, dtype and rank, conservatively with Whole demand. Output facets are
- * inferred independently from dtype/shape. Invalid computed numbers fail
- * OperationFailed before consumer entry, including cache hits; direct numeric
- * binding errors remain InvalidArgument.
+ * facets, dtype and rank, using Whole or a staged dependency program. Output
+ * facets are inferred independently from dtype/shape. Invalid computed numbers
+ * fail OperationFailed before consumer entry, including cache hits; direct
+ * numeric binding errors remain InvalidArgument.
  */
 struct PHOTOSPIDER_API OperationPortConstraint final {
   /** @brief Closed port kind; scalar output is unsupported. */
@@ -246,7 +238,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 7U;
+  std::uint32_t version = 8U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Static output type for scalar or descriptor validation. */
@@ -300,9 +292,9 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief Output semantic inference, copied into every compiler identity. */
   OperationSemanticRule output_semantic_rule = OperationSemanticRule::Drop;
   /** @brief Source for preserve/extract/swizzle/alpha/color transformations.
-   * @note Transformations require Whole and statically known compatible
-   * metadata. Swizzle emits generic output when selected roles cannot form a
-   * valid descriptor.
+   * @note Transformations require Whole or Dependency and statically known
+   * compatible metadata. Swizzle emits generic output when selected roles
+   * cannot form a valid descriptor.
    */
   std::uint32_t output_semantic_input = 0;
   std::vector<ValueFacet> output_facets = {};
@@ -318,14 +310,18 @@ struct PHOTOSPIDER_API OperationTraits final {
    * may leave it false. This semantic requirement participates in identities.
    */
   bool requires_dense_output = false;
+  /** @brief Local declaration; compiler checks all ancestors before reuse. */
+  ObservationKind observation_kind = ObservationKind::Atomic;
+  /** @brief All relevant stages must implement the declared error delivery. */
+  FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
+  /** @brief Zero for synchronous callback, one for the staged read protocol. */
+  std::uint32_t dependency_version = 0;
+  /** @brief Host-allocated state bound and finite poll limit for staged code.
+   */
+  std::uint64_t continuation_bytes = 0;
+  std::uint32_t maximum_dependency_stages = 0;
 };
 
-/** @brief Owned static Value metadata shared by compiler and direct invocation.
- */
-struct PHOTOSPIDER_API OperationMetadata final {
-  ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
-};
 /** @brief Expands an operation template and resolves its static parameters.
  * @param traits Validated registry template, copied and never modified.
  * @param input_count Actual input count, at most 1024.
@@ -418,7 +414,7 @@ struct PHOTOSPIDER_API OperationInvocation final {
    */
   BufferAllocator allocator;
   /** @brief Borrowed native services; valid only during this invocation. */
-  const ps_gpu_service_v7* gpu = nullptr;
+  const ps_gpu_service_v8* gpu = nullptr;
 };
 
 /** @brief Function signature for one synchronous operation invocation. */
@@ -441,6 +437,8 @@ struct PHOTOSPIDER_API OperationDefinition final {
   OperationTraits traits;
   /** @brief Required synchronous implementation callback. */
   OperationCallback callback;
+  /** @brief Alternative staged implementation; exactly one callback/start. */
+  DependencyStart start_dependency = {};
 };
 
 /**
@@ -516,7 +514,7 @@ class PHOTOSPIDER_API OperationRegistry final {
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
    * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v7 carries no output strides.
+   * must be densely representable because ABI v8 carries no output strides.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);
@@ -581,6 +579,15 @@ class PHOTOSPIDER_API OperationRegistry final {
   [[nodiscard]] Result<Value> invoke(
       const std::string& key, const OperationInvocation& invocation) const;
 
+  /** @brief Starts one validated atomic observation or complete terminal query.
+   * @note Uses the frozen definition and host allocator. Default request-only
+   * failure delivery rejects multi-observation atomic starts before callbacks.
+   * The returned handle owns state/definition; it has no upstream scheduler.
+   */
+  Result<std::shared_ptr<DependencySession>> start_dependency(
+      const std::string& key, DependencyRequest request,
+      const BufferAllocator& allocator = BufferAllocator{}) const;
+
   /**
    * @brief Returns the sorted immutable operation-key inventory.
    * @return Exact key list.
@@ -609,6 +616,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @note The probe is never retained in registry or compiled stage state.
    */
   [[nodiscard]] Result<Value> invoke_current(
+      const std::string& key, const OperationInvocation& invocation,
+      const std::function<bool()>& current) const;
+  Result<Value> invoke_dependency_current(
       const std::string& key, const OperationInvocation& invocation,
       const std::function<bool()>& current) const;
   /** @brief Opaque synchronized registry and DSO ownership state. */

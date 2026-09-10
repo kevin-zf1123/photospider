@@ -9,6 +9,8 @@
 
 #include "photospider/photospider.hpp"
 
+void progressive_workflow();
+
 namespace {
 void require(bool condition, const char* message) {
   if (!condition)
@@ -58,8 +60,7 @@ void data_workflow() {
   const auto request = checked(Footprint::from_regions(
       descriptor.shape, {Region({{1, 1}}), Region({{width - 2, 1}})}));
   std::vector<Value> values;
-  // The current data scenario drives existing regional execution once per
-  // rectangle; it does not claim a staged dependency coordinator is installed.
+  // This scenario constructs fragments from separate rectangular requests.
   for (const auto& region : request.boxes()) {
     const auto plan = checked(compiled.plan.tile_plan("result", region));
     auto result =
@@ -105,6 +106,7 @@ void data_workflow() {
 int main() {
   try {
     data_workflow();
+    progressive_workflow();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

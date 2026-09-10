@@ -125,6 +125,10 @@ struct PHOTOSPIDER_API ExecutionBindings final {
 struct PHOTOSPIDER_API ExecutionOptions final {
   /** @brief Maximum in-flight plan steps for this Run. */
   std::uint32_t maximum_parallelism = 0;
+  /** @brief Per-session discovery/metadata limits for dependency plans. */
+  DependencyLimits dependencies = {};
+  /** @brief Run-wide bound on demand records and stage transitions. */
+  std::uint64_t maximum_dependency_work = 1048576;
 };
 
 /**
