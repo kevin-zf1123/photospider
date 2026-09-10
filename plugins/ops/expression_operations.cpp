@@ -152,7 +152,7 @@ Result<double> interpolate(const Value& table, double query,
   double error = lost * (std::abs(a) + std::abs(b));
   error += add_split(&numerator, std::fma(a, right.high, -ar));
   error += add_split(&numerator, std::fma(b, left.high, -bl));
-  for (const auto term :
+  for (const auto& term :
        {std::pair<double, double>{a, right.low}, {b, left.low}}) {
     const double product = term.first * term.second;
     error += add_split(&numerator, product);
