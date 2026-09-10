@@ -52,11 +52,17 @@ Run each row with `--scenario NAME`:
 | `generator-gain` / `generators.cpp` | Snapshot RGBA and dynamic Float64 coefficient; count-one `c[0]*2` feeds exposure gain; one plan run sequentially/concurrently | Independent results for each coefficient; actual warm cache hits; invalid fresh/cached gain and NaN coefficients enter gain callback zero times |
 | `components` / `components.cpp` | Empty mask; connected bridge; 3x3 diagonal checkerboard; signed field→threshold→labels→count | Zero empty labels/count and nonempty zero tables; bridge area 5/bbox `[0,0,3,2]`; stable diagonal IDs `[1,0,2,0,3,0,4,0,5]`; capacity overflow rejected |
 
-The final line is `Foundations scenarios=6 oracle=passed backend=cpu` for all.
+The four additional scenarios in `basic.cpp` are `basic-curves` (PCHIP/channel
+LUT/premul mix, alpha=.5), `basic-masks` (Boolean/closing/feather, coverage=1/9),
+`basic-filters` (asymmetric kernels, histogram [0,3] and overflow [0,0]), and
+`basic-fields` (coordinates/smoothstep/local levels, alpha=1). Their complete
+interfaces and Whole/Elementwise/Halo rules are in [Basic operations](../../docs/kernel-architecture/Basic-Operations.md).
+
+The final line is `Foundations scenarios=10 oracle=passed backend=cpu` for all.
 Every success line is printed after comparing computed samples against independent
 constants or fractions. Cache-hit counts are actual diagnostics and may vary.
 
-All new numeric/channel/color/expression/LUT/component operators use Whole,
+The original numeric/channel/color/expression/LUT/component operators use Whole,
 including the component scene's 1x1 planning tiles: connectivity covers the whole
 input. Every Value has nonzero shape and complete coverage. Existing exposure
 gain keeps its image Region rule and validates the complete Float32 `{1}` scalar

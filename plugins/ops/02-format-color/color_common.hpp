@@ -1,21 +1,24 @@
-#include "plugin/color_operations.hpp"
+#pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "00-foundation/numeric_common.hpp"
 #include "data/input_validation.hpp"
-#include "numeric_common.hpp"  // NOLINT(build/include_subdir)
 
-namespace ps::plugin_internal {
-namespace {
-Result<OperationMetadata> metadata(const OperationTraits& traits,
-                                   const OperationInvocation& call) {
+namespace ps::plugin_internal::color_ops {
+inline Result<OperationMetadata> metadata(const OperationTraits& traits,
+                                          const OperationInvocation& call) {
   auto resolved =
       resolve_operation_traits(traits, call.inputs.size(), call.parameters);
   if (!resolved.ok())
@@ -25,15 +28,15 @@ Result<OperationMetadata> metadata(const OperationTraits& traits,
     inputs.push_back({input.descriptor(), input.facets()});
   return infer_operation_output(resolved.value(), inputs, call.parameters);
 }
-SemanticDescriptor semantic(const Value& value) {
+inline SemanticDescriptor semantic(const Value& value) {
   for (const auto& facet : value.facets())
     if (facet.key == "photospider.image" || facet.key == "photospider.semantic")
       return decode_semantic(facet).take_value();
   return {};
 }
-Result<Value> publish(MutableValue output,
-                      const std::vector<ValueFacet>& facets,
-                      const CancellationToken& cancellation) {
+inline Result<Value> publish(MutableValue output,
+                             const std::vector<ValueFacet>& facets,
+                             const CancellationToken& cancellation) {
   if (cancellation.cancelled()) {
     Status status;
     status.code = ErrorCode::Cancelled;
@@ -41,8 +44,8 @@ Result<Value> publish(MutableValue output,
   }
   return std::move(output).publish(facets);
 }
-Result<Value> channels(const OperationInvocation& call,
-                       const OperationTraits& traits) {
+inline Result<Value> channels(const OperationInvocation& call,
+                              const OperationTraits& traits) {
   auto inferred = metadata(traits, call);
   if (!inferred.ok())
     return Result<Value>(inferred.status());
@@ -89,9 +92,9 @@ Result<Value> channels(const OperationInvocation& call,
 // Rational sRGB/D65 matrices and CIELAB thresholds: W3C CSS Color 4
 // https://www.w3.org/TR/css-color-4/#color-conversion-code
 // Reference white is always supplied by the typed descriptor; no adaptation.
-std::array<double, 3> transform_color(const std::array<double, 3>& input,
-                                      const SemanticDescriptor& source,
-                                      OperationSemanticRule rule) {
+inline std::array<double, 3> transform_color(const std::array<double, 3>& input,
+                                             const SemanticDescriptor& source,
+                                             OperationSemanticRule rule) {
   constexpr double rgb_xyz[3][3] = {
       {506752. / 1228815, 87881. / 245763, 12673. / 70218},
       {87098. / 409605, 175762. / 245763, 12673. / 175545},
@@ -131,8 +134,8 @@ std::array<double, 3> transform_color(const std::array<double, 3>& input,
   }
   return result;
 }
-Result<Value> colors(const OperationInvocation& call,
-                     const OperationTraits& traits) {
+inline Result<Value> colors(const OperationInvocation& call,
+                            const OperationTraits& traits) {
   input_internal::Float32Environment environment;
   if (!environment.active())
     return Result<Value>(Status::failure(
@@ -213,89 +216,5 @@ Result<Value> colors(const OperationInvocation& call,
   }
   return publish(std::move(output), meta.facets, call.cancellation);
 }
-}  // namespace
-Status register_color_operations(OperationRegistry* registry) {
-  const char* keys[] = {"channel.extract",   "channel.swizzle",
-                        "channel.merge",     "alpha.associate",
-                        "alpha.unassociate", "color.rgb_to_xyz",
-                        "color.xyz_to_rgb",  "color.xyz_to_lab",
-                        "color.lab_to_xyz",  "color.assign"};
-  const OperationSemanticRule rules[] = {
-      OperationSemanticRule::ExtractChannel,
-      OperationSemanticRule::SwizzleChannels,
-      OperationSemanticRule::MergeChannelsParameter,
-      OperationSemanticRule::AssociateAlpha,
-      OperationSemanticRule::UnassociateAlpha,
-      OperationSemanticRule::RgbToXyz,
-      OperationSemanticRule::XyzToRgb,
-      OperationSemanticRule::XyzToLab,
-      OperationSemanticRule::LabToXyz,
-      OperationSemanticRule::Parameter};
-  for (std::size_t i = 0; i < 10; ++i) {
-    OperationDefinition operation;
-    operation.key = keys[i];
-    auto& t = operation.traits;
-    t.output_semantic_rule = rules[i];
-    t.input_count = 1;
-    t.input_schema.resize(1);
-    auto& port = t.input_schema[0];
-    port.kind = OperationPortKind::Typed;
-    port.rank = 3;
-    port.element_type_mask = 12;
-    t.output_schema.kind = OperationPortKind::Typed;
-    t.output_dtype_rule = OperationDtypeRule::Input;
-    t.shape_rule = OperationShapeRule::PreserveFirstInput;
-    t.requires_dense_output = true;
-    if (i < 3) {
-      t.shape_rule = OperationShapeRule::Axes;
-      t.output_axes = {{OperationExtentSource::InputAxis, 1, {}, 0, 0, 0},
-                       {OperationExtentSource::InputAxis, 1, {}, 0, 1, 0}};
-      if (i == 0) {
-        t.output_semantic_parameter = "index";
-        t.parameter_schema = {
-            {"index", OperationParameterType::Int64, true, true, 0, 63}};
-      } else if (i == 1) {
-        port.kind = OperationPortKind::Value;
-        t.output_schema.kind = OperationPortKind::Value;
-        t.output_semantic_parameter = "indices";
-        t.parameter_schema = {
-            {"indices", OperationParameterType::String, true}};
-        t.output_axes.push_back(
-            {OperationExtentSource::IndexListCount, 1, "indices", 0, 0, 0});
-      } else {
-        port.kind = OperationPortKind::Value;
-        port.rank = 2;
-        t.input_count = 0;
-        t.repeated_minimum = 2;
-        t.repeated_maximum = 4;
-        t.output_semantic_parameter = "semantic";
-        t.parameter_schema = {
-            {"semantic", OperationParameterType::String, true}};
-        t.output_axes.push_back(
-            {OperationExtentSource::InputCount, 1, {}, 0, 0, 0});
-      }
-    } else {
-      port.element_type_mask = 0;
-      port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
-      port.semantic_kind = static_cast<std::uint32_t>(SemanticKind::Image);
-      t.output_schema.semantic_kind =
-          static_cast<std::uint32_t>(SemanticKind::Image);
-      if (i == 9) {
-        port.kind = OperationPortKind::Value;
-        port.semantic_kind = 0;
-        t.output_semantic_parameter = "semantic";
-        t.parameter_schema = {
-            {"semantic", OperationParameterType::String, true}};
-      }
-    }
-    operation.callback = [traits = t,
-                          channel = i < 3](const OperationInvocation& call) {
-      return channel ? channels(call, traits) : colors(call, traits);
-    };
-    auto status = registry->register_operation(std::move(operation));
-    if (!status.ok())
-      return status;
-  }
-  return Status::success();
-}
-}  // namespace ps::plugin_internal
+
+}  // namespace ps::plugin_internal::color_ops

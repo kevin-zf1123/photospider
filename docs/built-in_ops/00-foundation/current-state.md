@@ -24,7 +24,7 @@
 | `mask.downsample_box` | 同上，HW mask | 蒙版预览缩小 |
 | `image.brush_circle` | image,x,y,radius,r,g,b,a；硬边圆点 source-over | 单次硬边盖印，不含连续笔迹/压感/抗锯齿 |
 
-出处：[注册与参数](../../../plugins/ops/image_operations.cpp)、[C ABI 模块](../../../plugins/ops/rgba32f/image_plugin.c)、[完整图像语义](../../kernel-architecture/Image-Operations.md)。同一组 8 项已有可选 Metal 实现；CPU exact 为默认，MetalFp32 显式选择且具有数值 eligibility 与逐算子 CPU fallback，不能由此推断所有新算子已有 GPU 支持。[S4 使用说明](../../kernel-architecture/S4-Workflow.md)
+出处：[注册与参数](../../../plugins/ops/README.md)、[C ABI 模块](../../../plugins/ops/rgba32f/image_plugin.c)、[完整图像语义](../../kernel-architecture/Image-Operations.md)。同一组 8 项已有可选 Metal 实现；CPU exact 为默认，MetalFp32 显式选择且具有数值 eligibility 与逐算子 CPU fallback，不能由此推断所有新算子已有 GPU 支持。[S4 使用说明](../../kernel-architecture/S4-Workflow.md)
 
 ## 现有数据和编译器限制
 

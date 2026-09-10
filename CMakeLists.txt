@@ -69,13 +69,74 @@ endif()
 
 find_package(Threads REQUIRED)
 
+set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/00-foundation/core_constant.cpp
+  plugins/ops/00-foundation/core_delay.cpp
+  plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
+  plugins/ops/00-foundation/core_identity.cpp
+  plugins/ops/01-numeric/curve_sample_linear.cpp
+  plugins/ops/01-numeric/curve_sample_monotone.cpp
+  plugins/ops/01-numeric/field_apply_lut_1d.cpp
+  plugins/ops/01-numeric/field_smoothstep.cpp
+  plugins/ops/01-numeric/lut_apply_1d.cpp
+  plugins/ops/01-numeric/math_add.cpp
+  plugins/ops/01-numeric/numeric_abs.cpp
+  plugins/ops/01-numeric/numeric_add.cpp
+  plugins/ops/01-numeric/numeric_cast.cpp
+  plugins/ops/01-numeric/numeric_clamp.cpp
+  plugins/ops/01-numeric/numeric_divide.cpp
+  plugins/ops/01-numeric/numeric_encode_range.cpp
+  plugins/ops/01-numeric/numeric_maximum.cpp
+  plugins/ops/01-numeric/numeric_mean.cpp
+  plugins/ops/01-numeric/numeric_minimum.cpp
+  plugins/ops/01-numeric/numeric_multiply.cpp
+  plugins/ops/01-numeric/numeric_sample_expression.cpp
+  plugins/ops/01-numeric/numeric_subtract.cpp
+  plugins/ops/01-numeric/numeric_variance.cpp
+  plugins/ops/02-format-color/alpha_associate.cpp
+  plugins/ops/02-format-color/alpha_unassociate.cpp
+  plugins/ops/02-format-color/channel_extract.cpp
+  plugins/ops/02-format-color/channel_merge.cpp
+  plugins/ops/02-format-color/channel_swizzle.cpp
+  plugins/ops/02-format-color/color_assign.cpp
+  plugins/ops/02-format-color/color_lab_to_xyz.cpp
+  plugins/ops/02-format-color/color_rgb_to_xyz.cpp
+  plugins/ops/02-format-color/color_xyz_to_lab.cpp
+  plugins/ops/02-format-color/color_xyz_to_rgb.cpp
+  plugins/ops/03-generation/field_constant.cpp
+  plugins/ops/03-generation/field_coordinate.cpp
+  plugins/ops/04-mask-morphology/component_area.cpp
+  plugins/ops/04-mask-morphology/component_bbox.cpp
+  plugins/ops/04-mask-morphology/component_count.cpp
+  plugins/ops/04-mask-morphology/mask_combine.cpp
+  plugins/ops/04-mask-morphology/mask_components.cpp
+  plugins/ops/04-mask-morphology/mask_dilate.cpp
+  plugins/ops/04-mask-morphology/mask_erode.cpp
+  plugins/ops/04-mask-morphology/mask_invert.cpp
+  plugins/ops/04-mask-morphology/mask_threshold.cpp
+  plugins/ops/05-filter/field_box_mean.cpp
+  plugins/ops/05-filter/field_convolve.cpp
+  plugins/ops/05-filter/field_correlate.cpp
+  plugins/ops/05-filter/field_gaussian_blur.cpp
+  plugins/ops/05-filter/image_gaussian_blur.cpp
+  plugins/ops/07-grade/grade_levels.cpp
+  plugins/ops/07-grade/image_exposure_gain.cpp
+  plugins/ops/08-transform/image_downsample_box.cpp
+  plugins/ops/08-transform/mask_downsample_box.cpp
+  plugins/ops/09-composite/image_brush_circle.cpp
+  plugins/ops/09-composite/image_mask.cpp
+  plugins/ops/09-composite/image_mix.cpp
+  plugins/ops/09-composite/image_opacity.cpp
+  plugins/ops/09-composite/image_source_over.cpp
+  plugins/ops/10-analysis/analysis_histogram.cpp
+  plugins/ops/10-analysis/analysis_histogram_out_of_range.cpp
+)
+
 set(
   PHOTOSPIDER_KERNEL_SOURCES
-  plugins/ops/image_operations.cpp
-  plugins/ops/numeric_operations.cpp
-  plugins/ops/color_operations.cpp
-  plugins/ops/expression_operations.cpp
-  plugins/ops/component_operations.cpp
+  ${PHOTOSPIDER_OPERATION_SOURCES}
+  src/lib/plugin/builtin_operations.cpp
+
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/region.cpp
@@ -100,21 +161,15 @@ if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
 endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  set_source_files_properties(plugins/ops/image_operations.cpp
-    plugins/ops/numeric_operations.cpp
-    plugins/ops/color_operations.cpp
-    plugins/ops/expression_operations.cpp
-    plugins/ops/component_operations.cpp
+  set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
+
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 elseif(MSVC)
-  set_source_files_properties(plugins/ops/image_operations.cpp
-    plugins/ops/numeric_operations.cpp
-    plugins/ops/color_operations.cpp
-    plugins/ops/expression_operations.cpp
-    plugins/ops/component_operations.cpp
+  set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
+
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
@@ -179,7 +234,7 @@ function(photospider_configure_kernel_target target)
     ${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
       ${CMAKE_CURRENT_BINARY_DIR}/plugins/ops/rgba32f)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
@@ -466,9 +521,11 @@ if(BUILD_TESTING)
   photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
   add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
   add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
-  foreach(_scenario cast-range channels alpha-color expression-lut generator-gain components all)
+  foreach(_scenario cast-range channels alpha-color expression-lut generator-gain components basic-curves basic-masks basic-filters basic-fields all)
     add_test(NAME test_foundations_${_scenario} COMMAND photospider_foundations_workflow --scenario ${_scenario})
   endforeach()
+  photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
+  target_include_directories(test_basic_operations PRIVATE examples)
   photospider_add_test(test_component_operations Photospider::kernel tests/integration/test_component_operations.cpp)
   add_dependencies(test_component_operations photospider_foundations_workflow)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)

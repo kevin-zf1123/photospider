@@ -57,7 +57,7 @@ output. Do not extend ABI, implicit broadcasting or GPU support.
   fuzzy (.5,.5,0), independent (.25,.75,.5), for AND/OR/XOR.
 - [NumPy histogram](https://numpy.org/doc/stable/reference/generated/numpy.histogram.html):
   final-bin endpoint inclusion is adopted; automatic ranges, weights, density
-  and multi-output tuples are excluded. Histograms cost O(HW+bins).
+  and multi-output tuples are excluded. Stable Float64 edges and binary search cost O(HW*log(bins)+bins).
 - [Khronos smoothstep](https://registry.khronos.org/SPIR-V/specs/unified1/GLSL.std.450.html)
   supplies the clamped cubic formula; invalid/reversed endpoints are explicit
   errors here. Levels is an explicitly chosen power-law interface, with

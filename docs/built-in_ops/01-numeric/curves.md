@@ -1,5 +1,7 @@
 # 曲线、采样与 LUT
 
+2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+
 状态Proposed。标量插值/查表为D1，通用Path与LUT烘焙/求逆为D2。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，shape/辅助表/有界scalar组合需G3/G4/G5。
 
 ## 表示与目录

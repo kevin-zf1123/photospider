@@ -1,6 +1,6 @@
 # 内建图像算子需求与研究规格
 
-2026-09-10 补充：G1/G2/G3/G5 的限定基础子集已由 [ADR 0020](../adr/0020-composable-operation-foundations.md) 接受，#287 追踪实现；全部八个旧算子将升级 image v2 并删除 v1 支持。其余目录仍为 Proposed。新接口在对应实现 Issue 完成前不能用于当前 registry。
+2026-09-11 更新：G1/G2/G3/G5 的限定基础子集已通过 PR #298 交付。新增基础算子见[实现说明](../kernel-architecture/zh/Basic-Operations.zh.md)。C++ 算子按本目录的职责分类组织，每个算子一个源文件，见[源码目录](../../plugins/ops/README.md)。其余目录项仍为 Proposed。
 
 本目录面向 Photospider 算子实现者、workflow 作者和使用这些能力的图像应用。目标是覆盖 Photoshop、Lightroom、Camera Raw、DaVinci Resolve、Clip Studio Paint、Nuke、After Effects 中主要的图像处理与分析能力，并拆解为可组合、可验证的计算接口。
 

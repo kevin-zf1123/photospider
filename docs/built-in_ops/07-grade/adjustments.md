@@ -1,5 +1,7 @@
 # 调色与局部色调
 
+2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+
 状态 Proposed；逐像素明确公式为D1，局部tone mapping、复杂色域压缩和商业控制匹配为D2。输入为描述明确的RGB/Lab等图像，可选mask；默认保留alpha。参考使用Float32颜色、Float64系数与统计，GPU FP32须单独验证。E/H/W为数学依赖；辅助LUT/统计表的完整输入需求仍需G4。
 
 ## 调色目录
