@@ -1,5 +1,9 @@
 # 当前实现与规格前置条件
 
+2026-09-11 更新：`ops@2495393c` 已合并 foundations PR #298，#287/#288–#297 已交付。
+当前实现使用 package 0.7 / ABI 7；以下旧基线与限制属于历史研究。
+本轮基础算子研究见 [basic operations](basic-operations-research.md)。
+
 2026-09-10 契约补充：执行基线为 `main@fba06270`、package 0.6.0/ABI 6。
 以下表格记录原研究的 0.6 限制，不能用作新目标。[ADR 0020](../../adr/0020-composable-operation-foundations.md)
 已接受 image v2 完整替换、四 dtype、静态输出及 computed scalar；#287/#288–#297
