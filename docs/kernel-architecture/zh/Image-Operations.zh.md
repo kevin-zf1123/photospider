@@ -1,7 +1,7 @@
 # Float32 图像算子
 
 默认 registry 包含 CPU 算子，实现位于
-[`plugins/ops/image_operations.cpp`](../../../plugins/ops/image_operations.cpp)。
+[`plugins/ops/README.md`](../../../plugins/ops/README.md)。
 下列两个 S1 算子都有两个有序 runtime Value input，无 compile-time parameter 或隐式默认值，
 输出一个由 workflow 命名的区域图像。
 

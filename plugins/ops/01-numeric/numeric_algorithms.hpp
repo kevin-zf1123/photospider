@@ -1,33 +1,36 @@
-#include "plugin/numeric_operations.hpp"
+#pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "00-foundation/numeric_common.hpp"
 #include "data/input_validation.hpp"
-#include "numeric_common.hpp"  // NOLINT(build/include_subdir)
 
-namespace ps::plugin_internal {
-namespace {
+namespace ps::plugin_internal::numeric_ops {
 using numeric_internal::numeric_failure;
 using numeric_internal::read;
 using numeric_internal::visit;
-Status argument(const char* message) {
+inline Status argument(const char* message) {
   return Status::failure(ErrorCode::InvalidArgument, message);
 }
-ElementType target_type(const std::string& name) {
+inline ElementType target_type(const std::string& name) {
   return name == "uint8"     ? ElementType::UInt8
          : name == "int64"   ? ElementType::Int64
          : name == "float32" ? ElementType::Float32
                              : ElementType::Float64;
 }
-Result<Value> publish(MutableValue value, const CancellationToken& token) {
+inline Result<Value> publish(MutableValue value,
+                             const CancellationToken& token) {
   if (token.cancelled()) {
     Status status;
     status.code = ErrorCode::Cancelled;
@@ -37,7 +40,7 @@ Result<Value> publish(MutableValue value, const CancellationToken& token) {
 }
 /** @brief Checked conversion never routes integer sources through binary64. */
 template <class Destination, class Source>
-bool convert(Source input, Destination* output, bool clip) {
+inline bool convert(Source input, Destination* output, bool clip) {
   if constexpr (std::is_integral_v<Destination>) {
     if constexpr (std::is_integral_v<Source>) {
       if constexpr (std::is_same_v<Destination, std::uint8_t> &&
@@ -90,8 +93,8 @@ bool convert(Source input, Destination* output, bool clip) {
   return true;
 }
 template <class Source>
-bool write_cast(Source input, ElementType target, std::uint8_t* output,
-                bool clip) {
+inline bool write_cast(Source input, ElementType target, std::uint8_t* output,
+                       bool clip) {
   switch (target) {
     case ElementType::UInt8: {
       std::uint8_t number;
@@ -220,9 +223,9 @@ struct Range {
   }
 };
 template <class Source>
-Status cast_samples(const OperationInvocation& call, MutableValue* output,
-                    ElementType target, bool clip, bool encode,
-                    const Range& range) {
+inline Status cast_samples(const OperationInvocation& call,
+                           MutableValue* output, ElementType target, bool clip,
+                           bool encode, const Range& range) {
   const auto& input = call.inputs[0];
   const auto width = Value::element_size(target);
   return visit(
@@ -253,7 +256,7 @@ Status cast_samples(const OperationInvocation& call, MutableValue* output,
         return Status::success();
       });
 }
-Result<Value> cast(const OperationInvocation& call, bool encode) {
+inline Result<Value> cast(const OperationInvocation& call, bool encode) {
   input_internal::Float32Environment environment;
   if (!environment.active())
     return Result<Value>(argument("numeric environment unavailable"));
@@ -304,7 +307,8 @@ Result<Value> cast(const OperationInvocation& call, bool encode) {
   return publish(std::move(output), call.cancellation);
 }
 template <class Number>
-Result<Value> arithmetic(const OperationInvocation& call, unsigned kind) {
+inline Result<Value> arithmetic(const OperationInvocation& call,
+                                unsigned kind) {
   input_internal::Float32Environment environment;
   if (!environment.active())
     return Result<Value>(argument("numeric environment unavailable"));
@@ -353,7 +357,7 @@ Result<Value> arithmetic(const OperationInvocation& call, unsigned kind) {
   return publish(std::move(output), call.cancellation);
 }
 template <class Number>
-Result<Value> reduction(const OperationInvocation& call, bool variance) {
+inline Result<Value> reduction(const OperationInvocation& call, bool variance) {
   input_internal::Float32Environment environment;
   if (!environment.active())
     return Result<Value>(argument("numeric environment unavailable"));
@@ -400,71 +404,5 @@ Result<Value> reduction(const OperationInvocation& call, bool variance) {
   std::memcpy(output.data(), &result, sizeof(result));
   return publish(std::move(output), call.cancellation);
 }
-}  // namespace
-Status register_numeric_operations(OperationRegistry* registry) {
-  const double maximum = std::numeric_limits<double>::max();
-  for (bool encode : {false, true}) {
-    OperationDefinition operation;
-    operation.key = encode ? "numeric.encode_range" : "numeric.cast";
-    auto& t = operation.traits;
-    t.input_count = 1;
-    t.input_schema.resize(1);
-    t.shape_rule = OperationShapeRule::PreserveFirstInput;
-    t.output_dtype_rule = OperationDtypeRule::Parameter;
-    t.output_dtype_parameter = "dtype";
-    t.requires_dense_output = true;
-    t.parameter_schema = {{"dtype", OperationParameterType::String, true},
-                          {"rounding", OperationParameterType::String, true},
-                          {"overflow", OperationParameterType::String, true}};
-    if (encode)
-      for (const char* key : {"src_min", "src_max", "dst_min", "dst_max"})
-        t.parameter_schema.push_back({key, OperationParameterType::Float64,
-                                      true, true, -maximum, maximum});
-    operation.callback = [encode](const OperationInvocation& call) {
-      return cast(call, encode);
-    };
-    auto status = registry->register_operation(std::move(operation));
-    if (!status.ok())
-      return status;
-  }
-  const char* names[] = {
-      "numeric.add",   "numeric.subtract", "numeric.multiply", "numeric.divide",
-      "numeric.clamp", "numeric.mean",     "numeric.variance"};
-  for (unsigned kind = 0; kind < 7; ++kind) {
-    OperationDefinition operation;
-    operation.key = names[kind];
-    auto& t = operation.traits;
-    t.input_schema.resize(1);
-    t.input_schema[0].element_type_mask = 12;
-    t.requires_dense_output = true;
-    if (kind < 4) {
-      t.repeated_minimum = t.repeated_maximum = 2;
-      t.repeated_match = 1;
-    } else {
-      t.input_count = 1;
-    }
-    if (kind < 5) {
-      t.shape_rule = OperationShapeRule::PreserveFirstInput;
-      t.output_dtype_rule = OperationDtypeRule::Input;
-    }
-    if (kind == 4)
-      t.parameter_schema = {{"min", OperationParameterType::Float64, true, true,
-                             -maximum, maximum},
-                            {"max", OperationParameterType::Float64, true, true,
-                             -maximum, maximum}};
-    operation.callback = [kind](const OperationInvocation& call) {
-      const bool fp32 =
-          call.inputs[0].descriptor().element_type == ElementType::Float32;
-      if (kind < 5)
-        return fp32 ? arithmetic<float>(call, kind)
-                    : arithmetic<double>(call, kind);
-      return fp32 ? reduction<float>(call, kind == 6)
-                  : reduction<double>(call, kind == 6);
-    };
-    auto status = registry->register_operation(std::move(operation));
-    if (!status.ok())
-      return status;
-  }
-  return Status::success();
-}
-}  // namespace ps::plugin_internal
+
+}  // namespace ps::plugin_internal::numeric_ops

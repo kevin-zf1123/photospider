@@ -1,5 +1,7 @@
 # 空间滤波、边缘与细节
 
+2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+
 状态Proposed。确定核/局部统计/导数为D1，复杂保边、多尺度和后处理AA为D2。通用核输入为signed real `[H,W,C]`和kernel `[Kh,Kw]`；颜色wrapper另负责alpha/transfer。CPU参考Float64累加，输出Float32/64；GPU支持须逐算法验证。
 
 ## 共同参数

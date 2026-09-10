@@ -45,10 +45,10 @@ build/photospider_foundations_workflow --scenario all
 | generator-gain / generators.cpp | Snapshot RGBA，动态 Float64 系数，count=1 的 c[0]*2→gain，同 plan 顺序/并发 | 独立绑定结果，实际 warm cache hit；fresh/cached 非法 gain 和 NaN 系数进入 gain callback 零次 |
 | components / components.cpp | 空 mask、bridge、3x3 对角棋盘、signed field→threshold→labels→count | 空 labels/count 零及非空零表；bridge area=5/bbox `[0,0,3,2]`；稳定 IDs `[1,0,2,0,3,0,4,0,5]`；超容量拒绝 |
 
-All 最后一行 `Foundations scenarios=6 oracle=passed backend=cpu`。每行成功信息在
+All 最后一行 `Foundations scenarios=10 oracle=passed backend=cpu`。每行成功信息在
 对独立常量/分数 oracle 核查后打印，cache-hit 数值为实际诊断。
 
-所有新增算子 Whole，组件场景即使规划 1x1 tile 仍跨整幅连接。每个 Value shape 非零且
+原有 numeric/channel/color/expression/LUT/component 算子使用 Whole，组件场景即使规划 1x1 tile 仍跨整幅连接。每个 Value shape 非零且
 完整覆盖。既有 gain 保持 image Region 规则并在消费前验证完整 Float32 `{1}`。
 Signal 的采样轴与样本单位分别声明；示例均 dimensionless。颜色保留 signed，不隐式
 夹 gamut 或适应参考白。
@@ -78,3 +78,10 @@ signal 20 后，作为 gain 时违反 `[0,16]` 并拒绝。
 
 完整参数/错误契约与 focused tests 见[基础 workflow 指南](../../docs/kernel-architecture/zh/Foundations-Workflow.zh.md)。
 本示例交付到 ops 线；daemon 0.6 迁移、G4/G6、FFT、完整路径、ICC/OCIO 是独立工作。
+
+## 新增基础场景
+
+basic.cpp 新增 basic-curves（PCHIP、通道 LUT、premul mix，alpha=.5）、
+basic-masks（Boolean、closing、羽化，coverage=1/9）、basic-filters（非对称核、
+直方图 [0,3] 与范围外 [0,0]）、basic-fields（坐标、smoothstep、局部 levels，alpha=1）。
+完整参数与 Whole/Elementwise/Halo 规则见[基础算子](../../docs/kernel-architecture/zh/Basic-Operations.zh.md)。

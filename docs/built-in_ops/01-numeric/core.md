@@ -1,5 +1,7 @@
 # 数值与数组基础
 
+2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+
 已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：四 dtype cast/range 分离，Float32/64 同 shape 基础算术和显式 clamp，全数组 Float64 mean/variance，有界单通道 expression（静态 start/step/count、动态 Float64 coefficients）及 linear 1D LUT。默认由 workflow 显式提交，全部新增算子首版 Whole；其他 unary/broadcast/scan/数组操作继续 Proposed。
 
 当前已实现的 cast/encode_range、四种二元算术、clamp、mean/variance 及公开运行示例见[数值算子实现](../../kernel-architecture/zh/Numeric-Operations.zh.md)。Expression/LUT 的首版实现与公开 workflow 见[实现文档](../../kernel-architecture/zh/Expression-and-LUT-Operations.zh.md)；下表扩展目录仍为 Proposed。

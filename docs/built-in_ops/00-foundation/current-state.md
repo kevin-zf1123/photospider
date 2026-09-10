@@ -1,5 +1,9 @@
 # 当前实现与规格前置条件
 
+2026-09-11 更新：`ops@2495393c` 已合并 foundations PR #298，#287/#288–#297 已交付。
+当前实现使用 package 0.7 / ABI 7；以下旧基线与限制属于历史研究。
+本轮基础算子研究见 [basic operations](basic-operations-research.md)。
+
 2026-09-10 契约补充：执行基线为 `main@fba06270`、package 0.6.0/ABI 6。
 以下表格记录原研究的 0.6 限制，不能用作新目标。[ADR 0020](../../adr/0020-composable-operation-foundations.md)
 已接受 image v2 完整替换、四 dtype、静态输出及 computed scalar；#287/#288–#297
@@ -20,7 +24,7 @@
 | `mask.downsample_box` | 同上，HW mask | 蒙版预览缩小 |
 | `image.brush_circle` | image,x,y,radius,r,g,b,a；硬边圆点 source-over | 单次硬边盖印，不含连续笔迹/压感/抗锯齿 |
 
-出处：[注册与参数](../../../plugins/ops/image_operations.cpp)、[C ABI 模块](../../../plugins/ops/rgba32f/image_plugin.c)、[完整图像语义](../../kernel-architecture/Image-Operations.md)。同一组 8 项已有可选 Metal 实现；CPU exact 为默认，MetalFp32 显式选择且具有数值 eligibility 与逐算子 CPU fallback，不能由此推断所有新算子已有 GPU 支持。[S4 使用说明](../../kernel-architecture/S4-Workflow.md)
+出处：[注册与参数](../../../plugins/ops/README.md)、[C ABI 模块](../../../plugins/ops/rgba32f/image_plugin.c)、[完整图像语义](../../kernel-architecture/Image-Operations.md)。同一组 8 项已有可选 Metal 实现；CPU exact 为默认，MetalFp32 显式选择且具有数值 eligibility 与逐算子 CPU fallback，不能由此推断所有新算子已有 GPU 支持。[S4 使用说明](../../kernel-architecture/S4-Workflow.md)
 
 ## 现有数据和编译器限制
 

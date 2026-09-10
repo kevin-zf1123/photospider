@@ -128,4 +128,8 @@ void alpha_color();
 void expressions();
 void generator_gain();
 void components();
+void basic_curves();
+void basic_masks();
+void basic_filters();
+void basic_fields();
 }  // namespace foundations

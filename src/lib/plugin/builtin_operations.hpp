@@ -1,0 +1,68 @@
+#pragma once
+
+#include "photospider/plugin/operation_registry.hpp"
+
+namespace ps::plugin_internal {
+/** @brief Registers the source-tree operations grouped by docs/built-in_ops. */
+Status register_builtin_operations(OperationRegistry* registry);
+Status register_numeric_cast(OperationRegistry* registry);
+Status register_numeric_encode_range(OperationRegistry* registry);
+Status register_numeric_add(OperationRegistry* registry);
+Status register_numeric_subtract(OperationRegistry* registry);
+Status register_numeric_multiply(OperationRegistry* registry);
+Status register_numeric_divide(OperationRegistry* registry);
+Status register_numeric_clamp(OperationRegistry* registry);
+Status register_numeric_mean(OperationRegistry* registry);
+Status register_numeric_variance(OperationRegistry* registry);
+Status register_channel_extract(OperationRegistry* registry);
+Status register_channel_swizzle(OperationRegistry* registry);
+Status register_channel_merge(OperationRegistry* registry);
+Status register_alpha_associate(OperationRegistry* registry);
+Status register_alpha_unassociate(OperationRegistry* registry);
+Status register_color_rgb_to_xyz(OperationRegistry* registry);
+Status register_color_xyz_to_rgb(OperationRegistry* registry);
+Status register_color_xyz_to_lab(OperationRegistry* registry);
+Status register_color_lab_to_xyz(OperationRegistry* registry);
+Status register_color_assign(OperationRegistry* registry);
+Status register_mask_threshold(OperationRegistry* registry);
+Status register_mask_components(OperationRegistry* registry);
+Status register_component_count(OperationRegistry* registry);
+Status register_component_area(OperationRegistry* registry);
+Status register_component_bbox(OperationRegistry* registry);
+Status register_numeric_sample_expression(OperationRegistry* registry);
+Status register_lut_apply_1d(OperationRegistry* registry);
+Status register_image_exposure_gain(OperationRegistry* registry);
+Status register_image_opacity(OperationRegistry* registry);
+Status register_image_gaussian_blur(OperationRegistry* registry);
+Status register_image_mask(OperationRegistry* registry);
+Status register_image_source_over(OperationRegistry* registry);
+Status register_image_downsample_box(OperationRegistry* registry);
+Status register_mask_downsample_box(OperationRegistry* registry);
+Status register_image_brush_circle(OperationRegistry* registry);
+Status register_curve_sample_linear(OperationRegistry* registry);
+Status register_curve_sample_monotone(OperationRegistry* registry);
+Status register_field_apply_lut_1d(OperationRegistry* registry);
+Status register_mask_invert(OperationRegistry* registry);
+Status register_mask_combine(OperationRegistry* registry);
+Status register_image_mix(OperationRegistry* registry);
+Status register_field_box_mean(OperationRegistry* registry);
+Status register_field_gaussian_blur(OperationRegistry* registry);
+Status register_mask_dilate(OperationRegistry* registry);
+Status register_mask_erode(OperationRegistry* registry);
+Status register_field_convolve(OperationRegistry* registry);
+Status register_field_correlate(OperationRegistry* registry);
+Status register_analysis_histogram(OperationRegistry* registry);
+Status register_analysis_histogram_out_of_range(OperationRegistry* registry);
+Status register_grade_levels(OperationRegistry* registry);
+Status register_numeric_minimum(OperationRegistry* registry);
+Status register_numeric_maximum(OperationRegistry* registry);
+Status register_numeric_abs(OperationRegistry* registry);
+Status register_field_smoothstep(OperationRegistry* registry);
+Status register_field_coordinate(OperationRegistry* registry);
+Status register_field_constant(OperationRegistry* registry);
+Status register_core_constant(OperationRegistry* registry);
+Status register_core_identity(OperationRegistry* registry);
+Status register_math_add(OperationRegistry* registry);
+Status register_core_delay(OperationRegistry* registry);
+Status register_core_gpu_fallback_probe(OperationRegistry* registry);
+}  // namespace ps::plugin_internal

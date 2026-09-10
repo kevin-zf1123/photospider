@@ -88,8 +88,8 @@ been migrated to this breaking 0.7 package; migration remains separate work.
 ## Composable workflows
 
 The self-contained [foundations example](examples/foundations_workflow) builds
-against an installed 0.7 package and runs six numeric/channel/color/expression/
-component scenarios with independent result checks. Copy the directory outside
+against an installed 0.7 package and runs ten numeric, color, curve, mask, filter
+and generated-field scenarios with independent result checks. Copy the directory outside
 this checkout or follow its README to modify and combine public workflows.
 The foundations implementation targets `ops`; `main@fba06270` remains the 0.6
 baseline. PR review, CI and merge status are recorded in the current delivery

@@ -18,12 +18,8 @@
 #include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
-#include "plugin/color_operations.hpp"
-#include "plugin/component_operations.hpp"
+#include "plugin/builtin_operations.hpp"
 #include "plugin/dense_layout_validation.hpp"
-#include "plugin/expression_operations.hpp"
-#include "plugin/image_operations.hpp"
-#include "plugin/numeric_operations.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -805,52 +801,6 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
 int plugin_cancelled(void* context) noexcept {
   const auto* token = static_cast<const CancellationToken*>(context);
   return token && token->cancelled() ? 1 : 0;
-}
-
-/**
- * @brief Reads one required integer parameter after schema validation.
- * @param parameters Canonical parameter map.
- * @param key Parameter name.
- * @return Integer value or `InvalidArgument` when absent/wrong-type.
- * @throws std::bad_alloc If a diagnostic allocation fails.
- * @note The map is never modified and no default value is synthesized.
- */
-Result<std::int64_t> integer_parameter(
-    const std::map<std::string, ParameterValue>& parameters,
-    const std::string& key) {
-  const auto iterator = parameters.find(key);
-  if (iterator == parameters.end()) {
-    return Result<std::int64_t>(Status::failure(
-        ErrorCode::InvalidArgument, "required operation parameter is missing"));
-  }
-  if (const auto* value = std::get_if<std::int64_t>(&iterator->second)) {
-    return Result<std::int64_t>(*value);
-  }
-  return Result<std::int64_t>(Status::failure(
-      ErrorCode::InvalidArgument, "operation parameter is not int64"));
-}
-
-/**
- * @brief Reads one required Float64 parameter after schema validation.
- * @param parameters Canonical parameter map.
- * @param key Parameter name.
- * @return Float64 value or `InvalidArgument` when absent/wrong-type.
- * @throws std::bad_alloc If a diagnostic allocation fails.
- * @note Numeric alternatives are not coerced and no default is synthesized.
- */
-Result<double> floating_parameter(
-    const std::map<std::string, ParameterValue>& parameters,
-    const std::string& key) {
-  const auto iterator = parameters.find(key);
-  if (iterator == parameters.end()) {
-    return Result<double>(Status::failure(
-        ErrorCode::InvalidArgument, "required operation parameter is missing"));
-  }
-  if (const auto* value = std::get_if<double>(&iterator->second)) {
-    return Result<double>(*value);
-  }
-  return Result<double>(Status::failure(ErrorCode::InvalidArgument,
-                                        "operation parameter is not Float64"));
 }
 
 }  // namespace
@@ -1834,225 +1784,14 @@ std::vector<std::string> OperationRegistry::keys() const {
   return result;
 }
 
-namespace {
-/** @brief Creates a scalar through the callback allocator, preserving all bits.
- */
-Value allocated_scalar(const OperationInvocation& invocation, double number) {
-  auto allocation = MutableValue::allocate(
-      {ElementType::Float64, {1}}, Region::whole({1}), invocation.allocator);
-  if (!allocation.ok())
-    throw std::bad_alloc();
-  auto value = allocation.take_value();
-  std::memcpy(value.data(), &number, sizeof(number));
-  auto result = std::move(value).publish();
-  if (!result.ok())
-    throw std::logic_error(result.status().message);
-  return result.take_value();
-}
-}  // namespace
-
 /**
  * @brief Implements the maintained frozen built-in operation set.
  * @copydetails make_default_operation_registry
  */
 std::shared_ptr<OperationRegistry> make_default_operation_registry() {
   auto registry = std::make_shared<OperationRegistry>();
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-  constexpr bool simulated_gpu = true;
-#else
-  constexpr bool simulated_gpu = false;
-#endif
-
-  const auto preserving = [](OperationTraits traits) {
-    traits.output_dtype_rule = OperationDtypeRule::Input;
-    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
-    return traits;
-  };
-  const auto float64_inputs = [](OperationTraits traits) {
-    for (auto& port : traits.input_schema)
-      port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
-    return traits;
-  };
-
-  Status status = registry->register_operation(OperationDefinition{
-      "core.constant",
-      OperationTraits{0U,
-                      true,
-                      true,
-                      true,
-                      simulated_gpu,
-                      simulated_gpu,
-                      sizeof(double),
-                      7U,
-                      true,
-                      ElementType::Float64,
-                      OperationShapeRule::Scalar,
-                      OperationRegionRule::Whole,
-                      0U,
-                      {OperationParameterSpec{
-                          "value", OperationParameterType::Float64, true}},
-                      {},
-                      std::vector<OperationPortConstraint>(0),
-                      {/* output Value */}},
-      [](const OperationInvocation& invocation) -> Result<Value> {
-        auto value = floating_parameter(invocation.parameters, "value");
-        if (!value.ok()) {
-          return Result<Value>(value.status());
-        }
-        return Result<Value>(allocated_scalar(invocation, value.value()));
-      }});
-  if (!status.ok()) {
-    throw std::logic_error(status.message);
-  }
-
-  status = registry->register_operation(OperationDefinition{
-      "core.identity",
-      preserving(OperationTraits{1U,
-                                 true,
-                                 true,
-                                 true,
-                                 simulated_gpu,
-                                 simulated_gpu,
-                                 0U,
-                                 7U,
-                                 true,
-                                 ElementType::Float64,
-                                 OperationShapeRule::PreserveFirstInput,
-                                 OperationRegionRule::Elementwise,
-                                 0U,
-                                 {},
-                                 {},
-                                 std::vector<OperationPortConstraint>(1),
-                                 {/* output Value */}}),
-      [](const OperationInvocation& invocation) -> Result<Value> {
-        return Result<Value>(invocation.inputs.front());
-      }});
-  if (!status.ok()) {
-    throw std::logic_error(status.message);
-  }
-
-  status = registry->register_operation(OperationDefinition{
-      "math.add",
-      float64_inputs(OperationTraits{2U,
-                                     true,
-                                     true,
-                                     true,
-                                     simulated_gpu,
-                                     simulated_gpu,
-                                     sizeof(double),
-                                     7U,
-                                     true,
-                                     ElementType::Float64,
-                                     OperationShapeRule::MatchAllInputs,
-                                     OperationRegionRule::Elementwise,
-                                     0U,
-                                     {},
-                                     {},
-                                     std::vector<OperationPortConstraint>(2),
-                                     {/* output Value */}}),
-      [](const OperationInvocation& invocation) -> Result<Value> {
-        auto left = invocation.inputs[0].as_float64();
-        auto right = invocation.inputs[1].as_float64();
-        if (!left.ok()) {
-          return Result<Value>(left.status());
-        }
-        if (!right.ok()) {
-          return Result<Value>(right.status());
-        }
-        return Result<Value>(
-            allocated_scalar(invocation, left.value() + right.value()));
-      }});
-  if (!status.ok()) {
-    throw std::logic_error(status.message);
-  }
-
-  status = registry->register_operation(OperationDefinition{
-      "core.delay",
-      preserving(OperationTraits{
-          1U,
-          true,
-          true,
-          true,
-          false,
-          false,
-          0U,
-          7U,
-          false,
-          ElementType::Float64,
-          OperationShapeRule::PreserveFirstInput,
-          OperationRegionRule::Whole,
-          0U,
-          {OperationParameterSpec{"milliseconds", OperationParameterType::Int64,
-                                  true}},
-          {},
-          std::vector<OperationPortConstraint>(1),
-          {/* output Value */}}),
-      [](const OperationInvocation& invocation) -> Result<Value> {
-        auto milliseconds =
-            integer_parameter(invocation.parameters, "milliseconds");
-        if (!milliseconds.ok() || milliseconds.value() < 0 ||
-            milliseconds.value() > 5000) {
-          return Result<Value>(Status::failure(
-              ErrorCode::InvalidArgument,
-              "delay milliseconds must be an int64 in 0..5000"));
-        }
-        for (std::int64_t elapsed = 0; elapsed < milliseconds.value();
-             ++elapsed) {
-          if (invocation.cancellation.cancelled()) {
-            return Result<Value>(
-                Status::failure(ErrorCode::Cancelled, "delay was cancelled"));
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return Result<Value>(invocation.inputs.front());
-      }});
-  if (!status.ok()) {
-    throw std::logic_error(status.message);
-  }
-
-  status = registry->register_operation(OperationDefinition{
-      "core.gpu_fallback_probe",
-      preserving(OperationTraits{1U,
-                                 true,
-                                 true,
-                                 true,
-                                 true,
-                                 true,
-                                 0U,
-                                 7U,
-                                 true,
-                                 ElementType::Float64,
-                                 OperationShapeRule::PreserveFirstInput,
-                                 OperationRegionRule::Elementwise,
-                                 0U,
-                                 {},
-                                 {},
-                                 std::vector<OperationPortConstraint>(1),
-                                 {/* output Value */}}),
-      [](const OperationInvocation& invocation) -> Result<Value> {
-        if (invocation.backend == Backend::Gpu) {
-          return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
-                                               "probe rejects GPU execution"));
-        }
-        return Result<Value>(invocation.inputs.front());
-      }});
-  if (!status.ok()) {
-    throw std::logic_error(status.message);
-  }
-
-  status = plugin_internal::register_image_operations(registry.get());
-  if (!status.ok())
-    throw std::logic_error(status.message);
-  status = plugin_internal::register_numeric_operations(registry.get());
-  if (!status.ok())
-    throw std::logic_error(status.message);
-  status = plugin_internal::register_color_operations(registry.get());
-  if (!status.ok())
-    throw std::logic_error(status.message);
-  status = plugin_internal::register_expression_operations(registry.get());
-  if (!status.ok())
-    throw std::logic_error(status.message);
-  status = plugin_internal::register_component_operations(registry.get());
+  const auto status =
+      plugin_internal::register_builtin_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
   registry->builtins_ = true;

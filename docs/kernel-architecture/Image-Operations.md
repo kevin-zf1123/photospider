@@ -1,7 +1,7 @@
 # Float32 Image Operations
 
 The default registry includes CPU operations implemented in
-[`plugins/ops/image_operations.cpp`](../../plugins/ops/image_operations.cpp).
+[`plugins/ops/README.md`](../../plugins/ops/README.md).
 The two S1 operations below have two ordered runtime Value inputs, no compile-time parameters or
 implicit defaults, and one regional image output named by the workflow.
 

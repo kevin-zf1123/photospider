@@ -1,5 +1,7 @@
 # 混合模式与图层合成
 
+2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+
 状态 Proposed；标准数学模式为D1，商业兼容和图层组行为为D2。输入为前景S、背景B、可选mask/opacity，尺寸/工作空间先显式对齐。计算分为颜色混合函数与coverage合成，默认输出线性premultiplied图像；选择编码域的艺术混合时必须另标空间。所有公式中S/B是unassociated颜色，a/b是有效前景/背景alpha。
 
 ## coverage 合成

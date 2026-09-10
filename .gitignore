@@ -38,7 +38,10 @@
 # Maintained repository-owned operation implementations.
 !plugins/
 !plugins/ops/
-!plugins/ops/*.cpp
+!plugins/ops/**/
+!plugins/ops/**/*.cpp
+!plugins/ops/**/*.hpp
+!plugins/ops/README.md
 !plugins/ops/rgba32f/
 !plugins/ops/rgba32f/*.c
 !plugins/ops/rgba32f/*.h
@@ -47,6 +50,11 @@
 !plugins/ops/rgba32f/CMakeLists.txt
 
 # Maintained public-API image example and shared acceptance fixture.
+!examples/foundations_workflow/
+!examples/foundations_workflow/*.cpp
+!examples/foundations_workflow/*.hpp
+!examples/foundations_workflow/*.md
+!examples/foundations_workflow/CMakeLists.txt
 !examples/
 !examples/image_vertical/
 !examples/image_vertical/*.cpp
