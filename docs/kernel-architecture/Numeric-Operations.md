@@ -128,5 +128,5 @@ Float32 result to `image.exposure_gain`, keep shape `{1}` and the gain range
 `[0,16]`; the bounded consumer validates every computed result before use.
 The [channel/color operations](Channel-and-Color-Operations.md) provide this
 explicit composition. [Expression and LUT operations](Expression-and-LUT-Operations.md)
-provide sampled generators with dynamic coefficients. The combined standalone
-foundations example follows in a subsequent tracked slice.
+provide sampled generators with dynamic coefficients. The [standalone foundations example](../../examples/foundations_workflow)
+combines these operations using an installed public package.

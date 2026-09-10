@@ -116,6 +116,9 @@ add_subdirectory(../../examples/image_vertical image_vertical)
 add_subdirectory(../../examples/regional_image_vertical regional_image_vertical)
 add_subdirectory(../../examples/s3_image_workflow s3_image_workflow)
 add_subdirectory(../../examples/s4_gpu_workflow s4_gpu_workflow)
+add_subdirectory(../../examples/foundations_workflow foundations_workflow)
+target_compile_options(photospider_foundations_workflow PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_foundations_workflow PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_s4_gpu_workflow PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_s4_gpu_workflow PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_s3_image_workflow PRIVATE ${_photospider_consumer_compile_options})
@@ -205,6 +208,7 @@ target_link_options(photospider_component_consumer PRIVATE ${_photospider_consum
 add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_foundations_workflow>" --scenario all
   COMMAND "$<TARGET_FILE:photospider_color_consumer>"
   COMMAND "$<TARGET_FILE:photospider_expression_consumer>"
   COMMAND "$<TARGET_FILE:photospider_component_consumer>"
@@ -225,6 +229,6 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  DEPENDS photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

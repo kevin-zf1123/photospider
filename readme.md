@@ -11,10 +11,11 @@ The installed `Photospider::kernel` target provides:
 
 - schema-2 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v6 semantic traits with closed typed parameter schemas,
+- operation ABI v7 semantic traits with closed typed parameter schemas,
   optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
-- eight Float32 image/mask operations with bounded runtime scalars;
+- eight signed/HDR Float32 image-v2/mask operations with composable bounded scalars;
+- reusable numeric, channel/alpha/color, bounded expression/LUT and component operations;
 - explicit regional `Value`, bounded semantic facets, rank-general `Region`,
   strided layout, immutable bytes, Metal shared storage and bounded local caches;
 - cooperative cancellation, local resource accounting, fallback, and stale
@@ -59,7 +60,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.6 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.7 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -78,10 +79,21 @@ or legacy preset.
 
 The separate
 [`photospider-daemon`](https://github.com/kevin-zf1123/photospider-daemon)
-repository consumes an isolated installation of this package. It owns local
+repository owns local
 IPC v3 and ephemeral Session/Job orchestration. The daemon has no private
 kernel include, copied compiler/planner implementation, internal-IR wire
-format, remote endpoint, or plugin path method.
+format, remote endpoint, or plugin path method. Its existing 0.6 consumer has not
+been migrated to this breaking 0.7 package; migration remains separate work.
+
+## Composable workflows
+
+The self-contained [foundations example](examples/foundations_workflow) builds
+against an installed 0.7 package and runs six numeric/channel/color/expression/
+component scenarios with independent result checks. Copy the directory outside
+this checkout or follow its README to modify and combine public workflows.
+The foundations implementation targets `ops`; `main@fba06270` remains the 0.6
+baseline. PR review, CI and merge status are recorded in the current delivery
+Issues rather than implied by local example success.
 
 ## Documentation
 
@@ -91,6 +103,7 @@ format, remote endpoint, or plugin path method.
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
 | Native Metal workflows | [S4 examples](docs/kernel-architecture/S4-Workflow.md) |
+| Composable foundations | [Foundations examples](docs/kernel-architecture/Foundations-Workflow.md) |
 | Runnable image workflow | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |

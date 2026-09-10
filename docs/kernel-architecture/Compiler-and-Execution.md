@@ -223,5 +223,6 @@ v7 compiler domains and v3 result-region keys; the no-op optimizer remains v5.
 See [Plugin ABI](Plugin-ABI.md) for the exposed helpers and staged limits.
 Computed bounded scalar consumption and supported image-v2 snapshots/cache
 storage are implemented. Sampling-domain metadata remains distinct from scalar
-value units and enters eligible result keys. Other operation families retain
-their separate delivery slices.
+value units and enters eligible result keys. Numeric, channel/color, expression/
+LUT and component families now use these contracts. The self-contained
+[foundations workflow](Foundations-Workflow.md) runs their public compositions.

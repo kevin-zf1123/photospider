@@ -1,6 +1,6 @@
 # ADR 0020：可组合数值、语义与输出基础
 
-- 状态：Accepted；实现由 #289–#297 待交付
+- 状态：Accepted；已本地实现至 #297，交付审查/合并待完成
 - 日期：2026-09-10
 - 接受记录：维护者批准 G1/G2/G3/G5 实现计划，包括替换 image v1 和迁移全部八个已有算子。
 - 基线：`main@fba06270a44b24de7dcf12ac82624c4a56e0fa67`，package 0.6.0、operation ABI/OperationTraits 6

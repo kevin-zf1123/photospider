@@ -2,7 +2,7 @@
 
 - Snapshot date: 2026-09-10
 - Audited foundation: `main@fba06270` (delivered S4, package 0.6.0)
-- Current milestone: G1/G2/G3/G5 operation foundations, #287; implementation pending
+- Current milestone: G1/G2/G3/G5 operation foundations, #287; local implementation verified
 - Delivery branch: `ops-foundations` into `ops`, with no merge into main
 
 ## Role and authority
@@ -47,16 +47,21 @@ The synchronized baseline `main@fba06270` contains S4 package 0.6.0 and
 operation ABI/traits 6: explicit CpuExact/MetalFp32 planning, native shared
 storage, all eight image operations, regional uploads, bounded residency and
 fallback. The [S4 guide](../kernel-architecture/S4-Workflow.md) and its executable
-examples/tests document that implemented baseline. This documentation slice
-has not rerun those product tests.
+examples/tests document that implemented baseline. Foundation migration preserves
+its CPU/C/Metal behavior; focused native validation has also exercised signed/HDR
+image-v2 inputs with actual dispatches and zero fallback.
 
 [Foundations #287](https://github.com/kevin-zf1123/photospider/issues/287) implements
 [ADR 0020](../adr/0020-composable-operation-foundations.md). Its accepted target
 is package 0.7.0/ABI 7, structured semantics and image v2, static output inference,
 computed scalars, complete eight-op migration, cache/snapshot integration and
-reusable numeric/channel/color/expression/LUT/component workflows. At this
-snapshot only the contract is being recorded; implementation and merge remain
-pending. Schema 2, provider ABI 1 and C++17 remain.
+reusable numeric/channel/color/expression/LUT/component workflows. The local
+implementation now includes all ten slices, with focused tests and isolated
+static/shared consumers. The [standalone example](../../examples/foundations_workflow)
+runs six public composition scenarios; owning operator guides link the focused
+regressions. Live comprehensive-review, PR CI, Codex bot review and merge status
+are recorded in #287 and its implementation PR. Local validation does not establish
+those delivery gates. Schema 2, provider ABI 1 and C++17 remain.
 
 | Order | Active leaf | Completion boundary |
 | --- | --- | --- |
@@ -72,9 +77,8 @@ pending. Schema 2, provider ABI 1 and C++17 remain.
 | 10 | #297 | Installed public workflow examples and combined acceptance |
 
 Each leaf depends on the preceding delivery slice. ABI migration may update
-existing callers mechanically to keep each commit buildable; complete eight-op
-behavior/validation belongs to #290. Unsupported snapshot/cache representations
-must be rejected until #291 implements them. One implementation writer owns
+existing callers mechanically to keep each commit buildable. The eight-op and
+snapshot/cache slices have implemented their supported image-v2 representations. One implementation writer owns
 project changes; the coordinator owns Issue/commit/PR administration. Separate
 Issue commits precede a fresh independent comprehensive review, six required
 CI jobs and Codex review-bot fixes. The sole implementation PR merges

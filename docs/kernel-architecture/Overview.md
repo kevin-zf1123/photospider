@@ -25,7 +25,7 @@ semantic, optimized, plan, runtime Value, and daemon identities are separate.
 | compiler | fail-closed parameter validation, typed IR, conservative no-op optimization, demand-aware local plan, typed digests/key |
 | execution | bounded CPU pool, optional native Metal queue/lane, private Run, cancellation, byte ledger, raw diagnostics |
 | data | regional immutable `Value` and CPU-accessible/native storage, rank-general `Region`, `StridedLayout` |
-| plugin | exact operation ABI v6/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
+| plugin | exact operation ABI v7/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
 | benchmark | raw compile/plan/execute observations plus named correctness-oracle or explicit unchecked status; execution cancellation aborts the complete run without a report |
 
 CPU exact execution is required. Explicit MetalFp32 selects declared native
@@ -46,3 +46,10 @@ execution before an operation callback receives them.
 The daemon depends on the installed public package. The kernel never depends
 on daemon source, serializes no internal IR, and owns no daemon namespace or
 Job/result lifecycle.
+
+The 0.7 foundations implementation adds typed image-v2 semantics, shared static
+dtype/shape/output inference, computed bounded scalars and reusable numeric,
+channel/color, expression/LUT and component operations. The
+[standalone foundations workflow](Foundations-Workflow.md) demonstrates the
+public composition surface. This is the `ops` delivery line; main's audited
+baseline is 0.6 and daemon's 0.6 consumer remains unmigrated.

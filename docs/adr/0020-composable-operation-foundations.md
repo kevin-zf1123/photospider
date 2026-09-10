@@ -1,6 +1,6 @@
 # ADR 0020: Composable Numeric, Semantic, and Output Foundations
 
-- Status: Accepted; implementation pending in #289–#297
+- Status: Accepted; locally implemented through #297, delivery review/merge pending
 - Date: 2026-09-10
 - Acceptance: the maintainer approved the G1/G2/G3/G5 implementation plan,
   including replacement of image v1 and migration of all eight existing ops.

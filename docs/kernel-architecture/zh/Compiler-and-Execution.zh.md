@@ -169,4 +169,5 @@ S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收�
 推断 facets 进入 v7 compiler domain 和 v3 result-region key，no-op optimizer 保持 v5。
 公开 helper 和阶段限制见 [Plugin ABI](Plugin-ABI.zh.md)。Computed bounded scalar 消费与
 受支持 image-v2 snapshot/cache 已实现。采样域元数据与样本值单位分别保留，并进入符合
-资格的 result key；其他算子族继续按各自切片交付。
+资格的 result key。Numeric、channel/color、expression/LUT、component 已使用这些
+契约；[独立 foundations workflow](Foundations-Workflow.zh.md)运行其公开组合。

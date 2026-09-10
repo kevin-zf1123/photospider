@@ -2,7 +2,7 @@
 
 - 快照日期：2026-09-10
 - 已审计基础：`main@fba06270`（已交付 S4，package 0.6.0）
-- 当前 milestone：G1/G2/G3/G5 算子基础，#287；实现待交付
+- 当前 milestone：G1/G2/G3/G5 算子基础，#287；本地实现已验证
 - 交付分支：`ops-foundations` 合入 `ops`，不合入 main
 
 ## 角色与权威
@@ -43,13 +43,17 @@ compiler 与 execution contract，因此进入 Project #8。
 同步基线 `main@fba06270` 包含 S4 package 0.6.0、operation ABI/traits 6：显式
 CpuExact/MetalFp32、原生 shared storage、全部八个图像算子、区域上传、有界驻留和
 fallback。[S4 指南](../../kernel-architecture/zh/S4-Workflow.zh.md) 及其可执行示例/测试
-记录该实现基线。本次文档切片没有重新运行这些产品测试。
+记录该实现基线。Foundations 迁移保留 CPU/C/Metal 行为，focused native 验证也已
+对 signed/HDR image-v2 输入观察到真实 dispatch 与零 fallback。
 
 [Foundations #287](https://github.com/kevin-zf1123/photospider/issues/287) 实现
 [ADR 0020](../../adr/0020-composable-operation-foundations.md)。已接受目标为 package
 0.7.0/ABI 7、结构化语义与 image v2、静态输出推断、computed scalar、八算子完整迁移、
 cache/snapshot 集成及可复用 numeric/channel/color/expression/LUT/component workflow。
-本快照仅记录契约，实现与合并仍待完成。Schema 2、provider ABI 1、C++17 保持。
+本地已完成十个切片的实现、focused tests 与隔离 static/shared consumer。
+[独立示例](../../../examples/foundations_workflow)运行六个公开组合场景，各算子指南链接
+focused 回归。全面审查、PR CI、Codex bot review 与合并的实时状态由 #287 及其实现
+PR 记录，本地验证不代表这些交付门槛已通过。Schema 2、provider ABI 1、C++17 保持。
 
 | 顺序 | Active leaf | 完成边界 |
 | --- | --- | --- |
@@ -65,7 +69,7 @@ cache/snapshot 集成及可复用 numeric/channel/color/expression/LUT/component
 | 10 | #297 | 安装包公开 workflow 示例与组合验收 |
 
 每叶项依赖前一交付切片。ABI 迁移可机械更新既有调用方以保持各提交可构建；完整八算子
-行为及验证属于 #290。Snapshot/cache 未支持的表示在 #291 完成前必须拒绝。
+及 snapshot/cache 切片已实现各自支持的 image-v2 表示。
 唯一实现写入者负责项目修改，协调者负责 Issue/commit/PR 行政操作。每 Issue 单独提交后，
 新建独立全面审查，完成六项必需 CI 和 Codex review bot 修复。唯一实现 PR 通过 merge
 commit 将 `ops-foundations` 合入 `ops`。验证 ops 交付后结算 Issue，保留本地/远端 ops，
