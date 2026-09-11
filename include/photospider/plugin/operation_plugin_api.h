@@ -371,8 +371,10 @@ typedef int (*ps_operation_cancelled_v9)(void* context);
 /**
  * @brief Synchronous operation execution callback.
  * @param user_data Descriptor-owned opaque state.
- * @param inputs Array of `input_count` immutable Value views.
- * @param input_count Exact descriptor input count.
+ * @param inputs Array of `input_count` immutable projected Value views.
+ * Each view's `input_index` identifies its original descriptor port.
+ * @param input_count Number of supplied views after the selected output's
+ * input projection; this can be smaller than the descriptor input count.
  * @param parameters Canonically key-ordered validated parameter array.
  * @param parameter_count Exact number of supplied source parameters.
  * @param backend 1 for CPU or 2 for optional local GPU.
