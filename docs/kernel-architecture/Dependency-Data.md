@@ -276,10 +276,11 @@ Input owner destructors run outside the publication mutex.
 active demand calls are bounded by the existing queue plus CPU worker capacity
 and one coordinator slot. `DemandConfig::maximum_metadata_entries` bounds each
 handle's retained query/evidence/dirty metadata (1..1048576, default 65536).
-The handle owns no workers or pixel cache. Current calls execute independently
-through the existing CPU pool, WaitingAdmission and accounted allocator.
-Cross-Run dependency Flights, content-cache reuse and GPU fragment execution
-remain unfinished G4 integration.
+The handle owns no workers or pixel cache. Exact demand calls use context-owned
+Flights for overlapping active observations in the same immutable bundle, through
+the existing CPU pool, WaitingAdmission and accounted allocator. Completed
+dependency content-cache reuse and GPU fragment execution remain unfinished G4
+integration.
 
 `test_execution_demand` covers sparse results, typed snapshots, continuous dirty
 accumulation, frozen isolation, stale publication, independent cancellation and
@@ -294,3 +295,54 @@ storage owner expires on failure. The same context can then execute A with an
 observed 4 MiB allocation peak. With 5 MiB, the parent receives both results and
 returns 3, with an observed 5 MiB peak. This verifies finite rejection and actual
 lease retirement for that execution order, not an optimal scheduling guarantee.
+
+## Shared exact-observation Flights
+
+`request` and `execute_fragments` claim one Atomic sample/full image pixel or one
+complete terminal Q. The key binds the captured bundle identity, plan/operation
+contract, node, geometry, exact query and resource policy. Sharing requires
+deterministic, side-effect-free implementations throughout the input ancestry.
+A side-effectful/non-deterministic Whole ancestor therefore prevents downstream
+sharing even when the local callback is pure. Dispatch never expands Q or
+batches RequestFailureOnly observations.
+
+The directory linearizes claims, gives each producer a unique FlightId and keeps
+waiter cancellation/currentness separate from its producer token. Explicit and
+auxiliary set cancellation both belong to the waiter. The caller's coordinator
+drives stages and waits for dependencies; callback workers never wait for another
+Flight. While waiting for a callback, the coordinator checks ancestor waiters.
+An independently needed child can finish after the originating parent request
+is cancelled. A successful frozen waiter can likewise receive old-bundle work
+when a latest waiter becomes Stale after replacement.
+
+Last-waiter cancellation prevents new joins; a later request claims a new
+FlightId. Late completion removes the directory entry only if its ID still
+matches, so retiring P0 cannot erase P1. Context shutdown cancels active producers
+and drains demand calls before destroying workers. `clear_result_cache()` also
+advances the dependency epoch; completed dependency cache retention is not yet
+enabled. `maximum_dependency_flights` separately bounds active Flights and their
+total subscribers, each by the same configured count (1..1048576, default 65536).
+Exhaustion returns ResourceExhausted without a wait for metadata capacity.
+
+Successful shared values carry immutable direct records with exact certificates
+or indivisible manifests and links to contributing upstream records. Import walks
+these links in topological order, preserving the per-output relation in each
+waiter's execution evidence. Structural records contain no pixel/snapshot owners.
+Their destruction uses an allocation-free iterative retirement queue, including
+when a long chain loses its last owner. Context `cache_statistics()` includes
+active dependency Flights and shared subscriptions even with result retention
+disabled; per-call shared diagnostics exclude duplicated callback timings.
+
+The integration tests exercise shared legacy and staged ancestors, independent
+explicit/auxiliary cancellation, impure-ancestor exclusion, old-P0/new-P1 overlap,
+latest/frozen races and imported dirty evidence. The direct lifetime regression
+checks epoch/limit behavior and retirement of 20000 linked structural records.
+The gated terminal case proves identical sparse Q shares once while a smaller Q
+executes separately; imported terminal evidence still rejects subset restriction.
+An explicit joint request containing a nonfinite sample fails while a shared
+normal-only waiter succeeds, and a later atom finishing first does not change the
+joint request's canonical error. This generic callback check does not replace the
+remaining ordered-scan/carry integration.
+The public workflow uses two exact waiters and a bounded callback barrier to
+prove one callback, one cancelled waiter and the other waiter's value 7 with
+complete identity dependency evidence.

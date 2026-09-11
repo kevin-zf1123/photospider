@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "execution/dependency_flights.hpp"
 #include "execution/memory_budget.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
@@ -717,6 +718,101 @@ int sibling_admission() {
   PS_CHECK(retained[0].expired() && retained[1].expired());
   return 0;
 }
+int flight_lifetime() {
+  using execution_internal::DependencyFlights;
+  using execution_internal::DependencyFlightValue;
+  using execution_internal::DependencyRecord;
+  using Outcome = Result<std::shared_ptr<const DependencyFlightValue>>;
+  auto value = std::make_shared<DependencyFlightValue>();
+  value->value =
+      ValueFragments::create({ElementType::Float64, {1}}, {},
+                             Footprint::all({1}).take_value(),
+                             {values<double>(ElementType::Float64, {42})})
+          .take_value();
+  DependencyFlights directory(8);
+  CancellationSource old_stop;
+  auto p0 = directory
+                .claim("same-atom",
+                       [&] {
+                         return old_stop.token().cancelled()
+                                    ? ErrorCode::Cancelled
+                                    : ErrorCode::Ok;
+                       })
+                .take_value();
+  old_stop.cancel();
+  auto p1 =
+      directory.claim("same-atom", [] { return ErrorCode::Ok; }).take_value();
+  PS_CHECK(p0->producer() && p1->producer() && p0->id() != p1->id());
+  PS_CHECK(directory.statistics().first == 2);
+  directory.clear();
+  auto next_epoch =
+      directory.claim("other-atom", [] { return ErrorCode::Ok; }).take_value();
+  PS_CHECK(next_epoch->epoch() == p1->epoch() + 1);
+  // Late P0 cannot erase the replacement P1 or accept a new subscriber.
+  p0->complete(Outcome(value));
+  PS_CHECK(p0->wait().status().code == ErrorCode::Cancelled);
+  auto joined =
+      directory.claim("same-atom", [] { return ErrorCode::Ok; }).take_value();
+  PS_CHECK(!joined->producer() && joined->id() == p1->id());
+  p1->complete(Outcome(value));
+  auto result = joined->wait();
+  double answer = 0;
+  PS_CHECK(result.ok() && result.value()->value.read({0}, &answer, 8).ok() &&
+           answer == 42);
+  next_epoch->complete(Outcome(value));
+  PS_CHECK(directory.statistics().first == 0);
+  unsigned retired_candidates = 0;
+  const auto candidate = [&] {
+    return std::shared_ptr<const DependencyFlightValue>(
+        new DependencyFlightValue(*value),
+        [&](const DependencyFlightValue* rejected) {
+          directory.statistics();
+          ++retired_candidates;
+          delete rejected;
+        });
+  };
+  // Discarded candidates may own external allocation leases whose destructors
+  // reenter the directory. Both cancellation and duplicate completion unlock.
+  p1->complete(Outcome(candidate()));
+  PS_CHECK(retired_candidates == 1);
+  CancellationSource stopped;
+  auto cancelled = directory
+                       .claim("cancelled-candidate",
+                              [&] {
+                                return stopped.token().cancelled()
+                                           ? ErrorCode::Cancelled
+                                           : ErrorCode::Ok;
+                              })
+                       .take_value();
+  stopped.cancel();
+  cancelled->complete(Outcome(candidate()));
+  PS_CHECK(retired_candidates == 2);
+  DependencyFlights bounded(1);
+  auto active = bounded.claim("a", [] { return ErrorCode::Ok; }).take_value();
+  PS_CHECK(bounded.claim("b", [] { return ErrorCode::Ok; }).status().code ==
+           ErrorCode::ResourceExhausted);
+  active->complete(Outcome(value));
+  active.reset();
+  PS_CHECK(bounded.claim("b", [] { return ErrorCode::Ok; }).ok());
+  // Structural owners can outlive all pixel owners. Retiring a deep chain
+  // must not recurse through the C++ stack or allocate during destruction.
+  std::shared_ptr<const DependencyRecord> chain;
+  std::weak_ptr<const DependencyRecord> leaf;
+  for (unsigned i = 0; i < 20000; ++i) {
+    auto record = std::shared_ptr<DependencyRecord>(new DependencyRecord(),
+                                                    DependencyRecord::retire);
+    record->step = i;
+    if (chain)
+      record->upstream.push_back(std::move(chain));
+    chain = std::move(record);
+    if (!i)
+      leaf = chain;
+  }
+  PS_CHECK(!leaf.expired());
+  chain.reset();
+  PS_CHECK(leaf.expired());
+  return 0;
+}
 int execution_network() {
   auto registry = std::make_shared<OperationRegistry>();
   auto counts = std::make_shared<Counts>();
@@ -963,11 +1059,20 @@ int execution_network() {
       });
   PS_CHECK(whole_stream.ok() && whole_tiles == 16 && whole_calls == 1);
   PS_CHECK(whole_stream.value().peak_live_bytes == 136);
+  CancellationSource auxiliary;
+  auxiliary.cancel();
+  ExecutionOptions stopped;
+  stopped.dependencies.sets.cancellation = auxiliary.token();
+  const auto prior_starts = counts->starts.load();
+  PS_CHECK(execution.execute(frozen.value(), {}, stopped).status().code ==
+           ErrorCode::Cancelled);
+  PS_CHECK(counts->starts == prior_starts);
   return 0;
 }
 
 }  // namespace
 int main() {
+  PS_CHECK(flight_lifetime() == 0);
   PS_CHECK(sibling_admission() == 0);
   PS_CHECK(execution_network() == 0);
   PS_CHECK(progressive() == 0);

@@ -635,6 +635,99 @@ std::uint64_t DependencyRecords::metadata_size(
     const ExecutionDependencies& evidence) noexcept {
   return evidence.impl_ ? evidence.impl_->entries : 0;
 }
+Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
+    std::string identity, std::size_t index, const Footprint& samples,
+    std::vector<std::shared_ptr<const DependencyRecord>> upstream) {
+  using Answer = Result<std::shared_ptr<const DependencyRecord>>;
+  if (limits_.cancellation.cancelled())
+    return Answer(Status{ErrorCode::Cancelled, {}});
+  if (identity.empty() || identity.size() > 4096 ||
+      index >= plan_->steps().size())
+    return Answer(invalid("invalid direct record identity"));
+  const auto node = plan_->steps()[index].node_id;
+  const ExecutionDependencies::Impl::Record* selected = nullptr;
+  const auto grouped = impl_->grouped.find(node);
+  if (grouped != impl_->grouped.end()) {
+    selected = &impl_->records[grouped->second];
+  } else {
+    for (auto i = impl_->records.rbegin(); i != impl_->records.rend(); ++i)
+      if (i->node == node && i->samples == samples) {
+        selected = &*i;
+        break;
+      }
+  }
+  if (!selected)
+    return Answer(invalid("missing direct record"));
+  const auto cost = ExecutionDependencies::Impl::weight(*selected);
+  if (cost > limits_.maximum_work || upstream.size() > limits_.maximum_boxes ||
+      cost > limits_.maximum_boxes - upstream.size() ||
+      imported_.size() >= limits_.maximum_boxes)
+    return Answer(Status{ErrorCode::ResourceExhausted, {}});
+  auto result = std::shared_ptr<DependencyRecord>(new DependencyRecord(),
+                                                  DependencyRecord::retire);
+  result->identity = std::move(identity);
+  result->step = index;
+  result->samples = samples;
+  if (selected->certificate) {
+    auto observations =
+        operation_observations(selected->output, samples, limits_);
+    if (!observations.ok())
+      return Answer(observations.status());
+    auto restricted =
+        selected->certificate->restrict(observations.value(), limits_);
+    if (!restricted.ok())
+      return Answer(restricted.status());
+    result->certificate = restricted.take_value();
+  } else {
+    if (samples != selected->samples)
+      return Answer(invalid("cannot split indivisible direct record"));
+    result->manifest = selected->manifest;
+  }
+  result->upstream = std::move(upstream);
+  imported_.insert(result->identity);
+  return Answer(std::move(result));
+}
+Status DependencyRecords::import(
+    const std::shared_ptr<const DependencyRecord>& root) {
+  if (!root)
+    return invalid("missing imported dependency record");
+  std::vector<std::pair<std::shared_ptr<const DependencyRecord>, bool>> pending;
+  pending.emplace_back(root, false);
+  std::uint64_t work = limits_.maximum_work;
+  while (!pending.empty()) {
+    if (limits_.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    if (!work--)
+      return Status{ErrorCode::ResourceExhausted, {}};
+    auto [record, ready] = std::move(pending.back());
+    pending.pop_back();
+    if (!record || record->step >= plan_->steps().size())
+      return invalid("invalid imported dependency record");
+    if (imported_.count(record->identity))
+      continue;
+    if (imported_.size() >= limits_.maximum_boxes ||
+        pending.size() >= limits_.maximum_boxes ||
+        record->upstream.size() >= limits_.maximum_boxes - pending.size())
+      return Status{ErrorCode::ResourceExhausted, {}};
+    if (!ready) {
+      pending.emplace_back(record, true);
+      for (const auto& upstream : record->upstream) {
+        // The compiler's topological step order prevents cycles and makes
+        // this internal immutable graph independently safe to traverse.
+        if (!upstream || upstream->step >= record->step)
+          return invalid("non-topological imported dependency record");
+        pending.emplace_back(upstream, false);
+      }
+      continue;
+    }
+    auto status = append_record(record->step, record->samples,
+                                record->certificate, record->manifest);
+    if (!status.ok())
+      return status;
+    imported_.insert(record->identity);
+  }
+  return Status::success();
+}
 Status DependencyRecords::output(const std::string& name, std::size_t index,
                                  const Footprint& samples) {
   const auto& step = plan_->steps().at(index);

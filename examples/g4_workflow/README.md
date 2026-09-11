@@ -30,8 +30,14 @@ exact sparse query. Two binding replacements change a radius and then its data
 without recomputing between edits. Dirty accumulates over both endpoints. The
 direct radius predicate gives latest values `[1+9,5+9]`, while a frozen bundle
 still returns `[1,5]`. It also rejects the middle hole and releases the exact
-subscription. These calls use the existing worker/allocator owners; cross-Run
-shared computation and dependency pixel-cache reuse remain separate work.
+subscription. These calls use the existing worker/allocator owners.
+
+The `shared` scenario submits two exact waiters against one immutable bundle.
+A bounded barrier in a registered identity callback lets the second waiter join
+the actual in-flight observation before the first is cancelled. Exactly one
+callback runs; the second waiter still receives 7 and complete identity evidence.
+Shared active work is available with result retention disabled. Completed
+dependency pixel-cache reuse remains unfinished.
 
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
@@ -47,6 +53,7 @@ stmap: red=0.5, source_pixels=[0,1023], source_bytes=32
 radius: scatter_before=1, scatter_after=5, gather=1, frozen=1
 dependencies: radius[3] -> scatter{0}, gather{}, new_data_edge=present, frozen_data_edge=absent
 demand: Q={0,4}, latest=[10,14], frozen=[1,5], generation=3, accumulated_dirty={0,4}, release=ok
+shared: callbacks=1, first=Cancelled, second=7, evidence=present
 ```
 
 It also builds as a standalone installed public package consumer:

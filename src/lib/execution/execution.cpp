@@ -27,6 +27,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_flights.hpp"
 #include "execution/dependency_records.hpp"
 #include "execution/disk_cache.hpp"
 #include "execution/memory_budget.hpp"
@@ -875,6 +876,12 @@ struct ExecutionContext::Impl final {
         requested.maximum_demands,
         static_cast<std::uint64_t>(maximum_waiting_callbacks) +
             cpu_worker_count + 1);
+    if (!requested.maximum_dependency_flights ||
+        requested.maximum_dependency_flights > 1048576)
+      throw std::invalid_argument("invalid dependency Flight limit");
+    dependency_flights =
+        std::make_unique<execution_internal::DependencyFlights>(
+            requested.maximum_dependency_flights);
     if (requested.result_cache_bytes > requested.maximum_live_bytes)
       throw std::invalid_argument("cache limit exceeds execution budget");
     if (requested.disk_cache) {
@@ -917,6 +924,7 @@ struct ExecutionContext::Impl final {
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
   std::shared_ptr<execution_internal::DemandCoordinator> demands;
+  std::unique_ptr<execution_internal::DependencyFlights> dependency_flights;
 };
 
 namespace {
@@ -1145,19 +1153,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const std::function<void(std::uint64_t)>& reclaim,
       const DemandQuery* requested = nullptr,
       std::map<std::string, ValueFragments>* fragment_outputs = nullptr,
-      const std::string& snapshot_identity = {}) {
+      const std::string& snapshot_identity = {},
+      execution_internal::DependencyFlights* flights = nullptr) {
     const auto started = std::chrono::steady_clock::now();
-    const auto stop = [&] { return binding_stop(plan, cancellation); };
+    std::function<ErrorCode()> shared_stop;
+    std::function<void(Status)> abort_flights;
+    const auto stop = [&] {
+      return shared_stop ? shared_stop() : binding_stop(plan, cancellation);
+    };
     const auto fail = [&](Status status) {
       const auto code = stop();
       if (code != ErrorCode::Ok) {
         status.code = code;
         status.message.clear();
       }
+      if (abort_flights)
+        abort_flights(status);
       return Result<ExecutionResult>(std::move(status));
     };
     auto limits = options.dependencies.sets;
-    limits.cancellation = cancellation;
+    limits.cancellation = flights ? CancellationToken{} : cancellation;
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
     ExecutionResult result;
@@ -1237,6 +1252,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::vector<ValueFragments> ready;
       std::shared_ptr<DependencySession> session;
       std::optional<ValueFragments> complete;
+      std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
+      std::string record_identity;
+      std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+          upstream;
+      std::set<std::string> upstream_ids;
+      std::shared_ptr<const execution_internal::DependencyRecord> record;
       Frame(PlanInput target, Footprint outputs, bool unit = false,
             bool terminal = false)
           : target(std::move(target)),
@@ -1247,6 +1268,58 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     // This explicit stack is a deterministic ready order. Parent frames in
     // Waiting retain state and actual input owners, but no active reservation.
     std::vector<Frame> frames;
+    const auto active_token = [&] {
+      for (auto i = frames.rbegin(); i != frames.rend(); ++i)
+        if (i->flight && i->flight->producer())
+          return i->flight->token();
+      return cancellation;
+    };
+    const auto pump = [&] {
+      for (const auto& frame : frames)
+        if (frame.flight)
+          frame.flight->refresh();
+    };
+    if (flights) {
+      shared_stop = [&] {
+        for (auto i = frames.rbegin(); i != frames.rend(); ++i)
+          if (i->flight && i->flight->producer())
+            return i->flight->token().cancelled() ? ErrorCode::Cancelled
+                                                  : ErrorCode::Ok;
+        return binding_stop(plan, cancellation);
+      };
+      abort_flights = [&](Status status) {
+        for (auto i = frames.rbegin(); i != frames.rend(); ++i)
+          if (i->flight && i->flight->producer())
+            i->flight->complete(
+                Result<std::shared_ptr<
+                    const execution_internal::DependencyFlightValue>>(status));
+      };
+    }
+    const auto observation_key = [&](std::size_t index,
+                                     const Footprint& outputs) {
+      content_internal::Sha256 hash;
+      hash.text("photospider.dependency-flight.v1");
+      hash.text(plan.digest().value);
+      hash.text(identity);
+      hash.integer(plan.steps()[index].node_id);
+      hash.integer(plan.tile_width());
+      hash.integer(plan.tile_height());
+      hash.integer(options.dependencies.sets.maximum_boxes);
+      hash.integer(options.dependencies.sets.maximum_work);
+      hash.integer(options.dependencies.maximum_work);
+      hash.integer(options.dependencies.maximum_state_bytes);
+      hash.integer(options.dependencies.maximum_stages);
+      hash.integer(options.maximum_dependency_work);
+      for (const auto n : outputs.shape())
+        hash.integer(n);
+      hash.integer(outputs.boxes().size());
+      for (const auto& box : outputs.boxes())
+        for (const auto& d : box.dimensions()) {
+          hash.integer(d.offset);
+          hash.integer(d.extent);
+        }
+      return hash.finish();
+    };
     struct Query {
       std::size_t step;
       std::string name;
@@ -1303,7 +1376,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::any_of(wanted.begin(), wanted.end(),
                     [](const auto& q) { return !q.second.empty(); });
     std::vector<Query> queries;
+    std::vector<bool> shareable(plan.steps().size(), false);
+    for (std::size_t i = 0; i < plan.steps().size(); ++i) {
+      const auto& step = plan.steps()[i];
+      shareable[i] = step.traits.deterministic && step.traits.side_effect_free;
+      for (const auto& input : step.inputs)
+        if (const auto* producer = std::get_if<PlanStepInput>(&input))
+          shareable[i] = shareable[i] && shareable[producer->step_index];
+    }
     std::map<std::size_t, ValueFragments> whole_records;
+    std::map<std::size_t,
+             std::shared_ptr<const execution_internal::DependencyRecord>>
+        whole_evidence;
     if (nonempty) {
       for (std::size_t i = 0; i < plan.steps().size(); ++i) {
         if (plan.steps()[i].whole_boundary &&
@@ -1378,13 +1462,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       frames.emplace_back(PlanStepInput{named.step}, named.samples, false,
                           !named.boundary);
       std::optional<ValueFragments> returned;
+      std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+          returned_records;
       while (!frames.empty()) {
+        pump();
+        limits.cancellation = active_token();
         auto status = consume();
         if (!status.ok())
           return fail(status);
         auto& frame = frames.back();
         const auto output = metadata(frame.target);
         if (returned) {
+          for (auto& record : returned_records) {
+            if (!frame.upstream_ids.count(record->identity)) {
+              if (frame.upstream.size() >= limits.maximum_boxes)
+                return fail(Status{ErrorCode::ResourceExhausted, {}});
+              frame.upstream_ids.insert(record->identity);
+              frame.upstream.push_back(std::move(record));
+            }
+          }
+          returned_records.clear();
           if (frame.state == Frame::State::Expand) {
             frame.values.insert(frame.values.end(),
                                 returned->fragments().begin(),
@@ -1402,6 +1499,27 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
             const auto& step = plan.steps()[producer->step_index];
+            if (flights && !frame.record &&
+                (frame.unit || frame.terminal_allowed) &&
+                !frame.record_identity.empty()) {
+              auto captured =
+                  records.capture(frame.record_identity, producer->step_index,
+                                  frame.outputs, std::move(frame.upstream));
+              if (!captured.ok())
+                return fail(captured.status());
+              frame.record = captured.take_value();
+            }
+            if (frame.flight && frame.flight->producer()) {
+              auto value =
+                  std::make_shared<execution_internal::DependencyFlightValue>();
+              value->value = *frame.complete;
+              value->record = frame.record;
+              value->producer_peak = budget->peaks(observation).first;
+              frame.flight->complete(
+                  Result<std::shared_ptr<
+                      const execution_internal::DependencyFlightValue>>(
+                      std::move(value)));
+            }
             if (step.whole_boundary && frame.unit &&
                 step.traits.observation_kind !=
                     ObservationKind::RequestRecord) {
@@ -1413,9 +1531,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     Status::failure(ErrorCode::Internal,
                                     "incomplete Whole record publication"));
               whole_records.emplace(producer->step_index, *frame.complete);
+              if (frame.record)
+                whole_evidence.emplace(producer->step_index, frame.record);
             }
           }
           returned = std::move(frame.complete);
+          if (frame.record)
+            returned_records = {std::move(frame.record)};
+          else
+            returned_records = std::move(frame.upstream);
           frames.pop_back();
           continue;
         }
@@ -1471,14 +1595,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             if (!allocation.ok())
               return fail(allocation.status());
             auto writer = allocation.take_value();
-            auto read = dependency_stage<Region>(pool, admission, [&] {
-              if (stop() != ErrorCode::Ok)
-                return Result<Region>(Status{stop(), {}});
-              return binding.source->read(
-                  box, writer.data(), writer.size(),
-                  seal.reservation->allocator(binding.source->workspace_bytes),
-                  cancellation);
-            });
+            auto read = dependency_stage<Region>(
+                pool, admission,
+                [&] {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<Region>(Status{stop(), {}});
+                  return binding.source->read(
+                      box, writer.data(), writer.size(),
+                      seal.reservation->allocator(
+                          binding.source->workspace_bytes),
+                      active_token());
+                },
+                pump);
             if (!read.ok())
               return fail(read.status());
             if (!same_region(read.value(), box))
@@ -1519,6 +1647,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (!restricted.ok())
             return fail(restricted.status());
           frame.complete = restricted.take_value();
+          const auto evidence = whole_evidence.find(step_index);
+          if (evidence != whole_evidence.end())
+            frame.record = evidence->second;
           frame.state = Frame::State::Complete;
           continue;
         }
@@ -1569,7 +1700,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   frame.parts.push_back(samples.take_value());
                   return Status::success();
                 },
-                work, cancellation);
+                work, active_token());
             if (!status.ok())
               return fail(status);
           }
@@ -1593,6 +1724,41 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           continue;
         }
         if (frame.state == Frame::State::Initial) {
+          if (flights && shareable[step_index]) {
+            const auto parent_token = active_token();
+            bool parent_shared = false;
+            for (const auto& ancestor : frames)
+              parent_shared |= ancestor.flight && ancestor.flight->producer();
+            frame.record_identity = observation_key(step_index, frame.outputs);
+            auto claimed = flights->claim(
+                frame.record_identity, [parent_token, parent_shared, &plan] {
+                  if (parent_token.cancelled())
+                    return ErrorCode::Cancelled;
+                  return parent_shared || plan.current() ? ErrorCode::Ok
+                                                         : ErrorCode::Stale;
+                });
+            if (!claimed.ok())
+              return fail(claimed.status());
+            frame.flight = claimed.take_value();
+            if (!frame.flight->producer()) {
+              auto shared = frame.flight->wait(pump);
+              if (!shared.ok())
+                return fail(shared.status());
+              status = records.import(shared.value()->record);
+              if (!status.ok())
+                return fail(status);
+              frame.complete = shared.value()->value;
+              frame.record = shared.value()->record;
+              ++diagnostics.shared_computations;
+              diagnostics.selected_backends[step.node_id] = step.backend;
+              diagnostics.shared_peak_live_bytes =
+                  std::max(diagnostics.shared_peak_live_bytes,
+                           shared.value()->producer_peak);
+              frame.state = Frame::State::Complete;
+              continue;
+            }
+            limits.cancellation = active_token();
+          }
           frame.parts.clear();
           frame.next = 0;
           if (step.traits.dependency_version == 1) {
@@ -1602,8 +1768,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             request.parameters = step.parameters;
             request.outputs = frame.outputs;
             request.snapshot_identity = identity;
-            request.cancellation = cancellation;
+            request.cancellation = active_token();
             request.limits = options.dependencies;
+            if (flights)
+              request.limits.sets.cancellation = request.cancellation;
             request.limits.maximum_work =
                 std::min(request.limits.maximum_work, work);
             auto reserved =
@@ -1613,14 +1781,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(reserved.status());
             Seal seal{reserved.take_value()};
             auto session = dependency_stage<std::shared_ptr<DependencySession>>(
-                pool, admission, [&] {
+                pool, admission,
+                [&] {
                   if (stop() != ErrorCode::Ok)
                     return Result<std::shared_ptr<DependencySession>>(
                         Status{stop(), {}});
                   return operations->start_dependency(
                       step.operation, std::move(request),
                       seal.reservation->allocator());
-                });
+                },
+                pump);
             if (!session.ok())
               return fail(session.status());
             frame.session = session.take_value();
@@ -1707,8 +1877,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           std::uint64_t callback_us = 0;
           if (frame.session) {
             const auto charged_before = frame.session->consumed_work();
-            auto progress =
-                dependency_stage<DependencyProgress>(pool, admission, [&] {
+            auto progress = dependency_stage<DependencyProgress>(
+                pool, admission,
+                [&] {
                   if (stop() != ErrorCode::Ok)
                     return Result<DependencyProgress>(Status{stop(), {}});
                   const auto callback_started =
@@ -1717,7 +1888,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       frame.session->poll(seal.reservation->allocator());
                   callback_us = duration_us(callback_started);
                   return result;
-                });
+                },
+                pump);
             status = consume(frame.session->consumed_work() - charged_before);
             if (!status.ok())
               return fail(status);
@@ -1776,7 +1948,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
           } else {
             auto value = dependency_stage<Value>(
-                pool, admission, [&]() -> Result<Value> {
+                pool, admission,
+                [&]() -> Result<Value> {
                   if (stop() != ErrorCode::Ok)
                     return Result<Value>(Status{stop(), {}});
                   std::vector<Value> inputs;
@@ -1795,7 +1968,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                            demands,
                                            step.parameters,
                                            Backend::Cpu,
-                                           cancellation,
+                                           active_token(),
                                            frame.outputs.boxes()[0],
                                            seal.reservation->allocator()};
                   const auto callback_started =
@@ -1808,7 +1981,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     return transfer_value(computed.value(), call.allocator,
                                           true);
                   return computed;
-                });
+                },
+                pump);
             if (!value.ok())
               return fail(value.status());
             status =
@@ -1911,7 +2085,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   template <class T>
   static Result<T> dependency_stage(ThreadPool* pool,
                                     WaitingAdmission* admission,
-                                    std::function<Result<T>()> work) {
+                                    std::function<Result<T>()> work,
+                                    const std::function<void()>& pump = {}) {
     struct Completion {
       std::promise<Result<T>> promise;
       Result<T> result{Status{ErrorCode::Internal, {}}};
@@ -1945,6 +2120,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     if (!pool->submit(std::move(callback)))
       return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
                                        "dependency callback queue stopped"));
+    if (pump) {
+      while (future.wait_for(std::chrono::milliseconds(2)) !=
+             std::future_status::ready)
+        pump();
+      pump();
+    }
     return future.get();
   }
 
@@ -2954,6 +3135,8 @@ ExecutionContext::ExecutionContext(
  * @copydetails ExecutionContext::~ExecutionContext
  */
 ExecutionContext::~ExecutionContext() noexcept {
+  if (impl_ && impl_->dependency_flights)
+    impl_->dependency_flights->close();
   if (impl_ && impl_->demands)
     impl_->demands->close();
 }
@@ -2969,11 +3152,17 @@ DiskCacheStatistics ExecutionContext::disk_cache_statistics() const {
   return impl_->disk ? impl_->disk->statistics() : DiskCacheStatistics{};
 }
 void ExecutionContext::clear_result_cache() {
+  impl_->dependency_flights->clear();
   if (impl_->cache)
     impl_->cache->clear();
 }
 ResultCacheStatistics ExecutionContext::cache_statistics() const {
-  return impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
+  auto result =
+      impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
+  const auto dependencies = impl_->dependency_flights->statistics();
+  result.in_flight += dependencies.first;
+  result.shared_computations += dependencies.second;
+  return result;
 }
 
 /**
@@ -3191,7 +3380,11 @@ Result<DemandResult> ExecutionContext::execute_fragments(
       frozen.operations_ != impl_->operation_registry)
     return Result<DemandResult>(
         Status{ErrorCode::Stale, "invalid or foreign frozen demand"});
-  const auto stop = [&] { return binding_stop(frozen.plan_, cancellation); };
+  const auto stop = [&] {
+    if (options.dependencies.sets.cancellation.cancelled())
+      return ErrorCode::Cancelled;
+    return binding_stop(frozen.plan_, cancellation);
+  };
   const auto failure = [&](Status status) {
     const auto code = stop();
     if (code != ErrorCode::Ok)
@@ -3200,6 +3393,10 @@ Result<DemandResult> ExecutionContext::execute_fragments(
   };
   if (stop() != ErrorCode::Ok)
     return failure(Status{stop(), {}});
+  auto combined = CancellationToken::combine(
+      {cancellation, options.dependencies.sets.cancellation});
+  if (!combined.ok())
+    return failure(combined.status());
   auto key =
       demand_key(query, frozen.plan_, options.dependencies.sets.maximum_boxes);
   if (!key.ok())
@@ -3234,19 +3431,19 @@ Result<DemandResult> ExecutionContext::execute_fragments(
   auto run = ExecutionRun::run_dependencies(
       &impl_->cpu_pool, &impl_->waiting_admission, impl_->budget,
       impl_->operation_registry,
-      [operations = impl_->operation_registry, &frozen](
+      [operations = impl_->operation_registry](
           const std::string& key, const OperationInvocation& call) {
-        return operations->invoke_current(
-            key, call, [&] { return frozen.plan_.current(); });
+        return operations->invoke_current(key, call, [] { return true; });
       },
-      frozen.plan_, validated.take_value(), cancellation, options, nullptr,
+      frozen.plan_, validated.take_value(), combined.value(), options, nullptr,
       [this](std::uint64_t bytes) {
         if (impl_->disk && impl_->budget->available() < bytes)
           impl_->disk->drop_pending();
         if (impl_->cache)
           impl_->cache->reclaim_for(bytes);
       },
-      &query, &result.values, frozen.execution_identity_);
+      &query, &result.values, frozen.execution_identity_,
+      impl_->dependency_flights.get());
   if (!run.ok())
     return failure(run.status());
   auto completed = run.take_value();
@@ -3306,7 +3503,14 @@ Result<DemandResult> DemandHandle::request(
   if (!owner)
     return Result<DemandResult>(
         Status{ErrorCode::Cancelled, "demand context retired"});
-  auto begun = owner->acquire(impl_, cancellation);
+  if (cancellation.cancelled() ||
+      options.dependencies.sets.cancellation.cancelled())
+    return Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
+  auto combined = CancellationToken::combine(
+      {cancellation, options.dependencies.sets.cancellation});
+  if (!combined.ok())
+    return Result<DemandResult>(combined.status());
+  auto begun = owner->acquire(impl_, combined.value());
   if (!begun.ok())
     return Result<DemandResult>(begun.status());
   auto lease = begun.take_value();

@@ -286,6 +286,8 @@ int workflow(std::uint32_t (*starts)(), std::uint32_t (*destroys)()) {
   const auto sparse = point(1).unite(point(3)).take_value();
   const auto calls = starts();
   auto sparse_result = demand.request({{"result", sparse}});
+  if (!sparse_result.ok())
+    std::cerr << sparse_result.status().message << '\n';
   PS_CHECK(sparse_result.ok() && starts() == calls + 1 &&
            starts() == destroys());
   PS_CHECK(sparse_result.value().values.at("result").coverage() == sparse);

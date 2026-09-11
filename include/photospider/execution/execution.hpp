@@ -55,7 +55,8 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint32_t maximum_queued_tasks = 1024;
   /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
-  /** @brief Optional result retention sublimit; zero disables all cache work.
+  /** @brief Optional completed-result retention sublimit; zero disables it.
+   * Same-snapshot exact demand Flights still share active computations.
    */
   std::uint64_t result_cache_bytes = 0;
   /** @brief Optional exclusive disk directory; requires positive result cache.
@@ -63,6 +64,8 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::optional<DiskCacheConfig> disk_cache = {};
   /** @brief Maximum live context-managed demand handles, 1..65536. */
   std::uint32_t maximum_demands = 1024;
+  /** @brief Concurrent dependency Flights and subscribers, each 1..1048576. */
+  std::uint64_t maximum_dependency_flights = 65536;
 };
 
 /**
@@ -161,7 +164,10 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t native_compute_us = 0;
 };
 
-/** @brief Cumulative context-local cache observations, synchronized on read. */
+/** @brief Cumulative context-local cache observations, synchronized on read.
+ * @note shared_computations/in_flight include exact demand Flights even when
+ * completed-result retention is disabled.
+ */
 struct ResultCacheStatistics final {
   std::uint64_t hits = 0, misses = 0, evictions = 0, shared_computations = 0;
   std::uint64_t retained_bytes = 0, entries = 0, in_flight = 0;
@@ -314,6 +320,10 @@ class PHOTOSPIDER_API DemandHandle final {
    * @return Complete fragments/evidence, or typed failure without partial
    * publication. Atomic observations are isolated; terminal Q is never split.
    * Concurrent replacement makes old latest requests Stale; cancellation wins.
+   * @note Equal Atomic observations or identical terminal Q in the same
+   * immutable bundle can share active work only with deterministic, side-effect
+   * free ancestors. Waiter cancellation sources are independent of the
+   * producer.
    * @throws std::bad_alloc For request/structural metadata.
    */
   Result<DemandResult> request(const DemandQuery& query,

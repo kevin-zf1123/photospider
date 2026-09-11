@@ -6,10 +6,12 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -140,6 +142,8 @@ struct Gate {
   std::condition_variable changed;
   unsigned entered = 0;
   bool release = false;
+  bool ignore_cancellation = false;
+  unsigned released = 0;
   std::atomic<unsigned> active{0};
   bool await(unsigned count) {
     std::unique_lock<std::mutex> lock(mutex);
@@ -151,9 +155,77 @@ struct Gate {
     release = true;
     changed.notify_all();
   }
+  void allow(unsigned count) {
+    std::lock_guard<std::mutex> lock(mutex);
+    released = count;
+    changed.notify_all();
+  }
+};
+struct StagedGate {
+  std::function<Result<Value>(const OperationInvocation&)> callback;
+  bool terminal = false;
+  bool requested = false;
+  explicit StagedGate(
+      std::function<Result<Value>(const OperationInvocation&)> callback,
+      bool terminal = false)
+      : callback(std::move(callback)), terminal(terminal) {}
+  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+    const auto at =
+        terminal ? 0 : phase.query.outputs.boxes()[0].dimensions()[0].offset;
+    if (!requested) {
+      requested = true;
+      if (terminal)
+        return Result<DependencyPoll>(DependencyNeedBatch{
+            {},
+            {{0, 1, point(0, phase.query.inputs[0].descriptor.shape[0]), {}}}});
+      return Result<DependencyPoll>(
+          DependencyNeedBatch{{{{at}, {{0, 1, phase.query.outputs, {}}}}}, {}});
+    }
+    double sample = 0;
+    auto status = phase.read(0, {at}, &sample, 8);
+    if (!status.ok())
+      return Result<DependencyPoll>(status);
+    const std::vector<Value> inputs{phase.inputs[0].fragments()[0]};
+    const std::vector<Region> regions{
+        terminal ? Region({{0, 1}}) : phase.query.outputs.boxes()[0]};
+    const std::map<std::string, ParameterValue> parameters;
+    OperationInvocation call{inputs,
+                             regions,
+                             parameters,
+                             Backend::Cpu,
+                             phase.query.cancellation,
+                             regions[0],
+                             phase.allocator};
+    auto output = callback(call);
+    if (!output.ok())
+      return Result<DependencyPoll>(output.status());
+    if (terminal) {
+      output = Result<Value>(Status{ErrorCode::Cancelled, {}});
+      const double value = sample + phase.query.outputs.element_count().value();
+      std::vector<Value> fragments;
+      for (const auto& region : phase.query.outputs.boxes()) {
+        auto writer = MutableValue::allocate(phase.query.output.descriptor,
+                                             region, phase.allocator)
+                          .take_value();
+        for (std::size_t i = 0; i < writer.size(); i += 8)
+          std::memcpy(writer.data() + i, &value, 8);
+        fragments.push_back(std::move(writer).publish().take_value());
+      }
+      return Result<DependencyPoll>(
+          ValueFragments::create(phase.query.output.descriptor, {},
+                                 phase.query.outputs, fragments)
+              .take_value());
+    }
+    return Result<DependencyPoll>(
+        ValueFragments::create(phase.query.output.descriptor, {},
+                               phase.query.outputs, {output.take_value()})
+            .take_value());
+  }
 };
 std::shared_ptr<OperationRegistry> gated_registry(
-    const std::shared_ptr<Gate>& gate) {
+    const std::shared_ptr<Gate>& gate, bool staged = false,
+    std::shared_ptr<std::atomic<unsigned>> effects = {},
+    bool terminal = false) {
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition op;
   op.key = "wait";
@@ -169,16 +241,18 @@ std::shared_ptr<OperationRegistry> gated_registry(
     } active{gate.get()};
     {
       std::unique_lock<std::mutex> lock(gate->mutex);
-      ++gate->entered;
+      const auto ticket = ++gate->entered;
       gate->changed.notify_all();
       const auto deadline =
           std::chrono::steady_clock::now() + std::chrono::seconds(3);
-      while (!gate->release && !call.cancellation.cancelled()) {
+      while (!gate->release && ticket > gate->released &&
+             (!call.cancellation.cancelled() || gate->ignore_cancellation)) {
         if (std::chrono::steady_clock::now() >= deadline)
           break;
         gate->changed.wait_for(lock, std::chrono::milliseconds(2));
       }
-      if (!gate->release && !call.cancellation.cancelled())
+      if (!gate->release && ticket > gate->released &&
+          !call.cancellation.cancelled())
         return Result<Value>(
             Status{ErrorCode::OperationFailed, "gate deadline"});
     }
@@ -191,14 +265,50 @@ std::shared_ptr<OperationRegistry> gated_registry(
     double value = 0;
     std::memcpy(&value, call.inputs[0].bytes().data() + address.value(), 8);
     if (!std::isfinite(value))
-      return Result<Value>(
-          Status{ErrorCode::OperationFailed, "nonfinite sample"});
+      return Result<Value>(Status{ErrorCode::OperationFailed,
+                                  "nonfinite sample " + std::to_string(at)});
     auto output = MutableValue::allocate(call.inputs[0].descriptor(),
                                          call.output_region, call.allocator)
                       .take_value();
     std::memcpy(output.data(), &value, 8);
     return std::move(output).publish();
   };
+  if (staged) {
+    op.traits.region_rule = OperationRegionRule::Dependency;
+    op.traits.dependency_version = 1;
+    op.traits.continuation_bytes = sizeof(StagedGate);
+    op.traits.maximum_dependency_stages = 4;
+    if (terminal)
+      op.traits.observation_kind = ObservationKind::RequestRecord;
+    op.start_dependency = [callback = std::move(op.callback), terminal](
+                              const DependencyQuery&,
+                              const BufferAllocator& allocator) {
+      return DependencyContinuation::make<StagedGate>(allocator, callback,
+                                                      terminal);
+    };
+    op.callback = {};
+  }
+  if (effects) {
+    OperationDefinition effect;
+    effect.key = "effect";
+    effect.traits.deterministic = false;
+    effect.traits.side_effect_free = false;
+    effect.traits.cacheable = false;
+    effect.traits.shape_rule = OperationShapeRule::Fixed;
+    effect.traits.fixed_output_shape = {2};
+    effect.callback =
+        [effects](const OperationInvocation& call) -> Result<Value> {
+      const double value = ++*effects;
+      auto writer = MutableValue::allocate({ElementType::Float64, {2}},
+                                           Region::whole({2}), call.allocator)
+                        .take_value();
+      std::memcpy(writer.data(), &value, 8);
+      std::memcpy(writer.data() + 8, &value, 8);
+      return std::move(writer).publish();
+    };
+    if (!registry->register_operation(std::move(effect)).ok())
+      throw std::runtime_error("effect registration");
+  }
   if (!registry->register_operation(std::move(op)).ok() ||
       !registry->freeze().ok())
     throw std::runtime_error("gate registration");
@@ -451,6 +561,303 @@ int owner_retirement() {
            closing.generation().status().code == ErrorCode::Cancelled);
   return 0;
 }
+bool await_shared(const ExecutionContext& context, std::uint64_t previous) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (context.cache_statistics().shared_computations <= previous) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      return false;
+    std::this_thread::yield();
+  }
+  return true;
+}
+int shared_ancestors() {
+  for (unsigned scenario = 0; scenario < 6; ++scenario) {
+    const auto cancelled = scenario % 3;
+    auto gate = std::make_shared<Gate>();
+    auto registry = gated_registry(gate, scenario >= 3);
+    auto document = gate_document();
+    document.nodes.push_back({2, "wait", {WorkflowNodeOutput{1, "value"}}, {}});
+    document.outputs = {{"inner", 1, "value"}, {"outer", 2, "value"}};
+    GraphContext graph(document);
+    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    ExecutionContext context(registry, {1, false, 8, 4096});
+    auto demand =
+        context
+            .open_demand(
+                plan, {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+            .take_value();
+    CancellationSource stop_outer, stop_inner;
+    auto outer = std::async(std::launch::async, [&] {
+      return demand.request({{"outer", point(0, 2)}}, stop_outer.token());
+    });
+    PS_CHECK(gate->await(1));
+    auto inner = std::async(std::launch::async, [&] {
+      return demand.request({{"inner", point(0, 2)}}, stop_inner.token());
+    });
+    // Observe a real directory join before cancellation; no timing sleep.
+    PS_CHECK(await_shared(context, 0));
+    if (cancelled == 1)
+      stop_outer.cancel();
+    if (cancelled == 2)
+      stop_inner.cancel();
+    gate->open();
+    auto outer_result = outer.get();
+    auto inner_result = inner.get();
+    if (outer_result.ok() != (cancelled != 1) ||
+        inner_result.ok() != (cancelled != 2))
+      std::cerr << "shared scenario " << scenario
+                << ": outer=" << static_cast<int>(outer_result.status().code)
+                << ' ' << outer_result.status().message
+                << "; inner=" << static_cast<int>(inner_result.status().code)
+                << ' ' << inner_result.status().message << '\n';
+    PS_CHECK(outer_result.ok() == (cancelled != 1));
+    PS_CHECK(inner_result.ok() == (cancelled != 2));
+    if (cancelled == 1)
+      PS_CHECK(outer_result.status().code == ErrorCode::Cancelled);
+    if (cancelled == 2)
+      PS_CHECK(inner_result.status().code == ErrorCode::Cancelled);
+    if (outer_result.ok()) {
+      double value = 0;
+      PS_CHECK(
+          outer_result.value().values.at("outer").read({0}, &value, 8).ok() &&
+          value == 7);
+      PS_CHECK(outer_result.value().dependencies.record_count() == 2);
+      PS_CHECK(outer_result.value()
+                   .dependencies.potential_dirty("x", point(0, 2))
+                   .value()
+                   .at("outer") == point(0, 2));
+    }
+    if (inner_result.ok()) {
+      double value = 0;
+      PS_CHECK(
+          inner_result.value().values.at("inner").read({0}, &value, 8).ok() &&
+          value == 7);
+      PS_CHECK(inner_result.value().diagnostics.shared_computations == 1);
+      PS_CHECK(inner_result.value().diagnostics.shared_peak_live_bytes >= 8);
+      PS_CHECK(inner_result.value().dependencies.record_count() == 1);
+      PS_CHECK(inner_result.value()
+                   .dependencies.potential_dirty("x", point(0, 2))
+                   .value()
+                   .at("inner") == point(0, 2));
+    }
+    PS_CHECK(gate->entered == (cancelled == 1 ? 1U : 2U));
+    PS_CHECK(context.cache_statistics().in_flight == 0);
+  }
+  return 0;
+}
+int auxiliary_cancellation() {
+  auto gate = std::make_shared<Gate>();
+  auto registry = gated_registry(gate, true);
+  GraphContext graph(gate_document());
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {1, false, 8, 4096});
+  auto demand =
+      context
+          .open_demand(plan,
+                       {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+          .take_value();
+  CancellationSource auxiliary;
+  ExecutionOptions options;
+  options.dependencies.sets.cancellation = auxiliary.token();
+  auto a = std::async(std::launch::async, [&] {
+    return demand.request({{"y", point(0, 2)}}, {}, options);
+  });
+  PS_CHECK(gate->await(1));
+  auto b = std::async(std::launch::async,
+                      [&] { return demand.request({{"y", point(0, 2)}}); });
+  PS_CHECK(await_shared(context, 0));
+  auxiliary.cancel();
+  gate->open();
+  PS_CHECK(a.get().status().code == ErrorCode::Cancelled);
+  auto survived = b.get();
+  PS_CHECK(survived.ok() &&
+           survived.value().diagnostics.shared_computations == 1);
+  PS_CHECK(gate->entered == 1 && gate->active == 0);
+  return 0;
+}
+int impure_ancestor() {
+  auto gate = std::make_shared<Gate>();
+  auto effects = std::make_shared<std::atomic<unsigned>>(0);
+  auto registry = gated_registry(gate, true, effects);
+  WorkflowDocument document;
+  document.nodes = {{1, "effect", {}, {}},
+                    {2, "wait", {WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"y", 2, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {2, false, 8, 4096});
+  auto demand = context.open_demand(plan, {}).take_value();
+  auto a = std::async(std::launch::async,
+                      [&] { return demand.request({{"y", point(0, 2)}}); });
+  PS_CHECK(gate->await(1));
+  auto b = std::async(std::launch::async,
+                      [&] { return demand.request({{"y", point(0, 2)}}); });
+  PS_CHECK(gate->await(2));
+  gate->open();
+  auto first = a.get(), second = b.get();
+  PS_CHECK(first.ok() && second.ok());
+  double x = 0, y = 0;
+  PS_CHECK(first.value().values.at("y").read({0}, &x, 8).ok());
+  PS_CHECK(second.value().values.at("y").read({0}, &y, 8).ok());
+  PS_CHECK(x == 1 && y == 2 && *effects == 2);
+  PS_CHECK(context.cache_statistics().shared_computations == 0);
+  PS_CHECK(first.value().dependencies.record_count() == 2 &&
+           second.value().dependencies.record_count() == 2);
+  return 0;
+}
+int late_flight_and_frozen() {
+  auto gate = std::make_shared<Gate>();
+  gate->ignore_cancellation = true;
+  auto registry = gated_registry(gate, true);
+  GraphContext graph(gate_document());
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {2, false, 8, 4096});
+  ExecutionBindings bindings{
+      {{"x", values<double>(ElementType::Float64, {7, 9})}}};
+  auto demand = context.open_demand(plan, bindings).take_value();
+  CancellationSource stop;
+  DemandQuery query{{"y", point(0, 2)}};
+  auto p0 = std::async(std::launch::async,
+                       [&] { return demand.request(query, stop.token()); });
+  PS_CHECK(gate->await(1));
+  stop.cancel();
+  context.clear_result_cache();
+  auto p1 =
+      std::async(std::launch::async, [&] { return demand.request(query); });
+  PS_CHECK(gate->await(2));
+  gate->allow(1);
+  PS_CHECK(p0.get().status().code == ErrorCode::Cancelled);
+  auto follower =
+      std::async(std::launch::async, [&] { return demand.request(query); });
+  PS_CHECK(await_shared(context, 0));
+  gate->open();
+  PS_CHECK(p1.get().ok());
+  auto joined = follower.get();
+  PS_CHECK(joined.ok() && joined.value().diagnostics.shared_computations == 1);
+  PS_CHECK(gate->entered == 2 && context.cache_statistics().in_flight == 0);
+  // A frozen waiter retains the old bundle while latest publication is stale.
+  auto frozen = demand.freeze().take_value();
+  {
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->entered = 0;
+    gate->released = 0;
+    gate->release = false;
+    gate->ignore_cancellation = false;
+  }
+  auto latest =
+      std::async(std::launch::async, [&] { return demand.request(query); });
+  PS_CHECK(gate->await(1));
+  const auto shared_before = context.cache_statistics().shared_computations;
+  auto pinned = std::async(std::launch::async, [&] {
+    return context.execute_fragments(frozen, query);
+  });
+  PS_CHECK(await_shared(context, shared_before));
+  bindings.inputs[0].value = values<double>(ElementType::Float64, {8, 9});
+  PS_CHECK(demand.replace_bindings(bindings).ok());
+  gate->open();
+  PS_CHECK(latest.get().status().code == ErrorCode::Stale);
+  auto old = pinned.get();
+  double result = 0;
+  PS_CHECK(old.ok() && old.value().values.at("y").read({0}, &result, 8).ok() &&
+           result == 7);
+  PS_CHECK(gate->entered == 1);
+  auto current = demand.request(query);
+  PS_CHECK(current.ok() &&
+           current.value().values.at("y").read({0}, &result, 8).ok() &&
+           result == 8);
+  return 0;
+}
+int shared_terminal() {
+  auto gate = std::make_shared<Gate>();
+  auto registry = gated_registry(gate, true, {}, true);
+  auto document = gate_document();
+  document.inputs[0].descriptor.shape = {3};
+  document.inputs[0].region = Region::whole({3});
+  GraphContext graph(document);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {2, false, 8, 4096});
+  auto demand =
+      context
+          .open_demand(
+              plan, {{{"x", values<double>(ElementType::Float64, {7, 8, 9})}}})
+          .take_value();
+  const auto wide = point(0, 3).unite(point(2, 3)).take_value();
+  auto first = std::async(std::launch::async,
+                          [&] { return demand.request({{"y", wide}}); });
+  PS_CHECK(gate->await(1));
+  auto same = std::async(std::launch::async,
+                         [&] { return demand.request({{"y", wide}}); });
+  PS_CHECK(await_shared(context, 0));
+  auto subset = std::async(
+      std::launch::async, [&] { return demand.request({{"y", point(0, 3)}}); });
+  PS_CHECK(gate->await(2));
+  gate->open();
+  auto a = first.get(), b = same.get(), c = subset.get();
+  PS_CHECK(a.ok() && b.ok() && c.ok() && gate->entered == 2);
+  double value = 0;
+  for (const auto* result : {&a.value(), &b.value()}) {
+    PS_CHECK(result->values.at("y").read({2}, &value, 8).ok() && value == 9);
+    PS_CHECK(!result->values.at("y").read({1}, &value, 8).ok());
+    PS_CHECK(!result->dependencies.restrict({{"y", point(0, 3)}}).ok());
+    PS_CHECK(result->dependencies.coverage().at("y") == wide);
+    PS_CHECK(result->dependencies.certificate(1).status().code ==
+             ErrorCode::NotFound);
+  }
+  PS_CHECK(c.value().values.at("y").read({0}, &value, 8).ok() && value == 8);
+  PS_CHECK(b.value().diagnostics.shared_computations == 1 &&
+           c.value().diagnostics.shared_computations == 0);
+  return 0;
+}
+int joint_failure_isolation() {
+  auto gate = std::make_shared<Gate>();
+  auto registry = gated_registry(gate, true);
+  GraphContext graph(gate_document());
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {2, false, 8, 4096});
+  ExecutionBindings bindings{
+      {{"x", values<double>(ElementType::Float64,
+                            {1, std::numeric_limits<double>::infinity()})}}};
+  auto demand = context.open_demand(plan, bindings).take_value();
+  auto joint = std::async(std::launch::async, [&] {
+    return demand.request({{"y", Footprint::all({2}).take_value()}});
+  });
+  PS_CHECK(gate->await(1));
+  auto narrow = std::async(
+      std::launch::async, [&] { return demand.request({{"y", point(0, 2)}}); });
+  PS_CHECK(await_shared(context, 0));
+  gate->open();
+  auto failed = joint.get(), survived = narrow.get();
+  PS_CHECK(failed.status().code == ErrorCode::OperationFailed &&
+           failed.status().message == "nonfinite sample 1");
+  double value = 0;
+  PS_CHECK(survived.ok() &&
+           survived.value().values.at("y").read({0}, &value, 8).ok() &&
+           value == 1);
+  PS_CHECK(gate->entered == 2 &&
+           survived.value().diagnostics.shared_computations == 1);
+  {
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->entered = 0;
+    gate->release = false;
+  }
+  bindings.inputs[0].value = values<double>(
+      ElementType::Float64, {std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::infinity()});
+  PS_CHECK(demand.replace_bindings(bindings).ok());
+  auto later_atom = std::async(
+      std::launch::async, [&] { return demand.request({{"y", point(1, 2)}}); });
+  PS_CHECK(gate->await(1));
+  auto ordered = std::async(std::launch::async, [&] {
+    return demand.request({{"y", Footprint::all({2}).take_value()}});
+  });
+  PS_CHECK(gate->await(2));
+  gate->allow(1);
+  PS_CHECK(later_atom.get().status().message == "nonfinite sample 1");
+  gate->open();
+  PS_CHECK(ordered.get().status().message == "nonfinite sample 0");
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(combined_tokens() == 0);
@@ -459,5 +866,11 @@ int main() {
   PS_CHECK(isolation_and_limits() == 0);
   PS_CHECK(snapshot_replacement() == 0);
   PS_CHECK(owner_retirement() == 0);
+  PS_CHECK(shared_ancestors() == 0);
+  PS_CHECK(auxiliary_cancellation() == 0);
+  PS_CHECK(impure_ancestor() == 0);
+  PS_CHECK(late_flight_and_frozen() == 0);
+  PS_CHECK(shared_terminal() == 0);
+  PS_CHECK(joint_failure_isolation() == 0);
   return 0;
 }

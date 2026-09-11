@@ -195,8 +195,9 @@ bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不�
 调用上限为既有队列容量加 CPU worker 数再加一个 coordinator 槽。
 `DemandConfig::maximum_metadata_entries` 限制每个 handle 保留的 query/evidence/dirty
 metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache；当前调用
-通过既有 CPU pool、WaitingAdmission 和计费 allocator 独立执行。跨 Run dependency
-Flights、content-cache 复用及 GPU fragment 执行仍是未完成的 G4 集成。
+通过 context-owned Flights 共享同一不可变 bundle 中重叠的活跃观察，执行仍使用既有
+CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的 content-cache
+复用及 GPU fragment 执行仍是未完成的 G4 集成。
 
 `test_execution_demand` 覆盖稀疏结果、各 dtype snapshot、连续 dirty 累积、frozen
 隔离、陈旧发布、独立取消及 context 排空。真实 C terminal fixture 检查稀疏 Q 仅调用
@@ -208,3 +209,39 @@ allocator 分配 1 MiB 输出和 3 MiB scratch。预算 4 MiB 时 A 完成，B �
 开始前被拒绝；失败返回后 A 的 storage owner 已释放。同一 context 随后仍可执行 A，
 观察分配峰值为 4 MiB。预算 5 MiB 时父节点取得两个结果并返回 3，观察峰值为 5 MiB。
 该测试验证此执行顺序的有限拒绝和真实 lease 退休，不承诺最优调度。
+
+## 共享精确观察 Flight
+
+`request` 和 `execute_fragments` 认领单个 Atomic 样本/完整图像像素，或完整 terminal Q。
+Key 绑定捕获的 bundle 身份、plan/operation 契约、节点、geometry、精确 query 和资源
+策略。共享要求全部输入祖先的实现都 deterministic 且 side-effect-free。因此，即使
+本地 callback 是纯函数，带副作用或非确定性的 Whole 祖先也会阻止下游共享。Dispatch
+不扩大 Q，不合批 RequestFailureOnly 观察。
+
+目录线性化认领，为 producer 分配唯一 FlightId，并将 waiter 的取消/当前性与 producer
+token 分开。显式 token 和辅助 set token 都属于 waiter。调用方 coordinator 推进阶段并
+等待依赖；callback worker 不等待其他 Flight。等待 callback 时 coordinator 检查祖先
+waiter。发起父请求取消后，仍被独立 waiter 需要的子节点可以完成。Latest waiter 在
+replacement 后变为 Stale 时，frozen waiter 同样可取得旧 bundle 的成功结果。
+
+最后一个 waiter 取消后禁止新加入，后续请求认领新 FlightId。晚完成只有在目录 ID 仍
+匹配时才删除该项，因此 P0 退休不能删除 P1。Context 关闭会取消活跃 producer，排空
+demand 调用后再销毁 worker。`clear_result_cache()` 同时递增 dependency epoch；目前
+尚未启用已完成 dependency cache 保留。`maximum_dependency_flights` 用同一个配置数值
+分别限制活跃 Flight 和全部订阅者的数量，范围 1..1048576、默认 65536。Metadata 容量
+耗尽直接返回 ResourceExhausted，不等待容量。
+
+共享成功值携带不可变直接记录，包括精确 certificate 或不可分割 manifest，以及相关
+上游记录的链接。导入按拓扑顺序遍历链接，在各 waiter 的 execution evidence 中保留
+逐输出关系。结构记录不持有像素/snapshot owner。其析构使用无需分配的迭代退休队列，
+长链失去最后 owner 时也适用。即使禁用结果保留，context `cache_statistics()` 仍包含
+活跃 dependency Flight 和共享订阅；逐调用共享诊断不重复计入 callback timing。
+
+集成测试覆盖 legacy/staged 共享祖先、显式/辅助取消隔离、非纯祖先排除、旧 P0 与新 P1
+重叠、latest/frozen 竞争及导入证据的 dirty 查询。直接生命周期回归检查 epoch/限额和
+20000 个链接结构记录的退休。公开 workflow 用两个精确 waiter 和有界 callback barrier
+证明 callback 只执行一次，一个 waiter 取消，另一个得到 7 及完整 identity 依赖证据。
+带 barrier 的 terminal 用例证明相同稀疏 Q 只共享一次、较小 Q 单独执行，导入的 terminal
+证据仍拒绝子集 restriction。含非有限样本的显式联合请求失败时，共享的正常点 waiter
+仍成功；后序原子先完成也不改变联合请求的规范错误。该 generic callback 检查不能替代
+尚待实现的 ordered-scan/carry 集成。
