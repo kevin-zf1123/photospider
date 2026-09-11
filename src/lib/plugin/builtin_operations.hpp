@@ -35,6 +35,7 @@ Status register_numeric_sample_expression(OperationRegistry* registry);
 Status register_lut_apply_1d(OperationRegistry* registry);
 Status register_image_exposure_gain(OperationRegistry* registry);
 Status register_image_opacity(OperationRegistry* registry);
+Status register_image_gaussian_blur_with_kernel(OperationRegistry* registry);
 Status register_image_gaussian_blur(OperationRegistry* registry);
 Status register_image_mask(OperationRegistry* registry);
 Status register_image_source_over(OperationRegistry* registry);

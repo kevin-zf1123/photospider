@@ -408,10 +408,187 @@ int channel_convolution() {
   PS_CHECK(dirty.ok() && dirty.value().at("value").empty());
   return 0;
 }
+Result<Value> gaussian_kernel(
+    const std::shared_ptr<OperationRegistry>& registry, double radius,
+    double sigma) {
+  const std::vector<Value> inputs;
+  const std::vector<Region> demands;
+  const std::map<std::string, ParameterValue> parameters{{"radius", radius},
+                                                         {"sigma", sigma}};
+  OperationInvocation invocation(inputs, demands, parameters);
+  invocation.input_metadata = {{{ElementType::Float32, {1, 1, 3}},
+                                {encode_semantic(rgb()).take_value()}}};
+  invocation.output_index = 1;
+  return registry->invoke("image.gaussian_blur_with_kernel", invocation);
+}
+int gaussian_parameters() {
+  auto registry = make_default_operation_registry();
+  const std::vector<double> radii{0,
+                                  .25,
+                                  1,
+                                  1.25,
+                                  2,
+                                  64,
+                                  std::nextafter(1., 0.),
+                                  std::nextafter(1., 2.),
+                                  std::nextafter(2., 1.),
+                                  std::nextafter(2., 3.)};
+  for (auto radius : radii) {
+    const int extent = static_cast<int>(std::ceil(radius));
+    const std::uint64_t side = 2 * extent + 1;
+    auto result = gaussian_kernel(registry, radius, 1.3);
+    if (!result.ok())
+      std::cerr << "radius=" << radius << ": " << result.status().message
+                << '\n';
+    PS_CHECK(result.ok() && result.value().descriptor().shape ==
+                                (std::vector<std::uint64_t>{side, side}));
+    std::vector<long double> weights;
+    long double normalizer = 0;
+    for (int y = -extent; y <= extent; ++y)
+      for (int x = -extent; x <= extent; ++x) {
+        const auto factor = [&](int d) {
+          return std::min(1.L, std::max(0.L, static_cast<long double>(radius) -
+                                                 (std::abs(d) - 1)));
+        };
+        const long double sigma = 1.3;
+        const auto weight =
+            std::exp(-(static_cast<long double>(x * x + y * y)) /
+                     (2 * sigma * sigma)) *
+            factor(x) * factor(y);
+        weights.push_back(weight);
+        normalizer += weight;
+      }
+    double sum = 0;
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+      float coefficient;
+      std::memcpy(&coefficient, result.value().bytes().data() + i * 4, 4);
+      PS_CHECK(std::abs(static_cast<long double>(coefficient) -
+                        weights[i] / normalizer) < 1e-7L);
+      sum += coefficient;
+    }
+    PS_CHECK(std::abs(sum - 1) < 1e-6);
+    if (radius == std::nextafter(1., 2.)) {
+      float boundary;
+      std::memcpy(&boundary, result.value().bytes().data() + 2 * 4, 4);
+      PS_CHECK(boundary > 0);
+    }
+  }
+  for (double sigma : {0., std::numeric_limits<double>::denorm_min()}) {
+    auto impulse = gaussian_kernel(registry, 1.25, sigma);
+    PS_CHECK(impulse.ok() && impulse.value().descriptor().shape ==
+                                 (std::vector<std::uint64_t>{5, 5}));
+    for (std::size_t i = 0; i < 25; ++i) {
+      float coefficient;
+      std::memcpy(&coefficient, impulse.value().bytes().data() + i * 4, 4);
+      PS_CHECK(coefficient == (i == 12 ? 1 : 0));
+    }
+  }
+  for (double invalid :
+       {-1., std::nextafter(64., 65.), std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()}) {
+    PS_CHECK(!gaussian_kernel(registry, invalid, 1).ok());
+    PS_CHECK(!gaussian_kernel(registry, 1, invalid).ok());
+  }
+  return 0;
+}
+int gaussian_workflow() {
+  auto registry = make_default_operation_registry();
+  std::vector<float> pixels(2 * 3 * 3);
+  for (std::size_t i = 0; i < pixels.size(); ++i)
+    pixels[i] = static_cast<float>(i) / 13;
+  auto input =
+      samples({2, 3, 3}, pixels, {encode_semantic(rgb()).take_value()});
+  for (const std::string boundary : {"zero", "clamp"}) {
+    WorkflowDocument doc;
+    doc.inputs = {declaration(1, "image", input)};
+    doc.nodes = {
+        {1,
+         "image.gaussian_blur_with_kernel",
+         {WorkflowInputReference{1}},
+         {{"radius", 1.25}, {"sigma", .9}, {"boundary", boundary}}},
+        {2,
+         "channel.extract",
+         {WorkflowInputReference{1}},
+         {{"index", std::int64_t{0}}}},
+        {3,
+         "field.convolve",
+         {WorkflowNodeOutput{2, "value"}, WorkflowNodeOutput{1, "kernel"}},
+         {{"anchor_y", std::int64_t{2}},
+          {"anchor_x", std::int64_t{2}},
+          {"boundary", boundary}}}};
+    doc.outputs = {{"image", 1, "image"},
+                   {"kernel", 1, "kernel"},
+                   {"recomputed", 3, "value"}};
+    GraphContext graph(doc);
+    auto compiled = Compiler(registry).compile(graph);
+    if (!compiled.ok())
+      std::cerr << compiled.status().message << '\n';
+    PS_CHECK(compiled.ok());
+    for (bool joint : {false, true}) {
+      ExecutionContext execution(registry, {2, false, 64, 4194304, 1048576});
+      auto frozen =
+          execution.freeze(compiled.value().plan, {{{"image", input}}})
+              .take_value();
+      ExecutionOptions options;
+      options.enable_joint = joint;
+      auto result = execution.execute_fragments(
+          frozen,
+          {{"image", Footprint::all({2, 3, 3}).take_value()},
+           {"kernel", Footprint::all({5, 5}).take_value()},
+           {"recomputed", Footprint::all({2, 3}).take_value()}},
+          {}, options);
+      if (!result.ok())
+        std::cerr << result.status().message << '\n';
+      PS_CHECK(result.ok());
+      PS_CHECK((result.value().diagnostics.joint_groups > 0) == joint);
+      for (std::uint64_t y = 0; y < 2; ++y)
+        for (std::uint64_t x = 0; x < 3; ++x) {
+          float image, field;
+          PS_CHECK(result.value()
+                       .values.at("image")
+                       .read({y, x, 0}, &image, 4)
+                       .ok());
+          PS_CHECK(result.value()
+                       .values.at("recomputed")
+                       .read({y, x}, &field, 4)
+                       .ok());
+          PS_CHECK(image == field);
+        }
+      auto dirty = result.value().dependencies.potential_dirty(
+          "image", Footprint::all({2, 3, 3}).take_value());
+      PS_CHECK(dirty.ok() && dirty.value().at("kernel").empty());
+    }
+    doc.outputs = {{"kernel", 1, "kernel"}};
+    GraphContext kernel_graph(doc);
+    auto kernel_plan =
+        Compiler(registry).compile(kernel_graph).take_value().plan;
+    auto reads = std::make_shared<unsigned>(0);
+    auto source = std::make_shared<RegionalSource>();
+    source->descriptor = input.descriptor();
+    source->facets = input.facets();
+    source->read = [reads](const Region&, std::uint8_t*, std::uint64_t,
+                           const BufferAllocator&,
+                           const CancellationToken&) -> Result<Region> {
+      ++*reads;
+      return Result<Region>(
+          Status{ErrorCode::OperationFailed, "image must not be read"});
+    };
+    ExecutionContext execution(registry);
+    auto kernel = execution.execute(kernel_plan, {{{"image", {}, source}}});
+    if (!kernel.ok())
+      std::cerr << kernel.status().message << '\n';
+    PS_CHECK(kernel.ok() && *reads == 0 &&
+             kernel.value().values.at("kernel").descriptor().shape ==
+                 (std::vector<std::uint64_t>{5, 5}));
+  }
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(ycbcr420() == 0);
   PS_CHECK(split_horizontal() == 0);
   PS_CHECK(channel_convolution() == 0);
+  PS_CHECK(gaussian_parameters() == 0);
+  PS_CHECK(gaussian_workflow() == 0);
   return 0;
 }

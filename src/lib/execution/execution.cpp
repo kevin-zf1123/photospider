@@ -2943,7 +2943,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           all_cancelled.cancel();
       });
       restore.pump_registered = true;
+      std::shared_ptr<DependencyJointSession> session;
       const auto publish_failure = [&](Member& member, Status status) {
+        if (session && member.waiting)
+          static_cast<void>(session->fail_input(
+              plan.steps()[member.step].output_index, status));
         auto key = observation_key(member.step, member.samples);
         if (member.flight)
           member.flight->complete(
@@ -2975,7 +2979,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       auto reserved = reserve(state_capacity.value());
       if (!reserved.ok())
         return fallback();
-      std::shared_ptr<DependencyJointSession> session;
       {
         Seal seal{reserved.take_value()};
         std::vector<DependencyRequest> requests;

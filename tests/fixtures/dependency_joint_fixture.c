@@ -63,6 +63,8 @@ static int joint_poll(const ps_dependency_joint_member_v9* members,
                       uint32_t* out_count, void* user) {
   (void)user;
   const int mode = *(int*)state;
+  if (mode == 9)
+    shared->consume_work(shared->context, UINT64_MAX);
   uint8_t* scratch = NULL;
   if (!shared->scratch(shared->context, 8, &scratch))
     return 1;

@@ -94,3 +94,29 @@ ctest --test-dir build/issue257-static -R '^test_multi_output_ops$' --output-on-
 公开 API 集成测试构造 3×5 RGB workflow，对照独立 long-double oracle 检查三端口，
 比较 joint/singleton 位值，检查奇数边缘与 dirty 支持，单独请求 Y，拒绝非法样本域
 及 alpha，并验证通道顺序和 reference 元数据。安装后的四场景示例由 M10（#313）交付。
+
+## `image.gaussian_blur_with_kernel`
+
+输入为 Float32 HWC Image，输出 `image` 保持原描述与 facets，`kernel` 为
+通用 Float32 HW。必填 Float64 `radius` 和 `sigma` 必须有限且位于 `[0,64]`。
+可选 String `boundary` 默认为 `clamp`，也可为 `zero`。
+令 `R=ceil(radius)`，kernel 尺寸为 `{2R+1,2R+1}`，sigma 为零时尺寸也不变。
+整数坐标权重为 `exp(-(x*x+y*y)/(2*sigma*sigma))*a(x)*a(y)`，其中
+`a(d)=clamp(radius+1-abs(d),0,1)`，最终归一化；sigma 为零使用中心冲激。
+radius=1.25 生成 5×5，最外层每轴覆盖因子为 0.25。实现保留整数上侧相邻
+浮点 radius 的正边界权重，极小正 sigma 不产生中心除零错误。
+
+系数仅转换一次为 Float32。图像路径使用同一系数、核行优先顺序和 binary64
+累加，公开 `channel.extract` → `field.convolve` 可逐通道精确复算。
+输入样本与输出须有限且可表示。图像观察读取裁剪后的半径邻域，并记录 Data
+和 Validation；kernel 只依赖静态参数和描述元数据，不读取图像样本。
+当前缓存身份仍包含完整参数集合。
+
+Singleton 在读取图像前检查点保存宿主拥有的核表；joint 共享一次核生成，
+通过共享 work 服务计费。发布的 kernel view 独立持有 backing owner。
+共享 work 错误具有粘性，C ABI 同样执行；上游失败成员先退休，再继续其他成员。
+既有 Gaussian 算子语义保持不变。
+
+`test_multi_output_ops` 检查 radius 为 0、0.25、1、1.25、2、64 的完整矩阵，
+整数两侧相邻浮点值、零与极小 sigma、非法参数、kernel-only 零图像读取，
+以及两种 boundary 和 joint 开关下公开 `field.convolve` 的精确复算。

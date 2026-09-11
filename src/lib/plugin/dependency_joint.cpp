@@ -240,9 +240,29 @@ Result<std::vector<DependencyAtomProgress>> DependencyJointSession::poll(
       auto scratch = allocator.limited(impl_->workspace, [&](ErrorCode code) {
         impl_->failure = Status{code, {}};
       });
-      auto results =
-          impl_->state.poll_(impl_->state.storage_.data(),
-                             DependencyJointPhase{impl_->phases, scratch});
+      const auto shared_work =
+          [weak = std::weak_ptr<Impl>(impl_)](std::uint64_t amount) -> Status {
+        auto impl = weak.lock();
+        if (!impl || !impl->active)
+          return invalid("expired shared work service");
+        if (!impl->failure.ok())
+          return impl->failure;
+        bool active = false;
+        for (const auto& member : impl->members)
+          active |= !member.second.terminal && member.second.session &&
+                    !member.second.session->query().cancellation.cancelled();
+        if (!active)
+          impl->failure = Status{ErrorCode::Cancelled, {}};
+        else if (amount > impl->maximum_work - impl->work)
+          impl->failure = Status{ErrorCode::ResourceExhausted,
+                                 "joint work budget exhausted"};
+        else
+          impl->work += amount;
+        return impl->failure;
+      };
+      auto results = impl_->state.poll_(
+          impl_->state.storage_.data(),
+          DependencyJointPhase{impl_->phases, scratch, shared_work});
       if (impl_->allocation_failure->load() != ErrorCode::Ok)
         impl_->failure = Status{impl_->allocation_failure->load(), {}};
       if (!impl_->failure.ok())
@@ -332,6 +352,26 @@ Status DependencyJointSession::supply(std::uint32_t id,
   impl_->active = false;
   return status;
 }
+Status DependencyJointSession::fail_input(std::uint32_t id, Status failure) {
+  std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
+  if (!lock.owns_lock() || impl_->active)
+    return invalid("concurrent or recursive joint call");
+  auto found = impl_->members.find(id);
+  if (failure.ok() || impl_->terminal || found == impl_->members.end() ||
+      !found->second.waiting)
+    return invalid("upstream failure requires a waiting member");
+  impl_->active = true;
+  found->second.waiting = false;
+  found->second.terminal = true;
+  found->second.session.reset();
+  impl_->terminal =
+      std::all_of(impl_->members.begin(), impl_->members.end(),
+                  [](const auto& member) { return member.second.terminal; });
+  if (impl_->terminal)
+    impl_->state.reset();
+  impl_->active = false;
+  return Status::success();
+}
 Result<std::vector<DependencyNeed>> DependencyJointSession::pending_reads(
     std::uint32_t id) const {
   std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
@@ -342,7 +382,8 @@ Result<std::vector<DependencyNeed>> DependencyJointSession::pending_reads(
   if (found == impl_->members.end())
     return Result<std::vector<DependencyNeed>>(invalid("unknown joint member"));
   if (!found->second.session)
-    return Result<std::vector<DependencyNeed>>(*found->second.start_failure);
+    return Result<std::vector<DependencyNeed>>(
+        found->second.start_failure.value_or(invalid("retired joint member")));
   return found->second.session->pending_reads();
 }
 std::uint64_t DependencyJointSession::consumed_work() const {

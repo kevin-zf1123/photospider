@@ -346,6 +346,11 @@ struct DependencyAtomOutcome final {
 struct DependencyJointPhase final {
   const std::vector<const DependencyPhase*>& members;
   const BufferAllocator& allocator;
+  /** @brief Charges shared arithmetic once against the group/Run fuel.
+   * Failure is sticky for the group. Cancellation applies only when every
+   * remaining member has cancelled; borrowed service expires with this phase.
+   */
+  std::function<Status(std::uint64_t)> consume_work;
 };
 /** @brief Host-owned optional joint state, destroyed exactly once.
  * @note State implements poll(DependencyJointPhase), returning exactly one
@@ -534,6 +539,13 @@ class PHOTOSPIDER_API DependencyJointSession final {
       std::uint64_t maximum_additional_work = UINT64_MAX);
   Status supply(std::uint32_t output_index, std::vector<ValueFragments> inputs,
                 const std::string& snapshot_identity);
+  /** @brief Reports a host upstream failure for one waiting member.
+   * @note The host already owns the member's terminal error; no additional poll
+   * event is emitted. Rejects success statuses and nonwaiting members. Releases
+   * the member immediately and shared state when no members remain. Uses the
+   * same concurrent/reentrant rejection rule as supply.
+   */
+  Status fail_input(std::uint32_t output_index, Status failure);
   Result<std::vector<DependencyNeed>> pending_reads(
       std::uint32_t output_index) const;
   std::uint64_t consumed_work() const;

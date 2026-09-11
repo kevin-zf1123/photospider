@@ -51,6 +51,8 @@ struct Joint {
   Result<std::vector<DependencyAtomOutcome>> poll(
       const DependencyJointPhase& joint) {
     ++counts->polls;
+    if (mode == 9)
+      static_cast<void>(joint.consume_work(UINT64_MAX));
     if (counts->hook)
       counts->hook();
     using Answer = Result<std::vector<DependencyAtomOutcome>>;
@@ -275,10 +277,45 @@ int reentrant_calls() {
     PS_CHECK(member.outcome.ok());
   return 0;
 }
+int host_input_failure() {
+  auto counts = std::make_shared<Counters>();
+  OperationRegistry registry;
+  PS_CHECK(registry.register_operation(definition(counts, 7)).ok());
+  auto session =
+      registry.start_joint("test.joint", requests(2, true)).take_value();
+  PS_CHECK(session->poll().ok());
+  PS_CHECK(
+      session->fail_input(0, Status{ErrorCode::OperationFailed, "upstream"})
+          .ok());
+  PS_CHECK(!session->pending_reads(0).ok());
+  auto input = Value::from_float64(20);
+  auto fragments =
+      ValueFragments::create(input.descriptor(), {},
+                             Footprint::all({1}).take_value(), {input})
+          .take_value();
+  PS_CHECK(session->supply(1, {fragments}, "snapshot").ok());
+  auto result = session->poll();
+  PS_CHECK(result.ok() && result.value().size() == 1 &&
+           result.value()[0].output_index == 1 &&
+           result.value()[0].outcome.ok());
+  PS_CHECK(counts->destroys == 1);
+  return 0;
+}
+int shared_work_limit() {
+  auto counts = std::make_shared<Counters>();
+  OperationRegistry registry;
+  PS_CHECK(registry.register_operation(definition(counts, 9)).ok());
+  auto session = registry.start_joint("test.joint", requests()).take_value();
+  auto result = session->poll();
+  PS_CHECK(!result.ok() &&
+           result.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(counts->destroys == 1);
+  return 0;
+}
 int c_protocol() {
   OperationRegistry registry;
   PS_CHECK(registry.load_plugin(PS_DEPENDENCY_JOINT_FIXTURE).ok());
-  for (int mode = 0; mode <= 8; ++mode) {
+  for (int mode = 0; mode <= 9; ++mode) {
     auto query = requests();
     for (auto& member : query)
       member.parameters["mode"] = static_cast<std::int64_t>(mode);
@@ -289,7 +326,10 @@ int c_protocol() {
     }
     PS_CHECK(started.ok());
     auto result = started.value()->poll();
-    if (mode >= 1 && mode <= 4) {
+    if (mode == 9) {
+      PS_CHECK(!result.ok() &&
+               result.status().code == ErrorCode::ResourceExhausted);
+    } else if (mode >= 1 && mode <= 4) {
       PS_CHECK(!result.ok());
       PS_CHECK(result.status().code == (mode == 4
                                             ? ErrorCode::OperationFailed
@@ -304,6 +344,8 @@ int c_protocol() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(host_input_failure() == 0);
+  PS_CHECK(shared_work_limit() == 0);
   PS_CHECK(reentrant_calls() == 0);
   PS_CHECK(c_protocol() == 0);
   PS_CHECK(outcomes() == 0);

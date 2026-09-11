@@ -102,6 +102,41 @@ checks 24 R/B cache hits for a 3×4 image, and verifies a finite field ROI succe
 without reading a remote NaN sample. Existing basic convolution results are also
 covered by `test_basic_operations`.
 
+## `image.gaussian_blur_with_kernel`
+
+One Float32 HWC Image input produces `image` (same descriptor/facets) and
+`kernel` (generic Float32 HW). Required Float64 `radius` and `sigma` are finite
+and in `[0,64]`. Optional String `boundary` is `clamp` by default, or `zero`.
+Let `R = ceil(radius)`; the kernel shape is `{2R+1,2R+1}`, including when
+`sigma=0`. At integer offsets `x,y` in `[-R,R]`, normalize
+`exp(-(x*x+y*y)/(2*sigma*sigma)) * a(x) * a(y)`, where
+`a(d)=clamp(radius+1-abs(d),0,1)`. Sigma zero produces a center impulse.
+For example radius 1.25 produces 5×5, with outer per-axis coverage 0.25.
+The implementation preserves positive edge weights immediately above integer
+radii and handles the smallest positive sigma without a center division error.
+
+Kernel coefficients are rounded to Float32 once. Image convolution uses these
+same coefficients, row-major kernel order and binary64 accumulation, so a
+`channel.extract` → `field.convolve` graph can independently reproduce each
+stored channel exactly. Image samples and results must be finite/representable.
+Each image observation reads its clipped radius neighborhood with Data and
+Validation roles. Kernel observations use static parameters and descriptor
+metadata only; requesting the kernel never reads image samples. Parameters are
+currently included as a complete set in cache identity.
+
+The singleton staged implementation checkpoints its host-owned coefficient
+table before reading image data. Joint execution shares one coefficient table
+and charges its generation once through the shared work service. Published
+kernel views retain the backing owner independently. Shared work failures are
+sticky, including through the C ABI; a failed upstream member is retired before
+continuing the remaining members. Existing Gaussian operators retain their
+original parameter semantics.
+
+`test_multi_output_ops` checks complete matrices for radii 0, 0.25, 1, 1.25,
+2 and 64, adjacent floating-point values around integers, zero/tiny sigma,
+invalid parameters, kernel-only zero source reads, and exact public
+`field.convolve` recomputation with both boundaries and joint modes.
+
 ## Current executable validation
 
 ```sh

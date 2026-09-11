@@ -273,6 +273,8 @@ typedef struct ps_dependency_joint_services_v9 {
   uint32_t struct_size, reserved;
   void* context;
   int (*scratch)(void*, uint64_t bytes, uint8_t**);
+  /** @brief Shared arithmetic fuel; zero is a sticky group failure. */
+  int (*consume_work)(void*, uint64_t work);
 } ps_dependency_joint_services_v9;
 /** @brief Optional CPU joint implementation for distinct Atomic outputs.
  * @note Singleton callbacks remain required. start/destroy share one zeroed

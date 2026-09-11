@@ -931,9 +931,10 @@ struct CJointState {
     };
     struct Scratch {
       const BufferAllocator& allocator;
+      const std::function<Status(std::uint64_t)>& consume_work;
       std::vector<MutableBuffer> owners;
       Status failure;
-    } scratch{joint.allocator, {}, {}};
+    } scratch{joint.allocator, joint.consume_work, {}, {}};
     const ps_dependency_joint_services_v9 shared{
         sizeof(ps_dependency_joint_services_v9), 0, &scratch,
         [](void* opaque, std::uint64_t size, std::uint8_t** output) -> int {
@@ -957,6 +958,16 @@ struct CJointState {
             scratch.failure = Status{ErrorCode::ResourceExhausted, {}};
             return 0;
           }
+        },
+        [](void* opaque, std::uint64_t amount) -> int {
+          auto& scratch = *static_cast<Scratch*>(opaque);
+          try {
+            if (scratch.failure.ok())
+              scratch.failure = scratch.consume_work(amount);
+          } catch (...) {
+            scratch.failure = Status{ErrorCode::OperationFailed, {}};
+          }
+          return scratch.failure.ok() ? 1 : 0;
         }};
     std::vector<std::unique_ptr<Bundle>> bundles;
     std::vector<ps_dependency_joint_member_v9> members;
