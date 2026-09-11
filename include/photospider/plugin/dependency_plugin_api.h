@@ -79,6 +79,34 @@ typedef struct ps_dependency_checkpoint_v8 {
   uint32_t struct_size, reserved;
   uint64_t handle, sequence, byte_size;
 } ps_dependency_checkpoint_v8;
+/** @brief Read-only input and accounted scratch services for a pure block.
+ * @note Borrowed until compute returns. There are no association, checkpoint,
+ * retained-owner or output-publication services: discovery precedes the block.
+ */
+typedef struct ps_dependency_block_services_v8 {
+  uint32_t struct_size, reserved;
+  void* context;
+  int (*read)(void*, uint32_t, const uint64_t*, uint32_t, void*, uint64_t);
+  uint8_t* (*allocate_scratch)(void*, uint64_t);
+  int (*consume_work)(void*, uint64_t);
+  int (*is_cancelled)(void*);
+} ps_dependency_block_services_v8;
+/** @brief Computes complete outgoing state from copied incoming bytes.
+ * @note Finite, nonblocking and pure: use only supplied inputs, incoming state,
+ * phase/range/mode and registered static parameters/metadata. user may carry
+ * only information already determined by those inputs or fixed implementation
+ * constants; its address and extra configuration are not automatically keyed.
+ * Each phase/mode identifies one fixed transition within the registered
+ * implementation; a different algorithm needs a distinct phase/mode. All
+ * carried controls and numeric state belong in incoming. Never depend on
+ * original Q, mutable user state, timing or earlier unsupplied inputs. Write
+ * every outgoing byte; no pointer/handle or uninitialized padding belongs in
+ * either state. Pointers expire at return; host owns both buffers. Return
+ * SUCCESS or an error, not NEED.
+ */
+typedef int (*ps_dependency_block_compute_v8)(
+    const ps_dependency_block_services_v8*, const uint8_t* incoming,
+    uint8_t* outgoing, uint64_t state_bytes, void* user);
 /** @brief Finite, nonblocking phase services; every failure is sticky.
  * @note Service/context/input/scratch pointers expire at poll return. Output
  * pointers expire immediately on successful publish_output, or at poll return
@@ -131,6 +159,19 @@ typedef struct ps_dependency_services_v8 {
    */
   int (*checkpoint_publish)(void*, uint32_t phase, uint64_t sequence,
                             const uint8_t* state, uint64_t byte_size);
+  /** @brief Evaluates a pure Atomic block using the host's optional state LRU.
+   * @note Copies incoming before compute, so incoming/outgoing caller buffers
+   * may overlap. They must be nonnull and state_bytes positive. Output is
+   * copied only on success. The operation must reserve workspace for two state
+   * copies plus any scratch. Host keys include actual incoming/input bytes and
+   * static implementation identity; failures are sticky and never cached. A hit
+   * skips compute while retaining current input evidence. No output batching
+   * occurs.
+   */
+  int (*block)(void*, uint32_t phase, uint64_t begin, uint64_t end,
+               uint64_t mode, const uint8_t* incoming, uint64_t state_bytes,
+               uint8_t* outgoing, ps_dependency_block_compute_v8 compute,
+               void* user);
 } ps_dependency_services_v8;
 /** @brief Copied staged callbacks for trusted in-process C implementations.
  * @note Exactly one synchronous execute or dependency_program is supplied.

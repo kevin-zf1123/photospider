@@ -427,6 +427,71 @@ int checkpoint_protocol(std::uint32_t (*starts)(),
   PS_CHECK(starts() == destroys());
   return 0;
 }
+int block_workflow(std::uint32_t (*starts)(), std::uint32_t (*destroys)(),
+                   std::uint32_t (*calls)()) {
+  auto registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(registry->load_plugin(PS_DEPENDENCY_FIXTURE).ok());
+  PS_CHECK(registry->freeze().ok());
+  const auto value = [](const std::vector<double>& numbers) {
+    std::vector<std::uint8_t> bytes(numbers.size() * 8);
+    std::memcpy(bytes.data(), numbers.data(), bytes.size());
+    return Value::create({ElementType::Float64, {numbers.size()}},
+                         Region::whole({numbers.size()}), {0, {8}}, bytes)
+        .take_value();
+  };
+  WorkflowDocument doc;
+  doc.inputs = {
+      {1, "x", {ElementType::Float64, {6}}, Region::whole({6}), {0, {8}}, {}}};
+  doc.nodes = {
+      {1, "fixture.scan", {WorkflowInputReference{1}}, {{"mode", INT64_C(0)}}}};
+  doc.outputs = {{"y", 1, "value"}};
+  GraphContext graph(doc);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {1, false, 8, 4096, 512});
+  std::vector<double> numbers{0, 1, 0x1p54, 4, 5, 6};
+  auto demand =
+      context.open_demand(plan, {{{"x", value(numbers)}}}).take_value();
+  DemandQuery q{
+      {"y", Footprint::from_regions({6}, {Region({{5, 1}})}).take_value()}};
+  const auto before = calls();
+  auto initial = demand.request(q);
+  PS_CHECK(initial.ok() &&
+           initial.value().diagnostics.block_cache_misses == 6 &&
+           calls() == before + 6);
+  numbers[0] = 1;
+  PS_CHECK(demand.replace_bindings({{{"x", value(numbers)}}}).ok());
+  auto changed = demand.request(q);
+  PS_CHECK(changed.ok() && changed.value().diagnostics.block_cache_hits == 3 &&
+           changed.value().diagnostics.block_cache_misses == 3 &&
+           calls() == before + 9);
+  volatile double expected = 0;
+  for (const auto number : numbers)
+    expected = expected + number;
+  double actual = 0;
+  PS_CHECK(changed.value().values.at("y").read({5}, &actual, 8).ok() &&
+           actual == expected);
+  PS_CHECK(changed.value().dependencies.source_support().value().at("x") ==
+           Footprint::all({6}).value());
+  PS_CHECK(starts() == destroys());
+  for (std::int64_t mode = 7; mode <= 11; ++mode) {
+    doc.nodes[0].parameters["mode"] = mode;
+    GraphContext invalid(doc);
+    auto bad_plan = Compiler(registry).compile(invalid).take_value().plan;
+    auto bad =
+        context.open_demand(bad_plan, {{{"x", value(numbers)}}}).take_value();
+    const auto count = calls();
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+      auto failed = bad.request(q);
+      const auto expected_code = mode <= 8    ? ErrorCode::InvalidArgument
+                                 : mode == 10 ? ErrorCode::ResourceExhausted
+                                              : ErrorCode::OperationFailed;
+      PS_CHECK(failed.status().code == expected_code);
+      PS_CHECK(calls() == count + (mode == 7 ? 0 : repeat + 1));
+      PS_CHECK(starts() == destroys());
+    }
+  }
+  return 0;
+}
 int session_owns_library() {
   // No observer dlopen handle remains to mask premature DSO unload.
   auto registry = std::make_shared<OperationRegistry>();
@@ -469,12 +534,21 @@ int main() {
   auto destroys = reinterpret_cast<std::uint32_t (*)()>(
       dlsym(library, "ps_dependency_fixture_destroys"));
 #endif
-  PS_CHECK(starts && destroys);
+#if defined(_WIN32)
+  auto block_calls = reinterpret_cast<std::uint32_t (*)()>(
+      GetProcAddress(library, "ps_dependency_fixture_block_calls"));
+#else
+  auto block_calls = reinterpret_cast<std::uint32_t (*)()>(
+      dlsym(library, "ps_dependency_fixture_block_calls"));
+#endif
+  PS_CHECK(starts && destroys && block_calls);
   auto result = exercise(starts, destroys);
   if (result == 0)
     result = workflow(starts, destroys);
   if (result == 0)
     result = checkpoint_protocol(starts, destroys);
+  if (result == 0)
+    result = block_workflow(starts, destroys, block_calls);
 #if defined(_WIN32)
   FreeLibrary(library);
 #else

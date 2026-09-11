@@ -610,6 +610,67 @@ int checkpoint_publish(void* context, std::uint32_t phase,
     return status.ok() || p->reject(status);
   });
 }
+int block(void* context, std::uint32_t phase, std::uint64_t begin,
+          std::uint64_t end, std::uint64_t mode, const std::uint8_t* incoming,
+          std::uint64_t size, std::uint8_t* outgoing,
+          ps_dependency_block_compute_v8 compute, void* user) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (p->phase.query.kind != ObservationKind::Atomic || !incoming ||
+        !outgoing || !size || size > SIZE_MAX || !compute || begin >= end)
+      return p->reject(invalid("invalid C block request"));
+    if (size > UINT64_MAX / 3)
+      return p->reject(Status{ErrorCode::ResourceExhausted, {}});
+    auto charged = p->phase.consume_work(3 * size);
+    if (!charged.ok())
+      return p->reject(charged);
+    const ValueDescriptor descriptor{ElementType::UInt8, {size}};
+    auto allocated = MutableValue::allocate(descriptor, Region::whole({size}),
+                                            p->phase.allocator);
+    if (!allocated.ok())
+      return p->reject(allocated.status());
+    auto writer = allocated.take_value();
+    std::memcpy(writer.data(), incoming, static_cast<std::size_t>(size));
+    auto state = std::move(writer).publish();
+    if (!state.ok())
+      return p->reject(state.status());
+    const ps_dependency_block_services_v8 services{
+        sizeof(ps_dependency_block_services_v8),
+        0,
+        p,
+        read,
+        scratch,
+        consume_work,
+        is_cancelled};
+    auto result = p->phase.block(
+        phase, begin, end, mode, state.value(), [&]() -> Result<Value> {
+          auto made = MutableValue::allocate(descriptor, Region::whole({size}),
+                                             p->phase.allocator);
+          if (!made.ok())
+            return Result<Value>(made.status());
+          auto output = made.take_value();
+          std::memset(output.data(), 0, static_cast<std::size_t>(size));
+          const auto status =
+              outcome(compute(&services, state.value().bytes().data(),
+                              output.data(), size, user));
+          if (!p->failure.ok())
+            return Result<Value>(p->failure);
+          if (!status.ok())
+            return Result<Value>(status);
+          return std::move(output).publish();
+        });
+    if (!result.ok())
+      return p->reject(result.status());
+    auto status = p->phase.consume_work(0);
+    if (!status.ok())
+      return p->reject(status);
+    std::memcpy(outgoing, result.value().bytes().data(),
+                static_cast<std::size_t>(size));
+    return true;
+  });
+}
 Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
   Phase p{phase, *this, {}, {}, {}, {}, {}, {}};
   Query query(phase.query);
@@ -630,7 +691,8 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
                                            is_cancelled,
                                            checkpoint_before,
                                            checkpoint_read,
-                                           checkpoint_publish};
+                                           checkpoint_publish,
+                                           block};
   const auto result =
       program.poll(&query.query, payload.data(), &services, user);
   if (!p.failure.ok())

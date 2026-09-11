@@ -304,5 +304,14 @@ Direct host 可提供相同服务，异常及被忽略的失败仍 sticky。
 真实 scan 回归将 `[1,2^54]` 前的 incoming 0 改为 1：改变的块重算、早期输出从 1
 变为 2，仅在完整 carry 重汇合后复用后续匹配块。Mean/variance 检查第一遍未变块复用
 及 mean 改变后的第二遍 miss。Direct 协议测试让两个不同实现 registry 共用一个 host
-cache，另检查错误 metadata、外部分配和忽略 host 错误均拒绝。C 桥当前提供已完成
-checkpoint 服务；纯 block callback 服务是 C++ phase 能力。
+cache，另检查错误 metadata、外部分配和忽略 host 错误均拒绝。C 桥也提供 `block`，其只读服务表仅有当前输入 read、计量 scratch、work 与取消，
+不提供 association、checkpoint、retained-owner 或输出发布。Compute 前复制 incoming，
+仅成功时复制 outgoing 回调用方，故两者缓冲区可以重叠。Compute 接收宿主分配并清零
+的 outgoing，必须写完整 state，返回 SUCCESS 或错误；NEED 非法。两份状态副本和
+scratch 必须容纳在声明的阶段 workspace 内。
+
+C callback 的 `user` 仅能传递由 key 输入确定的数据或固定的注册实现常量，其他不可变
+配置与地址不自动进入 key。每个 phase/mode 在注册实现内标识一个固定算法；另一种
+transition 必须使用不同身份。C11 scan workflow 检查初次六次计算、重汇合编辑后三次
+计算加三次命中，以及完整当前源支持。空 callback、忽略非法 read、NEED 返回、scratch
+耗尽和普通 compute 失败均拒绝；重复失败请求仍实际调用 compute。

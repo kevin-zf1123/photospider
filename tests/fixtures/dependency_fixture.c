@@ -1,3 +1,4 @@
+#include <fenv.h>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
@@ -13,7 +14,10 @@ struct State {
   uint32_t stage;
   int mode;
 };
-static uint32_t starts, destroys;
+static uint32_t starts, destroys, block_calls;
+PS_OPERATION_EXPORT uint32_t ps_dependency_fixture_block_calls(void) {
+  return block_calls;
+}
 PS_OPERATION_EXPORT uint32_t ps_dependency_fixture_starts(void) {
   return starts;
 }
@@ -44,8 +48,9 @@ static int start(const ps_dependency_query_v8* q, void* state, uint64_t bytes,
   return s->mode == 4 ? PS_OPERATION_RESULT_FAILURE_V8
                       : PS_OPERATION_RESULT_SUCCESS_V8;
 }
-static int need(const ps_dependency_query_v8* q,
-                const ps_dependency_services_v8* host, uint64_t index) {
+static int need_impl(const ps_dependency_query_v8* q,
+                     const ps_dependency_services_v8* host, uint64_t index,
+                     int adversarial) {
   ps_dependency_run_v8 run = {0};
   run.struct_size = sizeof(run);
   run.rank = 1;
@@ -58,7 +63,7 @@ static int need(const ps_dependency_query_v8* q,
   a.roles = 1;
   a.run_count = 1;
   a.runs = &run;
-  const int mode = (int)q->metadata.parameters[0].int64_value;
+  const int mode = adversarial ? (int)q->metadata.parameters[0].int64_value : 0;
   ps_dependency_run_v8 repeated[17];
   for (uint32_t i = 0; i < 17; ++i)
     repeated[i] = run;
@@ -78,6 +83,10 @@ static int need(const ps_dependency_query_v8* q,
     run.rank = 2;
   return host->associate(host->context, &a) ? PS_DEPENDENCY_NEED_V8
                                             : PS_OPERATION_RESULT_FAILURE_V8;
+}
+static int need(const ps_dependency_query_v8* q,
+                const ps_dependency_services_v8* host, uint64_t index) {
+  return need_impl(q, host, index, 1);
 }
 static int sample(const ps_dependency_services_v8* host, uint64_t owner,
                   uint64_t index, uint32_t dtype, double* result) {
@@ -208,6 +217,50 @@ static int scan_start(const ps_dependency_query_v8* q, void* state,
   s->mode = (uint32_t)q->metadata.parameters[0].int64_value;
   return PS_OPERATION_RESULT_SUCCESS_V8;
 }
+static int scan_compute_impl(const ps_dependency_block_services_v8* host,
+                             const uint8_t* incoming, uint8_t* outgoing,
+                             uint64_t bytes, void* user) {
+  ++block_calls;
+  const struct ScanState* s = user;
+  if (bytes != 8)
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  if (s->mode == 8) {
+    const uint64_t illegal = UINT64_MAX;
+    double ignored = 0;
+    host->read(host->context, 0, &illegal, 1, &ignored, 8);
+    return PS_OPERATION_RESULT_SUCCESS_V8;
+  }
+  if (s->mode == 9)
+    return PS_DEPENDENCY_NEED_V8;
+  if (s->mode == 10) {
+    host->allocate_scratch(host->context, UINT64_MAX);
+    return PS_OPERATION_RESULT_SUCCESS_V8;
+  }
+  if (s->mode == 11)
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  double carry = 0, value = 0;
+  memcpy(&carry, incoming, 8);
+  if (!host->read(host->context, 0, &s->cursor, 1, &value, 8) ||
+      !isfinite(value))
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  volatile double sum = carry + value;
+  if (!isfinite(sum))
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  const double result = sum;
+  memcpy(outgoing, &result, 8);
+  return PS_OPERATION_RESULT_SUCCESS_V8;
+}
+static int scan_compute(const ps_dependency_block_services_v8* host,
+                        const uint8_t* incoming, uint8_t* outgoing,
+                        uint64_t bytes, void* user) {
+  fenv_t prior;
+  if (fegetenv(&prior) || fesetround(FE_TONEAREST))
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  const int result = scan_compute_impl(host, incoming, outgoing, bytes, user);
+  if (fesetenv(&prior))
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  return result;
+}
 static int scan_poll(const ps_dependency_query_v8* q, void* state,
                      const ps_dependency_services_v8* host, void* user) {
   (void)user;
@@ -247,12 +300,10 @@ static int scan_poll(const ps_dependency_query_v8* q, void* state,
       double ignored;
       host->checkpoint_read(host->context, s->borrowed, 0, &ignored, 8);
     }
-    double sample_value = 0;
-    if (!host->read(host->context, 0, &s->cursor, 1, &sample_value, 8))
+    if (!host->block(host->context, 1, s->cursor, s->cursor + 1, 1,
+                     (const uint8_t*)&s->carry, 8, (uint8_t*)&s->carry,
+                     s->mode == 7 ? NULL : scan_compute, s))
       return PS_OPERATION_RESULT_FAILURE_V8;
-    if (!isfinite(sample_value) || !isfinite(s->carry + sample_value))
-      return PS_OPERATION_RESULT_FAILURE_V8;
-    s->carry += sample_value;
     uint8_t encoded[8];
     memcpy(encoded, &s->carry, 8);
     if (!host->checkpoint_publish(host->context, 1, s->cursor, encoded, 8))
@@ -271,7 +322,7 @@ static int scan_poll(const ps_dependency_query_v8* q, void* state,
     ++s->cursor;
   }
   if (s->cursor <= target)
-    return need(q, host, s->cursor);
+    return need_impl(q, host, s->cursor, 0);
   uint64_t output = 0;
   uint8_t* bytes = host->allocate_output(host->context, q->outputs, &output);
   if (!bytes)
@@ -330,8 +381,8 @@ static const ps_operation_descriptor_v8 operations[] = {
     DESCRIPTOR("fixture.fragment", 0, 0, &program, 0),
     DESCRIPTOR("fixture.terminal", 1, 0, &program, 0),
     DESCRIPTOR("fixture.wide", 0, 1, &program, 0),
-    DESCRIPTOR("fixture.scan", 0, 0, &scan_program, 8),
-    DESCRIPTOR("fixture.scan_terminal", 1, 0, &scan_program, 8)};
+    DESCRIPTOR("fixture.scan", 0, 0, &scan_program, 16),
+    DESCRIPTOR("fixture.scan_terminal", 1, 0, &scan_program, 16)};
 static void destroy_api(const ps_operation_descriptor_v8* records,
                         uint32_t count) {
   (void)records;

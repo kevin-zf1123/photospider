@@ -178,8 +178,10 @@ struct PHOTOSPIDER_API DependencyPhase final {
    * @note compute must depend only on incoming state, current supplied inputs,
    * static parameters/metadata, phase, [begin,end) and mode. It must encode all
    * carried controls/numeric state in incoming, and must not inspect original
-   * Q, earlier unsupplied fragments or external/mutable state. This trusted
-   * contract does not infer purity from arbitrary C++ code. Output state must
+   * Q, earlier unsupplied fragments or external/mutable state. Each phase/mode
+   * identifies one fixed transition in the registered implementation; a changed
+   * algorithm requires a distinct phase/mode. This trusted contract does not
+   * infer purity from arbitrary C++ code. Output state must
    * match the incoming descriptor, region and facets and use this stage
    * allocator. Successful hits are copied into the stage allocator and preserve
    * current input evidence; they never import an obsolete prefix relation.

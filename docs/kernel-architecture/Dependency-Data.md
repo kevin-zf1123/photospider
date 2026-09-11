@@ -428,5 +428,19 @@ matching transitions hit after complete carry reconvergence. Mean/variance tests
 check unchanged first-pass reuse and second-pass misses when mean changes. Direct
 protocol tests share one host cache across two registries with distinct pure
 implementations, and reject wrong state metadata, foreign allocations and ignored
-host errors. The C bridge currently exposes completed checkpoint services; the
-pure block callback service is a C++ phase facility.
+host errors. The C bridge also exposes `block` with a read-only block service
+table (current input read, accounted scratch, work and cancellation). It provides
+no association, checkpoint, retained-owner or output-publication operations.
+Incoming is copied before compute and outgoing is copied back only on success,
+so caller buffers may overlap. Compute receives host-owned zeroed outgoing bytes
+and must write the complete state, returning SUCCESS or an error; NEED is invalid.
+Two state copies and scratch must fit the declared stage workspace.
+
+The C callback's `user` can carry only key-determined data or fixed registered
+implementation constants. Extra immutable configuration and pointer addresses are
+not automatically keyed. Each phase/mode names one fixed algorithm within the
+registered implementation; another transition requires a distinct identity.
+The C11 scan workflow observes six initial computations and three computations
+plus three hits after the reconverging edit, with complete current source support.
+Null callbacks, ignored invalid reads, NEED returns, scratch exhaustion and ordinary
+compute failure reject; repeated failed requests invoke compute again.

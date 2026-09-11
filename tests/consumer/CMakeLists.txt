@@ -213,6 +213,9 @@ target_link_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_l
 
 add_library(photospider_dependency_fixture MODULE ../fixtures/dependency_fixture.c)
 target_link_libraries(photospider_dependency_fixture PRIVATE Photospider::operation_sdk)
+if(UNIX)
+  target_link_libraries(photospider_dependency_fixture PRIVATE m)
+endif()
 target_compile_definitions(photospider_dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
 set_target_properties(photospider_dependency_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 add_executable(photospider_dependency_consumer ../integration/test_dependency_plugin.cpp)
