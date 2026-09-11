@@ -255,9 +255,163 @@ int split_horizontal() {
   }
   return 0;
 }
+float convolution_oracle(const std::vector<float>& image, std::uint64_t h,
+                         std::uint64_t w, unsigned channel,
+                         const std::vector<float>& kernel, std::uint64_t kh,
+                         std::uint64_t kw, std::int64_t ay, std::int64_t ax,
+                         bool clamp, std::uint64_t y, std::uint64_t x) {
+  double sum = 0;
+  for (std::uint64_t ky = 0; ky < kh; ++ky)
+    for (std::uint64_t kx = 0; kx < kw; ++kx) {
+      auto sy =
+          static_cast<std::int64_t>(y) + ay - static_cast<std::int64_t>(ky);
+      auto sx =
+          static_cast<std::int64_t>(x) + ax - static_cast<std::int64_t>(kx);
+      if (clamp) {
+        sy = std::clamp<std::int64_t>(sy, 0, h - 1);
+        sx = std::clamp<std::int64_t>(sx, 0, w - 1);
+      }
+      const double value =
+          sy < 0 || sx < 0 || sy >= static_cast<std::int64_t>(h) ||
+                  sx >= static_cast<std::int64_t>(w)
+              ? 0
+              : image[(static_cast<std::uint64_t>(sy) * w + sx) * 3 + channel];
+      sum += value * static_cast<double>(kernel[ky * kw + kx]);
+    }
+  return static_cast<float>(sum);
+}
+int channel_convolution() {
+  auto registry = make_default_operation_registry();
+  constexpr std::uint64_t h = 3, w = 4;
+  std::vector<float> image_data(h * w * 3);
+  for (std::size_t i = 0; i < image_data.size(); ++i)
+    image_data[i] = static_cast<float>(i) / 7;
+  auto image =
+      samples({h, w, 3}, image_data, {encode_semantic(rgb()).take_value()});
+  const std::array<std::vector<float>, 3> coefficients{
+      {{1, 2, -1, .5F}, {.25F, .5F, .25F}, {1, -2, 1}}};
+  const std::array<std::array<std::uint64_t, 2>, 3> shapes{
+      {{2, 2}, {1, 3}, {3, 1}}};
+  const std::array<std::array<std::int64_t, 2>, 3> anchors{
+      {{0, 1}, {0, 1}, {1, 0}}};
+  const std::array<std::string, 3> names{"r", "g", "b"};
+  std::array<Value, 3> kernels;
+  WorkflowDocument doc;
+  doc.inputs = {declaration(1, "image", image)};
+  std::map<std::string, ParameterValue> parameters;
+  for (unsigned i = 0; i < 3; ++i) {
+    kernels[i] = samples({shapes[i][0], shapes[i][1]}, coefficients[i]);
+    doc.inputs.push_back(declaration(i + 2, "k" + names[i], kernels[i]));
+    parameters[names[i] + "_anchor_y"] = anchors[i][0];
+    parameters[names[i] + "_anchor_x"] = anchors[i][1];
+    parameters[names[i] + "_boundary"] = std::string(i == 1 ? "clamp" : "zero");
+    doc.outputs.push_back({names[i], 1, names[i]});
+  }
+  doc.nodes = {{1,
+                "image.convolve_channels",
+                {WorkflowInputReference{1}, WorkflowInputReference{2},
+                 WorkflowInputReference{3}, WorkflowInputReference{4}},
+                parameters}};
+  GraphContext graph(doc);
+  auto compiled = Compiler(registry).compile(graph);
+  PS_CHECK(compiled.ok());
+  ExecutionBindings bindings{{{"image", image},
+                              {"kr", kernels[0]},
+                              {"kg", kernels[1]},
+                              {"kb", kernels[2]}}};
+  DemandQuery query;
+  for (const auto& name : names)
+    query[name] = Footprint::all({h, w}).take_value();
+  for (bool joint : {false, true}) {
+    ExecutionContext execution(registry, {2, false, 64, 1048576, 65536});
+    auto frozen =
+        execution.freeze(compiled.value().plan, bindings).take_value();
+    ExecutionOptions options;
+    options.enable_joint = joint;
+    auto result = execution.execute_fragments(frozen, query, {}, options);
+    if (!result.ok())
+      std::cerr << result.status().message << '\n';
+    PS_CHECK(result.ok());
+    for (unsigned channel = 0; channel < 3; ++channel)
+      for (std::uint64_t y = 0; y < h; ++y)
+        for (std::uint64_t x = 0; x < w; ++x) {
+          float actual;
+          PS_CHECK(result.value()
+                       .values.at(names[channel])
+                       .read({y, x}, &actual, sizeof(actual))
+                       .ok());
+          PS_CHECK(actual ==
+                   convolution_oracle(image_data, h, w, channel,
+                                      coefficients[channel], shapes[channel][0],
+                                      shapes[channel][1], anchors[channel][0],
+                                      anchors[channel][1], channel == 1, y, x));
+        }
+    auto dirty = result.value().dependencies.potential_dirty(
+        "kg", Footprint::all({1, 3}).take_value());
+    PS_CHECK(dirty.ok() && dirty.value().at("r").empty() &&
+             dirty.value().at("b").empty());
+    PS_CHECK(dirty.value().at("g") == query.at("g"));
+    auto changed = bindings;
+    changed.inputs[2].value = samples({1, 3}, {.25F, 1.F, .25F});
+    auto next = execution.freeze(compiled.value().plan, changed).take_value();
+    auto rerun = execution.execute_fragments(next, query, {}, options);
+    if (!rerun.ok())
+      std::cerr << rerun.status().message << '\n';
+    PS_CHECK(rerun.ok() && rerun.value().diagnostics.cache_hits == 2 * h * w);
+    for (const auto& timing : rerun.value().diagnostics.operation_timings)
+      PS_CHECK(timing.output.output_index == 1);
+    changed.inputs[2].value =
+        samples({1, 3}, {0, std::numeric_limits<float>::quiet_NaN(), 0});
+    auto unrelated =
+        execution.freeze(compiled.value().plan, changed).take_value();
+    PS_CHECK(
+        execution.execute_fragments(unrelated, {{"r", query.at("r")}}).ok());
+  }
+  // A remote invalid field sample must not be read by a finite ROI.
+  std::vector<float> field_data(h * w);
+  for (std::size_t i = 0; i < field_data.size(); ++i)
+    field_data[i] = image_data[i * 3];
+  field_data.back() = std::numeric_limits<float>::quiet_NaN();
+  auto field = samples({h, w}, field_data);
+  WorkflowDocument field_doc;
+  field_doc.inputs = {declaration(1, "field", field),
+                      declaration(2, "kernel", kernels[0])};
+  field_doc.nodes = {{1,
+                      "field.convolve",
+                      {WorkflowInputReference{1}, WorkflowInputReference{2}},
+                      {{"anchor_y", std::int64_t{0}},
+                       {"anchor_x", std::int64_t{1}},
+                       {"boundary", std::string("zero")}}}};
+  field_doc.outputs = {{"value", 1, "value"}};
+  GraphContext field_graph(field_doc);
+  auto field_plan = Compiler(registry).compile(field_graph).take_value().plan;
+  ExecutionContext execution(registry);
+  auto frozen =
+      execution.freeze(field_plan, {{{"field", field}, {"kernel", kernels[0]}}})
+          .take_value();
+  auto roi =
+      Footprint::from_regions({h, w}, {Region({{1, 1}, {1, 1}})}).take_value();
+  auto result = execution.execute_fragments(frozen, {{"value", roi}});
+  if (!result.ok())
+    std::cerr << result.status().message << '\n';
+  PS_CHECK(result.ok());
+  float actual;
+  PS_CHECK(result.value()
+               .values.at("value")
+               .read({1, 1}, &actual, sizeof(actual))
+               .ok());
+  PS_CHECK(actual == convolution_oracle(image_data, h, w, 0, coefficients[0], 2,
+                                        2, 0, 1, false, 1, 1));
+  auto dirty = result.value().dependencies.potential_dirty(
+      "field",
+      Footprint::from_regions({h, w}, {Region({{2, 1}, {3, 1}})}).take_value());
+  PS_CHECK(dirty.ok() && dirty.value().at("value").empty());
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(ycbcr420() == 0);
   PS_CHECK(split_horizontal() == 0);
+  PS_CHECK(channel_convolution() == 0);
   return 0;
 }

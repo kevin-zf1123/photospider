@@ -53,6 +53,7 @@ Status register_field_box_mean(OperationRegistry* registry);
 Status register_field_gaussian_blur(OperationRegistry* registry);
 Status register_mask_dilate(OperationRegistry* registry);
 Status register_mask_erode(OperationRegistry* registry);
+Status register_image_convolve_channels(OperationRegistry* registry);
 Status register_field_convolve(OperationRegistry* registry);
 Status register_field_correlate(OperationRegistry* registry);
 Status register_analysis_histogram(OperationRegistry* registry);

@@ -60,6 +60,30 @@ storage owner；收集成稠密结果时可能复制视图。联合成员在需�
 集成测试请求三个不同偏移 ROI，在 joint 开关两种模式下检查源值、facet 和 owner
 身份，验证 dirty 映射，并拒绝负数、零及超出宽度的切分位置。
 
+## `image.convolve_channels` 与区域化 `field.convolve`
+
+`image.convolve_channels` 按顺序接收 Float32 RGB Image 和 R、G、B 三个普通
+Float32 HW kernel。RGB 角色可以在存储中重新排列。各存储 RGB 通道独立滤波，
+不输出 alpha，也不隐式去预乘。`r/g/b` 输出为 Float32 HW ScalarField，保留对应
+relative 通道角色。每通道必填 Int64 `{r,g,b}_anchor_y`、`{r,g,b}_anchor_x` 和
+String `{r,g,b}_boundary`（`zero` 或 `clamp`），没有默认值。Anchor 必须位于
+自己的 kernel 内。支持奇数、偶数及非对称 kernel，不添加归一化或 bias。
+
+`field.convolve` 保留公开输入顺序、同 dtype Float32/Float64 HW kernel，以及
+必填 `anchor_y`、`anchor_x`、`boundary` 参数；现在支持分阶段区域请求，也接受
+ImagePlane 输入。输出为普通 HW field。`field.correlate` 保留现有 Whole 实现。
+
+两条卷积路径均按固定 kernel 行优先顺序、binary64 累加计算
+`sum K[ky,kx] * I[y+anchor_y-ky,x+anchor_x-kx]`。Zero 在外部补零，clamp 重复最近
+有效边缘。输入、系数、中间值和最终 dtype 转换必须有限且可表示。每输出声明自己
+完整的 kernel 及精确裁剪后的源邻域；image-v2 仍读取完整源像素。Data/Validation
+角色明确，不读取兄弟 kernel 样本，因此修改 G kernel 只使 G 失效，R/B 保留缓存。
+独立请求某通道时，不相关 kernel 的非法样本不会使该请求失败。
+
+集成测试使用独立奇偶非对称 kernel 和 anchor，对照标量 oracle 检查两种执行模式，
+仅改变 G kernel 并验证 3×4 图像有 24 个 R/B cache hit，同时验证有限 field ROI
+不会读取远处 NaN。既有基本卷积结果由 `test_basic_operations` 覆盖。
+
 ## 当前可运行验证
 
 ```sh

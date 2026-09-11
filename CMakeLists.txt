@@ -121,6 +121,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/field_correlate.cpp
   plugins/ops/05-filter/field_gaussian_blur.cpp
   plugins/ops/05-filter/image_gaussian_blur.cpp
+  plugins/ops/05-filter/image_convolve_channels.cpp
   plugins/ops/07-grade/grade_levels.cpp
   plugins/ops/07-grade/image_exposure_gain.cpp
   plugins/ops/08-transform/dependency_sampling.cpp

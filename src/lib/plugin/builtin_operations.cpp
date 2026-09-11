@@ -2,7 +2,8 @@
 
 namespace ps::plugin_internal {
 Status register_builtin_operations(OperationRegistry* registry) {
-  for (const auto function : {register_image_split_horizontal,
+  for (const auto function : {register_image_convolve_channels,
+                              register_image_split_horizontal,
                               register_color_rgb_to_ycbcr420,
                               register_numeric_cast,
                               register_numeric_encode_range,

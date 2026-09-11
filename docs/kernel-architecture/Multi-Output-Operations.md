@@ -70,6 +70,38 @@ The integration test requests three different offset ROIs, checks exact source
 values, facets and owner identity with joint enabled/disabled, verifies dirty
 mapping and rejects negative, zero and out-of-width splits.
 
+## `image.convolve_channels` and regional `field.convolve`
+
+`image.convolve_channels` consumes a Float32 RGB Image followed by three generic
+Float32 HW kernels in R,G,B order. RGB roles may be reordered in storage. The
+stored RGB channels are filtered independently; alpha is not emitted or implicitly
+unassociated. Outputs `r/g/b` are Float32 HW ScalarFields with the corresponding
+relative channel role. Each channel has required Int64 `{r,g,b}_anchor_y` and
+`{r,g,b}_anchor_x`, and required String `{r,g,b}_boundary` (`zero` or `clamp`).
+There are no defaults. Anchors must lie inside their own kernel. Odd, even and
+non-symmetric kernels are supported without normalization or bias.
+
+`field.convolve` retains the public input order, same-dtype Float32/Float64 HW
+kernel, and required `anchor_y`, `anchor_x`, `boundary` parameters. It now accepts
+regional staged requests and also consumes ImagePlane inputs. Output is a generic
+HW field. `field.correlate` retains its existing Whole implementation.
+
+Both convolution paths compute, in fixed kernel row-major order and binary64
+accumulation, `sum K[ky,kx] * I[y+anchor_y-ky,x+anchor_x-kx]`. Zero extends with
+zero; clamp repeats the nearest valid edge. Input samples, coefficients,
+intermediates and final dtype conversion must be finite/representable. Each
+output declares its full selected kernel and exact clipped source neighborhood;
+image-v2 still requires complete source pixels. Data and Validation roles are
+explicit. No sibling kernel samples are read, so changing G's kernel invalidates
+G while preserving R/B cache entries. Unrelated invalid kernel samples do not
+fail an independently requested channel.
+
+The integration test uses independent odd/even asymmetric kernels and anchors,
+compares both execution modes to a scalar oracle, changes only G's kernel and
+checks 24 R/B cache hits for a 3×4 image, and verifies a finite field ROI succeeds
+without reading a remote NaN sample. Existing basic convolution results are also
+covered by `test_basic_operations`.
+
 ## Current executable validation
 
 ```sh
