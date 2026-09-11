@@ -53,8 +53,9 @@ Result<DependencyResult> drive(
     auto event = session->poll(BufferAllocator{}, checkpoints);
     if (!event.ok())
       return Result<DependencyResult>(event.status());
-    if (auto* result = std::get_if<DependencyResult>(&event.value()))
-      return Result<DependencyResult>(std::move(*result));
+    if (std::holds_alternative<DependencyResult>(event.value()))
+      return Result<DependencyResult>(
+          std::get<DependencyResult>(event.take_value()));
     auto status = supply(session, input);
     if (!status.ok())
       return Result<DependencyResult>(status);

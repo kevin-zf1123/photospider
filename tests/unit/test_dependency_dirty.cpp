@@ -111,7 +111,7 @@ int random_graphs() {
       bool changed;
       do {
         changed = false;
-        for (const auto edge : edges)
+        for (const auto& edge : edges)
           if (expected.count(edge.first))
             changed |= expected.insert(edge.second).second;
       } while (changed);
