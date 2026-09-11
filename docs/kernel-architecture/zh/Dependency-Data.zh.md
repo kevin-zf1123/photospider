@@ -84,8 +84,9 @@ effect。Atomic stream 按配置的 tile 交付并释放，终端 stream 保留�
 
 公开 progressive workflow 与 `test_dependency_program` 覆盖真实源发现、
 legacy→staged→legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及
-frozen 输入所有权。当前尚未发布共享结构记录或复用依赖 result cache。Dirty 传播、
-共享 Flight 和原生 GPU fragment 访问继续属于本轮 G4。
+frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据，见下文。Context-owned
+活跃 demand 替换、共享 Flight、依赖 result cache 复用和原生 GPU fragment 访问
+继续属于本轮 G4。
 直接证书 API 已独立实现，不能据此声称这些缓存与调度集成已完成。
 
 [依赖采样算子](Dependency-Sampling.zh.md) 已实现 STMap 和动态 radius gather/scatter。
@@ -128,3 +129,38 @@ build/issue257-static/consumer-build/photospider_dependency_consumer
 只有 Atomic 输出 9、terminal 输出 11、精确源端点、拒绝缺口，以及所有权和资源
 失败案例均通过时才返回零。consumer-build 由 `test_installed_consumer` 创建；
 共享库安装将路径中的 `static` 替换为 `shared`。
+
+
+## 运行时结构证据
+
+成功 G4 dependency-network Run 的 `ExecutionResult::dependencies` 保留不可变
+直接记录。Atomic 记录合并匹配 node/contract/snapshot 的完整逐观察 rows 和覆盖域；
+Whole 与 terminal RequestRecord 保存不可分割 manifest。Legacy regional step
+记录 callback 和 validation 实际使用的逐端口 demand。Source declaration、记录、
+订阅和命名 root 共同受 metadata 计数限额约束，与受控像素字节分别计费。
+证据不持有 Value、source callback、snapshot block 或 worker，在像素结果、graph、
+registry 和 ExecutionContext 释放后仍可查询。
+
+`coverage()` 表明证据完整的命名输出样本域。`certificate(node)` 返回已观察的
+Atomic rows；未知 node、Whole 和 terminal 均返回 NotFound，不能据此宣称未知 row
+为 clean。`potential_dirty(input, samples)` 对捕获关系及已记录输出子域精确，
+只沿直接订阅使用真实 `DirtyDeltaQueue` 传播。同代稍后到达的新 delta 会再次传播。
+入口 Footprint 复制、遍历和答案增长有总量边界，取消和 ResourceExhausted 均显式
+失败，不返回部分 clean/dirty 答案。
+
+该查询仅处理固定 declaration 下的 payload 变化。Descriptor/schema 替换沿重新
+编译路径；样本记录图未表示 metadata-output 原子，因此拒绝 Descriptor-role
+编辑。逐节点 certificate 仍保留非空间 tag，可直接在该节点执行 transpose，
+不把缺少 metadata-only 上游样本记录误判为 clean。
+
+`restrict({name: subset})` 沿已保存直接关联后向收缩所有相关 Atomic rows 和订阅，
+移除不再需要的记录和 root。未知覆盖域拒绝；Whole 保留完整全局 manifest；
+terminal RequestRecord 仅接受相同完整 Q。Atomic Empty 是已知空，省略的输出名
+则不在结果中。该操作不读取像素或调用算子。
+
+`test_execution_dependencies` 通过真实短/长菱形 workflow 验证 B/T 先收到 `{0}`
+后再收到 `{1}`，用独立逐端口 oracle 核验，并在像素/context owner 释放后查询证据。
+动态 scatter 验证排除项控制证据、相同输出的改边和旧证据隔离。Whole 和真实 C
+terminal 测试检查不可分割 manifest；同一检查消费安装后的静态库和共享库。
+公开 G4 workflow 也检查 radius 编辑与 frozen 旧关系的运行时证据。该层为后续
+context-owned demand/cache 集成提供结构，不自行订阅可变 bindings。

@@ -130,6 +130,22 @@ void radius_workflow(const std::shared_ptr<OperationRegistry>& registry) {
     throw std::runtime_error("radius independent oracle failed");
   std::cout
       << "radius: scatter_before=1, scatter_after=5, gather=1, frozen=1\n";
+  const auto edited = checked(Footprint::from_regions({4}, {Region({{3, 1}})}));
+  const auto output = checked(Footprint::from_regions({4}, {Region({{0, 1}})}));
+  const auto dirty =
+      checked(before.dependencies.potential_dirty("radius", edited));
+  const auto new_data =
+      checked(after.dependencies.potential_dirty("source", edited));
+  const auto frozen_data =
+      checked(pinned.dependencies.potential_dirty("source", edited));
+  const auto restricted =
+      checked(before.dependencies.restrict({{"scatter", output}}));
+  if (dirty.at("scatter") != output || !dirty.at("gather").empty() ||
+      new_data.at("scatter") != output || !frozen_data.at("scatter").empty() ||
+      restricted.coverage().size() != 1)
+    throw std::runtime_error("runtime dependency evidence oracle failed");
+  std::cout << "dependencies: radius[3] -> scatter{0}, gather{}, "
+               "new_data_edge=present, frozen_data_edge=absent\n";
 }
 }  // namespace
 void dynamic_workflow() {

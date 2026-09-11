@@ -128,9 +128,10 @@ tile before advancing; terminal streams preserve full original Q. This respects 
 The public progressive workflow and `test_dependency_program` exercise real
 source discovery, legacy-to-staged-to-legacy composition, full-Q terminal
 behavior, one-worker progress, finite admission, cancellation and frozen input
-ownership. This integration does not yet publish shared structural records or
-reuse dependency result-cache entries. Dirty propagation, shared Flights and native GPU fragment access remain part of the
-ongoing G4 implementation. The direct certificate API is implemented independently
+ownership. Successful dependency Runs now publish immutable structural evidence as described
+below. Context-owned live demand replacement, shared Flights, dependency result
+cache reuse and native GPU fragment access remain part of the ongoing G4
+implementation. The direct certificate API is implemented independently
 of those pending cache/scheduler integrations.
 
 The [dependency sampling operations](Dependency-Sampling.md) implement STMap and
@@ -187,3 +188,50 @@ It exits zero only after checking Atomic output 9, terminal output 11, exact
 source endpoints, rejected holes and the ownership/resource failure cases.
 The consumer build is created by `test_installed_consumer`; replace `static`
 with `shared` for the shared-library installation.
+
+
+## Runtime structural evidence
+
+`ExecutionResult::dependencies` owns immutable direct records for a successful
+G4 dependency-network Run. Records preserve merged Atomic certificate rows and
+their exact coverage; each Whole or terminal RequestRecord keeps an indivisible
+manifest. Legacy regional steps record the actual per-port demands used for their
+callback and validation. The builder merges only matching node/contract/snapshot
+rows. Source declarations, records, subscriptions and named roots share a bounded
+metadata count, separate from controlled pixel bytes. Evidence owns no Values,
+source callbacks, snapshot blocks or workers and remains usable after pixel
+results, the graph, registry and ExecutionContext have retired.
+
+`coverage()` states the named output samples for which the evidence is complete.
+`certificate(node)` returns observed Atomic rows; an absent node, Whole record or
+terminal request returns NotFound. None of those outcomes means unknown rows are
+clean. `potential_dirty(input, samples)` is exact for the captured relation and
+those named output subsets. It routes only direct subscriptions using the real
+`DirtyDeltaQueue`; a record receiving a later disjoint delta propagates again in
+the same query generation. Source Footprint copying, traversal and answer growth
+are bounded, with cancellation and explicit ResourceExhausted failures. A failed
+query never returns a partial clean/dirty map.
+
+This query concerns payload changes under fixed declarations. Descriptor/schema
+replacement follows recompilation; the sample record graph does not model
+metadata-output atoms and rejects Descriptor-role edits. Direct nonspatial tags
+remain present in each certificate and may be transposed through that single
+node's certificate. This distinction avoids claiming an absent metadata-only
+upstream sample record proves a clean result.
+
+`restrict({name: subset})` walks the stored direct associations backward and
+restricts all contributing Atomic rows and subscriptions together, discarding
+unused records and roots. Unknown coverage is rejected. Whole retains its
+complete global manifest; terminal RequestRecord permits only its identical full
+Q. Empty Atomic coverage is known empty, while an omitted output name is absent.
+This operation reads no pixels and does not invoke callbacks.
+
+`test_execution_dependencies` runs a short/long diamond whose B and T records
+must receive `{0}` and later `{1}`, checks an independently constructed per-port
+oracle, and retains evidence after releasing pixel/context owners. Dynamic
+scatter checks excluded control evidence, equal-output dependency changes and
+old evidence isolation. Whole and real C terminal tests check indivisible
+manifests. The same tests run against installed static and shared packages. The
+public G4 workflow also checks live runtime evidence for radius edits and frozen
+old relations. This evidence layer is the basis for the remaining context-owned
+demand and cache integration; it does not itself subscribe to mutable bindings.

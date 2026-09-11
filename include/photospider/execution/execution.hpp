@@ -13,6 +13,7 @@
 #include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
+#include "photospider/execution/dependencies.hpp"
 
 namespace ps {
 
@@ -236,6 +237,10 @@ struct PHOTOSPIDER_API ExecutionResult final {
   std::map<std::string, Value> values;
   /** @brief Raw compiler-independent execution diagnostics. */
   ExecutionDiagnostics diagnostics;
+  /** @brief Direct structural evidence for a completed dependency-network Run.
+   * @note Empty for the legacy execution path. Owns no result pixel storage.
+   */
+  ExecutionDependencies dependencies;
 };
 
 /**

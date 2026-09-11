@@ -27,6 +27,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_records.hpp"
 #include "execution/disk_cache.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
@@ -1091,6 +1092,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                     "dependency Run identities exhausted"));
     } while (!sequence.compare_exchange_weak(nonce, nonce + 1));
     const auto identity = "run-" + std::to_string(nonce);
+    execution_internal::DependencyRecords records(plan, identity, limits);
+    if (!records.status().ok())
+      return fail(records.status());
     const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& step = plan.steps().at(producer->step_index);
@@ -1520,14 +1524,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (!reserved.ok())
             return fail(reserved.status());
           Seal seal{reserved.take_value()};
-          const auto stage_started = std::chrono::steady_clock::now();
+          std::uint64_t callback_us = 0;
           if (frame.session) {
             const auto charged_before = frame.session->consumed_work();
             auto progress =
                 dependency_stage<DependencyProgress>(pool, admission, [&] {
                   if (stop() != ErrorCode::Ok)
                     return Result<DependencyProgress>(Status{stop(), {}});
-                  return frame.session->poll(seal.reservation->allocator());
+                  const auto callback_started =
+                      std::chrono::steady_clock::now();
+                  auto result =
+                      frame.session->poll(seal.reservation->allocator());
+                  callback_us = duration_us(callback_started);
+                  return result;
                 });
             status = consume(frame.session->consumed_work() - charged_before);
             if (!status.ok())
@@ -1538,6 +1547,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(Status{stop(), {}});
             auto event = progress.take_value();
             if (auto* complete = std::get_if<DependencyResult>(&event)) {
+              status = records.append(step_index, *complete);
+              if (!status.ok())
+                return fail(status);
               std::vector<Value> owned;
               const auto allocator = seal.reservation->allocator();
               for (const auto& fragment : complete->value.fragments()) {
@@ -1606,7 +1618,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                            cancellation,
                                            frame.outputs.boxes()[0],
                                            seal.reservation->allocator()};
+                  const auto callback_started =
+                      std::chrono::steady_clock::now();
                   auto computed = invoke(step.operation, call);
+                  callback_us = duration_us(callback_started);
                   if (!computed.ok())
                     return computed;
                   if (!call.allocator.owns(*computed.value().storage()))
@@ -1616,6 +1631,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 });
             if (!value.ok())
               return fail(value.status());
+            status =
+                records.append_legacy(step_index, frame.outputs, frame.parts);
+            if (!status.ok())
+              return fail(status);
             auto fragments = ValueFragments::create(
                 output.descriptor, output.facets, frame.outputs,
                 {value.take_value()}, limits);
@@ -1628,8 +1647,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           diagnostics.peak_active_tasks = 1;
           diagnostics.selected_backends[step.node_id] = Backend::Cpu;
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, Backend::Cpu, duration_us(stage_started),
-              ErrorCode::Ok, 1,
+              step.node_id, Backend::Cpu, callback_us, ErrorCode::Ok, 1,
               frame.state == Frame::State::Complete ? elements.value() : 0});
         }
       }
@@ -1639,6 +1657,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (named.boundary)
         continue;
       const auto& region = named.region;
+      auto published_samples = Footprint::from_regions(
+          returned->descriptor().shape, {region}, limits);
+      if (!published_samples.ok())
+        return fail(published_samples.status());
+      auto recorded =
+          records.output(named.name, named.step, published_samples.value());
+      if (!recorded.ok())
+        return fail(recorded);
       auto bytes = region_bytes(returned->descriptor(), region);
       if (!bytes.ok())
         return fail(bytes.status());
@@ -1666,6 +1692,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     diagnostics.peak_live_bytes = peaks.first;
     diagnostics.planned_peak_bytes = peaks.second;
     diagnostics.execute_us = duration_us(started);
+    result.dependencies = std::move(records).finish();
     if (!sink)
       diagnostics.result_digest = result_digest(result.values);
     if (stop() != ErrorCode::Ok)

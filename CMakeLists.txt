@@ -156,6 +156,7 @@ set(
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
+  src/lib/execution/dependency_records.cpp
   src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
@@ -563,6 +564,7 @@ if(BUILD_TESTING)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
   photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
+  photospider_add_test(test_execution_dependencies Photospider::kernel tests/integration/test_execution_dependencies.cpp)
   add_library(dependency_fixture MODULE tests/fixtures/dependency_fixture.c)
   target_link_libraries(dependency_fixture PRIVATE Photospider::operation_sdk)
   target_compile_definitions(dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)

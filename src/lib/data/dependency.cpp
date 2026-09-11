@@ -170,9 +170,39 @@ Result<DependencyCertificate> DependencyCertificate::restrict(
   if (!outside.value().empty())
     return Result<DependencyCertificate>(invalid("unknown certificate row"));
   std::vector<AtomCertificate> selected;
-  for (const auto& row : rows_)
-    if (subset.contains(row.output))
+  std::uint64_t entries = 0;
+  std::uint64_t scanned = 0;
+  for (const auto& row : rows_) {
+    auto stop = stopped(limits);
+    if (!stop.ok())
+      return Result<DependencyCertificate>(stop);
+    if (scanned == limits.maximum_work)
+      return Result<DependencyCertificate>(
+          Status{ErrorCode::ResourceExhausted, {}});
+    ++scanned;
+    if (subset.contains(row.output)) {
+      // Check before deep-copying supports; a tiny restriction must not first
+      // duplicate a large source certificate or one oversized selected row.
+      std::uint64_t extra = 1;
+      for (const auto& need : row.inputs) {
+        const auto count = 1 + need.tags.size() + need.samples.boxes().size();
+        if (count > limits.maximum_boxes ||
+            extra > limits.maximum_boxes - count)
+          return Result<DependencyCertificate>(
+              Status{ErrorCode::ResourceExhausted, {}});
+        extra += count;
+      }
+      if (extra > limits.maximum_boxes ||
+          entries > limits.maximum_boxes - extra)
+        return Result<DependencyCertificate>(
+            Status{ErrorCode::ResourceExhausted, {}});
+      entries += extra;
+      auto status = bounded(entries, limits);
+      if (!status.ok())
+        return Result<DependencyCertificate>(status);
       selected.push_back(row);
+    }
+  }
   return create(identity_, subset, input_shapes_, std::move(selected), limits);
 }
 Result<std::vector<DependencyNeed>> DependencyCertificate::backward(

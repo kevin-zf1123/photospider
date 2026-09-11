@@ -262,6 +262,18 @@ int workflow(std::uint32_t (*starts)(), std::uint32_t (*destroys)()) {
   PS_CHECK(terminal.ok());
   std::memcpy(&value, terminal.value().values.at("result").bytes().data(), 8);
   PS_CHECK(value == 11 && starts() == destroys());
+  const auto full_query = point(1).unite(point(2)).take_value();
+  const auto& evidence = terminal.value().dependencies;
+  PS_CHECK(evidence.valid() &&
+           evidence.certificate(1).status().code == ErrorCode::NotFound);
+  PS_CHECK(evidence.potential_dirty("samples", point(0)).value().at("result") ==
+           full_query);
+  PS_CHECK(evidence.potential_dirty("samples", point(1))
+               .value()
+               .at("result")
+               .empty());
+  PS_CHECK(!evidence.restrict({{"result", point(1)}}).ok());
+  PS_CHECK(evidence.restrict({{"result", full_query}}).ok());
   return 0;
 }
 int session_owns_library() {
