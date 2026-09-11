@@ -168,7 +168,7 @@ int exact_reads(bool ancestor) {
     std::memcpy(&value, output.bytes().data() + i * 8, 8);
     PS_CHECK(value == static_cast<double>((i + 1) * (i + 2) / 2));
   }
-  auto certificate = result.value().dependencies.certificate(1);
+  auto certificate = result.value().dependencies.certificate({1, 0});
   PS_CHECK(certificate.ok());
   for (auto i : {0U, 13U, 255U}) {
     const auto prefix =

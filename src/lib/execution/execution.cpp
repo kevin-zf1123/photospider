@@ -1119,7 +1119,7 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
 /** @brief Finds work needed for outputs, stopping at Run-local
  * materializations. */
 std::vector<bool> required_steps(const ExecutionPlan& plan,
-                                 const std::map<std::uint64_t, Value>& cached,
+                                 const std::map<ValueRef, Value>& cached,
                                  std::size_t future_whole_begin = SIZE_MAX) {
   std::vector<bool> required(plan.steps().size(), false);
   for (const auto& output : plan.outputs())
@@ -1129,7 +1129,7 @@ std::vector<bool> required_steps(const ExecutionPlan& plan,
       required[i] = true;
   for (std::size_t reverse = plan.steps().size(); reverse > 0; --reverse) {
     const auto i = reverse - 1;
-    if (!required[i] || cached.count(plan.steps()[i].node_id) != 0)
+    if (!required[i] || cached.count(plan.steps()[i].result_ref()) != 0)
       continue;
     for (const auto& source : plan.steps()[i].inputs)
       if (const auto* producer = std::get_if<PlanStepInput>(&source))
@@ -1344,6 +1344,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (snapshot)
             hash.text(identity);
           hash.integer(plan.steps()[index].node_id);
+          hash.integer(plan.steps()[index].output_index);
           hash.integer(plan.tile_width());
           hash.integer(plan.tile_height());
           hash.integer(options.dependencies.sets.maximum_boxes);
@@ -1926,7 +1927,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Status::failure(ErrorCode::BackendUnavailable,
                               "native dependency worker unavailable");
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, frame.backend, 0, unavailable.code, 1, 0});
+              step.result_ref(), frame.backend, 0, unavailable.code, 1, 0});
           if (!fallback(unavailable))
             return fail(unavailable);
           if (frame.session) {
@@ -1965,7 +1966,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               frame.backend = shared.value()->backend;
               frame.fallback_taint |= shared.value()->fallback_taint;
               ++diagnostics.shared_computations;
-              diagnostics.selected_backends[step.node_id] = frame.backend;
+              diagnostics.selected_backends[step.result_ref()] = frame.backend;
               diagnostics.shared_peak_live_bytes =
                   std::max(diagnostics.shared_peak_live_bytes,
                            shared.value()->producer_peak);
@@ -2015,7 +2016,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 frame.cache_hit = true;
                 frame.state = Frame::State::Complete;
                 ++diagnostics.cache_hits;
-                diagnostics.selected_backends[step.node_id] = frame.backend;
+                diagnostics.selected_backends[step.result_ref()] =
+                    frame.backend;
                 break;
               }
               if (frame.state == Frame::State::Complete)
@@ -2038,6 +2040,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             DependencyRequest request;
             for (const auto& input : step.inputs)
               request.inputs.push_back(metadata(input));
+            request.output_index = step.output_index;
             request.parameters = step.parameters;
             request.outputs = frame.outputs;
             request.snapshot_identity = identity;
@@ -2066,8 +2069,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 },
                 pump);
             if (!session.ok()) {
-              diagnostics.operation_timings.push_back(OperationTiming{
-                  step.node_id, frame.backend, 0, session.status().code, 1, 0});
+              diagnostics.operation_timings.push_back(
+                  OperationTiming{step.result_ref(), frame.backend, 0,
+                                  session.status().code, 1, 0});
               if (fallback(session.status())) {
                 status = restart_cpu();
                 if (!status.ok())
@@ -2087,6 +2091,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                           "synchronous terminal requires a "
                                           "rectangular complete request"));
             for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+              const auto& included = step.traits.outputs[0].input_indices;
+              if (included && std::find(included->begin(), included->end(),
+                                        port) == included->end()) {
+                auto none = Footprint::none(
+                    metadata(step.inputs[port]).descriptor.shape, limits);
+                if (!none.ok())
+                  return fail(none.status());
+                frame.parts.push_back(none.take_value());
+                continue;
+              }
               auto demand = input_internal::derive_input_demand(
                   step.traits, frame.outputs.boxes()[0],
                   output.descriptor.shape,
@@ -2149,6 +2163,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           // The pending input footprint remains available after supply moved
           // ready owners into the session. It describes exact stage scratch.
           for (std::size_t port = 0; port < frame.parts.size(); ++port) {
+            if (frame.parts[port].empty())
+              continue;
             auto count = frame.parts[port].element_count();
             const auto input_width = Value::element_size(
                 metadata(step.inputs[port]).descriptor.element_type);
@@ -2391,7 +2407,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(status);
             if (!progress.ok()) {
               diagnostics.operation_timings.push_back(
-                  OperationTiming{step.node_id, frame.backend, callback_us,
+                  OperationTiming{step.result_ref(), frame.backend, callback_us,
                                   progress.status().code, 1, 0});
               diagnostics.operation_timings.back().native_dispatch_count =
                   native_stats.dispatches;
@@ -2470,8 +2486,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   }
                   std::vector<Value> inputs;
                   std::vector<Region> demands;
+                  std::vector<std::uint32_t> input_indices;
                   for (std::size_t port = 0; port < frame.parts.size();
                        ++port) {
+                    if (frame.parts[port].empty())
+                      continue;
+                    input_indices.push_back(static_cast<std::uint32_t>(port));
                     const auto& box = frame.parts[port].boxes().at(0);
                     auto dense =
                         frame.ready[port].collect(box, allocator, limits);
@@ -2489,6 +2509,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       inputs,        demands,        step.parameters,
                       frame.backend, active_token(), frame.outputs.boxes()[0],
                       allocator};
+                  call.output_index = step.output_index;
+                  call.input_indices = std::move(input_indices);
+                  for (const auto& input : step.inputs)
+                    call.input_metadata.push_back(metadata(input));
                   if (native)
                     call.gpu = native->service();
                   const auto callback_started =
@@ -2524,7 +2548,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 pump);
             if (!value.ok()) {
               diagnostics.operation_timings.push_back(
-                  OperationTiming{step.node_id, frame.backend, callback_us,
+                  OperationTiming{step.result_ref(), frame.backend, callback_us,
                                   value.status().code, 1, 0});
               diagnostics.operation_timings.back().native_dispatch_count =
                   native_stats.dispatches;
@@ -2548,9 +2572,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             frame.state = Frame::State::Complete;
           }
           diagnostics.peak_active_tasks = 1;
-          diagnostics.selected_backends[step.node_id] = frame.backend;
+          diagnostics.selected_backends[step.result_ref()] = frame.backend;
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, frame.backend, callback_us, ErrorCode::Ok, 1,
+              step.result_ref(), frame.backend, callback_us, ErrorCode::Ok, 1,
               frame.state == Frame::State::Complete ? elements.value() : 0});
           diagnostics.operation_timings.back().native_dispatch_count =
               native_stats.dispatches;
@@ -2708,8 +2732,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           invoke,
       const ExecutionPlan* plan, std::vector<Value> bindings,
       CancellationToken cancellation, std::uint32_t maximum_parallelism,
-      bool regional = false, const std::map<std::uint64_t, Value>& cached = {},
-      const std::map<std::uint64_t, Backend>& cached_backends = {},
+      bool regional = false, const std::map<ValueRef, Value>& cached = {},
+      const std::map<ValueRef, Backend>& cached_backends = {},
       std::function<void(std::size_t, const Value&, Backend)> retain = {},
       std::shared_ptr<gpu_internal::Device> native_device = {},
       execution_internal::ResultCache* native_cache = nullptr,
@@ -2757,13 +2781,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                               ? required_steps(*plan_, cached)
                               : std::vector<bool>(plan_->steps().size(), true);
     for (std::size_t i = 0; i < plan_->steps().size(); ++i) {
-      const auto found = cached.find(plan_->steps()[i].node_id);
+      const auto found = cached.find(plan_->steps()[i].result_ref());
       if (!required[i] || found != cached.end()) {
         completed_[i] = true;
         ++completed_count_;
         if (found != cached.end()) {
           values_[i] = found->second;
-          const auto backend = cached_backends.find(plan_->steps()[i].node_id);
+          const auto backend =
+              cached_backends.find(plan_->steps()[i].result_ref());
           if (backend != cached_backends.end())
             value_backends_[i] = backend->second;
           fallback_taint_[i] = value_backends_[i] != plan_->steps()[i].backend;
@@ -2995,11 +3020,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             !cancellation_.cancelled() && plan_->current();
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          diagnostics_.operation_timings.push_back(OperationTiming{
-              step.node_id, Backend::Gpu, 0U, ErrorCode::BackendUnavailable});
+          diagnostics_.operation_timings.push_back(
+              OperationTiming{step.result_ref(), Backend::Gpu, 0U,
+                              ErrorCode::BackendUnavailable});
           if (can_fallback) {
             diagnostics_.fallback_reasons.push_back(
                 "node " + std::to_string(step.node_id) +
+                (step.traits.outputs[0].key == "value"
+                     ? ""
+                     : "/" + step.traits.outputs[0].key) +
                 ": optional local GPU lane is unavailable");
           }
         }
@@ -3310,6 +3339,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                cancellation_,
                                regional_ ? step.output_demand : Region{},
                                callback_allocator};
+      call.output_index = step.output_index;
       if (native_device_ && backend == Backend::Gpu) {
         native.emplace(native_device_, cancellation_);
         call.gpu = native->service();
@@ -3337,8 +3367,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       bool should_fallback = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        diagnostics_.operation_timings.push_back(OperationTiming{
-            step.node_id, backend, elapsed, invocation_result.status().code});
+        diagnostics_.operation_timings.push_back(
+            OperationTiming{step.result_ref(), backend, elapsed,
+                            invocation_result.status().code});
         if (native) {
           diagnostics_.native_dispatch_count += native->statistics().dispatches;
           diagnostics_.native_submission_count +=
@@ -3376,8 +3407,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             !cancellation_.cancelled() && plan_->current();
         if (should_fallback) {
           diagnostics_.fallback_reasons.push_back(
-              "node " + std::to_string(step.node_id) + ": " +
-              invocation_result.status().message);
+              "node " + std::to_string(step.node_id) +
+              (step.traits.outputs[0].key == "value"
+                   ? ""
+                   : "/" + step.traits.outputs[0].key) +
+              ": " + invocation_result.status().message);
         }
       }
 
@@ -3481,8 +3515,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     value_backends_[step_index] = backend;
     completed_[step_index] = true;
     ++completed_count_;
-    diagnostics_.selected_backends.emplace(plan_->steps()[step_index].node_id,
-                                           backend);
+    diagnostics_.selected_backends.emplace(
+        plan_->steps()[step_index].result_ref(), backend);
     for (std::size_t dependent : dependents_[step_index]) {
       if (remaining_dependencies_[dependent] == 0U) {
         finish_failure_locked(Status::failure(ErrorCode::Internal,
@@ -4436,7 +4470,7 @@ Result<ExecutionResult> ExecutionContext::execute(
                                             [&plan] { return plan.current(); });
         },
         &plan, prepared.take_value(), cancellation, parallelism, false,
-        std::map<std::uint64_t, Value>{}, std::map<std::uint64_t, Backend>{},
+        std::map<ValueRef, Value>{}, std::map<ValueRef, Backend>{},
         std::function<void(std::size_t, const Value&, Backend)>{},
         impl_->native_device, impl_->cache.get(),
         impl_->cache ? impl_->cache->epoch() : 0);
@@ -4512,11 +4546,11 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           });
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
-    std::map<std::uint64_t, Value> cached;
-    std::map<std::uint64_t, Backend> cached_backends;
+    std::map<ValueRef, Value> cached;
+    std::map<ValueRef, Backend> cached_backends;
     // Whole values survive separate materializations within this Run. Their
     // actual backend alone cannot describe fallback ancestry/cache eligibility.
-    std::set<std::uint64_t> uncacheable_whole;
+    std::set<ValueRef> uncacheable_whole;
     ExecutionDiagnostics diagnostics;
     diagnostics.plan_digest = plan.digest().value;
     if (impl_->cache && impl_->native_device &&
@@ -4572,7 +4606,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         auto found = std::find_if(diagnostics.operation_timings.begin(),
                                   diagnostics.operation_timings.end(),
                                   [&](const OperationTiming& prior) {
-                                    return prior.node_id == timing.node_id &&
+                                    return prior.output == timing.output &&
                                            prior.backend == timing.backend;
                                   });
         if (found == diagnostics.operation_timings.end()) {
@@ -4660,8 +4694,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     const auto run_tile =
         [this, snapshot, observation, parallelism](
             const ExecutionPlan& tile,
-            const std::map<std::uint64_t, Value>& tile_cached,
-            const std::map<std::uint64_t, Backend>& tile_backends,
+            const std::map<ValueRef, Value>& tile_cached,
+            const std::map<ValueRef, Backend>& tile_backends,
             const std::vector<std::string>& keys, std::uint64_t cache_epoch,
             const CancellationToken& token) -> Result<ExecutionResult> {
       const auto stop = [&] { return binding_stop(tile, token); };
@@ -4671,7 +4705,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       std::uint64_t working = 0;
       for (std::size_t i = 0; i < tile.steps().size(); ++i) {
         const auto& step = tile.steps()[i];
-        if (!required[i] || tile_cached.count(step.node_id))
+        if (!required[i] || tile_cached.count(step.result_ref()))
           continue;
         auto sum = checked_add(working, step.planned_bytes);
         if (!sum.ok())
@@ -4901,7 +4935,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         // Invalidate before lookup: a cached Whole value may be GPU-backed
         // while still derived from a CPU fallback earlier in this Run.
         for (std::size_t i = 0; i < tile.steps().size(); ++i) {
-          if (uncacheable_whole.count(tile.steps()[i].node_id))
+          if (uncacheable_whole.count(tile.steps()[i].result_ref()))
             keys[i].clear();
           for (const auto& source : tile.steps()[i].inputs)
             if (const auto* producer = std::get_if<PlanStepInput>(&source))
@@ -4913,7 +4947,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           needed[output.second] = true;
         for (std::size_t reverse = keys.size(); reverse > 0; --reverse) {
           const auto i = reverse - 1;
-          if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
+          if (!needed[i] || tile_cached.count(tile.steps()[i].result_ref()))
             continue;
           auto retained = impl_->cache->get_output(
               keys[i], tile.steps()[i], stop,
@@ -4931,9 +4965,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               impl_->cache->put(keys[i], hit, cache_epoch);
           }
           if (hit.valid()) {
-            tile_cached[tile.steps()[i].node_id] = std::move(hit);
-            tile_backends[tile.steps()[i].node_id] = tile.steps()[i].backend;
-            diagnostics.selected_backends[tile.steps()[i].node_id] =
+            tile_cached[tile.steps()[i].result_ref()] = std::move(hit);
+            tile_backends[tile.steps()[i].result_ref()] =
+                tile.steps()[i].backend;
+            diagnostics.selected_backends[tile.steps()[i].result_ref()] =
                 tile.steps()[i].backend;
             ++diagnostics.cache_hits;
           } else {
@@ -4949,7 +4984,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       const auto required = required_steps(tile, tile_cached);
       for (std::size_t i = 0; i < tile.steps().size(); ++i) {
         const auto& step = tile.steps()[i];
-        if (!required[i] || tile_cached.count(step.node_id))
+        if (!required[i] || tile_cached.count(step.result_ref()))
           continue;
         for (const auto& source : step.inputs)
           if (const auto* producer = std::get_if<PlanStepInput>(&source))
@@ -4990,36 +5025,38 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         if (share && !completed.diagnostics.selected_backends.empty()) {
           const auto selected =
               completed.diagnostics.selected_backends.begin()->second;
-          completed.diagnostics.selected_backends = {{step.node_id, selected}};
+          completed.diagnostics.selected_backends = {
+              {step.result_ref(), selected}};
         }
         auto status = accumulate(completed.diagnostics);
         if (!status.ok())
           return Result<ExecutionResult>(status);
-        tile_cached[step.node_id] = completed.values.at(name);
+        tile_cached[step.result_ref()] = completed.values.at(name);
         const auto backend =
-            completed.diagnostics.selected_backends.find(step.node_id);
-        tile_backends[step.node_id] =
+            completed.diagnostics.selected_backends.find(step.result_ref());
+        tile_backends[step.result_ref()] =
             backend == completed.diagnostics.selected_backends.end()
                 ? step.backend
                 : backend->second;
-        if (tile_backends[step.node_id] != step.backend)
+        if (tile_backends[step.result_ref()] != step.backend)
           keys[i].clear();
         // Keep only ancestors still read by an unfinished node or output.
         const auto remaining = required_steps(tile, tile_cached);
         for (std::size_t j = 0; j < tile.steps().size(); ++j)
           if (!remaining[j]) {
-            tile_cached.erase(tile.steps()[j].node_id);
-            tile_backends.erase(tile.steps()[j].node_id);
+            tile_cached.erase(tile.steps()[j].result_ref());
+            tile_backends.erase(tile.steps()[j].result_ref());
           }
       }
       for (const auto& output : tile.outputs())
         if (tile.steps()[output.second].whole_boundary &&
             keys[output.second].empty())
-          uncacheable_whole.insert(tile.steps()[output.second].node_id);
+          uncacheable_whole.insert(tile.steps()[output.second].result_ref());
       ExecutionResult result;
       for (const auto& output : tile.outputs())
         result.values.emplace(
-            output.first, tile_cached.at(tile.steps()[output.second].node_id));
+            output.first,
+            tile_cached.at(tile.steps()[output.second].result_ref()));
       return Result<ExecutionResult>(std::move(result));
     };
     // Materialize Whole/effect boundaries once in source-topological order.
@@ -5041,9 +5078,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       auto status = accumulate(result.value().diagnostics);
       if (!status.ok())
         return failure(status);
-      cached[step.node_id] = result.value().values.at(name);
-      const auto backend = diagnostics.selected_backends.find(step.node_id);
-      cached_backends[step.node_id] =
+      cached[step.result_ref()] = result.value().values.at(name);
+      const auto backend =
+          diagnostics.selected_backends.find(step.result_ref());
+      cached_backends[step.result_ref()] =
           backend == diagnostics.selected_backends.end() ? step.backend
                                                          : backend->second;
       // Completed boundaries cut their ancestors from future demands. Retain
@@ -5051,16 +5089,16 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       const auto future = required_steps(plan, cached, i + 1);
       for (std::size_t prior = 0; prior <= i; ++prior)
         if (!future[prior]) {
-          cached.erase(plan.steps()[prior].node_id);
-          cached_backends.erase(plan.steps()[prior].node_id);
+          cached.erase(plan.steps()[prior].result_ref());
+          cached_backends.erase(plan.steps()[prior].result_ref());
         }
     }
     // Whole results with no output-side reader can retire before streaming.
     const auto needed = required_steps(plan, cached);
     for (std::size_t i = 0; i < plan.steps().size(); ++i)
       if (!needed[i]) {
-        cached.erase(plan.steps()[i].node_id);
-        cached_backends.erase(plan.steps()[i].node_id);
+        cached.erase(plan.steps()[i].result_ref());
+        cached_backends.erase(plan.steps()[i].result_ref());
       }
 
     ExecutionPlan remaining_outputs = plan;
@@ -5142,8 +5180,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       const auto future_needed = required_steps(remaining_outputs, cached);
       for (std::size_t i = 0; i < plan.steps().size(); ++i)
         if (!future_needed[i]) {
-          cached.erase(plan.steps()[i].node_id);
-          cached_backends.erase(plan.steps()[i].node_id);
+          cached.erase(plan.steps()[i].result_ref());
+          cached_backends.erase(plan.steps()[i].result_ref());
         }
     }
     cached.clear();
@@ -5162,8 +5200,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     std::sort(diagnostics.operation_timings.begin(),
               diagnostics.operation_timings.end(),
               [](const OperationTiming& a, const OperationTiming& b) {
-                return a.node_id != b.node_id ? a.node_id < b.node_id
-                                              : a.backend < b.backend;
+                return a.output != b.output ? a.output < b.output
+                                            : a.backend < b.backend;
               });
     if (!sink)
       diagnostics.result_digest = result_digest(result.values);

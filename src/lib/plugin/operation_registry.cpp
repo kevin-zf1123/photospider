@@ -542,7 +542,10 @@ Status validate_traits(const OperationTraits& traits) {
  */
 Result<OperationMetadata> expected_callback_output_descriptor(
     const OperationTraits& traits, const std::vector<Value>& inputs,
-    const std::map<std::string, ParameterValue>& parameters) {
+    const std::map<std::string, ParameterValue>& parameters,
+    const std::vector<OperationMetadata>& complete_metadata = {}) {
+  if (!complete_metadata.empty())
+    return infer_operation_output(traits, complete_metadata, parameters);
   std::vector<OperationMetadata> metadata;
   for (const auto& value : inputs) {
     if (!value.valid())
@@ -1446,6 +1449,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         view.struct_size = sizeof(view);
         view.element_type =
             static_cast<std::uint32_t>(input_descriptor.element_type);
+        view.input_index = invocation.input_indices.empty()
+                               ? static_cast<std::uint32_t>(input_index)
+                               : invocation.input_indices[input_index];
         view.rank = static_cast<std::uint32_t>(input_descriptor.shape.size());
         view.byte_size = logical_bytes;
         view.shape = input_descriptor.shape.data();
@@ -1505,11 +1511,15 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
       OutputSinkState output;
       auto resolved = resolve_operation_traits(
-          selected.value(), invocation.inputs.size(), invocation.parameters);
+          selected.value(),
+          invocation.input_metadata.empty() ? invocation.inputs.size()
+                                            : invocation.input_metadata.size(),
+          invocation.parameters);
       if (!resolved.ok())
         return Result<Value>(resolved.status());
       auto expected = expected_callback_output_descriptor(
-          resolved.value(), invocation.inputs, invocation.parameters);
+          resolved.value(), invocation.inputs, invocation.parameters,
+          invocation.input_metadata);
 
       if (!expected.ok())
         return Result<Value>(expected.status());
@@ -1737,13 +1747,16 @@ Result<Value> OperationRegistry::invoke_current(
   }
   if (definition->traits.outputs[0].dependency_version)
     return invoke_dependency_current(key, invocation, current);
+  const auto metadata_count = invocation.input_metadata.empty()
+                                  ? invocation.inputs.size()
+                                  : invocation.input_metadata.size();
   if ((!definition->traits.repeated_maximum &&
-       invocation.inputs.size() != definition->traits.input_count) ||
+       metadata_count != definition->traits.input_count) ||
       (definition->traits.repeated_maximum &&
-       (invocation.inputs.size() < definition->traits.input_count +
-                                       definition->traits.repeated_minimum ||
-        invocation.inputs.size() > definition->traits.input_count +
-                                       definition->traits.repeated_maximum))) {
+       (metadata_count < definition->traits.input_count +
+                             definition->traits.repeated_minimum ||
+        metadata_count > definition->traits.input_count +
+                             definition->traits.repeated_maximum))) {
     return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                          "operation input count mismatch"));
   }
@@ -1751,6 +1764,21 @@ Result<Value> OperationRegistry::invoke_current(
     return Result<Value>(
         Status::failure(ErrorCode::InvalidArgument,
                         "operation input demand count does not match inputs"));
+  }
+  std::vector<std::uint32_t> positions = invocation.input_indices;
+  if (positions.empty()) {
+    for (std::uint32_t i = 0; i < invocation.inputs.size(); ++i)
+      positions.push_back(i);
+  }
+  if (positions.size() != invocation.inputs.size())
+    return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                         "input index count mismatch"));
+  std::vector<bool> seen(metadata_count, false);
+  for (auto port : positions) {
+    if (port >= metadata_count || seen[port])
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "invalid original input index"));
+    seen[port] = true;
   }
   for (std::size_t index = 0U; index < invocation.inputs.size(); ++index) {
     if (!invocation.inputs[index].valid()) {
@@ -1802,22 +1830,49 @@ Result<Value> OperationRegistry::invoke_current(
   if (!selected.ok())
     return Result<Value>(selected.status());
   auto resolved_result = resolve_operation_traits(
-      selected.value(), invocation.inputs.size(), invocation.parameters);
+      selected.value(),
+      invocation.input_metadata.empty() ? invocation.inputs.size()
+                                        : invocation.input_metadata.size(),
+      invocation.parameters);
   if (!resolved_result.ok())
     return Result<Value>(resolved_result.status());
   auto resolved_shape = resolved_result.take_value();
   auto expected_output = expected_callback_output_descriptor(
-      resolved_shape, invocation.inputs, invocation.parameters);
+      resolved_shape, invocation.inputs, invocation.parameters,
+      invocation.input_metadata);
   if (!expected_output.ok()) {
     return Result<Value>(expected_output.status());
   }
+  const auto& included = resolved_shape.outputs[0].input_indices;
+  const auto active = [&](std::uint32_t port) {
+    return !included || std::find(included->begin(), included->end(), port) !=
+                            included->end();
+  };
+  for (std::uint32_t port = 0; port < metadata_count; ++port)
+    if (active(port) && !seen[port])
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "missing projected input"));
   const auto stop = [&]() noexcept {
     if (invocation.cancellation.cancelled())
       return ErrorCode::Cancelled;
     return current && !current() ? ErrorCode::Stale : ErrorCode::Ok;
   };
   for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
-    const auto& port = resolved_shape.input_schema[i];
+    const auto original = positions[i];
+    if (!invocation.input_metadata.empty()) {
+      const auto& expected = invocation.input_metadata[original];
+      if (invocation.inputs[i].descriptor().shape !=
+              expected.descriptor.shape ||
+          invocation.inputs[i].descriptor().element_type !=
+              expected.descriptor.element_type ||
+          !input_internal::same_facets(invocation.inputs[i].facets(),
+                                       expected.facets))
+        return Result<Value>(Status::failure(
+            ErrorCode::TypeMismatch, "projected input metadata mismatch"));
+    }
+    if (!active(original))
+      continue;
+    const auto& port = resolved_shape.input_schema[original];
     const auto status = input_internal::validate_port_value(
         port, invocation.inputs[i], ErrorCode::InvalidArgument, stop);
     if (!status.ok())
@@ -1841,7 +1896,27 @@ Result<Value> OperationRegistry::invoke_current(
         return Result<Value>(Status::failure(
             ErrorCode::OperationFailed, "cannot set binary32 environment"));
     }
-    OperationInvocation normalized = invocation;
+    std::vector<Value> projected_inputs;
+    std::vector<Region> projected_demands;
+    std::vector<std::uint32_t> projected_positions;
+    for (std::size_t i = 0; i < invocation.inputs.size(); ++i)
+      if (active(positions[i])) {
+        projected_inputs.push_back(invocation.inputs[i]);
+        projected_demands.push_back(invocation.input_demands[i]);
+        projected_positions.push_back(positions[i]);
+      }
+    OperationInvocation normalized(
+        projected_inputs, projected_demands, invocation.parameters,
+        invocation.backend, invocation.cancellation, invocation.output_region,
+        invocation.allocator);
+    normalized.gpu = invocation.gpu;
+    normalized.output_index = invocation.output_index;
+    normalized.input_indices = projected_positions;
+    normalized.input_metadata = invocation.input_metadata;
+    if (normalized.input_metadata.empty())
+      for (const auto& input : invocation.inputs)
+        normalized.input_metadata.push_back(
+            {input.descriptor(), input.facets()});
     if (normalized.output_region.rank() == 0)
       normalized.output_region =
           Region::whole(expected_output.value().descriptor.shape);
@@ -1867,11 +1942,13 @@ Result<Value> OperationRegistry::invoke_current(
       return Result<Value>(Status::failure(
           ErrorCode::InvalidArgument, "Whole operation requires whole output"));
     for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
+      if (!active(positions[i]))
+        continue;
       const auto required = input_internal::derive_input_demand(
           resolved, normalized.output_region,
           expected_output.value().descriptor.shape,
           invocation.inputs[i].descriptor().shape,
-          resolved.input_schema[i].kind);
+          resolved.input_schema[positions[i]].kind);
       if (!required.ok())
         return Result<Value>(required.status());
       for (std::size_t axis = 0; axis < required.value().rank(); ++axis) {

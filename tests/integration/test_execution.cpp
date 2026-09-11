@@ -1258,19 +1258,19 @@ ps::ExecutionDiagnostics make_sentinel_execution_diagnostics() {
   ps::ExecutionDiagnostics diagnostics;
   diagnostics.execute_us = 29U;
   diagnostics.selected_backends = {
-      {1U, ps::Backend::Cpu},
-      {2U, ps::Backend::Gpu},
-      {3U, ps::Backend::Cpu},
+      {{1U, 0}, ps::Backend::Cpu},
+      {{2U, 0}, ps::Backend::Gpu},
+      {{3U, 0}, ps::Backend::Cpu},
   };
   diagnostics.transfer_count = 1U;
   diagnostics.transfer_bytes = sizeof(double);
   diagnostics.peak_live_bytes = 24U;
   diagnostics.fallback_reasons = {"node 1 sentinel GPU fallback"};
   diagnostics.operation_timings = {
-      {1U, ps::Backend::Gpu, 0U, ps::ErrorCode::BackendUnavailable},
-      {1U, ps::Backend::Cpu, 3U, ps::ErrorCode::Ok},
-      {2U, ps::Backend::Gpu, 5U, ps::ErrorCode::Ok},
-      {3U, ps::Backend::Cpu, 7U, ps::ErrorCode::Ok},
+      {{1U, 0}, ps::Backend::Gpu, 0U, ps::ErrorCode::BackendUnavailable},
+      {{1U, 0}, ps::Backend::Cpu, 3U, ps::ErrorCode::Ok},
+      {{2U, 0}, ps::Backend::Gpu, 5U, ps::ErrorCode::Ok},
+      {{3U, 0}, ps::Backend::Cpu, 7U, ps::ErrorCode::Ok},
   };
   diagnostics.plan_digest = std::string(64U, 'a');
   diagnostics.result_digest = std::string(64U, 'b');
@@ -1552,7 +1552,7 @@ int main() {
   PS_CHECK(unavailable_gpu_result.value().diagnostics.fallback_reasons.size() ==
            3U);
   PS_CHECK(unavailable_gpu_result.value().diagnostics.selected_backends.at(
-               3U) == Backend::Cpu);
+               {3U, 0}) == Backend::Cpu);
 
   GraphContext left(ps::test::addition_document(1.0, 2.0));
   GraphContext right(ps::test::addition_document(10.0, 20.0));
@@ -2077,7 +2077,7 @@ int main() {
   PS_CHECK(ps::test::named_scalar(gpu_submission_recovered.value(), "value") ==
            1.0);
   PS_CHECK(gpu_submission_recovered.value().diagnostics.selected_backends.at(
-               1U) == Backend::Gpu);
+               {1U, 0}) == Backend::Gpu);
   PS_CHECK(gpu_only_gpu_calls == 1U);
   PS_CHECK(gpu_only_cpu_calls == 0U);
 
@@ -2287,7 +2287,7 @@ int main() {
   PS_CHECK(fallback_result.value().diagnostics.transfer_count == 1U);
   PS_CHECK(fallback_result.value().diagnostics.transfer_bytes ==
            sizeof(double));
-  PS_CHECK(fallback_result.value().diagnostics.selected_backends.at(2U) ==
+  PS_CHECK(fallback_result.value().diagnostics.selected_backends.at({2U, 0}) ==
            Backend::Cpu);
 
   FixtureInvocationObserver dso_invocations(PS_OPERATION_FIXTURE_PATH);
@@ -2326,14 +2326,14 @@ int main() {
       dso_diagnostics.fallback_reasons ==
       std::vector<std::string>({"node 2: fixture GPU backend is unavailable"}));
   PS_CHECK(dso_diagnostics.operation_timings.size() == 3U);
-  PS_CHECK(dso_diagnostics.operation_timings[1U].node_id == 2U);
+  PS_CHECK(dso_diagnostics.operation_timings[1U].output.node_id == 2U);
   PS_CHECK(dso_diagnostics.operation_timings[1U].backend == Backend::Gpu);
   PS_CHECK(dso_diagnostics.operation_timings[1U].outcome ==
            ErrorCode::BackendUnavailable);
-  PS_CHECK(dso_diagnostics.operation_timings[2U].node_id == 2U);
+  PS_CHECK(dso_diagnostics.operation_timings[2U].output.node_id == 2U);
   PS_CHECK(dso_diagnostics.operation_timings[2U].backend == Backend::Cpu);
   PS_CHECK(dso_diagnostics.operation_timings[2U].outcome == ErrorCode::Ok);
-  PS_CHECK(dso_diagnostics.selected_backends.at(2U) == Backend::Cpu);
+  PS_CHECK(dso_diagnostics.selected_backends.at({2U, 0}) == Backend::Cpu);
   PS_CHECK(dso_invocations.counter("ps_operation_fixture_gpu_invocation_count",
                                    kFixtureGpuBackendUnavailable) == 1U);
   PS_CHECK(dso_invocations.counter("ps_operation_fixture_cpu_invocation_count",
@@ -2888,7 +2888,7 @@ int main() {
        index < rejected_sample.execution.operation_timings.size(); ++index) {
     const auto& actual = rejected_sample.execution.operation_timings[index];
     const auto& expected = expected_execution.operation_timings[index];
-    PS_CHECK(actual.node_id == expected.node_id);
+    PS_CHECK(actual.output == expected.output);
     PS_CHECK(actual.backend == expected.backend);
     PS_CHECK(actual.duration_us == expected.duration_us);
     PS_CHECK(actual.outcome == expected.outcome);
@@ -2941,7 +2941,7 @@ int main() {
        index < throwing_sample.execution.operation_timings.size(); ++index) {
     const auto& actual = throwing_sample.execution.operation_timings[index];
     const auto& expected = expected_execution.operation_timings[index];
-    PS_CHECK(actual.node_id == expected.node_id);
+    PS_CHECK(actual.output == expected.output);
     PS_CHECK(actual.backend == expected.backend);
     PS_CHECK(actual.duration_us == expected.duration_us);
     PS_CHECK(actual.outcome == expected.outcome);
@@ -3016,7 +3016,7 @@ int main() {
          index < sample->execution.operation_timings.size(); ++index) {
       const auto& actual = sample->execution.operation_timings[index];
       const auto& expected = expected_execution.operation_timings[index];
-      PS_CHECK(actual.node_id == expected.node_id);
+      PS_CHECK(actual.output == expected.output);
       PS_CHECK(actual.backend == expected.backend);
       PS_CHECK(actual.duration_us == expected.duration_us);
       PS_CHECK(actual.outcome == expected.outcome);

@@ -51,8 +51,8 @@ bool diagnostics_match(const ps::ExecutionDiagnostics& diagnostics,
     return false;
   for (std::size_t index = 0; index < 2; ++index) {
     const auto& timing = diagnostics.operation_timings[index];
-    const auto selected = diagnostics.selected_backends.find(timing.node_id);
-    if (timing.node_id != (index + 1) * 10 ||
+    const auto selected = diagnostics.selected_backends.find(timing.output);
+    if (timing.output.node_id != (index + 1) * 10 ||
         timing.backend != ps::Backend::Cpu ||
         timing.outcome != ps::ErrorCode::Ok ||
         selected == diagnostics.selected_backends.end() ||
@@ -73,7 +73,7 @@ void print_diagnostics(const ps::ExecutionDiagnostics& diagnostics) {
             << " fallback_count=" << diagnostics.fallback_reasons.size()
             << '\n';
   for (const auto& timing : diagnostics.operation_timings)
-    std::cout << "raw node=" << timing.node_id
+    std::cout << "raw node=" << timing.output.node_id
               << " backend=CPU duration_us=" << timing.duration_us
               << " outcome=" << static_cast<unsigned>(timing.outcome) << '\n';
 }

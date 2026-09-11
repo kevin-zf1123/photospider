@@ -70,7 +70,7 @@ void measure_workflow() {
     if (output.bytes().size() != source.bytes().size() ||
         std::memcmp(output.bytes().data(), source.bytes().data(),
                     source.bytes().size()) != 0 ||
-        checked(result.dependencies.certificate(1)).rows().size() != width)
+        checked(result.dependencies.certificate({1, 0})).rows().size() != width)
       throw std::runtime_error("single-pixel measurement oracle failed");
     std::uint64_t polls = 0, callback_us = 0, computed = 0;
     for (const auto& timing : result.diagnostics.operation_timings) {

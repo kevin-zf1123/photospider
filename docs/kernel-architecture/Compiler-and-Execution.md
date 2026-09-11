@@ -247,5 +247,25 @@ Each retained producer reference names its selected physical step, so different
 shapes and types never share a node-only metadata slot. The semantic and physical
 v9 identities encode ordered outputs and selected result indices respectively.
 Pruning preserves the graph-selected staged execution family and its established
-Whole streaming behavior. Runtime cache/record routing and joint execution are
-separate #306–#308 delivery gates.
+Whole streaming behavior. Runtime routing is implemented by #306; joint execution remains a separate
+#307–#308 delivery gate.
+
+## Independent result execution
+
+M3 (#306) routes certificates, subscriptions, dirty propagation, frozen snapshot
+results, flights, Whole reuse and diagnostics by `ValueRef`. Public certificate
+lookup takes a result reference; timing and backend records identify the selected
+result. Content witnesses encode the selected named contract without a global
+node ID. Static parameters remain complete; sample evidence follows actual reads.
+
+Synchronous callbacks receive only the selected output's declared inputs.
+`input_indices` preserves original port numbers and `input_metadata` describes
+the complete static input signature. The C value view exposes `input_index`.
+An explicit empty projection executes without fetching any input samples; absent
+projection retains all-input behavior. Staged reads outside the selected input
+projection fail validation. Empty input sets never evaluate their producers.
+
+`test_multi_output_execution` exercises independent sibling caches, certificates,
+dirty subscriptions, frozen snapshots, named C outputs and an unused failing
+producer. Existing single-output fallback messages retain their spelling; named
+outputs add the port name to identify the failing result.

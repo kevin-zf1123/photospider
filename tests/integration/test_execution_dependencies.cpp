@@ -116,7 +116,7 @@ int late_delta() {
   auto dirty = evidence.potential_dirty("x", point(0));
   PS_CHECK(dirty.ok() && dirty.value().at("y") == all);
   PS_CHECK(evidence.potential_dirty("x", point(1)).value().at("y").empty());
-  auto certificate = evidence.certificate(4);
+  auto certificate = evidence.certificate({4, 0});
   PS_CHECK(certificate.ok() && certificate.value().coverage() == all);
   PS_CHECK(certificate.value().transpose({0, 1, point(0), {}}).value() ==
            point(0));
@@ -125,11 +125,11 @@ int late_delta() {
   auto first = certificate.value().restrict(point(0)).take_value();
   PS_CHECK(first.transpose({1, 1, point(0), {}}).value().empty());
   PS_CHECK(!first.restrict(point(1)).ok());
-  PS_CHECK(evidence.certificate(999).status().code == ErrorCode::NotFound);
+  PS_CHECK(evidence.certificate({999, 0}).status().code == ErrorCode::NotFound);
   auto narrowed = evidence.restrict({{"y", point(0)}});
   PS_CHECK(narrowed.ok() && narrowed.value().record_count() == 3);
-  PS_CHECK(narrowed.value().certificate(4).value().coverage() == point(0));
-  PS_CHECK(narrowed.value().certificate(3).status().code ==
+  PS_CHECK(narrowed.value().certificate({4, 0}).value().coverage() == point(0));
+  PS_CHECK(narrowed.value().certificate({3, 0}).status().code ==
            ErrorCode::NotFound);
   PS_CHECK(narrowed.value().potential_dirty("x", point(0)).value().at("y") ==
            point(0));
@@ -190,7 +190,7 @@ int negative_evidence() {
   PS_CHECK(
       evidence.potential_dirty("data", point(3, 5)).value().at("sum").empty());
   PS_CHECK(evidence.coverage().at("sum") == point(0, 5));
-  PS_CHECK(!evidence.certificate(1).value().restrict(point(4, 5)).ok());
+  PS_CHECK(!evidence.certificate({1, 0}).value().restrict(point(4, 5)).ok());
   bindings.inputs[1].value =
       values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0});
   auto after = context.execute(plan, bindings);
@@ -250,7 +250,7 @@ int whole_record() {
       plan, {{{"x", values<double>(ElementType::Float64, {3, 5})}}});
   PS_CHECK(executed.ok());
   const auto& evidence = executed.value().dependencies;
-  PS_CHECK(evidence.certificate(1).status().code == ErrorCode::NotFound);
+  PS_CHECK(evidence.certificate({1, 0}).status().code == ErrorCode::NotFound);
   PS_CHECK(evidence.potential_dirty("x", point(1)).value().at("y") == point(0));
   auto restricted = evidence.restrict({{"y", point(0)}});
   PS_CHECK(restricted.ok() && restricted.value().record_count() == 2);
@@ -363,7 +363,7 @@ int metadata_bounds() {
                .status()
                .code == ErrorCode::InvalidArgument);
   PS_CHECK(full.value()
-               .dependencies.certificate(1)
+               .dependencies.certificate({1, 0})
                .value()
                .transpose({0, 8, Footprint::none({2}).take_value(), {{1, 0}}})
                .value() == Footprint::all({2}).take_value());
@@ -406,7 +406,8 @@ int metadata_bounds() {
   PS_CHECK(wide_result.ok());
   auto tiny =
       wide_result.value().dependencies.restrict({{"a", point(0, 512)}}, small);
-  PS_CHECK(tiny.ok() && tiny.value().certificate(1).value().rows().size() == 1);
+  PS_CHECK(tiny.ok() &&
+           tiny.value().certificate({1, 0}).value().rows().size() == 1);
   std::vector<Region> sparse;
   for (unsigned i = 0; i < 9; ++i)
     sparse.push_back(Region({{2 * i, 1}}));

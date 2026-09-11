@@ -206,6 +206,8 @@ typedef struct ps_operation_value_view_v9 {
   const uint64_t* region_extents;
   /** @brief Byte offset of storage_origin from data (allocation start). */
   uint64_t byte_offset;
+  /** @brief Original common-schema input port for this supplied value. */
+  uint32_t input_index;
 } ps_operation_value_view_v9;
 
 /** @brief One invocation-local native buffer binding; no native handle escapes.

@@ -1011,6 +1011,12 @@ Result<DependencyProgress> DependencySession::poll(
       if (!projected.ok())
         return Result<DependencyProgress>(impl_->retire(projected.status()));
       for (const auto& fetch : projected.value()) {
+        const auto& allowed = impl_->traits.outputs[0].input_indices;
+        if (allowed && std::find(allowed->begin(), allowed->end(),
+                                 fetch.port) == allowed->end())
+          return Result<DependencyProgress>(impl_->retire(
+              invalid("dependency reads an excluded input port")));
+
         status = impl_->consume(fetch.tags.size() +
                                 fetch.samples.boxes().size() + 1);
         if (!status.ok())

@@ -246,7 +246,7 @@ int fallback_records(const ExecutionBindings& bindings) {
                 "ordinary fallback retained abandoned records"))
         return 1;
     } else if (mode == 1) {
-      if (check(evidence.certificate(1).value().coverage() ==
+      if (check(evidence.certificate({1, 0}).value().coverage() ==
                         point(0).unite(point(2)).take_value() &&
                     ancestors == 3,
                 "rollback lost prior rows or retained abandoned rows"))
@@ -349,7 +349,7 @@ int main() {
         check(result.value().diagnostics.native_dispatch_count ==
                   (enabled ? 2 : 0),
               "dispatch count") ||
-        check(result.value().diagnostics.selected_backends.at(1) ==
+        check(result.value().diagnostics.selected_backends.at({1, 0}) ==
                   (enabled ? Backend::Gpu : Backend::Cpu),
               "actual backend"))
       return 1;
@@ -386,10 +386,10 @@ int main() {
       const bool staged = std::string(key) != "example.whole";
       const float expected = staged ? 1 : 2;
       if (verify(fallback, 0, expected) ||
-          check(fallback.value().diagnostics.selected_backends.at(1) ==
+          check(fallback.value().diagnostics.selected_backends.at({1, 0}) ==
                     Backend::Cpu,
                 "producer fallback backend") ||
-          check(fallback.value().diagnostics.selected_backends.at(2) ==
+          check(fallback.value().diagnostics.selected_backends.at({2, 0}) ==
                     (enabled ? Backend::Gpu : Backend::Cpu),
                 "descendant backend") ||
           check(context.cache_statistics().retained_bytes == 0,
@@ -401,7 +401,7 @@ int main() {
         unsigned rejected = 0;
         for (const auto& attempt :
              fallback.value().diagnostics.operation_timings)
-          if (attempt.node_id == 1 && attempt.backend == Backend::Gpu &&
+          if (attempt.output.node_id == 1 && attempt.backend == Backend::Gpu &&
               attempt.outcome == ErrorCode::BackendUnavailable)
             ++rejected;
         if (check(rejected == 1, "native rejection attempt missing"))

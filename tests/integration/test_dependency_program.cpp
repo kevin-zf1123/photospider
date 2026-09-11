@@ -1310,7 +1310,7 @@ int dependency_record_rollback() {
   PS_CHECK(records.output("b", 1, point(1)).ok());
   auto result = std::move(records).finish();
   PS_CHECK(result.record_count() == 2);
-  PS_CHECK(result.certificate(1).value().coverage() ==
+  PS_CHECK(result.certificate({1, 0}).value().coverage() ==
            point(0).unite(point(1)).take_value());
   PS_CHECK(result.potential_dirty("x", point(0)).value().at("a") == point(0));
   PS_CHECK(result.potential_dirty("x", point(0)).value().at("b").empty());

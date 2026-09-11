@@ -1053,7 +1053,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   for (const auto& node : optimized.nodes())
     for (const auto& output : node.traits.outputs)
       plan.dependency_protocol_ =
-          plan.dependency_protocol_ || output.dependency_version != 0;
+          plan.dependency_protocol_ || output.dependency_version != 0 ||
+          node.outputs.size() > 1 || output.input_indices.has_value();
 
   plan.tile_height_ = options.tile_height;
   plan.tile_width_ = options.tile_width;

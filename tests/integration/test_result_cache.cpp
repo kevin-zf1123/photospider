@@ -30,7 +30,7 @@ ps::Value scalar(float number) {
 std::uint64_t calls(const ps::ExecutionResult& result, std::uint64_t id) {
   std::uint64_t n = 0;
   for (const auto& t : result.diagnostics.operation_timings)
-    if (t.node_id == id)
+    if (t.output.node_id == id)
       n += t.invocation_count;
   return n;
 }
@@ -580,8 +580,10 @@ int main() {
   cv.notify_all();
   auto shared_result = following.get();
   PS_CHECK(shared_result.ok() && invocations == before + 1);
-  PS_CHECK(shared_result.value().diagnostics.selected_backends.count(1) == 0);
-  PS_CHECK(shared_result.value().diagnostics.selected_backends.count(11) == 1);
+  PS_CHECK(shared_result.value().diagnostics.selected_backends.count({1, 0}) ==
+           0);
+  PS_CHECK(shared_result.value().diagnostics.selected_backends.count({11, 0}) ==
+           1);
   ExecutionContext plain(gated);
   auto expected = plain.execute(pb, bb);
   PS_CHECK(expected.ok());

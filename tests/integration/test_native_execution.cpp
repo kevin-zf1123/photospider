@@ -138,8 +138,8 @@ int main() {
     PS_CHECK(d.native_dispatch_count == 2 && d.native_submission_count == 2);
     PS_CHECK(d.transfer_count == 1 && d.transfer_bytes == 16);
     PS_CHECK(d.host_access_count == 1);
-    PS_CHECK(d.selected_backends.at(1) == ps::Backend::Gpu);
-    PS_CHECK(d.selected_backends.at(3) == ps::Backend::Cpu);
+    PS_CHECK(d.selected_backends.at({1, 0}) == ps::Backend::Gpu);
+    PS_CHECK(d.selected_backends.at({3, 0}) == ps::Backend::Cpu);
     retained = result.value().values.at("result");
     ps::CancellationSource cancellation;
     after_dispatch = [&] { cancellation.cancel(); };

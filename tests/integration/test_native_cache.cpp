@@ -288,7 +288,7 @@ void whole_fallback(const std::shared_ptr<ps::OperationRegistry>& base) {
     auto result = s3::take(context.execute(plan, bindings));
     unsigned final_calls = 0;
     for (const auto& timing : result.diagnostics.operation_timings)
-      if (timing.node_id == 3)
+      if (timing.output.node_id == 3)
         final_calls += timing.invocation_count;
     s3::require(final_calls == 4 && result.diagnostics.cache_hits == 0 &&
                     result.diagnostics.fallback_reasons.size() == 1 &&

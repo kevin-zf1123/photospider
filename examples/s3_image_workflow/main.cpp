@@ -73,7 +73,7 @@ void preview(const std::shared_ptr<ps::OperationRegistry>& registry) {
 std::uint64_t calls(const ps::ExecutionResult& result, std::uint64_t id = 0) {
   std::uint64_t total = 0;
   for (const auto& timing : result.diagnostics.operation_timings)
-    if (id == 0 || timing.node_id == id)
+    if (id == 0 || timing.output.node_id == id)
       total += timing.invocation_count;
   return total;
 }

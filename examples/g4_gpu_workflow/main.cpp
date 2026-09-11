@@ -310,7 +310,7 @@ int main() {
     if (check(diagnostics.native_dispatch_count == (gpu ? 2 : 0),
               "native dispatch count failed"))
       return 1;
-    if (check(diagnostics.selected_backends.at(1) ==
+    if (check(diagnostics.selected_backends.at({1, 0}) ==
                       (gpu ? Backend::Gpu : Backend::Cpu) &&
                   diagnostics.block_cache_hits == (gpu ? 1 : 0),
               "backend or block cache diagnostics failed"))

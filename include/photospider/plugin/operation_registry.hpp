@@ -444,6 +444,10 @@ struct PHOTOSPIDER_API OperationInvocation final {
   std::uint32_t output_index = 0;
   /** @brief Original input indices for supplied projected inputs. */
   std::vector<std::uint32_t> input_indices;
+  /** @brief Complete static input metadata when runtime inputs are projected.
+   * Empty selects descriptors from the complete supplied input vector.
+   */
+  std::vector<OperationMetadata> input_metadata;
   /** @brief Host allocator for output and scratch, valid for callback duration.
    */
   BufferAllocator allocator;

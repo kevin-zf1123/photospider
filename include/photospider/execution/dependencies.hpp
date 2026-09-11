@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "photospider/compiler/workflow_document.hpp"
 #include "photospider/data/dependency.hpp"
 
 namespace ps {
@@ -32,12 +33,12 @@ class PHOTOSPIDER_API ExecutionDependencies final {
   /** @brief Number of directly observed operation records, excluding sources.
    */
   std::size_t record_count() const noexcept;
-  /** @brief Retrieves merged per-observation evidence for an Atomic node.
+  /** @brief Retrieves merged per-observation evidence for an Atomic result.
    * @return Certificate or NotFound if no such resolved Atomic record exists.
    * Whole and terminal request records do not masquerade as sample rows.
    * @throws std::bad_alloc For copied metadata.
    */
-  Result<DependencyCertificate> certificate(std::uint64_t node) const;
+  Result<DependencyCertificate> certificate(ValueRef result) const;
   /** @brief Restricts roots and every contributing Atomic certificate together.
    * @param outputs Named subsets of coverage(); omitted names are removed.
    * @param limits Bounds copied records and backward traversal.

@@ -12,7 +12,7 @@ inline std::uint64_t calls(const ps::ExecutionResult& result,
                            std::uint64_t node = 0) {
   std::uint64_t total = 0;
   for (const auto& timing : result.diagnostics.operation_timings)
-    if (!node || timing.node_id == node)
+    if (!node || timing.output.node_id == node)
       total += timing.invocation_count;
   return total;
 }
