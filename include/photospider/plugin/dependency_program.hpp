@@ -91,6 +91,11 @@ struct PHOTOSPIDER_API DependencyPhase final {
   const std::function<Status(std::uint64_t)>& consume_work;
   /** @brief Makes a service failure sticky even if callback code ignores it. */
   const std::function<Status(Status)>& report_failure;
+  /** @brief Effective exact-set limits, including invocation cancellation.
+   * @note Apply before copying raw candidates; normalization must not erase
+   * their contribution to metadata/work bounds.
+   */
+  FootprintLimits sets = {};
   /** @brief Charged, bounds-checked sample read; no missing-page zero fallback.
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,

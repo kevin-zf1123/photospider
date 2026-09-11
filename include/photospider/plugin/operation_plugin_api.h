@@ -534,6 +534,7 @@ typedef struct ps_operation_port_constraint_v8 {
 #endif
 } ps_operation_port_constraint_v8;
 
+struct ps_dependency_program_v8;
 /**
  * @brief One immutable operation descriptor published by a plugin.
  *
@@ -630,6 +631,15 @@ typedef struct ps_operation_descriptor_v8 {
 #else
   uint32_t observation_kind;
   uint32_t failure_delivery;
+#endif
+  /** @brief Alternative staged program, copied and validated by the host.
+   * @note Exactly one execute or dependency_program must be nonnull. Include
+   * dependency_plugin_api.h for the staged table and phase-service contract.
+   */
+#ifdef __cplusplus
+  const struct ps_dependency_program_v8* dependency_program = nullptr;
+#else
+  const struct ps_dependency_program_v8* dependency_program;
 #endif
 } ps_operation_descriptor_v8;
 

@@ -71,14 +71,17 @@ C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Regist
 验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算
 dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
 layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
-`estimated_bytes` 是独立的 modeled admission estimate。C DSO Fixed descriptor 更严格，
-因为 ABI v8 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
+`estimated_bytes` 是独立的 modeled admission estimate。同步 C DSO Fixed descriptor 更严格，
+因为其 sink 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
 byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last
 byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上，UInt8
 `{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被
 拒绝。复制的 `requires_dense_output` trait 还会在 semantic IR 发布前按解析后的 dtype
 检查完整输出，覆盖 dtype 来自输入或静态参数的 Fixed 输出。该要求为 false 时，
-C++ Fixed broadcast 语义继续有效。
+C++ Fixed broadcast 语义继续有效。分阶段 C dependency program 也将该字段设为 false：
+宿主服务逐个校验实际输出 fragment。仅物化有界合法片段时，logical Fixed domain
+无需具有可表示的完整 dense byte product。分阶段 C 契约见
+[依赖数据](Dependency-Data.zh.md#c-分阶段程序)。
 
 ## Validation
 
@@ -221,8 +224,9 @@ grid，完成后才返回。参数失败粘滞，不能由 callback 成功覆盖
 ## G4 观察与 continuation 契约
 
 ABI/Traits 8 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C
-descriptor 复制并校验这些字段，同步调用继续可用；C 分阶段 service table 仍在本轮
-G4 实施范围。PerAtomOutcome 保留但拒绝注册，必须先具备完整逐观察 outcome 交付。
+descriptor 复制并校验这些字段，同步调用继续可用。`dependency_plugin_api.h`
+提供可选 C 分阶段程序表，使用宿主 continuation、精确关联、fragment 读取和跨 poll
+owner handle。PerAtomOutcome 保留但拒绝注册，必须先具备完整逐观察 outcome 交付。
 
 C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply
 阶段执行。编译器检查全部输入祖先的 EffectiveAtomic，拒绝 RequestRecord 全部出边。

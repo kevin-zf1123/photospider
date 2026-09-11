@@ -85,8 +85,46 @@ effect。Atomic stream 按配置的 tile 交付并释放，终端 stream 保留�
 公开 progressive workflow 与 `test_dependency_program` 覆盖真实源发现、
 legacy→staged→legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及
 frozen 输入所有权。当前尚未发布共享结构记录或复用依赖 result cache。Dirty 传播、
-共享 Flight、C 分阶段服务和原生 GPU fragment 访问继续属于本轮 G4。
+共享 Flight 和原生 GPU fragment 访问继续属于本轮 G4。
 直接证书 API 已独立实现，不能据此声称这些缓存与调度集成已完成。
 
 [依赖采样算子](Dependency-Sampling.zh.md) 已实现 STMap 和动态 radius gather/scatter。
 可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。
+
+
+## C 分阶段程序
+
+`dependency_plugin_api.h` 提供 ABI 8 的 C 分阶段协议。descriptor 必须恰好提供
+一个 `execute` 或 `dependency_program`。loader 复制并校验有界程序表，并在
+状态和回调存续期间保留动态库。宿主在 `start` 前将状态字节清零；只要进入
+start，destroy 就恰好执行一次，包括 start 失败。Empty 仍运行纯元数据校验，
+但跳过所有状态回调。
+
+poll 提交逐输出、逐端口和角色的精确 run 与 tag 关联。Atomic 坐标对应当前
+sample 或 HW pixel；terminal 关联不使用原子坐标，保留完整 original Q。
+Need 阶段分配输出、完成时仍有未解决 Need 或未发布输出都返回错误。
+
+阶段服务提供 checked read 与借用 fragment view，包含实际 dtype、origin、
+有符号 stride、字节跨度和授权区域。跨 poll 必须使用 `retain_input`，其
+handle 保留该 fragment 的精确授权和原 storage lease。每次 invocation 内
+handle 单调且不复用，在 release 或状态销毁时失效。无效 handle 和被忽略
+的服务失败保持 sticky。scratch 指针在 poll 返回后失效；输出指针在成功发布时立即失效，未发布时最晚
+在 poll 返回后失效，发布后不能再访问。输出通过宿主 handle 显式发布；image 输出分配前检查完整 C。原生插件仍是受信任的
+进程内代码，指针元数据校验不提供内存隔离。
+
+`test_dependency_plugin` 加载真实 C11 模块，检查四种 dtype、负 stride、
+两个远端样本与中间缺口、owner 保留、start 失败、忽略读取错误、重复发布、
+取消、库生命周期和 full-Q RequestRecord。公开 workflow 只读取 16 字节，
+验证实际 admission 边界及少一字节的失败，并检查取消清理后恢复执行。
+同一测试和 C 模块也通过安装包分别消费静态库和共享库。
+
+单独运行安装后的 C workflow 和独立检查：
+
+```sh
+cmake --build build/issue257-static/consumer-build --target photospider_dependency_consumer -j 8
+build/issue257-static/consumer-build/photospider_dependency_consumer
+```
+
+只有 Atomic 输出 9、terminal 输出 11、精确源端点、拒绝缺口，以及所有权和资源
+失败案例均通过时才返回零。consumer-build 由 `test_installed_consumer` 创建；
+共享库安装将路径中的 `static` 替换为 `shared`。

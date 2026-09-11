@@ -306,8 +306,9 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::string output_semantic_parameter = {};
   /** @brief Require resolved Fixed/Whole output dense representability.
    * @note Regional C outputs check their actual demand at the sink instead.
-   * Always true for the stride-free C ABI; C++ Fixed broadcast callbacks
-   * may leave it false. This semantic requirement participates in identities.
+   * True for the synchronous stride-free C sink; staged C fragment programs
+   * and C++ Fixed broadcast callbacks may leave it false. This semantic
+   * requirement participates in identities.
    */
   bool requires_dense_output = false;
   /** @brief Local declaration; compiler checks all ancestors before reuse. */
@@ -515,8 +516,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * `NotFound` when the exact valid path cannot be loaded, or another complete
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
-   * @note Path rejection precedes the platform loader. Fixed C descriptors
-   * must be densely representable because ABI v8 carries no output strides.
+   * @note Path rejection precedes the platform loader. Synchronous Fixed C
+   * sinks require a dense domain. Staged C programs validate actual output
+   * fragments, without requiring the entire logical domain to fit densely.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);

@@ -104,7 +104,8 @@ static const ps_operation_descriptor_v8 operations[] = {
      0,
      &preserve_contract,
      PS_OPERATION_OBSERVATION_ATOMIC_V8,
-     PS_OPERATION_FAILURE_REQUEST_ONLY_V8},
+     PS_OPERATION_FAILURE_REQUEST_ONLY_V8,
+     NULL},
     {sizeof(ps_operation_descriptor_v8),
      "image.opacity",
      13,
@@ -135,7 +136,8 @@ static const ps_operation_descriptor_v8 operations[] = {
      0,
      &preserve_contract,
      PS_OPERATION_OBSERVATION_ATOMIC_V8,
-     PS_OPERATION_FAILURE_REQUEST_ONLY_V8}};
+     PS_OPERATION_FAILURE_REQUEST_ONLY_V8,
+     NULL}};
 static void destroy(const ps_operation_descriptor_v8* records, uint32_t count) {
   (void)records;
   (void)count;

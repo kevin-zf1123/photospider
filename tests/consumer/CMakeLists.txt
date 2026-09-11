@@ -211,9 +211,22 @@ target_link_libraries(photospider_basic_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_link_options})
 
+add_library(photospider_dependency_fixture MODULE ../fixtures/dependency_fixture.c)
+target_link_libraries(photospider_dependency_fixture PRIVATE Photospider::operation_sdk)
+target_compile_definitions(photospider_dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+set_target_properties(photospider_dependency_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_executable(photospider_dependency_consumer ../integration/test_dependency_plugin.cpp)
+target_include_directories(photospider_dependency_consumer PRIVATE ..)
+target_link_libraries(photospider_dependency_consumer PRIVATE Photospider::kernel ${CMAKE_DL_LIBS})
+target_compile_definitions(photospider_dependency_consumer PRIVATE PS_DEPENDENCY_FIXTURE="$<TARGET_FILE:photospider_dependency_fixture>")
+target_compile_options(photospider_dependency_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_dependency_consumer PRIVATE ${_photospider_consumer_link_options})
+add_dependencies(photospider_dependency_consumer photospider_dependency_fixture)
+
 add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_dependency_consumer>"
   COMMAND "$<TARGET_FILE:photospider_foundations_workflow>" --scenario all
   COMMAND "$<TARGET_FILE:photospider_color_consumer>"
   COMMAND "$<TARGET_FILE:photospider_expression_consumer>"
@@ -236,6 +249,6 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  DEPENDS photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

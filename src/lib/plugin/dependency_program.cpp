@@ -497,8 +497,9 @@ Result<DependencyProgress> DependencySession::poll(
             auto expected = ErrorCode::Ok;
             failure->compare_exchange_strong(expected, code);
           });
-      const DependencyPhase phase{impl_->query, impl_->ready, stage_allocator,
-                                  consume, report};
+      const DependencyPhase phase{impl_->query,    impl_->ready,
+                                  stage_allocator, consume,
+                                  report,          impl_->limits.sets};
       ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||

@@ -147,6 +147,7 @@ set(
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
+  src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
   src/lib/plugin/dependency_invocation.cpp
   src/lib/plugin/operation_contract.cpp
@@ -562,6 +563,22 @@ if(BUILD_TESTING)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
   photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
+  add_library(dependency_fixture MODULE tests/fixtures/dependency_fixture.c)
+  target_link_libraries(dependency_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(dependency_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_test(test_dependency_plugin Photospider::kernel tests/integration/test_dependency_plugin.cpp)
+  target_link_libraries(test_dependency_plugin PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_definitions(test_dependency_plugin PRIVATE PS_DEPENDENCY_FIXTURE="$<TARGET_FILE:dependency_fixture>")
+  add_dependencies(test_dependency_plugin dependency_fixture)
+  foreach(_case RANGE 1 4)
+    add_library(dependency_bad_${_case} MODULE tests/fixtures/dependency_fixture.c)
+    target_link_libraries(dependency_bad_${_case} PRIVATE Photospider::operation_sdk)
+    target_compile_definitions(dependency_bad_${_case} PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD PS_DEPENDENCY_BAD_CASE=${_case})
+    set_target_properties(dependency_bad_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_compile_definitions(test_dependency_plugin PRIVATE PS_DEPENDENCY_BAD_${_case}="$<TARGET_FILE:dependency_bad_${_case}>")
+    add_dependencies(test_dependency_plugin dependency_bad_${_case})
+  endforeach()
   photospider_add_test(test_dependency_program Photospider::kernel tests/integration/test_dependency_program.cpp)
   target_include_directories(test_dependency_program PRIVATE src/lib)
   photospider_add_test(test_dependency_dirty Photospider::kernel tests/unit/test_dependency_dirty.cpp)

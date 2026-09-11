@@ -93,7 +93,7 @@ type/rules, and the ordinary trait combinations without evaluating a dense
 element or byte product. The callback may return any Value layout that passes
 normal publication validation, including an eight-byte zero-stride broadcast
 over a huge logical shape. `estimated_bytes` is an independent modeled
-admission estimate. A C DSO Fixed descriptor is stricter because ABI v8 carries
+admission estimate. A synchronous C DSO Fixed descriptor is stricter because its sink carries
 no output strides: loading separately requires representable contiguous
 signed strides and uint64 byte count. For total dense bytes `B`, the loader
 also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
@@ -102,7 +102,11 @@ also requires `B > 0`, zero-based last byte `B - 1 <= INT64_MAX`, and
 either boundary is rejected. The copied `requires_dense_output` trait also checks the complete output using
 the resolved dtype before semantic IR publication, including Fixed outputs
 whose dtype comes from an input or static parameter. C++ Fixed broadcast
-semantics remain available when that requirement is false.
+semantics remain available when that requirement is false. Staged C dependency
+programs also leave it false: their host output service validates each actual
+fragment. A logical Fixed domain need not have a representable full dense byte
+product when the query only materializes valid bounded fragments. See
+[Dependency Data](Dependency-Data.md#c-staged-programs) for the staged C contract.
 
 ## Validation
 
@@ -273,8 +277,9 @@ See the public C header and [S4 Workflow](S4-Workflow.md).
 
 ABI/Traits 8 adds Atomic versus terminal RequestRecord and explicit
 RequestFailureOnly delivery. The current C descriptor copies and validates these
-fields; its synchronous invocation remains available. The C staged service table
-is pending in the G4 implementation. PerAtomOutcome is reserved and rejected
+fields; its synchronous invocation remains available. `dependency_plugin_api.h`
+adds the alternative C staged program table with host-owned continuation, exact
+associations, fragment reads and cross-poll owner handles. PerAtomOutcome is reserved and rejected
 until complete per-observation outcome delivery exists.
 
 The C++ registry accepts an alternative `start_dependency` with bounded host

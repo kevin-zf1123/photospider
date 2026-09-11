@@ -21,6 +21,7 @@
 #include "photospider/plugin/operation_plugin_api.h"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/dense_layout_validation.hpp"
+#include "plugin/dependency_plugin.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -269,6 +270,8 @@ Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
  */
 Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
   switch (value) {
+    case PS_OPERATION_REGION_DEPENDENCY_V8:
+      return Result<OperationRegionRule>(OperationRegionRule::Dependency);
     case PS_OPERATION_REGION_SHRINK_V8:
       return Result<OperationRegionRule>(OperationRegionRule::Shrink);
     case PS_OPERATION_REGION_WHOLE_V8:
@@ -1106,7 +1109,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     const ps_operation_descriptor_v8& descriptor = api->operations[index];
     if (descriptor.struct_size != sizeof(ps_operation_descriptor_v8) ||
         !descriptor.key || descriptor.key_size == 0U ||
-        descriptor.key_size > 1024U || !descriptor.execute ||
+        descriptor.key_size > 1024U ||
+        (static_cast<bool>(descriptor.execute) ==
+         static_cast<bool>(descriptor.dependency_program)) ||
         descriptor.input_count > 1024U || descriptor.cacheable > 1U ||
         descriptor.input_schema_count > 1024 ||
         ((descriptor.input_schema_count == 0) !=
@@ -1176,7 +1181,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                                "invalid input port size");
     }
     definition.traits.input_count = descriptor.input_count;
-    definition.traits.requires_dense_output = true;
+    definition.traits.requires_dense_output = !descriptor.dependency_program;
     if (!copy_contract(descriptor.contract, &definition.traits))
       return Status::failure(ErrorCode::InvalidArgument,
                              "malformed declarative contract");
@@ -1266,11 +1271,19 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                  const OperationParameterSpec& right) {
                 return left.key < right.key;
               });
+    if (descriptor.dependency_program) {
+      const auto prepared = plugin_internal::prepare_dependency_plugin(
+          &definition, descriptor.dependency_program, descriptor.user_data,
+          library);
+      if (!prepared.ok())
+        return prepared;
+    }
     const Status traits_status = validate_traits(definition.traits);
     if (!traits_status.ok()) {
       return traits_status;
     }
-    if (definition.traits.shape_rule == OperationShapeRule::Fixed) {
+    if (definition.traits.requires_dense_output &&
+        definition.traits.shape_rule == OperationShapeRule::Fixed) {
       auto fixed_layout = dense_layout(
           definition.traits.fixed_output_shape,
           Value::element_size(definition.traits.output_element_type));
@@ -1286,6 +1299,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
     const ps_operation_descriptor_v8* descriptor = &api->operations[index];
+    if (descriptor->dependency_program)
+      continue;
     staged[index]->callback =
         [library, descriptor, traits = staged[index]->traits,
          image_output = staged[index]->traits.output_schema.kind ==
