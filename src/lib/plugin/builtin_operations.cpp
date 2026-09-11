@@ -33,6 +33,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_image_gaussian_blur,
                               register_image_mask,
                               register_image_source_over,
+                              register_dependency_sampling,
                               register_image_downsample_box,
                               register_mask_downsample_box,
                               register_image_brush_circle,

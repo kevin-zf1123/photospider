@@ -85,5 +85,8 @@ effect。Atomic stream 按配置的 tile 交付并释放，终端 stream 保留�
 公开 progressive workflow 与 `test_dependency_program` 覆盖真实源发现、
 legacy→staged→legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及
 frozen 输入所有权。当前尚未发布共享结构记录或复用依赖 result cache。Dirty 传播、
-共享 Flight、动态内建算子、C 分阶段服务和原生 GPU fragment 访问继续属于本轮 G4。
+共享 Flight、C 分阶段服务和原生 GPU fragment 访问继续属于本轮 G4。
 直接证书 API 已独立实现，不能据此声称这些缓存与调度集成已完成。
+
+[依赖采样算子](Dependency-Sampling.zh.md) 已实现 STMap 和动态 radius gather/scatter。
+可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。

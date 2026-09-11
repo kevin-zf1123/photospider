@@ -145,6 +145,19 @@ class PHOTOSPIDER_API DependencyContinuation final {
   Destroy destroy_ = nullptr;
   Result<DependencyPoll> (*poll_)(void*, const DependencyPhase&) = nullptr;
 };
+/** @brief Optional pure static validation, including Empty output requests.
+ * @note Called after base parameter/descriptor inference, before any state or
+ * source read, and during compilation. May reject but cannot change metadata.
+ * Must be deterministic, finite and independent of request coverage, pixels or
+ * external state. Borrowed inputs/parameters expire at return; exceptions are
+ * fenced. Implementation identity follows its immutable registered definition.
+ */
+// Wrapped function types are not namespace indentation.
+// NOLINTBEGIN(whitespace/indent_namespace)
+using DependencyValidator =
+    std::function<Status(const std::vector<OperationMetadata>&,
+                         const std::map<std::string, ParameterValue>&)>;
+// NOLINTEND
 /** @brief Creates host-owned continuation without any upstream blocking call.
  */
 using DependencyStart = std::function<Result<DependencyContinuation>(
@@ -211,8 +224,14 @@ class PHOTOSPIDER_API DependencySession final {
   explicit DependencySession(std::unique_ptr<Impl> impl);
   static Result<std::shared_ptr<DependencySession>> create(
       const std::string& operation, OperationTraits traits,
-      DependencyStart start, DependencyRequest request,
-      const BufferAllocator& allocator, std::shared_ptr<const void> definition);
+      const DependencyStart& start, const DependencyValidator& validate,
+      DependencyRequest request, const BufferAllocator& allocator,
+      std::shared_ptr<const void> definition);
+  static Status validate_static(
+      const DependencyValidator& validate,
+      const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters,
+      const CancellationToken& cancellation = {});
   std::unique_ptr<Impl> impl_;
 };
 /** @brief Resolves observation coordinates and complete-pixel closure metadata.

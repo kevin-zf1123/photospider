@@ -2,6 +2,7 @@
 #include <cstring>
 #include <functional>
 #include <future>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -371,6 +372,40 @@ DependencyRequest probe_request() {
                            "bundle"};
 }
 int service_and_identity_regressions() {
+  for (unsigned action = 0; action < 5; ++action) {
+    auto counts = std::make_shared<Counts>();
+    auto definition = probe_definition(counts);
+    CancellationSource cancel;
+    unsigned validations = 0;
+    definition.validate_dependency =
+        [&](const std::vector<OperationMetadata>&,
+            const std::map<std::string, ParameterValue>&) -> Status {
+      ++validations;
+      if (action == 2 || action == 3)
+        cancel.cancel();
+      if (action == 0 || action == 2)
+        throw std::bad_alloc();
+      if (action == 1)
+        throw std::runtime_error("static validation");
+      return action == 3 ? Status{ErrorCode::InvalidArgument, {}}
+                         : Status::success();
+    };
+    OperationRegistry registry;
+    PS_CHECK(registry.register_operation(definition).ok());
+    auto request = probe_request();
+    request.outputs = Footprint::none({16}).take_value();
+    request.cancellation = cancel.token();
+    auto started = registry.start_dependency("probe", request);
+    const auto expected = action == 0   ? ErrorCode::ResourceExhausted
+                          : action == 1 ? ErrorCode::OperationFailed
+                          : action == 4 ? ErrorCode::Ok
+                                        : ErrorCode::Cancelled;
+    PS_CHECK(started.status().code == expected && validations == 1 &&
+             counts->starts == 0);
+    if (started.ok())
+      PS_CHECK(started.value()->poll().ok() && counts->starts == 0);
+  }
+
   for (unsigned kind = 0; kind < 2; ++kind) {
     auto counts = std::make_shared<Counts>();
     auto definition = probe_definition(counts);

@@ -129,7 +129,10 @@ The public progressive workflow and `test_dependency_program` exercise real
 source discovery, legacy-to-staged-to-legacy composition, full-Q terminal
 behavior, one-worker progress, finite admission, cancellation and frozen input
 ownership. This integration does not yet publish shared structural records or
-reuse dependency result-cache entries. Dirty propagation, shared Flights, dynamic
-built-ins, C staged services and native GPU fragment access remain part of the
+reuse dependency result-cache entries. Dirty propagation, shared Flights, C staged services and native GPU fragment access remain part of the
 ongoing G4 implementation. The direct certificate API is implemented independently
 of those pending cache/scheduler integrations.
+
+The [dependency sampling operations](Dependency-Sampling.md) implement STMap and
+dynamic radius gather/scatter. Optional pure static validators run during
+compilation and before direct Empty-query state decisions.

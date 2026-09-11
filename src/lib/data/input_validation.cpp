@@ -225,7 +225,9 @@ Status validate_port_schema(const OperationTraits& traits) {
       (traits.output_element_type != ElementType::Float32 ||
        (traits.shape_rule != OperationShapeRule::PreserveFirstInput &&
         traits.shape_rule != OperationShapeRule::MatchAllInputs &&
-        traits.shape_rule != OperationShapeRule::Shrink) ||
+        traits.shape_rule != OperationShapeRule::Shrink &&
+        !(traits.dependency_version == 1 &&
+          traits.shape_rule == OperationShapeRule::Axes)) ||
        traits.input_schema.empty() ||
        traits.input_schema.front().kind != traits.output_schema.kind)) {
     return failure(ErrorCode::InvalidArgument,

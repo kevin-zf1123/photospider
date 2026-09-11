@@ -231,8 +231,27 @@ struct DependencySession::Impl {
 DependencySession::DependencySession(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 DependencySession::~DependencySession() noexcept = default;
+Status DependencySession::validate_static(
+    const DependencyValidator& validate,
+    const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters,
+    const CancellationToken& cancellation) {
+  if (cancellation.cancelled())
+    return Status{ErrorCode::Cancelled, {}};
+  Status status;
+  try {
+    if (validate)
+      status = validate(inputs, parameters);
+  } catch (const std::bad_alloc&) {
+    status = Status{ErrorCode::ResourceExhausted, {}};
+  } catch (...) {
+    status = Status{ErrorCode::OperationFailed, {}};
+  }
+  return cancellation.cancelled() ? Status{ErrorCode::Cancelled, {}} : status;
+}
 Result<std::shared_ptr<DependencySession>> DependencySession::create(
-    const std::string& operation, OperationTraits traits, DependencyStart start,
+    const std::string& operation, OperationTraits traits,
+    const DependencyStart& start, const DependencyValidator& validate,
     DependencyRequest request, const BufferAllocator& allocator,
     std::shared_ptr<const void> definition) {
   if (!start || traits.dependency_version != 1 || !traits.continuation_bytes ||
@@ -263,6 +282,10 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                                        request.parameters);
   if (!output.ok())
     return Result<std::shared_ptr<DependencySession>>(output.status());
+  const auto static_status = validate_static(
+      validate, request.inputs, request.parameters, request.cancellation);
+  if (!static_status.ok())
+    return Result<std::shared_ptr<DependencySession>>(static_status);
   auto observations = operation_observations(output.value(), request.outputs,
                                              request.limits.sets);
   if (!observations.ok())

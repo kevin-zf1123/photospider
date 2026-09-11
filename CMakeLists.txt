@@ -121,6 +121,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/image_gaussian_blur.cpp
   plugins/ops/07-grade/grade_levels.cpp
   plugins/ops/07-grade/image_exposure_gain.cpp
+  plugins/ops/08-transform/dependency_sampling.cpp
   plugins/ops/08-transform/image_downsample_box.cpp
   plugins/ops/08-transform/mask_downsample_box.cpp
   plugins/ops/09-composite/image_brush_circle.cpp
@@ -560,6 +561,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_result_cache Photospider::kernel tests/integration/test_result_cache.cpp)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
+  photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
   photospider_add_test(test_dependency_program Photospider::kernel tests/integration/test_dependency_program.cpp)
   target_include_directories(test_dependency_program PRIVATE src/lib)
   photospider_add_test(test_dependency_dirty Photospider::kernel tests/unit/test_dependency_dirty.cpp)

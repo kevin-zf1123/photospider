@@ -889,6 +889,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!output.ok()) {
       return Result<SemanticGraphIR>(output.status());
     }
+    if (node.traits.dependency_version) {
+      const auto validated = operations_->validate_dependency_metadata(
+          node.operation, input_descriptors, node.parameters);
+      if (!validated.ok())
+        return Result<SemanticGraphIR>(validated);
+    }
     node.output_descriptor = output.value().descriptor;
     node.output_facets = output.value().facets;
     for (std::size_t i = 0;

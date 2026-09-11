@@ -439,6 +439,8 @@ struct PHOTOSPIDER_API OperationDefinition final {
   OperationCallback callback;
   /** @brief Alternative staged implementation; exactly one callback/start. */
   DependencyStart start_dependency = {};
+  /** @brief Optional pure static validation, also applied to Empty queries. */
+  DependencyValidator validate_dependency = {};
 };
 
 /**
@@ -604,8 +606,13 @@ class PHOTOSPIDER_API OperationRegistry final {
 
  private:
   friend class ExecutionContext;
+  friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry();
   bool builtins_ = false;
+  Status validate_dependency_metadata(
+      const std::string& key, const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
+
   /**
    * @brief Internal Run entry with periodic graph-currentness observation.
    * @param key Registered key.

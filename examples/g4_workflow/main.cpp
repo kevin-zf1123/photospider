@@ -10,6 +10,7 @@
 #include "photospider/photospider.hpp"
 
 void progressive_workflow();
+void dynamic_workflow();
 
 namespace {
 void require(bool condition, const char* message) {
@@ -107,6 +108,7 @@ int main() {
   try {
     data_workflow();
     progressive_workflow();
+    dynamic_workflow();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

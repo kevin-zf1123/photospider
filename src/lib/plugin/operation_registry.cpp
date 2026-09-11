@@ -935,7 +935,8 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const bool staged = definition.traits.dependency_version == 1;
   if (!valid_key(definition.key) || !traits_status.ok() ||
       (staged ? (!definition.start_dependency || definition.callback)
-              : (!definition.callback || definition.start_dependency))) {
+              : (!definition.callback || definition.start_dependency ||
+                 definition.validate_dependency))) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
   }
@@ -1578,6 +1579,20 @@ Result<OperationTraits> OperationRegistry::find_traits(
   return Result<OperationTraits>(iterator->second->traits);
 }
 
+Status OperationRegistry::validate_dependency_metadata(
+    const std::string& key, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Status{ErrorCode::NotFound, {}};
+    definition = found->second;
+  }
+  return DependencySession::validate_static(definition->validate_dependency,
+                                            inputs, parameters);
+}
 Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
     const std::string& key, DependencyRequest request,
     const BufferAllocator& allocator) const {
@@ -1592,8 +1607,9 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
   }
   return DependencySession::create(
       "registry-" + std::to_string(impl_->identity) + ":" + key,
-      definition->traits, definition->start_dependency, std::move(request),
-      allocator, definition);
+      definition->traits, definition->start_dependency,
+      definition->validate_dependency, std::move(request), allocator,
+      definition);
 }
 
 /**
