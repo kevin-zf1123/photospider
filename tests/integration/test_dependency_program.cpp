@@ -312,8 +312,8 @@ int terminal_and_graph() {
   GraphContext allowed(document);
   auto plan = compiler.compile(allowed);
   PS_CHECK(plan.ok() && plan.value().plan.dependency_network());
-  PS_CHECK(!plan.value().semantic.nodes()[0].effective_atomic &&
-           plan.value().semantic.nodes()[1].effective_atomic);
+  PS_CHECK(!plan.value().semantic.nodes()[0].outputs[0].effective_atomic &&
+           plan.value().semantic.nodes()[1].outputs[0].effective_atomic);
   PS_CHECK(plan.value().plan.steps()[0].input_demands.empty());
   PS_CHECK(plan.value().plan.tile_plan("record", Region({{0, 2}})).ok());
   return 0;

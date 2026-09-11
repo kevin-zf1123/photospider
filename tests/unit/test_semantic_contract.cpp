@@ -137,14 +137,14 @@ int inference() {
   auto compiled = compiler.compile(graph);
   PS_CHECK(compiled.ok());
   const auto& node = compiled.value().semantic.nodes()[0];
-  PS_CHECK(node.output_descriptor.shape == std::vector<std::uint64_t>{3});
-  PS_CHECK(node.output_descriptor.element_type == ElementType::Float32);
-  PS_CHECK(!node.output_facets.empty());
+  PS_CHECK(node.outputs[0].descriptor.shape == std::vector<std::uint64_t>{3});
+  PS_CHECK(node.outputs[0].descriptor.element_type == ElementType::Float32);
+  PS_CHECK(!node.outputs[0].facets.empty());
   ExecutionContext execution(registry);
   auto run = execution.execute(compiled.value().plan);
   PS_CHECK(run.ok());
   PS_CHECK(run.value().values.at("output").facets()[0].payload ==
-           node.output_facets[0].payload);
+           node.outputs[0].facets[0].payload);
   const std::vector<Value> inputs;
   const std::vector<Region> demands;
   auto direct =

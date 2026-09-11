@@ -2,7 +2,9 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "photospider/plugin/operation_registry.hpp"
@@ -130,6 +132,66 @@ int staged_selection() {
   return 0;
 }
 
+int compilation() {
+  auto registry = std::make_shared<OperationRegistry>();
+  auto op = definition();
+  op.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+  op.traits.outputs[0].fixed_output_shape = {3, 5};
+  op.traits.outputs[1].shape_rule = OperationShapeRule::Fixed;
+  op.traits.outputs[1].fixed_output_shape = {2};
+  op.traits.outputs[1].output_element_type = ElementType::Int64;
+  PS_CHECK(registry->register_operation(op).ok());
+  OperationDefinition identity;
+  identity.key = "test.identity";
+  identity.traits.input_count = 1;
+  identity.traits.input_schema.resize(1);
+  identity.traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
+  identity.traits.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  identity.callback = [](const OperationInvocation& call) {
+    return Result<Value>(call.inputs[0]);
+  };
+  PS_CHECK(registry->register_operation(identity).ok());
+  auto mixed_record = definition();
+  mixed_record.key = "test.record_and_value";
+  mixed_record.traits.outputs[0].observation_kind =
+      ObservationKind::RequestRecord;
+  PS_CHECK(registry->register_operation(mixed_record).ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument document;
+  document.nodes = {{1, op.key, {}, {}},
+                    {2, identity.key, {WorkflowNodeOutput{1, "second"}}, {}}};
+  document.outputs = {{"selected", 2, "value"}};
+  GraphContext graph(document);
+  Compiler compiler(registry);
+  auto compiled = compiler.compile(graph);
+  PS_CHECK(compiled.ok());
+  PS_CHECK(compiled.value().semantic.nodes()[0].outputs.size() == 2);
+  PS_CHECK(
+      compiled.value().semantic.nodes()[0].outputs[1].descriptor.element_type ==
+      ElementType::Int64);
+  const auto& steps = compiled.value().plan.steps();
+  PS_CHECK(steps.size() == 2);
+  PS_CHECK((steps[0].result_ref() == ValueRef{1, 1}));
+  PS_CHECK(steps[0].output_descriptor.shape == std::vector<std::uint64_t>{2});
+  PS_CHECK(std::get<PlanStepInput>(steps[1].inputs[0]).step_index == 0);
+  document.outputs.push_back({"first", 1, "first"});
+  GraphContext both(document);
+  auto all = compiler.compile(both);
+  PS_CHECK(all.ok() && all.value().plan.steps().size() == 3);
+  document.outputs.back().port = "absent";
+  GraphContext bad(document);
+  PS_CHECK(!compiler.compile(bad).ok());
+  document.nodes[0].operation = mixed_record.key;
+  document.outputs = {{"selected", 2, "value"}};
+  GraphContext atomic_sibling(document);
+  PS_CHECK(compiler.compile(atomic_sibling).ok());
+  document.nodes[1].inputs = {WorkflowNodeOutput{1, "first"}};
+  GraphContext terminal_consumer(document);
+  PS_CHECK(!compiler.compile(terminal_consumer).ok());
+  return 0;
+}
+
 int inference() {
   auto op = definition();
   auto& traits = op.traits;
@@ -178,5 +240,6 @@ int main() {
   PS_CHECK(registration_and_invocation() == 0);
   PS_CHECK(inference() == 0);
   PS_CHECK(staged_selection() == 0);
+  PS_CHECK(compilation() == 0);
   return 0;
 }

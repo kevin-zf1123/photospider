@@ -54,6 +54,14 @@ struct PHOTOSPIDER_API PlanCacheKey final {
   std::string value;
 };
 
+/** @brief One independently inferred result in declaration order. */
+struct PHOTOSPIDER_API SemanticOutput final {
+  std::string key;
+  ValueDescriptor descriptor;
+  std::vector<ValueFacet> facets;
+  bool effective_atomic = true;
+};
+
 /**
  * @brief One normalized typed node in semantic compiler IR.
  *
@@ -70,13 +78,8 @@ struct PHOTOSPIDER_API SemanticNode final {
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied compiler-visible operation traits. */
   OperationTraits traits;
-  /** @brief Statically inferred output Value descriptor. */
-  ValueDescriptor output_descriptor;
-  /** @brief Canonical inferred output facets, independent of runtime storage.
-   */
-  std::vector<ValueFacet> output_facets = {};
-  /** @brief Local Atomic AND all declared input ancestors EffectiveAtomic. */
-  bool effective_atomic = true;
+  /** @brief Independent named result metadata and observation legality. */
+  std::vector<SemanticOutput> outputs;
 };
 
 /**
@@ -357,6 +360,10 @@ struct PHOTOSPIDER_API PhysicalStep final {
 struct PHOTOSPIDER_API PlanStep final {
   /** @brief Stable source node id. */
   std::uint64_t node_id = 0;
+  /** @brief Selected declaration-order output. */
+  std::uint32_t output_index = 0;
+  /** @brief Result route independent of physical scheduling. */
+  ValueRef result_ref() const noexcept { return {node_id, output_index}; }
   /** @brief Stable operation key. */
   std::string operation;
   /** @brief Tagged physical producers in exact input order. */
@@ -516,6 +523,9 @@ class PHOTOSPIDER_API ExecutionPlan final {
 
   std::map<std::string, Region> output_regions_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;
+  /** @brief Preserve the graph-selected staged execution family after pruning.
+   */
+  bool dependency_protocol_ = false;
   std::vector<PhysicalStep> physical_steps_;
   std::uint64_t tile_height_ = 128;
   std::uint64_t tile_width_ = 128;

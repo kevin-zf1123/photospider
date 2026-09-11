@@ -234,3 +234,18 @@ C++ start/poll/supply protocol. Whole inference rules remain available for
 synchronous implementations; dependency implementations can discover exact
 per-port fragments at run time. See [Dependency data and execution](Dependency-Data.md)
 for implemented behavior and the remaining integration work.
+
+## Independent result lowering
+
+M2 (#305) gives each SemanticNode an ordered `outputs` sequence of independently
+inferred descriptor/facets/EffectiveAtomic records. Workflow producer port names
+resolve to `ValueRef{node_id, output_index}`; a terminal RequestRecord port cannot
+feed a consumer, while an Atomic sibling remains composable. A PlanStep selects
+one original output index and carries a single projected output contract. Pure
+unreferenced result steps are removed; side-effecting singleton roots remain.
+Each retained producer reference names its selected physical step, so different
+shapes and types never share a node-only metadata slot. The semantic and physical
+v9 identities encode ordered outputs and selected result indices respectively.
+Pruning preserves the graph-selected staged execution family and its established
+Whole streaming behavior. Runtime cache/record routing and joint execution are
+separate #306–#308 delivery gates.

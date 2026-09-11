@@ -177,3 +177,13 @@ S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收�
 当前 package 0.8、ABI/traits 8 增加依赖计划模板与 C++ start/poll/supply 协议。
 同步实现保留 Whole 推断规则；依赖实现可在运行期发现逐端口精确 fragment。
 已实现行为和剩余集成范围见 [依赖数据与执行](Dependency-Data.zh.md)。
+
+## 独立结果降低
+
+M2（#305）为每个 SemanticNode 提供有序 outputs，每项独立推导 descriptor、facets 和
+EffectiveAtomic。Workflow 的生产者端口名称解析为 ValueRef{node_id, output_index}；
+终端 RequestRecord 端口不能供给消费者，Atomic 兄弟输出仍可组合。每个 PlanStep 选择
+原始输出索引并携带单输出契约。未引用的纯结果步骤被移除，具有副作用的单输出根保留。
+生产者引用指向所选物理 step，不同 shape/type 不共用节点级 metadata 槽。
+semantic/physical v9 身份分别编码有序输出和所选索引。裁剪保留图选择的分阶段执行协议
+及既有 Whole 流式行为。运行时缓存/记录路由与联合执行由 #306–#308 分别交付。

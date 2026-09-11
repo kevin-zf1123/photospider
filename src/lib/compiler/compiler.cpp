@@ -226,9 +226,13 @@ std::string semantic_digest(
       append_parameter(&digest, parameter.second);
     }
     contract_internal::append_traits(&digest, node.traits);
-    digest.integer(node.effective_atomic);
-    append_descriptor(&digest, node.output_descriptor);
-    contract_internal::append_facets(&digest, node.output_facets);
+    digest.integer(node.outputs.size());
+    for (const auto& output : node.outputs) {
+      digest.text(output.key);
+      digest.integer(output.effective_atomic);
+      append_descriptor(&digest, output.descriptor);
+      contract_internal::append_facets(&digest, output.facets);
+    }
   }
   digest.integer(outputs.size());
   for (const WorkflowOutput& output : outputs) {
@@ -309,6 +313,7 @@ std::string physical_digest(
   digest.integer(steps.size());
   for (const PlanStep& step : steps) {
     digest.integer(step.node_id);
+    digest.integer(step.output_index);
     digest.text(step.operation);
     digest.integer(step.inputs.size());
     for (const PlanInput& input : step.inputs) {
@@ -514,6 +519,8 @@ std::uint64_t microseconds(
 }  // namespace
 
 bool ExecutionPlan::dependency_network() const noexcept {
+  if (dependency_protocol_)
+    return true;
   for (const auto& step : steps_)
     if (step.traits.outputs[0].dependency_version || !step.effective_atomic)
       return true;
@@ -727,7 +734,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
   nodes_by_id.reserve(document.nodes.size());
   std::unordered_map<std::uint64_t, std::size_t> indegree;
-  std::unordered_map<std::uint64_t, ObservationKind> local_observations;
+  std::map<std::pair<std::uint64_t, std::string>, ValueRef> result_ports;
+  std::map<ValueRef, ObservationKind> local_observations;
   std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> dependents;
   for (const WorkflowNode& node : document.nodes) {
     if (node.id == 0U || !valid_text(node.operation, 1024U) ||
@@ -765,20 +773,26 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       return Result<SemanticGraphIR>(parameter_status);
     }
     indegree.emplace(node.id, 0);
-    local_observations.emplace(node.id,
-                               traits.value().outputs[0].observation_kind);
+    for (std::uint32_t i = 0; i < traits.value().outputs.size(); ++i) {
+      const auto& output = traits.value().outputs[i];
+      const ValueRef ref{node.id, i};
+      result_ports.emplace(std::make_pair(node.id, output.key), ref);
+      local_observations.emplace(ref, output.observation_kind);
+    }
   }
 
   for (const WorkflowNode& node : document.nodes) {
     for (const WorkflowInput& input : node.inputs) {
       if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
-        if (source->source_node == 0 || source->source_port != "value" ||
+        if (source->source_node == 0 ||
+            !result_ports.count({source->source_node, source->source_port}) ||
             nodes_by_id.count(source->source_node) == 0) {
           return Result<SemanticGraphIR>(
               Status::failure(ErrorCode::NotFound,
                               "workflow input references a missing producer"));
         }
-        if (local_observations.at(source->source_node) ==
+        if (local_observations.at(
+                result_ports.at({source->source_node, source->source_port})) ==
             ObservationKind::RequestRecord)
           return Result<SemanticGraphIR>(Status::failure(
               ErrorCode::InvalidArgument,
@@ -796,7 +810,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
 
   std::set<std::string> output_names;
   for (const WorkflowOutput& output : document.outputs) {
-    if (!valid_text(output.name, 1024U) || output.port != "value" ||
+    if (!valid_text(output.name, 1024U) ||
+        !result_ports.count({output.node_id, output.port}) ||
         output.node_id == 0U || nodes_by_id.count(output.node_id) == 0U ||
         !output_names.insert(output.name).second) {
       return Result<SemanticGraphIR>(Status::failure(
@@ -817,12 +832,11 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   SemanticGraphIR semantic;
   semantic.revision_ = snapshot.revision();
   semantic.input_declarations_ = declarations;
-  std::map<std::uint64_t, std::vector<ValueFacet>> output_facets;
-  std::map<std::uint64_t, bool> effective_atomic;
+  std::map<ValueRef, std::vector<ValueFacet>> output_facets;
+  std::map<ValueRef, bool> effective_atomic;
   std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
-  std::unordered_map<std::uint64_t, ValueDescriptor> output_by_node;
-  output_by_node.reserve(document.nodes.size());
+  std::map<ValueRef, ValueDescriptor> output_by_value;
   while (!ready.empty()) {
     const std::uint64_t id = ready.top();
     ready.pop();
@@ -840,8 +854,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!resolved.ok())
       return Result<SemanticGraphIR>(resolved.status());
     node.traits = resolved.take_value();
-    node.effective_atomic =
-        node.traits.outputs[0].observation_kind == ObservationKind::Atomic;
+    bool ancestors_atomic = true;
     node.inputs.reserve(source.inputs.size());
     std::vector<OperationMetadata> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
@@ -853,14 +866,15 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       ValueDescriptor descriptor;
       std::vector<ValueFacet> facets;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
-        if (!effective_atomic.at(producer->source_node))
+        const auto ref =
+            result_ports.at({producer->source_node, producer->source_port});
+        if (!effective_atomic.at(ref))
           return Result<SemanticGraphIR>(Status::failure(
               ErrorCode::InvalidArgument,
               "consumer requires EffectiveAtomic input ancestry"));
-        node.effective_atomic =
-            node.effective_atomic && effective_atomic.at(producer->source_node);
-        descriptor = output_by_node.at(producer->source_node);
-        facets = output_facets.at(producer->source_node);
+        ancestors_atomic = ancestors_atomic && effective_atomic.at(ref);
+        descriptor = output_by_value.at(ref);
+        facets = output_facets.at(ref);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
@@ -885,8 +899,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
         return Result<SemanticGraphIR>(status);
       input_descriptors.push_back({std::move(descriptor), std::move(facets)});
     }
-    auto output =
-        infer_operation_output(node.traits, input_descriptors, node.parameters);
+    auto output = infer_operation_outputs(node.traits, input_descriptors,
+                                          node.parameters);
     if (!output.ok()) {
       return Result<SemanticGraphIR>(output.status());
     }
@@ -896,21 +910,29 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       if (!validated.ok())
         return Result<SemanticGraphIR>(validated);
     }
-    node.output_descriptor = output.value().descriptor;
-    node.output_facets = output.value().facets;
-    for (std::size_t i = 0; i < input_descriptors.size() &&
-                            !node.traits.outputs[0].dependency_version;
-         ++i) {
-      auto demand = input_internal::derive_input_demand(
-          node.traits, Region::whole(node.output_descriptor.shape),
-          node.output_descriptor.shape, input_descriptors[i].descriptor.shape,
-          node.traits.input_schema[i].kind);
-      if (!demand.ok())
-        return Result<SemanticGraphIR>(demand.status());
+    for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
+      const auto& contract = node.traits.outputs[oi];
+      const auto& metadata = output.value()[oi];
+      auto selected = select_operation_output(node.traits, oi).take_value();
+      for (std::size_t i = 0;
+           i < input_descriptors.size() && !contract.dependency_version; ++i) {
+        auto demand = input_internal::derive_input_demand(
+            selected, Region::whole(metadata.descriptor.shape),
+            metadata.descriptor.shape, input_descriptors[i].descriptor.shape,
+            selected.input_schema[i].kind);
+        if (!demand.ok())
+          return Result<SemanticGraphIR>(demand.status());
+      }
+      const bool atomic =
+          contract.observation_kind == ObservationKind::Atomic &&
+          ancestors_atomic;
+      const ValueRef ref{node.id, oi};
+      effective_atomic.emplace(ref, atomic);
+      output_facets.emplace(ref, metadata.facets);
+      output_by_value.emplace(ref, metadata.descriptor);
+      node.outputs.push_back(
+          {contract.key, metadata.descriptor, metadata.facets, atomic});
     }
-    effective_atomic.emplace(node.id, node.effective_atomic);
-    output_facets.emplace(node.id, node.output_facets);
-    output_by_node.emplace(node.id, node.output_descriptor);
     semantic.nodes_.push_back(std::move(node));
     for (std::uint64_t dependent : dependents[id]) {
       std::size_t& count = indegree[dependent];
@@ -999,10 +1021,40 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         ErrorCode::Stale,
         "optimized IR is invalid, stale, or from another operation set"));
   }
-  std::unordered_map<std::uint64_t, std::size_t> step_by_node;
-  step_by_node.reserve(optimized.nodes().size());
+  std::map<ValueRef, std::size_t> step_by_value;
+  std::map<std::pair<std::uint64_t, std::string>, ValueRef> result_ports;
+  for (const auto& node : optimized.nodes())
+    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi)
+      result_ports.emplace(std::make_pair(node.id, node.outputs[oi].key),
+                           ValueRef{node.id, oi});
+  // Keep only output-reachable pure results. Side-effecting singleton roots
+  // remain explicit even when no named result consumes them.
+  std::set<ValueRef> needed;
+  for (const auto& output : optimized.outputs())
+    needed.insert(result_ports.at({output.node_id, output.port}));
+  for (auto it = optimized.nodes().rbegin(); it != optimized.nodes().rend();
+       ++it) {
+    const auto& node = *it;
+    if (!node.traits.side_effect_free)
+      needed.insert({node.id, 0});
+    bool used = false;
+    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi)
+      used = used || needed.count({node.id, oi});
+    if (used)
+      for (const auto& input : node.inputs)
+        if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input))
+          needed.insert(
+              result_ports.at({producer->source_node, producer->source_port}));
+  }
   ExecutionPlan plan;
   plan.execution_mode_ = options.execution_mode;
+  // Pruning result tasks must not change the established Whole streaming
+  // behavior of a graph compiled for the staged execution family.
+  for (const auto& node : optimized.nodes())
+    for (const auto& output : node.traits.outputs)
+      plan.dependency_protocol_ =
+          plan.dependency_protocol_ || output.dependency_version != 0;
+
   plan.tile_height_ = options.tile_height;
   plan.tile_width_ = options.tile_width;
   plan.revision_ = optimized.revision();
@@ -1012,56 +1064,65 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     declaration_by_id.emplace(plan.input_declarations_[i].id, i);
   plan.steps_.reserve(optimized.nodes().size());
   for (const SemanticNode& node : optimized.nodes()) {
-    PlanStep step;
-    step.node_id = node.id;
-    step.operation = node.operation;
-    step.parameters = node.parameters;
-    step.traits = node.traits;
-    step.effective_atomic = node.effective_atomic;
-    step.whole_boundary =
-        node.traits.outputs[0].region_rule == OperationRegionRule::Whole ||
-        !node.traits.deterministic || !node.traits.side_effect_free;
-    step.output_descriptor = node.output_descriptor;
-    step.output_facets = node.output_facets;
-    step.backend = options.execution_mode == ExecutionMode::MetalFp32 &&
-                           node.traits.supports_gpu
-                       ? Backend::Gpu
-                       : Backend::Cpu;
-    if (step.backend == Backend::Cpu && !node.traits.supports_cpu) {
-      return Result<ExecutionPlan>(
-          Status::failure(ErrorCode::BackendUnavailable,
-                          "operation has no required CPU implementation"));
-    }
-    auto dense_output = input_internal::dense_metadata(step.output_descriptor);
-    if (!dense_output.ok() && node.traits.outputs[0].output_schema.kind ==
-                                  OperationPortKind::RgbaFloat32)
-      return Result<ExecutionPlan>(dense_output.status());
-    step.planned_bytes = std::max(
-        node.traits.estimated_bytes,
-        dense_output.ok() ? dense_output.value().bytes
-                          : static_cast<std::uint64_t>(Value::element_size(
-                                step.output_descriptor.element_type)));
-    step.inputs.reserve(node.inputs.size());
-    for (const WorkflowInput& input : node.inputs) {
-      if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
-        const auto iterator = step_by_node.find(source->source_node);
-        if (iterator == step_by_node.end() ||
-            iterator->second >= plan.steps_.size()) {
-          return Result<ExecutionPlan>(Status::failure(
-              ErrorCode::Internal, "optimized IR input order is invalid"));
-        }
-        step.inputs.push_back(PlanStepInput{iterator->second});
-      } else {
-        step.inputs.push_back(PlanWorkflowInput{declaration_by_id.at(
-            std::get<WorkflowInputReference>(input).input_id)});
+    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi) {
+      if (!needed.count({node.id, oi}))
+        continue;
+      const auto& output = node.outputs[oi];
+      PlanStep step;
+      step.output_index = oi;
+      step.node_id = node.id;
+      step.operation = node.operation;
+      step.parameters = node.parameters;
+      step.traits = select_operation_output(node.traits, oi).take_value();
+      step.effective_atomic = output.effective_atomic;
+      step.whole_boundary =
+          step.traits.outputs[0].region_rule == OperationRegionRule::Whole ||
+          !node.traits.deterministic || !node.traits.side_effect_free;
+      step.output_descriptor = output.descriptor;
+      step.output_facets = output.facets;
+      step.backend = options.execution_mode == ExecutionMode::MetalFp32 &&
+                             node.traits.supports_gpu
+                         ? Backend::Gpu
+                         : Backend::Cpu;
+      if (step.backend == Backend::Cpu && !node.traits.supports_cpu) {
+        return Result<ExecutionPlan>(
+            Status::failure(ErrorCode::BackendUnavailable,
+                            "operation has no required CPU implementation"));
       }
+      auto dense_output =
+          input_internal::dense_metadata(step.output_descriptor);
+      if (!dense_output.ok() && step.traits.outputs[0].output_schema.kind ==
+                                    OperationPortKind::RgbaFloat32)
+        return Result<ExecutionPlan>(dense_output.status());
+      step.planned_bytes = std::max(
+          node.traits.estimated_bytes,
+          dense_output.ok() ? dense_output.value().bytes
+                            : static_cast<std::uint64_t>(Value::element_size(
+                                  step.output_descriptor.element_type)));
+      step.inputs.reserve(node.inputs.size());
+      for (const WorkflowInput& input : node.inputs) {
+        if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
+          const auto iterator = step_by_value.find(
+              result_ports.at({source->source_node, source->source_port}));
+          if (iterator == step_by_value.end() ||
+              iterator->second >= plan.steps_.size()) {
+            return Result<ExecutionPlan>(Status::failure(
+                ErrorCode::Internal, "optimized IR input order is invalid"));
+          }
+          step.inputs.push_back(PlanStepInput{iterator->second});
+        } else {
+          step.inputs.push_back(PlanWorkflowInput{declaration_by_id.at(
+              std::get<WorkflowInputReference>(input).input_id)});
+        }
+      }
+      step_by_value.emplace(ValueRef{node.id, oi}, plan.steps_.size());
+      plan.steps_.push_back(std::move(step));
     }
-    step_by_node.emplace(node.id, plan.steps_.size());
-    plan.steps_.push_back(std::move(step));
   }
   for (const WorkflowOutput& output : optimized.outputs()) {
-    const auto iterator = step_by_node.find(output.node_id);
-    if (iterator == step_by_node.end() ||
+    const auto iterator =
+        step_by_value.find(result_ports.at({output.node_id, output.port}));
+    if (iterator == step_by_value.end() ||
         !plan.outputs_.emplace(output.name, iterator->second).second) {
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::Internal, "optimized output mapping is invalid"));
