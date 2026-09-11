@@ -79,6 +79,22 @@ typedef struct ps_dependency_checkpoint_v8 {
   uint32_t struct_size, reserved;
   uint64_t handle, sequence, byte_size;
 } ps_dependency_checkpoint_v8;
+/** @brief Exact current-stage native atlas with immutable view tokens.
+ * @note Initialize struct_size and zero reserved. The host writes all fields
+ * only on success. shape/tile_shape use rank axes; unused axes are zero.
+ * payload_byte_size is the physical binding span, including the inert byte for
+ * Empty. payload_sample_bytes excludes that inert byte. Directory layout and
+ * lookup follow PS_FRAGMENT_ATLAS_MSL_V8. Apply global boundary mapping first.
+ * Tokens expire at poll return and never authorize an absent sample. Repeated
+ * lookup of one port within a poll returns the same two tokens.
+ */
+typedef struct ps_dependency_atlas_v8 {
+  uint32_t struct_size, rank, element_type, reserved;
+  uint64_t shape[8], tile_shape[8];
+  uint64_t slot_count, payload_sample_bytes;
+  uint64_t payload_token, payload_byte_size, directory_token,
+      directory_byte_size;
+} ps_dependency_atlas_v8;
 /** @brief Read-only input and accounted scratch services for a pure block.
  * @note Borrowed until compute returns. There are no association, checkpoint,
  * retained-owner or output-publication services: discovery precedes the block.
@@ -90,6 +106,14 @@ typedef struct ps_dependency_block_services_v8 {
   uint8_t* (*allocate_scratch)(void*, uint64_t);
   int (*consume_work)(void*, uint64_t);
   int (*is_cancelled)(void*);
+  /** @brief Native current-input transport and dispatch for pure compute.
+   * @note Boolean success is 1, failure 0, as for ordinary phase services.
+   * No discovery or publication is allowed inside a pure block.
+   */
+  int (*atlas)(void*, uint32_t port, ps_dependency_atlas_v8*);
+  int (*gpu_buffer)(void*, const uint8_t*, uint64_t, uint32_t writable,
+                    uint64_t*);
+  int (*gpu_execute)(void*, const ps_gpu_dispatch_v8*, uint32_t);
 } ps_dependency_block_services_v8;
 /** @brief Computes complete outgoing state from copied incoming bytes.
  * @note Finite, nonblocking and pure: use only supplied inputs, incoming state,
@@ -172,6 +196,30 @@ typedef struct ps_dependency_services_v8 {
                uint64_t mode, const uint8_t* incoming, uint64_t state_bytes,
                uint8_t* outgoing, ps_dependency_block_compute_v8 compute,
                void* user);
+  /** @brief Packs exactly the current supplied port into a native atlas.
+   * @note Only GPU queries may use native services. Preparation/packing work
+   * is charged before separate atlas admission. No hidden reads or source
+   * evaluation occurs. Atlas owners remain alive through synchronous drain.
+   */
+  int (*atlas)(void*, uint32_t port, ps_dependency_atlas_v8*);
+  /** @brief Acquires a bounded native input/output/scratch view.
+   * @note Nonnull aligned token destination; writable is 0 or 1. Tokens are
+   * invocation-local monotonic handles but valid only during the current poll.
+   * They are distinct from output/retained/checkpoint handles. No more than
+   * 1024 native views may exist in a poll. Successful publication revokes
+   * mutable output access. Initialize dispatch bindings with these tokens.
+   */
+  int (*gpu_buffer)(void*, const uint8_t*, uint64_t, uint32_t writable,
+                    uint64_t*);
+  /** @brief Executes 1..32 native dispatch records and drains before return.
+   * @note Uses ps_gpu_dispatch_v8 bounds and trusted shader semantics. Boolean
+   * return is 1 for success, 0 for sticky failure, unlike ps_gpu_service_v8's
+   * result codes. Tokens must belong to this poll; replay across polls fails.
+   * A missing atlas sample must suspend with declared needs or fail before any
+   * numerical output publication. This service does not infer shader reads.
+   * Scratch, state and output workspace count actual native capacity.
+   */
+  int (*gpu_execute)(void*, const ps_gpu_dispatch_v8*, uint32_t);
 } ps_dependency_services_v8;
 /** @brief Copied staged callbacks for trusted in-process C implementations.
  * @note Exactly one synchronous execute or dependency_program is supplied.

@@ -28,4 +28,22 @@ build/g4-gpu-consumer/photospider_g4_gpu_workflow
 
 Exit 77 means native Metal is unavailable; the CPU oracle still runs. It does
 not count as native success. This example covers C++ staged GPU execution;
-bounded GPU discovery and the C staged GPU bridge remain separate G4 work.
+bounded GPU discovery remains separate G4 work. The C staged bridge is covered below.
+
+
+The same project builds a C11 plugin and its public workflow loader:
+
+```sh
+cmake --build build/issue257-static --target photospider_g4_c_gpu_workflow -j 8
+build/issue257-static/photospider_g4_c_gpu_workflow
+# Standalone installed-package build also includes these targets:
+build/g4-gpu-consumer/photospider_g4_c_gpu_workflow
+```
+
+The C version returns `2145,2145` with one native dispatch, one block hit and
+16 native cache bytes, and verifies current control evidence. Negative cases
+reject stale/forged tokens, malformed native service records, immutable input
+promotion, writes after publication and missing shader samples. It uses the same
+bounded host services as C++ stages. After each failure, a fresh computation runs
+with result caching disabled at the exact declared native stage reservation,
+checking owner retirement. An optional argument selects the module path.

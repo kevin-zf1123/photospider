@@ -162,6 +162,8 @@ struct Phase {
   std::vector<Value> published;
   std::vector<MutableBuffer> scratch;
   std::map<std::uint64_t, DependencyCheckpoint> checkpoints;
+  std::map<std::uint64_t, std::uint64_t> gpu_tokens;
+  std::map<std::uint32_t, ps_dependency_atlas_v8> atlases;
   std::uint64_t metadata_entries = 0;
   bool reject(Status status) {
     if (failure.ok())
@@ -610,6 +612,110 @@ int checkpoint_publish(void* context, std::uint32_t phase,
     return status.ok() || p->reject(status);
   });
 }
+int gpu_buffer(void* context, const std::uint8_t* bytes, std::uint64_t size,
+               std::uint32_t writable, std::uint64_t* destination) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (!records(destination, 1, 1) || writable > 1)
+      return p->reject(invalid("invalid C native view destination"));
+    if (p->gpu_tokens.size() >= 1024)
+      return p->reject(Status{ErrorCode::ResourceExhausted, {}});
+    auto token = p->phase.gpu_buffer(bytes, size, writable != 0);
+    if (!token.ok())
+      return p->reject(token.status());
+    const auto id = p->state.id(p);
+    if (!id)
+      return false;
+    p->gpu_tokens.emplace(id, token.value());
+    *destination = id;
+    return true;
+  });
+}
+int atlas(void* context, std::uint32_t port,
+          ps_dependency_atlas_v8* destination) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (!records(destination, 1, 1) ||
+        destination->struct_size != sizeof(*destination) ||
+        destination->reserved)
+      return p->reject(invalid("invalid C atlas destination"));
+    const auto existing = p->atlases.find(port);
+    if (existing != p->atlases.end()) {
+      *destination = existing->second;
+      return true;
+    }
+    auto packed = p->phase.atlas(port);
+    if (!packed.ok())
+      return p->reject(packed.status());
+    const auto& value = packed.value();
+    ps_dependency_atlas_v8 result{};
+    result.struct_size = sizeof(result);
+    result.rank = value.descriptor.shape.size();
+    result.element_type =
+        static_cast<std::uint32_t>(value.descriptor.element_type);
+    for (std::size_t i = 0; i < result.rank; ++i) {
+      result.shape[i] = value.descriptor.shape[i];
+      result.tile_shape[i] = value.tile_shape[i];
+    }
+    result.slot_count = value.slot_count;
+    result.payload_sample_bytes = value.payload_bytes;
+    result.payload_byte_size = value.payload.bytes().size();
+    result.directory_byte_size = value.directory.bytes().size();
+    if (!gpu_buffer(p, value.payload.bytes().data(), result.payload_byte_size,
+                    0, &result.payload_token) ||
+        !gpu_buffer(p, value.directory.bytes().data(),
+                    result.directory_byte_size, 0, &result.directory_token))
+      return false;
+    p->atlases.emplace(port, result);
+    *destination = result;
+    return true;
+  });
+}
+int gpu_execute(void* context, const ps_gpu_dispatch_v8* commands,
+                std::uint32_t count) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (!count || !records(commands, count, 32))
+      return p->reject(invalid("invalid C native dispatch list"));
+    auto charged = p->phase.consume_work(count);
+    if (!charged.ok())
+      return p->reject(charged);
+    std::uint64_t work = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+      if (commands[i].struct_size != sizeof(ps_gpu_dispatch_v8) ||
+          !records(commands[i].buffers, commands[i].buffer_count, 31))
+        return p->reject(invalid("invalid C native binding list"));
+      work += commands[i].buffer_count;
+    }
+    charged = p->phase.consume_work(work);
+    if (!charged.ok())
+      return p->reject(charged);
+    std::vector<ps_gpu_dispatch_v8> translated(commands, commands + count);
+    std::vector<std::vector<ps_gpu_buffer_binding_v8>> bindings(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+      auto& output = bindings[i];
+      for (std::uint32_t j = 0; j < commands[i].buffer_count; ++j) {
+        const auto& binding = commands[i].buffers[j];
+        if (binding.struct_size != sizeof(binding))
+          return p->reject(invalid("invalid C native binding"));
+        const auto token = p->gpu_tokens.find(binding.token);
+        if (token == p->gpu_tokens.end())
+          return p->reject(invalid("native token is not from current C poll"));
+        output.push_back(binding);
+        output.back().token = token->second;
+      }
+      translated[i].buffers = output.empty() ? nullptr : output.data();
+    }
+    auto status = p->phase.gpu_execute(translated.data(), count);
+    return status.ok() || p->reject(status);
+  });
+}
 int block(void* context, std::uint32_t phase, std::uint64_t begin,
           std::uint64_t end, std::uint64_t mode, const std::uint8_t* incoming,
           std::uint64_t size, std::uint8_t* outgoing,
@@ -643,7 +749,10 @@ int block(void* context, std::uint32_t phase, std::uint64_t begin,
         read,
         scratch,
         consume_work,
-        is_cancelled};
+        is_cancelled,
+        atlas,
+        gpu_buffer,
+        gpu_execute};
     auto result = p->phase.block(
         phase, begin, end, mode, state.value(), [&]() -> Result<Value> {
           auto made = MutableValue::allocate(descriptor, Region::whole({size}),
@@ -672,7 +781,7 @@ int block(void* context, std::uint32_t phase, std::uint64_t begin,
   });
 }
 Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
-  Phase p{phase, *this, {}, {}, {}, {}, {}, {}};
+  Phase p{phase, *this, {}, {}, {}, {}, {}, {}, {}, {}};
   Query query(phase.query);
   const ps_dependency_services_v8 services{sizeof(ps_dependency_services_v8),
                                            0,
@@ -692,7 +801,10 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
                                            checkpoint_before,
                                            checkpoint_read,
                                            checkpoint_publish,
-                                           block};
+                                           block,
+                                           atlas,
+                                           gpu_buffer,
+                                           gpu_execute};
   const auto result =
       program.poll(&query.query, payload.data(), &services, user);
   if (!p.failure.ok())

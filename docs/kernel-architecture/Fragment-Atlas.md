@@ -50,7 +50,7 @@ global coordinates before lookup. An absent mask bit/slot is an explicit missing
 sample, never a zero value or per-fragment clamp.
 
 C++ staged GPU Runs now integrate this transport as described below. Bounded
-GPU discovery and the staged C GPU bridge remain G4 work. Legacy synchronous
+GPU discovery remains G4 work; the C staged bridge shares this transport. Legacy synchronous
 GPU producers within dependency templates also remain unsupported. Raw
 Float64/Int64 transport does not assert native floating-point arithmetic support.
 
@@ -133,3 +133,47 @@ absence, CPU misuse, host exceptions, ignored errors, work-before-allocation and
 atlas reuse/retirement. It does not count as native evidence. Installed static
 and shared consumers run that test and compile the same public workflow. The
 workflow returns 77 on hosts without native Metal, after verifying its CPU oracle.
+
+
+## C staged GPU bridge
+
+Both `ps_dependency_services_v8` and `ps_dependency_block_services_v8` expose
+`atlas`, `gpu_buffer` and `gpu_execute`, with Boolean 1 success / 0 failure.
+This return convention differs from `ps_gpu_service_v8` result codes. A
+`ps_dependency_atlas_v8` reports full-domain shape/tile geometry, slot count,
+valid sample bytes, physical binding spans and immutable payload/directory
+view tokens. It exposes no new source reads. Repeated same-port lookup returns
+the same tokens within a poll. CPU use fails with InvalidArgument.
+
+The adapter maps native view tokens to invocation-monotonic C handles. Only the
+current poll's map can translate dispatch bindings; previous-poll, forged or
+other-kind handles cannot accidentally refer to a newly reused native token.
+Output publication revokes writable access even for an already acquired token.
+The C adapter bounds command count to 32, bindings to 31 per command and views
+to 1024 per poll, and charges command/binding metadata before copying. Native
+validation still enforces source, constants, access and grid bounds. Every
+service error is sticky, including ignored errors inside pure compute. Atlas
+and native view owners survive synchronous drain, then retire with their normal
+Phase/Invocation leases.
+
+The public C11 plugin `examples/g4_gpu_workflow/c_plugin.c` and loader
+`c_main.cpp` run a real two-observation workflow. Each host control read selects
+65 isolated Float32 samples. The expected sum is 2145 for both observations;
+there is one actual Metal dispatch and one block hit. The second observation
+retains current control `{1}` and excludes obsolete control `{0}`. Retained
+native output/state capacity is 16 bytes. Negative runs cover stale/forged
+handles, malformed atlas records, invalid view/command/binding arguments,
+immutable input promotion, writes after publication and actual shader misses.
+A missing sample returns failure before numerical output publication. Each
+failed case is followed by a real uncached retry in the same tight-budget context,
+so an old cached output cannot hide retained failure-path allocations.
+
+```sh
+cmake --build build/issue257-static --target photospider_g4_c_gpu_workflow -j 8
+build/issue257-static/photospider_g4_c_gpu_workflow
+```
+
+The standalone example CMake project and static/shared installed consumers also
+build this C11 module and its public loader. An optional loader argument selects
+a module path. Exit 77 means native unavailable after CPU checks, never native
+success. This bridge does not itself implement a discovery request table.

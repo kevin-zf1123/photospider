@@ -31,7 +31,7 @@ tile extents 和 payload 字节数。任意 fragment 数仅需 payload 与目录
 边界映射必须先作用于全局坐标。缺失 slot/mask bit 是明确缺页，不是零值或逐 fragment
 clamp。
 
-C++ staged GPU Run 已接入下述 transport。有界 GPU discovery、staged C GPU 桥接和
+C++ staged GPU Run 已接入下述 transport。C staged GPU 桥接已接入；有界 GPU discovery 和
 依赖模板中的旧同步 GPU producer 仍待实现。Float64/Int64 原始 bits 传输不代表已支持
 相应 GPU 浮点算术。
 
@@ -73,3 +73,28 @@ seal 只释放未用 reservation；atlas、state、scratch/output 活跃 owner �
 `test_dependency_gpu` 使用明确非 native 的 mock，验证服务缺失、CPU 误用、异常、忽略
 错误、先计工作后分配和 atlas 复用/退休；不构成 native 证据。static/shared 安装 consumer
 运行此测试并编译相同公开 workflow。没有 native Metal 时 workflow 验证 CPU 后返回 77。
+
+
+## C staged GPU 桥接
+
+`ps_dependency_services_v8` 与 `ps_dependency_block_services_v8` 均提供 `atlas`、
+`gpu_buffer`、`gpu_execute`，返回布尔 1 成功/0 失败，与 `ps_gpu_service_v8` 结果码不同。
+`ps_dependency_atlas_v8` 给出全域 shape/tile、slot 数、有效样本字节、真实 binding span
+和不可变 payload/目录 token，不增加源读取权限。同 poll 同端口复用 token；CPU 调用拒绝。
+
+适配器把 native view token 映射成会话内单调 C handle，只接受当前 poll 的映射，旧 poll、
+伪造或其他类型 handle 无法误用被重新编号的 native token。发布输出撤销既有 token 的
+写权限。每批最多 32 commands、每 command 31 bindings、每 poll 1024 views，复制前计
+command/binding metadata 工作；底层仍核验 source、constants、access/grid 边界。
+错误 sticky，包括 pure compute 忽略错误。atlas/view owner 保持到同步 drain 完成。
+
+公开 C11 `c_plugin.c` 与 `c_main.cpp` 执行两个观察：host control 决定 65 个离散
+Float32 样本，独立预期均为 2145。实际 1 dispatch + 1 block hit；第二观察保留 control
+`{1}`，排除旧 `{0}`。native 输出/状态缓存合计 16 字节。负例覆盖旧/伪造 handle、
+错误 atlas record、view/command/binding 参数、不变输入提权、发布后写和真实 shader
+缺失样本。缺失样本在数值输出发布前失败。每个失败案例后，在相同的紧预算 context 内禁用结果
+缓存并执行真实重算，排除旧缓存遮蔽失败路径 owner 未退休的情况。
+
+英文文档提供命令。standalone CMake 与 static/shared 安装 consumer 均编译该 C11
+模块及公开 loader；loader 可传模块路径。无 native 时先验证 CPU，再返回 77。
+此桥接自身尚不实现 discovery request table。
