@@ -9,11 +9,20 @@ maximum_live_bytes 的子限额。副本共享不可变分配租约；驱逐只�
 仍有效，旧生产者不能重新填充已清空 epoch。统计报告命中、未命中、驱逐、共享、
 条目数和容量。零缓存额度保留无缓存执行。
 
-InputSnapshotStore 独立限额管理不可变 Float32 image-v2 与 canonical coverage-mask 块。
-RGB/RGBA/XYZ/Lab 保留有序通道角色、参考白、单位和 alpha association，HWC C 取自
-描述符。导入和 patch 校验完整图像通道与有限样本，支持 signed/HDR 和 straight 隐藏色。
-Patch 要求精确 descriptor/facets，只复制相交块并保留旧版本。content_identity(region) 使用规范 SHA-256 对元数据与需求样本
-位求身份，与分块尺寸和分配地址无关；有符号零保持不同。快照绑定提供区域读取。
+InputSnapshotStore 独立限额管理 rank 1–8 的 UInt8、Int64、Float32、Float64 不可变块。
+Generic Value 保留所有合法原始位模式；typed 导入与 patch 校验各自的语义样本规则。
+Image-v2 RGB/RGBA/XYZ/Lab 保留有序通道角色、参考白、单位和 alpha association，始终
+校验并复制完整像素通道。配置的 block_size 用于 generic 的每个轴及图像 H/W，图像 C
+保持完整。maximum_blocks 在像素分配前限制每个版本的目录条目；maximum_bytes 统计
+所有版本仍持有的实际块。目录元数据单独有界，该额度不是进程 RSS 上限。
+
+Patch 要求 dtype、shape、facets 完全一致，复制相交块并保留旧版本。
+SnapshotAccessOptions 提供取消与样本上限，约束导入、读取、hash 以及 patch 的受影响
+块复制。取消的 read 可能已经部分写入调用方缓冲区，只有成功返回才确认其内容。
+content_identity(region) 使用 photospider.input-region.v2 域及规范 SHA-256，包含 dtype、
+shape、需求坐标、facets 和精确样本位。整数/IEEE 样本按实际宽度解码，再编码为
+uint64 little-endian 字段；分块、origin/stride 和分配地址不进入身份。正负零及 NaN
+payload 保持不同。包括 generic 输入在内，快照绑定的区域读取传递 Run 取消令牌。
 
 内存和 native 完成值保留真实 facet。结果命中在复用前核对解析后的 descriptor、需求
 coverage、输出语义规则和 typed 样本约束，包含 flight 完成竞态中的二次查询。数值验证
@@ -31,7 +40,7 @@ result-region v3 键递归覆盖各消费者实际需要的上游区域、算子
 派生 demand 必须覆盖完整 Whole 值。Snapshot、bounded-scalar、compact Whole Value 有
 独立类别 tag；compact key 包含 dtype、rank/shape、精确 facet、byte 长度与原始 bytes，
 包括负零和未使用系数。更大或局部直接输入无资格。该规则用于区域执行与 execute_stream；
-纯 generic/scalar 的普通 execute 保持既有快速路径，未扩展 snapshot/disk 类型。公开
+纯 generic/scalar 的普通 execute 保持既有快速路径；磁盘结果仍仅支持既有图像/蒙版。公开
 expression workflow 检查 2048/2049+ 边界、dtype/shape/facet 分离、并发系数及缓存非法
 bounded 消费者拒绝。
 
@@ -101,3 +110,37 @@ MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static
 Typed native 驻留使用公开纯字节复制操作：九种描述符均须保留精确 bytes/facets，冷运行
 一次 dispatch，缓存命中零 dispatch。此处验证存储与复用，不新增颜色转换算子。
 既有 native 取消与预算用例继续保留。
+
+## G4 精确依赖内容缓存
+
+`DemandHandle::request` 与 `execute_fragments` 在 `result_cache_bytes` 为正时，使用同一
+context 像素 LRU 保留成功的精确观察。此路径只在进程内生效，不将依赖记录写入磁盘。
+全部祖先必须 deterministic、side-effect-free 且 cacheable。Manifest 持有结构记录链接、
+完整传递的源 Data/Control/Validation footprint、内容身份和 fragment key，不持有输入、
+snapshot 或像素 owner。复用前，旧记录全部正向和负向控制证据中的源字节必须与当前
+不可变绑定一致。仅输出字节相同不足以证明可复用。
+
+候选模板绑定 plan、node、精确 Q 和资源策略；源身份对四种 dtype 使用 snapshot v2
+规范编码。Value 与 snapshot 按相同逻辑字节编码，不受 block 或 stride 布局影响。
+Snapshot/session 身份仅表示来源；确定性程序不得根据其字符串计算数值或依赖。
+模板对图和计划变化采用保守失效。每个模板最多保留八个有界内容版本。命中后逐输出
+关联以当前 bundle 身份导入，因此缓存行与本次新计算行能够安全合并。
+
+每个 fragment key 包含实际逻辑 Region。部分逐出后合法分区变化不会拼接旧新重叠块。
+只有当前 epoch 中全部 key 仍存在，LRU 才一起取得所有 Value；缺少任意块均为 miss。
+只有 producer 能填入其捕获的 epoch；`clear_result_cache` 阻止旧 producer 晚完成后回填。
+外部输出存储经过既有计费 allocator 复制后才能保留。活跃结果和 demand 证据在逐出、
+清空后仍有效，但不因此保留缓存资格。
+
+`maximum_dependency_cache_metadata` 限制保留的证明单位，范围 1..1048576、默认 65536。
+计费遍历实际不同记录 owner，包括重算的相同观察、其 row/tag/坐标及源证据；同一
+manifest 内共享的指针 owner 只计一次。不以较小的已合并公开 certificate 大小代替。
+`maximum_dependency_cache_work` 提供每 Run 独立可选预算，默认 1048576，零禁用此缓存。
+遍历、复制、哈希均预先计费；精确集合归一化获得预扣的有限工作额度。可选证明预算
+耗尽时跳过复用/保留并继续计算。`dependency_cache_records_visited` 统计新遍历的证明
+记录；`dependency_cache_work` 报告已消耗/预扣单位，含归一化预留，不代表 CPU 指令或时间。
+
+G4 公开 workflow 检查相同内容命中、无关编辑、输出数值相同的控制变化及清空后的 dirty
+证据。Focused 回归另外覆盖 snapshot/Value 位级身份、稀疏混合命中/未命中 certificate、
+frozen 版本、部分逐出后的分区变化、重复 owner、极小共享证明预算，以及清空后真实
+producer 完成。这些检查尚未完成 ordered-scan carry 复用和原生 GPU fragment 执行。

@@ -93,7 +93,7 @@ CPU 访问不强制再次复制。原生输入/输出/scratch/保留副本共用
 模式关闭磁盘读写。参见 Cache-Model 与 S4-Workflow。
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
-transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v7 input
+transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v8 input
 view 会接收该精确 demand。图像和区域源 Run 惰性物化需求 tile，Whole/副作用边界每个 Run
 完整物化一次，参见[区域语义](Region-Semantics.zh.md)。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
@@ -103,7 +103,7 @@ cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness 
 linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
 与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
-Operation ABI v7 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
+Operation ABI v8 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
 result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
 上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
@@ -171,3 +171,9 @@ S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收�
 受支持 image-v2 snapshot/cache 已实现。采样域元数据与样本值单位分别保留，并进入符合
 资格的 result key。Numeric、channel/color、expression/LUT、component 已使用这些
 契约；[独立 foundations workflow](Foundations-Workflow.zh.md)运行其公开组合。
+
+## G4 分阶段执行
+
+当前 package 0.8、ABI/traits 8 增加依赖计划模板与 C++ start/poll/supply 协议。
+同步实现保留 Whole 推断规则；依赖实现可在运行期发现逐端口精确 fragment。
+已实现行为和剩余集成范围见 [依赖数据与执行](Dependency-Data.zh.md)。

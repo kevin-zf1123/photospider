@@ -75,6 +75,8 @@ struct PHOTOSPIDER_API SemanticNode final {
   /** @brief Canonical inferred output facets, independent of runtime storage.
    */
   std::vector<ValueFacet> output_facets = {};
+  /** @brief Local Atomic AND all declared input ancestors EffectiveAtomic. */
+  bool effective_atomic = true;
 };
 
 /**
@@ -380,6 +382,8 @@ struct PHOTOSPIDER_API PlanStep final {
   /** @brief Requires one complete materialization, never per-tile
    * recomputation. */
   bool whole_boundary = false;
+  /** @brief Compiler-proven observation kind over all input edges. */
+  bool effective_atomic = true;
 };
 
 /**
@@ -499,9 +503,16 @@ class PHOTOSPIDER_API ExecutionPlan final {
   Result<ExecutionPlan> tile_plan(const std::string& output_name,
                                   const Region& region) const;
 
+  /** @brief True when this plan requires staged/terminal dependency execution.
+   * @note In this case input_demands are unresolved templates, not Whole or
+   * Empty evidence. Runtime certificates carry the actual exact dependencies.
+   */
+  bool dependency_network() const noexcept;
+
  private:
   friend class Compiler;
   friend class ExecutionContext;
+  friend class DemandHandle;
 
   std::map<std::string, Region> output_regions_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;

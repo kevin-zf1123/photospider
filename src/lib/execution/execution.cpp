@@ -1,6 +1,7 @@
 #include "photospider/execution/execution.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -26,6 +27,10 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_checkpoints.hpp"
+#include "execution/dependency_content.hpp"
+#include "execution/dependency_flights.hpp"
+#include "execution/dependency_records.hpp"
 #include "execution/disk_cache.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
@@ -731,6 +736,109 @@ Result<std::string> upload_content_key(const Value& value,
   return Result<std::string>(hash.finish());
 }
 
+struct DemandHandle::Impl {
+  struct Publication {
+    DemandQuery query;
+    ExecutionDependencies dependencies;
+    DemandQuery dirty;
+    std::uint64_t weight = 0;
+  };
+  std::weak_ptr<execution_internal::DemandCoordinator> owner;
+  std::shared_ptr<const FrozenExecution> bundle;
+  std::atomic<std::uint64_t> generation{1};
+  CancellationSource cancellation;
+  DemandConfig config;
+  std::uint64_t revision = 0, metadata_entries = 0;
+  std::map<std::string, std::shared_ptr<const Publication>> publications;
+};
+namespace execution_internal {
+/** @brief One context lifetime/publication lock; owns no threads or pixels. */
+struct DemandCoordinator : std::enable_shared_from_this<DemandCoordinator> {
+  std::mutex mutex;
+  std::condition_variable changed;
+  CancellationSource shutdown;
+  bool closing = false;
+  std::size_t calls = 0;
+  std::uint64_t next = 1;
+  std::uint32_t maximum_handles;
+  std::uint64_t maximum_calls;
+  ExecutionContext* context = nullptr;
+  struct HandleEntry {
+    std::weak_ptr<DemandHandle::Impl> handle;
+    CancellationToken cancellation;
+  };
+  std::map<std::uint64_t, HandleEntry> handles;
+  DemandCoordinator(std::uint32_t maximum_handles, std::uint64_t maximum_calls)
+      : maximum_handles(maximum_handles), maximum_calls(maximum_calls) {}
+  struct Lease {
+    std::shared_ptr<DemandCoordinator> owner;
+    std::shared_ptr<DemandHandle::Impl> handle;
+    std::shared_ptr<const FrozenExecution> bundle;
+    std::uint64_t generation = 0, revision = 0;
+    CancellationToken cancellation;
+    bool active = false;
+    ~Lease() {
+      if (active) {
+        std::lock_guard<std::mutex> lock(owner->mutex);
+        --owner->calls;
+        owner->changed.notify_all();
+      }
+    }
+    Status stop(Status status = {}) const {
+      if (cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, {}};
+      if (handle->generation.load(std::memory_order_acquire) != generation)
+        return Status{ErrorCode::Stale, {}};
+      return status;
+    }
+  };
+  Result<std::shared_ptr<Lease>> acquire(
+      const std::shared_ptr<DemandHandle::Impl>& handle,
+      const CancellationToken& cancellation) {
+    auto lease = std::make_shared<Lease>();
+    lease->owner = shared_from_this();
+    lease->handle = handle;
+    auto combined = CancellationToken::combine(
+        {shutdown.token(), handle->cancellation.token(), cancellation});
+    if (!combined.ok())
+      return Result<std::shared_ptr<Lease>>(combined.status());
+    lease->cancellation = combined.take_value();
+    std::lock_guard<std::mutex> lock(mutex);
+    if (closing || lease->cancellation.cancelled())
+      return Result<std::shared_ptr<Lease>>(Status{ErrorCode::Cancelled, {}});
+    if (!handle->bundle)
+      return Result<std::shared_ptr<Lease>>(Status{ErrorCode::Stale, {}});
+    if (calls >= maximum_calls)
+      return Result<std::shared_ptr<Lease>>(
+          Status{ErrorCode::ResourceExhausted, "active demand call limit"});
+    lease->bundle = handle->bundle;
+    lease->generation = handle->generation.load(std::memory_order_relaxed);
+    lease->revision = handle->revision;
+    ++calls;
+    lease->active = true;
+    return Result<std::shared_ptr<Lease>>(std::move(lease));
+  }
+  void close() noexcept {
+    std::unique_lock<std::mutex> lock(mutex);
+    closing = true;
+    shutdown.cancel();
+    for (const auto& item : handles)
+      if (auto handle = item.second.handle.lock()) {
+        handle->cancellation.cancel();
+        handle->publications.clear();
+        handle->metadata_entries = 0;
+        auto retired = std::move(handle->bundle);
+        lock.unlock();
+        retired.reset();
+        lock.lock();
+      }
+    changed.wait(lock, [&] { return calls == 0; });
+    handles.clear();
+    context = nullptr;
+  }
+};
+}  // namespace execution_internal
+
 /**
  * @brief Opaque fixed resource ownership for ExecutionContext.
  * @note Destruction order stops the optional GPU lane and required CPU pool
@@ -764,6 +872,24 @@ struct ExecutionContext::Impl final {
       throw std::invalid_argument(
           "ExecutionContext requires a frozen operation registry");
     }
+    if (!requested.maximum_demands || requested.maximum_demands > 65536)
+      throw std::invalid_argument("invalid demand handle limit");
+    demands = std::make_shared<execution_internal::DemandCoordinator>(
+        requested.maximum_demands,
+        static_cast<std::uint64_t>(maximum_waiting_callbacks) +
+            cpu_worker_count + 1);
+    if (!requested.maximum_dependency_flights ||
+        requested.maximum_dependency_flights > 1048576)
+      throw std::invalid_argument("invalid dependency Flight limit");
+    dependency_flights =
+        std::make_unique<execution_internal::DependencyFlights>(
+            requested.maximum_dependency_flights);
+    dependency_checkpoints =
+        std::make_unique<execution_internal::DependencyCheckpoints>(
+            requested.maximum_dependency_flights);
+    if (!requested.maximum_dependency_cache_metadata ||
+        requested.maximum_dependency_cache_metadata > 1048576)
+      throw std::invalid_argument("invalid dependency cache metadata limit");
     if (requested.result_cache_bytes > requested.maximum_live_bytes)
       throw std::invalid_argument("cache limit exceeds execution budget");
     if (requested.disk_cache) {
@@ -779,7 +905,8 @@ struct ExecutionContext::Impl final {
       cache = std::make_unique<execution_internal::ResultCache>(
           requested.result_cache_bytes, budget,
           std::min<std::uint32_t>(cpu_worker_count, 4),
-          maximum_waiting_callbacks);
+          maximum_waiting_callbacks,
+          requested.maximum_dependency_cache_metadata);
     if (gpu_available) {
       gpu_pool = std::make_unique<ThreadPool>(1U, Backend::Gpu);
     }
@@ -805,6 +932,10 @@ struct ExecutionContext::Impl final {
   std::unique_ptr<execution_internal::DiskCache> disk;
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
+  std::shared_ptr<execution_internal::DemandCoordinator> demands;
+  std::unique_ptr<execution_internal::DependencyFlights> dependency_flights;
+  std::unique_ptr<execution_internal::DependencyCheckpoints>
+      dependency_checkpoints;
 };
 
 namespace {
@@ -931,7 +1062,8 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
         if (token.cancelled())
           return Result<Region>(
               Status::failure(ErrorCode::Cancelled, "snapshot read cancelled"));
-        auto status = snapshot->read(r, bytes, size);
+        auto status = snapshot->read(r, bytes, size,
+                                     SnapshotAccessOptions{UINT64_MAX, token});
         return status.ok() ? Result<Region>(r) : Result<Region>(status);
       };
       binding.source = std::move(source);
@@ -1015,6 +1147,1539 @@ std::vector<bool> required_steps(const ExecutionPlan& plan,
  * stores itself in global state.
  */
 class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
+ public:
+  /** @brief Drives unresolved dependency records on the calling coordinator.
+   * @note Uses the context's existing worker/admission/allocator owners. No
+   * worker waits for an upstream record or holds unused stage reservations.
+   */
+  static Result<ExecutionResult> run_dependencies(
+      ThreadPool* pool, ThreadPool* gpu_pool,
+      const std::shared_ptr<gpu_internal::Device>& native_device,
+      WaitingAdmission* admission, const std::shared_ptr<MemoryBudget>& budget,
+      const std::shared_ptr<OperationRegistry>& operations,
+      const std::function<Result<Value>(const std::string&,
+                                        const OperationInvocation&)>& invoke,
+      const ExecutionPlan& plan, std::vector<ExecutionBinding> bindings,
+      const CancellationToken& caller_cancellation,
+      const ExecutionOptions& options, const ExecutionSink* sink,
+      const std::function<void(std::uint64_t)>& reclaim,
+      const DemandQuery* requested = nullptr,
+      std::map<std::string, ValueFragments>* fragment_outputs = nullptr,
+      const std::string& snapshot_identity = {},
+      execution_internal::DependencyFlights* flights = nullptr,
+      execution_internal::ResultCache* dependency_cache = nullptr,
+      execution_internal::DependencyCheckpoints* checkpoints = nullptr) {
+    const auto started = std::chrono::steady_clock::now();
+    auto combined_cancellation = CancellationToken::combine(
+        {caller_cancellation, options.dependencies.sets.cancellation});
+    if (!combined_cancellation.ok())
+      return Result<ExecutionResult>(combined_cancellation.status());
+    const auto cancellation = combined_cancellation.take_value();
+    std::function<ErrorCode()> shared_stop;
+    std::function<void(Status)> abort_flights;
+    const auto stop = [&] {
+      return shared_stop ? shared_stop() : binding_stop(plan, cancellation);
+    };
+    const auto fail = [&](Status status) {
+      const auto code = stop();
+      if (code != ErrorCode::Ok) {
+        status.code = code;
+        status.message.clear();
+      }
+      if (abort_flights)
+        abort_flights(status);
+      return Result<ExecutionResult>(std::move(status));
+    };
+    auto limits = options.dependencies.sets;
+    limits.cancellation = flights ? CancellationToken{} : cancellation;
+    auto observation =
+        std::make_shared<execution_internal::MemoryObservation>();
+    ExecutionResult result;
+    auto& diagnostics = result.diagnostics;
+    diagnostics.plan_digest = plan.digest().value;
+    std::set<const CpuStorage*> external;
+    for (const auto& binding : bindings)
+      if (binding.value.valid() &&
+          external.insert(binding.value.storage().get()).second) {
+        auto bytes = checked_add(diagnostics.retained_input_bytes,
+                                 binding.value.storage()->capacity());
+        if (!bytes.ok())
+          return fail(bytes.status());
+        diagnostics.retained_input_bytes = bytes.value();
+      }
+    std::map<std::size_t, std::shared_ptr<execution_internal::CheckpointScope>>
+        checkpoint_scopes;
+    struct Seal {
+      std::shared_ptr<MemoryReservation> reservation;
+      ~Seal() {
+        if (reservation)
+          reservation->seal();
+      }
+    };
+    const auto reserve = [&](std::uint64_t bytes) {
+      if (reclaim)
+        reclaim(bytes);
+      if (bytes > budget->available())
+        for (const auto& scope : checkpoint_scopes)
+          if (scope.second)
+            scope.second->clear();
+      // Deliberately omit the blocking stop callback. All already-live owners
+      // remain charged; an impossible minimum stage fails finitely.
+      return budget->reserve(bytes, {}, observation);
+    };
+    std::uint64_t work = options.maximum_dependency_work;
+    std::uint64_t cache_work = options.maximum_dependency_cache_work;
+    const auto cache_epoch = dependency_cache ? dependency_cache->epoch() : 0;
+    const auto consume = [&](std::uint64_t count = 1) -> Status {
+      if (stop() != ErrorCode::Ok)
+        return Status{stop(), {}};
+      if (count > work)
+        return Status::failure(ErrorCode::ResourceExhausted,
+                               "dependency Run work limit");
+      work -= count;
+      return Status::success();
+    };
+    static std::atomic<std::uint64_t> sequence{1};
+    auto nonce = sequence.load();
+    do {
+      if (nonce == UINT64_MAX)
+        return fail(Status::failure(ErrorCode::ResourceExhausted,
+                                    "dependency Run identities exhausted"));
+    } while (!sequence.compare_exchange_weak(nonce, nonce + 1));
+    const auto identity = snapshot_identity.empty()
+                              ? "run-" + std::to_string(nonce)
+                              : snapshot_identity;
+    execution_internal::DependencyRecords records(plan, identity, limits);
+    if (!records.status().ok())
+      return fail(records.status());
+    const bool keep_record_graph =
+        flights || std::any_of(plan.steps().begin(), plan.steps().end(),
+                               [](const auto& step) {
+                                 return step.backend == Backend::Gpu &&
+                                        step.traits.dependency_version &&
+                                        step.traits.allows_cpu_fallback;
+                               });
+    const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
+      if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+        const auto& step = plan.steps().at(producer->step_index);
+        return {step.output_descriptor, step.output_facets};
+      }
+      const auto& declaration = plan.input_declarations().at(
+          std::get<PlanWorkflowInput>(input).declaration_index);
+      return {declaration.descriptor, declaration.facets};
+    };
+    struct Frame {
+      enum class State {
+        Initial,
+        Expand,
+        Waiting,
+        Poll,
+        Legacy,
+        Complete
+      } state = State::Initial;
+      PlanInput target;
+      Footprint outputs;
+      bool unit = false, terminal_allowed = false;
+      std::vector<Footprint> parts;
+      std::size_t next = 0;
+      std::vector<Value> values;
+      std::vector<ValueFragments> ready;
+      std::shared_ptr<DependencySession> session;
+      std::optional<execution_internal::DependencyRecords::Checkpoint>
+          attempt_records;
+      std::optional<ValueFragments> complete;
+      std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
+      std::string record_identity;
+      bool cache_hit = false;
+      bool backend_selected = false, fallback_taint = false;
+      Backend backend = Backend::Cpu;
+      std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+          upstream;
+      std::set<std::string> upstream_ids;
+      std::shared_ptr<const execution_internal::DependencyRecord> record;
+      Frame(PlanInput target, Footprint outputs, bool unit = false,
+            bool terminal = false)
+          : target(std::move(target)),
+            outputs(std::move(outputs)),
+            unit(unit),
+            terminal_allowed(terminal) {}
+    };
+    // This explicit stack is a deterministic ready order. Parent frames in
+    // Waiting retain state and actual input owners, but no active reservation.
+    std::vector<Frame> frames;
+    const auto active_token = [&] {
+      for (auto i = frames.rbegin(); i != frames.rend(); ++i)
+        if (i->flight && i->flight->producer())
+          return i->flight->token();
+      return cancellation;
+    };
+    const auto pump = [&] {
+      for (const auto& frame : frames)
+        if (frame.flight)
+          frame.flight->refresh();
+    };
+    if (flights) {
+      shared_stop = [&] {
+        for (auto i = frames.rbegin(); i != frames.rend(); ++i)
+          if (i->flight && i->flight->producer())
+            return i->flight->token().cancelled() ? ErrorCode::Cancelled
+                                                  : ErrorCode::Ok;
+        return binding_stop(plan, cancellation);
+      };
+      abort_flights = [&](Status status) {
+        for (auto i = frames.rbegin(); i != frames.rend(); ++i)
+          if (i->flight && i->flight->producer())
+            i->flight->complete(
+                Result<std::shared_ptr<
+                    const execution_internal::DependencyFlightValue>>(status));
+      };
+    }
+    const auto observation_key =
+        [&](std::size_t index, const Footprint& outputs, bool snapshot = true) {
+          content_internal::Sha256 hash;
+          hash.text(snapshot ? "photospider.dependency-flight.v1"
+                             : "photospider.dependency-cache-template.v1");
+          hash.text(plan.digest().value);
+          if (snapshot)
+            hash.text(identity);
+          hash.integer(plan.steps()[index].node_id);
+          hash.integer(plan.tile_width());
+          hash.integer(plan.tile_height());
+          hash.integer(options.dependencies.sets.maximum_boxes);
+          hash.integer(options.dependencies.sets.maximum_work);
+          hash.integer(options.dependencies.maximum_work);
+          hash.integer(options.dependencies.maximum_state_bytes);
+          hash.integer(options.dependencies.maximum_stages);
+          hash.integer(options.dependencies.maximum_gpu_requests);
+          hash.integer(options.maximum_dependency_work);
+          for (const auto n : outputs.shape())
+            hash.integer(n);
+          hash.integer(outputs.boxes().size());
+          for (const auto& box : outputs.boxes())
+            for (const auto& d : box.dimensions()) {
+              hash.integer(d.offset);
+              hash.integer(d.extent);
+            }
+          return hash.finish();
+        };
+    const auto retain_cache =
+        [&](std::size_t index,
+            const std::shared_ptr<const execution_internal::DependencyRecord>&
+                record,
+            const ValueFragments& completed) {
+          // Retention is optional. Precharge the actual owner DAG before any
+          // walk/copy; cache exhaustion cannot fail a valid computation.
+          try {
+            auto collected = execution_internal::dependency_cache_proof(
+                plan, record, dependency_cache->dependency_metadata_limit(),
+                &cache_work, &diagnostics.dependency_cache_records_visited,
+                limits);
+            if (!collected.ok())
+              return;
+            auto proof = collected.take_value();
+            const auto charge = [&](std::uint64_t count) {
+              if (count > cache_work) {
+                cache_work = 0;
+                return false;
+              }
+              cache_work -= count;
+              const auto cap = dependency_cache->dependency_metadata_limit();
+              if (count > cap || proof.metadata_entries > cap - count)
+                return false;
+              proof.metadata_entries += count;
+              return true;
+            };
+            if (!charge(8 + completed.descriptor().shape.size() +
+                        completed.coverage().boxes().size() +
+                        completed.fragments().size() * 2))
+              return;
+            for (const auto& facet : completed.facets())
+              if (!charge(1 + facet.key.size() + facet.payload.size()))
+                return;
+            auto digest = dependency_stage<std::string>(
+                pool, admission,
+                [&] {
+                  return execution_internal::dependency_content_identity(
+                      bindings, proof.support, &cache_work, active_token());
+                },
+                pump);
+            if (!digest.ok())
+              return;
+            auto manifest =
+                std::make_shared<execution_internal::DependencyCacheManifest>();
+            manifest->record = record;
+            manifest->descriptor = completed.descriptor();
+            manifest->facets = completed.facets();
+            manifest->outputs = completed.coverage();
+            manifest->support = std::move(proof.support);
+            manifest->content_identity = digest.take_value();
+            manifest->epoch = cache_epoch;
+            manifest->metadata_entries = proof.metadata_entries;
+            const auto template_key =
+                observation_key(index, completed.coverage(), false);
+            std::vector<Value> pixels;
+            BufferAllocator domain({}, budget);
+            for (const auto& fragment : completed.fragments()) {
+              if (domain.owns(*fragment.storage())) {
+                pixels.push_back(fragment);
+              } else {
+                auto bytes =
+                    region_bytes(fragment.descriptor(), fragment.region());
+                if (!bytes.ok())
+                  return;
+                auto reserved = reserve(bytes.value());
+                if (!reserved.ok())
+                  return;
+                Seal seal{reserved.take_value()};
+                auto copied = transfer_value(
+                    fragment, seal.reservation->allocator(), true);
+                if (!copied.ok())
+                  return;
+                pixels.push_back(copied.take_value());
+              }
+              manifest->fragment_keys.push_back(
+                  execution_internal::dependency_fragment_key(
+                      template_key, manifest->content_identity,
+                      fragment.region()));
+            }
+            std::vector<bool> native_pixels;
+            for (const auto& pixel : pixels)
+              native_pixels.push_back(native_device &&
+                                      native_device->owns(*pixel.storage()));
+            dependency_cache->put_dependency(template_key, std::move(manifest),
+                                             pixels, native_pixels);
+          } catch (...) {
+          }
+        };
+    struct Query {
+      std::size_t step;
+      std::string name;
+      Footprint samples;
+      bool boundary;
+    };
+    DemandQuery wanted;
+    std::uint64_t query_entries = 0;
+    if (requested) {
+      for (const auto& item : *requested) {
+        const auto found = plan.outputs().find(item.first);
+        if (found == plan.outputs().end() || !item.second.valid())
+          return fail(Status{ErrorCode::InvalidArgument,
+                             "unknown or invalid named query"});
+        const auto weight = 1 + item.second.boxes().size();
+        if (weight > limits.maximum_boxes ||
+            query_entries > limits.maximum_boxes - weight)
+          return fail(
+              Status{ErrorCode::ResourceExhausted, "query metadata limit"});
+        query_entries += weight;
+        const auto& step = plan.steps().at(found->second);
+        if (item.second.shape() != step.output_descriptor.shape)
+          return fail(
+              Status{ErrorCode::TypeMismatch, "query output domain mismatch"});
+        auto scope = Footprint::from_regions(
+            step.output_descriptor.shape,
+            {plan.output_regions().at(item.first)}, limits);
+        if (!scope.ok())
+          return fail(scope.status());
+        auto outside = item.second.subtract(scope.value(), limits);
+        if (!outside.ok())
+          return fail(outside.status());
+        if (!outside.value().empty())
+          return fail(Status{ErrorCode::InvalidArgument,
+                             "query exceeds compiled output region"});
+        for (const auto& box : item.second.boxes())
+          if (!input_internal::complete_image_channels(step.output_descriptor,
+                                                       step.output_facets, box))
+            return fail(Status{ErrorCode::InvalidArgument,
+                               "query requires complete image channels"});
+        wanted.emplace(item.first, item.second);
+      }
+    } else {
+      for (const auto& named : plan.outputs()) {
+        auto samples = Footprint::from_regions(
+            plan.steps()[named.second].output_descriptor.shape,
+            {plan.output_regions().at(named.first)}, limits);
+        if (!samples.ok())
+          return fail(samples.status());
+        wanted.emplace(named.first, samples.take_value());
+      }
+    }
+    const bool nonempty =
+        std::any_of(wanted.begin(), wanted.end(),
+                    [](const auto& q) { return !q.second.empty(); });
+    std::vector<Query> queries;
+    std::vector<bool> shareable(plan.steps().size(), false);
+    std::vector<bool> cacheable(plan.steps().size(), false);
+    for (std::size_t i = 0; i < plan.steps().size(); ++i) {
+      const auto& step = plan.steps()[i];
+      shareable[i] = step.traits.deterministic && step.traits.side_effect_free;
+      cacheable[i] = shareable[i] && step.traits.cacheable;
+      for (const auto& input : step.inputs)
+        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+          shareable[i] = shareable[i] && shareable[producer->step_index];
+          cacheable[i] = cacheable[i] && cacheable[producer->step_index];
+        }
+    }
+    std::map<std::size_t, ValueFragments> whole_records;
+    std::map<std::size_t, std::pair<Backend, bool>> whole_backends;
+    std::map<std::size_t,
+             std::shared_ptr<const execution_internal::DependencyRecord>>
+        whole_evidence;
+    if (nonempty) {
+      for (std::size_t i = 0; i < plan.steps().size(); ++i) {
+        // Pure Whole records are resolved lazily through their real users.
+        // Eager evaluation would bypass a valid descendant cache proof and
+        // could fail admission for pixels that no current query needs.
+        if (plan.steps()[i].whole_boundary &&
+            !plan.steps()[i].traits.side_effect_free &&
+            plan.steps()[i].traits.observation_kind !=
+                ObservationKind::RequestRecord) {
+          auto all =
+              Footprint::all(plan.steps()[i].output_descriptor.shape, limits);
+          if (!all.ok())
+            return fail(all.status());
+          queries.push_back({i, {}, all.take_value(), true});
+        }
+      }
+    }
+    for (const auto& named : wanted) {
+      const auto step_index = plan.outputs().at(named.first);
+      const auto& step = plan.steps()[step_index];
+      if (!sink ||
+          step.traits.observation_kind == ObservationKind::RequestRecord) {
+        queries.push_back({step_index, named.first, named.second, false});
+        continue;
+      }
+      for (const auto& region : named.second.boxes()) {
+        const auto rank = region.rank();
+        std::vector<std::uint64_t> geometry(rank, 1), cursor;
+        const bool image = std::any_of(
+            step.output_facets.begin(), step.output_facets.end(),
+            [](const auto& facet) { return facet.key == "photospider.image"; });
+        if (image) {
+          geometry[0] = plan.tile_height();
+          geometry[1] = plan.tile_width();
+          geometry[2] = step.output_descriptor.shape[2];
+        } else {
+          geometry[rank - 1] = plan.tile_width();
+          if (rank > 1)
+            geometry[rank - 2] = plan.tile_height();
+        }
+        for (const auto& dimension : region.dimensions())
+          cursor.push_back(dimension.offset);
+        for (;;) {
+          auto status = consume();
+          if (!status.ok())
+            return fail(status);
+          std::vector<RegionDimension> dimensions;
+          for (std::size_t axis = 0; axis < rank; ++axis) {
+            const auto& extent = region.dimensions()[axis];
+            dimensions.push_back(
+                {cursor[axis],
+                 std::min(geometry[axis],
+                          extent.offset + extent.extent - cursor[axis])});
+          }
+          auto tile = Footprint::from_regions(step.output_descriptor.shape,
+                                              {Region(dimensions)}, limits);
+          if (!tile.ok())
+            return fail(tile.status());
+          queries.push_back(
+              {step_index, named.first, tile.take_value(), false});
+          std::size_t axis = rank;
+          while (axis) {
+            --axis;
+            cursor[axis] += dimensions[axis].extent;
+            if (cursor[axis] < region.dimensions()[axis].offset +
+                                   region.dimensions()[axis].extent)
+              break;
+            cursor[axis] = region.dimensions()[axis].offset;
+          }
+          if (axis == 0 && cursor[0] == region.dimensions()[0].offset)
+            break;
+        }
+      }
+    }
+    for (const auto& named : queries) {
+      frames.emplace_back(PlanStepInput{named.step}, named.samples, false,
+                          !named.boundary);
+      std::optional<ValueFragments> returned;
+      bool returned_taint = false;
+      std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+          returned_records;
+      while (!frames.empty()) {
+        pump();
+        limits.cancellation = active_token();
+        auto status = consume();
+        if (!status.ok())
+          return fail(status);
+        auto& frame = frames.back();
+        const auto output = metadata(frame.target);
+        if (returned) {
+          frame.fallback_taint |= returned_taint;
+          for (auto& record : returned_records) {
+            const auto record_id =
+                records.observation_identity(record->step, record->samples);
+            if (!frame.upstream_ids.count(record_id)) {
+              if (frame.upstream.size() >= limits.maximum_boxes)
+                return fail(Status{ErrorCode::ResourceExhausted, {}});
+              frame.upstream_ids.insert(record_id);
+              frame.upstream.push_back(std::move(record));
+            }
+          }
+          returned_records.clear();
+          if (frame.state == Frame::State::Expand) {
+            frame.values.insert(frame.values.end(),
+                                returned->fragments().begin(),
+                                returned->fragments().end());
+          } else if (frame.state == Frame::State::Waiting) {
+            frame.ready.push_back(std::move(*returned));
+          } else {
+            return fail(Status::failure(
+                ErrorCode::Internal,
+                "dependency child returned to nonwaiting record"));
+          }
+          returned.reset();
+        }
+        if (frame.state == Frame::State::Complete) {
+          if (const auto* producer =
+                  std::get_if<PlanStepInput>(&frame.target)) {
+            const auto& step = plan.steps()[producer->step_index];
+            if (keep_record_graph && !frame.record &&
+                (frame.unit || frame.terminal_allowed) &&
+                !frame.record_identity.empty()) {
+              auto captured =
+                  records.capture(producer->step_index, frame.outputs,
+                                  std::move(frame.upstream));
+              if (!captured.ok())
+                return fail(captured.status());
+              frame.record = captured.take_value();
+            }
+            if (frame.flight && frame.flight->producer()) {
+              if (dependency_cache && cacheable[producer->step_index] &&
+                  !frame.cache_hit && !frame.fallback_taint && cache_work)
+                retain_cache(producer->step_index, frame.record,
+                             *frame.complete);
+              auto value =
+                  std::make_shared<execution_internal::DependencyFlightValue>();
+              value->value = *frame.complete;
+              value->record = frame.record;
+              value->backend = frame.backend;
+              value->fallback_taint = frame.fallback_taint;
+              value->producer_peak = budget->peaks(observation).first;
+              frame.flight->complete(
+                  Result<std::shared_ptr<
+                      const execution_internal::DependencyFlightValue>>(
+                      std::move(value)));
+            }
+            if (step.whole_boundary && frame.unit &&
+                step.traits.observation_kind !=
+                    ObservationKind::RequestRecord) {
+              auto whole = Footprint::all(step.output_descriptor.shape, limits);
+              if (!whole.ok())
+                return fail(whole.status());
+              if (frame.complete->coverage() != whole.value())
+                return fail(
+                    Status::failure(ErrorCode::Internal,
+                                    "incomplete Whole record publication"));
+              whole_records.emplace(producer->step_index, *frame.complete);
+              whole_backends.emplace(
+                  producer->step_index,
+                  std::make_pair(frame.backend, frame.fallback_taint));
+              if (frame.record)
+                whole_evidence.emplace(producer->step_index, frame.record);
+            }
+          }
+          returned = std::move(frame.complete);
+          returned_taint = frame.fallback_taint;
+          if (frame.record)
+            returned_records = {std::move(frame.record)};
+          else
+            returned_records = std::move(frame.upstream);
+          frames.pop_back();
+          continue;
+        }
+        if (frame.outputs.empty()) {
+          if (const auto* producer =
+                  std::get_if<PlanStepInput>(&frame.target)) {
+            if (plan.steps()[producer->step_index].traits.observation_kind ==
+                    ObservationKind::RequestRecord &&
+                !frame.terminal_allowed)
+              return fail(Status{ErrorCode::InvalidArgument,
+                                 "RequestRecord cannot supply a DAG input"});
+            status = records.append_empty(producer->step_index, frame.outputs);
+            if (!status.ok())
+              return fail(status);
+          }
+          auto empty = ValueFragments::create(output.descriptor, output.facets,
+                                              frame.outputs, {}, limits);
+          if (!empty.ok())
+            return fail(empty.status());
+          frame.complete = empty.take_value();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        if (const auto* input = std::get_if<PlanWorkflowInput>(&frame.target)) {
+          const auto& binding = bindings.at(input->declaration_index);
+          if (binding.value.valid()) {
+            auto view =
+                ValueFragments::create(output.descriptor, output.facets,
+                                       frame.outputs, {binding.value}, limits);
+            if (!view.ok())
+              return fail(view.status());
+            frame.complete = view.take_value();
+            frame.state = Frame::State::Complete;
+            continue;
+          }
+          for (const auto& box : frame.outputs.boxes()) {
+            status = consume();
+            if (!status.ok())
+              return fail(status);
+            auto bytes = region_bytes(output.descriptor, box);
+            if (!bytes.ok())
+              return fail(bytes.status());
+            auto capacity =
+                checked_add(bytes.value(), binding.source->workspace_bytes);
+            if (!capacity.ok())
+              return fail(capacity.status());
+            auto reserved = reserve(capacity.value());
+            if (!reserved.ok())
+              return fail(reserved.status());
+            Seal seal{reserved.take_value()};
+            auto allocation = MutableValue::allocate(
+                output.descriptor, box, seal.reservation->allocator());
+            if (!allocation.ok())
+              return fail(allocation.status());
+            auto writer = allocation.take_value();
+            auto read = dependency_stage<Region>(
+                pool, admission,
+                [&] {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<Region>(Status{stop(), {}});
+                  return binding.source->read(
+                      box, writer.data(), writer.size(),
+                      seal.reservation->allocator(
+                          binding.source->workspace_bytes),
+                      active_token());
+                },
+                pump);
+            if (!read.ok())
+              return fail(read.status());
+            if (!same_region(read.value(), box))
+              return fail(
+                  Status::failure(ErrorCode::TypeMismatch,
+                                  "source returned different coverage"));
+            if (stop() != ErrorCode::Ok)
+              return fail(Status{stop(), {}});
+            auto published = std::move(writer).publish(output.facets);
+            if (!published.ok())
+              return fail(published.status());
+            frame.values.push_back(published.take_value());
+            ++diagnostics.source_read_count;
+            auto total =
+                checked_add(diagnostics.source_read_bytes, bytes.value());
+            if (!total.ok())
+              return fail(total.status());
+            diagnostics.source_read_bytes = total.value();
+            diagnostics.peak_active_tasks = 1;
+          }
+          auto fragments =
+              ValueFragments::create(output.descriptor, output.facets,
+                                     frame.outputs, frame.values, limits);
+          if (!fragments.ok())
+            return fail(fragments.status());
+          frame.complete = fragments.take_value();
+          frame.values.clear();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        const auto step_index =
+            std::get<PlanStepInput>(frame.target).step_index;
+        const auto& step = plan.steps().at(step_index);
+        if (!frame.backend_selected) {
+          frame.backend = step.backend;
+          frame.backend_selected = true;
+        }
+        const auto fallback = [&](const Status& failure) {
+          if (failure.code != ErrorCode::BackendUnavailable ||
+              frame.backend != Backend::Gpu || !step.traits.supports_cpu ||
+              !step.traits.allows_cpu_fallback || stop() != ErrorCode::Ok)
+            return false;
+          frame.backend = Backend::Cpu;
+          frame.fallback_taint = true;
+          const auto reason = step.operation + ": " + failure.message;
+          if (std::find(diagnostics.fallback_reasons.begin(),
+                        diagnostics.fallback_reasons.end(),
+                        reason) == diagnostics.fallback_reasons.end())
+            diagnostics.fallback_reasons.push_back(reason);
+          return true;
+        };
+        const auto restart_cpu = [&]() -> Status {
+          // The failed worker has drained. Retire its continuation and input
+          // owners before restarting the same observation on the CPU pool.
+          frame.session.reset();
+          frame.ready.clear();
+          frame.parts.clear();
+          frame.upstream.clear();
+          frame.upstream_ids.clear();
+          frame.next = 0;
+          frame.state = Frame::State::Initial;
+          if (frame.attempt_records) {
+            auto restored = records.rollback(*frame.attempt_records, &work);
+            frame.attempt_records.reset();
+            if (!restored.ok())
+              return restored;
+          }
+          return Status::success();
+        };
+        const auto retained = whole_records.find(step_index);
+        if (frame.state == Frame::State::Initial &&
+            retained != whole_records.end()) {
+          auto restricted = retained->second.restrict(frame.outputs, limits);
+          if (!restricted.ok())
+            return fail(restricted.status());
+          frame.complete = restricted.take_value();
+          frame.backend = whole_backends.at(step_index).first;
+          frame.fallback_taint |= whole_backends.at(step_index).second;
+          const auto evidence = whole_evidence.find(step_index);
+          if (evidence != whole_evidence.end()) {
+            // Fallback can remove the builder record while Whole pixels and
+            // their complete DAG retain at-most-once Run ownership.
+            status = records.import(evidence->second);
+            if (!status.ok())
+              return fail(status);
+            frame.record = evidence->second;
+          }
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        const bool terminal =
+            step.traits.observation_kind == ObservationKind::RequestRecord;
+        if (terminal && !frame.terminal_allowed)
+          return fail(
+              Status::failure(ErrorCode::InvalidArgument,
+                              "RequestRecord cannot supply a DAG input"));
+        if (!terminal && !step.effective_atomic)
+          return fail(
+              Status::failure(ErrorCode::InvalidArgument,
+                              "dependency producer has non-atomic ancestry"));
+        if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
+          if (step.traits.dependency_version == 0 && step.whole_boundary) {
+            // The legacy Whole contract observes global validation for every
+            // request. Preserve that actual dependency; never relabel a tile.
+            auto whole = Footprint::all(output.descriptor.shape, limits);
+            if (!whole.ok())
+              return fail(whole.status());
+            frame.parts.push_back(whole.take_value());
+          } else {
+            auto observations =
+                operation_observations(output, frame.outputs, limits);
+            if (!observations.ok())
+              return fail(observations.status());
+            status = observations.value().visit(
+                [&](const auto& coordinate) {
+                  auto charged = consume();
+                  if (!charged.ok())
+                    return charged;
+                  std::vector<RegionDimension> dimensions;
+                  for (auto c : coordinate)
+                    dimensions.push_back({c, 1});
+                  auto atom = Footprint::from_regions(
+                      observations.value().shape(),
+                      {Region(std::move(dimensions))}, limits);
+                  if (!atom.ok())
+                    return atom.status();
+                  auto samples =
+                      observation_samples(output, atom.value(), limits);
+                  if (!samples.ok())
+                    return samples.status();
+                  frame.parts.push_back(samples.take_value());
+                  return Status::success();
+                },
+                work, active_token());
+            if (!status.ok())
+              return fail(status);
+          }
+          frame.state = Frame::State::Expand;
+        }
+        if (frame.state == Frame::State::Expand) {
+          if (frame.next < frame.parts.size()) {
+            const auto query = frame.parts[frame.next++];
+            const auto target = frame.target;
+            frames.emplace_back(target, query, true);
+            continue;
+          }
+          auto fragments =
+              ValueFragments::create(output.descriptor, output.facets,
+                                     frame.outputs, frame.values, limits);
+          if (!fragments.ok())
+            return fail(fragments.status());
+          frame.complete = fragments.take_value();
+          frame.values.clear();
+          frame.state = Frame::State::Complete;
+          continue;
+        }
+        if (frame.backend == Backend::Gpu &&
+            (!native_device || !native_device->available() || !gpu_pool)) {
+          const auto unavailable =
+              Status::failure(ErrorCode::BackendUnavailable,
+                              "native dependency worker unavailable");
+          diagnostics.operation_timings.push_back(OperationTiming{
+              step.node_id, frame.backend, 0, unavailable.code, 1, 0});
+          if (!fallback(unavailable))
+            return fail(unavailable);
+          if (frame.session) {
+            status = restart_cpu();
+            if (!status.ok())
+              return fail(status);
+            continue;
+          }
+        }
+        if (frame.state == Frame::State::Initial) {
+          if (flights && shareable[step_index] && !frame.flight) {
+            const auto parent_token = active_token();
+            bool parent_shared = false;
+            for (const auto& ancestor : frames)
+              parent_shared |= ancestor.flight && ancestor.flight->producer();
+            frame.record_identity = observation_key(step_index, frame.outputs);
+            auto claimed = flights->claim(
+                frame.record_identity, [parent_token, parent_shared, &plan] {
+                  if (parent_token.cancelled())
+                    return ErrorCode::Cancelled;
+                  return parent_shared || plan.current() ? ErrorCode::Ok
+                                                         : ErrorCode::Stale;
+                });
+            if (!claimed.ok())
+              return fail(claimed.status());
+            frame.flight = claimed.take_value();
+            if (!frame.flight->producer()) {
+              auto shared = frame.flight->wait(pump);
+              if (!shared.ok())
+                return fail(shared.status());
+              status = records.import(shared.value()->record);
+              if (!status.ok())
+                return fail(status);
+              frame.complete = shared.value()->value;
+              frame.record = shared.value()->record;
+              frame.backend = shared.value()->backend;
+              frame.fallback_taint |= shared.value()->fallback_taint;
+              ++diagnostics.shared_computations;
+              diagnostics.selected_backends[step.node_id] = frame.backend;
+              diagnostics.shared_peak_live_bytes =
+                  std::max(diagnostics.shared_peak_live_bytes,
+                           shared.value()->producer_peak);
+              frame.state = Frame::State::Complete;
+              continue;
+            }
+            limits.cancellation = active_token();
+            if (dependency_cache && cacheable[step_index] &&
+                !frame.fallback_taint && cache_work) {
+              const auto template_key =
+                  observation_key(step_index, frame.outputs, false);
+              for (const auto& candidate :
+                   dependency_cache->dependency_candidates(template_key)) {
+                if (candidate->metadata_entries > cache_work) {
+                  cache_work = 0;
+                  break;
+                }
+                cache_work -= candidate->metadata_entries;
+                auto digest = dependency_stage<std::string>(
+                    pool, admission,
+                    [&] {
+                      return execution_internal::dependency_content_identity(
+                          bindings, candidate->support, &cache_work,
+                          active_token());
+                    },
+                    pump);
+                if (!digest.ok()) {
+                  if (digest.status().code == ErrorCode::Cancelled)
+                    return fail(digest.status());
+                  break;
+                }
+                if (digest.value() != candidate->content_identity)
+                  continue;
+                auto pixels = dependency_cache->dependency_values(*candidate);
+                if (pixels.empty())
+                  continue;
+                auto cached = ValueFragments::create(
+                    candidate->descriptor, candidate->facets,
+                    candidate->outputs, std::move(pixels), limits);
+                if (!cached.ok())
+                  continue;
+                status = records.import(candidate->record);
+                if (!status.ok())
+                  return fail(status);
+                frame.complete = cached.take_value();
+                frame.record = candidate->record;
+                frame.cache_hit = true;
+                frame.state = Frame::State::Complete;
+                ++diagnostics.cache_hits;
+                diagnostics.selected_backends[step.node_id] = frame.backend;
+                break;
+              }
+              if (frame.state == Frame::State::Complete)
+                continue;
+            }
+          }
+          frame.parts.clear();
+          frame.next = 0;
+          if (keep_record_graph && frame.record_identity.empty())
+            frame.record_identity =
+                records.observation_identity(step_index, frame.outputs);
+          if (step.traits.dependency_version == 1) {
+            if (frame.backend == Backend::Gpu &&
+                step.traits.allows_cpu_fallback && !frame.attempt_records) {
+              auto saved = records.checkpoint(&work);
+              if (!saved.ok())
+                return fail(saved.status());
+              frame.attempt_records = saved.take_value();
+            }
+            DependencyRequest request;
+            for (const auto& input : step.inputs)
+              request.inputs.push_back(metadata(input));
+            request.parameters = step.parameters;
+            request.outputs = frame.outputs;
+            request.snapshot_identity = identity;
+            request.backend = frame.backend;
+            request.cancellation = active_token();
+            request.limits = options.dependencies;
+            if (flights)
+              request.limits.sets.cancellation = request.cancellation;
+            request.limits.maximum_work =
+                std::min(request.limits.maximum_work, work);
+            auto reserved =
+                reserve(std::min(step.traits.continuation_bytes,
+                                 options.dependencies.maximum_state_bytes));
+            if (!reserved.ok())
+              return fail(reserved.status());
+            Seal seal{reserved.take_value()};
+            auto session = dependency_stage<std::shared_ptr<DependencySession>>(
+                pool, admission,
+                [&] {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<std::shared_ptr<DependencySession>>(
+                        Status{stop(), {}});
+                  return operations->start_dependency(
+                      step.operation, std::move(request),
+                      seal.reservation->allocator());
+                },
+                pump);
+            if (!session.ok()) {
+              diagnostics.operation_timings.push_back(OperationTiming{
+                  step.node_id, frame.backend, 0, session.status().code, 1, 0});
+              if (fallback(session.status())) {
+                status = restart_cpu();
+                if (!status.ok())
+                  return fail(status);
+                continue;
+              }
+              return fail(session.status());
+            }
+            frame.session = session.take_value();
+            status = consume(frame.session->consumed_work());
+            if (!status.ok())
+              return fail(status);
+            frame.state = Frame::State::Poll;
+          } else {
+            if (frame.outputs.boxes().size() != 1)
+              return fail(Status::failure(ErrorCode::InvalidArgument,
+                                          "synchronous terminal requires a "
+                                          "rectangular complete request"));
+            for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+              auto demand = input_internal::derive_input_demand(
+                  step.traits, frame.outputs.boxes()[0],
+                  output.descriptor.shape,
+                  metadata(step.inputs[port]).descriptor.shape,
+                  step.traits.input_schema[port].kind);
+              if (!demand.ok())
+                return fail(demand.status());
+              auto footprint = Footprint::from_regions(
+                  metadata(step.inputs[port]).descriptor.shape,
+                  {demand.take_value()}, limits);
+              if (!footprint.ok())
+                return fail(footprint.status());
+              frame.parts.push_back(footprint.take_value());
+            }
+            frame.state = Frame::State::Waiting;
+          }
+        }
+        if (frame.state == Frame::State::Waiting) {
+          if (frame.next < frame.parts.size()) {
+            const auto port = frame.next++;
+            const auto query = frame.parts[port];
+            const auto target = step.inputs[port];
+            frames.emplace_back(target, query);
+            continue;
+          }
+          if (frame.session) {
+            status = frame.session->supply(std::move(frame.ready), identity);
+            if (!status.ok())
+              return fail(status);
+            frame.state = Frame::State::Poll;
+          } else {
+            frame.state = Frame::State::Legacy;
+          }
+        }
+        if (frame.state == Frame::State::Poll ||
+            frame.state == Frame::State::Legacy) {
+          auto elements = frame.outputs.element_count();
+          const auto width =
+              Value::element_size(output.descriptor.element_type);
+          if (!elements.ok() || elements.value() > UINT64_MAX / width)
+            return fail(Status::failure(ErrorCode::ResourceExhausted,
+                                        "dependency output bytes overflow"));
+          auto output_bytes = elements.value() * width;
+          if (frame.backend == Backend::Gpu) {
+            output_bytes = 0;
+            for (const auto& box : frame.outputs.boxes()) {
+              const auto bytes = gpu_internal::allocation_capacity(
+                  box.element_count().value() * width);
+              if (!bytes || bytes > UINT64_MAX - output_bytes)
+                return fail(Status::failure(ErrorCode::ResourceExhausted,
+                                            "native output capacity overflow"));
+              output_bytes += bytes;
+            }
+          }
+          auto capacity =
+              checked_add(std::max(step.traits.estimated_bytes, output_bytes),
+                          step.traits.workspace_bytes);
+          if (!capacity.ok())
+            return fail(capacity.status());
+          // The pending input footprint remains available after supply moved
+          // ready owners into the session. It describes exact stage scratch.
+          for (std::size_t port = 0; port < frame.parts.size(); ++port) {
+            auto count = frame.parts[port].element_count();
+            const auto input_width = Value::element_size(
+                metadata(step.inputs[port]).descriptor.element_type);
+            const auto scale =
+                input_width * step.traits.workspace_input_multiplier;
+            if (!frame.session) {
+              if (!count.ok() || count.value() > UINT64_MAX / input_width)
+                return fail(Status{ErrorCode::ResourceExhausted, {}});
+              auto packed_bytes = count.value() * input_width;
+              if (frame.backend == Backend::Gpu)
+                packed_bytes = gpu_internal::allocation_capacity(packed_bytes);
+              if (!packed_bytes || packed_bytes > UINT64_MAX - capacity.value())
+                return fail(Status{ErrorCode::ResourceExhausted,
+                                   "dependency input capacity overflow"});
+              capacity = Result<std::uint64_t>(capacity.value() + packed_bytes);
+            }
+            if (scale &&
+                (!count.ok() ||
+                 count.value() > (UINT64_MAX - capacity.value()) / scale))
+              return fail(
+                  Status::failure(ErrorCode::ResourceExhausted,
+                                  "dependency stage input bytes overflow"));
+            if (scale)
+              capacity = Result<std::uint64_t>(capacity.value() +
+                                               count.value() * scale);
+          }
+          auto reserved = reserve(capacity.value());
+          if (!reserved.ok())
+            return fail(reserved.status());
+          Seal seal{reserved.take_value()};
+          std::uint64_t callback_us = 0;
+          gpu_internal::Statistics native_stats;
+          if (frame.session) {
+            const auto charged_before = frame.session->consumed_work();
+            auto progress = dependency_stage<DependencyProgress>(
+                frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
+                [&] {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<DependencyProgress>(Status{stop(), {}});
+                  const auto callback_started =
+                      std::chrono::steady_clock::now();
+                  DependencyCheckpointServices services;
+                  if (shareable[step_index] && !frame.fallback_taint &&
+                      step.traits.observation_kind == ObservationKind::Atomic) {
+                    auto& scope = checkpoint_scopes[step_index];
+                    if (!scope) {
+                      if (checkpoints) {
+                        auto all = Footprint::none(step.output_descriptor.shape,
+                                                   limits);
+                        if (!all.ok())
+                          return Result<DependencyProgress>(all.status());
+                        scope = checkpoints->acquire(
+                            observation_key(step_index, all.value()),
+                            limits.maximum_boxes);
+                      } else {
+                        scope = std::make_shared<
+                            execution_internal::CheckpointScope>(
+                            limits.maximum_boxes);
+                      }
+                    }
+                    if (scope) {
+                      auto empty =
+                          Footprint::none(step.output_descriptor.shape, limits);
+                      if (!empty.ok())
+                        return Result<DependencyProgress>(empty.status());
+                      services.identity =
+                          observation_key(step_index, empty.value());
+                      services.find = [&, scope](std::uint32_t phase,
+                                                 std::uint64_t before)
+                          -> Result<std::optional<DependencyCheckpoint>> {
+                        auto found = scope->find(phase, before);
+                        if (!found)
+                          return Result<std::optional<DependencyCheckpoint>>(
+                              std::optional<DependencyCheckpoint>{});
+                        auto charged = consume(found->weight);
+                        if (!charged.ok())
+                          return Result<std::optional<DependencyCheckpoint>>(
+                              charged);
+                        for (const auto& upstream : found->upstream) {
+                          auto status = records.import(upstream);
+                          if (!status.ok())
+                            return Result<std::optional<DependencyCheckpoint>>(
+                                status);
+                          const auto id = records.observation_identity(
+                              upstream->step, upstream->samples);
+                          if (frame.upstream_ids.insert(id).second)
+                            frame.upstream.push_back(upstream);
+                        }
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+                        execution_testing::notify_checkpoint_borrowed();
+#endif
+                        return Result<std::optional<DependencyCheckpoint>>(
+                            found->checkpoint);
+                      };
+                      services.publish = [&, scope](const DependencyCheckpoint&
+                                                        checkpoint) {
+                        std::uint64_t weight = checkpoint.metadata_entries() +
+                                               frame.upstream.size();
+                        if (weight > cache_work)
+                          return Status::success();
+                        cache_work -= weight;
+                        for (const auto& upstream : frame.upstream) {
+                          auto proof =
+                              execution_internal::dependency_cache_proof(
+                                  plan, upstream, limits.maximum_boxes,
+                                  &cache_work,
+                                  &diagnostics.dependency_cache_records_visited,
+                                  limits);
+                          if (!proof.ok() ||
+                              proof.value().metadata_entries >
+                                  limits.maximum_boxes -
+                                      std::min(weight, limits.maximum_boxes))
+                            return Status::success();
+                          weight += proof.value().metadata_entries;
+                        }
+                        if (scope->put({checkpoint, frame.upstream, weight})) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+                          execution_testing::notify_checkpoint_published();
+#endif
+                        }
+                        return Status::success();
+                      };
+                    }
+                  }
+                  DependencyBlockServices blocks;
+                  if (dependency_cache && shareable[step_index] &&
+                      !frame.fallback_taint && step.traits.cacheable) {
+                    blocks.consume_work = [&](std::uint64_t cost) {
+                      if (cost > cache_work) {
+                        cache_work = 0;
+                        return false;
+                      }
+                      cache_work -= cost;
+                      return true;
+                    };
+                    blocks.find = [&](const std::string& key) {
+                      auto value =
+                          dependency_cache->get("g4-block/" + key, cache_epoch);
+                      if (value.valid())
+                        ++diagnostics.block_cache_hits;
+                      else
+                        ++diagnostics.block_cache_misses;
+                      return Result<Value>(std::move(value));
+                    };
+                    blocks.publish = [&](const std::string& key,
+                                         const Value& value) {
+                      dependency_cache->put(
+                          "g4-block/" + key, value, cache_epoch,
+                          native_device &&
+                              native_device->owns(*value.storage()));
+                      return Status::success();
+                    };
+                  }
+                  auto allocator = seal.reservation->allocator();
+                  DependencyGpuServices gpu;
+                  std::optional<gpu_internal::Invocation> native;
+                  if (frame.backend == Backend::Gpu) {
+                    allocator = native_device->allocator(allocator);
+                    native.emplace(native_device, active_token());
+                    gpu.allocation_capacity = gpu_internal::allocation_capacity;
+                    gpu.allocate_discovery = [&](std::uint64_t bytes) {
+                      const auto capacity =
+                          gpu_internal::allocation_capacity(bytes);
+                      if (!capacity)
+                        return Result<MutableBuffer>(
+                            Status{ErrorCode::ResourceExhausted,
+                                   "GPU discovery capacity overflow"});
+                      auto admitted = reserve(capacity);
+                      if (!admitted.ok())
+                        return Result<MutableBuffer>(admitted.status());
+                      Seal discovery_seal{admitted.take_value()};
+                      return native_device
+                          ->allocator(discovery_seal.reservation->allocator())
+                          .allocate(bytes);
+                    };
+                    gpu.materialize = [&](const FragmentAtlasPlan& plan,
+                                          const ValueFragments& input,
+                                          const FootprintLimits& bounds) {
+                      const auto payload = gpu_internal::allocation_capacity(
+                          plan.payload_allocation_bytes());
+                      const auto directory = gpu_internal::allocation_capacity(
+                          plan.directory_allocation_bytes());
+                      if (!payload || !directory ||
+                          directory > UINT64_MAX - payload)
+                        return Result<FragmentAtlas>(
+                            Status::failure(ErrorCode::ResourceExhausted,
+                                            "native atlas capacity overflow"));
+                      auto admitted = reserve(payload + directory);
+                      if (!admitted.ok())
+                        return Result<FragmentAtlas>(admitted.status());
+                      Seal atlas_seal{admitted.take_value()};
+                      auto packed = plan.materialize(
+                          input,
+                          native_device->allocator(
+                              atlas_seal.reservation->allocator()),
+                          bounds);
+                      if (packed.ok()) {
+                        diagnostics.transfer_count += 2;
+                        diagnostics.transfer_bytes +=
+                            plan.payload_allocation_bytes() +
+                            plan.directory_allocation_bytes();
+                      }
+                      return packed;
+                    };
+                    gpu.buffer = [&](const std::uint8_t* bytes,
+                                     std::uint64_t size, bool writable) {
+                      std::uint64_t token = 0;
+                      const auto* api = native->service();
+                      api->buffer(api->context, bytes, size, writable, &token);
+                      return native->status().ok()
+                                 ? Result<std::uint64_t>(token)
+                                 : Result<std::uint64_t>(native->status());
+                    };
+                    gpu.execute = [&](const ps_gpu_dispatch_v8* commands,
+                                      std::uint32_t count) {
+                      const auto* api = native->service();
+                      api->execute(api->context, commands, count);
+                      return native->status();
+                    };
+                  }
+                  auto result =
+                      frame.session->poll(allocator, services, blocks, gpu);
+                  if (native) {
+                    const auto& stats = native->statistics();
+                    native_stats = stats;
+                    diagnostics.native_dispatch_count += stats.dispatches;
+                    diagnostics.native_submission_count += stats.submissions;
+                    diagnostics.native_compute_us += stats.device_us;
+                    diagnostics.native_constant_bytes += stats.constant_bytes;
+                    if (result.ok() && !native->status().ok())
+                      result = Result<DependencyProgress>(native->status());
+                  }
+                  callback_us = duration_us(callback_started);
+                  return result;
+                },
+                pump);
+            status = consume(frame.session->consumed_work() - charged_before);
+            if (!status.ok())
+              return fail(status);
+            if (!progress.ok()) {
+              diagnostics.operation_timings.push_back(
+                  OperationTiming{step.node_id, frame.backend, callback_us,
+                                  progress.status().code, 1, 0});
+              diagnostics.operation_timings.back().native_dispatch_count =
+                  native_stats.dispatches;
+              diagnostics.operation_timings.back().native_compute_us =
+                  native_stats.device_us;
+              if (fallback(progress.status())) {
+                status = restart_cpu();
+                if (!status.ok())
+                  return fail(status);
+                continue;
+              }
+              return fail(progress.status());
+            }
+            if (stop() != ErrorCode::Ok)
+              return fail(Status{stop(), {}});
+            auto event = progress.take_value();
+            if (auto* complete = std::get_if<DependencyResult>(&event)) {
+              status = records.append(step_index, *complete);
+              if (!status.ok())
+                return fail(status);
+              std::vector<Value> owned;
+              const auto allocator = seal.reservation->allocator();
+              for (const auto& fragment : complete->value.fragments()) {
+                if (allocator.owns(*fragment.storage()) ||
+                    external.count(fragment.storage().get())) {
+                  owned.push_back(fragment);
+                } else {
+                  auto imported = transfer_value(fragment, allocator, true);
+                  if (!imported.ok())
+                    return fail(imported.status());
+                  owned.push_back(imported.take_value());
+                }
+              }
+              auto fragments =
+                  ValueFragments::create(output.descriptor, output.facets,
+                                         frame.outputs, owned, limits);
+              if (!fragments.ok())
+                return fail(fragments.status());
+              frame.complete = fragments.take_value();
+              frame.session.reset();
+              frame.state = Frame::State::Complete;
+            } else {
+              auto pending = frame.session->pending_reads();
+              if (!pending.ok())
+                return fail(pending.status());
+              frame.parts.clear();
+              frame.ready.clear();
+              frame.next = 0;
+              for (const auto& input : step.inputs) {
+                auto none =
+                    Footprint::none(metadata(input).descriptor.shape, limits);
+                if (!none.ok())
+                  return fail(none.status());
+                frame.parts.push_back(none.take_value());
+              }
+              for (const auto& need : pending.value()) {
+                auto united =
+                    frame.parts.at(need.port).unite(need.samples, limits);
+                if (!united.ok())
+                  return fail(united.status());
+                frame.parts[need.port] = united.take_value();
+              }
+              frame.state = Frame::State::Waiting;
+            }
+          } else {
+            auto value = dependency_stage<Value>(
+                frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
+                [&]() -> Result<Value> {
+                  if (stop() != ErrorCode::Ok)
+                    return Result<Value>(Status{stop(), {}});
+                  auto allocator = seal.reservation->allocator();
+                  std::optional<gpu_internal::Invocation> native;
+                  if (frame.backend == Backend::Gpu) {
+                    allocator = native_device->allocator(allocator);
+                    native.emplace(native_device, active_token());
+                  }
+                  std::vector<Value> inputs;
+                  std::vector<Region> demands;
+                  for (std::size_t port = 0; port < frame.parts.size();
+                       ++port) {
+                    const auto& box = frame.parts[port].boxes().at(0);
+                    auto dense =
+                        frame.ready[port].collect(box, allocator, limits);
+                    if (!dense.ok())
+                      return Result<Value>(dense.status());
+                    if (native) {
+                      ++diagnostics.transfer_count;
+                      diagnostics.transfer_bytes +=
+                          dense.value().bytes().size();
+                    }
+                    inputs.push_back(dense.take_value());
+                    demands.push_back(box);
+                  }
+                  OperationInvocation call{
+                      inputs,        demands,        step.parameters,
+                      frame.backend, active_token(), frame.outputs.boxes()[0],
+                      allocator};
+                  if (native)
+                    call.gpu = native->service();
+                  const auto callback_started =
+                      std::chrono::steady_clock::now();
+                  auto computed = invoke(step.operation, call);
+                  if (native) {
+                    native_stats = native->statistics();
+                    diagnostics.native_dispatch_count +=
+                        native_stats.dispatches;
+                    diagnostics.native_submission_count +=
+                        native_stats.submissions;
+                    diagnostics.native_compute_us += native_stats.device_us;
+                    diagnostics.native_constant_bytes +=
+                        native_stats.constant_bytes;
+                    if (active_token().cancelled())
+                      computed =
+                          Result<Value>(Status{ErrorCode::Cancelled, {}});
+                    else if (!native->status().ok())
+                      computed = Result<Value>(native->status());
+                    else if (computed.ok() && !native_stats.dispatches)
+                      computed = Result<Value>(
+                          Status{ErrorCode::BackendUnavailable,
+                                 "GPU callback submitted no native work"});
+                  }
+                  callback_us = duration_us(callback_started);
+                  if (!computed.ok())
+                    return computed;
+                  if (!call.allocator.owns(*computed.value().storage()))
+                    return transfer_value(computed.value(), call.allocator,
+                                          true);
+                  return computed;
+                },
+                pump);
+            if (!value.ok()) {
+              diagnostics.operation_timings.push_back(
+                  OperationTiming{step.node_id, frame.backend, callback_us,
+                                  value.status().code, 1, 0});
+              diagnostics.operation_timings.back().native_dispatch_count =
+                  native_stats.dispatches;
+              diagnostics.operation_timings.back().native_compute_us =
+                  native_stats.device_us;
+              if (fallback(value.status()))
+                continue;
+              return fail(value.status());
+            }
+            status =
+                records.append_legacy(step_index, frame.outputs, frame.parts);
+            if (!status.ok())
+              return fail(status);
+            auto fragments = ValueFragments::create(
+                output.descriptor, output.facets, frame.outputs,
+                {value.take_value()}, limits);
+            if (!fragments.ok())
+              return fail(fragments.status());
+            frame.complete = fragments.take_value();
+            frame.ready.clear();
+            frame.state = Frame::State::Complete;
+          }
+          diagnostics.peak_active_tasks = 1;
+          diagnostics.selected_backends[step.node_id] = frame.backend;
+          diagnostics.operation_timings.push_back(OperationTiming{
+              step.node_id, frame.backend, callback_us, ErrorCode::Ok, 1,
+              frame.state == Frame::State::Complete ? elements.value() : 0});
+          diagnostics.operation_timings.back().native_dispatch_count =
+              native_stats.dispatches;
+          diagnostics.operation_timings.back().native_compute_us =
+              native_stats.device_us;
+        }
+      }
+      if (!returned)
+        return fail(Status::failure(ErrorCode::Internal,
+                                    "dependency output record missing"));
+      if (named.boundary)
+        continue;
+      auto recorded = records.output(named.name, named.step, named.samples);
+      if (!recorded.ok())
+        return fail(recorded);
+      if (fragment_outputs) {
+        const auto& descriptor = returned->descriptor();
+        std::vector<std::uint64_t> geometry(descriptor.shape.size(), 1);
+        const bool image = std::any_of(
+            returned->facets().begin(), returned->facets().end(),
+            [](const auto& f) { return f.key == "photospider.image"; });
+        if (image) {
+          geometry[0] = plan.tile_height();
+          geometry[1] = plan.tile_width();
+          geometry[2] = descriptor.shape[2];
+        } else {
+          geometry.back() = plan.tile_width();
+          if (geometry.size() > 1)
+            geometry[geometry.size() - 2] = plan.tile_height();
+        }
+        auto tiles = named.samples.tile_cover(geometry, limits);
+        if (!tiles.ok())
+          return fail(tiles.status());
+        auto count = tiles.value().element_count();
+        if (!count.ok())
+          return fail(count.status());
+        auto total = checked_add(diagnostics.tile_count, count.value());
+        if (!total.ok())
+          return fail(total.status());
+        diagnostics.tile_count = total.value();
+        fragment_outputs->emplace(named.name, std::move(*returned));
+        continue;
+      }
+      if (named.samples.boxes().size() != 1)
+        return fail(Status{ErrorCode::InvalidArgument,
+                           "dense output requires one nonempty rectangle"});
+      const auto& region = named.samples.boxes()[0];
+      auto bytes = region_bytes(returned->descriptor(), region);
+      if (!bytes.ok())
+        return fail(bytes.status());
+      auto reserved = reserve(bytes.value());
+      if (!reserved.ok())
+        return fail(reserved.status());
+      Seal seal{reserved.take_value()};
+      auto value =
+          returned->collect(region, seal.reservation->allocator(), limits);
+      if (!value.ok())
+        return fail(value.status());
+      returned.reset();
+      if (stop() != ErrorCode::Ok)
+        return fail(Status{stop(), {}});
+      if (sink) {
+        auto status = (*sink)(named.name, ValueView(value.value()));
+        if (!status.ok())
+          return fail(status);
+      } else {
+        result.values.emplace(named.name, value.take_value());
+      }
+      ++diagnostics.tile_count;
+    }
+    const auto peaks = budget->peaks(observation);
+    diagnostics.peak_live_bytes = peaks.first;
+    diagnostics.planned_peak_bytes = peaks.second;
+    diagnostics.execute_us = duration_us(started);
+    diagnostics.dependency_cache_work =
+        options.maximum_dependency_cache_work - cache_work;
+    result.dependencies = std::move(records).finish();
+    if (!sink && !fragment_outputs)
+      diagnostics.result_digest = result_digest(result.values);
+    if (stop() != ErrorCode::Ok)
+      return fail(Status{stop(), {}});
+    return Result<ExecutionResult>(std::move(result));
+  }
+
+ private:
+  /** @brief Runs exactly one ready stage and drains its callback ownership. */
+  template <class T>
+  static Result<T> dependency_stage(ThreadPool* pool,
+                                    WaitingAdmission* admission,
+                                    std::function<Result<T>()> work,
+                                    const std::function<void()>& pump = {}) {
+    struct Completion {
+      std::promise<Result<T>> promise;
+      Result<T> result{Status{ErrorCode::Internal, {}}};
+      std::function<Result<T>()> work;
+    };
+    auto completion = std::make_shared<Completion>();
+    completion->work = std::move(work);
+    auto future = completion->promise.get_future();
+    auto slot = admission->try_acquire();
+    if (!slot)
+      return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
+                                       "dependency waiting queue exhausted"));
+    QueuedCallback callback{
+        [completion] {
+          // The callable's owners retire before the completion notification.
+          auto work = std::move(completion->work);
+          try {
+            completion->result = work();
+          } catch (const std::bad_alloc&) {
+            completion->result =
+                Result<T>(Status{ErrorCode::ResourceExhausted, {}});
+          } catch (...) {
+            completion->result =
+                Result<T>(Status{ErrorCode::OperationFailed, {}});
+          }
+        },
+        std::move(*slot),
+        [completion] {
+          completion->promise.set_value(std::move(completion->result));
+        }};
+    if (!pool->submit(std::move(callback)))
+      return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
+                                       "dependency callback queue stopped"));
+    if (pump) {
+      while (future.wait_for(std::chrono::milliseconds(2)) !=
+             std::future_status::ready)
+        pump();
+      pump();
+    }
+    return future.get();
+  }
+
  public:
   /**
    * @brief Builds dependency counters and initial deterministic ready set.
@@ -2012,13 +3677,20 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 ExecutionContext::ExecutionContext(
     std::shared_ptr<OperationRegistry> operations,
     ExecutionContextConfig config)
-    : impl_(std::make_unique<Impl>(std::move(operations), config)) {}
+    : impl_(std::make_unique<Impl>(std::move(operations), config)) {
+  impl_->demands->context = this;
+}
 
 /**
  * @brief Implements exact local worker/resource teardown.
  * @copydetails ExecutionContext::~ExecutionContext
  */
-ExecutionContext::~ExecutionContext() noexcept = default;
+ExecutionContext::~ExecutionContext() noexcept {
+  if (impl_ && impl_->dependency_flights)
+    impl_->dependency_flights->close();
+  if (impl_ && impl_->demands)
+    impl_->demands->close();
+}
 void ExecutionContext::clear_disk_cache() {
   if (impl_->disk)
     impl_->disk->clear();
@@ -2031,11 +3703,18 @@ DiskCacheStatistics ExecutionContext::disk_cache_statistics() const {
   return impl_->disk ? impl_->disk->statistics() : DiskCacheStatistics{};
 }
 void ExecutionContext::clear_result_cache() {
+  impl_->dependency_flights->clear();
+  impl_->dependency_checkpoints->clear();
   if (impl_->cache)
     impl_->cache->clear();
 }
 ResultCacheStatistics ExecutionContext::cache_statistics() const {
-  return impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
+  auto result =
+      impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
+  const auto dependencies = impl_->dependency_flights->statistics();
+  result.in_flight += dependencies.first;
+  result.shared_computations += dependencies.second;
+  return result;
 }
 
 /**
@@ -2055,6 +3734,163 @@ Result<FrozenExecution> FrozenExecution::for_region(
   return Result<FrozenExecution>(std::move(result));
 }
 
+namespace {
+Result<std::string> frozen_identity() {
+  static std::atomic<std::uint64_t> sequence{1};
+  auto next = sequence.load();
+  do {
+    if (next == UINT64_MAX)
+      return Result<std::string>(Status{ErrorCode::ResourceExhausted, {}});
+  } while (!sequence.compare_exchange_weak(next, next + 1));
+  return Result<std::string>("frozen-" + std::to_string(next));
+}
+struct DemandKey {
+  std::string value;
+  std::uint64_t entries;
+};
+Result<DemandKey> demand_key(const DemandQuery& query,
+                             const ExecutionPlan& plan, std::uint64_t maximum) {
+  content_internal::Sha256 hash;
+  hash.text("photospider.demand-query.v1");
+  hash.integer(query.size());
+  std::uint64_t entries = 1;
+  if (query.size() > maximum || !maximum)
+    return Result<DemandKey>(Status{ErrorCode::ResourceExhausted, {}});
+  for (const auto& item : query) {
+    if (item.first.empty() || item.first.size() > 1024 ||
+        !item.second.valid() || !plan.outputs().count(item.first))
+      return Result<DemandKey>(Status{ErrorCode::InvalidArgument,
+                                      "unknown or invalid demand query"});
+    const auto weight = 1 + item.second.boxes().size();
+    if (weight > maximum || entries > maximum - weight)
+      return Result<DemandKey>(
+          Status{ErrorCode::ResourceExhausted, "demand query metadata limit"});
+    entries += weight;
+    hash.text(item.first);
+    hash.integer(item.second.shape().size());
+    for (const auto n : item.second.shape())
+      hash.integer(n);
+    hash.integer(item.second.boxes().size());
+    for (const auto& box : item.second.boxes())
+      for (const auto& d : box.dimensions()) {
+        hash.integer(d.offset);
+        hash.integer(d.extent);
+      }
+  }
+  return Result<DemandKey>(DemandKey{hash.finish(), entries});
+}
+Status unite_named(DemandQuery* target, const DemandQuery& values,
+                   const FootprintLimits& limits) {
+  for (const auto& item : values) {
+    auto found = target->find(item.first);
+    auto next = found == target->end()
+                    ? Footprint::from_regions(item.second.shape(),
+                                              item.second.boxes(), limits)
+                    : found->second.unite(item.second, limits);
+    if (!next.ok())
+      return next.status();
+    target->insert_or_assign(item.first, next.take_value());
+  }
+  std::uint64_t entries = 0;
+  for (const auto& item : *target) {
+    const auto cost = 1 + item.second.boxes().size();
+    if (cost > limits.maximum_boxes || entries > limits.maximum_boxes - cost)
+      return Status{ErrorCode::ResourceExhausted, {}};
+    entries += cost;
+  }
+  return Status::success();
+}
+Result<DemandQuery> changed_inputs(const ExecutionBindings& before,
+                                   const ExecutionBindings& after,
+                                   const DemandQuery& support,
+                                   const SnapshotAccessOptions& access,
+                                   const FootprintLimits& limits) {
+  std::map<std::string, const ExecutionBinding*> old, next;
+  for (const auto& input : before.inputs)
+    old.emplace(input.name, &input);
+  for (const auto& input : after.inputs)
+    next.emplace(input.name, &input);
+  std::uint64_t remaining = access.maximum_samples;
+  DemandQuery changes;
+  for (const auto& required : support) {
+    const auto& a = *old.at(required.first);
+    const auto& b = *next.at(required.first);
+    OperationMetadata metadata =
+        a.snapshot
+            ? OperationMetadata{a.snapshot->descriptor(), a.snapshot->facets()}
+            : OperationMetadata{a.value.descriptor(), a.value.facets()};
+    auto observations =
+        operation_observations(metadata, required.second, limits);
+    if (!observations.ok())
+      return Result<DemandQuery>(observations.status());
+    const bool image =
+        observations.value().shape().size() != metadata.descriptor.shape.size();
+    const auto channels = image ? metadata.descriptor.shape.back() : 1;
+    const auto width = Value::element_size(metadata.descriptor.element_type);
+    if (!channels || channels > SIZE_MAX / width)
+      return Result<DemandQuery>(Status{ErrorCode::ResourceExhausted, {}});
+    std::vector<std::uint8_t> left(channels * width), right(channels * width);
+    std::vector<Region> dirty;
+    auto status = observations.value().visit(
+        [&](const auto& coordinate) {
+          if (channels > remaining)
+            return Status{ErrorCode::ResourceExhausted,
+                          "demand update sample limit"};
+          remaining -= channels;
+          std::vector<RegionDimension> dimensions;
+          for (const auto at : coordinate)
+            dimensions.push_back({at, 1});
+          if (image)
+            dimensions.push_back({0, channels});
+          Region region(dimensions);
+          const auto read = [&](const ExecutionBinding& input,
+                                std::vector<std::uint8_t>* bytes) -> Status {
+            if (input.snapshot)
+              return input.snapshot->read(
+                  region, bytes->data(), bytes->size(),
+                  SnapshotAccessOptions{channels, access.cancellation});
+            auto at = coordinate;
+            if (image)
+              at.push_back(0);
+            for (std::uint64_t c = 0; c < channels; ++c) {
+              if (image)
+                at.back() = c;
+              auto offset = input.value.byte_address(at);
+              if (!offset.ok())
+                return offset.status();
+              std::memcpy(bytes->data() + c * width,
+                          input.value.bytes().data() + offset.value(), width);
+            }
+            return Status::success();
+          };
+          auto status = read(a, &left);
+          if (!status.ok())
+            return status;
+          status = read(b, &right);
+          if (!status.ok())
+            return status;
+          if (left != right) {
+            if (dirty.size() >= limits.maximum_boxes)
+              return Status{ErrorCode::ResourceExhausted,
+                            "demand edit footprint limit"};
+            dirty.push_back(std::move(region));
+          }
+          return Status::success();
+        },
+        access.maximum_samples, access.cancellation);
+    if (!status.ok())
+      return Result<DemandQuery>(status);
+    auto samples =
+        Footprint::from_regions(required.second.shape(), dirty, limits);
+    if (!samples.ok())
+      return Result<DemandQuery>(samples.status());
+    if (!samples.value().empty())
+      changes.emplace(required.first, samples.take_value());
+  }
+  return Result<DemandQuery>(std::move(changes));
+}
+}  // namespace
+
 Result<FrozenExecution> ExecutionContext::freeze(
     const ExecutionPlan& plan, ExecutionBindings bindings) const {
   if (!impl_ || !plan.current() ||
@@ -2073,7 +3909,11 @@ Result<FrozenExecution> ExecutionContext::freeze(
   auto validated = preflight_regional_bindings(plan, bindings, {});
   if (!validated.ok())
     return Result<FrozenExecution>(validated.status());
+  auto identity = frozen_identity();
+  if (!identity.ok())
+    return Result<FrozenExecution>(identity.status());
   FrozenExecution frozen;
+  frozen.execution_identity_ = identity.take_value();
   frozen.plan_ = plan;
   frozen.bindings_ = std::move(bindings);
   frozen.operations_ = impl_->operation_registry;
@@ -2085,6 +3925,384 @@ Result<FrozenExecution> ExecutionContext::freeze(
         Status::failure(ErrorCode::Stale, "graph changed during freeze"));
   return Result<FrozenExecution>(std::move(frozen));
 }
+Result<DemandResult> ExecutionContext::execute_fragments(
+    const FrozenExecution& frozen, const DemandQuery& query,
+    const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (!impl_ || !frozen.valid() || !frozen.plan_.current() ||
+      frozen.operations_ != impl_->operation_registry)
+    return Result<DemandResult>(
+        Status{ErrorCode::Stale, "invalid or foreign frozen demand"});
+  const auto stop = [&] {
+    if (options.dependencies.sets.cancellation.cancelled())
+      return ErrorCode::Cancelled;
+    return binding_stop(frozen.plan_, cancellation);
+  };
+  const auto failure = [&](Status status) {
+    const auto code = stop();
+    if (code != ErrorCode::Ok)
+      status = Status{code, {}};
+    return Result<DemandResult>(std::move(status));
+  };
+  if (stop() != ErrorCode::Ok)
+    return failure(Status{stop(), {}});
+  auto combined = CancellationToken::combine(
+      {cancellation, options.dependencies.sets.cancellation});
+  if (!combined.ok())
+    return failure(combined.status());
+  auto key =
+      demand_key(query, frozen.plan_, options.dependencies.sets.maximum_boxes);
+  if (!key.ok())
+    return failure(key.status());
+  auto validated =
+      preflight_regional_bindings(frozen.plan_, frozen.bindings_, cancellation);
+  if (!validated.ok())
+    return failure(validated.status());
+  for (const auto& item : query)
+    if (item.second.empty()) {
+      const auto& step =
+          frozen.plan_.steps().at(frozen.plan_.outputs().at(item.first));
+      if (step.traits.dependency_version == 1) {
+        std::vector<OperationMetadata> inputs;
+        for (const auto& input : step.inputs) {
+          if (const auto* source = std::get_if<PlanStepInput>(&input)) {
+            const auto& p = frozen.plan_.steps().at(source->step_index);
+            inputs.push_back({p.output_descriptor, p.output_facets});
+          } else {
+            const auto& p = frozen.plan_.input_declarations().at(
+                std::get<PlanWorkflowInput>(input).declaration_index);
+            inputs.push_back({p.descriptor, p.facets});
+          }
+        }
+        auto status = impl_->operation_registry->validate_dependency_metadata(
+            step.operation, inputs, step.parameters);
+        if (!status.ok())
+          return failure(status);
+      }
+    }
+  DemandResult result;
+  auto run = ExecutionRun::run_dependencies(
+      &impl_->cpu_pool, impl_->gpu_pool.get(), impl_->native_device,
+      &impl_->waiting_admission, impl_->budget, impl_->operation_registry,
+      [operations = impl_->operation_registry](
+          const std::string& key, const OperationInvocation& call) {
+        return operations->invoke_current(key, call, [] { return true; });
+      },
+      frozen.plan_, validated.take_value(), combined.value(), options, nullptr,
+      [this](std::uint64_t bytes) {
+        if (impl_->disk && impl_->budget->available() < bytes)
+          impl_->disk->drop_pending();
+        if (impl_->cache)
+          impl_->cache->reclaim_for(bytes);
+      },
+      &query, &result.values, frozen.execution_identity_,
+      impl_->dependency_flights.get(), impl_->cache.get(),
+      impl_->dependency_checkpoints.get());
+  if (!run.ok())
+    return failure(run.status());
+  auto completed = run.take_value();
+  result.diagnostics = std::move(completed.diagnostics);
+  result.dependencies = std::move(completed.dependencies);
+  if (stop() != ErrorCode::Ok)
+    return failure(Status{stop(), {}});
+  return Result<DemandResult>(std::move(result));
+}
+Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
+                                                   ExecutionBindings bindings,
+                                                   DemandConfig config) {
+  if (!impl_ || !plan.current() ||
+      plan.operation_registry_.lock() != impl_->operation_registry)
+    return Result<DemandHandle>(
+        Status{ErrorCode::Stale, "invalid or foreign demand plan"});
+  if (!config.maximum_metadata_entries ||
+      config.maximum_metadata_entries > 1048576)
+    return Result<DemandHandle>(
+        Status{ErrorCode::InvalidArgument, "invalid demand metadata limit"});
+  auto frozen = freeze(plan, std::move(bindings));
+  if (!frozen.ok())
+    return Result<DemandHandle>(frozen.status());
+  auto state = std::make_shared<DemandHandle::Impl>();
+  state->owner = impl_->demands;
+  state->config = config;
+  state->bundle = std::make_shared<const FrozenExecution>(frozen.take_value());
+  auto& owner = *impl_->demands;
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  if (owner.closing)
+    return Result<DemandHandle>(Status{ErrorCode::Cancelled, {}});
+  for (auto i = owner.handles.begin(); i != owner.handles.end();) {
+    // Do not acquire a temporary last owner under the publication lock:
+    // input allocation deleters may reenter another demand in this context.
+    if (i->second.handle.expired() || i->second.cancellation.cancelled())
+      i = owner.handles.erase(i);
+    else
+      ++i;
+  }
+  if (owner.handles.size() >= owner.maximum_handles || owner.next == UINT64_MAX)
+    return Result<DemandHandle>(
+        Status{ErrorCode::ResourceExhausted, "demand handle limit"});
+  owner.handles.emplace(owner.next++,
+                        execution_internal::DemandCoordinator::HandleEntry{
+                            state, state->cancellation.token()});
+  return Result<DemandHandle>(DemandHandle(std::move(state)));
+}
+DemandHandle::DemandHandle(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+Result<DemandResult> DemandHandle::request(
+    const DemandQuery& query, const CancellationToken& cancellation,
+    const ExecutionOptions& options) const {
+  if (!impl_)
+    return Result<DemandResult>(
+        Status{ErrorCode::Stale, "invalid demand handle"});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<DemandResult>(
+        Status{ErrorCode::Cancelled, "demand context retired"});
+  if (cancellation.cancelled() ||
+      options.dependencies.sets.cancellation.cancelled())
+    return Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
+  auto combined = CancellationToken::combine(
+      {cancellation, options.dependencies.sets.cancellation});
+  if (!combined.ok())
+    return Result<DemandResult>(combined.status());
+  auto begun = owner->acquire(impl_, combined.value());
+  if (!begun.ok())
+    return Result<DemandResult>(begun.status());
+  auto lease = begun.take_value();
+  const auto failure = [&](Status status) {
+    return Result<DemandResult>(lease->stop(std::move(status)));
+  };
+  auto key = demand_key(query, lease->bundle->plan(),
+                        std::min(impl_->config.maximum_metadata_entries,
+                                 options.dependencies.sets.maximum_boxes));
+  if (!key.ok())
+    return failure(key.status());
+  DemandQuery original = query;
+  auto run = *lease->bundle;
+  run.plan_.current_check_ = [handle = impl_, generation = lease->generation] {
+    return handle->generation.load(std::memory_order_acquire) == generation;
+  };
+  auto executed = owner->context->execute_fragments(
+      run, original, lease->cancellation, options);
+  if (!executed.ok())
+    return failure(executed.status());
+  auto result = executed.take_value();
+  result.generation = lease->generation;
+  auto publication = std::make_shared<Impl::Publication>();
+  publication->query = std::move(original);
+  publication->dependencies = result.dependencies;
+  auto limits = options.dependencies.sets;
+  limits.cancellation = lease->cancellation;
+  for (const auto& item : publication->query) {
+    auto empty = Footprint::none(item.second.shape(), limits);
+    if (!empty.ok())
+      return failure(empty.status());
+    publication->dirty.emplace(item.first, empty.take_value());
+  }
+  const auto base = checked_add(
+      key.value().entries, execution_internal::DependencyRecords::metadata_size(
+                               result.dependencies));
+  if (!base.ok())
+    return failure(base.status());
+  auto weight = checked_add(base.value(), publication->dirty.size());
+  if (!weight.ok())
+    return failure(weight.status());
+  publication->weight = weight.value();
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  auto status = lease->stop();
+  if (!status.ok())
+    return Result<DemandResult>(status);
+  if (impl_->revision == UINT64_MAX)
+    return Result<DemandResult>(Status{ErrorCode::ResourceExhausted, {}});
+  auto old = impl_->publications.find(key.value().value);
+  if (old != impl_->publications.end() &&
+      old->second->query != publication->query)
+    return Result<DemandResult>(
+        Status{ErrorCode::Internal, "query identity collision"});
+  const auto remainder =
+      impl_->metadata_entries -
+      (old == impl_->publications.end() ? 0 : old->second->weight);
+  if (publication->weight > impl_->config.maximum_metadata_entries ||
+      remainder > impl_->config.maximum_metadata_entries - publication->weight)
+    return Result<DemandResult>(
+        Status{ErrorCode::ResourceExhausted, "retained demand metadata limit"});
+  impl_->publications.insert_or_assign(key.value().value, publication);
+  impl_->metadata_entries = remainder + publication->weight;
+  ++impl_->revision;
+  return Result<DemandResult>(std::move(result));
+}
+Result<FrozenExecution> DemandHandle::freeze() const {
+  if (!impl_)
+    return Result<FrozenExecution>(Status{ErrorCode::Stale, {}});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<FrozenExecution>(Status{ErrorCode::Cancelled, {}});
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  if (owner->closing || impl_->cancellation.token().cancelled())
+    return Result<FrozenExecution>(Status{ErrorCode::Cancelled, {}});
+  return Result<FrozenExecution>(*impl_->bundle);
+}
+Result<std::uint64_t> DemandHandle::generation() const {
+  if (!impl_)
+    return Result<std::uint64_t>(Status{ErrorCode::Stale, {}});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<std::uint64_t>(Status{ErrorCode::Cancelled, {}});
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  if (owner->closing || impl_->cancellation.token().cancelled())
+    return Result<std::uint64_t>(Status{ErrorCode::Cancelled, {}});
+  return Result<std::uint64_t>(impl_->generation.load());
+}
+Status DemandHandle::release(const DemandQuery& query) const {
+  if (!impl_)
+    return Status{ErrorCode::Stale, {}};
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Status{ErrorCode::Cancelled, {}};
+  auto begun = owner->acquire(impl_, {});
+  if (!begun.ok())
+    return begun.status();
+  auto lease = begun.take_value();
+  auto key = demand_key(query, lease->bundle->plan(),
+                        impl_->config.maximum_metadata_entries);
+  if (!key.ok())
+    return lease->stop(key.status());
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  auto status = lease->stop();
+  if (!status.ok())
+    return status;
+  auto found = impl_->publications.find(key.value().value);
+  if (found == impl_->publications.end() || found->second->query != query)
+    return Status{ErrorCode::NotFound, {}};
+  if (impl_->revision == UINT64_MAX)
+    return Status{ErrorCode::ResourceExhausted, {}};
+  impl_->metadata_entries -= found->second->weight;
+  impl_->publications.erase(found);
+  ++impl_->revision;
+  return Status::success();
+}
+bool DemandHandle::cancel() const noexcept {
+  if (!impl_)
+    return false;
+  const bool first = impl_->cancellation.cancel();
+  std::shared_ptr<const FrozenExecution> retired;
+  if (auto owner = impl_->owner.lock()) {
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    impl_->publications.clear();
+    impl_->metadata_entries = 0;
+    retired = std::move(impl_->bundle);
+  }
+  return first;
+}
+Result<DemandUpdate> DemandHandle::replace_bindings(
+    ExecutionBindings bindings, const SnapshotAccessOptions& options) const {
+  if (!impl_)
+    return Result<DemandUpdate>(Status{ErrorCode::Stale, {}});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<DemandUpdate>(Status{ErrorCode::Cancelled, {}});
+  auto begun = owner->acquire(impl_, options.cancellation);
+  if (!begun.ok())
+    return Result<DemandUpdate>(begun.status());
+  auto lease = begun.take_value();
+  const auto failure = [&](Status status) {
+    return Result<DemandUpdate>(lease->stop(std::move(status)));
+  };
+  std::map<std::string, std::shared_ptr<const Impl::Publication>> publications;
+  {
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    auto status = lease->stop();
+    if (!status.ok())
+      return Result<DemandUpdate>(status);
+    publications = impl_->publications;
+    lease->revision = impl_->revision;
+  }
+  auto frozen =
+      owner->context->freeze(lease->bundle->plan_, std::move(bindings));
+  if (!frozen.ok())
+    return failure(frozen.status());
+  auto next = std::make_shared<const FrozenExecution>(frozen.take_value());
+  FootprintLimits limits{impl_->config.maximum_metadata_entries, 1048576,
+                         lease->cancellation};
+  DemandQuery support;
+  for (const auto& item : publications) {
+    auto source = item.second->dependencies.source_support(limits);
+    if (!source.ok())
+      return failure(source.status());
+    auto status = unite_named(&support, source.value(), limits);
+    if (!status.ok())
+      return failure(status);
+  }
+  auto access = options;
+  access.cancellation = lease->cancellation;
+  auto changes = changed_inputs(lease->bundle->bindings_, next->bindings_,
+                                support, access, limits);
+  if (!changes.ok())
+    return failure(changes.status());
+  DemandUpdate update;
+  if (lease->generation == UINT64_MAX)
+    return failure(Status{ErrorCode::ResourceExhausted, {}});
+  update.generation = lease->generation + 1;
+  std::uint64_t entries = 0;
+  for (auto& item : publications) {
+    auto publication = std::make_shared<Impl::Publication>(*item.second);
+    for (const auto& change : changes.value()) {
+      auto dirty = publication->dependencies.potential_dirty(
+          change.first, change.second, 7, limits);
+      if (!dirty.ok())
+        return failure(dirty.status());
+      auto status = unite_named(&publication->dirty, dirty.value(), limits);
+      if (!status.ok())
+        return failure(status);
+    }
+    auto key = demand_key(publication->query, next->plan_,
+                          impl_->config.maximum_metadata_entries);
+    if (!key.ok())
+      return failure(key.status());
+    auto weight =
+        checked_add(key.value().entries,
+                    execution_internal::DependencyRecords::metadata_size(
+                        publication->dependencies));
+    if (!weight.ok())
+      return failure(weight.status());
+    std::uint64_t cost = weight.value();
+    for (const auto& dirty : publication->dirty) {
+      weight = checked_add(cost, 1 + dirty.second.boxes().size());
+      if (!weight.ok())
+        return failure(weight.status());
+      cost = weight.value();
+    }
+    publication->weight = cost;
+    if (cost > impl_->config.maximum_metadata_entries ||
+        entries > impl_->config.maximum_metadata_entries - cost)
+      return failure(Status{ErrorCode::ResourceExhausted,
+                            "updated demand metadata limit"});
+    entries += cost;
+    auto status = unite_named(&update.coverage, publication->query, limits);
+    if (!status.ok())
+      return failure(status);
+    status = unite_named(&update.potential_dirty, publication->dirty, limits);
+    if (!status.ok())
+      return failure(status);
+    item.second = std::move(publication);
+  }
+  std::shared_ptr<const FrozenExecution> retired;
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  auto status = lease->stop();
+  if (!status.ok())
+    return Result<DemandUpdate>(status);
+  if (impl_->revision != lease->revision)
+    return Result<DemandUpdate>(Status{
+        ErrorCode::Stale, "demand publications changed during replacement"});
+  if (impl_->revision == UINT64_MAX)
+    return Result<DemandUpdate>(Status{ErrorCode::ResourceExhausted, {}});
+  retired = std::move(impl_->bundle);
+  impl_->bundle = std::move(next);
+  impl_->publications.swap(publications);
+  impl_->metadata_entries = entries;
+  ++impl_->revision;
+  impl_->generation.store(update.generation, std::memory_order_release);
+  return Result<DemandUpdate>(std::move(update));
+}
+
 Result<ExecutionResult> ExecutionContext::execute(
     const FrozenExecution& frozen, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
@@ -2100,6 +4318,9 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
 Result<ExecutionResult> ExecutionContext::execute(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (plan.dependency_network())
+    return execute_regions(plan, std::move(bindings), nullptr, cancellation,
+                           options);
   const bool spatial = std::any_of(
       plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
         return step.traits.output_schema.kind ==
@@ -2268,6 +4489,22 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     if (!validated.ok())
       return failure(validated.status());
     auto snapshot = validated.take_value();
+    if (plan.dependency_network())
+      return ExecutionRun::run_dependencies(
+          &impl_->cpu_pool, impl_->gpu_pool.get(), impl_->native_device,
+          &impl_->waiting_admission, impl_->budget, impl_->operation_registry,
+          [operations = impl_->operation_registry, &plan](
+              const std::string& key, const OperationInvocation& call) {
+            return operations->invoke_current(
+                key, call, [&plan] { return plan.current(); });
+          },
+          plan, std::move(snapshot), cancellation, options, sink,
+          [this](std::uint64_t bytes) {
+            if (impl_->disk && impl_->budget->available() < bytes)
+              impl_->disk->drop_pending();
+            if (impl_->cache)
+              impl_->cache->reclaim_for(bytes);
+          });
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
     std::map<std::uint64_t, Value> cached;
@@ -2304,6 +4541,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             diagnostics.shared_peak_live_bytes,
             std::max(part.shared_peak_live_bytes, part.peak_live_bytes));
       diagnostics.cache_hits += part.cache_hits;
+      diagnostics.block_cache_hits += part.block_cache_hits;
+      diagnostics.block_cache_misses += part.block_cache_misses;
       diagnostics.shared_computations += part.shared_computations;
       diagnostics.source_read_count += part.source_read_count;
       diagnostics.source_read_bytes += part.source_read_bytes;
@@ -2652,7 +4891,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             tile, snapshot,
             impl_->native_device && impl_->native_device->available()
                 ? impl_->native_device->identity()
-                : std::string{});
+                : std::string{},
+            cancellation);
         // Invalidate before lookup: a cached Whole value may be GPU-backed
         // while still derived from a CPU fallback earlier in this Run.
         for (std::size_t i = 0; i < tile.steps().size(); ++i) {

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.7.0
+  VERSION 0.8.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -88,6 +88,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_encode_range.cpp
   plugins/ops/01-numeric/numeric_maximum.cpp
   plugins/ops/01-numeric/numeric_mean.cpp
+  plugins/ops/01-numeric/numeric_ordered_scan.cpp
   plugins/ops/01-numeric/numeric_minimum.cpp
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
@@ -121,6 +122,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/image_gaussian_blur.cpp
   plugins/ops/07-grade/grade_levels.cpp
   plugins/ops/07-grade/image_exposure_gain.cpp
+  plugins/ops/08-transform/dependency_sampling.cpp
   plugins/ops/08-transform/image_downsample_box.cpp
   plugins/ops/08-transform/mask_downsample_box.cpp
   plugins/ops/09-composite/image_brush_circle.cpp
@@ -139,16 +141,26 @@ set(
 
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
+  src/lib/data/dependency.cpp
+  src/lib/data/footprint.cpp
+  src/lib/data/value_fragments.cpp
+  src/lib/data/fragment_atlas.cpp
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
+  src/lib/plugin/dependency_plugin.cpp
+  src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_discovery.cpp
+  src/lib/plugin/dependency_block.cpp
+  src/lib/plugin/dependency_invocation.cpp
   src/lib/plugin/operation_contract.cpp
   src/lib/plugin/operation_semantics.cpp
   src/lib/plugin/expression.cpp
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
+  src/lib/execution/dependency_records.cpp
   src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
@@ -330,6 +342,7 @@ add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
   foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
@@ -547,6 +560,10 @@ if(BUILD_TESTING)
     PS_BAD_CHANNEL_1="$<TARGET_FILE:channel_contract_1>"
     PS_BAD_CHANNEL_2="$<TARGET_FILE:channel_contract_2>")
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
+  photospider_add_test(test_ordered_reduction Photospider::kernel tests/integration/test_ordered_reduction.cpp)
+  photospider_add_test(test_ordered_scan Photospider::kernel tests/integration/test_ordered_scan.cpp)
+  photospider_add_test(test_scan_waiters photospider_test_kernel tests/integration/test_scan_waiters.cpp)
+  target_include_directories(test_scan_waiters PRIVATE src/lib)
   photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
   target_include_directories(test_computed_scalar PRIVATE examples)
   add_dependencies(test_computed_scalar photospider_rgba32f_ops)
@@ -554,6 +571,41 @@ if(BUILD_TESTING)
   photospider_add_test(test_result_cache Photospider::kernel tests/integration/test_result_cache.cpp)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
+  photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
+  photospider_add_test(test_execution_dependencies Photospider::kernel tests/integration/test_execution_dependencies.cpp)
+  photospider_add_test(test_execution_demand Photospider::kernel tests/integration/test_execution_demand.cpp)
+  add_library(dependency_fixture MODULE tests/fixtures/dependency_fixture.c)
+  target_link_libraries(dependency_fixture PRIVATE Photospider::operation_sdk)
+  if(UNIX)
+    target_link_libraries(dependency_fixture PRIVATE m)
+  endif()
+  target_compile_definitions(dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(dependency_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_test(test_dependency_plugin Photospider::kernel tests/integration/test_dependency_plugin.cpp)
+  target_link_libraries(test_dependency_plugin PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_definitions(test_dependency_plugin PRIVATE PS_DEPENDENCY_FIXTURE="$<TARGET_FILE:dependency_fixture>")
+  add_dependencies(test_dependency_plugin dependency_fixture)
+  foreach(_case RANGE 1 4)
+    add_library(dependency_bad_${_case} MODULE tests/fixtures/dependency_fixture.c)
+    target_link_libraries(dependency_bad_${_case} PRIVATE Photospider::operation_sdk)
+    if(UNIX)
+      target_link_libraries(dependency_bad_${_case} PRIVATE m)
+    endif()
+    target_compile_definitions(dependency_bad_${_case} PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD PS_DEPENDENCY_BAD_CASE=${_case})
+    set_target_properties(dependency_bad_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_compile_definitions(test_dependency_plugin PRIVATE PS_DEPENDENCY_BAD_${_case}="$<TARGET_FILE:dependency_bad_${_case}>")
+    add_dependencies(test_dependency_plugin dependency_bad_${_case})
+  endforeach()
+  photospider_add_test(test_dependency_program photospider_test_kernel tests/integration/test_dependency_program.cpp)
+  target_include_directories(test_dependency_program PRIVATE src/lib)
+  photospider_add_test(test_dependency_dirty Photospider::kernel tests/unit/test_dependency_dirty.cpp)
+  target_include_directories(test_dependency_dirty PRIVATE src/lib)
+  photospider_add_test(test_dependency Photospider::kernel tests/unit/test_dependency.cpp)
+  add_dependencies(test_dependency photospider_g4_workflow)
+  add_test(NAME test_g4_data COMMAND photospider_g4_workflow)
+  photospider_add_test(test_footprint Photospider::kernel tests/unit/test_footprint.cpp)
+  photospider_add_test(test_value_fragments Photospider::kernel tests/unit/test_value_fragments.cpp)
+  photospider_add_test(test_fragment_atlas Photospider::kernel tests/unit/test_fragment_atlas.cpp)
   photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
@@ -570,6 +622,31 @@ if(BUILD_TESTING)
   set_tests_properties(test_metal_images test_metal_images_plugin PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_dependency_gpu Photospider::kernel tests/unit/test_dependency_gpu.cpp)
+  photospider_add_test(photospider_g4_sync_gpu_workflow Photospider::kernel examples/g4_gpu_workflow/sync_main.cpp)
+  set_tests_properties(photospider_g4_sync_gpu_workflow PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_gpu_discovery Photospider::kernel tests/unit/test_gpu_discovery.cpp)
+  add_library(g4_discovery_plugin MODULE examples/g4_gpu_workflow/discovery_plugin.c)
+  target_link_libraries(g4_discovery_plugin PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(g4_discovery_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(g4_discovery_plugin PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_test(photospider_g4_discovery_workflow Photospider::kernel examples/g4_gpu_workflow/discovery_main.cpp)
+  target_compile_definitions(photospider_g4_discovery_workflow PRIVATE PS_G4_DISCOVERY_PLUGIN="$<TARGET_FILE:g4_discovery_plugin>")
+  add_dependencies(photospider_g4_discovery_workflow g4_discovery_plugin)
+  set_tests_properties(photospider_g4_discovery_workflow PROPERTIES SKIP_RETURN_CODE 77)
+  add_library(g4_c_gpu_plugin MODULE examples/g4_gpu_workflow/c_plugin.c)
+  target_link_libraries(g4_c_gpu_plugin PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(g4_c_gpu_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(g4_c_gpu_plugin PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_test(photospider_g4_c_gpu_workflow Photospider::kernel examples/g4_gpu_workflow/c_main.cpp)
+  target_compile_definitions(photospider_g4_c_gpu_workflow PRIVATE PS_G4_C_GPU_PLUGIN="$<TARGET_FILE:g4_c_gpu_plugin>")
+  add_dependencies(photospider_g4_c_gpu_workflow g4_c_gpu_plugin)
+  set_tests_properties(photospider_g4_c_gpu_workflow PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(photospider_g4_gpu_workflow Photospider::kernel examples/g4_gpu_workflow/main.cpp)
+  set_tests_properties(photospider_g4_gpu_workflow PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_fragment_atlas_gpu photospider_test_kernel tests/unit/test_fragment_atlas_gpu.cpp)
+  target_include_directories(test_fragment_atlas_gpu PRIVATE src/lib)
+  set_tests_properties(test_fragment_atlas_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_gpu photospider_test_kernel tests/unit/test_native_gpu.cpp)
   target_include_directories(test_native_gpu PRIVATE src/lib)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)

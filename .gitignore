@@ -50,6 +50,16 @@
 !plugins/ops/rgba32f/CMakeLists.txt
 
 # Maintained public-API image example and shared acceptance fixture.
+!examples/g4_gpu_workflow/
+!examples/g4_gpu_workflow/*.cpp
+!examples/g4_gpu_workflow/*.c
+!examples/g4_gpu_workflow/*.md
+!examples/g4_gpu_workflow/CMakeLists.txt
+!examples/g4_workflow/
+!examples/g4_workflow/*.cpp
+!examples/g4_workflow/*.hpp
+!examples/g4_workflow/*.md
+!examples/g4_workflow/CMakeLists.txt
 !examples/foundations_workflow/
 !examples/foundations_workflow/*.cpp
 !examples/foundations_workflow/*.hpp

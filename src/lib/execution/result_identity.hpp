@@ -19,11 +19,14 @@ namespace ps::execution_internal {
  */
 inline std::vector<std::string> result_keys(
     const ExecutionPlan& plan, const std::vector<ExecutionBinding>& bindings,
-    const std::string& native_identity = {}) {
+    const std::string& native_identity = {},
+    const CancellationToken& cancellation = {}) {
   std::vector<std::string> keys(plan.steps().size());
   std::map<std::pair<std::size_t, std::string>, std::string> memo;
   std::function<std::string(std::size_t, Region)> identify;
   identify = [&](std::size_t i, Region requested) -> std::string {
+    if (cancellation.cancelled())
+      return {};
     const auto& step = plan.steps()[i];
     const auto& t = step.traits;
     if (!t.cacheable || !t.deterministic || !t.side_effect_free ||
@@ -42,7 +45,7 @@ inline std::vector<std::string> result_keys(
     if (prior != memo.end())
       return prior->second;
     content_internal::Sha256 hash;
-    hash.text("photospider.result-region.v3");
+    hash.text("photospider.result-region.v4");
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
     if (step.backend == Backend::Gpu)
@@ -116,7 +119,9 @@ inline std::vector<std::string> result_keys(
             bindings[std::get<PlanWorkflowInput>(step.inputs[port])
                          .declaration_index];
         if (input.snapshot) {
-          auto key = input.snapshot->content_identity(demand);
+          SnapshotAccessOptions access;
+          access.cancellation = cancellation;
+          auto key = input.snapshot->content_identity(demand, access);
           if (!key.ok()) {
             valid = false;
             break;

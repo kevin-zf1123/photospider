@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+env:
+  CC: clang
+  CXX: clang++
+
 jobs:
   build-test-package:
     name: build-test-package (${{ matrix.os }}, shared=${{ matrix.build_shared_libs }})
@@ -15,6 +19,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Verify Clang
+        run: |
+          "$CC" --version
+          "$CXX" --version
       - name: Verify Ninja
         run: ninja --version
       - name: Configure
@@ -38,6 +46,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Verify Clang
+        run: |
+          "$CC" --version
+          "$CXX" --version
       - name: Verify Ninja
         run: ninja --version
       - name: Configure

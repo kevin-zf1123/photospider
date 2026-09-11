@@ -110,4 +110,18 @@ void notify_callback_body_finished() noexcept {
     hooks->callback_body_finished();
 }
 
+/** @brief Implements the private successful-checkpoint publication boundary. */
+void notify_checkpoint_published() noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->checkpoint_published)
+    hooks->checkpoint_published();
+}
+
+/** @brief Implements the private checkpoint lookup boundary. */
+void notify_checkpoint_borrowed() noexcept {
+  const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->checkpoint_borrowed)
+    hooks->checkpoint_borrowed();
+}
+
 }  // namespace ps::execution_testing

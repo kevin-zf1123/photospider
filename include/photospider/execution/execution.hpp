@@ -13,8 +13,12 @@
 #include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
+#include "photospider/execution/dependencies.hpp"
 
 namespace ps {
+namespace execution_internal {
+struct DemandCoordinator;
+}
 
 /** @brief Explicit local disposable cache directory and storage/queue limits.
  */
@@ -51,12 +55,23 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint32_t maximum_queued_tasks = 1024;
   /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
-  /** @brief Optional result retention sublimit; zero disables all cache work.
+  /** @brief Optional completed-result retention sublimit; zero disables it.
+   * Same-snapshot exact demand Flights still share active computations.
    */
   std::uint64_t result_cache_bytes = 0;
   /** @brief Optional exclusive disk directory; requires positive result cache.
    */
   std::optional<DiskCacheConfig> disk_cache = {};
+  /** @brief Maximum live context-managed demand handles, 1..65536. */
+  std::uint32_t maximum_demands = 1024;
+  /** @brief Concurrent dependency Flights and subscribers, each 1..1048576. */
+  std::uint64_t maximum_dependency_flights = 65536;
+  /** @brief Retained dependency-cache proof units, 1..1048576.
+   * @note Counts actual record owners, row/tag/coordinate storage and source
+   * witnesses per manifest; shared owners in one manifest count once. Optional
+   * exhaustion skips retention. Independent from the pixel allocation limit.
+   */
+  std::uint64_t maximum_dependency_cache_metadata = 65536;
 };
 
 /**
@@ -125,6 +140,18 @@ struct PHOTOSPIDER_API ExecutionBindings final {
 struct PHOTOSPIDER_API ExecutionOptions final {
   /** @brief Maximum in-flight plan steps for this Run. */
   std::uint32_t maximum_parallelism = 0;
+  /** @brief Per-session discovery/metadata limits for dependency plans. */
+  DependencyLimits dependencies = {};
+  /** @brief Run-wide bound on demand records and stage transitions. */
+  std::uint64_t maximum_dependency_work = 1048576;
+  /** @brief Separate optional cache-proof traversal/sample budget per Run.
+   * @note One shared budget precharges structural traversal, metadata copies,
+   * source sample/facet hashing, internal block keys and finite normalization.
+   * Optional exhaustion skips verification/retention without failing
+   * computation. Zero disables dependency cache verification and retention for
+   * that Run.
+   */
+  std::uint64_t maximum_dependency_cache_work = 1048576;
 };
 
 /**
@@ -151,7 +178,10 @@ struct PHOTOSPIDER_API OperationTiming final {
   std::uint64_t native_compute_us = 0;
 };
 
-/** @brief Cumulative context-local cache observations, synchronized on read. */
+/** @brief Cumulative context-local cache observations, synchronized on read.
+ * @note shared_computations/in_flight include exact demand Flights even when
+ * completed-result retention is disabled.
+ */
 struct ResultCacheStatistics final {
   std::uint64_t hits = 0, misses = 0, evictions = 0, shared_computations = 0;
   std::uint64_t retained_bytes = 0, entries = 0, in_flight = 0;
@@ -168,7 +198,10 @@ struct ResultCacheStatistics final {
 struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Total execute call duration in microseconds. */
   std::uint64_t execute_us = 0;
-  /** @brief Successful physical backend per source node. */
+  /** @brief Selected successful implementation backend per source node.
+   * @note A staged GPU path may reuse completed state or resolve a constant
+   * without new native work. Dispatch/submission fields report actual work.
+   */
   std::map<std::uint64_t, Backend> selected_backends;
   /** @brief Number of explicit cross-backend input transfers. */
   std::uint64_t transfer_count = 0;
@@ -205,10 +238,22 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint32_t peak_active_tasks = 0;
   /** @brief Successfully delivered output tile count, across named outputs. */
   std::uint64_t tile_count = 0;
-  /** @brief Successful regional source reads and bytes; Value bindings are
-   * separate. */
+  /** @brief Successful completed-result cache observations reused by this Run.
+   */
   std::uint64_t cache_hits = 0;
+  /** @brief Actual direct records visited by optional dependency cache proofs.
+   */
+  std::uint64_t dependency_cache_records_visited = 0;
+  /** @brief Precharged proof, normalization, sample and internal block-key
+   * work. */
+  std::uint64_t dependency_cache_work = 0;
+  /** @brief Completed internal state transitions reused/computed after keyed
+   * lookup. */
+  std::uint64_t block_cache_hits = 0, block_cache_misses = 0;
+  /** @brief Active computations joined without duplicating producer timings. */
   std::uint64_t shared_computations = 0;
+  /** @brief Successful regional source reads; direct Value bindings are
+   * separate. */
   std::uint64_t source_read_count = 0;
   std::uint64_t source_read_bytes = 0;
   /** @brief Human-readable CPU fallback reasons in occurrence order. */
@@ -232,6 +277,10 @@ struct PHOTOSPIDER_API ExecutionResult final {
   std::map<std::string, Value> values;
   /** @brief Raw compiler-independent execution diagnostics. */
   ExecutionDiagnostics diagnostics;
+  /** @brief Direct structural evidence for a completed dependency-network Run.
+   * @note Empty for the legacy execution path. Owns no result pixel storage.
+   */
+  ExecutionDependencies dependencies;
 };
 
 /**
@@ -255,9 +304,93 @@ class PHOTOSPIDER_API FrozenExecution final {
 
  private:
   friend class ExecutionContext;
+  friend class DemandHandle;
   ExecutionPlan plan_;
   ExecutionBindings bindings_;
   std::shared_ptr<OperationRegistry> operations_;
+  std::string execution_identity_;
+};
+
+/** @brief Exact named sample subsets of the compiled output regions. */
+using DemandQuery = std::map<std::string, Footprint>;
+/** @brief Complete sparse result; holes remain unauthorized and unallocated. */
+struct PHOTOSPIDER_API DemandResult final {
+  std::map<std::string, ValueFragments> values;
+  ExecutionDiagnostics diagnostics;
+  ExecutionDependencies dependencies;
+  /** @brief Captured demand generation; zero for direct frozen execution. */
+  std::uint64_t generation = 0;
+};
+/** @brief Bounds the total retained structural publications for one handle. */
+struct DemandConfig final {
+  /** @brief Retained metadata units; supported range 1..1048576. */
+  std::uint64_t maximum_metadata_entries = 65536;
+};
+/** @brief Atomic binding replacement and potential change in recorded outputs.
+ * @note Coverage excludes never-requested outputs. Dirty sets accumulate until
+ * a new successful request replaces that exact query's publication. Hints do
+ * not authorize clean results; byte comparisons use immutable input owners.
+ */
+struct PHOTOSPIDER_API DemandUpdate final {
+  std::uint64_t generation = 0;
+  DemandQuery coverage;
+  DemandQuery potential_dirty;
+};
+/** @brief Context-managed immutable binding bundle with explicit replacement.
+ * @note Copies share one handle. Requests are independently cancellable and
+ * keep original Q. Context destruction cancels and drains active calls; later
+ * handle calls fail Cancelled. No worker or pixel cache is owned by the handle.
+ */
+class PHOTOSPIDER_API DemandHandle final {
+ public:
+  DemandHandle() = default;
+  bool valid() const noexcept { return impl_ != nullptr; }
+  /** @brief Executes exact original Q against the captured latest generation.
+   * @return Complete fragments/evidence, or typed failure without partial
+   * publication. Atomic observations are isolated; terminal Q is never split.
+   * Concurrent replacement makes old latest requests Stale; cancellation wins.
+   * @note Equal Atomic observations or identical terminal Q in the same
+   * immutable bundle can share active work only with deterministic, side-effect
+   * free ancestors. Waiter cancellation sources are independent of the
+   * producer.
+   * @throws std::bad_alloc For request/structural metadata.
+   */
+  Result<DemandResult> request(const DemandQuery& query,
+                               const CancellationToken& cancellation = {},
+                               const ExecutionOptions& options = {}) const;
+  /** @brief Validates immutable replacements and commits bundle/dirty together.
+   * @note Values/snapshots must retain the same static declarations. Required
+   * old support bytes are compared under the sample limit. Concurrent request
+   * publication/replacement may return Stale for retry; no partial edit occurs.
+   * @return New generation and accumulated dirty coverage, or typed failure.
+   * @throws std::bad_alloc For immutable snapshots/metadata.
+   */
+  Result<DemandUpdate> replace_bindings(
+      ExecutionBindings bindings,
+      const SnapshotAccessOptions& options = {}) const;
+  /** @brief Pins the current bundle for ordinary independent frozen execution.
+   * @return Owning frozen work or Cancelled/Stale for an unusable handle.
+   */
+  Result<FrozenExecution> freeze() const;
+  /** @brief Removes one exact query's retained structural subscription.
+   * @note Does not cancel active requests. An already-running request for Q
+   * can publish a new subscription after this removal.
+   * @return Success, NotFound for an unregistered query, or stopped status.
+   */
+  Status release(const DemandQuery& query) const;
+  /** @brief Cancels all handle requests and releases retained publications.
+   * @return True on the first cancellation; running callbacks drain normally.
+   * @throws Nothing.
+   */
+  bool cancel() const noexcept;
+  Result<std::uint64_t> generation() const;
+
+ private:
+  friend class ExecutionContext;
+  friend struct execution_internal::DemandCoordinator;
+  struct Impl;
+  explicit DemandHandle(std::shared_ptr<Impl> impl);
+  std::shared_ptr<Impl> impl_;
 };
 
 /**
@@ -284,7 +417,8 @@ class PHOTOSPIDER_API ExecutionContext final {
   /**
    * @brief Stops admission, joins workers, and verifies resource settlement.
    * @throws Nothing.
-   * @note Callers must not invoke `execute` concurrently with destruction.
+   * @note Direct execute/open/freeze calls must not race destruction. Existing
+   * demand-handle calls may race shutdown; they are cancelled and drained.
    */
   ~ExecutionContext() noexcept;
 
@@ -347,6 +481,39 @@ class PHOTOSPIDER_API ExecutionContext final {
   [[nodiscard]] Result<ExecutionResult> execute(
       const ExecutionPlan& plan, ExecutionBindings bindings = {},
       const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+
+  /** @brief Opens an immutable latest-demand bundle without starting callbacks.
+   * @note Requires Value/kernel-snapshot bindings, using the freeze contract.
+   * Custom RegionalSource inputs must first be imported into snapshots. The
+   * handle owns its captured plan independently from later graph replacement.
+   * @return Handle or Stale/typed validation/resource failure.
+   */
+  Result<DemandHandle> open_demand(const ExecutionPlan& plan,
+                                   ExecutionBindings bindings = {},
+                                   DemandConfig config = {});
+  /** @brief Executes arbitrary exact subsets against independently frozen work.
+   * @note Empty revalidates static metadata and skips start/poll/source.
+   * Complete terminal RequestRecord Q stays intact, including noncontiguous
+   * requests. With a positive result cache, deterministic/side-effect-free/
+   * cacheable ancestry may reuse successful exact observations after matching
+   * the complete old source witness against current immutable bindings. Hits
+   * preserve per-output evidence under the current bundle identity. Optional
+   * cache limits do not change the observation or failure-isolation contract.
+   * CPU and native GPU callbacks use the existing context workers. Synchronous
+   * producers receive exact rectangular input collections; staged producers
+   * receive authorized fragments through bounded atlas/discovery services.
+   * BackendUnavailable may retry on CPU only when the operation permits it.
+   * A staged retry retires its failed continuation and starts the original Q
+   * again; per-session limits apply to each attempt, within the shared Run work
+   * bound. CPU fallback ancestry is propagated through shared Flights and Whole
+   * records and is excluded from result, checkpoint and block retention/reuse.
+   * Diagnostics record actual backends and rejected physical attempts.
+   * Caller must not race direct execution with context destruction.
+   */
+  Result<DemandResult> execute_fragments(
+      const FrozenExecution& frozen, const DemandQuery& query,
+      const CancellationToken& cancellation = {},
       const ExecutionOptions& options = {});
 
   /**

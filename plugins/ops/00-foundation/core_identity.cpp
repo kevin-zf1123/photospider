@@ -18,7 +18,7 @@ Status register_core_identity(OperationRegistry* registry) {
                                  simulated_gpu,
                                  simulated_gpu,
                                  0U,
-                                 7U,
+                                 8U,
                                  true,
                                  ElementType::Float64,
                                  OperationShapeRule::PreserveFirstInput,

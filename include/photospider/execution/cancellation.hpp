@@ -1,17 +1,19 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <utility>
+#include <vector>
 
-#include "photospider/core/export.hpp"
+#include "photospider/core/status.hpp"
 
 namespace ps {
 
 /**
  * @brief Read-only cooperative cancellation observation.
  *
- * @note Tokens are cheap copies sharing one monotonic false-to-true flag.
+ * @note Tokens are cheap copies observing immutable groups of monotonic flags.
  */
 class PHOTOSPIDER_API CancellationToken final {
  public:
@@ -29,11 +31,64 @@ class PHOTOSPIDER_API CancellationToken final {
    * @note Observation is lock-free where the platform atomic permits it.
    */
   [[nodiscard]] bool cancelled() const noexcept {
-    return state_ && state_->load(std::memory_order_acquire);
+    if (!state_)
+      return false;
+    if (state_->flag.load(std::memory_order_acquire))
+      return true;
+    for (const auto& source : state_->sources)
+      if (source->flag.load(std::memory_order_acquire))
+        return true;
+    return false;
+  }
+  /** @brief Observes cancellation from any of at most 64 distinct sources.
+   * @note Groups are flattened and deduplicated; observation never recurses or
+   * allocates and cancelling one source does not cancel any other source.
+   * @return Inert/group token or ResourceExhausted for more than 64 arguments
+   * or distinct flags. Inert arguments do not create a flag.
+   * @throws std::bad_alloc For bounded immutable group metadata.
+   */
+  static Result<CancellationToken> combine(
+      const std::vector<CancellationToken>& tokens) {
+    if (tokens.size() > 64)
+      return Result<CancellationToken>(
+          Status{ErrorCode::ResourceExhausted, {}});
+    auto state = std::make_shared<State>();
+    auto add = [&](const std::shared_ptr<const State>& source) {
+      if (std::find(state->sources.begin(), state->sources.end(), source) !=
+          state->sources.end())
+        return true;
+      if (state->sources.size() == 64)
+        return false;
+      state->sources.push_back(source);
+      return true;
+    };
+    for (const auto& token : tokens) {
+      if (!token.state_)
+        continue;
+      if (token.state_->sources.empty()) {
+        if (!add(token.state_))
+          return Result<CancellationToken>(
+              Status{ErrorCode::ResourceExhausted, {}});
+      } else {
+        for (const auto& source : token.state_->sources)
+          if (!add(source))
+            return Result<CancellationToken>(
+                Status{ErrorCode::ResourceExhausted, {}});
+      }
+    }
+    if (state->sources.empty())
+      return Result<CancellationToken>(CancellationToken{});
+    if (state->sources.size() == 1)
+      return Result<CancellationToken>(CancellationToken(state->sources[0]));
+    return Result<CancellationToken>(CancellationToken(std::move(state)));
   }
 
  private:
   friend class CancellationSource;
+  struct State {
+    std::atomic<bool> flag{false};
+    std::vector<std::shared_ptr<const State>> sources;
+  };
 
   /**
    * @brief Constructs a token sharing one source flag.
@@ -41,11 +96,11 @@ class PHOTOSPIDER_API CancellationToken final {
    * @throws Nothing.
    * @note Only CancellationSource can create an active token.
    */
-  explicit CancellationToken(std::shared_ptr<std::atomic<bool>> state) noexcept
+  explicit CancellationToken(std::shared_ptr<const State> state) noexcept
       : state_(std::move(state)) {}
 
   /** @brief Shared monotonic flag; null means cancellation is unsupported. */
-  std::shared_ptr<std::atomic<bool>> state_;
+  std::shared_ptr<const State> state_;
 };
 
 /**
@@ -60,7 +115,7 @@ class PHOTOSPIDER_API CancellationSource final {
    * @throws std::bad_alloc If the shared flag cannot be allocated.
    * @note The source and all tokens share the flag lifetime.
    */
-  CancellationSource() : state_(std::make_shared<std::atomic<bool>>(false)) {}
+  CancellationSource() : state_(std::make_shared<CancellationToken::State>()) {}
 
   /**
    * @brief Creates a read-only token.
@@ -80,13 +135,13 @@ class PHOTOSPIDER_API CancellationSource final {
    */
   bool cancel() noexcept {
     bool expected = false;
-    return state_->compare_exchange_strong(expected, true,
-                                           std::memory_order_acq_rel);
+    return state_->flag.compare_exchange_strong(expected, true,
+                                                std::memory_order_acq_rel);
   }
 
  private:
   /** @brief Shared monotonic state retained by issued tokens. */
-  std::shared_ptr<std::atomic<bool>> state_;
+  std::shared_ptr<CancellationToken::State> state_;
 };
 
 }  // namespace ps

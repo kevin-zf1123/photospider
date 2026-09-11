@@ -59,6 +59,15 @@ Result<ExecutionResult> run(const std::string& operation,
   auto base = make_default_operation_registry();
   auto registry = std::make_shared<OperationRegistry>();
   auto traits = base->find_traits(operation).take_value();
+  if (traits.dependency_version) {
+    // This fixture is a synchronous outer wrapper around the real public
+    // direct staged invocation. Reserve its live state and scalar assembly.
+    traits.workspace_bytes += traits.continuation_bytes + 16;
+    traits.dependency_version = 0;
+    traits.continuation_bytes = 0;
+    traits.maximum_dependency_stages = 0;
+    traits.region_rule = OperationRegionRule::Whole;
+  }
   auto registered = registry->register_operation(
       {operation, traits,
        [base, operation, calls](const OperationInvocation& call) {

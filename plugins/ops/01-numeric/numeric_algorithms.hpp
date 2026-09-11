@@ -356,53 +356,5 @@ inline Result<Value> arithmetic(const OperationInvocation& call,
     return Result<Value>(status);
   return publish(std::move(output), call.cancellation);
 }
-template <class Number>
-inline Result<Value> reduction(const OperationInvocation& call, bool variance) {
-  input_internal::Float32Environment environment;
-  if (!environment.active())
-    return Result<Value>(argument("numeric environment unavailable"));
-  const auto& input = call.inputs[0];
-  auto count = input.region().element_count();
-  if (!count.ok())
-    return Result<Value>(count.status());
-  double sum = 0;
-  auto status =
-      visit(input, call.cancellation, [&](auto index, const auto& coordinate) {
-        const double value = read<Number>(input, coordinate);
-        if (!std::isfinite(value))
-          return numeric_failure(index, "reduction input is nonfinite");
-        sum += value;
-        return std::isfinite(sum)
-                   ? Status::success()
-                   : numeric_failure(index, "reduction sum overflow");
-      });
-  if (!status.ok())
-    return Result<Value>(status);
-  const double mean = sum / static_cast<double>(count.value());
-  double result = mean;
-  if (variance) {
-    sum = 0;
-    status = visit(
-        input, call.cancellation, [&](auto index, const auto& coordinate) {
-          const double difference =
-              static_cast<double>(read<Number>(input, coordinate)) - mean;
-          const double square = difference * difference;
-          sum += square;
-          return std::isfinite(sum)
-                     ? Status::success()
-                     : numeric_failure(index, "variance overflow");
-        });
-    if (!status.ok())
-      return Result<Value>(status);
-    result = sum / static_cast<double>(count.value());
-  }
-  auto made = MutableValue::allocate({ElementType::Float64, {1}},
-                                     call.output_region, call.allocator);
-  if (!made.ok())
-    return Result<Value>(made.status());
-  auto output = made.take_value();
-  std::memcpy(output.data(), &result, sizeof(result));
-  return publish(std::move(output), call.cancellation);
-}
 
 }  // namespace ps::plugin_internal::numeric_ops

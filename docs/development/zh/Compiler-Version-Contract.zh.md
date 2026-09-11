@@ -103,3 +103,17 @@ minor 请求，C++ consumer 重建。Daemon 0.6 迁移为独立任务。
 #289 的共享契约实现现已在 ops-foundations 提供上述 0.7.0/ABI7 接口，包括 canonical
 typed facets 和完整约束/dense-output identity。这是本地分支实现；#290–#297 及验证后
 交付到 ops 是独立完成条件。Main 保持决策基线，后续变更需要独立授权工作。
+
+## G4 实现版本
+
+G4 开发分支使用 package 0.8.0、operation ABI/OperationTraits 8、
+semantic-graph-ir-v8、physical-plan-v8、plan-cache-key-v8 和 result-region-key-v4。
+五个观察/失败/依赖字段及 EffectiveAtomic 进入适用的 identity。Optimizer-v5-canonical-noop、
+result digest v2、disk framing v2、image facet v2、schema 2 与 provider ABI 1
+保持原语义。Host 在读取 get_api_v8 前拒绝 version 7 DSO，不提供旧别名或 image-v1
+reader。C++ consumer 需要以 0.8 重编。上面的 foundations 段落描述其历史实现边界。
+C++ 与 C 分阶段程序通过既有 Run 和 allocator 执行，支持精确 fragments、不可变
+依赖记录、独立共享观察和内容结果复用。原生 fragment atlas、有界 GPU discovery
+及 CPU fallback 使用同一协议。已实现契约和可执行验收案例见
+[依赖数据与执行](../../kernel-architecture/zh/Dependency-Data.zh.md)及
+[G4 workflows](../../../examples/g4_workflow/README.zh.md)。
