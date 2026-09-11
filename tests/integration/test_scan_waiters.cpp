@@ -120,6 +120,50 @@ int shared(bool long_first, bool cancel_owner, bool finite, bool warm) {
   }
   return 0;
 }
+int warm_short_first(bool cancel_short, bool finite) {
+  auto registry = make_default_operation_registry();
+  WorkflowDocument doc;
+  doc.inputs = {
+      {1, "x", {ElementType::Float64, {2}}, Region::whole({2}), {0, {8}}, {}}};
+  doc.nodes = {{1,
+                "numeric.ordered_scan",
+                {WorkflowInputReference{1}},
+                {{"block_size", INT64_C(1)}}}};
+  doc.outputs = {{"y", 1, "value"}};
+  GraphContext graph(doc);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {2, false, 8, 4096, 64});
+  auto demand =
+      context.open_demand(plan, {{{"x", input(finite)}}}).take_value();
+  PS_CHECK(demand.request({{"y", point(0)}}).ok());
+  CancellationSource stop;
+  if (cancel_short)
+    stop.cancel();
+  // The short observation is already completed in cache. It has no active
+  // checkpoint callback to hold; submit it first and preserve its own outcome.
+  auto short_result = demand.request({{"y", point(0)}}, stop.token());
+  auto long_result = demand.request({{"y", point(1)}});
+  if (cancel_short) {
+    PS_CHECK(short_result.status().code == ErrorCode::Cancelled);
+  } else {
+    double value = 0;
+    PS_CHECK(short_result.ok() &&
+             short_result.value().diagnostics.cache_hits == 1 &&
+             short_result.value().values.at("y").read({0}, &value, 8).ok() &&
+             value == 1);
+  }
+  if (finite) {
+    double value = 0;
+    PS_CHECK(long_result.ok() &&
+             long_result.value().values.at("y").read({1}, &value, 8).ok() &&
+             value == 3);
+  } else {
+    PS_CHECK(long_result.status().code == ErrorCode::OperationFailed &&
+             long_result.status().message == "nonfinite scan input 1");
+  }
+  PS_CHECK(demand.request({{"y", point(0)}}).ok());
+  return 0;
+}
 }  // namespace
 int main() {
   for (bool long_first : {false, true}) {
@@ -127,6 +171,9 @@ int main() {
     PS_CHECK(shared(long_first, true, false, false) == 0);
     PS_CHECK(shared(long_first, true, true, false) == 0);
   }
+  for (bool cancel : {false, true})
+    for (bool finite : {false, true})
+      PS_CHECK(warm_short_first(cancel, finite) == 0);
   PS_CHECK(shared(true, false, false, true) == 0);
   PS_CHECK(shared(true, true, false, true) == 0);
   return 0;

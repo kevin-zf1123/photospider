@@ -32,7 +32,7 @@ tile extents 和 payload 字节数。任意 fragment 数仅需 payload 与目录
 clamp。
 
 C++ staged GPU Run 已接入下述 transport。C staged GPU 桥接已接入；[有界 GPU discovery](GPU-Discovery.zh.md) 已接入；
-依赖模板中的旧同步 GPU producer 仍待实现。Float64/Int64 原始 bits 传输不代表已支持
+同步 GPU producer 使用下述精确矩形传输。Float64/Int64 原始 bits 传输不代表已支持
 相应 GPU 浮点算术。
 
 公开安装 consumer 使用 `test_fragment_atlas.cpp`，验证四 dtype、wire words、bit63
@@ -98,3 +98,23 @@ Float32 样本，独立预期均为 2145。实际 1 dispatch + 1 block hit；第
 英文文档提供命令。standalone CMake 与 static/shared 安装 consumer 均编译该 C11
 模块及公开 loader；loader 可传模块路径。无 native 时先验证 CPU，再返回 77。
 此桥接通过独立 callback 提供[有界 discovery request table](GPU-Discovery.zh.md)。
+
+
+## 同步 producer 与 CPU 回退
+
+依赖 Run 通过 context 原有 native worker 调用同步 GPU producer。host 按声明的矩形
+输入需求收集到紧密 native storage，分别计入实际取整容量，并在 callback 生命周期内
+提供 `ps_gpu_service_v8`。GPU callback 必须提交真实 native work。Invocation view
+在 owner 退休或 CPU 重试前完成 drain；Whole 保持全域验证与证据。
+
+仅 `BackendUnavailable`、支持 CPU 且 `allows_cpu_fallback` 时重试。staged 失败后
+退休 continuation，在 CPU worker 从原始 Q 重新 start。取消优先；每个 attempt 使用
+per-session 限额，所有 attempt 计入同一 Run 工作上限。诊断记录实际 backend 和拒绝
+attempt。回退来源随子结果、shared Flight、Whole record 传播；禁止保留 dependency
+结果缓存，后续阶段也不使用或保留 checkpoint/pure block。waiter 取消继续独立。
+
+公开 `sync_main.cpp` 以 `x+1` 独立 oracle 检查离散 `{0,2}` 得到 1、3，验证真实 Metal、
+无设备 CPU 回退、Whole 和 staged 中途回退后再消费的 GPU 后代、attempt 诊断、无旧
+缓存命中的 native 重试及 Whole 全域证据。两个 20000 字节 payload 的 native 分配各取整为 32768 字节，总预算
+65535 失败、65536 成功；在同一预算内释放前次输出后也可完成回退与再次 native 重算。无 Metal 时先检查无设备回退再返回 77。
+`test_execution_demand` 另检查共享回退中的 owner waiter 取消及零缓存保留。命令见英文。

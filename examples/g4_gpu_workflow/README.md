@@ -65,3 +65,18 @@ Overflow, disabled discovery and premature completion fail. The native table's
 rounded allocation participates in an exact admission frontier. See
 [GPU Discovery](../../docs/kernel-architecture/GPU-Discovery.md) for the wire
 format, resource limits and protocol tests.
+
+
+Existing synchronous GPU producers and CPU fallback are exercised by:
+
+```sh
+cmake --build build/issue257-static --target photospider_g4_sync_gpu_workflow -j 4
+build/issue257-static/photospider_g4_sync_gpu_workflow
+# The standalone installed-package build includes the same target.
+```
+
+Expected separated results for `x+1` are 1 and 3. The workflow checks real Metal,
+missing-device fallback, Whole and staged restart with native descendants,
+rejected attempt diagnostics, cache isolation and exact 65535/65536-byte
+admission. No Metal returns 77 only after the CPU fallback checks. See
+[Fragment Atlas](../../docs/kernel-architecture/Fragment-Atlas.md#synchronous-producers-and-cpu-fallback).

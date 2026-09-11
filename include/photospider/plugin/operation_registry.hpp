@@ -403,7 +403,7 @@ struct PHOTOSPIDER_API OperationInvocation final {
   /** @brief Canonically ordered source parameters. */
   const std::map<std::string, ParameterValue>& parameters;
   /**
-   * @brief Physical backend selected by the validated plan.
+   * @brief Actual physical backend for this attempt, including CPU fallback.
    * @note Only `Cpu` and `Gpu` are accepted at invocation.
    */
   Backend backend = Backend::Cpu;

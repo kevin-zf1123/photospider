@@ -195,7 +195,7 @@ bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不�
 `DemandConfig::maximum_metadata_entries` 限制每个 handle 保留的 query/evidence/dirty
 metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache；当前调用
 通过 context-owned Flights 共享同一不可变 bundle 中重叠的活跃观察，执行仍使用既有
-CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的内容缓存复用既有像素 LRU 和有界结构证明，见
+CPU/GPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的内容缓存复用既有像素 LRU 和有界结构证明，见
 [缓存模型](Cache-Model.zh.md)。C++ staged GPU fragment 已接入，C staged GPU 桥接同样已接入，[有界 discovery](GPU-Discovery.zh.md) 已实现。
 
 `test_execution_demand` 覆盖稀疏结果、各 dtype snapshot、连续 dirty 累积、frozen
@@ -327,3 +327,6 @@ C++ staged GPU 已通过 [Fragment Atlas](Fragment-Atlas.zh.md) 接入现有 GPU
 共同 admission。每阶段按需 materialize 精确端口，工作量预扣、真实 native 容量独立计费，
 错误 sticky，普通/stream/frozen Run 均保持辅助取消优先级。C staged GPU 桥接同样已接入，[有界
 GPU discovery](GPU-Discovery.zh.md) 已实现。
+
+同步 GPU producer 也通过既有 native worker 执行，实际容量与 CPU 回退见
+[Fragment Atlas](Fragment-Atlas.zh.md)。

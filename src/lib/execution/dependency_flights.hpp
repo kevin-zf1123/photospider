@@ -18,6 +18,8 @@ struct DependencyFlightValue final {
   ValueFragments value;
   std::shared_ptr<const DependencyRecord> record;
   std::uint64_t producer_peak = 0;
+  Backend backend = Backend::Cpu;
+  bool fallback_taint = false;
 };
 /** @brief Context-owned exact-observation directory without worker ownership.
  * @note A claim's driver remains on the requesting coordinator. Only actual

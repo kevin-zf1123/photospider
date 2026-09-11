@@ -26,3 +26,7 @@ target_link_libraries(photospider_g4_discovery_workflow PRIVATE Photospider::ker
 target_compile_features(photospider_g4_discovery_workflow PRIVATE cxx_std_17)
 target_compile_definitions(photospider_g4_discovery_workflow PRIVATE PS_G4_DISCOVERY_PLUGIN="$<TARGET_FILE:g4_discovery_plugin>")
 add_dependencies(photospider_g4_discovery_workflow g4_discovery_plugin)
+
+add_executable(photospider_g4_sync_gpu_workflow sync_main.cpp)
+target_link_libraries(photospider_g4_sync_gpu_workflow PRIVATE Photospider::kernel)
+target_compile_features(photospider_g4_sync_gpu_workflow PRIVATE cxx_std_17)

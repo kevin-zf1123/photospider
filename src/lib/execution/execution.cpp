@@ -1282,6 +1282,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
       std::string record_identity;
       bool cache_hit = false;
+      bool backend_selected = false, fallback_taint = false;
+      Backend backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
           upstream;
       std::set<std::string> upstream_ids;
@@ -1509,6 +1511,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
     }
     std::map<std::size_t, ValueFragments> whole_records;
+    std::map<std::size_t, std::pair<Backend, bool>> whole_backends;
     std::map<std::size_t,
              std::shared_ptr<const execution_internal::DependencyRecord>>
         whole_evidence;
@@ -1590,6 +1593,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       frames.emplace_back(PlanStepInput{named.step}, named.samples, false,
                           !named.boundary);
       std::optional<ValueFragments> returned;
+      bool returned_taint = false;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
           returned_records;
       while (!frames.empty()) {
@@ -1601,6 +1605,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         auto& frame = frames.back();
         const auto output = metadata(frame.target);
         if (returned) {
+          frame.fallback_taint |= returned_taint;
           for (auto& record : returned_records) {
             const auto record_id =
                 records.observation_identity(record->step, record->samples);
@@ -1641,13 +1646,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
             if (frame.flight && frame.flight->producer()) {
               if (dependency_cache && cacheable[producer->step_index] &&
-                  !frame.cache_hit && cache_work)
+                  !frame.cache_hit && !frame.fallback_taint && cache_work)
                 retain_cache(producer->step_index, frame.record,
                              *frame.complete);
               auto value =
                   std::make_shared<execution_internal::DependencyFlightValue>();
               value->value = *frame.complete;
               value->record = frame.record;
+              value->backend = frame.backend;
+              value->fallback_taint = frame.fallback_taint;
               value->producer_peak = budget->peaks(observation).first;
               frame.flight->complete(
                   Result<std::shared_ptr<
@@ -1665,11 +1672,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     Status::failure(ErrorCode::Internal,
                                     "incomplete Whole record publication"));
               whole_records.emplace(producer->step_index, *frame.complete);
+              whole_backends.emplace(
+                  producer->step_index,
+                  std::make_pair(frame.backend, frame.fallback_taint));
               if (frame.record)
                 whole_evidence.emplace(producer->step_index, frame.record);
             }
           }
           returned = std::move(frame.complete);
+          returned_taint = frame.fallback_taint;
           if (frame.record)
             returned_records = {std::move(frame.record)};
           else
@@ -1774,6 +1785,35 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         const auto step_index =
             std::get<PlanStepInput>(frame.target).step_index;
         const auto& step = plan.steps().at(step_index);
+        if (!frame.backend_selected) {
+          frame.backend = step.backend;
+          frame.backend_selected = true;
+        }
+        const auto fallback = [&](const Status& failure) {
+          if (failure.code != ErrorCode::BackendUnavailable ||
+              frame.backend != Backend::Gpu || !step.traits.supports_cpu ||
+              !step.traits.allows_cpu_fallback || stop() != ErrorCode::Ok)
+            return false;
+          frame.backend = Backend::Cpu;
+          frame.fallback_taint = true;
+          const auto reason = step.operation + ": " + failure.message;
+          if (std::find(diagnostics.fallback_reasons.begin(),
+                        diagnostics.fallback_reasons.end(),
+                        reason) == diagnostics.fallback_reasons.end())
+            diagnostics.fallback_reasons.push_back(reason);
+          return true;
+        };
+        const auto restart_cpu = [&] {
+          // The failed worker has drained. Retire its continuation and input
+          // owners before restarting the same observation on the CPU pool.
+          frame.session.reset();
+          frame.ready.clear();
+          frame.parts.clear();
+          frame.upstream.clear();
+          frame.upstream_ids.clear();
+          frame.next = 0;
+          frame.state = Frame::State::Initial;
+        };
         const auto retained = whole_records.find(step_index);
         if (frame.state == Frame::State::Initial &&
             retained != whole_records.end()) {
@@ -1781,6 +1821,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (!restricted.ok())
             return fail(restricted.status());
           frame.complete = restricted.take_value();
+          frame.backend = whole_backends.at(step_index).first;
+          frame.fallback_taint |= whole_backends.at(step_index).second;
           const auto evidence = whole_evidence.find(step_index);
           if (evidence != whole_evidence.end())
             frame.record = evidence->second;
@@ -1797,12 +1839,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return fail(
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
-        if (step.backend == Backend::Gpu &&
-            (!native_device || !native_device->available() || !gpu_pool ||
-             step.traits.dependency_version != 1))
-          return fail(Status::failure(
-              ErrorCode::BackendUnavailable,
-              "native dependency worker or staged program unavailable"));
         if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
           if (step.traits.dependency_version == 0 && step.whole_boundary) {
             // The legacy Whole contract observes global validation for every
@@ -1859,8 +1895,22 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           frame.state = Frame::State::Complete;
           continue;
         }
+        if (frame.backend == Backend::Gpu &&
+            (!native_device || !native_device->available() || !gpu_pool)) {
+          const auto unavailable =
+              Status::failure(ErrorCode::BackendUnavailable,
+                              "native dependency worker unavailable");
+          diagnostics.operation_timings.push_back(OperationTiming{
+              step.node_id, frame.backend, 0, unavailable.code, 1, 0});
+          if (!fallback(unavailable))
+            return fail(unavailable);
+          if (frame.session) {
+            restart_cpu();
+            continue;
+          }
+        }
         if (frame.state == Frame::State::Initial) {
-          if (flights && shareable[step_index]) {
+          if (flights && shareable[step_index] && !frame.flight) {
             const auto parent_token = active_token();
             bool parent_shared = false;
             for (const auto& ancestor : frames)
@@ -1885,8 +1935,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 return fail(status);
               frame.complete = shared.value()->value;
               frame.record = shared.value()->record;
+              frame.backend = shared.value()->backend;
+              frame.fallback_taint |= shared.value()->fallback_taint;
               ++diagnostics.shared_computations;
-              diagnostics.selected_backends[step.node_id] = step.backend;
+              diagnostics.selected_backends[step.node_id] = frame.backend;
               diagnostics.shared_peak_live_bytes =
                   std::max(diagnostics.shared_peak_live_bytes,
                            shared.value()->producer_peak);
@@ -1894,7 +1946,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               continue;
             }
             limits.cancellation = active_token();
-            if (dependency_cache && cacheable[step_index] && cache_work) {
+            if (dependency_cache && cacheable[step_index] &&
+                !frame.fallback_taint && cache_work) {
               const auto template_key =
                   observation_key(step_index, frame.outputs, false);
               for (const auto& candidate :
@@ -1935,7 +1988,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 frame.cache_hit = true;
                 frame.state = Frame::State::Complete;
                 ++diagnostics.cache_hits;
-                diagnostics.selected_backends[step.node_id] = step.backend;
+                diagnostics.selected_backends[step.node_id] = frame.backend;
                 break;
               }
               if (frame.state == Frame::State::Complete)
@@ -1951,7 +2004,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             request.parameters = step.parameters;
             request.outputs = frame.outputs;
             request.snapshot_identity = identity;
-            request.backend = step.backend;
+            request.backend = frame.backend;
             request.cancellation = active_token();
             request.limits = options.dependencies;
             if (flights)
@@ -1975,8 +2028,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       seal.reservation->allocator());
                 },
                 pump);
-            if (!session.ok())
+            if (!session.ok()) {
+              diagnostics.operation_timings.push_back(OperationTiming{
+                  step.node_id, frame.backend, 0, session.status().code, 1, 0});
+              if (fallback(session.status())) {
+                restart_cpu();
+                continue;
+              }
               return fail(session.status());
+            }
             frame.session = session.take_value();
             status = consume(frame.session->consumed_work());
             if (!status.ok())
@@ -2031,7 +2091,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             return fail(Status::failure(ErrorCode::ResourceExhausted,
                                         "dependency output bytes overflow"));
           auto output_bytes = elements.value() * width;
-          if (step.backend == Backend::Gpu) {
+          if (frame.backend == Backend::Gpu) {
             output_bytes = 0;
             for (const auto& box : frame.outputs.boxes()) {
               const auto bytes = gpu_internal::allocation_capacity(
@@ -2051,11 +2111,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           // ready owners into the session. It describes exact stage scratch.
           for (std::size_t port = 0; port < frame.parts.size(); ++port) {
             auto count = frame.parts[port].element_count();
+            const auto input_width = Value::element_size(
+                metadata(step.inputs[port]).descriptor.element_type);
             const auto scale =
-                Value::element_size(
-                    metadata(step.inputs[port]).descriptor.element_type) *
-                (step.traits.workspace_input_multiplier +
-                 (frame.session ? 0 : 1));
+                input_width * step.traits.workspace_input_multiplier;
+            if (!frame.session) {
+              if (!count.ok() || count.value() > UINT64_MAX / input_width)
+                return fail(Status{ErrorCode::ResourceExhausted, {}});
+              auto packed_bytes = count.value() * input_width;
+              if (frame.backend == Backend::Gpu)
+                packed_bytes = gpu_internal::allocation_capacity(packed_bytes);
+              if (!packed_bytes || packed_bytes > UINT64_MAX - capacity.value())
+                return fail(Status{ErrorCode::ResourceExhausted,
+                                   "dependency input capacity overflow"});
+              capacity = Result<std::uint64_t>(capacity.value() + packed_bytes);
+            }
             if (scale &&
                 (!count.ok() ||
                  count.value() > (UINT64_MAX - capacity.value()) / scale))
@@ -2075,14 +2145,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (frame.session) {
             const auto charged_before = frame.session->consumed_work();
             auto progress = dependency_stage<DependencyProgress>(
-                step.backend == Backend::Gpu ? gpu_pool : pool, admission,
+                frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&] {
                   if (stop() != ErrorCode::Ok)
                     return Result<DependencyProgress>(Status{stop(), {}});
                   const auto callback_started =
                       std::chrono::steady_clock::now();
                   DependencyCheckpointServices services;
-                  if (shareable[step_index] &&
+                  if (shareable[step_index] && !frame.fallback_taint &&
                       step.traits.observation_kind == ObservationKind::Atomic) {
                     auto& scope = checkpoint_scopes[step_index];
                     if (!scope) {
@@ -2166,7 +2236,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   }
                   DependencyBlockServices blocks;
                   if (dependency_cache && shareable[step_index] &&
-                      step.traits.cacheable) {
+                      !frame.fallback_taint && step.traits.cacheable) {
                     blocks.consume_work = [&](std::uint64_t cost) {
                       if (cost > cache_work) {
                         cache_work = 0;
@@ -2196,7 +2266,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   auto allocator = seal.reservation->allocator();
                   DependencyGpuServices gpu;
                   std::optional<gpu_internal::Invocation> native;
-                  if (step.backend == Backend::Gpu) {
+                  if (frame.backend == Backend::Gpu) {
                     allocator = native_device->allocator(allocator);
                     native.emplace(native_device, active_token());
                     gpu.allocation_capacity = gpu_internal::allocation_capacity;
@@ -2279,8 +2349,20 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             status = consume(frame.session->consumed_work() - charged_before);
             if (!status.ok())
               return fail(status);
-            if (!progress.ok())
+            if (!progress.ok()) {
+              diagnostics.operation_timings.push_back(
+                  OperationTiming{step.node_id, frame.backend, callback_us,
+                                  progress.status().code, 1, 0});
+              diagnostics.operation_timings.back().native_dispatch_count =
+                  native_stats.dispatches;
+              diagnostics.operation_timings.back().native_compute_us =
+                  native_stats.device_us;
+              if (fallback(progress.status())) {
+                restart_cpu();
+                continue;
+              }
               return fail(progress.status());
+            }
             if (stop() != ErrorCode::Ok)
               return fail(Status{stop(), {}});
             auto event = progress.take_value();
@@ -2334,32 +2416,61 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
           } else {
             auto value = dependency_stage<Value>(
-                pool, admission,
+                frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&]() -> Result<Value> {
                   if (stop() != ErrorCode::Ok)
                     return Result<Value>(Status{stop(), {}});
+                  auto allocator = seal.reservation->allocator();
+                  std::optional<gpu_internal::Invocation> native;
+                  if (frame.backend == Backend::Gpu) {
+                    allocator = native_device->allocator(allocator);
+                    native.emplace(native_device, active_token());
+                  }
                   std::vector<Value> inputs;
                   std::vector<Region> demands;
                   for (std::size_t port = 0; port < frame.parts.size();
                        ++port) {
                     const auto& box = frame.parts[port].boxes().at(0);
-                    auto dense = frame.ready[port].collect(
-                        box, seal.reservation->allocator(), limits);
+                    auto dense =
+                        frame.ready[port].collect(box, allocator, limits);
                     if (!dense.ok())
                       return Result<Value>(dense.status());
+                    if (native) {
+                      ++diagnostics.transfer_count;
+                      diagnostics.transfer_bytes +=
+                          dense.value().bytes().size();
+                    }
                     inputs.push_back(dense.take_value());
                     demands.push_back(box);
                   }
-                  OperationInvocation call{inputs,
-                                           demands,
-                                           step.parameters,
-                                           Backend::Cpu,
-                                           active_token(),
-                                           frame.outputs.boxes()[0],
-                                           seal.reservation->allocator()};
+                  OperationInvocation call{
+                      inputs,        demands,        step.parameters,
+                      frame.backend, active_token(), frame.outputs.boxes()[0],
+                      allocator};
+                  if (native)
+                    call.gpu = native->service();
                   const auto callback_started =
                       std::chrono::steady_clock::now();
                   auto computed = invoke(step.operation, call);
+                  if (native) {
+                    native_stats = native->statistics();
+                    diagnostics.native_dispatch_count +=
+                        native_stats.dispatches;
+                    diagnostics.native_submission_count +=
+                        native_stats.submissions;
+                    diagnostics.native_compute_us += native_stats.device_us;
+                    diagnostics.native_constant_bytes +=
+                        native_stats.constant_bytes;
+                    if (active_token().cancelled())
+                      computed =
+                          Result<Value>(Status{ErrorCode::Cancelled, {}});
+                    else if (!native->status().ok())
+                      computed = Result<Value>(native->status());
+                    else if (computed.ok() && !native_stats.dispatches)
+                      computed = Result<Value>(
+                          Status{ErrorCode::BackendUnavailable,
+                                 "GPU callback submitted no native work"});
+                  }
                   callback_us = duration_us(callback_started);
                   if (!computed.ok())
                     return computed;
@@ -2369,8 +2480,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return computed;
                 },
                 pump);
-            if (!value.ok())
+            if (!value.ok()) {
+              diagnostics.operation_timings.push_back(
+                  OperationTiming{step.node_id, frame.backend, callback_us,
+                                  value.status().code, 1, 0});
+              diagnostics.operation_timings.back().native_dispatch_count =
+                  native_stats.dispatches;
+              diagnostics.operation_timings.back().native_compute_us =
+                  native_stats.device_us;
+              if (fallback(value.status()))
+                continue;
               return fail(value.status());
+            }
             status =
                 records.append_legacy(step_index, frame.outputs, frame.parts);
             if (!status.ok())
@@ -2385,9 +2506,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             frame.state = Frame::State::Complete;
           }
           diagnostics.peak_active_tasks = 1;
-          diagnostics.selected_backends[step.node_id] = step.backend;
+          diagnostics.selected_backends[step.node_id] = frame.backend;
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, step.backend, callback_us, ErrorCode::Ok, 1,
+              step.node_id, frame.backend, callback_us, ErrorCode::Ok, 1,
               frame.state == Frame::State::Complete ? elements.value() : 0});
           diagnostics.operation_timings.back().native_dispatch_count =
               native_stats.dispatches;

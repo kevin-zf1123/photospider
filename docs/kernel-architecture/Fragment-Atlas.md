@@ -51,8 +51,8 @@ sample, never a zero value or per-fragment clamp.
 
 C++ staged GPU Runs now integrate this transport as described below. Bounded
 GPU discovery is integrated through [bounded request tables](GPU-Discovery.md);
-the C staged bridge shares this transport. Legacy synchronous
-GPU producers within dependency templates also remain unsupported. Raw
+the C staged bridge shares this transport. Synchronous GPU producers use the
+exact rectangular transport described below. Raw
 Float64/Int64 transport does not assert native floating-point arithmetic support.
 
 ## Public and native verification
@@ -178,3 +178,40 @@ The standalone example CMake project and static/shared installed consumers also
 build this C11 module and its public loader. An optional loader argument selects
 a module path. Exit 77 means native unavailable after CPU checks, never native
 success. The bridge also exposes [bounded discovery](GPU-Discovery.md) through a dedicated callback.
+
+
+## Synchronous producers and CPU fallback
+
+Dependency Runs also invoke existing synchronous GPU producers on the context's
+native worker. The host collects each declared rectangular input demand into
+packed native storage, independently charges its rounded capacity, and supplies
+`ps_gpu_service_v8` for the callback lifetime. GPU callbacks must submit actual
+native work. Native invocation views drain before owners retire or CPU retry.
+Whole producers preserve their full-domain validation and evidence.
+
+Only `BackendUnavailable` with both CPU support and `allows_cpu_fallback` permits
+retry. A staged failure retires the continuation and restarts the original Q on
+the CPU worker; it never polls GPU state with CPU services. Cancellation wins.
+Per-session limits apply to each attempt, and all attempts consume the bounded
+Run work. Diagnostics include actual backends and rejected attempt timings.
+Fallback ancestry propagates through child results, shared Flights and retained
+Whole records. Such results cannot populate dependency result caches, and their
+stages cannot use or retain checkpoints or pure blocks under native identities.
+Independent waiter cancellation still cannot abort a producer another waiter needs.
+
+The public `sync_main.cpp` workflow checks separated samples `{0,2}` against the
+independent `x+1` oracle (1 and 3), real Metal dispatches, missing-device CPU
+fallback, synchronous Whole and mid-program staged fallback followed by a GPU
+descendant, actual attempt diagnostics, fresh native retry without stale hits,
+and exact Whole source evidence. Two 20000-byte payloads each require a
+32768-byte native allocation; together they require
+65536 live bytes: 65535 fails, 65536 succeeds. Rejection/CPU retry and a fresh
+native retry also fit that same budget after earlier output owners retire. Its
+nonnative fallback checks run
+before returning 77 on hosts without Metal. `test_execution_demand` also checks
+shared fallback with producer-waiter cancellation and zero cache retention.
+
+```sh
+cmake --build build/issue257-static --target photospider_g4_sync_gpu_workflow -j 4
+build/issue257-static/photospider_g4_sync_gpu_workflow
+```

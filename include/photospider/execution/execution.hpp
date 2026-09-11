@@ -500,6 +500,15 @@ class PHOTOSPIDER_API ExecutionContext final {
    * the complete old source witness against current immutable bindings. Hits
    * preserve per-output evidence under the current bundle identity. Optional
    * cache limits do not change the observation or failure-isolation contract.
+   * CPU and native GPU callbacks use the existing context workers. Synchronous
+   * producers receive exact rectangular input collections; staged producers
+   * receive authorized fragments through bounded atlas/discovery services.
+   * BackendUnavailable may retry on CPU only when the operation permits it.
+   * A staged retry retires its failed continuation and starts the original Q
+   * again; per-session limits apply to each attempt, within the shared Run work
+   * bound. CPU fallback ancestry is propagated through shared Flights and Whole
+   * records and is excluded from result, checkpoint and block retention/reuse.
+   * Diagnostics record actual backends and rejected physical attempts.
    * Caller must not race direct execution with context destruction.
    */
   Result<DemandResult> execute_fragments(

@@ -94,5 +94,5 @@ These mocks are not native evidence. Static/shared installed consumers run them
 and compile the real C11 module/loader; the standalone example builds against the
 installed public package. Native unavailability returns 77 after CPU checks.
 
-This implements the bounded request-table path. Legacy synchronous GPU producers
-inside dependency templates and final G4 requirement audit remain separate work.
+Synchronous GPU producers and CPU fallback within dependency templates are
+described in [Fragment Atlas](Fragment-Atlas.md#synchronous-producers-and-cpu-fallback).

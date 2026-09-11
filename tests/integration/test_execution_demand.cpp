@@ -225,10 +225,12 @@ struct StagedGate {
 std::shared_ptr<OperationRegistry> gated_registry(
     const std::shared_ptr<Gate>& gate, bool staged = false,
     std::shared_ptr<std::atomic<unsigned>> effects = {}, bool terminal = false,
-    bool whole = false) {
+    bool whole = false, bool gpu_fallback = false) {
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition op;
   op.key = "wait";
+  op.traits.supports_gpu = gpu_fallback;
+  op.traits.allows_cpu_fallback = gpu_fallback;
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
   op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
@@ -712,6 +714,47 @@ int impure_ancestor() {
            second.value().dependencies.record_count() == 2);
   return 0;
 }
+int shared_fallback() {
+  auto gate = std::make_shared<Gate>();
+  auto registry = gated_registry(gate, false, {}, false, true, true);
+  auto doc = gate_document();
+  doc.nodes.push_back({2, "wait", {WorkflowNodeOutput{1, "value"}}, {}});
+  doc.outputs = {{"y", 2, "value"}};
+  GraphContext graph(doc);
+  PlanningOptions planning;
+  planning.execution_mode = ExecutionMode::MetalFp32;
+  auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
+  ExecutionContext context(registry, {2, false, 8, 4096, 128});
+  auto demand =
+      context
+          .open_demand(plan,
+                       {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+          .take_value();
+  CancellationSource stop;
+  auto owner = std::async(std::launch::async, [&] {
+    return demand.request({{"y", point(0, 2)}}, stop.token());
+  });
+  PS_CHECK(gate->await(1));
+  auto other = std::async(std::launch::async,
+                          [&] { return demand.request({{"y", point(0, 2)}}); });
+  PS_CHECK(await_shared(context, 0));
+  stop.cancel();
+  gate->open();
+  auto cancelled = owner.get();
+  auto completed = other.get();
+  double actual = 0;
+  PS_CHECK(cancelled.status().code == ErrorCode::Cancelled);
+  PS_CHECK(completed.ok() &&
+           completed.value().values.at("y").read({0}, &actual, 8).ok() &&
+           actual == 7);
+  PS_CHECK(completed.value().diagnostics.shared_computations == 1 &&
+           completed.value().diagnostics.selected_backends.at(2) ==
+               Backend::Cpu);
+  PS_CHECK(context.cache_statistics().retained_bytes == 0);
+  PS_CHECK(
+      demand.request({{"y", point(0, 2)}}).value().diagnostics.cache_hits == 0);
+  return 0;
+}
 int late_flight_and_frozen() {
   auto gate = std::make_shared<Gate>();
   gate->ignore_cancellation = true;
@@ -920,6 +963,24 @@ int cached_whole_ancestor() {
                        {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
           .take_value();
   PS_CHECK(query.request({{"a_desc", point(0, 2)}}).ok());
+  // A -> B -> C: the 16-byte LRU retains C and evicts B pixels. The
+  // active C subscription must still transpose an A edit through B evidence.
+  const auto old_bundle = query.freeze().take_value();
+  auto change = query.replace_bindings(
+      {{{"x", values<double>(ElementType::Float64, {11, 9})}}});
+  PS_CHECK(change.ok() &&
+           change.value().potential_dirty.at("a_desc") == point(0, 2));
+  auto updated = query.request({{"a_desc", point(0, 2)}});
+  PS_CHECK(updated.ok() &&
+           updated.value().values.at("a_desc").read({0}, &value, 8).ok() &&
+           value == 11);
+  auto pinned = tight.execute_fragments(old_bundle, {{"a_desc", point(0, 2)}});
+  PS_CHECK(pinned.ok() &&
+           pinned.value().values.at("a_desc").read({0}, &value, 8).ok() &&
+           value == 7);
+  // Restore the current descendant to the single-entry LRU before asking for
+  // both nodes; the old frozen computation must not replace current evidence.
+  PS_CHECK(query.request({{"a_desc", point(0, 2)}}).ok());
   const auto previous = gate->entered;
   auto both =
       query.request({{"a_desc", point(0, 2)}, {"z_ancestor", point(1, 2)}});
@@ -1121,6 +1182,7 @@ int main() {
   PS_CHECK(shared_ancestors() == 0);
   PS_CHECK(auxiliary_cancellation() == 0);
   PS_CHECK(impure_ancestor() == 0);
+  PS_CHECK(shared_fallback() == 0);
   PS_CHECK(late_flight_and_frozen() == 0);
   PS_CHECK(shared_terminal() == 0);
   PS_CHECK(joint_failure_isolation() == 0);

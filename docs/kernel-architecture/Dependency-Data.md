@@ -295,9 +295,10 @@ and one coordinator slot. `DemandConfig::maximum_metadata_entries` bounds each
 handle's retained query/evidence/dirty metadata (1..1048576, default 65536).
 The handle owns no workers or pixel cache. Exact demand calls use context-owned
 Flights for overlapping active observations in the same immutable bundle, through
-the existing CPU pool, WaitingAdmission and accounted allocator. Completed dependency content-cache reuse uses the existing pixel LRU with
-bounded structural proofs, as described in [Cache Model](Cache-Model.md). GPU
-fragment execution remains unfinished G4 integration.
+the existing CPU/GPU pools, WaitingAdmission and accounted allocator. Completed dependency content-cache reuse uses the existing pixel LRU with
+bounded structural proofs, as described in [Cache Model](Cache-Model.md).
+Synchronous and staged GPU producers use the existing native worker; see
+[Fragment Atlas](Fragment-Atlas.md) for exact input transport and CPU fallback.
 
 `test_execution_demand` covers sparse results, typed snapshots, continuous dirty
 accumulation, frozen isolation, stale publication, independent cancellation and

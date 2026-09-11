@@ -48,4 +48,4 @@ raw row 限额、忽略错误、递归/block 误用、取消、terminal 完整 Q
 稠密容量的 rank8 域。static/shared 安装 consumer 运行 mock 并编译真实 C11 模块及 loader；
 独立示例可消费安装包。无 native 时先验证 CPU，再返回 77，不作为 native 成功。
 
-有界请求表路径已实现。依赖模板中的旧同步 GPU producer 及最终 G4 逐项核验仍待完成。
+依赖模板中的同步 GPU producer 和 CPU 回退见 [Fragment Atlas](Fragment-Atlas.zh.md)。
