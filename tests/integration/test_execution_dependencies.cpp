@@ -318,6 +318,11 @@ int metadata_bounds() {
   auto many = Footprint::from_regions({64}, boxes).take_value();
   FootprintLimits small;
   small.maximum_boxes = 16;
+  PS_CHECK(full.value().dependencies.source_support(small).status().code ==
+           ErrorCode::ResourceExhausted);
+  auto support = full.value().dependencies.source_support();
+  PS_CHECK(support.ok() && support.value().size() == 1 &&
+           support.value().at("x") == Footprint::all({2}).take_value());
   auto one_root =
       full.value().dependencies.restrict({{"alias0", point(0)}}).take_value();
   PS_CHECK(one_root.potential_dirty("unused", many, 7, small).status().code ==

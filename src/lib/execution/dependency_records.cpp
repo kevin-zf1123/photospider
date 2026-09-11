@@ -400,6 +400,79 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
   }
   return Answer(ExecutionDependencies(std::move(result)));
 }
+Result<std::map<std::string, Footprint>> ExecutionDependencies::source_support(
+    const FootprintLimits& limits) const {
+  using Answer = std::map<std::string, Footprint>;
+  if (!impl_)
+    return Result<Answer>(invalid("invalid execution dependency evidence"));
+  if (limits.cancellation.cancelled())
+    return Result<Answer>(Status{ErrorCode::Cancelled, {}});
+  std::uint64_t root_entries = 0;
+  for (const auto& root : impl_->outputs) {
+    if (limits.cancellation.cancelled())
+      return Result<Answer>(Status{ErrorCode::Cancelled, {}});
+    const auto cost = 1 + root.second.samples.boxes().size();
+    if (cost > limits.maximum_boxes ||
+        root_entries > limits.maximum_boxes - cost ||
+        cost > limits.maximum_work || root_entries > limits.maximum_work - cost)
+      return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
+    root_entries += cost;
+  }
+  auto selected_limits = limits;
+  selected_limits.maximum_work -= root_entries;
+  auto selected = restrict(coverage(), selected_limits);
+  if (!selected.ok())
+    return Result<Answer>(selected.status());
+  const auto& data = *selected.value().impl_;
+  if (data.sources.size() > limits.maximum_work)
+    return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
+  std::uint64_t work = limits.maximum_work - data.sources.size();
+  std::map<std::uint64_t, std::string> names;
+  for (const auto& source : data.sources)
+    names.emplace(source.second.target.id, source.first);
+  Answer result;
+  std::uint64_t entries = 0;
+  for (const auto& record : data.records) {
+    const auto cost = Impl::weight(record);
+    if (cost > work)
+      return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
+    work -= cost;
+    std::vector<DependencyNeed> projected;
+    const auto* needs = &record.manifest;
+    if (record.certificate) {
+      auto value =
+          record.certificate->backward(record.certificate->coverage(), limits);
+      if (!value.ok())
+        return Result<Answer>(value.status());
+      projected = value.take_value();
+      needs = &projected;
+    }
+    for (const auto& need : *needs) {
+      if (!(need.roles & 7U) || need.samples.empty())
+        continue;
+      const auto& input = record.inputs.at(need.port);
+      if (!input.input)
+        continue;
+      const auto& name = names.at(input.id);
+      auto old = result.find(name);
+      auto united = old == result.end()
+                        ? Footprint::from_regions(need.samples.shape(),
+                                                  need.samples.boxes(), limits)
+                        : old->second.unite(need.samples, limits);
+      if (!united.ok())
+        return Result<Answer>(united.status());
+      const auto prior =
+          old == result.end() ? 0 : 1 + old->second.boxes().size();
+      const auto weight = 1 + united.value().boxes().size();
+      if (weight > limits.maximum_boxes ||
+          entries - prior > limits.maximum_boxes - weight)
+        return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
+      entries = entries - prior + weight;
+      result.insert_or_assign(name, united.take_value());
+    }
+  }
+  return Result<Answer>(std::move(result));
+}
 namespace execution_internal {
 DependencyRecords::DependencyRecords(const ExecutionPlan& plan,
                                      std::string identity,
@@ -446,7 +519,10 @@ Status DependencyRecords::append_record(
   const auto found = impl_->grouped.find(step.node_id);
   if (!terminal && found != impl_->grouped.end()) {
     const auto& old = impl_->records.at(found->second);
-    if (old.certificate && candidate.certificate) {
+    if (old.samples.empty()) {
+      // Empty is a resolved absence of observations, not a competing contract
+      // identity. A later actual observation establishes the node identity.
+    } else if (old.certificate && candidate.certificate) {
       auto merged = old.certificate->merge(*candidate.certificate, limits_);
       if (!merged.ok())
         return merged.status();
@@ -528,6 +604,36 @@ Status DependencyRecords::append_legacy(std::size_t index,
   if (!certificate.ok())
     return certificate.status();
   return append_record(index, outputs, certificate.take_value(), {});
+}
+Status DependencyRecords::append_empty(std::size_t index,
+                                       const Footprint& outputs) {
+  const auto& step = plan_->steps().at(index);
+  if (!outputs.empty())
+    return invalid("nonempty Empty record");
+  if (impl_->grouped.count(step.node_id))
+    return Status::success();
+  std::optional<DependencyCertificate> certificate;
+  if (!step.whole_boundary &&
+      step.traits.observation_kind == ObservationKind::Atomic) {
+    std::vector<std::vector<std::uint64_t>> inputs;
+    for (const auto& input : step.inputs)
+      inputs.push_back(metadata(*plan_, input).descriptor.shape);
+    auto observations = operation_observations(
+        {step.output_descriptor, step.output_facets}, outputs, limits_);
+    if (!observations.ok())
+      return observations.status();
+    auto empty = DependencyCertificate::create(
+        identity_ + "/empty/" + std::to_string(step.node_id),
+        observations.take_value(), std::move(inputs), {}, limits_);
+    if (!empty.ok())
+      return empty.status();
+    certificate = empty.take_value();
+  }
+  return append_record(index, outputs, std::move(certificate), {});
+}
+std::uint64_t DependencyRecords::metadata_size(
+    const ExecutionDependencies& evidence) noexcept {
+  return evidence.impl_ ? evidence.impl_->entries : 0;
 }
 Status DependencyRecords::output(const std::string& name, std::size_t index,
                                  const Footprint& samples) {

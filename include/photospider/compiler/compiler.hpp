@@ -512,6 +512,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
  private:
   friend class Compiler;
   friend class ExecutionContext;
+  friend class DemandHandle;
 
   std::map<std::string, Region> output_regions_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;

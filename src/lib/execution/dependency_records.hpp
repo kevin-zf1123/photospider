@@ -17,16 +17,19 @@ namespace ps::execution_internal {
 class DependencyRecords final {
  public:
   DependencyRecords(const ExecutionPlan& plan, std::string identity,
-                     FootprintLimits limits);
+                    FootprintLimits limits);
   DependencyRecords(const DependencyRecords&) = delete;
   DependencyRecords& operator=(const DependencyRecords&) = delete;
   const Status& status() const noexcept { return failure_; }
   Status append(std::size_t step, const DependencyResult& result);
   Status append_legacy(std::size_t step, const Footprint& outputs,
                        const std::vector<Footprint>& inputs);
+  Status append_empty(std::size_t step, const Footprint& outputs);
   Status output(const std::string& name, std::size_t step,
                 const Footprint& samples);
   ExecutionDependencies finish() &&;
+  static std::uint64_t metadata_size(
+      const ExecutionDependencies& evidence) noexcept;
 
  private:
   Status append_record(std::size_t step, Footprint outputs,

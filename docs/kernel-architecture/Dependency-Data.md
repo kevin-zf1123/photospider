@@ -233,5 +233,56 @@ scatter checks excluded control evidence, equal-output dependency changes and
 old evidence isolation. Whole and real C terminal tests check indivisible
 manifests. The same tests run against installed static and shared packages. The
 public G4 workflow also checks live runtime evidence for radius edits and frozen
-old relations. This evidence layer is the basis for the remaining context-owned
-demand and cache integration; it does not itself subscribe to mutable bindings.
+old relations. Evidence itself is immutable; subscriptions are owned by the
+context-managed demand API below.
+
+## Exact demands and immutable binding replacement
+
+`ExecutionContext::open_demand(plan, bindings)` pins the current graph contract
+and immutable Value/snapshot bindings. A `DemandHandle` shares that bundle and
+generation across copies. `request({name: Footprint})` returns exact
+`ValueFragments`, diagnostics and structural evidence. Every request keeps its
+original Q. Atomic callbacks still run per sample/full image pixel; a staged
+terminal RequestRecord receives the complete sparse Q once. A legacy synchronous
+terminal accepts rectangular Q only. Empty outputs validate static metadata and
+skip source reads, admission and continuation callbacks. Unrequested names are
+absent. `execute_fragments(frozen, Q)` provides the same exact query for an
+explicitly pinned bundle, with result generation zero.
+
+Successful requests retain only structural publications under their exact named
+query. `replace_bindings` compares immutable bytes from the old recorded source
+support, computes potential dirty through the recorded associations, and commits
+the new bundle, generation and accumulated dirty together. No caller dirty hint
+is trusted. Changed control evidence remains dirty until that exact query is
+successfully republished, even if the numeric output happens to stay equal.
+`source_support()` is the bounded fetch union used for these byte comparisons;
+it does not replace per-output certificate relations. Typed image comparisons
+include complete C, and generic comparisons preserve all dtype bit patterns.
+Static descriptor/schema changes require a newly compiled plan.
+
+Replacement validates all bindings before publication. Sample, metadata or
+validation failures retain the old generation. A racing request publication or
+replacement returns Stale for retry. Latest requests captured before a completed
+replacement cannot publish into the new generation; cancellation takes priority
+over Stale. `freeze()` pins the current immutable bundle independently of future
+edits. `release(Q)` drops one exact subscription without cancelling active
+requests, which may subsequently republish it; `cancel()` stops that handle
+and retires its publications and bundle. Context destruction cancels and drains
+active demand calls before retiring its existing workers. Direct context calls
+must not race context destruction, while existing handle calls may do so.
+Input owner destructors run outside the publication mutex.
+
+`maximum_demands` bounds live uncancelled handles (1..65536, default 1024), and
+active demand calls are bounded by the existing queue plus CPU worker capacity
+and one coordinator slot. `DemandConfig::maximum_metadata_entries` bounds each
+handle's retained query/evidence/dirty metadata (1..1048576, default 65536).
+The handle owns no workers or pixel cache. Current calls execute independently
+through the existing CPU pool, WaitingAdmission and accounted allocator.
+Cross-Run dependency Flights, content-cache reuse and GPU fragment execution
+remain unfinished G4 integration.
+
+`test_execution_demand` covers sparse results, typed snapshots, continuous dirty
+accumulation, frozen isolation, stale publication, independent cancellation and
+context drain. The real C terminal fixture checks one invocation for sparse Q
+and no invocation for Empty. The public `g4_workflow` demand scenario checks
+endpoint scatter sums before/after two replacements against a direct oracle.

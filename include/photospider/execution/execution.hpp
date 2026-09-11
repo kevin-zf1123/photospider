@@ -16,6 +16,9 @@
 #include "photospider/execution/dependencies.hpp"
 
 namespace ps {
+namespace execution_internal {
+struct DemandCoordinator;
+}
 
 /** @brief Explicit local disposable cache directory and storage/queue limits.
  */
@@ -58,6 +61,8 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   /** @brief Optional exclusive disk directory; requires positive result cache.
    */
   std::optional<DiskCacheConfig> disk_cache = {};
+  /** @brief Maximum live context-managed demand handles, 1..65536. */
+  std::uint32_t maximum_demands = 1024;
 };
 
 /**
@@ -264,9 +269,89 @@ class PHOTOSPIDER_API FrozenExecution final {
 
  private:
   friend class ExecutionContext;
+  friend class DemandHandle;
   ExecutionPlan plan_;
   ExecutionBindings bindings_;
   std::shared_ptr<OperationRegistry> operations_;
+  std::string execution_identity_;
+};
+
+/** @brief Exact named sample subsets of the compiled output regions. */
+using DemandQuery = std::map<std::string, Footprint>;
+/** @brief Complete sparse result; holes remain unauthorized and unallocated. */
+struct PHOTOSPIDER_API DemandResult final {
+  std::map<std::string, ValueFragments> values;
+  ExecutionDiagnostics diagnostics;
+  ExecutionDependencies dependencies;
+  /** @brief Captured demand generation; zero for direct frozen execution. */
+  std::uint64_t generation = 0;
+};
+/** @brief Bounds the total retained structural publications for one handle. */
+struct DemandConfig final {
+  /** @brief Retained metadata units; supported range 1..1048576. */
+  std::uint64_t maximum_metadata_entries = 65536;
+};
+/** @brief Atomic binding replacement and potential change in recorded outputs.
+ * @note Coverage excludes never-requested outputs. Dirty sets accumulate until
+ * a new successful request replaces that exact query's publication. Hints do
+ * not authorize clean results; byte comparisons use immutable input owners.
+ */
+struct PHOTOSPIDER_API DemandUpdate final {
+  std::uint64_t generation = 0;
+  DemandQuery coverage;
+  DemandQuery potential_dirty;
+};
+/** @brief Context-managed immutable binding bundle with explicit replacement.
+ * @note Copies share one handle. Requests are independently cancellable and
+ * keep original Q. Context destruction cancels and drains active calls; later
+ * handle calls fail Cancelled. No worker or pixel cache is owned by the handle.
+ */
+class PHOTOSPIDER_API DemandHandle final {
+ public:
+  DemandHandle() = default;
+  bool valid() const noexcept { return impl_ != nullptr; }
+  /** @brief Executes exact original Q against the captured latest generation.
+   * @return Complete fragments/evidence, or typed failure without partial
+   * publication. Atomic observations are isolated; terminal Q is never split.
+   * Concurrent replacement makes old latest requests Stale; cancellation wins.
+   * @throws std::bad_alloc For request/structural metadata.
+   */
+  Result<DemandResult> request(const DemandQuery& query,
+                               const CancellationToken& cancellation = {},
+                               const ExecutionOptions& options = {}) const;
+  /** @brief Validates immutable replacements and commits bundle/dirty together.
+   * @note Values/snapshots must retain the same static declarations. Required
+   * old support bytes are compared under the sample limit. Concurrent request
+   * publication/replacement may return Stale for retry; no partial edit occurs.
+   * @return New generation and accumulated dirty coverage, or typed failure.
+   * @throws std::bad_alloc For immutable snapshots/metadata.
+   */
+  Result<DemandUpdate> replace_bindings(
+      ExecutionBindings bindings,
+      const SnapshotAccessOptions& options = {}) const;
+  /** @brief Pins the current bundle for ordinary independent frozen execution.
+   * @return Owning frozen work or Cancelled/Stale for an unusable handle.
+   */
+  Result<FrozenExecution> freeze() const;
+  /** @brief Removes one exact query's retained structural subscription.
+   * @note Does not cancel active requests. An already-running request for Q
+   * can publish a new subscription after this removal.
+   * @return Success, NotFound for an unregistered query, or stopped status.
+   */
+  Status release(const DemandQuery& query) const;
+  /** @brief Cancels all handle requests and releases retained publications.
+   * @return True on the first cancellation; running callbacks drain normally.
+   * @throws Nothing.
+   */
+  bool cancel() const noexcept;
+  Result<std::uint64_t> generation() const;
+
+ private:
+  friend class ExecutionContext;
+  friend struct execution_internal::DemandCoordinator;
+  struct Impl;
+  explicit DemandHandle(std::shared_ptr<Impl> impl);
+  std::shared_ptr<Impl> impl_;
 };
 
 /**
@@ -293,7 +378,8 @@ class PHOTOSPIDER_API ExecutionContext final {
   /**
    * @brief Stops admission, joins workers, and verifies resource settlement.
    * @throws Nothing.
-   * @note Callers must not invoke `execute` concurrently with destruction.
+   * @note Direct execute/open/freeze calls must not race destruction. Existing
+   * demand-handle calls may race shutdown; they are cancelled and drained.
    */
   ~ExecutionContext() noexcept;
 
@@ -356,6 +442,25 @@ class PHOTOSPIDER_API ExecutionContext final {
   [[nodiscard]] Result<ExecutionResult> execute(
       const ExecutionPlan& plan, ExecutionBindings bindings = {},
       const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+
+  /** @brief Opens an immutable latest-demand bundle without starting callbacks.
+   * @note Requires Value/kernel-snapshot bindings, using the freeze contract.
+   * Custom RegionalSource inputs must first be imported into snapshots. The
+   * handle owns its captured plan independently from later graph replacement.
+   * @return Handle or Stale/typed validation/resource failure.
+   */
+  Result<DemandHandle> open_demand(const ExecutionPlan& plan,
+                                   ExecutionBindings bindings = {},
+                                   DemandConfig config = {});
+  /** @brief Executes arbitrary exact subsets against independently frozen work.
+   * @note Empty revalidates static metadata and skips start/poll/source.
+   * Complete terminal RequestRecord Q stays intact, including noncontiguous
+   * requests. Caller must not race direct execution with context destruction.
+   */
+  Result<DemandResult> execute_fragments(
+      const FrozenExecution& frozen, const DemandQuery& query,
+      const CancellationToken& cancellation = {},
       const ExecutionOptions& options = {});
 
   /**

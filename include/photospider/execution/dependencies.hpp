@@ -49,6 +49,13 @@ class PHOTOSPIDER_API ExecutionDependencies final {
   Result<ExecutionDependencies> restrict(
       const std::map<std::string, Footprint>& outputs,
       const FootprintLimits& limits = {}) const;
+  /** @brief Projects required root support onto named source payload sets.
+   * @note This fetch union is for bounded content verification, not a
+   * replacement for per-output certificates or their transpose relation.
+   * @return Exact support for recorded roots, or a typed metadata/work failure.
+   */
+  Result<std::map<std::string, Footprint>> source_support(
+      const FootprintLimits& limits = {}) const;
   /** @brief Transposes a source payload edit through recorded direct
    * associations.
    * @param input Exact workflow input name.

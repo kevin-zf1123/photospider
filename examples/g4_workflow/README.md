@@ -25,6 +25,14 @@ source edge is present after recomputation, while frozen evidence retains the ol
 relation. Restricting evidence to scatter also removes the gather root.
 Operator contracts are in [Dependency Sampling](../../docs/kernel-architecture/Dependency-Sampling.md).
 
+The `demand` scenario opens a context-owned handle and requests `{0,4}` in one
+exact sparse query. Two binding replacements change a radius and then its data
+without recomputing between edits. Dirty accumulates over both endpoints. The
+direct radius predicate gives latest values `[1+9,5+9]`, while a frozen bundle
+still returns `[1,5]`. It also rejects the middle hole and releases the exact
+subscription. These calls use the existing worker/allocator owners; cross-Run
+shared computation and dependency pixel-cache reuse remain separate work.
+
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
 build/issue257-static/examples/g4_workflow/photospider_g4_workflow
@@ -38,6 +46,7 @@ progressive: value=17.25, controls=[0,1,3], payload=[999999999], source_bytes=32
 stmap: red=0.5, source_pixels=[0,1023], source_bytes=32
 radius: scatter_before=1, scatter_after=5, gather=1, frozen=1
 dependencies: radius[3] -> scatter{0}, gather{}, new_data_edge=present, frozen_data_edge=absent
+demand: Q={0,4}, latest=[10,14], frozen=[1,5], generation=3, accumulated_dirty={0,4}, release=ok
 ```
 
 It also builds as a standalone installed public package consumer:

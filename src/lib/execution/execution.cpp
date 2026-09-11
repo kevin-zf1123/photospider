@@ -733,6 +733,109 @@ Result<std::string> upload_content_key(const Value& value,
   return Result<std::string>(hash.finish());
 }
 
+struct DemandHandle::Impl {
+  struct Publication {
+    DemandQuery query;
+    ExecutionDependencies dependencies;
+    DemandQuery dirty;
+    std::uint64_t weight = 0;
+  };
+  std::weak_ptr<execution_internal::DemandCoordinator> owner;
+  std::shared_ptr<const FrozenExecution> bundle;
+  std::atomic<std::uint64_t> generation{1};
+  CancellationSource cancellation;
+  DemandConfig config;
+  std::uint64_t revision = 0, metadata_entries = 0;
+  std::map<std::string, std::shared_ptr<const Publication>> publications;
+};
+namespace execution_internal {
+/** @brief One context lifetime/publication lock; owns no threads or pixels. */
+struct DemandCoordinator : std::enable_shared_from_this<DemandCoordinator> {
+  std::mutex mutex;
+  std::condition_variable changed;
+  CancellationSource shutdown;
+  bool closing = false;
+  std::size_t calls = 0;
+  std::uint64_t next = 1;
+  std::uint32_t maximum_handles;
+  std::uint64_t maximum_calls;
+  ExecutionContext* context = nullptr;
+  struct HandleEntry {
+    std::weak_ptr<DemandHandle::Impl> handle;
+    CancellationToken cancellation;
+  };
+  std::map<std::uint64_t, HandleEntry> handles;
+  DemandCoordinator(std::uint32_t maximum_handles, std::uint64_t maximum_calls)
+      : maximum_handles(maximum_handles), maximum_calls(maximum_calls) {}
+  struct Lease {
+    std::shared_ptr<DemandCoordinator> owner;
+    std::shared_ptr<DemandHandle::Impl> handle;
+    std::shared_ptr<const FrozenExecution> bundle;
+    std::uint64_t generation = 0, revision = 0;
+    CancellationToken cancellation;
+    bool active = false;
+    ~Lease() {
+      if (active) {
+        std::lock_guard<std::mutex> lock(owner->mutex);
+        --owner->calls;
+        owner->changed.notify_all();
+      }
+    }
+    Status stop(Status status = {}) const {
+      if (cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, {}};
+      if (handle->generation.load(std::memory_order_acquire) != generation)
+        return Status{ErrorCode::Stale, {}};
+      return status;
+    }
+  };
+  Result<std::shared_ptr<Lease>> acquire(
+      const std::shared_ptr<DemandHandle::Impl>& handle,
+      const CancellationToken& cancellation) {
+    auto lease = std::make_shared<Lease>();
+    lease->owner = shared_from_this();
+    lease->handle = handle;
+    auto combined = CancellationToken::combine(
+        {shutdown.token(), handle->cancellation.token(), cancellation});
+    if (!combined.ok())
+      return Result<std::shared_ptr<Lease>>(combined.status());
+    lease->cancellation = combined.take_value();
+    std::lock_guard<std::mutex> lock(mutex);
+    if (closing || lease->cancellation.cancelled())
+      return Result<std::shared_ptr<Lease>>(Status{ErrorCode::Cancelled, {}});
+    if (!handle->bundle)
+      return Result<std::shared_ptr<Lease>>(Status{ErrorCode::Stale, {}});
+    if (calls >= maximum_calls)
+      return Result<std::shared_ptr<Lease>>(
+          Status{ErrorCode::ResourceExhausted, "active demand call limit"});
+    lease->bundle = handle->bundle;
+    lease->generation = handle->generation.load(std::memory_order_relaxed);
+    lease->revision = handle->revision;
+    ++calls;
+    lease->active = true;
+    return Result<std::shared_ptr<Lease>>(std::move(lease));
+  }
+  void close() noexcept {
+    std::unique_lock<std::mutex> lock(mutex);
+    closing = true;
+    shutdown.cancel();
+    for (const auto& item : handles)
+      if (auto handle = item.second.handle.lock()) {
+        handle->cancellation.cancel();
+        handle->publications.clear();
+        handle->metadata_entries = 0;
+        auto retired = std::move(handle->bundle);
+        lock.unlock();
+        retired.reset();
+        lock.lock();
+      }
+    changed.wait(lock, [&] { return calls == 0; });
+    handles.clear();
+    context = nullptr;
+  }
+};
+}  // namespace execution_internal
+
 /**
  * @brief Opaque fixed resource ownership for ExecutionContext.
  * @note Destruction order stops the optional GPU lane and required CPU pool
@@ -766,6 +869,12 @@ struct ExecutionContext::Impl final {
       throw std::invalid_argument(
           "ExecutionContext requires a frozen operation registry");
     }
+    if (!requested.maximum_demands || requested.maximum_demands > 65536)
+      throw std::invalid_argument("invalid demand handle limit");
+    demands = std::make_shared<execution_internal::DemandCoordinator>(
+        requested.maximum_demands,
+        static_cast<std::uint64_t>(maximum_waiting_callbacks) +
+            cpu_worker_count + 1);
     if (requested.result_cache_bytes > requested.maximum_live_bytes)
       throw std::invalid_argument("cache limit exceeds execution budget");
     if (requested.disk_cache) {
@@ -807,6 +916,7 @@ struct ExecutionContext::Impl final {
   std::unique_ptr<execution_internal::DiskCache> disk;
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
+  std::shared_ptr<execution_internal::DemandCoordinator> demands;
 };
 
 namespace {
@@ -1032,7 +1142,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const ExecutionPlan& plan, std::vector<ExecutionBinding> bindings,
       const CancellationToken& cancellation, const ExecutionOptions& options,
       const ExecutionSink* sink,
-      const std::function<void(std::uint64_t)>& reclaim) {
+      const std::function<void(std::uint64_t)>& reclaim,
+      const DemandQuery* requested = nullptr,
+      std::map<std::string, ValueFragments>* fragment_outputs = nullptr,
+      const std::string& snapshot_identity = {}) {
     const auto started = std::chrono::steady_clock::now();
     const auto stop = [&] { return binding_stop(plan, cancellation); };
     const auto fail = [&](Status status) {
@@ -1091,7 +1204,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         return fail(Status::failure(ErrorCode::ResourceExhausted,
                                     "dependency Run identities exhausted"));
     } while (!sequence.compare_exchange_weak(nonce, nonce + 1));
-    const auto identity = "run-" + std::to_string(nonce);
+    const auto identity = snapshot_identity.empty()
+                              ? "run-" + std::to_string(nonce)
+                              : snapshot_identity;
     execution_internal::DependencyRecords records(plan, identity, limits);
     if (!records.status().ok())
       return fail(records.status());
@@ -1135,79 +1250,133 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     struct Query {
       std::size_t step;
       std::string name;
-      Region region;
+      Footprint samples;
       bool boundary;
     };
+    DemandQuery wanted;
+    std::uint64_t query_entries = 0;
+    if (requested) {
+      for (const auto& item : *requested) {
+        const auto found = plan.outputs().find(item.first);
+        if (found == plan.outputs().end() || !item.second.valid())
+          return fail(Status{ErrorCode::InvalidArgument,
+                             "unknown or invalid named query"});
+        const auto weight = 1 + item.second.boxes().size();
+        if (weight > limits.maximum_boxes ||
+            query_entries > limits.maximum_boxes - weight)
+          return fail(
+              Status{ErrorCode::ResourceExhausted, "query metadata limit"});
+        query_entries += weight;
+        const auto& step = plan.steps().at(found->second);
+        if (item.second.shape() != step.output_descriptor.shape)
+          return fail(
+              Status{ErrorCode::TypeMismatch, "query output domain mismatch"});
+        auto scope = Footprint::from_regions(
+            step.output_descriptor.shape,
+            {plan.output_regions().at(item.first)}, limits);
+        if (!scope.ok())
+          return fail(scope.status());
+        auto outside = item.second.subtract(scope.value(), limits);
+        if (!outside.ok())
+          return fail(outside.status());
+        if (!outside.value().empty())
+          return fail(Status{ErrorCode::InvalidArgument,
+                             "query exceeds compiled output region"});
+        for (const auto& box : item.second.boxes())
+          if (!input_internal::complete_image_channels(step.output_descriptor,
+                                                       step.output_facets, box))
+            return fail(Status{ErrorCode::InvalidArgument,
+                               "query requires complete image channels"});
+        wanted.emplace(item.first, item.second);
+      }
+    } else {
+      for (const auto& named : plan.outputs()) {
+        auto samples = Footprint::from_regions(
+            plan.steps()[named.second].output_descriptor.shape,
+            {plan.output_regions().at(named.first)}, limits);
+        if (!samples.ok())
+          return fail(samples.status());
+        wanted.emplace(named.first, samples.take_value());
+      }
+    }
+    const bool nonempty =
+        std::any_of(wanted.begin(), wanted.end(),
+                    [](const auto& q) { return !q.second.empty(); });
     std::vector<Query> queries;
     std::map<std::size_t, ValueFragments> whole_records;
-    for (std::size_t i = 0; i < plan.steps().size(); ++i)
-      if (plan.steps()[i].whole_boundary &&
-          plan.steps()[i].traits.observation_kind !=
-              ObservationKind::RequestRecord)
-        queries.push_back(
-            {i,
-             {},
-             Region::whole(plan.steps()[i].output_descriptor.shape),
-             true});
-    for (const auto& named : plan.outputs()) {
-      const auto& step = plan.steps()[named.second];
-      const auto& region = plan.output_regions().at(named.first);
+    if (nonempty) {
+      for (std::size_t i = 0; i < plan.steps().size(); ++i) {
+        if (plan.steps()[i].whole_boundary &&
+            plan.steps()[i].traits.observation_kind !=
+                ObservationKind::RequestRecord) {
+          auto all =
+              Footprint::all(plan.steps()[i].output_descriptor.shape, limits);
+          if (!all.ok())
+            return fail(all.status());
+          queries.push_back({i, {}, all.take_value(), true});
+        }
+      }
+    }
+    for (const auto& named : wanted) {
+      const auto step_index = plan.outputs().at(named.first);
+      const auto& step = plan.steps()[step_index];
       if (!sink ||
           step.traits.observation_kind == ObservationKind::RequestRecord) {
-        queries.push_back({named.second, named.first, region, false});
+        queries.push_back({step_index, named.first, named.second, false});
         continue;
       }
-      const auto rank = region.rank();
-      std::vector<std::uint64_t> geometry(rank, 1), cursor;
-      const bool image = std::any_of(
-          step.output_facets.begin(), step.output_facets.end(),
-          [](const auto& facet) { return facet.key == "photospider.image"; });
-      if (image) {
-        geometry[0] = plan.tile_height();
-        geometry[1] = plan.tile_width();
-        geometry[2] = step.output_descriptor.shape[2];
-      } else {
-        geometry[rank - 1] = plan.tile_width();
-        if (rank > 1)
-          geometry[rank - 2] = plan.tile_height();
-      }
-      for (const auto& dimension : region.dimensions())
-        cursor.push_back(dimension.offset);
-      for (;;) {
-        auto status = consume();
-        if (!status.ok())
-          return fail(status);
-        std::vector<RegionDimension> dimensions;
-        for (std::size_t axis = 0; axis < rank; ++axis) {
-          const auto& extent = region.dimensions()[axis];
-          dimensions.push_back(
-              {cursor[axis],
-               std::min(geometry[axis],
-                        extent.offset + extent.extent - cursor[axis])});
+      for (const auto& region : named.second.boxes()) {
+        const auto rank = region.rank();
+        std::vector<std::uint64_t> geometry(rank, 1), cursor;
+        const bool image = std::any_of(
+            step.output_facets.begin(), step.output_facets.end(),
+            [](const auto& facet) { return facet.key == "photospider.image"; });
+        if (image) {
+          geometry[0] = plan.tile_height();
+          geometry[1] = plan.tile_width();
+          geometry[2] = step.output_descriptor.shape[2];
+        } else {
+          geometry[rank - 1] = plan.tile_width();
+          if (rank > 1)
+            geometry[rank - 2] = plan.tile_height();
         }
-        queries.push_back(
-            {named.second, named.first, Region(dimensions), false});
-        std::size_t axis = rank;
-        while (axis) {
-          --axis;
-          cursor[axis] += dimensions[axis].extent;
-          if (cursor[axis] < region.dimensions()[axis].offset +
-                                 region.dimensions()[axis].extent)
+        for (const auto& dimension : region.dimensions())
+          cursor.push_back(dimension.offset);
+        for (;;) {
+          auto status = consume();
+          if (!status.ok())
+            return fail(status);
+          std::vector<RegionDimension> dimensions;
+          for (std::size_t axis = 0; axis < rank; ++axis) {
+            const auto& extent = region.dimensions()[axis];
+            dimensions.push_back(
+                {cursor[axis],
+                 std::min(geometry[axis],
+                          extent.offset + extent.extent - cursor[axis])});
+          }
+          auto tile = Footprint::from_regions(step.output_descriptor.shape,
+                                              {Region(dimensions)}, limits);
+          if (!tile.ok())
+            return fail(tile.status());
+          queries.push_back(
+              {step_index, named.first, tile.take_value(), false});
+          std::size_t axis = rank;
+          while (axis) {
+            --axis;
+            cursor[axis] += dimensions[axis].extent;
+            if (cursor[axis] < region.dimensions()[axis].offset +
+                                   region.dimensions()[axis].extent)
+              break;
+            cursor[axis] = region.dimensions()[axis].offset;
+          }
+          if (axis == 0 && cursor[0] == region.dimensions()[0].offset)
             break;
-          cursor[axis] = region.dimensions()[axis].offset;
         }
-        if (axis == 0 && cursor[0] == region.dimensions()[0].offset)
-          break;
       }
     }
     for (const auto& named : queries) {
-      auto original = Footprint::from_regions(
-          plan.steps()[named.step].output_descriptor.shape, {named.region},
-          limits);
-      if (!original.ok())
-        return fail(original.status());
-      frames.emplace_back(PlanStepInput{named.step}, original.take_value(),
-                          false, !named.boundary);
+      frames.emplace_back(PlanStepInput{named.step}, named.samples, false,
+                          !named.boundary);
       std::optional<ValueFragments> returned;
       while (!frames.empty()) {
         auto status = consume();
@@ -1251,6 +1420,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           continue;
         }
         if (frame.outputs.empty()) {
+          if (const auto* producer =
+                  std::get_if<PlanStepInput>(&frame.target)) {
+            if (plan.steps()[producer->step_index].traits.observation_kind ==
+                    ObservationKind::RequestRecord &&
+                !frame.terminal_allowed)
+              return fail(Status{ErrorCode::InvalidArgument,
+                                 "RequestRecord cannot supply a DAG input"});
+            status = records.append_empty(producer->step_index, frame.outputs);
+            if (!status.ok())
+              return fail(status);
+          }
           auto empty = ValueFragments::create(output.descriptor, output.facets,
                                               frame.outputs, {}, limits);
           if (!empty.ok())
@@ -1656,15 +1836,41 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                     "dependency output record missing"));
       if (named.boundary)
         continue;
-      const auto& region = named.region;
-      auto published_samples = Footprint::from_regions(
-          returned->descriptor().shape, {region}, limits);
-      if (!published_samples.ok())
-        return fail(published_samples.status());
-      auto recorded =
-          records.output(named.name, named.step, published_samples.value());
+      auto recorded = records.output(named.name, named.step, named.samples);
       if (!recorded.ok())
         return fail(recorded);
+      if (fragment_outputs) {
+        const auto& descriptor = returned->descriptor();
+        std::vector<std::uint64_t> geometry(descriptor.shape.size(), 1);
+        const bool image = std::any_of(
+            returned->facets().begin(), returned->facets().end(),
+            [](const auto& f) { return f.key == "photospider.image"; });
+        if (image) {
+          geometry[0] = plan.tile_height();
+          geometry[1] = plan.tile_width();
+          geometry[2] = descriptor.shape[2];
+        } else {
+          geometry.back() = plan.tile_width();
+          if (geometry.size() > 1)
+            geometry[geometry.size() - 2] = plan.tile_height();
+        }
+        auto tiles = named.samples.tile_cover(geometry, limits);
+        if (!tiles.ok())
+          return fail(tiles.status());
+        auto count = tiles.value().element_count();
+        if (!count.ok())
+          return fail(count.status());
+        auto total = checked_add(diagnostics.tile_count, count.value());
+        if (!total.ok())
+          return fail(total.status());
+        diagnostics.tile_count = total.value();
+        fragment_outputs->emplace(named.name, std::move(*returned));
+        continue;
+      }
+      if (named.samples.boxes().size() != 1)
+        return fail(Status{ErrorCode::InvalidArgument,
+                           "dense output requires one nonempty rectangle"});
+      const auto& region = named.samples.boxes()[0];
       auto bytes = region_bytes(returned->descriptor(), region);
       if (!bytes.ok())
         return fail(bytes.status());
@@ -1693,7 +1899,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     diagnostics.planned_peak_bytes = peaks.second;
     diagnostics.execute_us = duration_us(started);
     result.dependencies = std::move(records).finish();
-    if (!sink)
+    if (!sink && !fragment_outputs)
       diagnostics.result_digest = result_digest(result.values);
     if (stop() != ErrorCode::Ok)
       return fail(Status{stop(), {}});
@@ -2739,13 +2945,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 ExecutionContext::ExecutionContext(
     std::shared_ptr<OperationRegistry> operations,
     ExecutionContextConfig config)
-    : impl_(std::make_unique<Impl>(std::move(operations), config)) {}
+    : impl_(std::make_unique<Impl>(std::move(operations), config)) {
+  impl_->demands->context = this;
+}
 
 /**
  * @brief Implements exact local worker/resource teardown.
  * @copydetails ExecutionContext::~ExecutionContext
  */
-ExecutionContext::~ExecutionContext() noexcept = default;
+ExecutionContext::~ExecutionContext() noexcept {
+  if (impl_ && impl_->demands)
+    impl_->demands->close();
+}
 void ExecutionContext::clear_disk_cache() {
   if (impl_->disk)
     impl_->disk->clear();
@@ -2782,6 +2993,163 @@ Result<FrozenExecution> FrozenExecution::for_region(
   return Result<FrozenExecution>(std::move(result));
 }
 
+namespace {
+Result<std::string> frozen_identity() {
+  static std::atomic<std::uint64_t> sequence{1};
+  auto next = sequence.load();
+  do {
+    if (next == UINT64_MAX)
+      return Result<std::string>(Status{ErrorCode::ResourceExhausted, {}});
+  } while (!sequence.compare_exchange_weak(next, next + 1));
+  return Result<std::string>("frozen-" + std::to_string(next));
+}
+struct DemandKey {
+  std::string value;
+  std::uint64_t entries;
+};
+Result<DemandKey> demand_key(const DemandQuery& query,
+                             const ExecutionPlan& plan, std::uint64_t maximum) {
+  content_internal::Sha256 hash;
+  hash.text("photospider.demand-query.v1");
+  hash.integer(query.size());
+  std::uint64_t entries = 1;
+  if (query.size() > maximum || !maximum)
+    return Result<DemandKey>(Status{ErrorCode::ResourceExhausted, {}});
+  for (const auto& item : query) {
+    if (item.first.empty() || item.first.size() > 1024 ||
+        !item.second.valid() || !plan.outputs().count(item.first))
+      return Result<DemandKey>(Status{ErrorCode::InvalidArgument,
+                                      "unknown or invalid demand query"});
+    const auto weight = 1 + item.second.boxes().size();
+    if (weight > maximum || entries > maximum - weight)
+      return Result<DemandKey>(
+          Status{ErrorCode::ResourceExhausted, "demand query metadata limit"});
+    entries += weight;
+    hash.text(item.first);
+    hash.integer(item.second.shape().size());
+    for (const auto n : item.second.shape())
+      hash.integer(n);
+    hash.integer(item.second.boxes().size());
+    for (const auto& box : item.second.boxes())
+      for (const auto& d : box.dimensions()) {
+        hash.integer(d.offset);
+        hash.integer(d.extent);
+      }
+  }
+  return Result<DemandKey>(DemandKey{hash.finish(), entries});
+}
+Status unite_named(DemandQuery* target, const DemandQuery& values,
+                   const FootprintLimits& limits) {
+  for (const auto& item : values) {
+    auto found = target->find(item.first);
+    auto next = found == target->end()
+                    ? Footprint::from_regions(item.second.shape(),
+                                              item.second.boxes(), limits)
+                    : found->second.unite(item.second, limits);
+    if (!next.ok())
+      return next.status();
+    target->insert_or_assign(item.first, next.take_value());
+  }
+  std::uint64_t entries = 0;
+  for (const auto& item : *target) {
+    const auto cost = 1 + item.second.boxes().size();
+    if (cost > limits.maximum_boxes || entries > limits.maximum_boxes - cost)
+      return Status{ErrorCode::ResourceExhausted, {}};
+    entries += cost;
+  }
+  return Status::success();
+}
+Result<DemandQuery> changed_inputs(const ExecutionBindings& before,
+                                   const ExecutionBindings& after,
+                                   const DemandQuery& support,
+                                   const SnapshotAccessOptions& access,
+                                   const FootprintLimits& limits) {
+  std::map<std::string, const ExecutionBinding*> old, next;
+  for (const auto& input : before.inputs)
+    old.emplace(input.name, &input);
+  for (const auto& input : after.inputs)
+    next.emplace(input.name, &input);
+  std::uint64_t remaining = access.maximum_samples;
+  DemandQuery changes;
+  for (const auto& required : support) {
+    const auto& a = *old.at(required.first);
+    const auto& b = *next.at(required.first);
+    OperationMetadata metadata =
+        a.snapshot
+            ? OperationMetadata{a.snapshot->descriptor(), a.snapshot->facets()}
+            : OperationMetadata{a.value.descriptor(), a.value.facets()};
+    auto observations =
+        operation_observations(metadata, required.second, limits);
+    if (!observations.ok())
+      return Result<DemandQuery>(observations.status());
+    const bool image =
+        observations.value().shape().size() != metadata.descriptor.shape.size();
+    const auto channels = image ? metadata.descriptor.shape.back() : 1;
+    const auto width = Value::element_size(metadata.descriptor.element_type);
+    if (!channels || channels > SIZE_MAX / width)
+      return Result<DemandQuery>(Status{ErrorCode::ResourceExhausted, {}});
+    std::vector<std::uint8_t> left(channels * width), right(channels * width);
+    std::vector<Region> dirty;
+    auto status = observations.value().visit(
+        [&](const auto& coordinate) {
+          if (channels > remaining)
+            return Status{ErrorCode::ResourceExhausted,
+                          "demand update sample limit"};
+          remaining -= channels;
+          std::vector<RegionDimension> dimensions;
+          for (const auto at : coordinate)
+            dimensions.push_back({at, 1});
+          if (image)
+            dimensions.push_back({0, channels});
+          Region region(dimensions);
+          const auto read = [&](const ExecutionBinding& input,
+                                std::vector<std::uint8_t>* bytes) -> Status {
+            if (input.snapshot)
+              return input.snapshot->read(
+                  region, bytes->data(), bytes->size(),
+                  SnapshotAccessOptions{channels, access.cancellation});
+            auto at = coordinate;
+            if (image)
+              at.push_back(0);
+            for (std::uint64_t c = 0; c < channels; ++c) {
+              if (image)
+                at.back() = c;
+              auto offset = input.value.byte_address(at);
+              if (!offset.ok())
+                return offset.status();
+              std::memcpy(bytes->data() + c * width,
+                          input.value.bytes().data() + offset.value(), width);
+            }
+            return Status::success();
+          };
+          auto status = read(a, &left);
+          if (!status.ok())
+            return status;
+          status = read(b, &right);
+          if (!status.ok())
+            return status;
+          if (left != right) {
+            if (dirty.size() >= limits.maximum_boxes)
+              return Status{ErrorCode::ResourceExhausted,
+                            "demand edit footprint limit"};
+            dirty.push_back(std::move(region));
+          }
+          return Status::success();
+        },
+        access.maximum_samples, access.cancellation);
+    if (!status.ok())
+      return Result<DemandQuery>(status);
+    auto samples =
+        Footprint::from_regions(required.second.shape(), dirty, limits);
+    if (!samples.ok())
+      return Result<DemandQuery>(samples.status());
+    if (!samples.value().empty())
+      changes.emplace(required.first, samples.take_value());
+  }
+  return Result<DemandQuery>(std::move(changes));
+}
+}  // namespace
+
 Result<FrozenExecution> ExecutionContext::freeze(
     const ExecutionPlan& plan, ExecutionBindings bindings) const {
   if (!impl_ || !plan.current() ||
@@ -2800,7 +3168,11 @@ Result<FrozenExecution> ExecutionContext::freeze(
   auto validated = preflight_regional_bindings(plan, bindings, {});
   if (!validated.ok())
     return Result<FrozenExecution>(validated.status());
+  auto identity = frozen_identity();
+  if (!identity.ok())
+    return Result<FrozenExecution>(identity.status());
   FrozenExecution frozen;
+  frozen.execution_identity_ = identity.take_value();
   frozen.plan_ = plan;
   frozen.bindings_ = std::move(bindings);
   frozen.operations_ = impl_->operation_registry;
@@ -2812,6 +3184,368 @@ Result<FrozenExecution> ExecutionContext::freeze(
         Status::failure(ErrorCode::Stale, "graph changed during freeze"));
   return Result<FrozenExecution>(std::move(frozen));
 }
+Result<DemandResult> ExecutionContext::execute_fragments(
+    const FrozenExecution& frozen, const DemandQuery& query,
+    const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (!impl_ || !frozen.valid() || !frozen.plan_.current() ||
+      frozen.operations_ != impl_->operation_registry)
+    return Result<DemandResult>(
+        Status{ErrorCode::Stale, "invalid or foreign frozen demand"});
+  const auto stop = [&] { return binding_stop(frozen.plan_, cancellation); };
+  const auto failure = [&](Status status) {
+    const auto code = stop();
+    if (code != ErrorCode::Ok)
+      status = Status{code, {}};
+    return Result<DemandResult>(std::move(status));
+  };
+  if (stop() != ErrorCode::Ok)
+    return failure(Status{stop(), {}});
+  auto key =
+      demand_key(query, frozen.plan_, options.dependencies.sets.maximum_boxes);
+  if (!key.ok())
+    return failure(key.status());
+  auto validated =
+      preflight_regional_bindings(frozen.plan_, frozen.bindings_, cancellation);
+  if (!validated.ok())
+    return failure(validated.status());
+  for (const auto& item : query)
+    if (item.second.empty()) {
+      const auto& step =
+          frozen.plan_.steps().at(frozen.plan_.outputs().at(item.first));
+      if (step.traits.dependency_version == 1) {
+        std::vector<OperationMetadata> inputs;
+        for (const auto& input : step.inputs) {
+          if (const auto* source = std::get_if<PlanStepInput>(&input)) {
+            const auto& p = frozen.plan_.steps().at(source->step_index);
+            inputs.push_back({p.output_descriptor, p.output_facets});
+          } else {
+            const auto& p = frozen.plan_.input_declarations().at(
+                std::get<PlanWorkflowInput>(input).declaration_index);
+            inputs.push_back({p.descriptor, p.facets});
+          }
+        }
+        auto status = impl_->operation_registry->validate_dependency_metadata(
+            step.operation, inputs, step.parameters);
+        if (!status.ok())
+          return failure(status);
+      }
+    }
+  DemandResult result;
+  auto run = ExecutionRun::run_dependencies(
+      &impl_->cpu_pool, &impl_->waiting_admission, impl_->budget,
+      impl_->operation_registry,
+      [operations = impl_->operation_registry, &frozen](
+          const std::string& key, const OperationInvocation& call) {
+        return operations->invoke_current(
+            key, call, [&] { return frozen.plan_.current(); });
+      },
+      frozen.plan_, validated.take_value(), cancellation, options, nullptr,
+      [this](std::uint64_t bytes) {
+        if (impl_->disk && impl_->budget->available() < bytes)
+          impl_->disk->drop_pending();
+        if (impl_->cache)
+          impl_->cache->reclaim_for(bytes);
+      },
+      &query, &result.values, frozen.execution_identity_);
+  if (!run.ok())
+    return failure(run.status());
+  auto completed = run.take_value();
+  result.diagnostics = std::move(completed.diagnostics);
+  result.dependencies = std::move(completed.dependencies);
+  if (stop() != ErrorCode::Ok)
+    return failure(Status{stop(), {}});
+  return Result<DemandResult>(std::move(result));
+}
+Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
+                                                   ExecutionBindings bindings,
+                                                   DemandConfig config) {
+  if (!impl_ || !plan.current() ||
+      plan.operation_registry_.lock() != impl_->operation_registry)
+    return Result<DemandHandle>(
+        Status{ErrorCode::Stale, "invalid or foreign demand plan"});
+  if (!config.maximum_metadata_entries ||
+      config.maximum_metadata_entries > 1048576)
+    return Result<DemandHandle>(
+        Status{ErrorCode::InvalidArgument, "invalid demand metadata limit"});
+  auto frozen = freeze(plan, std::move(bindings));
+  if (!frozen.ok())
+    return Result<DemandHandle>(frozen.status());
+  auto state = std::make_shared<DemandHandle::Impl>();
+  state->owner = impl_->demands;
+  state->config = config;
+  state->bundle = std::make_shared<const FrozenExecution>(frozen.take_value());
+  auto& owner = *impl_->demands;
+  std::lock_guard<std::mutex> lock(owner.mutex);
+  if (owner.closing)
+    return Result<DemandHandle>(Status{ErrorCode::Cancelled, {}});
+  for (auto i = owner.handles.begin(); i != owner.handles.end();) {
+    // Do not acquire a temporary last owner under the publication lock:
+    // input allocation deleters may reenter another demand in this context.
+    if (i->second.handle.expired() || i->second.cancellation.cancelled())
+      i = owner.handles.erase(i);
+    else
+      ++i;
+  }
+  if (owner.handles.size() >= owner.maximum_handles || owner.next == UINT64_MAX)
+    return Result<DemandHandle>(
+        Status{ErrorCode::ResourceExhausted, "demand handle limit"});
+  owner.handles.emplace(owner.next++,
+                        execution_internal::DemandCoordinator::HandleEntry{
+                            state, state->cancellation.token()});
+  return Result<DemandHandle>(DemandHandle(std::move(state)));
+}
+DemandHandle::DemandHandle(std::shared_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+Result<DemandResult> DemandHandle::request(
+    const DemandQuery& query, const CancellationToken& cancellation,
+    const ExecutionOptions& options) const {
+  if (!impl_)
+    return Result<DemandResult>(
+        Status{ErrorCode::Stale, "invalid demand handle"});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<DemandResult>(
+        Status{ErrorCode::Cancelled, "demand context retired"});
+  auto begun = owner->acquire(impl_, cancellation);
+  if (!begun.ok())
+    return Result<DemandResult>(begun.status());
+  auto lease = begun.take_value();
+  const auto failure = [&](Status status) {
+    return Result<DemandResult>(lease->stop(std::move(status)));
+  };
+  auto key = demand_key(query, lease->bundle->plan(),
+                        std::min(impl_->config.maximum_metadata_entries,
+                                 options.dependencies.sets.maximum_boxes));
+  if (!key.ok())
+    return failure(key.status());
+  DemandQuery original = query;
+  auto run = *lease->bundle;
+  run.plan_.current_check_ = [handle = impl_, generation = lease->generation] {
+    return handle->generation.load(std::memory_order_acquire) == generation;
+  };
+  auto executed = owner->context->execute_fragments(
+      run, original, lease->cancellation, options);
+  if (!executed.ok())
+    return failure(executed.status());
+  auto result = executed.take_value();
+  result.generation = lease->generation;
+  auto publication = std::make_shared<Impl::Publication>();
+  publication->query = std::move(original);
+  publication->dependencies = result.dependencies;
+  auto limits = options.dependencies.sets;
+  limits.cancellation = lease->cancellation;
+  for (const auto& item : publication->query) {
+    auto empty = Footprint::none(item.second.shape(), limits);
+    if (!empty.ok())
+      return failure(empty.status());
+    publication->dirty.emplace(item.first, empty.take_value());
+  }
+  const auto base = checked_add(
+      key.value().entries, execution_internal::DependencyRecords::metadata_size(
+                               result.dependencies));
+  if (!base.ok())
+    return failure(base.status());
+  auto weight = checked_add(base.value(), publication->dirty.size());
+  if (!weight.ok())
+    return failure(weight.status());
+  publication->weight = weight.value();
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  auto status = lease->stop();
+  if (!status.ok())
+    return Result<DemandResult>(status);
+  if (impl_->revision == UINT64_MAX)
+    return Result<DemandResult>(Status{ErrorCode::ResourceExhausted, {}});
+  auto old = impl_->publications.find(key.value().value);
+  if (old != impl_->publications.end() &&
+      old->second->query != publication->query)
+    return Result<DemandResult>(
+        Status{ErrorCode::Internal, "query identity collision"});
+  const auto remainder =
+      impl_->metadata_entries -
+      (old == impl_->publications.end() ? 0 : old->second->weight);
+  if (publication->weight > impl_->config.maximum_metadata_entries ||
+      remainder > impl_->config.maximum_metadata_entries - publication->weight)
+    return Result<DemandResult>(
+        Status{ErrorCode::ResourceExhausted, "retained demand metadata limit"});
+  impl_->publications.insert_or_assign(key.value().value, publication);
+  impl_->metadata_entries = remainder + publication->weight;
+  ++impl_->revision;
+  return Result<DemandResult>(std::move(result));
+}
+Result<FrozenExecution> DemandHandle::freeze() const {
+  if (!impl_)
+    return Result<FrozenExecution>(Status{ErrorCode::Stale, {}});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<FrozenExecution>(Status{ErrorCode::Cancelled, {}});
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  if (owner->closing || impl_->cancellation.token().cancelled())
+    return Result<FrozenExecution>(Status{ErrorCode::Cancelled, {}});
+  return Result<FrozenExecution>(*impl_->bundle);
+}
+Result<std::uint64_t> DemandHandle::generation() const {
+  if (!impl_)
+    return Result<std::uint64_t>(Status{ErrorCode::Stale, {}});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<std::uint64_t>(Status{ErrorCode::Cancelled, {}});
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  if (owner->closing || impl_->cancellation.token().cancelled())
+    return Result<std::uint64_t>(Status{ErrorCode::Cancelled, {}});
+  return Result<std::uint64_t>(impl_->generation.load());
+}
+Status DemandHandle::release(const DemandQuery& query) const {
+  if (!impl_)
+    return Status{ErrorCode::Stale, {}};
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Status{ErrorCode::Cancelled, {}};
+  auto begun = owner->acquire(impl_, {});
+  if (!begun.ok())
+    return begun.status();
+  auto lease = begun.take_value();
+  auto key = demand_key(query, lease->bundle->plan(),
+                        impl_->config.maximum_metadata_entries);
+  if (!key.ok())
+    return lease->stop(key.status());
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  auto status = lease->stop();
+  if (!status.ok())
+    return status;
+  auto found = impl_->publications.find(key.value().value);
+  if (found == impl_->publications.end() || found->second->query != query)
+    return Status{ErrorCode::NotFound, {}};
+  if (impl_->revision == UINT64_MAX)
+    return Status{ErrorCode::ResourceExhausted, {}};
+  impl_->metadata_entries -= found->second->weight;
+  impl_->publications.erase(found);
+  ++impl_->revision;
+  return Status::success();
+}
+bool DemandHandle::cancel() const noexcept {
+  if (!impl_)
+    return false;
+  const bool first = impl_->cancellation.cancel();
+  std::shared_ptr<const FrozenExecution> retired;
+  if (auto owner = impl_->owner.lock()) {
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    impl_->publications.clear();
+    impl_->metadata_entries = 0;
+    retired = std::move(impl_->bundle);
+  }
+  return first;
+}
+Result<DemandUpdate> DemandHandle::replace_bindings(
+    ExecutionBindings bindings, const SnapshotAccessOptions& options) const {
+  if (!impl_)
+    return Result<DemandUpdate>(Status{ErrorCode::Stale, {}});
+  auto owner = impl_->owner.lock();
+  if (!owner)
+    return Result<DemandUpdate>(Status{ErrorCode::Cancelled, {}});
+  auto begun = owner->acquire(impl_, options.cancellation);
+  if (!begun.ok())
+    return Result<DemandUpdate>(begun.status());
+  auto lease = begun.take_value();
+  const auto failure = [&](Status status) {
+    return Result<DemandUpdate>(lease->stop(std::move(status)));
+  };
+  std::map<std::string, std::shared_ptr<const Impl::Publication>> publications;
+  {
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    auto status = lease->stop();
+    if (!status.ok())
+      return Result<DemandUpdate>(status);
+    publications = impl_->publications;
+    lease->revision = impl_->revision;
+  }
+  auto frozen =
+      owner->context->freeze(lease->bundle->plan_, std::move(bindings));
+  if (!frozen.ok())
+    return failure(frozen.status());
+  auto next = std::make_shared<const FrozenExecution>(frozen.take_value());
+  FootprintLimits limits{impl_->config.maximum_metadata_entries, 1048576,
+                         lease->cancellation};
+  DemandQuery support;
+  for (const auto& item : publications) {
+    auto source = item.second->dependencies.source_support(limits);
+    if (!source.ok())
+      return failure(source.status());
+    auto status = unite_named(&support, source.value(), limits);
+    if (!status.ok())
+      return failure(status);
+  }
+  auto access = options;
+  access.cancellation = lease->cancellation;
+  auto changes = changed_inputs(lease->bundle->bindings_, next->bindings_,
+                                support, access, limits);
+  if (!changes.ok())
+    return failure(changes.status());
+  DemandUpdate update;
+  if (lease->generation == UINT64_MAX)
+    return failure(Status{ErrorCode::ResourceExhausted, {}});
+  update.generation = lease->generation + 1;
+  std::uint64_t entries = 0;
+  for (auto& item : publications) {
+    auto publication = std::make_shared<Impl::Publication>(*item.second);
+    for (const auto& change : changes.value()) {
+      auto dirty = publication->dependencies.potential_dirty(
+          change.first, change.second, 7, limits);
+      if (!dirty.ok())
+        return failure(dirty.status());
+      auto status = unite_named(&publication->dirty, dirty.value(), limits);
+      if (!status.ok())
+        return failure(status);
+    }
+    auto key = demand_key(publication->query, next->plan_,
+                          impl_->config.maximum_metadata_entries);
+    if (!key.ok())
+      return failure(key.status());
+    auto weight =
+        checked_add(key.value().entries,
+                    execution_internal::DependencyRecords::metadata_size(
+                        publication->dependencies));
+    if (!weight.ok())
+      return failure(weight.status());
+    std::uint64_t cost = weight.value();
+    for (const auto& dirty : publication->dirty) {
+      weight = checked_add(cost, 1 + dirty.second.boxes().size());
+      if (!weight.ok())
+        return failure(weight.status());
+      cost = weight.value();
+    }
+    publication->weight = cost;
+    if (cost > impl_->config.maximum_metadata_entries ||
+        entries > impl_->config.maximum_metadata_entries - cost)
+      return failure(Status{ErrorCode::ResourceExhausted,
+                            "updated demand metadata limit"});
+    entries += cost;
+    auto status = unite_named(&update.coverage, publication->query, limits);
+    if (!status.ok())
+      return failure(status);
+    status = unite_named(&update.potential_dirty, publication->dirty, limits);
+    if (!status.ok())
+      return failure(status);
+    item.second = std::move(publication);
+  }
+  std::shared_ptr<const FrozenExecution> retired;
+  std::lock_guard<std::mutex> lock(owner->mutex);
+  auto status = lease->stop();
+  if (!status.ok())
+    return Result<DemandUpdate>(status);
+  if (impl_->revision != lease->revision)
+    return Result<DemandUpdate>(Status{
+        ErrorCode::Stale, "demand publications changed during replacement"});
+  if (impl_->revision == UINT64_MAX)
+    return Result<DemandUpdate>(Status{ErrorCode::ResourceExhausted, {}});
+  retired = std::move(impl_->bundle);
+  impl_->bundle = std::move(next);
+  impl_->publications.swap(publications);
+  impl_->metadata_entries = entries;
+  ++impl_->revision;
+  impl_->generation.store(update.generation, std::memory_order_release);
+  return Result<DemandUpdate>(std::move(update));
+}
+
 Result<ExecutionResult> ExecutionContext::execute(
     const FrozenExecution& frozen, const CancellationToken& cancellation,
     const ExecutionOptions& options) {

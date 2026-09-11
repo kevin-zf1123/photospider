@@ -162,5 +162,43 @@ terminal RequestRecord 仅接受相同完整 Q。Atomic Empty 是已知空，省
 后再收到 `{1}`，用独立逐端口 oracle 核验，并在像素/context owner 释放后查询证据。
 动态 scatter 验证排除项控制证据、相同输出的改边和旧证据隔离。Whole 和真实 C
 terminal 测试检查不可分割 manifest；同一检查消费安装后的静态库和共享库。
-公开 G4 workflow 也检查 radius 编辑与 frozen 旧关系的运行时证据。该层为后续
-context-owned demand/cache 集成提供结构，不自行订阅可变 bindings。
+公开 G4 workflow 也检查 radius 编辑与 frozen 旧关系的运行时证据。证据保持不可变，
+订阅由下面的 context demand API 管理。
+
+## 精确 demand 与不可变 binding 替换
+
+`ExecutionContext::open_demand(plan, bindings)` 固定当前图契约及不可变 Value/snapshot
+bindings。`DemandHandle` 副本共享 bundle 和 generation。`request({name: Footprint})`
+返回精确 `ValueFragments`、诊断和结构证据，每个请求保留 original Q。Atomic callback
+仍逐样本或完整图像像素调用；staged terminal RequestRecord 一次接收完整稀疏 Q。
+Legacy 同步 terminal 只接受矩形 Q。Empty 输出验证静态 metadata，跳过 source 读取、
+admission 和 continuation callback；未请求的名称不出现在结果中。
+`execute_fragments(frozen, Q)` 对固定 bundle 提供相同精确查询，结果 generation 为零。
+
+成功请求按精确命名 query 保留结构 publication。`replace_bindings` 比较旧记录所需
+source support 的不可变字节，通过既有关系计算 potential dirty，将新 bundle、
+generation 和累计 dirty 一起提交，不信任调用者 dirty hint。控制证据变化后，dirty
+一直保留到该精确 query 成功重新发布，即使数值结果相同。`source_support()` 是字节
+比较使用的有界取数并集，不能替代逐输出证书关联。图像比较包括完整 C，generic 比较
+保留全部 dtype 位模式。静态 descriptor/schema 变化需要重新编译 plan。
+
+替换在发布前验证全部 bindings。样本、metadata 限额或验证失败保留旧 generation；
+与 request 发布或其他 replacement 竞争时返回 Stale，供调用者重试。已完成替换前
+捕获的 latest 请求不能发布到新 generation，取消优先于 Stale。`freeze()` 固定当前
+bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不取消活跃请求，后者仍可
+重新发布该订阅；`cancel()` 停止该 handle
+并退休其 publication 和 bundle。Context 析构先取消并排空活跃 demand 调用，再退休
+既有 workers。直接 context 调用不能与析构竞争，已有 handle 调用可与析构竞争。
+输入 owner 析构在 publication mutex 之外执行。
+
+`maximum_demands` 限制存活且未取消的 handle，范围 1..65536、默认 1024；活跃 demand
+调用上限为既有队列容量加 CPU worker 数再加一个 coordinator 槽。
+`DemandConfig::maximum_metadata_entries` 限制每个 handle 保留的 query/evidence/dirty
+metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache；当前调用
+通过既有 CPU pool、WaitingAdmission 和计费 allocator 独立执行。跨 Run dependency
+Flights、content-cache 复用及 GPU fragment 执行仍是未完成的 G4 集成。
+
+`test_execution_demand` 覆盖稀疏结果、各 dtype snapshot、连续 dirty 累积、frozen
+隔离、陈旧发布、独立取消及 context 排空。真实 C terminal fixture 检查稀疏 Q 仅调用
+一次、Empty 不调用。公开 `g4_workflow` demand 场景使用直接 oracle 检查两次替换前后
+scatter 两端的结果。

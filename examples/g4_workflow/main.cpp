@@ -11,6 +11,7 @@
 
 void progressive_workflow();
 void dynamic_workflow();
+void demand_workflow();
 void measure_workflow();
 
 namespace {
@@ -116,6 +117,7 @@ int main(int argc, char** argv) {
     data_workflow();
     progressive_workflow();
     dynamic_workflow();
+    demand_workflow();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

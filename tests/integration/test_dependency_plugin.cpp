@@ -274,6 +274,32 @@ int workflow(std::uint32_t (*starts)(), std::uint32_t (*destroys)()) {
                .empty());
   PS_CHECK(!evidence.restrict({{"result", point(1)}}).ok());
   PS_CHECK(evidence.restrict({{"result", full_query}}).ok());
+  const auto full_plan = compiler.compile(terminal_graph).take_value().plan;
+  auto writer = MutableValue::allocate({ElementType::Float64, {5}},
+                                       Region::whole({5}), BufferAllocator{})
+                    .take_value();
+  const double data[] = {2, 11, 22, 33, 7};
+  std::memcpy(writer.data(), data, sizeof(data));
+  ExecutionBindings immutable{
+      {{"samples", std::move(writer).publish().take_value()}}};
+  auto demand = context.open_demand(full_plan, immutable).take_value();
+  const auto sparse = point(1).unite(point(3)).take_value();
+  const auto calls = starts();
+  auto sparse_result = demand.request({{"result", sparse}});
+  PS_CHECK(sparse_result.ok() && starts() == calls + 1 &&
+           starts() == destroys());
+  PS_CHECK(sparse_result.value().values.at("result").coverage() == sparse);
+  PS_CHECK(
+      sparse_result.value().values.at("result").read({1}, &value, 8).ok() &&
+      value == 11);
+  PS_CHECK(
+      sparse_result.value().values.at("result").read({3}, &value, 8).ok() &&
+      value == 11);
+  PS_CHECK(
+      !sparse_result.value().values.at("result").read({2}, &value, 8).ok());
+  auto empty = demand.request({{"result", Footprint::none({5}).take_value()}});
+  PS_CHECK(empty.ok() && starts() == calls + 1);
+  PS_CHECK(empty.value().values.at("result").coverage().empty());
   return 0;
 }
 int session_owns_library() {
