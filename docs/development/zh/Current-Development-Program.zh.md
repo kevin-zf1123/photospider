@@ -1,83 +1,32 @@
 # 当前开发计划
 
-- 快照日期：2026-09-10
-- 已审计基础：`main@fba06270`（已交付 S4，package 0.6.0）
-- 当前 milestone：G1/G2/G3/G5 算子基础，#287；本地实现已验证
-- 交付分支：`ops-foundations` 合入 `ops`，不合入 main
+- 快照日期：2026-09-12
+- 交付基线：ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458，包 0.8.0 / ABI 8
+- 当前里程碑：[#302 独立结果与 Atomic 联合执行](https://github.com/kevin-zf1123/photospider/issues/302)
+- 开发分支：codex/multi-output-semantics，仅合并到 ops
 
-## 角色与权威
+GitHub Issue 为实时交付状态权威。ADR 0021 记录已接受目标，接受不表示实现完成。
+基线已经包含算子基础与 G4 执行能力。历史 main@fba06270 和 ops-foundations 快照只说明
+历史里程碑，本快照不审核或改变 main。ADR 0015 保持产品边界权威。
 
-本文件记录公开 delivery baseline、当前 milestone、active leaf Issue、dependency 与
-执行顺序。它不能修改 ADR 0015 的产品边界，也不能修改
-`docs/kernel-architecture/` 记录的行为。
+## 执行顺序
 
-公开 GitHub Issue 是 live delivery-status authority。本快照与 Issue 不一致时，以 Issue
-为准，并同步修订本文件。GitHub Project 是 maintainer operational view，只同步 Issue
-状态，不能覆盖 Issue。私有 personal-overlay OpenSpec 文件属于 maintainer working
-note，没有公开 authority，也不构成交付 gate。
+- M0 / #303：研究与契约
+- M1 / #304：输出 traits 与 ABI 9
+- M2 / #305：多输出编译与规划
+- M3 / #306：输出独立执行、依赖和缓存
+- M4 / #307：逐观察 C/C++ 结果
+- M5 / #308：Atomic 联合调度
+- M6 / #309：平面语义与 420
+- M7 / #310：横向裁剪输出
+- M8 / #311：独立通道卷积
+- M9 / #312：非整数半径高斯图像与核
+- M10 / #313：安装 workflow 与组合验收
 
-Active Project container 是
-[#7 FND](https://github.com/users/kevin-zf1123/projects/7)、
-[#8 IR](https://github.com/users/kevin-zf1123/projects/8)、
-[#9 HEX](https://github.com/users/kevin-zf1123/projects/9) 与
-[#10 MED](https://github.com/users/kevin-zf1123/projects/10)。S1 kernel Issue 改变
-compiler 与 execution contract，因此进入 Project #8。
-
-## 已结算实现 baseline
-
-以下能力在已审计 baseline 已经完整交付，并已与对应 GitHub Issue 对齐：
-
-| 领域 | 已交付 Issue | 当前证据 |
-| --- | --- | --- |
-| 紧凑 build 与 validation profile | [#192](https://github.com/kevin-zf1123/photospider/issues/192)、[#193](https://github.com/kevin-zf1123/photospider/issues/193) | `CMakeLists.txt`、`CMakePresets.json`、`.github/workflows/ci.yml` 与测试文档 |
-| Package 与 public-version 边界 | [#196](https://github.com/kevin-zf1123/photospider/issues/196)、[#198](https://github.com/kevin-zf1123/photospider/issues/198) | `docs/development/Compiler-Version-Contract.md`、package export 与隔离 installed consumer |
-| Typed source 与 compiler stage | [#199](https://github.com/kevin-zf1123/photospider/issues/199)、[#200](https://github.com/kevin-zf1123/photospider/issues/200)、[#201](https://github.com/kevin-zf1123/photospider/issues/201)、[#202](https://github.com/kevin-zf1123/photospider/issues/202) | 公开 WorkflowDocument、operation trait、semantic/optimized IR、physical plan、typed digest 与 focused test |
-| Raw benchmark vertical | [#240](https://github.com/kevin-zf1123/photospider/issues/240) | `RawBenchmarkRunner`、named oracle 或显式 unchecked 状态、raw diagnostic 与 execution regression |
-
-历史 S0 baseline CI 是
-[`kernel-ci` run 68](https://github.com/kevin-zf1123/photospider/actions/runs/33738054894)。
-它在 Linux 与 macOS 上通过 static/shared kernel、ASAN 与 TSAN。
-
-## 当前 milestone
-
-同步基线 `main@fba06270` 包含 S4 package 0.6.0、operation ABI/traits 6：显式
-CpuExact/MetalFp32、原生 shared storage、全部八个图像算子、区域上传、有界驻留和
-fallback。[S4 指南](../../kernel-architecture/zh/S4-Workflow.zh.md) 及其可执行示例/测试
-记录该实现基线。Foundations 迁移保留 CPU/C/Metal 行为，focused native 验证也已
-对 signed/HDR image-v2 输入观察到真实 dispatch 与零 fallback。
-
-[Foundations #287](https://github.com/kevin-zf1123/photospider/issues/287) 实现
-[ADR 0020](../../adr/0020-composable-operation-foundations.md)。已接受目标为 package
-0.7.0/ABI 7、结构化语义与 image v2、静态输出推断、computed scalar、八算子完整迁移、
-cache/snapshot 集成及可复用 numeric/channel/color/expression/LUT/component workflow。
-本地已完成十个切片的实现、focused tests 与隔离 static/shared consumer。
-[独立示例](../../../examples/foundations_workflow)运行六个公开组合场景，各算子指南链接
-focused 回归。全面审查、PR CI、Codex bot review 与合并的实时状态由 #287 及其实现
-PR 记录，本地验证不代表这些交付门槛已通过。Schema 2、provider ABI 1、C++17 保持。
-
-| 顺序 | Active leaf | 完成边界 |
-| --- | --- | --- |
-| 1 | #288 | 接受契约及目标/事实区分 |
-| 2 | #289 | 共享语义、输出推断、C/C++ ABI |
-| 3 | #290 | 八算子 C++/C/Metal 迁移 |
-| 4 | #291 | Snapshot、freeze、完整 cache 语义 |
-| 5 | #292 | Computed scalar 验证与组合 |
-| 6 | #293 | Numeric cast/range/arithmetic/reduction |
-| 7 | #294 | Channel、alpha、参考白颜色组合 |
-| 8 | #295 | 有界 expression、动态 coefficients、linear LUT |
-| 9 | #296 | Threshold、labels、固定容量属性 |
-| 10 | #297 | 安装包公开 workflow 示例与组合验收 |
-
-每叶项依赖前一交付切片。ABI 迁移可机械更新既有调用方以保持各提交可构建；完整八算子
-及 snapshot/cache 切片已实现各自支持的 image-v2 表示。
-唯一实现写入者负责项目修改，协调者负责 Issue/commit/PR 行政操作。每 Issue 单独提交后，
-新建独立全面审查，完成六项必需 CI 和 Codex review bot 修复。唯一实现 PR 通过 merge
-commit 将 `ops-foundations` 合入 `ops`。验证 ops 交付后结算 Issue，保留本地/远端 ops，
-仅删除 ops-foundations。
-
-G4 空间依赖扩展、G6 宿主资产、daemon 0.6 迁移、完整路径、FFT、ICC/OCIO 不属于本次
-milestone。Main 保持基线，不表示已交付 0.7。S5 校准/自动选址 #209、增量编译 #203
-继续独立处理；更广泛算子目录保持 Proposed。
+各项依赖前项，分别验证并提交。全部叶项后进行新的独立全面审查、必要修复、PR 到 ops、
+最终 HEAD 的现有六项 CI 与 Codex bot review、merge commit、显式 Issue 结算、本地 ops
+同步及本轮分支清理。仅内核仓库在范围内。动态输出、RequestRecord 联合执行、新 Metal
+算法、daemon 迁移和 #206 通道裁剪另行处理。
 
 ## 当前 milestone 以外的 active backlog
 

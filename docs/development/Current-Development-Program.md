@@ -1,94 +1,41 @@
 # Current Development Program
 
-- Snapshot date: 2026-09-10
-- Audited foundation: `main@fba06270` (delivered S4, package 0.6.0)
-- Current milestone: G1/G2/G3/G5 operation foundations, #287; local implementation verified
-- Delivery branch: `ops-foundations` into `ops`, with no merge into main
+- Snapshot date: 2026-09-12
+- Delivery baseline: `ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458`, package 0.8.0 / ABI 8
+- Current milestone: [independent results and Atomic joint execution #302](https://github.com/kevin-zf1123/photospider/issues/302)
+- Branch: `codex/multi-output-semantics` into `ops`; no main or daemon delivery
 
-## Role and authority
+## Authority and current state
 
-This file records the public delivery baseline, current milestone, active leaf
-Issues, dependencies, and execution order. It cannot change the product
-boundary in ADR 0015 or behavior documented under `docs/kernel-architecture/`.
+GitHub Issues own live delivery status. [ADR 0021](../adr/0021-independent-node-results.md)
+records the maintainer-approved target; acceptance does not establish implementation.
+The baseline contains the operation foundations and G4 execution capabilities.
+Earlier main@fba06270 / ops-foundations snapshots describe historical milestones.
+This snapshot does not audit or change main. ADR 0015 retains product authority.
 
-Public GitHub Issues are the live delivery-status authority. If this snapshot
-differs from an Issue, the Issue prevails and this file must be reconciled.
-GitHub Projects are maintainer operational views that mirror Issues and cannot
-override them. Private personal-overlay OpenSpec files are maintainer working
-notes. They have no public authority and do not gate delivery.
+## Ordered implementation leaves
 
-The active Project containers are
-[#7 FND](https://github.com/users/kevin-zf1123/projects/7),
-[#8 IR](https://github.com/users/kevin-zf1123/projects/8),
-[#9 HEX](https://github.com/users/kevin-zf1123/projects/9), and
-[#10 MED](https://github.com/users/kevin-zf1123/projects/10). The S1 kernel
-Issues are tracked in Project #8 because they change compiler and execution
-contracts.
-
-## Settled implementation baseline
-
-The following capabilities were already complete at the audited baseline
-and were reconciled with their GitHub Issues:
-
-| Area | Delivered Issues | Current evidence |
+| Order | Issue | Acceptance |
 | --- | --- | --- |
-| Compact build and validation profiles | [#192](https://github.com/kevin-zf1123/photospider/issues/192), [#193](https://github.com/kevin-zf1123/photospider/issues/193) | `CMakeLists.txt`, `CMakePresets.json`, `.github/workflows/ci.yml`, and testing documentation |
-| Package and public-version boundary | [#196](https://github.com/kevin-zf1123/photospider/issues/196), [#198](https://github.com/kevin-zf1123/photospider/issues/198) | `docs/development/Compiler-Version-Contract.md`, package exports, and isolated installed consumers |
-| Typed source and compiler stages | [#199](https://github.com/kevin-zf1123/photospider/issues/199), [#200](https://github.com/kevin-zf1123/photospider/issues/200), [#201](https://github.com/kevin-zf1123/photospider/issues/201), [#202](https://github.com/kevin-zf1123/photospider/issues/202) | Public WorkflowDocument, operation traits, semantic/optimized IR, physical plan, typed digests, and focused tests |
-| Raw benchmark vertical | [#240](https://github.com/kevin-zf1123/photospider/issues/240) | `RawBenchmarkRunner`, named oracle or explicit unchecked status, raw diagnostics, and execution regressions |
+| M0 | [#303](https://github.com/kevin-zf1123/photospider/issues/303) | Research/contracts |
+| M1 | [#304](https://github.com/kevin-zf1123/photospider/issues/304) | Output traits and ABI 9 |
+| M2 | [#305](https://github.com/kevin-zf1123/photospider/issues/305) | Multi-output compilation and planning |
+| M3 | [#306](https://github.com/kevin-zf1123/photospider/issues/306) | Per-output execution/dependencies/caches |
+| M4 | [#307](https://github.com/kevin-zf1123/photospider/issues/307) | Per-observation C/C++ outcomes |
+| M5 | [#308](https://github.com/kevin-zf1123/photospider/issues/308) | Atomic joint scheduling |
+| M6 | [#309](https://github.com/kevin-zf1123/photospider/issues/309) | Plane semantics and 420 |
+| M7 | [#310](https://github.com/kevin-zf1123/photospider/issues/310) | Horizontal crop outputs |
+| M8 | [#311](https://github.com/kevin-zf1123/photospider/issues/311) | Independent channel convolutions |
+| M9 | [#312](https://github.com/kevin-zf1123/photospider/issues/312) | Fractional-radius Gaussian image/kernel |
+| M10 | [#313](https://github.com/kevin-zf1123/photospider/issues/313) | Installed workflows and combined acceptance |
 
-The historical S0 baseline CI was
-[`kernel-ci` run 68](https://github.com/kevin-zf1123/photospider/actions/runs/33738054894).
-It passed on Linux and macOS for static and shared kernels, plus ASAN and TSAN.
-
-## Current milestone
-
-The synchronized baseline `main@fba06270` contains S4 package 0.6.0 and
-operation ABI/traits 6: explicit CpuExact/MetalFp32 planning, native shared
-storage, all eight image operations, regional uploads, bounded residency and
-fallback. The [S4 guide](../kernel-architecture/S4-Workflow.md) and its executable
-examples/tests document that implemented baseline. Foundation migration preserves
-its CPU/C/Metal behavior; focused native validation has also exercised signed/HDR
-image-v2 inputs with actual dispatches and zero fallback.
-
-[Foundations #287](https://github.com/kevin-zf1123/photospider/issues/287) implements
-[ADR 0020](../adr/0020-composable-operation-foundations.md). Its accepted target
-is package 0.7.0/ABI 7, structured semantics and image v2, static output inference,
-computed scalars, complete eight-op migration, cache/snapshot integration and
-reusable numeric/channel/color/expression/LUT/component workflows. The local
-implementation now includes all ten slices, with focused tests and isolated
-static/shared consumers. The [standalone example](../../examples/foundations_workflow)
-runs six public composition scenarios; owning operator guides link the focused
-regressions. Live comprehensive-review, PR CI, Codex bot review and merge status
-are recorded in #287 and its implementation PR. Local validation does not establish
-those delivery gates. Schema 2, provider ABI 1 and C++17 remain.
-
-| Order | Active leaf | Completion boundary |
-| --- | --- | --- |
-| 1 | #288 | Accepted contracts and target/fact separation |
-| 2 | #289 | Shared semantics, output inference and C/C++ ABI |
-| 3 | #290 | Eight-op C++/C/Metal migration |
-| 4 | #291 | Snapshots, freeze and complete cache semantics |
-| 5 | #292 | Computed scalar validation and composition |
-| 6 | #293 | Numeric cast/range/arithmetic/reduction |
-| 7 | #294 | Channel, alpha and reference-white color combinations |
-| 8 | #295 | Bounded expression, dynamic coefficients and linear LUT |
-| 9 | #296 | Threshold, labels and fixed-capacity attributes |
-| 10 | #297 | Installed public workflow examples and combined acceptance |
-
-Each leaf depends on the preceding delivery slice. ABI migration may update
-existing callers mechanically to keep each commit buildable. The eight-op and
-snapshot/cache slices have implemented their supported image-v2 representations. One implementation writer owns
-project changes; the coordinator owns Issue/commit/PR administration. Separate
-Issue commits precede a fresh independent comprehensive review, six required
-CI jobs and Codex review-bot fixes. The sole implementation PR merges
-`ops-foundations` into `ops` with a merge commit. Settle Issues after verified
-ops delivery, retain local/remote ops, then remove only ops-foundations.
-
-G4 spatial dependency expansion, G6 host assets, daemon 0.6 migration, full paths,
-FFT and ICC/OCIO are outside this milestone. Main keeps its baseline; no 0.7
-main delivery is implied. S5 calibration/automatic placement #209 and incremental
-compiler #203 remain separate work. The broader operation catalogue is Proposed.
+Each leaf depends on the preceding slice and has a separate validated commit.
+M0 records accepted contracts; implementation follows. Final delivery requires a
+fresh independent comprehensive review, required fixes, one PR to ops, all six
+existing CI jobs and Codex bot review on the final HEAD, a merge commit, explicit
+Issue settlement, local ops synchronization and task-branch cleanup. Only the
+kernel repository is in scope. Dynamic outputs, RequestRecord joint execution,
+new Metal algorithms, daemon migration and #206 channel pruning remain separate.
 
 ## Active backlog outside the milestone
 
