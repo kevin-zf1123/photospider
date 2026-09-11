@@ -1,6 +1,8 @@
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,9 +47,10 @@ Status supply(const std::shared_ptr<DependencySession>& session,
                          session->query().snapshot_identity);
 }
 Result<DependencyResult> drive(
-    const std::shared_ptr<DependencySession>& session, const Value& input) {
+    const std::shared_ptr<DependencySession>& session, const Value& input,
+    const DependencyCheckpointServices& checkpoints = {}) {
   for (;;) {
-    auto event = session->poll();
+    auto event = session->poll(BufferAllocator{}, checkpoints);
     if (!event.ok())
       return Result<DependencyResult>(event.status());
     if (auto* result = std::get_if<DependencyResult>(&event.value()))
@@ -304,6 +307,126 @@ int workflow(std::uint32_t (*starts)(), std::uint32_t (*destroys)()) {
   PS_CHECK(empty.value().values.at("result").coverage().empty());
   return 0;
 }
+int checkpoint_protocol(std::uint32_t (*starts)(),
+                        std::uint32_t (*destroys)()) {
+  auto registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(registry->load_plugin(PS_DEPENDENCY_FIXTURE).ok());
+  auto input = reversed<double>(ElementType::Float64);
+  for (std::int64_t mode = 0; mode <= 5; ++mode) {
+    DependencyCheckpoint saved;
+    unsigned hits = 0;
+    DependencyCheckpointServices services;
+    services.identity = "C-scan-node";
+    services.publish = [&](const DependencyCheckpoint& checkpoint) {
+      saved = checkpoint;
+      return Status::success();
+    };
+    services.find = [&](std::uint32_t phase, std::uint64_t before)
+        -> Result<std::optional<DependencyCheckpoint>> {
+      if (saved.valid() && saved.phase() == phase &&
+          saved.sequence() <= before) {
+        ++hits;
+        return Result<std::optional<DependencyCheckpoint>>(saved);
+      }
+      return Result<std::optional<DependencyCheckpoint>>(
+          std::optional<DependencyCheckpoint>{});
+    };
+    DependencyRequest request{{{input.descriptor(), {}}},
+                              {{"mode", mode}},
+                              point(0),
+                              "C-scan-bundle"};
+    auto first =
+        registry->start_dependency("fixture.scan", request).take_value();
+    auto seed = drive(first, input, services);
+    PS_CHECK(starts() == destroys());
+    if (mode >= 1 && mode <= 3) {
+      PS_CHECK(seed.status().code == ErrorCode::InvalidArgument);
+      continue;
+    }
+    PS_CHECK(seed.ok() && saved.valid() && saved.sequence() == 0);
+    PS_CHECK(saved.state().descriptor().element_type == ElementType::UInt8);
+    double carry = 0;
+    std::memcpy(&carry, saved.state().bytes().data(), 8);
+    PS_CHECK(carry == 2 && hits == 0);
+    request.outputs = point(2);
+    auto next =
+        registry->start_dependency("fixture.scan", request).take_value();
+    auto result = drive(next, input, services);
+    PS_CHECK(hits == 1 && starts() == destroys());
+    if (mode >= 4) {
+      PS_CHECK(result.status().code == ErrorCode::InvalidArgument);
+    } else {
+      PS_CHECK(result.ok());
+      double actual = 0;
+      PS_CHECK(result.value().value.read({2}, &actual, 8).ok() && actual == 35);
+      auto support = result.value().certificate->backward(point(2));
+      PS_CHECK(support.ok());
+      auto read = Footprint::none({5}).take_value();
+      for (const auto& need : support.value())
+        read = read.unite(need.samples).take_value();
+      PS_CHECK(read ==
+               Footprint::from_regions({5}, {Region({{0, 3}})}).value());
+    }
+  }
+  DependencyRequest terminal{{{input.descriptor(), {}}},
+                             {{"mode", INT64_C(0)}},
+                             point(0),
+                             "terminal"};
+  auto session = registry->start_dependency("fixture.scan_terminal", terminal)
+                     .take_value();
+  PS_CHECK(session->poll().status().code == ErrorCode::InvalidArgument);
+  PS_CHECK(starts() == destroys());
+
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument doc;
+  doc.inputs = {{1, "x", input.descriptor(), Region::whole({5}), {0, {8}}, {}}};
+  doc.nodes = {
+      {1, "fixture.scan", {WorkflowInputReference{1}}, {{"mode", INT64_C(6)}}}};
+  doc.outputs = {{"y", 1, "value"}};
+  GraphContext graph(doc);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto source = std::make_shared<RegionalSource>();
+  source->descriptor = input.descriptor();
+  std::uint64_t reads = 0;
+  source->read = [&](const Region& region, std::uint8_t* bytes,
+                     std::uint64_t size, const BufferAllocator&,
+                     const CancellationToken&) {
+    if (size != 8 || region.dimensions()[0].offset != reads)
+      return Result<Region>(
+          Status{ErrorCode::OperationFailed, "C prefix reread"});
+    const double value = static_cast<double>(++reads);
+    std::memcpy(bytes, &value, 8);
+    return Result<Region>(region);
+  };
+  ExecutionContext context(registry, {1, false, 8, 4096});
+  auto result = context.execute(plan, {{{"x", {}, source}}});
+  PS_CHECK(result.ok() && reads == 5 && starts() == destroys());
+  for (unsigned i = 0; i < 5; ++i) {
+    double actual = 0;
+    std::memcpy(&actual, result.value().values.at("y").bytes().data() + i * 8,
+                8);
+    PS_CHECK(actual == static_cast<double>((i + 1) * (i + 2) / 2));
+  }
+  auto invalid = MutableValue::allocate(input.descriptor(), Region::whole({5}),
+                                        BufferAllocator{})
+                     .take_value();
+  const double numbers[]{1, std::numeric_limits<double>::infinity(), 0, 0, 0};
+  std::memcpy(invalid.data(), numbers, sizeof(numbers));
+  auto demand =
+      context
+          .open_demand(plan,
+                       {{{"x", std::move(invalid).publish().take_value()}}})
+          .take_value();
+  auto short_result = demand.request({{"y", point(0)}});
+  PS_CHECK(short_result.ok());
+  double actual = 0;
+  PS_CHECK(short_result.value().values.at("y").read({0}, &actual, 8).ok() &&
+           actual == 1);
+  auto both = demand.request({{"y", point(0).unite(point(1)).take_value()}});
+  PS_CHECK(both.status().code == ErrorCode::OperationFailed);
+  PS_CHECK(starts() == destroys());
+  return 0;
+}
 int session_owns_library() {
   // No observer dlopen handle remains to mask premature DSO unload.
   auto registry = std::make_shared<OperationRegistry>();
@@ -350,6 +473,8 @@ int main() {
   auto result = exercise(starts, destroys);
   if (result == 0)
     result = workflow(starts, destroys);
+  if (result == 0)
+    result = checkpoint_protocol(starts, destroys);
 #if defined(_WIN32)
   FreeLibrary(library);
 #else

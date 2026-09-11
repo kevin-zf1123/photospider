@@ -265,5 +265,18 @@ scope。已借用 state 随自身 lease 退休。查找不等待 producer，此�
 保留证据构造使用有界可选 dependency-cache work allowance，耗尽后可以重算；导入
 使用普通 dependency work 限额。目前实现活跃同 bundle carry 复用，跨 bundle 块内容
 缓存仍需将实际 incoming state、phase/range、input bits、numeric mode 和 controls
-纳入 key。C 分阶段桥尚未提供 checkpoint service table，既有有限 poll/read/supply
-协议保持有效。
+纳入 key。C 分阶段桥通过阶段内 opaque handle 和复制的字节 state 提供这些服务。
+
+
+C checkpoint 服务为 `checkpoint_before`、`checkpoint_read` 和
+`checkpoint_publish`。查找成功但未命中时 handle 为零；命中时导入完整成功证据，并
+返回 sequence 与字节数。非零 handle 仅在当前 poll 内有效，沿用 invocation 单调 ID
+空间，不授权输入读取。Read 复制正长度、范围内的字节区间，不暴露 storage 指针。
+Publish 从当前阶段 allocator 分配 packed UInt8 Value 并复制正长度 opaque state；
+算子应声明足够 workspace。State 必须编码完整确定性算法值，不含指针、handle 或
+未初始化 padding。调用方修改源字节不影响已发布状态。复制前计量 work，非法 handle、
+区间、scope 或 terminal 使用均产生 sticky failure。
+
+C checkpoint 回归检查部分字节读取、carry 副本、过期阶段 handle、非法地址/区间、
+terminal 拒绝、前缀证据导入，以及五个输出恰好读取五个输入的真实 C scan。
+相同 C11 module 和测试源码参与静态/共享安装包消费检查。

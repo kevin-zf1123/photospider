@@ -69,6 +69,16 @@ typedef struct ps_dependency_fragment_v8 {
   uint64_t byte_offset, byte_size;
   const uint8_t* data;
 } ps_dependency_fragment_v8;
+/** @brief Borrowed completed state found in one checkpoint phase.
+ * @note Initialize struct_size and zero reserved before lookup. A successful
+ * miss sets handle, sequence and byte_size to zero. Nonzero handles expire at
+ * poll return and are never reused within the invocation. Copy needed state
+ * through checkpoint_read into accounted continuation/scratch bytes.
+ */
+typedef struct ps_dependency_checkpoint_v8 {
+  uint32_t struct_size, reserved;
+  uint64_t handle, sequence, byte_size;
+} ps_dependency_checkpoint_v8;
 /** @brief Finite, nonblocking phase services; every failure is sticky.
  * @note Service/context/input/scratch pointers expire at poll return. Output
  * pointers expire immediately on successful publish_output, or at poll return
@@ -96,6 +106,31 @@ typedef struct ps_dependency_services_v8 {
   uint8_t* (*allocate_scratch)(void*, uint64_t);
   int (*consume_work)(void*, uint64_t);
   int (*is_cancelled)(void*);
+  /** @brief Finds the greatest completed sequence <= before in an algorithm
+   * phase, importing its full successful witness. Never waits for computation.
+   * @note Boolean success includes a miss with result.handle=0. Pure Atomic
+   * programs only; terminal use or ignored service errors remain sticky.
+   */
+  int (*checkpoint_before)(void*, uint32_t phase, uint64_t before,
+                           ps_dependency_checkpoint_v8* result);
+  /** @brief Copies an exact byte interval of a phase-local checkpoint handle.
+   * @note Requires nonnull destination, positive size and an in-bounds
+   * interval. Reads are charged before copying; no raw borrowed state pointer
+   * is exposed.
+   */
+  int (*checkpoint_read)(void*, uint64_t handle, uint64_t offset, void*,
+                         uint64_t);
+  /** @brief Copies and publishes complete algorithm state under phase/sequence.
+   * @note State must be nonnull with positive byte_size and contain only value
+   * bytes, never pointers/handles or uninitialized padding. It includes all
+   * numeric mode/control state required to continue the deterministic
+   * algorithm. The copy uses the current stage allocator/workspace; publish may
+   * decline optional retention while returning success. The caller retains its
+   * source bytes; no later mutation can change the host copy. No failures are
+   * stored.
+   */
+  int (*checkpoint_publish)(void*, uint32_t phase, uint64_t sequence,
+                            const uint8_t* state, uint64_t byte_size);
 } ps_dependency_services_v8;
 /** @brief Copied staged callbacks for trusted in-process C implementations.
  * @note Exactly one synchronous execute or dependency_program is supplied.

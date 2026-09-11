@@ -164,6 +164,19 @@ service failures are sticky. Scratch pointers expire at poll return. Output
 pointers expire immediately on
 successful publication, or at poll return if unpublished; they cannot be used
 after publishing through the host-owned handle.
+C checkpoint services add `checkpoint_before`, `checkpoint_read` and
+`checkpoint_publish`. A successful lookup miss returns handle zero; a hit imports
+the complete successful witness and returns sequence/byte size. The nonzero
+handle is valid only until this poll returns, shares the invocation's monotonic
+ID space and never authorizes an input read. `checkpoint_read` copies a positive,
+in-bounds byte interval without exposing storage pointers. Publication copies
+positive-size opaque state bytes into a packed UInt8 Value from the current stage
+allocator; the operation must declare enough workspace for that copy. State must
+encode complete deterministic algorithm values, with no pointers, handles or
+uninitialized padding. Mutating the caller's source bytes cannot change the
+published state. Copy work is charged before allocation/access. Invalid handles,
+intervals, scope or terminal use produce sticky failures.
+
 Every image output fragment must cover full C before allocation is granted.
 Native plugins remain trusted in-process code: pointer metadata checks are not
 memory isolation.
@@ -174,7 +187,10 @@ failed start, ignored reads and duplicate publication, cancellation, library
 lifetime, and full-Q RequestRecord values. Its public workflow reads only 16
 source bytes, exercises the observed admission frontier and one byte below it,
 and verifies cancellation cleanup followed by a successful new execution. The
-same source and C module run as an installed-package consumer for both library
+C checkpoint tests also check partial byte reads, copied carry state, expired
+phase handles, invalid addresses/intervals, terminal rejection, prefix witness
+import, and a real five-output C scan with exactly five source reads. The same
+source and C module run as an installed-package consumer for both library
 forms.
 
 To run that installed C workflow and its independent checks separately:
@@ -374,5 +390,5 @@ Retention proof construction uses the bounded optional dependency-cache work
 allowance; exhausted retention can recompute. Import uses ordinary dependency
 work limits. This is active same-bundle carry reuse, not cross-bundle block-content
 caching. The latter still needs actual incoming state, phase/range, input bits,
-numeric mode and controls in its key. The C staged bridge currently has no
-checkpoint service table; its existing finite poll/read/supply protocol is intact.
+numeric mode and controls in its key. The C staged bridge exposes these services
+through phase-local opaque handles and copied byte states, as described above.

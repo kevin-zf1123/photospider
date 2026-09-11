@@ -161,6 +161,7 @@ struct Phase {
   std::map<std::uint64_t, Output> outputs;
   std::vector<Value> published;
   std::vector<MutableBuffer> scratch;
+  std::map<std::uint64_t, DependencyCheckpoint> checkpoints;
   std::uint64_t metadata_entries = 0;
   bool reject(Status status) {
     if (failure.ok())
@@ -518,8 +519,99 @@ int is_cancelled(void* context) noexcept {
   return !context ||
          static_cast<Phase*>(context)->phase.query.cancellation.cancelled();
 }
+int checkpoint_before(void* context, std::uint32_t phase, std::uint64_t before,
+                      ps_dependency_checkpoint_v8* destination) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (!records(destination, 1, 1) ||
+        destination->struct_size != sizeof(*destination) ||
+        destination->reserved)
+      return p->reject(invalid("invalid C checkpoint destination"));
+    auto found = p->phase.checkpoint_before(phase, before);
+    if (!found.ok())
+      return p->reject(found.status());
+    ps_dependency_checkpoint_v8 result{};
+    result.struct_size = sizeof(result);
+    if (found.value()) {
+      if (p->checkpoints.size() >=
+          std::min<std::uint64_t>(65536, p->phase.sets.maximum_boxes))
+        return p->reject(Status{ErrorCode::ResourceExhausted, {}});
+      const auto& checkpoint = *found.value();
+      const auto& state = checkpoint.state();
+      if (state.descriptor().element_type != ElementType::UInt8 ||
+          state.descriptor().shape.size() != 1 ||
+          state.region().dimensions()[0].offset != 0 ||
+          state.region().dimensions()[0].extent !=
+              state.descriptor().shape[0] ||
+          !state.facets().empty() || state.layout().byte_offset != 0 ||
+          state.layout().byte_strides != std::vector<std::int64_t>{1} ||
+          (!state.layout().origin.empty() && state.layout().origin[0] != 0) ||
+          state.bytes().size() != state.descriptor().shape[0])
+        return p->reject(invalid("C checkpoint requires opaque value bytes"));
+      result.handle = p->state.id(p);
+      if (!result.handle)
+        return false;
+      result.sequence = checkpoint.sequence();
+      result.byte_size = state.descriptor().shape[0];
+      p->checkpoints.emplace(result.handle, checkpoint);
+    }
+    *destination = result;
+    return true;
+  });
+}
+int checkpoint_read(void* context, std::uint64_t handle, std::uint64_t offset,
+                    void* destination, std::uint64_t size) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    const auto found = p->checkpoints.find(handle);
+    if (found == p->checkpoints.end() || !destination || !size ||
+        size > SIZE_MAX)
+      return p->reject(invalid("invalid C checkpoint read"));
+    const auto& state = found->second.state();
+    const auto extent = state.descriptor().shape[0];
+    if (offset > extent || size > extent - offset)
+      return p->reject(invalid("C checkpoint read outside state"));
+    auto charged = p->phase.consume_work(size);
+    if (!charged.ok())
+      return p->reject(charged);
+    // The lookup accepts only the packed opaque arrays made by C publication.
+    std::memcpy(destination, state.bytes().data() + offset,
+                static_cast<std::size_t>(size));
+    return true;
+  });
+}
+int checkpoint_publish(void* context, std::uint32_t phase,
+                       std::uint64_t sequence, const std::uint8_t* bytes,
+                       std::uint64_t size) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (!bytes || !size || size > SIZE_MAX)
+      return p->reject(invalid("invalid C checkpoint state bytes"));
+    auto charged = p->phase.consume_work(size);
+    if (!charged.ok())
+      return p->reject(charged);
+    auto made =
+        MutableValue::allocate({ElementType::UInt8, {size}},
+                               Region::whole({size}), p->phase.allocator);
+    if (!made.ok())
+      return p->reject(made.status());
+    auto writer = made.take_value();
+    std::memcpy(writer.data(), bytes, static_cast<std::size_t>(size));
+    auto value = std::move(writer).publish();
+    if (!value.ok())
+      return p->reject(value.status());
+    auto status = p->phase.checkpoint_publish(phase, sequence, value.value());
+    return status.ok() || p->reject(status);
+  });
+}
 Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
-  Phase p{phase, *this, {}, {}, {}, {}, {}};
+  Phase p{phase, *this, {}, {}, {}, {}, {}, {}};
   Query query(phase.query);
   const ps_dependency_services_v8 services{sizeof(ps_dependency_services_v8),
                                            0,
@@ -535,7 +627,10 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
                                            publish_output,
                                            scratch,
                                            consume_work,
-                                           is_cancelled};
+                                           is_cancelled,
+                                           checkpoint_before,
+                                           checkpoint_read,
+                                           checkpoint_publish};
   const auto result =
       program.poll(&query.query, payload.data(), &services, user);
   if (!p.failure.ok())

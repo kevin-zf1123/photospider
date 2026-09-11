@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -192,6 +193,109 @@ static const ps_dependency_program_v8 program = {
     start,
     PS_DEPENDENCY_BAD_CASE == 4 ? NULL : poll,
     destroy};
+struct ScanState {
+  uint64_t cursor, borrowed;
+  double carry;
+  uint32_t stage, mode;
+};
+static int scan_start(const ps_dependency_query_v8* q, void* state,
+                      uint64_t bytes, void* user) {
+  (void)user;
+  ++starts;
+  if (bytes != sizeof(struct ScanState))
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  struct ScanState* s = state;
+  s->mode = (uint32_t)q->metadata.parameters[0].int64_value;
+  return PS_OPERATION_RESULT_SUCCESS_V8;
+}
+static int scan_poll(const ps_dependency_query_v8* q, void* state,
+                     const ps_dependency_services_v8* host, void* user) {
+  (void)user;
+  struct ScanState* s = state;
+  const uint64_t target = q->outputs[0].offsets[0];
+  if (s->stage == 0) {
+    ps_dependency_checkpoint_v8 checkpoint = {0};
+    checkpoint.struct_size = sizeof(checkpoint);
+    if (s->mode == 1)
+      host->checkpoint_publish(host->context, 1, 0, NULL, 8);
+    if (s->mode == 2)
+      checkpoint.struct_size = 0;
+    if (s->mode == 3) {
+      double ignored;
+      host->checkpoint_read(host->context, UINT64_MAX, 0, &ignored, 8);
+    }
+    if (host->checkpoint_before(host->context, 1, target, &checkpoint) &&
+        checkpoint.handle) {
+      if (checkpoint.byte_size != 8)
+        return PS_OPERATION_RESULT_FAILURE_V8;
+      if (s->mode == 4) {
+        double ignored;
+        host->checkpoint_read(host->context, checkpoint.handle, UINT64_MAX,
+                              &ignored, 8);
+      }
+      s->borrowed = checkpoint.handle;
+      if (!host->checkpoint_read(host->context, checkpoint.handle, 0, &s->carry,
+                                 4) ||
+          !host->checkpoint_read(host->context, checkpoint.handle, 4,
+                                 (uint8_t*)&s->carry + 4, 4))
+        return PS_OPERATION_RESULT_FAILURE_V8;
+      s->cursor = checkpoint.sequence + 1;
+    }
+    s->stage = 1;
+  } else {
+    if (s->mode == 5 && s->borrowed) {
+      double ignored;
+      host->checkpoint_read(host->context, s->borrowed, 0, &ignored, 8);
+    }
+    double sample_value = 0;
+    if (!host->read(host->context, 0, &s->cursor, 1, &sample_value, 8))
+      return PS_OPERATION_RESULT_FAILURE_V8;
+    if (!isfinite(sample_value) || !isfinite(s->carry + sample_value))
+      return PS_OPERATION_RESULT_FAILURE_V8;
+    s->carry += sample_value;
+    uint8_t encoded[8];
+    memcpy(encoded, &s->carry, 8);
+    if (!host->checkpoint_publish(host->context, 1, s->cursor, encoded, 8))
+      return PS_OPERATION_RESULT_FAILURE_V8;
+    memset(encoded, 0xff, 8);
+    if (s->mode == 6) {
+      ps_dependency_checkpoint_v8 copy = {0};
+      copy.struct_size = sizeof(copy);
+      double retained = 0;
+      if (!host->checkpoint_before(host->context, 1, s->cursor, &copy) ||
+          !copy.handle ||
+          !host->checkpoint_read(host->context, copy.handle, 0, &retained, 8) ||
+          retained != s->carry)
+        return PS_OPERATION_RESULT_FAILURE_V8;
+    }
+    ++s->cursor;
+  }
+  if (s->cursor <= target)
+    return need(q, host, s->cursor);
+  uint64_t output = 0;
+  uint8_t* bytes = host->allocate_output(host->context, q->outputs, &output);
+  if (!bytes)
+    return PS_OPERATION_RESULT_FAILURE_V8;
+  memcpy(bytes, &s->carry, 8);
+  host->publish_output(host->context, output);
+  return PS_OPERATION_RESULT_SUCCESS_V8;
+}
+static int scan_validate(const ps_dependency_metadata_query_v8* q, void* user) {
+  const int status = validate(q, user);
+  return status == PS_OPERATION_RESULT_SUCCESS_V8 &&
+                 q->inputs[0].element_type == PS_OPERATION_ELEMENT_FLOAT64_V8
+             ? PS_OPERATION_RESULT_SUCCESS_V8
+             : PS_DEPENDENCY_TYPE_MISMATCH_V8;
+}
+static const ps_dependency_program_v8 scan_program = {sizeof(scan_program),
+                                                      1024,
+                                                      0,
+                                                      0,
+                                                      sizeof(struct ScanState),
+                                                      scan_validate,
+                                                      scan_start,
+                                                      scan_poll,
+                                                      destroy};
 static const ps_operation_parameter_descriptor_v8 parameters[] = {
     {sizeof(ps_operation_parameter_descriptor_v8), "mode", 4,
      PS_OPERATION_PARAMETER_INT64_V8, 1, 1, 0, 11}};
@@ -199,7 +303,7 @@ static const ps_operation_port_constraint_v8 ports[] = {
     {sizeof(ps_operation_port_constraint_v8), PS_OPERATION_PORT_VALUE_V8, 0, 0,
      NULL}};
 static const uint64_t wide_shape[] = {UINT64_C(1) << 61};
-#define DESCRIPTOR(name, observation, wide)                           \
+#define DESCRIPTOR(name, observation, wide, staged, workspace)        \
   {.struct_size = sizeof(ps_operation_descriptor_v8),                 \
    .key = name,                                                       \
    .key_size = sizeof(name) - 1,                                      \
@@ -220,16 +324,20 @@ static const uint64_t wide_shape[] = {UINT64_C(1) << 61};
    .output_schema = {sizeof(ps_operation_port_constraint_v8),         \
                      PS_OPERATION_PORT_VALUE_V8, 0, 0, NULL},         \
    .observation_kind = observation,                                   \
-   .dependency_program = &program}
+   .workspace_bytes = workspace,                                      \
+   .dependency_program = staged}
 static const ps_operation_descriptor_v8 operations[] = {
-    DESCRIPTOR("fixture.fragment", 0, 0), DESCRIPTOR("fixture.terminal", 1, 0),
-    DESCRIPTOR("fixture.wide", 0, 1)};
+    DESCRIPTOR("fixture.fragment", 0, 0, &program, 0),
+    DESCRIPTOR("fixture.terminal", 1, 0, &program, 0),
+    DESCRIPTOR("fixture.wide", 0, 1, &program, 0),
+    DESCRIPTOR("fixture.scan", 0, 0, &scan_program, 8),
+    DESCRIPTOR("fixture.scan_terminal", 1, 0, &scan_program, 8)};
 static void destroy_api(const ps_operation_descriptor_v8* records,
                         uint32_t count) {
   (void)records;
   (void)count;
 }
-static const ps_operation_plugin_api_v8 api = {sizeof(api), 3, operations,
+static const ps_operation_plugin_api_v8 api = {sizeof(api), 5, operations,
                                                destroy_api};
 PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void) {
   return PS_OPERATION_ABI_VERSION_8;
