@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -149,14 +150,20 @@ struct Query {
     query.outputs = outputs.empty() ? nullptr : outputs.data();
   }
 };
-struct CState;
+struct Phase;
+struct MemberResources {
+  std::uint32_t maximum_retained_owners = 0;
+  std::shared_ptr<std::uint64_t> next = std::make_shared<std::uint64_t>(1);
+  std::map<std::uint64_t, ValueFragments> retained;
+  std::uint64_t id(Phase* phase);
+};
 struct Phase {
   struct Output {
     MutableValue value;
     bool published = false;
   };
   const DependencyPhase& phase;
-  CState& state;
+  MemberResources& state;
   Status failure;
   DependencyNeedBatch needs;
   std::map<std::uint64_t, Output> outputs;
@@ -205,28 +212,27 @@ struct Phase {
     return &phase.inputs[port].fragments()[index];
   }
 };
-struct CState {
+struct CState : MemberResources {
   ps_dependency_program_v9 program;
   void* user = nullptr;
   MutableBuffer payload;
   std::shared_ptr<const void> library;
   bool entered = false;
-  std::uint64_t next = 1;
-  std::map<std::uint64_t, ValueFragments> retained;
   CState(ps_dependency_program_v9 program, void* user, MutableBuffer payload,
          std::shared_ptr<const void> library)
       : program(program),
         user(user),
         payload(std::move(payload)),
-        library(std::move(library)) {}
+        library(std::move(library)) {
+    maximum_retained_owners = program.maximum_retained_owners;
+  }
   CState(CState&& other) noexcept
-      : program(other.program),
+      : MemberResources(std::move(other)),
+        program(other.program),
         user(other.user),
         payload(std::move(other.payload)),
         library(std::move(other.library)),
-        entered(std::exchange(other.entered, false)),
-        next(other.next),
-        retained(std::move(other.retained)) {}
+        entered(std::exchange(other.entered, false)) {}
   ~CState() noexcept {
     if (entered) {
       try {
@@ -235,15 +241,15 @@ struct CState {
       }
     }
   }
-  std::uint64_t id(Phase* phase) {
-    if (next == UINT64_MAX) {
-      phase->reject(Status{ErrorCode::ResourceExhausted, {}});
-      return 0;
-    }
-    return next++;
-  }
   Result<DependencyPoll> poll(const DependencyPhase& phase);
 };
+std::uint64_t MemberResources::id(Phase* phase) {
+  if (*next == UINT64_MAX) {
+    phase->reject(Status{ErrorCode::ResourceExhausted, {}});
+    return 0;
+  }
+  return (*next)++;
+}
 int associate(void* context,
               const ps_dependency_association_v9* association) noexcept {
   auto* p = static_cast<Phase*>(context);
@@ -388,7 +394,7 @@ std::uint64_t retain_input(void* context, std::uint32_t port,
     if (!value)
       return false;
     if (p->state.retained.size() >=
-        std::min<std::uint64_t>(p->state.program.maximum_retained_owners,
+        std::min<std::uint64_t>(p->state.maximum_retained_owners,
                                 p->phase.sets.maximum_boxes))
       return p->reject(Status{ErrorCode::ResourceExhausted, {}});
     auto set = Footprint::from_regions(value->descriptor().shape,
@@ -809,34 +815,33 @@ int block(void* context, std::uint32_t phase, std::uint64_t begin,
     return true;
   });
 }
-Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
-  Phase p{phase, *this, {}, {}, {}, {}, {}, {}, {}, {}};
-  Query query(phase.query);
-  const ps_dependency_services_v9 services{sizeof(ps_dependency_services_v9),
-                                           0,
-                                           &p,
-                                           associate,
-                                           read,
-                                           fragment_count,
-                                           fragment,
-                                           retain_input,
-                                           read_owner,
-                                           release_owner,
-                                           allocate_output,
-                                           publish_output,
-                                           scratch,
-                                           consume_work,
-                                           is_cancelled,
-                                           checkpoint_before,
-                                           checkpoint_read,
-                                           checkpoint_publish,
-                                           block,
-                                           atlas,
-                                           gpu_buffer,
-                                           gpu_execute,
-                                           discover};
-  const auto result =
-      program.poll(&query.query, payload.data(), &services, user);
+ps_dependency_services_v9 make_services(Phase* p) {
+  return ps_dependency_services_v9{sizeof(ps_dependency_services_v9),
+                                   0,
+                                   p,
+                                   associate,
+                                   read,
+                                   fragment_count,
+                                   fragment,
+                                   retain_input,
+                                   read_owner,
+                                   release_owner,
+                                   allocate_output,
+                                   publish_output,
+                                   scratch,
+                                   consume_work,
+                                   is_cancelled,
+                                   checkpoint_before,
+                                   checkpoint_read,
+                                   checkpoint_publish,
+                                   block,
+                                   atlas,
+                                   gpu_buffer,
+                                   gpu_execute,
+                                   discover};
+}
+Result<DependencyPoll> finish_poll(Phase& p, int result) {
+  const auto& phase = p.phase;
   if (!p.failure.ok())
     return Result<DependencyPoll>(p.failure);
   if (result == PS_DEPENDENCY_NEED_V9) {
@@ -867,6 +872,128 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
     return Result<DependencyPoll>(value.status());
   return Result<DependencyPoll>(value.take_value());
 }
+Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
+  Phase p{phase, *this, {}, {}, {}, {}, {}, {}, {}, {}};
+  Query query(phase.query);
+  const auto services = make_services(&p);
+  return finish_poll(
+      p, program.poll(&query.query, payload.data(), &services, user));
+}
+
+struct CJointState {
+  ps_dependency_joint_program_v9 program;
+  void* user;
+  MutableBuffer payload;
+  std::shared_ptr<const void> library;
+  bool entered = false;
+  std::map<std::uint32_t, MemberResources> resources;
+  CJointState(ps_dependency_joint_program_v9 program, void* user,
+              MutableBuffer payload, std::shared_ptr<const void> library,
+              const std::vector<DependencyQuery>& queries,
+              std::uint32_t maximum)
+      : program(program),
+        user(user),
+        payload(std::move(payload)),
+        library(std::move(library)) {
+    auto ids = std::make_shared<std::uint64_t>(1);
+    for (const auto& query : queries) {
+      auto& member = resources[query.output_index];
+      member.maximum_retained_owners = maximum;
+      member.next = ids;
+    }
+  }
+  CJointState(CJointState&& other) noexcept
+      : program(other.program),
+        user(other.user),
+        payload(std::move(other.payload)),
+        library(std::move(other.library)),
+        entered(std::exchange(other.entered, false)),
+        resources(std::move(other.resources)) {}
+  ~CJointState() noexcept {
+    if (entered) {
+      try {
+        program.destroy(payload.data(), user);
+      } catch (...) {
+      }
+    }
+  }
+  Result<std::vector<DependencyAtomOutcome>> poll(
+      const DependencyJointPhase& joint) {
+    using Answer = Result<std::vector<DependencyAtomOutcome>>;
+    struct Bundle {
+      Phase phase;
+      Query query;
+      ps_dependency_services_v9 services;
+      Bundle(const DependencyPhase& input, MemberResources& resources)
+          : phase{input, resources, {}, {}, {}, {}, {}, {}, {}, {}},
+            query(input.query),
+            services(make_services(&phase)) {}
+    };
+    struct Scratch {
+      const BufferAllocator& allocator;
+      std::vector<MutableBuffer> owners;
+      Status failure;
+    } scratch{joint.allocator, {}, {}};
+    const ps_dependency_joint_services_v9 shared{
+        sizeof(ps_dependency_joint_services_v9), 0, &scratch,
+        [](void* opaque, std::uint64_t size, std::uint8_t** output) -> int {
+          auto& scratch = *static_cast<Scratch*>(opaque);
+          try {
+            if (!scratch.failure.ok())
+              return 0;
+            if (!output || !size) {
+              scratch.failure = invalid("invalid joint scratch request");
+              return 0;
+            }
+            auto allocation = scratch.allocator.allocate(size);
+            if (!allocation.ok()) {
+              scratch.failure = allocation.status();
+              return 0;
+            }
+            scratch.owners.push_back(allocation.take_value());
+            *output = scratch.owners.back().data();
+            return 1;
+          } catch (...) {
+            scratch.failure = Status{ErrorCode::ResourceExhausted, {}};
+            return 0;
+          }
+        }};
+    std::vector<std::unique_ptr<Bundle>> bundles;
+    std::vector<ps_dependency_joint_member_v9> members;
+    for (const auto* phase : joint.members) {
+      bundles.push_back(std::make_unique<Bundle>(
+          *phase, resources.at(phase->query.output_index)));
+      auto& bundle = *bundles.back();
+      members.push_back({&bundle.query.query, &bundle.services});
+    }
+    std::vector<ps_dependency_atom_outcome_v9> outcomes(members.size(),
+                                                        {UINT32_MAX, -1});
+    std::uint32_t count = 0;
+    const auto status =
+        outcome(program.poll(members.data(), members.size(), payload.data(),
+                             &shared, outcomes.data(), &count, user));
+    if (!scratch.failure.ok())
+      return Answer(scratch.failure);
+    if (!status.ok())
+      return Answer(status);
+    if (count != members.size())
+      return Answer(invalid("C joint outcome count mismatch"));
+    std::set<std::uint32_t> seen;
+    std::vector<DependencyAtomOutcome> results;
+    for (const auto& result : outcomes) {
+      auto found =
+          std::find_if(bundles.begin(), bundles.end(), [&](const auto& bundle) {
+            return bundle->query.query.output_index == result.output_index;
+          });
+      if (found == bundles.end() || !seen.insert(result.output_index).second)
+        return Answer(invalid("C joint duplicate or unknown output"));
+      results.push_back(
+          {result.output_index, finish_poll((*found)->phase, result.result)});
+    }
+    return Answer(std::move(results));
+  }
+};
+
 }  // namespace
 Status prepare_dependency_plugin(OperationDefinition* definition,
                                  const ps_dependency_program_v9* pointer,
@@ -879,6 +1006,13 @@ Status prepare_dependency_plugin(OperationDefinition* definition,
       pointer->maximum_stages > 1048576 ||
       pointer->maximum_retained_owners > 65536)
     return invalid("invalid C dependency program table");
+  if (pointer->joint &&
+      (!records(pointer->joint, 1, 1) ||
+       pointer->joint->struct_size != sizeof(*pointer->joint) ||
+       pointer->joint->reserved || !pointer->joint->start ||
+       !pointer->joint->poll || !pointer->joint->destroy ||
+       !pointer->joint->state_bytes || pointer->joint->state_bytes > 1048576))
+    return invalid("invalid C joint program table");
   const auto program = *pointer;
   for (auto& output : definition->traits.outputs) {
     output.dependency_version = 1;
@@ -909,6 +1043,38 @@ Status prepare_dependency_plugin(OperationDefinition* definition,
       return Result<DependencyContinuation>(status);
     return DependencyContinuation::make<CState>(allocator, std::move(state));
   };
+  if (program.joint) {
+    const auto joint = *program.joint;
+    definition->traits.joint_contract = 1;
+    definition->traits.joint_continuation_bytes =
+        joint.state_bytes + sizeof(CJointState);
+    definition->traits.joint_workspace_bytes = joint.workspace_bytes;
+    definition->start_joint = [library, joint, program, user](
+                                  const std::vector<DependencyQuery>& queries,
+                                  const BufferAllocator& allocator)
+        -> Result<DependencyJointContinuation> {
+      auto allocated = allocator.allocate(joint.state_bytes);
+      if (!allocated.ok())
+        return Result<DependencyJointContinuation>(allocated.status());
+      CJointState state(joint, user, allocated.take_value(), library, queries,
+                        program.maximum_retained_owners);
+      std::memset(state.payload.data(), 0, state.payload.size());
+      std::vector<std::unique_ptr<Query>> owners;
+      std::vector<const ps_dependency_query_v9*> inputs;
+      for (const auto& query : queries) {
+        owners.push_back(std::make_unique<Query>(query));
+        inputs.push_back(&owners.back()->query);
+      }
+      state.entered = true;
+      auto status = outcome(joint.start(inputs.data(), inputs.size(),
+                                        state.payload.data(),
+                                        state.payload.size(), user));
+      if (!status.ok())
+        return Result<DependencyJointContinuation>(status);
+      return DependencyJointContinuation::make<CJointState>(allocator,
+                                                            std::move(state));
+    };
+  }
   return Status::success();
 }
 }  // namespace ps::plugin_internal

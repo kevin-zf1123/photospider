@@ -333,6 +333,70 @@ class PHOTOSPIDER_API DependencyContinuation final {
   Destroy destroy_ = nullptr;
   Result<DependencyPoll> (*poll_)(void*, const DependencyPhase&) = nullptr;
 };
+/** @brief One named member's next reads, completion or local error. */
+struct DependencyAtomOutcome final {
+  std::uint32_t output_index;
+  Result<DependencyPoll> outcome;
+};
+/** @brief Borrowed ready Atomic members of one finite CPU joint poll.
+ * @note Each output occurs once. Member phases and their services expire at
+ * return. Declare each member's own associations even when sharing computation.
+ * allocator owns shared scratch; never use one member's services for another.
+ */
+struct DependencyJointPhase final {
+  const std::vector<const DependencyPhase*>& members;
+  const BufferAllocator& allocator;
+};
+/** @brief Host-owned optional joint state, destroyed exactly once.
+ * @note State implements poll(DependencyJointPhase), returning exactly one
+ * DependencyAtomOutcome for every supplied member, in any order. An enclosing
+ * failure is unattributable; malformed membership is a protocol error. State
+ * must not retain borrowed phases or use hidden inputs. Calls are serialized by
+ * the owning session; no callback may wait for upstream execution.
+ */
+class PHOTOSPIDER_API DependencyJointContinuation final {
+ public:
+  DependencyJointContinuation() = default;
+  ~DependencyJointContinuation() noexcept;
+  DependencyJointContinuation(DependencyJointContinuation&&) noexcept;
+  DependencyJointContinuation& operator=(
+      DependencyJointContinuation&&) noexcept;
+  DependencyJointContinuation(const DependencyJointContinuation&) = delete;
+  DependencyJointContinuation& operator=(const DependencyJointContinuation&) =
+      delete;
+  template <class State, class... Args>
+  static Result<DependencyJointContinuation> make(
+      const BufferAllocator& allocator, Args&&... args) {
+    static_assert(alignof(State) <= alignof(std::max_align_t),
+                  "overaligned joint state");
+    static_assert(std::is_nothrow_destructible<State>::value,
+                  "throwing joint destructor");
+    auto memory = allocator.allocate(sizeof(State));
+    if (!memory.ok())
+      return Result<DependencyJointContinuation>(memory.status());
+    DependencyJointContinuation result;
+    result.storage_ = memory.take_value();
+    new (result.storage_.data()) State(std::forward<Args>(args)...);
+    result.destroy_ = [](void* state) noexcept {
+      static_cast<State*>(state)->~State();
+    };
+    result.poll_ = [](void* state, const DependencyJointPhase& phase) {
+      return static_cast<State*>(state)->poll(phase);
+    };
+    return Result<DependencyJointContinuation>(std::move(result));
+  }
+
+ private:
+  friend class DependencyJointSession;
+  void reset() noexcept;
+  MutableBuffer storage_;
+  using Destroy = void (*)(void*) noexcept;  // NOLINT(readability/casting)
+  Destroy destroy_ = nullptr;
+  Result<std::vector<DependencyAtomOutcome>> (*poll_)(
+      void*, const DependencyJointPhase&) = nullptr;
+};
+using DependencyJointStart = std::function<Result<DependencyJointContinuation>(
+    const std::vector<DependencyQuery>&, const BufferAllocator&)>;
 /** @brief Optional pure static validation, including Empty output requests.
  * @note Called after base parameter/descriptor inference, before any state or
  * source read, and during compilation. May reject but cannot change metadata.
@@ -418,19 +482,62 @@ class PHOTOSPIDER_API DependencySession final {
 
  private:
   friend class OperationRegistry;
+  friend class DependencyJointSession;
   struct Impl;
   explicit DependencySession(std::unique_ptr<Impl> impl);
   static Result<std::shared_ptr<DependencySession>> create(
       const std::string& operation, OperationTraits traits,
       const DependencyStart& start, const DependencyValidator& validate,
       DependencyRequest request, const BufferAllocator& allocator,
-      std::shared_ptr<const void> definition);
+      std::shared_ptr<const void> definition,
+      std::uint64_t host_proxy_bytes = 0,
+      std::function<Status(std::uint64_t)> shared_work = {});
   static Status validate_static(
       const DependencyValidator& validate,
       const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
       const CancellationToken& cancellation = {});
   std::unique_ptr<Impl> impl_;
+};
+/** @brief Validated member event; each terminal member is delivered once. */
+struct DependencyAtomProgress final {
+  std::uint32_t output_index;
+  Result<DependencyProgress> outcome;
+};
+/** @brief Direct joint start/poll/supply driver, with independent member
+ * validation.
+ * @note Supports 2..64 distinct Atomic outputs, one observation each, sharing
+ * operation, static inputs/parameters, snapshot and CPU backend. Concurrent or
+ * recursive calls are rejected without disturbing the active call. Supply only
+ * a waiting member's exact transport union. Poll advances all ready members;
+ * waiting and terminal members are omitted. Per-member failures do not retire
+ * siblings. An enclosing failure retires the group; InvalidArgument denotes a
+ * protocol error and must never trigger singleton retry. Destruction must not
+ * race calls. DSO ownership survives state destruction.
+ */
+class PHOTOSPIDER_API DependencyJointSession final {
+ public:
+  ~DependencyJointSession() noexcept;
+  DependencyJointSession(const DependencyJointSession&) = delete;
+  DependencyJointSession& operator=(const DependencyJointSession&) = delete;
+  Result<std::vector<DependencyAtomProgress>> poll(
+      const BufferAllocator& allocator = BufferAllocator{});
+  Status supply(std::uint32_t output_index, std::vector<ValueFragments> inputs,
+                const std::string& snapshot_identity);
+  Result<std::vector<DependencyNeed>> pending_reads(
+      std::uint32_t output_index) const;
+  std::uint64_t consumed_work() const;
+
+ private:
+  friend class OperationRegistry;
+  struct Impl;
+  explicit DependencyJointSession(std::shared_ptr<Impl> impl);
+  static Result<std::shared_ptr<DependencyJointSession>> create(
+      const std::string& operation, const OperationTraits& traits,
+      const DependencyJointStart& start, const DependencyValidator& validate,
+      std::vector<DependencyRequest> requests, const BufferAllocator& allocator,
+      std::shared_ptr<const void> definition);
+  std::shared_ptr<Impl> impl_;
 };
 /** @brief Resolves observation coordinates and complete-pixel closure metadata.
  * @note Pure checked transformations; no pixel reads or storage allocation.

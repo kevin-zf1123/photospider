@@ -330,7 +330,11 @@ Status validate_operation_contract(const OperationTraits& t) {
         "staged programs require deterministic side-effect-free behavior");
   if ((t.outputs[0].observation_kind != ObservationKind::Atomic &&
        t.outputs[0].observation_kind != ObservationKind::RequestRecord) ||
-      t.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly ||
+      (t.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly &&
+       t.outputs[0].failure_delivery != FailureDelivery::PerAtomOutcome) ||
+      (t.outputs[0].failure_delivery == FailureDelivery::PerAtomOutcome &&
+       (t.outputs[0].observation_kind != ObservationKind::Atomic ||
+        !t.outputs[0].dependency_version)) ||
       t.outputs[0].dependency_version > 1 ||
       ((t.outputs[0].dependency_version == 1) !=
        (t.outputs[0].region_rule == OperationRegionRule::Dependency)) ||

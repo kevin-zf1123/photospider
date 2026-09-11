@@ -151,6 +151,7 @@ set(
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/dependency_block.cpp
   src/lib/plugin/dependency_invocation.cpp
@@ -590,6 +591,11 @@ if(BUILD_TESTING)
   endif()
   target_compile_definitions(dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(dependency_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  add_library(dependency_joint_fixture MODULE tests/fixtures/dependency_joint_fixture.c)
+  target_link_libraries(dependency_joint_fixture PRIVATE Photospider::operation_sdk)
+  photospider_add_test(test_dependency_joint Photospider::kernel tests/integration/test_dependency_joint.cpp)
+  target_compile_definitions(test_dependency_joint PRIVATE PS_DEPENDENCY_JOINT_FIXTURE="$<TARGET_FILE:dependency_joint_fixture>")
+  add_dependencies(test_dependency_joint dependency_joint_fixture)
   photospider_add_test(test_dependency_plugin Photospider::kernel tests/integration/test_dependency_plugin.cpp)
   target_link_libraries(test_dependency_plugin PRIVATE ${CMAKE_DL_LIBS})
   target_compile_definitions(test_dependency_plugin PRIVATE PS_DEPENDENCY_FIXTURE="$<TARGET_FILE:dependency_fixture>")

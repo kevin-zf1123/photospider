@@ -44,6 +44,10 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
  */
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
+  digest->integer(traits.joint_contract);
+  digest->integer(traits.joint_continuation_bytes);
+  digest->integer(traits.joint_workspace_bytes);
+
   digest->integer(traits.outputs.size());
   if (traits.outputs.size() != 1) {
     for (const auto& output : traits.outputs) {

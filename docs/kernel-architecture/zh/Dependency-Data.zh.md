@@ -52,8 +52,9 @@ OperationTraits 8 区分本地 `Atomic`、终端 `RequestRecord`、请求级失�
 
 `start_dependency` 复制校验后的 metadata、参数、original Q 与不可变输入 bundle
 identity。Generic Atomic 每次最多一个 sample，image v2 每次最多一个完整像素。
-RequestRecord 保留完整 Q。PerAtomOutcome 目前保留但拒绝注册，必须实现逐观察 outcome
-交付后才能启用；修改标志不能使请求级失败 callback 获得合批能力。
+RequestRecord 保留完整 Q。ABI 9 的 `start_joint` 支持 PerAtomOutcome，逐成员验证
+outcome。Singleton start 仍然每次只接受一个 observation；修改失败标志不能使
+该 session 接受多个 observation。
 
 Continuation 在宿主分配中原位构造。`poll` 只消费已提供 fragment，返回逐输出关联的
 Need 或完整结果。`supply` 的每个端口必须精确匹配取数并集及 bundle identity。
@@ -333,3 +334,28 @@ GPU discovery](GPU-Discovery.zh.md) 已实现。
 
 同步 GPU producer 也通过既有 native worker 执行，实际容量与 CPU 回退见
 [Fragment Atlas](Fragment-Atlas.zh.md)。
+
+## 独立 Atomic outcome（M4，#307）
+
+`OperationDefinition::start_joint` 为可选入口，singleton staged start 仍然必需。
+traits 声明联合契约版本 1、共享 continuation 与 scratch 字节数。直接调用
+`DependencyJointSession` 拥有 2..64 个不同输出成员，每输出一个 Atomic observation；
+静态输入元数据、参数、快照及 CPU 后端相同，shape 和坐标可以不同。已取消成员
+不传入共享 start，并单独报告取消；共享实现须支持剩余非空子集。
+
+每轮同时借用就绪成员的 phase 服务，返回每成员恰好一个 `DependencyAtomOutcome`：
+Needs、完整 fragments 或局部错误，顺序任意。缺失、重复和未知输出 ID 属于组协议
+错误。现有成员 session 分别验证读取、关联、coverage、数值契约及忽略的服务错误。
+同线程允许嵌套不同 session；同组并发或重入调用被拒绝且不破坏正在执行的状态。
+借用 phase 在返回时失效。
+
+成员只接收自己的精确 supply union 和快照；成功或局部错误仅终结该成员一次。
+后续 poll 不包含等待或终结成员。外层执行错误终结组，调度和回退策略由 M5 实现。
+共享 state/scratch 通过宿主 allocator 计费一次；state 受请求上限最小值约束。
+Proxy 单独分配且不修改契约身份。共享 work 计数包含宿主成员验证。
+
+C joint table 复用 singleton 的服务及完成验证器。共享单调句柄源与独立成员映射
+拒绝跨成员 owner/output/checkpoint 句柄。共享 payload 在进入 start 后恰好析构
+一次，包括启动失败。`test_dependency_joint` 覆盖双语言成员协议、局部和忽略的
+服务错误、独立供给、重入、64 成员、启动前后取消、共享 work/state 上限及供给
+失败后的最终回收。

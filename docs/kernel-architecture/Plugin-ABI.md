@@ -279,8 +279,9 @@ ABI/Traits 8 adds Atomic versus terminal RequestRecord and explicit
 RequestFailureOnly delivery. The current C descriptor copies and validates these
 fields; its synchronous invocation remains available. `dependency_plugin_api.h`
 adds the alternative C staged program table with host-owned continuation, exact
-associations, fragment reads and cross-poll owner handles. PerAtomOutcome is reserved and rejected
-until complete per-observation outcome delivery exists.
+associations, fragment reads and cross-poll owner handles. ABI 9 adds the optional
+`ps_dependency_joint_program_v9` table and validates per-member outcomes through
+the same services and completion rules. See the M4 section in Dependency-Data.
 
 The C++ registry accepts an alternative `start_dependency` with bounded host
 continuation, poll and supply phases. The compiler checks EffectiveAtomic on all

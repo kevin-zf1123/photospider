@@ -226,7 +226,8 @@ grid，完成后才返回。参数失败粘滞，不能由 callback 成功覆盖
 ABI/Traits 8 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C
 descriptor 复制并校验这些字段，同步调用继续可用。`dependency_plugin_api.h`
 提供可选 C 分阶段程序表，使用宿主 continuation、精确关联、fragment 读取和跨 poll
-owner handle。PerAtomOutcome 保留但拒绝注册，必须先具备完整逐观察 outcome 交付。
+owner handle。ABI 9 增加可选 `ps_dependency_joint_program_v9`，使用相同服务与完成
+规则验证各成员 outcome，详见 Dependency-Data 的 M4 章节。
 
 C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply
 阶段执行。编译器检查全部输入祖先的 EffectiveAtomic，拒绝 RequestRecord 全部出边。

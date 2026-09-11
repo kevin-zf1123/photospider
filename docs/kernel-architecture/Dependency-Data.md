@@ -81,9 +81,9 @@ unresolved input demands instead of inventing a rectangular approximation.
 `start_dependency` copies validated metadata, parameters, original Q and the
 immutable input-bundle identity. Generic Atomic starts accept at most one sample;
 image-v2 starts accept at most one complete pixel. RequestRecord starts preserve
-the complete original query. PerAtomOutcome is reserved and rejected until an
-actual per-observation outcome protocol is implemented. Changing its flag cannot
-make a request-only callback batch-safe.
+the complete original query. ABI 9 adds the validated `start_joint` driver for
+PerAtomOutcome Atomic outputs. Singleton starts still accept only one observation;
+changing a failure flag does not authorize multiple observations in that session.
 
 A continuation is placement-constructed in its host allocation. `poll` consumes
 only supplied fragments and either returns exact associated Needs or a complete
@@ -457,3 +457,37 @@ compute failure reject; repeated failed requests invoke compute again.
 [Fragment Atlas](Fragment-Atlas.md) documents the implemented exact atlas/mask
 directory and SDK MSL lookup helper, including native transport verification.
 C++ staged GPU execution is integrated. C staged GPU execution is also integrated; bounded discovery is implemented in [GPU Discovery](GPU-Discovery.md).
+
+## Independent Atomic outcomes (M4, #307)
+
+`OperationDefinition::start_joint` is optional; the singleton staged start remains
+required. `OperationTraits` declares joint contract version 1, shared continuation
+bytes and shared scratch bytes. The direct `DependencyJointSession` owns 2..64
+distinct named Atomic members, one observation per output, with equal static input
+metadata, parameters, snapshot and CPU backend. Shapes and observation coordinates
+may differ. Cancelled members are omitted from shared start and reported locally.
+The shared implementation must support the remaining nonempty subset.
+
+Each poll borrows the ready members' phase services simultaneously. It returns
+exactly one `DependencyAtomOutcome` per borrowed member, in any order: Needs,
+complete fragments or a local error. Missing, duplicate and unknown output IDs
+fail the group as protocol errors. Existing member sessions validate each phase's
+reads, associations, exact coverage, numeric contract and sticky service errors.
+Different sessions may nest on one thread; same-group recursive/concurrent calls
+are rejected without changing active state. No borrowed phase survives return.
+
+Each member receives only its own exact supply union and snapshot. Success and
+local errors are terminal once; waiting and terminal members are absent from
+subsequent polls. An enclosing execution error retires the group. The runtime's
+retry and grouping policy is a separate M5 responsibility. Shared state and scratch
+use the host allocator once; state respects the minimum requested state limit.
+Proxy overhead is separately allocated without changing contract identity. Work
+charges use one shared bounded counter, including host member validation.
+
+The C joint table uses the same member service implementation and terminal
+validator as singleton C programs. A shared monotonic handle source and separate
+member maps reject cross-member owner/output/checkpoint handles. Shared payload
+is destroyed exactly once even after failed start. The tests in
+`test_dependency_joint` cover both languages, malformed membership, local/ignored
+service failures, independent supplies, recursive calls, 64 members, cancellation
+before and after start, shared work/state limits and final failed-supply cleanup.

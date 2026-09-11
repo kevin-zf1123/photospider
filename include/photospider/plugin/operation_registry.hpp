@@ -283,6 +283,13 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
+  /** @brief Optional CPU joint contract version, zero disables grouping. */
+  std::uint32_t joint_contract = 0;
+  /** @brief Shared host-owned state capacity, charged once per group. */
+  std::uint64_t joint_continuation_bytes = 0;
+  /** @brief Additional shared scratch bound per joint poll. */
+  std::uint64_t joint_workspace_bytes = 0;
+
   /** @brief Exact input count, or fixed prefix count for a repeated template.
    */
   std::uint32_t input_count = 0;
@@ -479,6 +486,9 @@ struct PHOTOSPIDER_API OperationDefinition final {
   DependencyStart start_dependency = {};
   /** @brief Optional pure static validation, also applied to Empty queries. */
   DependencyValidator validate_dependency = {};
+  /** @brief Optional Atomic joint implementation; singleton start remains
+   * required. */
+  DependencyJointStart start_joint = {};
 };
 
 /**
@@ -583,6 +593,13 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @throws std::bad_alloc If a failure diagnostic allocation fails.
    * @note The returned value grants no callback or registry mutation access.
    */
+  /** @brief Starts a validated optional CPU joint group; unsupported returns
+   * BackendUnavailable. Members are copied; allocator owns shared state once.
+   */
+  Result<std::shared_ptr<DependencyJointSession>> start_joint(
+      const std::string& key, std::vector<DependencyRequest> requests,
+      const BufferAllocator& allocator = BufferAllocator{}) const;
+
   [[nodiscard]] Result<OperationTraits> find_traits(
       const std::string& key) const;
 

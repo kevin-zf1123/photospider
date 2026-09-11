@@ -258,6 +258,43 @@ typedef struct ps_dependency_services_v9 {
   int (*discover)(void*, uint32_t capacity, uint32_t candidates,
                   ps_dependency_discovery_compute_v9 compute, void* user);
 } ps_dependency_services_v9;
+/** @brief Borrowed member services, valid only inside one joint poll. */
+typedef struct ps_dependency_joint_member_v9 {
+  const ps_dependency_query_v9* query;
+  const ps_dependency_services_v9* services;
+} ps_dependency_joint_member_v9;
+/** @brief Exactly one next-stage or terminal status for a supplied output. */
+typedef struct ps_dependency_atom_outcome_v9 {
+  uint32_t output_index;
+  int result;
+} ps_dependency_atom_outcome_v9;
+/** @brief Shared scratch, counted once and retired when joint poll returns. */
+typedef struct ps_dependency_joint_services_v9 {
+  uint32_t struct_size, reserved;
+  void* context;
+  int (*scratch)(void*, uint64_t bytes, uint8_t**);
+} ps_dependency_joint_services_v9;
+/** @brief Optional CPU joint implementation for distinct Atomic outputs.
+ * @note Singleton callbacks remain required. start/destroy share one zeroed
+ * payload, destroyed exactly once whenever start was entered, including
+ * failure. poll returns SUCCESS plus exactly count outcomes (any order), or an
+ * enclosing execution error. Each outcome is NEED, SUCCESS or a member-local
+ * error. Missing, duplicate and unknown members are protocol errors. Member
+ * handles cannot be used through another member's services. All pointers expire
+ * at callback return. state_bytes is 1..1048576; workspace_bytes bounds
+ * additional shared scratch.
+ */
+typedef struct ps_dependency_joint_program_v9 {
+  uint32_t struct_size, reserved;
+  uint64_t state_bytes, workspace_bytes;
+  int (*start)(const ps_dependency_query_v9* const*, uint32_t count,
+               void* state, uint64_t state_bytes, void* user);
+  int (*poll)(const ps_dependency_joint_member_v9*, uint32_t count, void* state,
+              const ps_dependency_joint_services_v9*,
+              ps_dependency_atom_outcome_v9* outcomes, uint32_t* outcome_count,
+              void* user);
+  void (*destroy)(void* state, void* user);
+} ps_dependency_joint_program_v9;
 /** @brief Copied staged callbacks for trusted in-process C implementations.
  * @note Exactly one synchronous execute or dependency_program is supplied.
  * state_bytes are zero-initialized host bytes, stable through destroy; the host
@@ -282,6 +319,8 @@ typedef struct ps_dependency_program_v9 {
   int (*poll)(const ps_dependency_query_v9*, void*,
               const ps_dependency_services_v9*, void*);
   void (*destroy)(void*, void*);
+  /** @brief Optional copied joint table; null retains singleton execution. */
+  const ps_dependency_joint_program_v9* joint;
 } ps_dependency_program_v9;
 
 #ifdef __cplusplus

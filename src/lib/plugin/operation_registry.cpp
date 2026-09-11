@@ -989,6 +989,15 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
   }
+  if (static_cast<bool>(definition.start_joint) !=
+          (definition.traits.joint_contract == 1) ||
+      definition.traits.joint_contract > 1 ||
+      (definition.start_joint &&
+       (!staged || definition.traits.outputs.size() < 2 ||
+        !definition.traits.joint_continuation_bytes)) ||
+      (!definition.start_joint && (definition.traits.joint_continuation_bytes ||
+                                   definition.traits.joint_workspace_bytes)))
+    return Status{ErrorCode::InvalidArgument, "invalid joint contract"};
   auto immutable_definition =
       std::make_shared<const OperationDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -1720,6 +1729,25 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
       "registry-" + std::to_string(impl_->identity) + ":" + key,
       definition->traits, definition->start_dependency,
       definition->validate_dependency, std::move(request), allocator,
+      definition);
+}
+
+Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
+    const std::string& key, std::vector<DependencyRequest> requests,
+    const BufferAllocator& allocator) const {
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Result<std::shared_ptr<DependencyJointSession>>(
+          Status{ErrorCode::NotFound, {}});
+    definition = found->second;
+  }
+  return DependencyJointSession::create(
+      "registry-" + std::to_string(impl_->identity) + ":" + key,
+      definition->traits, definition->start_joint,
+      definition->validate_dependency, std::move(requests), allocator,
       definition);
 }
 

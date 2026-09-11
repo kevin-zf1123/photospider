@@ -177,6 +177,7 @@ struct DependencySession::Impl {
   mutable std::recursive_mutex mutex;
   bool active_call = false;
   std::uint64_t remaining_work = 0;
+  std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
   std::string certificate_identity, block_identity;
   std::shared_ptr<std::atomic<ErrorCode>> service_failure =
@@ -211,6 +212,11 @@ struct DependencySession::Impl {
     if (count > remaining_work)
       return record_failure(Status::failure(
           ErrorCode::ResourceExhausted, "dependency discovery fuel exhausted"));
+    if (shared_work) {
+      auto shared = shared_work(count);
+      if (!shared.ok())
+        return record_failure(shared);
+    }
     remaining_work -= count;
     return Status::success();
   }
@@ -283,7 +289,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     const std::string& operation, OperationTraits traits,
     const DependencyStart& start, const DependencyValidator& validate,
     DependencyRequest request, const BufferAllocator& allocator,
-    std::shared_ptr<const void> definition) {
+    std::shared_ptr<const void> definition, std::uint64_t host_proxy_bytes,
+    std::function<Status(std::uint64_t)> shared_work) {
   auto selected = select_operation_output(traits, request.output_index);
   if (!selected.ok())
     return Result<std::shared_ptr<DependencySession>>(selected.status());
@@ -302,9 +309,6 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
       (request.backend == Backend::Gpu && !traits.supports_gpu))
     return Result<std::shared_ptr<DependencySession>>(Status::failure(
         ErrorCode::BackendUnavailable, "dependency backend unavailable"));
-  if (traits.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly)
-    return Result<std::shared_ptr<DependencySession>>(
-        invalid("per-atom outcome protocol required"));
   auto resolved = resolve_operation_traits(traits, request.inputs.size(),
                                            request.parameters);
   if (!resolved.ok())
@@ -344,6 +348,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
         ErrorCode::ResourceExhausted, "zero dependency execution limit"));
   auto impl = std::make_unique<Impl>();
   impl->definition = std::move(definition);
+  impl->shared_work = std::move(shared_work);
   impl->traits = resolved.take_value();
   impl->limits = request.limits;
   impl->auxiliary_cancellation = request.limits.sets.cancellation;
@@ -430,13 +435,14 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     if (!status.ok())
       return Result<std::shared_ptr<DependencySession>>(status);
     try {
-      auto limit =
-          allocator.limited(std::min(traits.outputs[0].continuation_bytes,
-                                     impl->limits.maximum_state_bytes),
-                            [failure = impl->service_failure](ErrorCode code) {
-                              auto expected = ErrorCode::Ok;
-                              failure->compare_exchange_strong(expected, code);
-                            });
+      auto limit = allocator.limited(
+          std::min(host_proxy_bytes ? host_proxy_bytes
+                                    : traits.outputs[0].continuation_bytes,
+                   impl->limits.maximum_state_bytes),
+          [failure = impl->service_failure](ErrorCode code) {
+            auto expected = ErrorCode::Ok;
+            failure->compare_exchange_strong(expected, code);
+          });
       auto state = start(impl->query, limit);
       if (!state.ok())
         return Result<std::shared_ptr<DependencySession>>(
