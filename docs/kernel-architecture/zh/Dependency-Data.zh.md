@@ -202,3 +202,9 @@ Flights、content-cache 复用及 GPU fragment 执行仍是未完成的 G4 集�
 隔离、陈旧发布、独立取消及 context 排空。真实 C terminal fixture 检查稀疏 Q 仅调用
 一次、Empty 不调用。公开 `g4_workflow` demand 场景使用直接 oracle 检查两次替换前后
 scatter 两端的结果。
+
+U2 兄弟工作集反例已成为真实 `test_dependency_program` workflow：A、B 各从 context
+allocator 分配 1 MiB 输出和 3 MiB scratch。预算 4 MiB 时 A 完成，B 在 callback
+开始前被拒绝；失败返回后 A 的 storage owner 已释放。同一 context 随后仍可执行 A，
+观察分配峰值为 4 MiB。预算 5 MiB 时父节点取得两个结果并返回 3，观察峰值为 5 MiB。
+该测试验证此执行顺序的有限拒绝和真实 lease 退休，不承诺最优调度。

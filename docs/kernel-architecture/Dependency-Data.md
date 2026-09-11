@@ -286,3 +286,11 @@ accumulation, frozen isolation, stale publication, independent cancellation and
 context drain. The real C terminal fixture checks one invocation for sparse Q
 and no invocation for Empty. The public `g4_workflow` demand scenario checks
 endpoint scatter sums before/after two replacements against a direct oracle.
+
+The U2 sibling working-set counterexample is a real `test_dependency_program`
+workflow: A and B each allocate a 1 MiB output and 3 MiB scratch from the context
+allocator. With 4 MiB, A completes but B is rejected before its callback; A's
+storage owner expires on failure. The same context can then execute A with an
+observed 4 MiB allocation peak. With 5 MiB, the parent receives both results and
+returns 3, with an observed 5 MiB peak. This verifies finite rejection and actual
+lease retirement for that execution order, not an optimal scheduling guarantee.

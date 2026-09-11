@@ -606,6 +606,117 @@ int allocator_lifetime() {
   PS_CHECK(counts->starts == counts->destroyed);
   return 0;
 }
+struct SiblingState {
+  bool requested = false;
+  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+    if (!requested) {
+      requested = true;
+      std::vector<DependencyNeed> needs;
+      for (unsigned port = 0; port < 2; ++port)
+        needs.push_back({port,
+                         1,
+                         point(0, phase.query.inputs[port].descriptor.shape[0]),
+                         {}});
+      return Result<DependencyPoll>(DependencyNeedBatch{{{{0}, needs}}, {}});
+    }
+    double sum = 0;
+    for (unsigned port = 0; port < 2; ++port) {
+      double value = 0;
+      auto status = phase.read(port, {0}, &value, 8);
+      if (!status.ok())
+        return Result<DependencyPoll>(status);
+      sum += value;
+    }
+    auto writer = MutableValue::allocate(phase.query.output.descriptor,
+                                         Region::whole({1}), phase.allocator)
+                      .take_value();
+    std::memcpy(writer.data(), &sum, 8);
+    return Result<DependencyPoll>(
+        ValueFragments::create(phase.query.output.descriptor, {},
+                               phase.query.outputs,
+                               {std::move(writer).publish().take_value()})
+            .take_value());
+  }
+};
+int sibling_admission() {
+  // U2: A and B each fit alone (1 MiB result + 3 MiB scratch), but retaining
+  // A while admitting B requires 5 MiB. Failure must retire actual owners.
+  constexpr std::uint64_t mib = 1024 * 1024;
+  auto registry = std::make_shared<OperationRegistry>();
+  unsigned calls[2]{};
+  std::weak_ptr<const CpuStorage> retained[2];
+  for (unsigned id = 0; id < 2; ++id) {
+    OperationDefinition op;
+    op.key = id ? "sibling_b" : "sibling_a";
+    op.traits.shape_rule = OperationShapeRule::Fixed;
+    op.traits.fixed_output_shape = {mib / 8};
+    op.traits.workspace_bytes = 3 * mib;
+    op.callback = [&, id](const OperationInvocation& call) -> Result<Value> {
+      ++calls[id];
+      auto scratch = call.allocator.allocate(3 * mib);
+      if (!scratch.ok())
+        return Result<Value>(scratch.status());
+      auto allocation =
+          MutableValue::allocate({ElementType::Float64, {mib / 8}},
+                                 Region::whole({mib / 8}), call.allocator);
+      if (!allocation.ok())
+        return Result<Value>(allocation.status());
+      auto writer = allocation.take_value();
+      const double first = id + 1;
+      std::memcpy(writer.data(), &first, 8);
+      auto value = std::move(writer).publish().take_value();
+      retained[id] = value.storage();
+      return Result<Value>(std::move(value));
+    };
+    PS_CHECK(registry->register_operation(std::move(op)).ok());
+  }
+  OperationDefinition parent;
+  parent.key = "siblings";
+  parent.traits = staged_traits(2, sizeof(SiblingState));
+  parent.traits.shape_rule = OperationShapeRule::Fixed;
+  parent.traits.fixed_output_shape = {1};
+  parent.start_dependency = [](const DependencyQuery&,
+                               const BufferAllocator& allocator) {
+    return DependencyContinuation::make<SiblingState>(allocator);
+  };
+  PS_CHECK(registry->register_operation(std::move(parent)).ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument document;
+  document.nodes = {
+      {1, "sibling_a", {}, {}},
+      {2, "sibling_b", {}, {}},
+      {3,
+       "siblings",
+       {WorkflowNodeOutput{1, "value"}, WorkflowNodeOutput{2, "value"}},
+       {}}};
+  document.outputs = {{"sum", 3, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext limited(registry, {1, false, 4, 4 * mib});
+  auto failed = limited.execute(plan);
+  PS_CHECK(failed.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(calls[0] == 1 && calls[1] == 0 && retained[0].expired());
+  // The same context can subsequently admit A's complete 4 MiB package.
+  document.nodes.resize(1);
+  document.outputs = {{"a", 1, "value"}};
+  GraphContext single_graph(document);
+  auto single = Compiler(registry).compile(single_graph).take_value().plan;
+  auto frozen = limited.freeze(single, {}).take_value();
+  auto recovered =
+      limited.execute_fragments(frozen, {{"a", point(0, mib / 8)}});
+  PS_CHECK(recovered.ok() && calls[0] == 2 && calls[1] == 0);
+  PS_CHECK(recovered.value().diagnostics.peak_live_bytes == 4 * mib);
+  recovered = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
+  PS_CHECK(retained[0].expired());
+  ExecutionContext sufficient(registry, {1, false, 4, 5 * mib});
+  auto complete = sufficient.execute(plan);
+  PS_CHECK(complete.ok() && calls[0] == 3 && calls[1] == 1);
+  double sum = 0;
+  std::memcpy(&sum, complete.value().values.at("sum").bytes().data(), 8);
+  PS_CHECK(sum == 3 && complete.value().diagnostics.peak_live_bytes == 5 * mib);
+  PS_CHECK(retained[0].expired() && retained[1].expired());
+  return 0;
+}
 int execution_network() {
   auto registry = std::make_shared<OperationRegistry>();
   auto counts = std::make_shared<Counts>();
@@ -857,6 +968,7 @@ int execution_network() {
 
 }  // namespace
 int main() {
+  PS_CHECK(sibling_admission() == 0);
   PS_CHECK(execution_network() == 0);
   PS_CHECK(progressive() == 0);
   PS_CHECK(terminal_and_graph() == 0);
