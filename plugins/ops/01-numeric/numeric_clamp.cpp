@@ -16,12 +16,12 @@ Status register_numeric_clamp(OperationRegistry* registry) {
   auto& t = operation.traits;
   t.input_schema.resize(1);
   t.input_schema[0].element_type_mask = 12;
-  t.requires_dense_output = true;
+  t.outputs[0].requires_dense_output = true;
 
   t.input_count = 1;
 
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
 
   t.parameter_schema = {
       {"min", OperationParameterType::Float64, true, true, -maximum, maximum},

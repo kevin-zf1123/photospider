@@ -18,7 +18,7 @@ cmake --build build/issue257-static --target photospider_g4_gpu_workflow -j 8
 build/issue257-static/photospider_g4_gpu_workflow
 ```
 
-Or build against an installed Photospider 0.8 package:
+Or build against an installed Photospider 0.9 package:
 
 ```sh
 cmake -S examples/g4_gpu_workflow -B build/g4-gpu-consumer -DCMAKE_PREFIX_PATH=/path/to/photospider/install

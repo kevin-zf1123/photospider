@@ -491,9 +491,9 @@ int compact_identity() {
   OperationTraits view;
   view.input_count = 1;
   view.input_schema.resize(1);
-  view.output_dtype_rule = OperationDtypeRule::Input;
-  view.shape_rule = OperationShapeRule::PreserveFirstInput;
-  view.region_rule = OperationRegionRule::Elementwise;
+  view.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  view.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  view.outputs[0].region_rule = OperationRegionRule::Elementwise;
   PS_CHECK(registry
                ->register_operation({"fixture.partial", view,
                                      [&](const OperationInvocation& call) {

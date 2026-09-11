@@ -12,27 +12,27 @@ Status register_color_assign(OperationRegistry* registry) {
   OperationDefinition operation;
   operation.key = "color.assign";
   auto& t = operation.traits;
-  t.output_semantic_rule = OperationSemanticRule::Parameter;
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::Parameter;
   t.input_count = 1;
   t.input_schema.resize(1);
   auto& port = t.input_schema[0];
   port.kind = OperationPortKind::Typed;
   port.rank = 3;
   port.element_type_mask = 12;
-  t.output_schema.kind = OperationPortKind::Typed;
-  t.output_dtype_rule = OperationDtypeRule::Input;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.requires_dense_output = true;
+  t.outputs[0].output_schema.kind = OperationPortKind::Typed;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].requires_dense_output = true;
 
   port.element_type_mask = 0;
   port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
   port.semantic_kind = static_cast<std::uint32_t>(SemanticKind::Image);
-  t.output_schema.semantic_kind =
+  t.outputs[0].output_schema.semantic_kind =
       static_cast<std::uint32_t>(SemanticKind::Image);
 
   port.kind = OperationPortKind::Value;
   port.semantic_kind = 0;
-  t.output_semantic_parameter = "semantic";
+  t.outputs[0].output_semantic_parameter = "semantic";
   t.parameter_schema = {{"semantic", OperationParameterType::String, true}};
 
   operation.callback = [traits = t,

@@ -1,5 +1,6 @@
 #include "photospider/data/value_fragments.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <utility>
@@ -22,6 +23,43 @@ bool same_mapping(const Value& a, const Value& b, const Region& overlap) {
   }
   const auto left = a.byte_address(first), right = b.byte_address(first);
   return left.ok() && right.ok() && left.value() == right.value();
+}
+// Coalesce only rectangular neighbors with identical checked byte mappings.
+// This keeps a shared table published one atom at a time from becoming a
+// quadratic overlap list. It never fills holes or merges distinct owners.
+void append_coalesced(std::vector<Value>* fragments, Value value) {
+  while (!fragments->empty()) {
+    const auto& prior = fragments->back();
+    if (prior.storage() != value.storage())
+      break;
+    auto dimensions = prior.region().dimensions();
+    const auto& incoming = value.region().dimensions();
+    std::size_t differing = 0;
+    bool adjacent = true;
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+      auto& a = dimensions[axis];
+      const auto b = incoming[axis];
+      if (a.offset == b.offset && a.extent == b.extent)
+        continue;
+      if (++differing > 1 || (a.offset + a.extent != b.offset &&
+                              b.offset + b.extent != a.offset)) {
+        adjacent = false;
+        break;
+      }
+      a.offset = std::min(a.offset, b.offset);
+      a.extent += b.extent;
+    }
+    if (!adjacent || differing != 1)
+      break;
+    auto joined =
+        Value::from_storage(prior.descriptor(), Region(dimensions),
+                            prior.layout(), prior.storage(), prior.facets());
+    if (!joined.ok() || !same_mapping(joined.value(), value, value.region()))
+      break;
+    value = joined.take_value();
+    fragments->pop_back();
+  }
+  fragments->push_back(std::move(value));
 }
 Status invalid(const char* message) {
   return Status::failure(ErrorCode::InvalidArgument, message);
@@ -112,7 +150,7 @@ Result<ValueFragments> ValueFragments::create(
       auto view = value.view(region);
       if (!view.ok())
         return Result<ValueFragments>(view.status());
-      result.fragments_.push_back(view.take_value());
+      append_coalesced(&result.fragments_, view.take_value());
     }
     auto next = available.unite(clipped.value(), limits);
     if (!next.ok())

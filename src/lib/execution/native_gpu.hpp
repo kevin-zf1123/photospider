@@ -44,7 +44,7 @@ class Device final : public std::enable_shared_from_this<Device> {
   Result<BufferView> view(const std::uint8_t* bytes, std::uint64_t size,
                           bool writable);
   Status execute(const std::vector<BufferView>& views,
-                 const ps_gpu_dispatch_v8* commands, std::uint32_t count,
+                 const ps_gpu_dispatch_v9* commands, std::uint32_t count,
                  const CancellationToken& cancellation, Statistics* statistics);
 
  private:
@@ -61,7 +61,7 @@ class Device final : public std::enable_shared_from_this<Device> {
 class Invocation final {
  public:
   Invocation(std::shared_ptr<Device> device, CancellationToken cancellation);
-  const ps_gpu_service_v8* service() const noexcept { return &service_; }
+  const ps_gpu_service_v9* service() const noexcept { return &service_; }
   const Status& status() const noexcept { return status_; }
   const Statistics& statistics() const noexcept { return statistics_; }
 
@@ -69,12 +69,12 @@ class Invocation final {
   static int buffer(void* context, const std::uint8_t* bytes,
                     std::uint64_t size, std::uint32_t writable,
                     std::uint64_t* token) noexcept;
-  static int execute(void* context, const ps_gpu_dispatch_v8* commands,
+  static int execute(void* context, const ps_gpu_dispatch_v9* commands,
                      std::uint32_t count) noexcept;
   int fail(Status status) noexcept;
   std::shared_ptr<Device> device_;
   CancellationToken cancellation_;
-  ps_gpu_service_v8 service_{};
+  ps_gpu_service_v9 service_{};
   std::vector<BufferView> views_;
   Status status_;
   Statistics statistics_;

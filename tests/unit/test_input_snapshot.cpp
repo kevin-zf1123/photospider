@@ -320,12 +320,12 @@ int main() {
   auto registry = std::make_shared<OperationRegistry>();
   OperationTraits traits;
   traits.input_count = 1;
-  traits.output_element_type = ElementType::Float32;
-  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Elementwise;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].output_semantic_rule = OperationSemanticRule::PreserveInput;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   traits.input_schema = {{OperationPortKind::Float32Mask, 0, 0}};
-  traits.output_schema = traits.input_schema[0];
+  traits.outputs[0].output_schema = traits.input_schema[0];
   PS_CHECK(registry
                ->register_operation({"identity", traits,
                                      [](const OperationInvocation& invocation) {

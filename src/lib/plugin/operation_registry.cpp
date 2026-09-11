@@ -143,7 +143,7 @@ class OperationLibrary final {
    * @throws Nothing.
    * @note A nonnull destroy callback becomes part of rollback immediately.
    */
-  void attach_api(const ps_operation_plugin_api_v8* api) noexcept {
+  void attach_api(const ps_operation_plugin_api_v9* api) noexcept {
     api_ = api;
   }
 
@@ -151,7 +151,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_operation_plugin_api_v8* api_ = nullptr;
+  const ps_operation_plugin_api_v9* api_ = nullptr;
 };
 
 /**
@@ -219,13 +219,13 @@ void* find_symbol(void* handle, const char* name) noexcept {
  */
 Result<ElementType> decode_element_type(std::uint32_t type) {
   switch (type) {
-    case PS_OPERATION_ELEMENT_UINT8_V8:
+    case PS_OPERATION_ELEMENT_UINT8_V9:
       return Result<ElementType>(ElementType::UInt8);
-    case PS_OPERATION_ELEMENT_INT64_V8:
+    case PS_OPERATION_ELEMENT_INT64_V9:
       return Result<ElementType>(ElementType::Int64);
-    case PS_OPERATION_ELEMENT_FLOAT32_V8:
+    case PS_OPERATION_ELEMENT_FLOAT32_V9:
       return Result<ElementType>(ElementType::Float32);
-    case PS_OPERATION_ELEMENT_FLOAT64_V8:
+    case PS_OPERATION_ELEMENT_FLOAT64_V9:
       return Result<ElementType>(ElementType::Float64);
     default:
       return Result<ElementType>(Status::failure(
@@ -235,24 +235,24 @@ Result<ElementType> decode_element_type(std::uint32_t type) {
 
 /**
  * @brief Decodes one closed C ABI output-shape inference rule.
- * @param value Numeric version-eight rule.
+ * @param value Numeric version-nine rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_SHAPE_AXES_V8:
+    case PS_OPERATION_SHAPE_AXES_V9:
       return Result<OperationShapeRule>(OperationShapeRule::Axes);
-    case PS_OPERATION_SHAPE_SHRINK_V8:
+    case PS_OPERATION_SHAPE_SHRINK_V9:
       return Result<OperationShapeRule>(OperationShapeRule::Shrink);
-    case PS_OPERATION_SHAPE_SCALAR_V8:
+    case PS_OPERATION_SHAPE_SCALAR_V9:
       return Result<OperationShapeRule>(OperationShapeRule::Scalar);
-    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V8:
+    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V9:
       return Result<OperationShapeRule>(OperationShapeRule::PreserveFirstInput);
-    case PS_OPERATION_SHAPE_MATCH_INPUTS_V8:
+    case PS_OPERATION_SHAPE_MATCH_INPUTS_V9:
       return Result<OperationShapeRule>(OperationShapeRule::MatchAllInputs);
-    case PS_OPERATION_SHAPE_FIXED_V8:
+    case PS_OPERATION_SHAPE_FIXED_V9:
       return Result<OperationShapeRule>(OperationShapeRule::Fixed);
     default:
       return Result<OperationShapeRule>(
@@ -263,22 +263,22 @@ Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI Region propagation rule.
- * @param value Numeric version-eight rule.
+ * @param value Numeric version-nine rule.
  * @return Typed rule or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown values fail closed.
  */
 Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_REGION_DEPENDENCY_V8:
+    case PS_OPERATION_REGION_DEPENDENCY_V9:
       return Result<OperationRegionRule>(OperationRegionRule::Dependency);
-    case PS_OPERATION_REGION_SHRINK_V8:
+    case PS_OPERATION_REGION_SHRINK_V9:
       return Result<OperationRegionRule>(OperationRegionRule::Shrink);
-    case PS_OPERATION_REGION_WHOLE_V8:
+    case PS_OPERATION_REGION_WHOLE_V9:
       return Result<OperationRegionRule>(OperationRegionRule::Whole);
-    case PS_OPERATION_REGION_ELEMENTWISE_V8:
+    case PS_OPERATION_REGION_ELEMENTWISE_V9:
       return Result<OperationRegionRule>(OperationRegionRule::Elementwise);
-    case PS_OPERATION_REGION_HALO_V8:
+    case PS_OPERATION_REGION_HALO_V9:
       return Result<OperationRegionRule>(OperationRegionRule::Halo);
     default:
       return Result<OperationRegionRule>(
@@ -289,20 +289,20 @@ Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI source-parameter type.
- * @param value Numeric operation ABI v8 parameter type.
+ * @param value Numeric operation ABI v9 parameter type.
  * @return Typed parameter kind or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown numeric values fail before registry publication.
  */
 Result<OperationParameterType> decode_parameter_type(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_PARAMETER_INT64_V8:
+    case PS_OPERATION_PARAMETER_INT64_V9:
       return Result<OperationParameterType>(OperationParameterType::Int64);
-    case PS_OPERATION_PARAMETER_FLOAT64_V8:
+    case PS_OPERATION_PARAMETER_FLOAT64_V9:
       return Result<OperationParameterType>(OperationParameterType::Float64);
-    case PS_OPERATION_PARAMETER_BOOL_V8:
+    case PS_OPERATION_PARAMETER_BOOL_V9:
       return Result<OperationParameterType>(OperationParameterType::Bool);
-    case PS_OPERATION_PARAMETER_STRING_V8:
+    case PS_OPERATION_PARAMETER_STRING_V9:
       return Result<OperationParameterType>(OperationParameterType::String);
     default:
       return Result<OperationParameterType>(
@@ -386,7 +386,7 @@ bool parameter_type_matches(const ParameterValue& value,
 }
 
 /**
- * @brief Validates one complete version-eight semantic trait record.
+ * @brief Validates one complete version-nine semantic trait record.
  * @param traits Candidate copied record.
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
@@ -394,9 +394,9 @@ bool parameter_type_matches(const ParameterValue& value,
  * side-effect-free behavior. Fixed shapes validate only rank/extents here;
  * actual C++ callback Value layout and storage are validated at publication.
  */
-Status validate_traits(const OperationTraits& traits) {
+Status validate_selected_traits(const OperationTraits& traits) {
   bool known_shape = false;
-  switch (traits.shape_rule) {
+  switch (traits.outputs[0].shape_rule) {
     case OperationShapeRule::Scalar:
     case OperationShapeRule::PreserveFirstInput:
     case OperationShapeRule::MatchAllInputs:
@@ -407,7 +407,7 @@ Status validate_traits(const OperationTraits& traits) {
       break;
   }
   bool known_region = false;
-  switch (traits.region_rule) {
+  switch (traits.outputs[0].region_rule) {
     case OperationRegionRule::Whole:
     case OperationRegionRule::Elementwise:
     case OperationRegionRule::Halo:
@@ -417,7 +417,8 @@ Status validate_traits(const OperationTraits& traits) {
       break;
   }
   try {
-    static_cast<void>(Value::element_size(traits.output_element_type));
+    static_cast<void>(
+        Value::element_size(traits.outputs[0].output_element_type));
   } catch (const std::invalid_argument&) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation output element type is unknown");
@@ -425,64 +426,104 @@ Status validate_traits(const OperationTraits& traits) {
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
   const bool fixed_shape_valid =
-      traits.shape_rule == OperationShapeRule::Fixed
-          ? (!traits.fixed_output_shape.empty() &&
-             traits.fixed_output_shape.size() <= 8U &&
-             std::none_of(traits.fixed_output_shape.begin(),
-                          traits.fixed_output_shape.end(),
+      traits.outputs[0].shape_rule == OperationShapeRule::Fixed
+          ? (!traits.outputs[0].fixed_output_shape.empty() &&
+             traits.outputs[0].fixed_output_shape.size() <= 8U &&
+             std::none_of(traits.outputs[0].fixed_output_shape.begin(),
+                          traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
-          : traits.fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 8U ||
+          : traits.outputs[0].fixed_output_shape.empty();
+  if (traits.workspace_input_multiplier > 16 || traits.version != 9U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
-      ((traits.shape_rule == OperationShapeRule::PreserveFirstInput ||
-        traits.shape_rule == OperationShapeRule::MatchAllInputs) &&
+      ((traits.outputs[0].shape_rule ==
+            OperationShapeRule::PreserveFirstInput ||
+        traits.outputs[0].shape_rule == OperationShapeRule::MatchAllInputs) &&
        traits.input_count == 0U && traits.repeated_minimum == 0U) ||
-      (traits.region_rule == OperationRegionRule::Halo &&
-       traits.halo_radius == 0U && traits.halo_radius_parameter.empty()) ||
-      (traits.region_rule != OperationRegionRule::Halo &&
-       traits.halo_radius != 0U) ||
+      (traits.outputs[0].region_rule == OperationRegionRule::Halo &&
+       traits.outputs[0].halo_radius == 0U &&
+       traits.outputs[0].halo_radius_parameter.empty()) ||
+      (traits.outputs[0].region_rule != OperationRegionRule::Halo &&
+       traits.outputs[0].halo_radius != 0U) ||
       !schema_status.ok() || !fixed_shape_valid ||
       !input_internal::validate_port_schema(traits).ok() ||
       !input_internal::validate_operation_contract(traits).ok()) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation semantic traits are inconsistent");
   }
-  const bool shrink = traits.shape_rule == OperationShapeRule::Shrink;
-  if (shrink != (traits.region_rule == OperationRegionRule::Shrink) ||
-      shrink != !traits.spatial_factor_parameter.empty() ||
-      traits.spatial_factor != 1)
+  const bool shrink =
+      traits.outputs[0].shape_rule == OperationShapeRule::Shrink;
+  if (shrink !=
+          (traits.outputs[0].region_rule == OperationRegionRule::Shrink) ||
+      shrink != !traits.outputs[0].spatial_factor_parameter.empty() ||
+      traits.outputs[0].spatial_factor != 1)
     return Status::failure(ErrorCode::InvalidArgument,
                            "inconsistent shrink contract");
   if (shrink) {
-    auto p = std::find_if(traits.parameter_schema.begin(),
-                          traits.parameter_schema.end(),
-                          [&](const OperationParameterSpec& spec) {
-                            return spec.key == traits.spatial_factor_parameter;
-                          });
+    auto p = std::find_if(
+        traits.parameter_schema.begin(), traits.parameter_schema.end(),
+        [&](const OperationParameterSpec& spec) {
+          return spec.key == traits.outputs[0].spatial_factor_parameter;
+        });
     if (traits.input_count != 1 ||
-        traits.output_schema.kind == OperationPortKind::Value ||
+        traits.outputs[0].output_schema.kind == OperationPortKind::Value ||
         p == traits.parameter_schema.end() || !p->required || !p->bounded ||
         p->type != OperationParameterType::Int64 || p->minimum < 1 ||
         p->maximum > 16)
       return Status::failure(ErrorCode::InvalidArgument,
                              "invalid shrink parameter");
   }
-  if (!traits.halo_radius_parameter.empty()) {
+  if (!traits.outputs[0].halo_radius_parameter.empty()) {
     auto parameter = std::find_if(
         traits.parameter_schema.begin(), traits.parameter_schema.end(),
         [&](const OperationParameterSpec& spec) {
-          return spec.key == traits.halo_radius_parameter;
+          return spec.key == traits.outputs[0].halo_radius_parameter;
         });
-    if (traits.region_rule != OperationRegionRule::Halo ||
-        traits.halo_radius != 0 || parameter == traits.parameter_schema.end() ||
-        !parameter->required || !parameter->bounded ||
+    if (traits.outputs[0].region_rule != OperationRegionRule::Halo ||
+        traits.outputs[0].halo_radius != 0 ||
+        parameter == traits.parameter_schema.end() || !parameter->required ||
+        !parameter->bounded ||
         parameter->type != OperationParameterType::Int64 ||
         parameter->minimum < 1 || parameter->maximum > UINT32_MAX)
       return Status::failure(ErrorCode::InvalidArgument,
                              "invalid halo parameter binding");
+  }
+  return Status::success();
+}
+
+Status validate_traits(const OperationTraits& traits) {
+  if (traits.outputs.empty() || traits.outputs.size() > 64 ||
+      (traits.outputs.size() > 1 &&
+       (!traits.deterministic || !traits.side_effect_free)))
+    return Status::failure(ErrorCode::InvalidArgument,
+                           "invalid multi-output contract");
+  std::vector<std::string> names;
+  for (std::uint32_t i = 0; i < traits.outputs.size(); ++i) {
+    const auto& output = traits.outputs[i];
+    if (!valid_key(output.key) || output.key.size() > 128 ||
+        std::find(names.begin(), names.end(), output.key) != names.end())
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "invalid or duplicate output name");
+    names.push_back(output.key);
+    if (output.input_indices) {
+      std::vector<std::uint32_t> seen;
+      for (auto port : *output.input_indices) {
+        if (port >= traits.input_schema.size() ||
+            std::find(seen.begin(), seen.end(), port) != seen.end())
+          return Status::failure(ErrorCode::InvalidArgument,
+                                 "invalid input projection");
+        seen.push_back(port);
+      }
+    }
+    auto selected = select_operation_output(traits, i);
+    auto status = validate_selected_traits(selected.value());
+    if (!status.ok())
+      return status;
+    if (output.dependency_version != traits.outputs[0].dependency_version)
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "outputs must share an execution protocol");
   }
   return Status::success();
 }
@@ -501,7 +542,10 @@ Status validate_traits(const OperationTraits& traits) {
  */
 Result<OperationMetadata> expected_callback_output_descriptor(
     const OperationTraits& traits, const std::vector<Value>& inputs,
-    const std::map<std::string, ParameterValue>& parameters) {
+    const std::map<std::string, ParameterValue>& parameters,
+    const std::vector<OperationMetadata>& complete_metadata = {}) {
+  if (!complete_metadata.empty())
+    return infer_operation_output(traits, complete_metadata, parameters);
   std::vector<OperationMetadata> metadata;
   for (const auto& value : inputs) {
     if (!value.valid())
@@ -676,7 +720,7 @@ std::uint8_t* allocate_plugin_scratch(void* context,
  */
 int publish_plugin_output(void* context, std::uint32_t element_type,
                           const std::uint64_t* shape, std::uint32_t rank,
-                          const ps_operation_facet_view_v8* facets,
+                          const ps_operation_facet_view_v9* facets,
                           std::uint32_t facet_count, const std::uint8_t* data,
                           std::uint64_t byte_size) noexcept {
   auto* state = static_cast<OutputSinkState*>(context);
@@ -695,7 +739,7 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
         rank == 0U || rank > 8U || facet_count > 64U ||
         (facet_count != 0U &&
          (!facets || reinterpret_cast<std::uintptr_t>(facets) %
-                             alignof(ps_operation_facet_view_v8) !=
+                             alignof(ps_operation_facet_view_v9) !=
                          0U)) ||
         (byte_size != 0U && !data) ||
         byte_size > static_cast<std::uint64_t>(
@@ -747,8 +791,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     std::vector<ValueFacet> owned_facets;
     owned_facets.reserve(facet_count);
     for (std::uint32_t index = 0U; index < facet_count; ++index) {
-      const ps_operation_facet_view_v8& facet = facets[index];
-      if (facet.struct_size != sizeof(ps_operation_facet_view_v8) ||
+      const ps_operation_facet_view_v9& facet = facets[index];
+      if (facet.struct_size != sizeof(ps_operation_facet_view_v9) ||
           !facet.key || facet.key_size == 0U || facet.key_size > 256U ||
           facet.version == 0U || facet.payload_size > 64U * 1024U ||
           (facet.payload_size != 0U && !facet.payload)) {
@@ -935,7 +979,9 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
       [](const OperationParameterSpec& left,
          const OperationParameterSpec& right) { return left.key < right.key; });
   const Status traits_status = validate_traits(definition.traits);
-  const bool staged = definition.traits.dependency_version == 1;
+  if (!traits_status.ok())
+    return traits_status;
+  const bool staged = definition.traits.outputs[0].dependency_version == 1;
   if (!valid_key(definition.key) || !traits_status.ok() ||
       (staged ? (!definition.start_dependency || definition.callback)
               : (!definition.callback || definition.start_dependency ||
@@ -943,6 +989,15 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
   }
+  if (static_cast<bool>(definition.start_joint) !=
+          (definition.traits.joint_contract == 1) ||
+      definition.traits.joint_contract > 1 ||
+      (definition.start_joint &&
+       (!staged || definition.traits.outputs.size() < 2 ||
+        !definition.traits.joint_continuation_bytes)) ||
+      (!definition.start_joint && (definition.traits.joint_continuation_bytes ||
+                                   definition.traits.joint_workspace_bytes)))
+    return Status{ErrorCode::InvalidArgument, "invalid joint contract"};
   auto immutable_definition =
       std::make_shared<const OperationDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -973,7 +1028,7 @@ bool copy_text(const char* pointer, std::uint32_t size, std::string* output) {
     output->assign(pointer, size);
   return true;
 }
-bool copy_facets(const ps_operation_facet_view_v8* pointer, std::uint32_t count,
+bool copy_facets(const ps_operation_facet_view_v9* pointer, std::uint32_t count,
                  std::vector<ValueFacet>* output) {
   if (!records(pointer, count, 64))
     return false;
@@ -989,26 +1044,28 @@ bool copy_facets(const ps_operation_facet_view_v8* pointer, std::uint32_t count,
   }
   return input_internal::canonicalize_facets(output).ok();
 }
-bool copy_contract(const ps_operation_contract_v8* c, OperationTraits* t) {
+bool copy_contract(const ps_operation_contract_v9* c, OperationTraits* t) {
   if (!c)
     return true;
-  if (reinterpret_cast<std::uintptr_t>(c) % alignof(ps_operation_contract_v8) ||
+  if (reinterpret_cast<std::uintptr_t>(c) % alignof(ps_operation_contract_v9) ||
       c->struct_size != sizeof(*c) || c->repeated_match > 1 ||
       !records(c->axes, c->axis_count, 8) ||
       !copy_text(c->dtype_parameter, c->dtype_parameter_size,
-                 &t->output_dtype_parameter) ||
+                 &t->outputs[0].output_dtype_parameter) ||
       !copy_text(c->semantic_parameter, c->semantic_parameter_size,
-                 &t->output_semantic_parameter) ||
-      !copy_facets(c->output_facets, c->output_facet_count, &t->output_facets))
+                 &t->outputs[0].output_semantic_parameter) ||
+      !copy_facets(c->output_facets, c->output_facet_count,
+                   &t->outputs[0].output_facets))
     return false;
-  t->output_dtype_rule = static_cast<OperationDtypeRule>(c->dtype_rule);
-  t->output_dtype_input = c->dtype_input;
+  t->outputs[0].output_dtype_rule =
+      static_cast<OperationDtypeRule>(c->dtype_rule);
+  t->outputs[0].output_dtype_input = c->dtype_input;
   t->repeated_minimum = c->repeated_minimum;
   t->repeated_maximum = c->repeated_maximum;
   t->repeated_match = c->repeated_match != 0;
-  t->output_semantic_rule =
+  t->outputs[0].output_semantic_rule =
       static_cast<OperationSemanticRule>(c->semantic_rule);
-  t->output_semantic_input = c->semantic_input;
+  t->outputs[0].output_semantic_input = c->semantic_input;
   for (std::uint32_t i = 0; i < c->axis_count; ++i) {
     const auto& a = c->axes[i];
     OperationExtent axis;
@@ -1020,7 +1077,12 @@ bool copy_contract(const ps_operation_contract_v8* c, OperationTraits* t) {
     axis.input = a.input;
     axis.axis = a.axis;
     axis.offset = a.offset;
-    t->output_axes.push_back(std::move(axis));
+    if (!copy_text(a.subtract_parameter, a.subtract_parameter_size,
+                   &axis.subtract_parameter))
+      return false;
+    axis.divisor = a.divisor;
+    axis.multiplier = a.multiplier;
+    t->outputs[0].output_axes.push_back(std::move(axis));
   }
   return true;
 }
@@ -1045,7 +1107,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   OperationLibrary pending_library(opened.value());
 
   using VersionFunction = std::uint32_t (*)();
-  using ApiFunction = const ps_operation_plugin_api_v8* (*)();
+  using ApiFunction = const ps_operation_plugin_api_v9* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
   void* version_symbol = find_symbol(pending_library.handle(),
@@ -1057,14 +1119,14 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin ABI version is unsupported");
   }
-  const ps_operation_plugin_api_v8* api = nullptr;
+  const ps_operation_plugin_api_v9* api = nullptr;
   try {
-    if (version() != PS_OPERATION_ABI_VERSION_8) {
+    if (version() != PS_OPERATION_ABI_VERSION_9) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin ABI version is unsupported");
     }
     void* api_symbol =
-        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v8");
+        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v9");
     std::memcpy(&get_api, &api_symbol, sizeof(get_api));
     if (!get_api)
       return Status::failure(ErrorCode::InvalidArgument,
@@ -1079,9 +1141,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-              alignof(ps_operation_plugin_api_v8) !=
+              alignof(ps_operation_plugin_api_v9) !=
           0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v8)) {
+      api->struct_size != sizeof(ps_operation_plugin_api_v9)) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin API table is malformed");
   }
@@ -1089,7 +1151,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   if (api->operation_count == 0U || api->operation_count > 1024U ||
       !api->operations ||
       reinterpret_cast<std::uintptr_t>(api->operations) %
-              alignof(ps_operation_descriptor_v8) !=
+              alignof(ps_operation_descriptor_v9) !=
           0U ||
       !api->destroy) {
     return Status::failure(ErrorCode::InvalidArgument,
@@ -1106,8 +1168,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v8& descriptor = api->operations[index];
-    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v8) ||
+    const ps_operation_descriptor_v9& descriptor = api->operations[index];
+    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v9) ||
+        descriptor.output_count == 0 ||
+        descriptor.output_count > PS_OPERATION_MAX_OUTPUTS_V9 ||
         !descriptor.key || descriptor.key_size == 0U ||
         descriptor.key_size > 1024U ||
         (static_cast<bool>(descriptor.execute) ==
@@ -1118,13 +1182,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.input_schema == nullptr)) ||
         (descriptor.input_schema &&
          reinterpret_cast<std::uintptr_t>(descriptor.input_schema) %
-                 alignof(ps_operation_port_constraint_v8) !=
+                 alignof(ps_operation_port_constraint_v9) !=
              0) ||
-        descriptor.output_rank > 8U ||
-        ((descriptor.output_rank == 0U) !=
-         (descriptor.output_shape == nullptr)) ||
-        (descriptor.output_shape &&
-         reinterpret_cast<std::uintptr_t>(descriptor.output_shape) %
+        descriptor.outputs[0].output_rank > 8U ||
+        ((descriptor.outputs[0].output_rank == 0U) !=
+         (descriptor.outputs[0].output_shape == nullptr)) ||
+        (descriptor.outputs[0].output_shape &&
+         reinterpret_cast<std::uintptr_t>(descriptor.outputs[0].output_shape) %
                  alignof(std::uint64_t) !=
              0U) ||
         descriptor.parameter_count > 128U ||
@@ -1132,7 +1196,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.parameters == nullptr)) ||
         (descriptor.parameters &&
          reinterpret_cast<std::uintptr_t>(descriptor.parameters) %
-                 alignof(ps_operation_parameter_descriptor_v8) !=
+                 alignof(ps_operation_parameter_descriptor_v9) !=
              0U) ||
         (descriptor.flags &
          ~(PS_OPERATION_FLAG_DETERMINISTIC |
@@ -1150,16 +1214,16 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin key is invalid or duplicated");
     }
-    auto copy_port = [](const ps_operation_port_constraint_v8& source,
+    auto copy_port = [](const ps_operation_port_constraint_v9& source,
                         OperationPortConstraint* target) {
-      if (source.struct_size != sizeof(ps_operation_port_constraint_v8))
+      if (source.struct_size != sizeof(ps_operation_port_constraint_v9))
         return false;
       target->kind = static_cast<OperationPortKind>(source.kind);
       std::memcpy(&target->minimum, &source.minimum_bits, sizeof(float));
       std::memcpy(&target->maximum, &source.maximum_bits, sizeof(float));
       if (const auto* m = source.semantic) {
         if (reinterpret_cast<std::uintptr_t>(m) %
-                alignof(ps_operation_semantic_constraint_v8) ||
+                alignof(ps_operation_semantic_constraint_v9) ||
             m->struct_size != sizeof(*m) ||
             !copy_facets(m->facets, m->facet_count, &target->facets))
           return false;
@@ -1170,9 +1234,6 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
       return true;
     };
-    if (!copy_port(descriptor.output_schema, &definition.traits.output_schema))
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "invalid output port size");
     definition.traits.input_schema.resize(descriptor.input_schema_count);
     for (std::size_t i = 0; i < descriptor.input_schema_count; ++i) {
       if (!copy_port(descriptor.input_schema[i],
@@ -1181,10 +1242,6 @@ Status OperationRegistry::load_plugin(const std::string& path) {
                                "invalid input port size");
     }
     definition.traits.input_count = descriptor.input_count;
-    definition.traits.requires_dense_output = !descriptor.dependency_program;
-    if (!copy_contract(descriptor.contract, &definition.traits))
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "malformed declarative contract");
     definition.traits.deterministic =
         (descriptor.flags & PS_OPERATION_FLAG_DETERMINISTIC) != 0U;
     definition.traits.side_effect_free =
@@ -1195,56 +1252,90 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         (descriptor.flags & PS_OPERATION_FLAG_GPU) != 0U;
     definition.traits.allows_cpu_fallback =
         (descriptor.flags & PS_OPERATION_FLAG_CPU_FALLBACK) != 0U;
-    definition.traits.observation_kind =
-        static_cast<ObservationKind>(descriptor.observation_kind);
-    definition.traits.failure_delivery =
-        static_cast<FailureDelivery>(descriptor.failure_delivery);
     definition.traits.estimated_bytes = descriptor.estimated_bytes;
     definition.traits.workspace_bytes = descriptor.workspace_bytes;
     definition.traits.workspace_input_multiplier =
         descriptor.workspace_input_multiplier;
-    if (descriptor.halo_radius_parameter_size > 1024 ||
-        ((descriptor.halo_radius_parameter_size == 0) !=
-         (descriptor.halo_radius_parameter == nullptr)))
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "invalid halo parameter pointer/count");
-    if (descriptor.halo_radius_parameter)
-      definition.traits.halo_radius_parameter.assign(
-          descriptor.halo_radius_parameter,
-          descriptor.halo_radius_parameter_size);
-    auto output_type = decode_element_type(descriptor.output_element_type);
-    if (descriptor.spatial_factor_parameter_size > 1024 ||
-        ((descriptor.spatial_factor_parameter_size == 0) !=
-         (descriptor.spatial_factor_parameter == nullptr)))
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "invalid shrink parameter pointer");
-    if (descriptor.spatial_factor_parameter)
-      definition.traits.spatial_factor_parameter.assign(
-          descriptor.spatial_factor_parameter,
-          descriptor.spatial_factor_parameter_size);
-    auto shape_rule = decode_shape_rule(descriptor.shape_rule);
-    auto region_rule = decode_region_rule(descriptor.region_rule);
-    if (!output_type.ok() || !shape_rule.ok() || !region_rule.ok()) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "operation plugin backend traits are malformed");
-    }
-    definition.traits.output_element_type = output_type.value();
-    if (descriptor.output_rank != 0U) {
-      definition.traits.fixed_output_shape.assign(
-          descriptor.output_shape,
-          descriptor.output_shape + descriptor.output_rank);
-    }
-    definition.traits.shape_rule = shape_rule.value();
-    definition.traits.region_rule = region_rule.value();
-    definition.traits.halo_radius = descriptor.halo_radius;
     definition.traits.cacheable = descriptor.cacheable != 0U;
+    definition.traits.outputs.clear();
+    for (std::uint32_t oi = 0; oi < descriptor.output_count; ++oi) {
+      const auto& output = descriptor.outputs[oi];
+      if (output.struct_size != sizeof(output) || !output.key ||
+          output.key_size == 0 || output.key_size > 128 ||
+          output.output_rank > 8 ||
+          !records(output.output_shape, output.output_rank, 8) ||
+          output.project_inputs > 1 ||
+          !records(output.input_indices, output.input_index_count, 1024) ||
+          (!output.project_inputs && output.input_index_count))
+        return Status::failure(ErrorCode::InvalidArgument,
+                               "malformed C output record");
+      OperationTraits copied = definition.traits;
+      copied.outputs = {OperationOutputTraits{}};
+      auto& target = copied.outputs[0];
+      target.key.assign(output.key, output.key_size);
+      if (output.project_inputs) {
+        target.input_indices.emplace();
+        if (output.input_index_count)
+          target.input_indices->assign(
+              output.input_indices,
+              output.input_indices + output.input_index_count);
+      }
+      if (!copy_port(output.output_schema, &target.output_schema) ||
+          !copy_text(output.halo_radius_parameter,
+                     output.halo_radius_parameter_size,
+                     &target.halo_radius_parameter) ||
+          !copy_text(output.spatial_factor_parameter,
+                     output.spatial_factor_parameter_size,
+                     &target.spatial_factor_parameter) ||
+          !copy_contract(output.contract, &copied))
+        return Status::failure(ErrorCode::InvalidArgument,
+                               "malformed C output contract");
+      if (oi == 0) {
+        definition.traits.repeated_minimum = copied.repeated_minimum;
+        definition.traits.repeated_maximum = copied.repeated_maximum;
+        definition.traits.repeated_match = copied.repeated_match;
+      } else if (definition.traits.repeated_minimum !=
+                     copied.repeated_minimum ||
+                 definition.traits.repeated_maximum !=
+                     copied.repeated_maximum ||
+                 definition.traits.repeated_match != copied.repeated_match) {
+        return Status::failure(ErrorCode::InvalidArgument,
+                               "inconsistent shared repeated inputs");
+      }
+      auto element = decode_element_type(output.output_element_type);
+      auto shape = decode_shape_rule(output.shape_rule);
+      auto region = decode_region_rule(output.region_rule);
+      if (!element.ok() || !shape.ok() || !region.ok())
+        return Status::failure(ErrorCode::InvalidArgument,
+                               "invalid C output type/shape/region");
+      target.output_element_type = element.value();
+      target.shape_rule = shape.value();
+      target.region_rule = region.value();
+      target.halo_radius = output.halo_radius;
+      target.observation_kind =
+          static_cast<ObservationKind>(output.observation_kind);
+      target.failure_delivery =
+          static_cast<FailureDelivery>(output.failure_delivery);
+      target.requires_dense_output = !descriptor.dependency_program;
+      if (output.output_rank)
+        target.fixed_output_shape.assign(
+            output.output_shape, output.output_shape + output.output_rank);
+      if (target.requires_dense_output &&
+          target.shape_rule == OperationShapeRule::Fixed &&
+          !dense_layout(target.fixed_output_shape,
+                        Value::element_size(target.output_element_type))
+               .ok())
+        return Status::failure(ErrorCode::InvalidArgument,
+                               "C output is not densely representable");
+      definition.traits.outputs.push_back(std::move(target));
+    }
     definition.traits.parameter_schema.reserve(descriptor.parameter_count);
     for (std::uint32_t parameter_index = 0U;
          parameter_index < descriptor.parameter_count; ++parameter_index) {
-      const ps_operation_parameter_descriptor_v8& parameter =
+      const ps_operation_parameter_descriptor_v9& parameter =
           descriptor.parameters[parameter_index];
       if (parameter.struct_size !=
-              sizeof(ps_operation_parameter_descriptor_v8) ||
+              sizeof(ps_operation_parameter_descriptor_v9) ||
           !parameter.key || parameter.key_size == 0U ||
           parameter.key_size > 1024U || parameter.required > 1U ||
           parameter.bounded > 1U) {
@@ -1282,11 +1373,12 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     if (!traits_status.ok()) {
       return traits_status;
     }
-    if (definition.traits.requires_dense_output &&
-        definition.traits.shape_rule == OperationShapeRule::Fixed) {
-      auto fixed_layout = dense_layout(
-          definition.traits.fixed_output_shape,
-          Value::element_size(definition.traits.output_element_type));
+    if (definition.traits.outputs[0].requires_dense_output &&
+        definition.traits.outputs[0].shape_rule == OperationShapeRule::Fixed) {
+      auto fixed_layout =
+          dense_layout(definition.traits.outputs[0].fixed_output_shape,
+                       Value::element_size(
+                           definition.traits.outputs[0].output_element_type));
       if (!fixed_layout.ok()) {
         return Status::failure(
             ErrorCode::InvalidArgument,
@@ -1298,14 +1390,19 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v8* descriptor = &api->operations[index];
+    const ps_operation_descriptor_v9* descriptor = &api->operations[index];
     if (descriptor->dependency_program)
       continue;
     staged[index]->callback =
-        [library, descriptor, traits = staged[index]->traits,
-         image_output = staged[index]->traits.output_schema.kind ==
-                        OperationPortKind::RgbaFloat32](
+        [library, descriptor, traits = staged[index]->traits, unused = false](
             const OperationInvocation& invocation) -> Result<Value> {
+      (void)unused;
+      auto selected = select_operation_output(traits, invocation.output_index);
+      if (!selected.ok())
+        return Result<Value>(selected.status());
+      const bool image_output =
+          selected.value().outputs[0].output_schema.kind ==
+          OperationPortKind::RgbaFloat32;
       if (invocation.input_demands.size() != invocation.inputs.size()) {
         return Result<Value>(
             Status::failure(ErrorCode::InvalidArgument,
@@ -1324,8 +1421,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
               Status::failure(ErrorCode::InvalidArgument,
                               "plugin invocation backend is unknown"));
       }
-      std::vector<ps_operation_value_view_v8> views;
-      std::vector<std::vector<ps_operation_facet_view_v8>> facet_views;
+      std::vector<ps_operation_value_view_v9> views;
+      std::vector<std::vector<ps_operation_facet_view_v9>> facet_views;
       std::vector<std::vector<std::uint64_t>> demand_offsets;
       std::vector<std::vector<std::uint64_t>> storage_origins;
       std::vector<std::vector<std::uint64_t>> region_offsets, region_extents;
@@ -1351,16 +1448,19 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         auto& input_facets = facet_views.emplace_back();
         input_facets.reserve(input.facets().size());
         for (const ValueFacet& facet : input.facets()) {
-          input_facets.push_back(ps_operation_facet_view_v8{
-              sizeof(ps_operation_facet_view_v8), facet.key.data(),
+          input_facets.push_back(ps_operation_facet_view_v9{
+              sizeof(ps_operation_facet_view_v9), facet.key.data(),
               static_cast<std::uint32_t>(facet.key.size()), facet.version,
               facet.payload.empty() ? nullptr : facet.payload.data(),
               static_cast<std::uint32_t>(facet.payload.size())});
         }
-        ps_operation_value_view_v8 view{};
+        ps_operation_value_view_v9 view{};
         view.struct_size = sizeof(view);
         view.element_type =
             static_cast<std::uint32_t>(input_descriptor.element_type);
+        view.input_index = invocation.input_indices.empty()
+                               ? static_cast<std::uint32_t>(input_index)
+                               : invocation.input_indices[input_index];
         view.rank = static_cast<std::uint32_t>(input_descriptor.shape.size());
         view.byte_size = logical_bytes;
         view.shape = input_descriptor.shape.data();
@@ -1393,38 +1493,42 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         view.facets = input_facets.empty() ? nullptr : input_facets.data();
         views.push_back(view);
       }
-      std::vector<ps_operation_parameter_value_v8> parameter_views;
+      std::vector<ps_operation_parameter_value_v9> parameter_views;
       parameter_views.reserve(invocation.parameters.size());
       for (const auto& parameter : invocation.parameters) {
-        ps_operation_parameter_value_v8 view{};
+        ps_operation_parameter_value_v9 view{};
         view.struct_size = sizeof(view);
         view.key = parameter.first.data();
         view.key_size = static_cast<std::uint32_t>(parameter.first.size());
         if (const auto* value = std::get_if<std::int64_t>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_INT64_V8;
+          view.type = PS_OPERATION_PARAMETER_INT64_V9;
           view.int64_value = *value;
         } else if (const auto* value = std::get_if<double>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_FLOAT64_V8;
+          view.type = PS_OPERATION_PARAMETER_FLOAT64_V9;
           view.float64_value = *value;
         } else if (const auto* value = std::get_if<bool>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_BOOL_V8;
+          view.type = PS_OPERATION_PARAMETER_BOOL_V9;
           view.bool_value = *value ? 1U : 0U;
         } else {
           const std::string& string_value =
               std::get<std::string>(parameter.second);
-          view.type = PS_OPERATION_PARAMETER_STRING_V8;
+          view.type = PS_OPERATION_PARAMETER_STRING_V9;
           view.string_value = string_value.data();
           view.string_size = static_cast<std::uint32_t>(string_value.size());
         }
         parameter_views.push_back(view);
       }
       OutputSinkState output;
-      auto resolved = resolve_operation_traits(traits, invocation.inputs.size(),
-                                               invocation.parameters);
+      auto resolved = resolve_operation_traits(
+          selected.value(),
+          invocation.input_metadata.empty() ? invocation.inputs.size()
+                                            : invocation.input_metadata.size(),
+          invocation.parameters);
       if (!resolved.ok())
         return Result<Value>(resolved.status());
       auto expected = expected_callback_output_descriptor(
-          resolved.value(), invocation.inputs, invocation.parameters);
+          resolved.value(), invocation.inputs, invocation.parameters,
+          invocation.input_metadata);
 
       if (!expected.ok())
         return Result<Value>(expected.status());
@@ -1440,7 +1544,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
           output_extents, Value::element_size(output.descriptor.element_type));
       if (!packed.ok())
         return Result<Value>(packed.status());
-      ps_operation_output_sink_v8 sink{};
+      ps_operation_output_sink_v9 sink{};
       sink.struct_size = sizeof(sink);
       sink.context = &output;
       sink.publish = publish_plugin_output;
@@ -1453,10 +1557,11 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       sink.allocate_output = allocate_plugin_output;
       sink.allocate_scratch = allocate_plugin_scratch;
       sink.gpu = invocation.gpu;
-      std::vector<ps_operation_facet_view_v8> output_facets;
+      sink.output_index = invocation.output_index;
+      std::vector<ps_operation_facet_view_v9> output_facets;
       for (const auto& f : expected.value().facets)
         output_facets.push_back(
-            {sizeof(ps_operation_facet_view_v8), f.key.data(),
+            {sizeof(ps_operation_facet_view_v9), f.key.data(),
              static_cast<std::uint32_t>(f.key.size()), f.version,
              f.payload.empty() ? nullptr : f.payload.data(),
              static_cast<std::uint32_t>(f.payload.size())});
@@ -1482,7 +1587,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
       if (!output.allocation_failure.ok())
         return Result<Value>(output.allocation_failure);
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V8 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V9 &&
           output.published && !output.result.ok() &&
           output.result.status().code != ErrorCode::ResourceExhausted &&
           output.result.status().code != ErrorCode::Cancelled) {
@@ -1495,12 +1600,12 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             ErrorCode::OperationFailed,
             "operation plugin violated output sink at-most-once contract"));
       }
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V8 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V9 &&
           output.published && !output.result.ok() &&
           output.result.status().code == ErrorCode::ResourceExhausted) {
         return output.result;
       }
-      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V8 &&
+      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V9 &&
           output.published) {
         if (!output.result.ok()) {
           return output.result;
@@ -1510,13 +1615,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             "operation plugin published output before reporting backend "
             "unavailable"));
       }
-      if (code != PS_OPERATION_RESULT_SUCCESS_V8) {
+      if (code != PS_OPERATION_RESULT_SUCCESS_V9) {
         ErrorCode error_code = ErrorCode::OperationFailed;
         const char* default_diagnostic = "operation plugin callback failed";
-        if (code == PS_OPERATION_RESULT_CANCELLED_V8) {
+        if (code == PS_OPERATION_RESULT_CANCELLED_V9) {
           error_code = ErrorCode::Cancelled;
           default_diagnostic = "operation plugin callback was cancelled";
-        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V8) {
+        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V9) {
           error_code = ErrorCode::BackendUnavailable;
           default_diagnostic = "operation plugin backend is unavailable";
         }
@@ -1627,6 +1732,25 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
       definition);
 }
 
+Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
+    const std::string& key, std::vector<DependencyRequest> requests,
+    const BufferAllocator& allocator) const {
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Result<std::shared_ptr<DependencyJointSession>>(
+          Status{ErrorCode::NotFound, {}});
+    definition = found->second;
+  }
+  return DependencyJointSession::create(
+      "registry-" + std::to_string(impl_->identity) + ":" + key,
+      definition->traits, definition->start_joint,
+      definition->validate_dependency, std::move(requests), allocator,
+      definition);
+}
+
 /**
  * @brief Implements validated, exception-fenced operation invocation.
  * @copydetails OperationRegistry::invoke
@@ -1649,15 +1773,18 @@ Result<Value> OperationRegistry::invoke_current(
     }
     definition = iterator->second;
   }
-  if (definition->traits.dependency_version)
+  if (definition->traits.outputs[0].dependency_version)
     return invoke_dependency_current(key, invocation, current);
+  const auto metadata_count = invocation.input_metadata.empty()
+                                  ? invocation.inputs.size()
+                                  : invocation.input_metadata.size();
   if ((!definition->traits.repeated_maximum &&
-       invocation.inputs.size() != definition->traits.input_count) ||
+       metadata_count != definition->traits.input_count) ||
       (definition->traits.repeated_maximum &&
-       (invocation.inputs.size() < definition->traits.input_count +
-                                       definition->traits.repeated_minimum ||
-        invocation.inputs.size() > definition->traits.input_count +
-                                       definition->traits.repeated_maximum))) {
+       (metadata_count < definition->traits.input_count +
+                             definition->traits.repeated_minimum ||
+        metadata_count > definition->traits.input_count +
+                             definition->traits.repeated_maximum))) {
     return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                          "operation input count mismatch"));
   }
@@ -1665,6 +1792,21 @@ Result<Value> OperationRegistry::invoke_current(
     return Result<Value>(
         Status::failure(ErrorCode::InvalidArgument,
                         "operation input demand count does not match inputs"));
+  }
+  std::vector<std::uint32_t> positions = invocation.input_indices;
+  if (positions.empty()) {
+    for (std::uint32_t i = 0; i < invocation.inputs.size(); ++i)
+      positions.push_back(i);
+  }
+  if (positions.size() != invocation.inputs.size())
+    return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                         "input index count mismatch"));
+  std::vector<bool> seen(metadata_count, false);
+  for (auto port : positions) {
+    if (port >= metadata_count || seen[port])
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "invalid original input index"));
+    seen[port] = true;
   }
   for (std::size_t index = 0U; index < invocation.inputs.size(); ++index) {
     if (!invocation.inputs[index].valid()) {
@@ -1711,23 +1853,61 @@ Result<Value> OperationRegistry::invoke_current(
     return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
                                          "operation backend is unavailable"));
   }
+  auto selected =
+      select_operation_output(definition->traits, invocation.output_index);
+  if (!selected.ok())
+    return Result<Value>(selected.status());
   auto resolved_result = resolve_operation_traits(
-      definition->traits, invocation.inputs.size(), invocation.parameters);
+      selected.value(),
+      invocation.input_metadata.empty() ? invocation.inputs.size()
+                                        : invocation.input_metadata.size(),
+      invocation.parameters);
   if (!resolved_result.ok())
     return Result<Value>(resolved_result.status());
   auto resolved_shape = resolved_result.take_value();
+  auto complete_metadata = invocation.input_metadata;
+  if (complete_metadata.empty()) {
+    complete_metadata.resize(metadata_count);
+    for (std::size_t i = 0; i < invocation.inputs.size(); ++i)
+      complete_metadata[positions[i]] = {invocation.inputs[i].descriptor(),
+                                         invocation.inputs[i].facets()};
+  }
   auto expected_output = expected_callback_output_descriptor(
-      resolved_shape, invocation.inputs, invocation.parameters);
+      resolved_shape, invocation.inputs, invocation.parameters,
+      complete_metadata);
   if (!expected_output.ok()) {
     return Result<Value>(expected_output.status());
   }
+  const auto& included = resolved_shape.outputs[0].input_indices;
+  const auto active = [&](std::uint32_t port) {
+    return !included || std::find(included->begin(), included->end(), port) !=
+                            included->end();
+  };
+  for (std::uint32_t port = 0; port < metadata_count; ++port)
+    if (active(port) && !seen[port])
+      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
+                                           "missing projected input"));
   const auto stop = [&]() noexcept {
     if (invocation.cancellation.cancelled())
       return ErrorCode::Cancelled;
     return current && !current() ? ErrorCode::Stale : ErrorCode::Ok;
   };
   for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
-    const auto& port = resolved_shape.input_schema[i];
+    const auto original = positions[i];
+    if (!invocation.input_metadata.empty()) {
+      const auto& expected = invocation.input_metadata[original];
+      if (invocation.inputs[i].descriptor().shape !=
+              expected.descriptor.shape ||
+          invocation.inputs[i].descriptor().element_type !=
+              expected.descriptor.element_type ||
+          !input_internal::same_facets(invocation.inputs[i].facets(),
+                                       expected.facets))
+        return Result<Value>(Status::failure(
+            ErrorCode::TypeMismatch, "projected input metadata mismatch"));
+    }
+    if (!active(original))
+      continue;
+    const auto& port = resolved_shape.input_schema[original];
     const auto status = input_internal::validate_port_value(
         port, invocation.inputs[i], ErrorCode::InvalidArgument, stop);
     if (!status.ok())
@@ -1744,13 +1924,30 @@ Result<Value> OperationRegistry::invoke_current(
   try {
     // Image callbacks share the host's nearest/gradual-underflow contract.
     std::optional<input_internal::Float32Environment> environment;
-    if (definition->traits.output_schema.kind != OperationPortKind::Value) {
+    if (resolved_shape.outputs[0].output_schema.kind !=
+        OperationPortKind::Value) {
       environment.emplace();
       if (!environment->active())
         return Result<Value>(Status::failure(
             ErrorCode::OperationFailed, "cannot set binary32 environment"));
     }
-    OperationInvocation normalized = invocation;
+    std::vector<Value> projected_inputs;
+    std::vector<Region> projected_demands;
+    std::vector<std::uint32_t> projected_positions;
+    for (std::size_t i = 0; i < invocation.inputs.size(); ++i)
+      if (active(positions[i])) {
+        projected_inputs.push_back(invocation.inputs[i]);
+        projected_demands.push_back(invocation.input_demands[i]);
+        projected_positions.push_back(positions[i]);
+      }
+    OperationInvocation normalized(
+        projected_inputs, projected_demands, invocation.parameters,
+        invocation.backend, invocation.cancellation, invocation.output_region,
+        invocation.allocator);
+    normalized.gpu = invocation.gpu;
+    normalized.output_index = invocation.output_index;
+    normalized.input_indices = projected_positions;
+    normalized.input_metadata = std::move(complete_metadata);
     if (normalized.output_region.rank() == 0)
       normalized.output_region =
           Region::whole(expected_output.value().descriptor.shape);
@@ -1766,20 +1963,23 @@ Result<Value> OperationRegistry::invoke_current(
       return Result<Value>(Status::failure(
           ErrorCode::InvalidArgument, "image output requires all channels"));
     auto resolved = resolved_shape;
-    if (!resolved.halo_radius_parameter.empty())
-      resolved.halo_radius = static_cast<std::uint32_t>(std::get<std::int64_t>(
-          invocation.parameters.at(resolved.halo_radius_parameter)));
-    if (resolved.region_rule == OperationRegionRule::Whole &&
+    if (!resolved.outputs[0].halo_radius_parameter.empty())
+      resolved.outputs[0].halo_radius = static_cast<std::uint32_t>(
+          std::get<std::int64_t>(invocation.parameters.at(
+              resolved.outputs[0].halo_radius_parameter)));
+    if (resolved.outputs[0].region_rule == OperationRegionRule::Whole &&
         !input_internal::whole_region(normalized.output_region,
                                       expected_output.value().descriptor.shape))
       return Result<Value>(Status::failure(
           ErrorCode::InvalidArgument, "Whole operation requires whole output"));
     for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
+      if (!active(positions[i]))
+        continue;
       const auto required = input_internal::derive_input_demand(
           resolved, normalized.output_region,
           expected_output.value().descriptor.shape,
           invocation.inputs[i].descriptor().shape,
-          resolved.input_schema[i].kind);
+          resolved.input_schema[positions[i]].kind);
       if (!required.ok())
         return Result<Value>(required.status());
       for (std::size_t axis = 0; axis < required.value().rank(); ++axis) {
@@ -1799,9 +1999,10 @@ Result<Value> OperationRegistry::invoke_current(
     Status output_status =
         validate_callback_output(expected_output.value().descriptor,
                                  result.value(), normalized.output_region);
-    const bool exact_facets =
-        resolved_shape.output_schema.kind != OperationPortKind::Value ||
-        resolved_shape.output_semantic_rule != OperationSemanticRule::Drop;
+    const bool exact_facets = resolved_shape.outputs[0].output_schema.kind !=
+                                  OperationPortKind::Value ||
+                              resolved_shape.outputs[0].output_semantic_rule !=
+                                  OperationSemanticRule::Drop;
     const bool facets_match =
         !output_status.ok() ||
         (exact_facets
@@ -1816,11 +2017,12 @@ Result<Value> OperationRegistry::invoke_current(
       output_status =
           Status::failure(ErrorCode::OperationFailed,
                           "output facets contradict inferred semantics");
-    if (definition->traits.output_schema.kind != OperationPortKind::Value ||
+    if (resolved_shape.outputs[0].output_schema.kind !=
+            OperationPortKind::Value ||
         !expected_output.value().facets.empty()) {
       if (output_status.ok())
         output_status = input_internal::validate_port_value(
-            definition->traits.output_schema, result.value(),
+            resolved_shape.outputs[0].output_schema, result.value(),
             ErrorCode::OperationFailed, stop);
       if (!output_status.ok() && output_status.code != ErrorCode::Cancelled &&
           output_status.code != ErrorCode::Stale &&

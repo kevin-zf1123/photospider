@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -155,7 +156,9 @@ enum class OperationExtentSource : std::uint32_t {
   InputAxis = 2,
   InputCount = 3,
   /** @brief Length of a canonical channel-index String parameter. */
-  IndexListCount = 4
+  IndexListCount = 4,
+  /** @brief Ceil of a bounded nonnegative Float64 parameter. */
+  CeilParameter = 5
 };
 /** @brief Checked positive extent plus a nonnegative constant offset. */
 struct PHOTOSPIDER_API OperationExtent final {
@@ -165,6 +168,11 @@ struct PHOTOSPIDER_API OperationExtent final {
   std::uint32_t input = 0;
   std::uint32_t axis = 0;
   std::uint64_t offset = 0;
+  /** @brief Subtract a nonnegative Int64 parameter before ceil division. */
+  std::string subtract_parameter = {};
+  /** @brief Positive divisor and multiplier, applied before offset. */
+  std::uint64_t divisor = 1;
+  std::uint64_t multiplier = 1;
 };
 /** @brief Explicit output semantic behavior; transformations use static
  * metadata. */
@@ -206,7 +214,72 @@ enum class OperationSemanticRule : std::uint32_t {
    * increasing domain. The String parameter selects reject/clip outside it.
    * Output preserves query shape and drops semantic guarantees.
    */
-  ApplyLut1d = 14
+  ApplyLut1d = 14,
+  /** @brief Establish a YCbCr ImagePlane template from linear sRGB D65 without
+   * alpha, preserving scene/display reference and white. output_facets contains
+   * one plane descriptor with the desired role and nominal sampling geometry.
+   */
+  YCbCrPlane = 15
+};
+
+/** @brief Static contract for one named result, independent of sibling outputs.
+ * @note A missing input projection means all declared inputs; an explicitly
+ * empty projection means no runtime inputs. Indices refer to the common schema.
+ * Metadata inference always receives complete input metadata. Pure data records
+ * are copied at registration and may be read concurrently afterwards.
+ */
+struct PHOTOSPIDER_API OperationOutputTraits final {
+  /** @brief Unique strict UTF-8 result key, 1..128 bytes. */
+  std::string key = "value";
+  /** @brief Optional ordered original input-port projection for evaluation. */
+  std::optional<std::vector<std::uint32_t>> input_indices;
+  /** @brief Static output type for scalar or descriptor validation. */
+  ElementType output_element_type = ElementType::Float64;
+  /** @brief Closed static output-shape inference behavior. */
+  OperationShapeRule shape_rule = OperationShapeRule::Scalar;
+  /** @brief Closed logical Region propagation behavior. */
+  OperationRegionRule region_rule = OperationRegionRule::Whole;
+  /** @brief Symmetric element halo, nonzero only for `Halo`. */
+  std::uint32_t halo_radius = 0U;
+  /**
+   * @brief Explicit nonzero rank-1..8 logical shape used only by `Fixed`.
+   * @note C++ embedding callbacks may materialize it through any valid Value
+   * layout, including a zero-stride broadcast whose dense product overflows.
+   */
+  std::vector<std::uint64_t> fixed_output_shape;
+  OperationPortConstraint output_schema;
+  /** @brief Required bounded Int64 parameter resolving a positive spatial halo.
+   */
+  std::string halo_radius_parameter = {};
+  /** @brief Required bounded Int64 parameter for Shrink shape/Region rules. */
+  std::string spatial_factor_parameter = {};
+  std::uint32_t spatial_factor = 1;
+  /** @brief Dtype rule and selected input or required String parameter. */
+  OperationDtypeRule output_dtype_rule = OperationDtypeRule::Declared;
+  std::uint32_t output_dtype_input = 0;
+  std::string output_dtype_parameter = {};
+  /** @brief Rank-1..8 axis expressions, present only for Axes. */
+  std::vector<OperationExtent> output_axes = {};
+  /** @brief Output semantic inference, copied into every compiler identity. */
+  OperationSemanticRule output_semantic_rule = OperationSemanticRule::Drop;
+  /** @brief Source for preserve/extract/swizzle/alpha/color transformations.
+   * @note Transformations require Whole or Dependency and statically known
+   * compatible metadata. Swizzle emits generic output when selected roles
+   * cannot form a valid descriptor.
+   */
+  std::uint32_t output_semantic_input = 0;
+  std::vector<ValueFacet> output_facets = {};
+  std::string output_semantic_parameter = {};
+  bool requires_dense_output = false;
+  ObservationKind observation_kind = ObservationKind::Atomic;
+  /** @brief All relevant stages must implement the declared error delivery. */
+  FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
+  /** @brief Zero for synchronous callback, one for the staged read protocol. */
+  std::uint32_t dependency_version = 0;
+  /** @brief Host-allocated state bound and finite poll limit for staged code.
+   */
+  std::uint64_t continuation_bytes = 0;
+  std::uint32_t maximum_dependency_stages = 0;
 };
 
 /**
@@ -215,6 +288,13 @@ enum class OperationSemanticRule : std::uint32_t {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
+  /** @brief Optional CPU joint contract version, zero disables grouping. */
+  std::uint32_t joint_contract = 0;
+  /** @brief Shared host-owned state capacity, charged once per group. */
+  std::uint64_t joint_continuation_bytes = 0;
+  /** @brief Additional shared scratch bound per joint poll. */
+  std::uint64_t joint_workspace_bytes = 0;
+
   /** @brief Exact input count, or fixed prefix count for a repeated template.
    */
   std::uint32_t input_count = 0;
@@ -238,46 +318,17 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 8U;
+  std::uint32_t version = 9U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
-  /** @brief Static output type for scalar or descriptor validation. */
-  ElementType output_element_type = ElementType::Float64;
-  /** @brief Closed static output-shape inference behavior. */
-  OperationShapeRule shape_rule = OperationShapeRule::Scalar;
-  /** @brief Closed logical Region propagation behavior. */
-  OperationRegionRule region_rule = OperationRegionRule::Whole;
-  /** @brief Symmetric element halo, nonzero only for `Halo`. */
-  std::uint32_t halo_radius = 0U;
   /** @brief Sorted closed parameter vocabulary for semantic validation. */
   std::vector<OperationParameterSpec> parameter_schema;
-  /**
-   * @brief Explicit nonzero rank-1..8 logical shape used only by `Fixed`.
-   * @note C++ embedding callbacks may materialize it through any valid Value
-   * layout, including a zero-stride broadcast whose dense product overflows.
-   */
-  std::vector<std::uint64_t> fixed_output_shape;
   /** @brief Ordered constraints; a repeated template has prefix+one record. */
   std::vector<OperationPortConstraint> input_schema;
-  /** @brief Resolved output constraint; facets are inferred independently. */
-  OperationPortConstraint output_schema;
   /** @brief Fixed maximum scratch bytes per invocation, excluding output. */
   std::uint64_t workspace_bytes = 0;
   /** @brief Additional scratch bound per demanded input byte, in 0..16. */
   std::uint32_t workspace_input_multiplier = 0;
-  /** @brief Required bounded Int64 parameter resolving a positive spatial halo.
-   */
-  std::string halo_radius_parameter = {};
-  /** @brief Required bounded Int64 parameter for Shrink shape/Region rules. */
-  std::string spatial_factor_parameter = {};
-  /** @brief Resolved factor, 1..16; registry definitions must leave it one. */
-  std::uint32_t spatial_factor = 1;
-  /** @brief Dtype rule and selected input or required String parameter. */
-  OperationDtypeRule output_dtype_rule = OperationDtypeRule::Declared;
-  std::uint32_t output_dtype_input = 0;
-  std::string output_dtype_parameter = {};
-  /** @brief Rank-1..8 axis expressions, present only for Axes. */
-  std::vector<OperationExtent> output_axes = {};
   /** @brief Optional trailing homogeneous group; input_count is fixed prefix.
    * @note With maximum>0, input_schema has prefix+one template. Lowering
    * expands it and sets repeated_resolved; the published registry keeps its
@@ -289,39 +340,29 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::uint32_t repeated_resolved = 0;
   /** @brief Require repeated inputs to share dtype and logical shape. */
   bool repeated_match = true;
-  /** @brief Output semantic inference, copied into every compiler identity. */
-  OperationSemanticRule output_semantic_rule = OperationSemanticRule::Drop;
-  /** @brief Source for preserve/extract/swizzle/alpha/color transformations.
-   * @note Transformations require Whole or Dependency and statically known
-   * compatible metadata. Swizzle emits generic output when selected roles
-   * cannot form a valid descriptor.
+  /** @brief Ordered named results; registry copies and validates all records.
    */
-  std::uint32_t output_semantic_input = 0;
-  std::vector<ValueFacet> output_facets = {};
-  /** @brief Required parameter for Parameter/Merge (semantic String),
-   * Extract (Int64 index), Swizzle (canonical index-list String),
-   * SampleExpression (expression String) or ApplyLut1d (reject/clip String).
-   * Empty for parameter-free transforms; no operation-key-specific inference.
-   */
-  std::string output_semantic_parameter = {};
-  /** @brief Require resolved Fixed/Whole output dense representability.
-   * @note Regional C outputs check their actual demand at the sink instead.
-   * True for the synchronous stride-free C sink; staged C fragment programs
-   * and C++ Fixed broadcast callbacks may leave it false. This semantic
-   * requirement participates in identities.
-   */
-  bool requires_dense_output = false;
-  /** @brief Local declaration; compiler checks all ancestors before reuse. */
-  ObservationKind observation_kind = ObservationKind::Atomic;
-  /** @brief All relevant stages must implement the declared error delivery. */
-  FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
-  /** @brief Zero for synchronous callback, one for the staged read protocol. */
-  std::uint32_t dependency_version = 0;
-  /** @brief Host-allocated state bound and finite poll limit for staged code.
-   */
-  std::uint64_t continuation_bytes = 0;
-  std::uint32_t maximum_dependency_stages = 0;
+  std::vector<OperationOutputTraits> outputs = {OperationOutputTraits{}};
 };
+
+/** @brief Copies one selected result contract while retaining common metadata.
+ * @param traits Registry or resolved operation record, never mutated.
+ * @param output_index Declaration-order result index.
+ * @return A record with one result, or InvalidArgument for an absent result.
+ * @throws std::bad_alloc On copied metadata. Pure and thread-safe.
+ */
+PHOTOSPIDER_API Result<OperationTraits> select_operation_output(
+    const OperationTraits& traits, std::uint32_t output_index);
+/** @brief Infers all declared outputs in declaration order, without callbacks.
+ * @param traits Resolved common and output traits.
+ * @param inputs Complete ordered static metadata, including projected inputs.
+ * @param parameters Validated static parameters.
+ * @return Complete output metadata or the first typed inference failure.
+ * @throws std::bad_alloc On metadata allocation. Pure and thread-safe.
+ */
+PHOTOSPIDER_API Result<std::vector<OperationMetadata>> infer_operation_outputs(
+    const OperationTraits& traits, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters);
 
 /** @brief Expands an operation template and resolves its static parameters.
  * @param traits Validated registry template, copied and never modified.
@@ -411,11 +452,19 @@ struct PHOTOSPIDER_API OperationInvocation final {
   CancellationToken cancellation;
   /** @brief Exact logical output requested by this invocation. */
   Region output_region;
+  /** @brief Original declaration-order selected output; defaults to value. */
+  std::uint32_t output_index = 0;
+  /** @brief Original input indices for supplied projected inputs. */
+  std::vector<std::uint32_t> input_indices;
+  /** @brief Complete static input metadata when runtime inputs are projected.
+   * Empty selects descriptors from the complete supplied input vector.
+   */
+  std::vector<OperationMetadata> input_metadata;
   /** @brief Host allocator for output and scratch, valid for callback duration.
    */
   BufferAllocator allocator;
   /** @brief Borrowed native services; valid only during this invocation. */
-  const ps_gpu_service_v8* gpu = nullptr;
+  const ps_gpu_service_v9* gpu = nullptr;
 };
 
 /** @brief Function signature for one synchronous operation invocation. */
@@ -442,6 +491,9 @@ struct PHOTOSPIDER_API OperationDefinition final {
   DependencyStart start_dependency = {};
   /** @brief Optional pure static validation, also applied to Empty queries. */
   DependencyValidator validate_dependency = {};
+  /** @brief Optional Atomic joint implementation; singleton start remains
+   * required. */
+  DependencyJointStart start_joint = {};
 };
 
 /**
@@ -546,6 +598,13 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @throws std::bad_alloc If a failure diagnostic allocation fails.
    * @note The returned value grants no callback or registry mutation access.
    */
+  /** @brief Starts a validated optional CPU joint group; unsupported returns
+   * BackendUnavailable. Members are copied; allocator owns shared state once.
+   */
+  Result<std::shared_ptr<DependencyJointSession>> start_joint(
+      const std::string& key, std::vector<DependencyRequest> requests,
+      const BufferAllocator& allocator = BufferAllocator{}) const;
+
   [[nodiscard]] Result<OperationTraits> find_traits(
       const std::string& key) const;
 

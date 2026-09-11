@@ -233,8 +233,8 @@ std::shared_ptr<OperationRegistry> gated_registry(
   op.traits.allows_cpu_fallback = gpu_fallback;
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  op.traits.region_rule =
+  op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  op.traits.outputs[0].region_rule =
       whole ? OperationRegionRule::Whole : OperationRegionRule::Elementwise;
   op.callback = [gate](const OperationInvocation& call) -> Result<Value> {
     ++gate->active;
@@ -282,12 +282,12 @@ std::shared_ptr<OperationRegistry> gated_registry(
     return std::move(output).publish();
   };
   if (staged) {
-    op.traits.region_rule = OperationRegionRule::Dependency;
-    op.traits.dependency_version = 1;
-    op.traits.continuation_bytes = sizeof(StagedGate);
-    op.traits.maximum_dependency_stages = 4;
+    op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+    op.traits.outputs[0].dependency_version = 1;
+    op.traits.outputs[0].continuation_bytes = sizeof(StagedGate);
+    op.traits.outputs[0].maximum_dependency_stages = 4;
     if (terminal)
-      op.traits.observation_kind = ObservationKind::RequestRecord;
+      op.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
     op.start_dependency = [callback = std::move(op.callback), terminal](
                               const DependencyQuery&,
                               const BufferAllocator& allocator) {
@@ -302,8 +302,8 @@ std::shared_ptr<OperationRegistry> gated_registry(
     effect.traits.deterministic = false;
     effect.traits.side_effect_free = false;
     effect.traits.cacheable = false;
-    effect.traits.shape_rule = OperationShapeRule::Fixed;
-    effect.traits.fixed_output_shape = {2};
+    effect.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+    effect.traits.outputs[0].fixed_output_shape = {2};
     effect.callback =
         [effects](const OperationInvocation& call) -> Result<Value> {
       const double value = ++*effects;
@@ -748,7 +748,7 @@ int shared_fallback() {
            completed.value().values.at("y").read({0}, &actual, 8).ok() &&
            actual == 7);
   PS_CHECK(completed.value().diagnostics.shared_computations == 1 &&
-           completed.value().diagnostics.selected_backends.at(2) ==
+           completed.value().diagnostics.selected_backends.at({2, 0}) ==
                Backend::Cpu);
   PS_CHECK(context.cache_statistics().retained_bytes == 0);
   PS_CHECK(
@@ -850,7 +850,7 @@ int shared_terminal() {
     PS_CHECK(!result->values.at("y").read({1}, &value, 8).ok());
     PS_CHECK(!result->dependencies.restrict({{"y", point(0, 3)}}).ok());
     PS_CHECK(result->dependencies.coverage().at("y") == wide);
-    PS_CHECK(result->dependencies.certificate(1).status().code ==
+    PS_CHECK(result->dependencies.certificate({1, 0}).status().code ==
              ErrorCode::NotFound);
   }
   PS_CHECK(c.value().values.at("y").read({0}, &value, 8).ok() && value == 8);
@@ -1064,8 +1064,9 @@ int content_cache() {
                .empty());
   auto unchanged = demand.request(query);
   PS_CHECK(unchanged.ok() && unchanged.value().diagnostics.cache_hits == 2);
-  PS_CHECK(unchanged.value().dependencies.certificate(1).value().identity() !=
-           first.value().dependencies.certificate(1).value().identity());
+  PS_CHECK(
+      unchanged.value().dependencies.certificate({1, 0}).value().identity() !=
+      first.value().dependencies.certificate({1, 0}).value().identity());
   // Cached and freshly computed rows must merge under the current identity.
   auto mixed = demand.request({{"sum", point(0).unite(point(1)).take_value()}});
   PS_CHECK(mixed.ok() && mixed.value().diagnostics.cache_hits == 1);

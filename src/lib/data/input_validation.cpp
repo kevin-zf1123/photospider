@@ -25,7 +25,7 @@ std::uint32_t float_bits(float value) noexcept {
   return bits;
 }
 bool valid_constraint(const OperationPortConstraint& port) {
-  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 9 ||
+  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 10 ||
       (port.element_type_mask & ~UINT32_C(15)) ||
       (port.element_type && port.element_type_mask))
     return false;
@@ -203,6 +203,8 @@ Status validate_binding(const WorkflowInputDeclaration& declaration,
 }
 
 Status validate_port_schema(const OperationTraits& traits) {
+  if (traits.outputs.size() != 1)
+    return failure(ErrorCode::InvalidArgument, "select one output schema");
   Float32Environment environment;
   if (!environment.active())
     return failure(ErrorCode::OperationFailed,
@@ -212,24 +214,27 @@ Status validate_port_schema(const OperationTraits& traits) {
           traits.input_count +
               (traits.repeated_maximum && !traits.repeated_resolved ? 1U
                                                                     : 0U) ||
-      !valid_constraint(traits.output_schema) ||
-      traits.output_schema.kind == OperationPortKind::Float32Scalar) {
+      !valid_constraint(traits.outputs[0].output_schema) ||
+      traits.outputs[0].output_schema.kind ==
+          OperationPortKind::Float32Scalar) {
     return failure(ErrorCode::InvalidArgument,
                    "invalid port schema count or output");
   }
   const bool image_output =
-      traits.output_schema.kind == OperationPortKind::RgbaFloat32;
+      traits.outputs[0].output_schema.kind == OperationPortKind::RgbaFloat32;
   const bool mask_output =
-      traits.output_schema.kind == OperationPortKind::Float32Mask;
+      traits.outputs[0].output_schema.kind == OperationPortKind::Float32Mask;
   if ((image_output || mask_output) &&
-      (traits.output_element_type != ElementType::Float32 ||
-       (traits.shape_rule != OperationShapeRule::PreserveFirstInput &&
-        traits.shape_rule != OperationShapeRule::MatchAllInputs &&
-        traits.shape_rule != OperationShapeRule::Shrink &&
-        !(traits.dependency_version == 1 &&
-          traits.shape_rule == OperationShapeRule::Axes)) ||
+      (traits.outputs[0].output_element_type != ElementType::Float32 ||
+       (traits.outputs[0].shape_rule !=
+            OperationShapeRule::PreserveFirstInput &&
+        traits.outputs[0].shape_rule != OperationShapeRule::MatchAllInputs &&
+        traits.outputs[0].shape_rule != OperationShapeRule::Shrink &&
+        !(traits.outputs[0].dependency_version == 1 &&
+          traits.outputs[0].shape_rule == OperationShapeRule::Axes)) ||
        traits.input_schema.empty() ||
-       traits.input_schema.front().kind != traits.output_schema.kind)) {
+       traits.input_schema.front().kind !=
+           traits.outputs[0].output_schema.kind)) {
     return failure(ErrorCode::InvalidArgument,
                    "image output must preserve first image");
   }
@@ -237,13 +242,13 @@ Status validate_port_schema(const OperationTraits& traits) {
     const auto& port = traits.input_schema[i];
     if (!valid_constraint(port) ||
         (port.kind == OperationPortKind::Float32Scalar &&
-         (traits.shape_rule == OperationShapeRule::MatchAllInputs ||
-          (i == 0 &&
-           traits.shape_rule == OperationShapeRule::PreserveFirstInput))) ||
+         (traits.outputs[0].shape_rule == OperationShapeRule::MatchAllInputs ||
+          (i == 0 && traits.outputs[0].shape_rule ==
+                         OperationShapeRule::PreserveFirstInput))) ||
         ((port.kind == OperationPortKind::RgbaFloat32 ||
           port.kind == OperationPortKind::Float32Mask) &&
-         traits.region_rule != OperationRegionRule::Whole &&
-         traits.region_rule != OperationRegionRule::Dependency &&
+         traits.outputs[0].region_rule != OperationRegionRule::Whole &&
+         traits.outputs[0].region_rule != OperationRegionRule::Dependency &&
          !image_output && !mask_output)) {
       return failure(ErrorCode::InvalidArgument,
                      "invalid input port combination");
@@ -266,7 +271,7 @@ Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
     const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
-  if (traits.region_rule == OperationRegionRule::Dependency)
+  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency)
     return Result<Region>(
         Status::failure(ErrorCode::InvalidArgument,
                         "dependency program requires runtime resolution"));
@@ -279,13 +284,14 @@ Result<Region> derive_input_demand(
   if (kind == OperationPortKind::Float32Scalar) {
     return Result<Region>(Region::whole(input_shape));
   }
-  if (traits.region_rule == OperationRegionRule::Shrink) {
+  if (traits.outputs[0].region_rule == OperationRegionRule::Shrink) {
     if (input_shape.size() < 2 || input_shape.size() != output_shape.size() ||
-        traits.spatial_factor < 1 || traits.spatial_factor > 16)
+        traits.outputs[0].spatial_factor < 1 ||
+        traits.outputs[0].spatial_factor > 16)
       return Result<Region>(
           Status::failure(ErrorCode::TypeMismatch, "invalid shrink shapes"));
     auto dimensions = output_demand.dimensions();
-    const std::uint64_t f = traits.spatial_factor;
+    const std::uint64_t f = traits.outputs[0].spatial_factor;
     for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
       if (axis >= 2) {
         if (input_shape[axis] != output_shape[axis])
@@ -305,7 +311,7 @@ Result<Region> derive_input_demand(
     return Result<Region>(Region(std::move(dimensions)));
   }
   if (kind == OperationPortKind::Float32Mask &&
-      traits.region_rule != OperationRegionRule::Whole &&
+      traits.outputs[0].region_rule != OperationRegionRule::Whole &&
       output_shape.size() == 3) {
     if (input_shape.size() != 2 || output_shape.size() != 3 ||
         input_shape[0] != output_shape[0] || input_shape[1] != output_shape[1])
@@ -316,7 +322,7 @@ Result<Region> derive_input_demand(
         Region({output_demand.dimensions()[0], output_demand.dimensions()[1]}),
         input_shape, input_shape, OperationPortKind::Value);
   }
-  switch (traits.region_rule) {
+  switch (traits.outputs[0].region_rule) {
     case OperationRegionRule::Dependency:
       return Result<Region>(
           failure(ErrorCode::InvalidArgument,
@@ -333,7 +339,7 @@ Result<Region> derive_input_demand(
       }
       return Result<Region>(output_demand);
     case OperationRegionRule::Halo:
-      if (input_shape != output_shape || traits.halo_radius == 0U) {
+      if (input_shape != output_shape || traits.outputs[0].halo_radius == 0U) {
         return Result<Region>(Status::failure(
             ErrorCode::TypeMismatch,
             "halo Region rule requires matching shapes and positive radius"));
@@ -342,7 +348,7 @@ Result<Region> derive_input_demand(
   }
   std::vector<RegionDimension> dimensions;
   dimensions.reserve(input_shape.size());
-  const std::uint64_t radius = traits.halo_radius;
+  const std::uint64_t radius = traits.outputs[0].halo_radius;
   for (std::size_t axis = 0U; axis < input_shape.size(); ++axis) {
     const RegionDimension& requested = output_demand.dimensions()[axis];
     if (kind == OperationPortKind::RgbaFloat32 && axis == 2) {
@@ -583,21 +589,21 @@ Result<Region> operation_dirty_region(
   if (!proof.ok())
     return Result<Region>(proof.status());
   if (kind == OperationPortKind::Float32Scalar ||
-      traits.region_rule == OperationRegionRule::Whole)
+      traits.outputs[0].region_rule == OperationRegionRule::Whole)
     return Result<Region>(Region::whole(output_shape));
   auto dims = dirty.dimensions();
-  if (traits.region_rule == OperationRegionRule::Shrink) {
-    const std::uint64_t f = traits.spatial_factor;
+  if (traits.outputs[0].region_rule == OperationRegionRule::Shrink) {
+    const std::uint64_t f = traits.outputs[0].spatial_factor;
     for (std::size_t a = 0; a < 2; ++a) {
       const auto end = dims[a].offset + dims[a].extent;
       const auto start = dims[a].offset / f;
       dims[a] = {start, end / f + (end % f != 0) - start};
     }
-  } else if (traits.region_rule == OperationRegionRule::Halo) {
+  } else if (traits.outputs[0].region_rule == OperationRegionRule::Halo) {
     for (std::size_t a = 0; a < dims.size(); ++a) {
       if (kind == OperationPortKind::RgbaFloat32 && a == 2)
         continue;
-      const std::uint64_t radius = traits.halo_radius;
+      const std::uint64_t radius = traits.outputs[0].halo_radius;
       const auto start = dims[a].offset > radius ? dims[a].offset - radius : 0;
       const auto end = dims[a].offset + dims[a].extent;
       dims[a] = {start, end + std::min(radius, input_shape[a] - end) - start};

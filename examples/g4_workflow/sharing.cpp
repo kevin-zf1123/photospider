@@ -31,8 +31,9 @@ void sharing_workflow() {
   identity.key = "example.shared_identity";
   identity.traits.input_count = 1;
   identity.traits.input_schema.resize(1);
-  identity.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  identity.traits.region_rule = OperationRegionRule::Elementwise;
+  identity.traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
+  identity.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   identity.callback = [gate](const OperationInvocation& call) -> Result<Value> {
     std::unique_lock<std::mutex> lock(gate->mutex);
     ++gate->calls;

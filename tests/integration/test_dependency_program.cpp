@@ -131,11 +131,11 @@ OperationTraits staged_traits(std::uint32_t inputs, std::uint64_t state_bytes) {
   OperationTraits traits;
   traits.input_count = inputs;
   traits.input_schema.resize(inputs);
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
-  traits.continuation_bytes = state_bytes;
-  traits.maximum_dependency_stages = 16;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
+  traits.outputs[0].continuation_bytes = state_bytes;
+  traits.outputs[0].maximum_dependency_stages = 16;
   return traits;
 }
 template <class T>
@@ -262,7 +262,7 @@ int terminal_and_graph() {
   OperationDefinition terminal;
   terminal.key = "terminal";
   terminal.traits = staged_traits(1, sizeof(TerminalState));
-  terminal.traits.observation_kind = ObservationKind::RequestRecord;
+  terminal.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
   terminal.start_dependency = [](const DependencyQuery&,
                                  const BufferAllocator& allocator) {
     return DependencyContinuation::make<TerminalState>(allocator);
@@ -270,7 +270,7 @@ int terminal_and_graph() {
   PS_CHECK(registry->register_operation(terminal).ok());
   auto atomic = terminal;
   atomic.key = "atomic";
-  atomic.traits.observation_kind = ObservationKind::Atomic;
+  atomic.traits.outputs[0].observation_kind = ObservationKind::Atomic;
   PS_CHECK(registry->register_operation(atomic).ok());
   const auto input = values(ElementType::Float64, std::vector<double>(16, 0));
   DependencyRequest request{{{input.descriptor(), {}}},
@@ -312,8 +312,8 @@ int terminal_and_graph() {
   GraphContext allowed(document);
   auto plan = compiler.compile(allowed);
   PS_CHECK(plan.ok() && plan.value().plan.dependency_network());
-  PS_CHECK(!plan.value().semantic.nodes()[0].effective_atomic &&
-           plan.value().semantic.nodes()[1].effective_atomic);
+  PS_CHECK(!plan.value().semantic.nodes()[0].outputs[0].effective_atomic &&
+           plan.value().semantic.nodes()[1].outputs[0].effective_atomic);
   PS_CHECK(plan.value().plan.steps()[0].input_demands.empty());
   PS_CHECK(plan.value().plan.tile_plan("record", Region({{0, 2}})).ok());
   return 0;
@@ -451,7 +451,8 @@ int block_services() {
     OperationRegistry registry;
     auto operation = definition(1, bad == 3);
     if (bad == 4)
-      operation.traits.observation_kind = ObservationKind::RequestRecord;
+      operation.traits.outputs[0].observation_kind =
+          ObservationKind::RequestRecord;
     PS_CHECK(registry.register_operation(operation).ok());
     auto broken = services;
     if (bad == 0) {
@@ -486,7 +487,8 @@ int service_and_identity_regressions() {
       static_cast<void>(phase.checkpoint_before(1, 0));
       return constant_result(phase);
     });
-    terminal.traits.observation_kind = ObservationKind::RequestRecord;
+    terminal.traits.outputs[0].observation_kind =
+        ObservationKind::RequestRecord;
     OperationRegistry registry;
     PS_CHECK(registry.register_operation(terminal).ok());
     auto session =
@@ -649,7 +651,7 @@ int service_and_identity_regressions() {
   identity_services.buffer = [](const std::uint8_t*, std::uint64_t, bool) {
     return Result<std::uint64_t>(Status{ErrorCode::BackendUnavailable, {}});
   };
-  identity_services.execute = [](const ps_gpu_dispatch_v8*, std::uint32_t) {
+  identity_services.execute = [](const ps_gpu_dispatch_v9*, std::uint32_t) {
     return Status{ErrorCode::BackendUnavailable, {}};
   };
   auto gpu = drive(left.start_dependency("probe", request).take_value(), {},
@@ -838,8 +840,8 @@ int sibling_admission() {
   for (unsigned id = 0; id < 2; ++id) {
     OperationDefinition op;
     op.key = id ? "sibling_b" : "sibling_a";
-    op.traits.shape_rule = OperationShapeRule::Fixed;
-    op.traits.fixed_output_shape = {mib / 8};
+    op.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+    op.traits.outputs[0].fixed_output_shape = {mib / 8};
     op.traits.workspace_bytes = 3 * mib;
     op.callback = [&, id](const OperationInvocation& call) -> Result<Value> {
       ++calls[id];
@@ -863,8 +865,8 @@ int sibling_admission() {
   OperationDefinition parent;
   parent.key = "siblings";
   parent.traits = staged_traits(2, sizeof(SiblingState));
-  parent.traits.shape_rule = OperationShapeRule::Fixed;
-  parent.traits.fixed_output_shape = {1};
+  parent.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+  parent.traits.outputs[0].fixed_output_shape = {1};
   parent.start_dependency = [](const DependencyQuery&,
                                const BufferAllocator& allocator) {
     return DependencyContinuation::make<SiblingState>(allocator);
@@ -1024,9 +1026,9 @@ int execution_network() {
   pass.key = "pass";
   pass.traits.input_count = 1;
   pass.traits.input_schema.resize(1);
-  pass.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  pass.traits.output_dtype_rule = OperationDtypeRule::Input;
-  pass.traits.region_rule = OperationRegionRule::Elementwise;
+  pass.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  pass.traits.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  pass.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   pass.callback = [](const OperationInvocation& call) {
     return Result<Value>(call.inputs[0]);
   };
@@ -1034,7 +1036,7 @@ int execution_network() {
   OperationDefinition terminal;
   terminal.key = "terminal";
   terminal.traits = staged_traits(1, sizeof(TerminalState));
-  terminal.traits.observation_kind = ObservationKind::RequestRecord;
+  terminal.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
   terminal.start_dependency = [](const DependencyQuery&,
                                  const BufferAllocator& allocator) {
     return DependencyContinuation::make<TerminalState>(allocator);
@@ -1058,8 +1060,8 @@ int execution_network() {
   std::atomic<unsigned> whole_calls{0};
   OperationDefinition whole;
   whole.key = "whole";
-  whole.traits.shape_rule = OperationShapeRule::Fixed;
-  whole.traits.fixed_output_shape = {16};
+  whole.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+  whole.traits.outputs[0].fixed_output_shape = {16};
   whole.callback = [&](const OperationInvocation& call) {
     ++whole_calls;
     auto writer = MutableValue::allocate({ElementType::Float64, {16}},
@@ -1272,8 +1274,8 @@ int dependency_record_rollback() {
   op.key = "copy";
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  op.traits.region_rule = OperationRegionRule::Elementwise;
+  op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  op.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   op.callback = [](const OperationInvocation& call) {
     return Result<Value>(call.inputs[0]);
   };
@@ -1308,7 +1310,7 @@ int dependency_record_rollback() {
   PS_CHECK(records.output("b", 1, point(1)).ok());
   auto result = std::move(records).finish();
   PS_CHECK(result.record_count() == 2);
-  PS_CHECK(result.certificate(1).value().coverage() ==
+  PS_CHECK(result.certificate({1, 0}).value().coverage() ==
            point(0).unite(point(1)).take_value());
   PS_CHECK(result.potential_dirty("x", point(0)).value().at("a") == point(0));
   PS_CHECK(result.potential_dirty("x", point(0)).value().at("b").empty());

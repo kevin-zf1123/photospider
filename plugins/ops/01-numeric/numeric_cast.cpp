@@ -14,10 +14,10 @@ Status register_numeric_cast(OperationRegistry* registry) {
   auto& t = operation.traits;
   t.input_count = 1;
   t.input_schema.resize(1);
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.output_dtype_rule = OperationDtypeRule::Parameter;
-  t.output_dtype_parameter = "dtype";
-  t.requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Parameter;
+  t.outputs[0].output_dtype_parameter = "dtype";
+  t.outputs[0].requires_dense_output = true;
   t.parameter_schema = {{"dtype", OperationParameterType::String, true},
                         {"rounding", OperationParameterType::String, true},
                         {"overflow", OperationParameterType::String, true}};

@@ -10,8 +10,8 @@
 namespace {
 
 /** @brief Explicit generic v3 port schema. */
-const ps_operation_port_constraint_v8 value_port = {
-    sizeof(ps_operation_port_constraint_v8), PS_OPERATION_PORT_VALUE_V8, 0U,
+const ps_operation_port_constraint_v9 value_port = {
+    sizeof(ps_operation_port_constraint_v9), PS_OPERATION_PORT_VALUE_V9, 0U,
     0U};  // NOLINT(whitespace/indent_namespace)
 
 /**
@@ -31,13 +31,13 @@ const ps_operation_port_constraint_v8 value_port = {
  * @throws Nothing.
  * @note Host validation must reject before retaining or invoking this callback.
  */
-int execute_never(void* user_data, const ps_operation_value_view_v8* inputs,
+int execute_never(void* user_data, const ps_operation_value_view_v9* inputs,
                   std::uint32_t input_count,
-                  const ps_operation_parameter_value_v8* parameters,
+                  const ps_operation_parameter_value_v9* parameters,
                   std::uint32_t parameter_count, std::uint32_t backend,
-                  ps_operation_cancelled_v8 cancelled,
+                  ps_operation_cancelled_v9 cancelled,
                   void* cancellation_context,
-                  const ps_operation_output_sink_v8* sink, char* diagnostic,
+                  const ps_operation_output_sink_v9* sink, char* diagnostic,
                   std::size_t diagnostic_capacity) {
   static_cast<void>(user_data);
   static_cast<void>(inputs);
@@ -60,7 +60,7 @@ int execute_never(void* user_data, const ps_operation_value_view_v8* inputs,
  * @throws Nothing.
  * @note Static fixture memory requires no release.
  */
-void destroy_fixture(const ps_operation_descriptor_v8* operations,
+void destroy_fixture(const ps_operation_descriptor_v9* operations,
                      std::uint32_t operation_count) {
   static_cast<void>(operations);
   static_cast<void>(operation_count);
@@ -72,9 +72,9 @@ void destroy_fixture(const ps_operation_descriptor_v8* operations,
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v8 make_parameter() noexcept {
-  return {sizeof(ps_operation_parameter_descriptor_v8) - 1U, "value", 5U,
-          PS_OPERATION_PARAMETER_FLOAT64_V8, 1U};
+ps_operation_parameter_descriptor_v9 make_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v9) - 1U, "value", 5U,
+          PS_OPERATION_PARAMETER_FLOAT64_V9, 1U};
 }
 #elif PS_BAD_PARAMETER_CASE == 4
 /**
@@ -82,9 +82,9 @@ ps_operation_parameter_descriptor_v8 make_parameter() noexcept {
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v8 make_parameter() noexcept {
-  return {sizeof(ps_operation_parameter_descriptor_v8), "x", 1025U,
-          PS_OPERATION_PARAMETER_FLOAT64_V8, 1U};
+ps_operation_parameter_descriptor_v9 make_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v9), "x", 1025U,
+          PS_OPERATION_PARAMETER_FLOAT64_V9, 1U};
 }
 #else
 /**
@@ -92,18 +92,18 @@ ps_operation_parameter_descriptor_v8 make_parameter() noexcept {
  * @return Structurally valid parameter descriptor.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v8 make_parameter() noexcept {
-  return {sizeof(ps_operation_parameter_descriptor_v8), "value", 5U,
-          PS_OPERATION_PARAMETER_FLOAT64_V8, 1U};
+ps_operation_parameter_descriptor_v9 make_parameter() noexcept {
+  return {sizeof(ps_operation_parameter_descriptor_v9), "value", 5U,
+          PS_OPERATION_PARAMETER_FLOAT64_V9, 1U};
 }
 #endif
 
 /** @brief Case-specific parameter record. */
-const ps_operation_parameter_descriptor_v8 parameter = make_parameter();
+const ps_operation_parameter_descriptor_v9 parameter = make_parameter();
 
 #if PS_BAD_PARAMETER_CASE == 5
 /** @brief Exact byte count required for one deliberately misaligned record. */
-constexpr auto kStorageSize = sizeof(ps_operation_parameter_descriptor_v8) + 1U;
+constexpr auto kStorageSize = sizeof(ps_operation_parameter_descriptor_v9) + 1U;
 /** @brief Byte storage used to provide a deliberately misaligned pointer. */
 unsigned char misaligned_storage[kStorageSize]{};
 #endif
@@ -114,11 +114,11 @@ unsigned char misaligned_storage[kStorageSize]{};
  * @throws Nothing.
  * @note The host must validate pointer/count/alignment before dereference.
  */
-const ps_operation_parameter_descriptor_v8* parameter_pointer() noexcept {
+const ps_operation_parameter_descriptor_v9* parameter_pointer() noexcept {
 #if PS_BAD_PARAMETER_CASE == 1
   return nullptr;
 #elif PS_BAD_PARAMETER_CASE == 5
-  return reinterpret_cast<const ps_operation_parameter_descriptor_v8*>(
+  return reinterpret_cast<const ps_operation_parameter_descriptor_v9*>(
       misaligned_storage + 1U);
 #else
   return &parameter;
@@ -144,55 +144,72 @@ std::uint32_t parameter_count() noexcept {
  * @throws Nothing.
  * @note No execution callback may be reached for the returned record.
  */
-ps_operation_descriptor_v8 make_descriptor() noexcept {
-  return {sizeof(ps_operation_descriptor_v8),
+ps_operation_descriptor_v9 make_descriptor() noexcept {
+  return {sizeof(ps_operation_descriptor_v9),
           "fixture.bad.parameter",
           21U,
           0U,
           PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
               PS_OPERATION_FLAG_CPU,
           sizeof(double),
-          PS_OPERATION_ELEMENT_FLOAT64_V8,
-          0U,
-          nullptr,
-          PS_OPERATION_SHAPE_SCALAR_V8,
-          PS_OPERATION_REGION_WHOLE_V8,
-          0U,
           1U,
           parameter_count(),
           parameter_pointer(),
           0U,
           nullptr,
-          value_port,
           execute_never,
-          nullptr};
+          nullptr,
+          0,
+          0,
+          0,
+          1,
+          {{sizeof(ps_operation_output_descriptor_v9),
+            "value",
+            5,
+            PS_OPERATION_ELEMENT_FLOAT64_V9,
+            0U,
+            nullptr,
+            PS_OPERATION_SHAPE_SCALAR_V9,
+            PS_OPERATION_REGION_WHOLE_V9,
+            0U,
+            value_port,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            NULL}}};
 }
 
 /** @brief Malformed operation descriptor selected by the compile definition. */
-const ps_operation_descriptor_v8 descriptor = make_descriptor();
+const ps_operation_descriptor_v9 descriptor = make_descriptor();
 
 /**
  * @brief Builds the complete API table for one malformed descriptor.
  * @return API table referencing `descriptor` and the lifecycle callback.
  * @throws Nothing.
  */
-ps_operation_plugin_api_v8 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v8), 1U, &descriptor, destroy_fixture};
+ps_operation_plugin_api_v9 make_api() noexcept {
+  return {sizeof(ps_operation_plugin_api_v9), 1U, &descriptor, destroy_fixture};
 }
 
 /** @brief Complete API table whose descriptor must fail atomically. */
-const ps_operation_plugin_api_v8 api = make_api();
+const ps_operation_plugin_api_v9 api = make_api();
 
 }  // namespace
 
 /**
  * @brief Returns the supported ABI version so descriptor validation runs.
- * @return `PS_OPERATION_ABI_VERSION_8`.
+ * @return `PS_OPERATION_ABI_VERSION_9`.
  * @throws Nothing.
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_8;
+  return PS_OPERATION_ABI_VERSION_9;
 }
 
 /**
@@ -201,7 +218,7 @@ ps_operation_plugin_get_abi_version(void) {
  * @throws Nothing.
  * @note The host must reject it without partial registry publication.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v8*
-ps_operation_plugin_get_api_v8(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v9*
+ps_operation_plugin_get_api_v9(void) {
   return &api;
 }

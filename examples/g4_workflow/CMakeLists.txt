@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderG4Workflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.8 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.9 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_g4_workflow main.cpp progressive.cpp dynamic.cpp demand.cpp sharing.cpp measure.cpp reductions.cpp scan.cpp blocks.cpp)
 target_link_libraries(photospider_g4_workflow PRIVATE Photospider::kernel)

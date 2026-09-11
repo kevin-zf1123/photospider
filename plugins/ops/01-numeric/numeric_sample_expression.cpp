@@ -78,16 +78,17 @@ Status register_numeric_sample_expression(OperationRegistry* registry) {
   s.input_schema[0].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   s.input_schema[0].rank = 1;
-  s.output_element_type = ElementType::Float32;
-  s.shape_rule = OperationShapeRule::Axes;
-  s.output_axes = {{OperationExtentSource::Parameter, 1, "count", 0, 0, 0}};
-  s.output_semantic_rule = OperationSemanticRule::SampleExpression;
-  s.output_semantic_parameter = "expression";
-  s.output_schema.kind = OperationPortKind::Typed;
-  s.output_schema.semantic_kind =
+  s.outputs[0].output_element_type = ElementType::Float32;
+  s.outputs[0].shape_rule = OperationShapeRule::Axes;
+  s.outputs[0].output_axes = {
+      {OperationExtentSource::Parameter, 1, "count", 0, 0, 0}};
+  s.outputs[0].output_semantic_rule = OperationSemanticRule::SampleExpression;
+  s.outputs[0].output_semantic_parameter = "expression";
+  s.outputs[0].output_schema.kind = OperationPortKind::Typed;
+  s.outputs[0].output_schema.semantic_kind =
       static_cast<std::uint32_t>(SemanticKind::SampledSignal);
   s.workspace_bytes = 4096;
-  s.requires_dense_output = true;
+  s.outputs[0].requires_dense_output = true;
   s.parameter_schema = {
       {"count", OperationParameterType::Int64, true, true, 1, 1048576},
       {"expression", OperationParameterType::String, true},

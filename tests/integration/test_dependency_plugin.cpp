@@ -269,7 +269,7 @@ int workflow(std::uint32_t (*starts)(), std::uint32_t (*destroys)()) {
   const auto full_query = point(1).unite(point(2)).take_value();
   const auto& evidence = terminal.value().dependencies;
   PS_CHECK(evidence.valid() &&
-           evidence.certificate(1).status().code == ErrorCode::NotFound);
+           evidence.certificate({1, 0}).status().code == ErrorCode::NotFound);
   PS_CHECK(evidence.potential_dirty("samples", point(0)).value().at("result") ==
            full_query);
   PS_CHECK(evidence.potential_dirty("samples", point(1))

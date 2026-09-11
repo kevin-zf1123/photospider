@@ -58,9 +58,9 @@ color models require explicit conversion before these operations.
 ## Reusable operation package and executable example
 
 [`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
-maintained ABI8 C module `photospider_rgba32f_ops` using only
+maintained ABI9 C module `photospider_rgba32f_ops` using only
 `Photospider::operation_sdk`. It implements the same image operations and profile
-as the built-ins above, with strict floating-point compilation. The ABI8 host
+as the built-ins above, with strict floating-point compilation. The ABI9 host
 validates ports and establishes nearest/gradual-underflow arithmetic before
 entry. The callback requests its output from the host allocator and publishes that
 same buffer; success freezes it, and failure releases it without publication. Load this
@@ -124,7 +124,7 @@ exercise this path and package 0.7/rejected 0.6 requests; see
 
 ## S2 Gaussian, mask and composition
 
-The built-in registry and maintained ABI8 C package also provide:
+The built-in registry and maintained ABI9 C package also provide:
 
 | Operation | Ordered inputs | Required static parameters | Region rule |
 | --- | --- | --- | --- |
@@ -180,7 +180,7 @@ module. Pass the trusted module's exact path as the sole optional argument.
 
 ## S3 box shrink and circle stamp
 
-Package 0.8 / operation ABI 8 exposes the following built-ins and the same C
+Package 0.9 / operation ABI 9 exposes the following built-ins and the same C
 module operations. These use existing Float32 linear-sRGB premultiplied RGBA
 and finite [0,1] Float32 HW masks. All parameters listed as scalar inputs are
 ordinary Float32 `{1}` bindings, not compile-time node parameters.
@@ -212,7 +212,7 @@ tracked by #275/#277.
 
 ## S4 native Metal implementations
 
-Package 0.8 / operation ABI 8 implements all eight operations with the same
+Package 0.9 / operation ABI 9 implements all eight operations with the same
 trusted pure C host GPU service. The built-in adapter and independently built
 C11 module share the maintained `plugins/ops/rgba32f/image.metal` program and
 host marshalling. CMake embeds shader text in a generated build header; installed

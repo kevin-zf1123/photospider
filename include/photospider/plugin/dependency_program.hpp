@@ -51,6 +51,8 @@ struct DependencyRequest final {
   Backend backend = Backend::Cpu;
   CancellationToken cancellation = {};
   DependencyLimits limits = {};
+  /** @brief Declaration-order selected result. */
+  std::uint32_t output_index = 0;
 };
 /** @brief Validated borrowed query visible to start/poll, never retained by
  * code.
@@ -68,6 +70,8 @@ struct DependencyQuery final {
   ObservationKind kind = ObservationKind::Atomic;
   Backend backend = Backend::Cpu;
   CancellationToken cancellation = {};
+  /** @brief Declaration-order selected result. */
+  std::uint32_t output_index = 0;
 };
 /** @brief Declared next reads plus their output associations.
  * @note Atomic programs emit associations; terminal RequestRecord programs emit
@@ -147,7 +151,7 @@ struct DependencyBlockServices final {
   std::function<Status(const std::string&, const Value&)> publish;
 };
 /** @brief Host-owned zeroed request table borrowed during discovery compute.
- * @note Wire layout follows PS_GPU_DISCOVERY_MSL_V8. The callback must use a
+ * @note Wire layout follows PS_GPU_DISCOVERY_MSL_V9. The callback must use a
  * separate finite discovery dispatch, never publish numerical output, and make
  * at most the declared candidates emit attempts across all dispatches. It may
  * read only already supplied control/data. Pointers expire at compute return;
@@ -175,12 +179,12 @@ struct DependencyGpuServices final {
   std::function<Result<FragmentAtlas>(
       const FragmentAtlasPlan&, const ValueFragments&, const FootprintLimits&)>
       materialize;
-  /** @brief Acquires a native view; same bounds as ps_gpu_service_v8::buffer.
+  /** @brief Acquires a native view; same bounds as ps_gpu_service_v9::buffer.
    */
   std::function<Result<std::uint64_t>(const std::uint8_t*, std::uint64_t, bool)>
       buffer;
-  /** @brief Executes and drains 1..32 bounded ps_gpu_dispatch_v8 records. */
-  std::function<Status(const ps_gpu_dispatch_v8*, std::uint32_t)> execute;
+  /** @brief Executes and drains 1..32 bounded ps_gpu_dispatch_v9 records. */
+  std::function<Status(const ps_gpu_dispatch_v9*, std::uint32_t)> execute;
   /** @brief Separately admits an exact native discovery allocation.
    * @note The Session bounds size before calling. Returned mutable storage
    * must have exactly the requested byte span and remain charged until retired.
@@ -258,7 +262,7 @@ struct PHOTOSPIDER_API DependencyPhase final {
    * handled explicitly; publishing a numerical result after an unresolved
    * read is invalid. GPU services never infer dependencies from shader code.
    */
-  std::function<Status(const ps_gpu_dispatch_v8*, std::uint32_t)> gpu_execute;
+  std::function<Status(const ps_gpu_dispatch_v9*, std::uint32_t)> gpu_execute;
   /** @brief Runs bounded discovery and appends decoded needs to this poll.
    * @note capacity is 1..maximum_gpu_requests and <=65536. candidates is a
    * positive upper bound on all emit attempts, <=UINT32_MAX, charged before
@@ -329,6 +333,75 @@ class PHOTOSPIDER_API DependencyContinuation final {
   Destroy destroy_ = nullptr;
   Result<DependencyPoll> (*poll_)(void*, const DependencyPhase&) = nullptr;
 };
+/** @brief One named member's next reads, completion or local error. */
+struct DependencyAtomOutcome final {
+  std::uint32_t output_index;
+  Result<DependencyPoll> outcome;
+};
+/** @brief Borrowed ready Atomic members of one finite CPU joint poll.
+ * @note Each output occurs once. Member phases and their services expire at
+ * return. Declare each member's own associations even when sharing computation.
+ * allocator owns shared scratch; never use one member's services for another.
+ */
+struct DependencyJointPhase final {
+  const std::vector<const DependencyPhase*>& members;
+  const BufferAllocator& allocator;
+  /** @brief Charges shared arithmetic once against the group/Run fuel.
+   * Failure is sticky for the group. Cancellation applies only when every
+   * remaining member has cancelled; borrowed service expires with this phase.
+   */
+  std::function<Status(std::uint64_t)> consume_work;
+};
+/** @brief Host-owned optional joint state, destroyed exactly once.
+ * @note State implements poll(DependencyJointPhase), returning exactly one
+ * DependencyAtomOutcome for every supplied member, in any order. An enclosing
+ * failure is unattributable; malformed membership is a protocol error. State
+ * must not retain borrowed phases or use hidden inputs. Calls are serialized by
+ * the owning session; no callback may wait for upstream execution.
+ */
+class PHOTOSPIDER_API DependencyJointContinuation final {
+ public:
+  DependencyJointContinuation() = default;
+  ~DependencyJointContinuation() noexcept;
+  DependencyJointContinuation(DependencyJointContinuation&&) noexcept;
+  DependencyJointContinuation& operator=(
+      DependencyJointContinuation&&) noexcept;
+  DependencyJointContinuation(const DependencyJointContinuation&) = delete;
+  DependencyJointContinuation& operator=(const DependencyJointContinuation&) =
+      delete;
+  template <class State, class... Args>
+  static Result<DependencyJointContinuation> make(
+      const BufferAllocator& allocator, Args&&... args) {
+    static_assert(alignof(State) <= alignof(std::max_align_t),
+                  "overaligned joint state");
+    static_assert(std::is_nothrow_destructible<State>::value,
+                  "throwing joint destructor");
+    auto memory = allocator.allocate(sizeof(State));
+    if (!memory.ok())
+      return Result<DependencyJointContinuation>(memory.status());
+    DependencyJointContinuation result;
+    result.storage_ = memory.take_value();
+    new (result.storage_.data()) State(std::forward<Args>(args)...);
+    result.destroy_ = [](void* state) noexcept {
+      static_cast<State*>(state)->~State();
+    };
+    result.poll_ = [](void* state, const DependencyJointPhase& phase) {
+      return static_cast<State*>(state)->poll(phase);
+    };
+    return Result<DependencyJointContinuation>(std::move(result));
+  }
+
+ private:
+  friend class DependencyJointSession;
+  void reset() noexcept;
+  MutableBuffer storage_;
+  using Destroy = void (*)(void*) noexcept;  // NOLINT(readability/casting)
+  Destroy destroy_ = nullptr;
+  Result<std::vector<DependencyAtomOutcome>> (*poll_)(
+      void*, const DependencyJointPhase&) = nullptr;
+};
+using DependencyJointStart = std::function<Result<DependencyJointContinuation>(
+    const std::vector<DependencyQuery>&, const BufferAllocator&)>;
 /** @brief Optional pure static validation, including Empty output requests.
  * @note Called after base parameter/descriptor inference, before any state or
  * source read, and during compilation. May reject but cannot change metadata.
@@ -414,19 +487,80 @@ class PHOTOSPIDER_API DependencySession final {
 
  private:
   friend class OperationRegistry;
+  friend class DependencyJointSession;
   struct Impl;
   explicit DependencySession(std::unique_ptr<Impl> impl);
   static Result<std::shared_ptr<DependencySession>> create(
       const std::string& operation, OperationTraits traits,
       const DependencyStart& start, const DependencyValidator& validate,
       DependencyRequest request, const BufferAllocator& allocator,
-      std::shared_ptr<const void> definition);
+      std::shared_ptr<const void> definition,
+      std::uint64_t host_proxy_bytes = 0,
+      std::function<Status(std::uint64_t)> shared_work = {},
+      bool joint_serialized = false);
   static Status validate_static(
       const DependencyValidator& validate,
       const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters,
       const CancellationToken& cancellation = {});
   std::unique_ptr<Impl> impl_;
+};
+/** @brief Validated member event; each terminal member is delivered once. */
+struct DependencyAtomProgress final {
+  std::uint32_t output_index;
+  Result<DependencyProgress> outcome;
+};
+/** @brief Direct joint start/poll/supply driver, with independent member
+ * validation.
+ * @note Supports 2..64 distinct Atomic outputs, one observation each, sharing
+ * operation, static inputs/parameters, snapshot and CPU backend. Concurrent or
+ * recursive calls are rejected without disturbing the active call. Supply only
+ * a waiting member's exact transport union. Poll advances all ready members;
+ * waiting and terminal members are omitted. Per-member failures do not retire
+ * siblings. An enclosing failure retires the group; InvalidArgument denotes a
+ * protocol error and must never trigger singleton retry. Destruction must not
+ * race calls. DSO ownership survives state destruction.
+ */
+class PHOTOSPIDER_API DependencyJointSession final {
+ public:
+  ~DependencyJointSession() noexcept;
+  /** @brief Accounted host adapter bytes per member, additional to shared
+   * state. */
+  static std::uint64_t member_state_bytes() noexcept;
+  DependencyJointSession(const DependencyJointSession&) = delete;
+  DependencyJointSession& operator=(const DependencyJointSession&) = delete;
+  /** @brief Advances the currently ready members using borrowed stage
+   * allocation.
+   * @param maximum_additional_work Further caps group fuel for this and later
+   * rounds, allowing a host to enforce its remaining Run budget after upstream
+   * work. UINT64_MAX preserves the existing group limit.
+   */
+  Result<std::vector<DependencyAtomProgress>> poll(
+      const BufferAllocator& allocator = BufferAllocator{},
+      std::uint64_t maximum_additional_work = UINT64_MAX);
+  Status supply(std::uint32_t output_index, std::vector<ValueFragments> inputs,
+                const std::string& snapshot_identity);
+  /** @brief Reports a host upstream failure for one waiting member.
+   * @note The host already owns the member's terminal error; no additional poll
+   * event is emitted. Rejects success statuses and nonwaiting members. Releases
+   * the member immediately and shared state when no members remain. Uses the
+   * same concurrent/reentrant rejection rule as supply.
+   */
+  Status fail_input(std::uint32_t output_index, Status failure);
+  Result<std::vector<DependencyNeed>> pending_reads(
+      std::uint32_t output_index) const;
+  std::uint64_t consumed_work() const;
+
+ private:
+  friend class OperationRegistry;
+  struct Impl;
+  explicit DependencyJointSession(std::shared_ptr<Impl> impl);
+  static Result<std::shared_ptr<DependencyJointSession>> create(
+      const std::string& operation, const OperationTraits& traits,
+      const DependencyJointStart& start, const DependencyValidator& validate,
+      std::vector<DependencyRequest> requests, const BufferAllocator& allocator,
+      std::shared_ptr<const void> definition);
+  std::shared_ptr<Impl> impl_;
 };
 /** @brief Resolves observation coordinates and complete-pixel closure metadata.
  * @note Pure checked transformations; no pixel reads or storage allocation.

@@ -20,6 +20,9 @@ enum class SemanticKind : std::uint32_t {
   SampledSignal = 7,
   Lut = 8,
   ByteResource = 9,
+  /** @brief One Float32 HW color plane with independent 2D sampling metadata.
+   */
+  ImagePlane = 10,
 };
 
 /** @brief Owned channel interpretation, independent of storage dtype. */
@@ -33,7 +36,8 @@ struct PHOTOSPIDER_API SemanticChannel final {
  * @brief Owned typed interpretation encoded by the canonical facet helpers.
  * @note Text fields are strict UTF-8, at most 128 bytes. Unused fields are
  * empty or positive zero. Metadata is bounded to 4096 encoded bytes. Image
- * samples are Float32 HWC; generic Value floating bits remain unrestricted.
+ * samples are Float32 HWC, ImagePlane samples are Float32 HW; generic Value
+ * floating bits remain unrestricted.
  * Immutable descriptors may be shared across threads; callers synchronize
  * mutation.
  */
@@ -59,6 +63,12 @@ struct PHOTOSPIDER_API SemanticDescriptor final {
   double sample_step = 0;
   std::string sample_axis_unit;
   std::string media_type;
+  /** @brief ImagePlane nominal source-pixel center origin in Y,X order.
+   * Other kinds require zero. Actual dependency support is not inferred here.
+   */
+  std::array<double, 2> plane_origin = {};
+  /** @brief ImagePlane positive source-pixel steps in Y,X order. */
+  std::array<double, 2> plane_step = {};
 };
 
 /** @brief Creates the linear-sRGB D65 relative RGBA coverage descriptor.

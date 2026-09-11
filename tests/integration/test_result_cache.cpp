@@ -30,7 +30,7 @@ ps::Value scalar(float number) {
 std::uint64_t calls(const ps::ExecutionResult& result, std::uint64_t id) {
   std::uint64_t n = 0;
   for (const auto& t : result.diagnostics.operation_timings)
-    if (t.node_id == id)
+    if (t.output.node_id == id)
       n += t.invocation_count;
   return n;
 }
@@ -94,7 +94,8 @@ int stored_contract() {
   step.output_descriptor = image.descriptor();
   step.output_demand = image.region();
   step.output_facets = image.facets();
-  step.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  step.traits.outputs[0].output_semantic_rule =
+      OperationSemanticRule::PreserveInput;
   cache.put("image", image, cache.epoch());
   auto retained = cache.get_output("image", step, {});
   PS_CHECK(retained.ok() && typed_images::same(retained.value(), image));
@@ -217,17 +218,96 @@ int dependency_cache_storage() {
   PS_CHECK(cache.statistics().retained_bytes == 0);
   return 0;
 }
+int cache_shared_route_budget() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  auto registry = std::make_shared<OperationRegistry>();
+  OperationDefinition leaf;
+  leaf.key = "cache.whole";
+  leaf.traits.input_count = 1;
+  leaf.traits.input_schema.resize(1);
+  leaf.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  leaf.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+  leaf.callback = [](const OperationInvocation& call) {
+    return Result<Value>(call.inputs[0]);
+  };
+  auto calls = std::make_shared<std::atomic<unsigned>>(0);
+  auto merge = leaf;
+  merge.key = "cache.merge";
+  merge.traits.input_count = 2;
+  merge.traits.input_schema.resize(2);
+  merge.callback = [calls](const OperationInvocation& call) {
+    ++*calls;
+    return Result<Value>(
+        Value::from_float64(call.inputs[0].as_float64().value() +
+                            call.inputs[1].as_float64().value()));
+  };
+  auto branch1 = leaf, branch2 = leaf;
+  branch1.key = "cache.branch1";
+  branch2.key = "cache.branch2";
+  PS_CHECK(registry->register_operation(leaf).ok());
+  PS_CHECK(registry->register_operation(branch1).ok());
+  PS_CHECK(registry->register_operation(branch2).ok());
+  PS_CHECK(registry->register_operation(merge).ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument document;
+  document.inputs = {
+      {1, "x", {ElementType::Float64, {1}}, Region::whole({1}), {0, {8}}, {}}};
+  document.nodes = {
+      {1, leaf.key, {WorkflowInputReference{1}}, {}},
+      {2, branch1.key, {WorkflowNodeOutput{1, "value"}}, {}},
+      {3, branch2.key, {WorkflowNodeOutput{1, "value"}}, {}},
+      {4,
+       merge.key,
+       {WorkflowNodeOutput{2, "value"}, WorkflowNodeOutput{3, "value"}},
+       {}}};
+  document.outputs = {{"y", 4, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext execution(registry, {1, false, 64, 1048576, 65536});
+  auto frozen =
+      execution.freeze(plan, {{{"x", Value::from_float64(7)}}}).take_value();
+  const DemandQuery query{{"y", Footprint::all({1}).take_value()}};
+  PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
+  // Split the old shared Whole owner into two equivalent new source nodes.
+  // The root content matches, but its proof must not be cloned twice against
+  // a single prepaid metadata charge. Safe miss still reuses each branch.
+  document.nodes = {
+      {10, leaf.key, {WorkflowInputReference{1}}, {}},
+      {11, leaf.key, {WorkflowInputReference{1}}, {}},
+      {20, branch1.key, {WorkflowNodeOutput{10, "value"}}, {}},
+      {21, branch2.key, {WorkflowNodeOutput{11, "value"}}, {}},
+      {30,
+       merge.key,
+       {WorkflowNodeOutput{20, "value"}, WorkflowNodeOutput{21, "value"}},
+       {}}};
+  document.outputs = {{"y", 30, "value"}};
+  GraphContext changed(document);
+  auto changed_plan = Compiler(registry).compile(changed).take_value().plan;
+  auto changed_frozen =
+      execution.freeze(changed_plan, {{{"x", Value::from_float64(7)}}})
+          .take_value();
+  auto result = execution.execute_fragments(changed_frozen, query);
+  PS_CHECK(result.ok() && *calls == 2 &&
+           result.value().diagnostics.cache_hits > 0);
+  double actual = 0;
+  PS_CHECK(
+      result.value().values.at("y").read({0}, &actual, sizeof(actual)).ok() &&
+      actual == 14);
+  auto dirty = result.value().dependencies.potential_dirty("x", query.at("y"));
+  PS_CHECK(dirty.ok() && dirty.value().at("y") == query.at("y"));
+  return 0;
+}
 int dependency_cache_proof_limits() {
   using namespace ps;                      // NOLINT(build/namespaces)
   using namespace ps::execution_internal;  // NOLINT(build/namespaces)
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition leaf;
   leaf.key = "leaf";
-  leaf.traits.output_element_type = ElementType::Float32;
+  leaf.traits.outputs[0].output_element_type = ElementType::Float32;
   leaf.traits.input_count = 1;
   leaf.traits.input_schema.resize(1);
-  leaf.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  leaf.traits.region_rule = OperationRegionRule::Elementwise;
+  leaf.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  leaf.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   leaf.callback = [](const OperationInvocation& call) {
     return Result<Value>(call.inputs[0]);
   };
@@ -322,6 +402,7 @@ int main() {
   PS_CHECK(dependency_cache_storage() == 0);
   PS_CHECK(dependency_content_bits() == 0);
   PS_CHECK(dependency_cache_proof_limits() == 0);
+  PS_CHECK(cache_shared_route_budget() == 0);
   PS_CHECK(dynamic_opaque_preservation() == 0);
   const std::vector<std::uint64_t> shape{5, 7, 4};
   std::vector<std::uint8_t> bytes(5 * 7 * 16);
@@ -409,12 +490,12 @@ int main() {
   CancellationToken observed;
   OperationTraits traits;
   traits.input_count = 1;
-  traits.output_element_type = ElementType::Float32;
-  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Elementwise;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].output_semantic_rule = OperationSemanticRule::PreserveInput;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
-  traits.output_schema = traits.input_schema[0];
+  traits.outputs[0].output_schema = traits.input_schema[0];
   PS_CHECK(gated
                ->register_operation(
                    {"gated", traits,
@@ -579,8 +660,10 @@ int main() {
   cv.notify_all();
   auto shared_result = following.get();
   PS_CHECK(shared_result.ok() && invocations == before + 1);
-  PS_CHECK(shared_result.value().diagnostics.selected_backends.count(1) == 0);
-  PS_CHECK(shared_result.value().diagnostics.selected_backends.count(11) == 1);
+  PS_CHECK(shared_result.value().diagnostics.selected_backends.count({1, 0}) ==
+           0);
+  PS_CHECK(shared_result.value().diagnostics.selected_backends.count({11, 0}) ==
+           1);
   ExecutionContext plain(gated);
   auto expected = plain.execute(pb, bb);
   PS_CHECK(expected.ok());

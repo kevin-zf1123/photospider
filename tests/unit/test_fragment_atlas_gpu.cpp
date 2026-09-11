@@ -15,7 +15,7 @@
 namespace {
 // MSL continuation strings are not namespace indentation.
 // NOLINTBEGIN(whitespace/indent_namespace)
-constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V8
+constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V9
     "kernel void lookup(device const uchar* data [[buffer(0)]],\n"
     " device const ulong* directory [[buffer(1)]],\n"
     " device const ulong* coordinates [[buffer(2)]],\n"
@@ -90,7 +90,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
   auto output = allocator.allocate(queries.size() * 16).take_value();
   gpu_internal::Invocation invocation(device, {});
   const auto* service = invocation.service();
-  std::array<ps_gpu_buffer_binding_v8, 4> buffers{};
+  std::array<ps_gpu_buffer_binding_v9, 4> buffers{};
   const std::uint8_t* pointers[]{atlas.payload.bytes().data(),
                                  atlas.directory.bytes().data(), indices.data(),
                                  output.data()};
@@ -102,7 +102,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     PS_CHECK(service->buffer(service->context, pointers[i], sizes[i], i == 3,
                              &token) == 0);
     buffers[i] = {
-        sizeof(ps_gpu_buffer_binding_v8), i, token, 0, sizes[i], i == 3};
+        sizeof(ps_gpu_buffer_binding_v9), i, token, 0, sizes[i], i == 3};
   }
   std::array<std::uint64_t, 20> config{};
   config[0] = shape.size();
@@ -113,7 +113,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     config[4 + axis] = shape[axis];
     config[12 + axis] = atlas.tile_shape[axis];
   }
-  ps_gpu_dispatch_v8 command{};
+  ps_gpu_dispatch_v9 command{};
   command.struct_size = sizeof(command);
   command.source = shader;
   command.source_size = sizeof(shader) - 1;

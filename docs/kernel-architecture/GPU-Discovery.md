@@ -1,7 +1,7 @@
 # Bounded GPU dependency discovery
 
 C++ `DependencyPhase::discover(capacity, candidates, compute)` and the C
-`ps_dependency_services_v8::discover` service run a separate bounded discovery
+`ps_dependency_services_v9::discover` service run a separate bounded discovery
 callback over already supplied inputs. The host allocates a zeroed native table
 through existing MemoryBudget admission, runs synchronous native work, freezes
 the buffer, validates it and appends decoded needs to the current poll. There is
@@ -24,7 +24,7 @@ checkpoint or block services. Errors remain sticky even if ignored.
 
 ## Wire format and bounds
 
-`PS_GPU_DISCOVERY_MSL_V8` supplies the Metal `ps_discovery_emit` helper. The table
+`PS_GPU_DISCOVERY_MSL_V9` supplies the Metal `ps_discovery_emit` helper. The table
 starts with four little-endian uint32 words: attempted emit count, overflow,
 zero and zero. It is followed by `capacity` records of 144 bytes each:
 

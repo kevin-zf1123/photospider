@@ -6,8 +6,8 @@
 namespace {
 
 /** @brief Explicit generic v3 port schema. */
-const ps_operation_port_constraint_v8 value_port = {
-    sizeof(ps_operation_port_constraint_v8), PS_OPERATION_PORT_VALUE_V8, 0U,
+const ps_operation_port_constraint_v9 value_port = {
+    sizeof(ps_operation_port_constraint_v9), PS_OPERATION_PORT_VALUE_V9, 0U,
     0U};  // NOLINT(whitespace/indent_namespace)
 
 /** @brief Number of exact destroy callbacks observed by this fixture image. */
@@ -37,13 +37,13 @@ const std::uint64_t overflowing_shape[] = {kMaximumExtent};
  * @note Loader validation must reject the descriptor before publication.
  */
 int execute_unreachable(void* user_data,
-                        const ps_operation_value_view_v8* inputs,
+                        const ps_operation_value_view_v9* inputs,
                         std::uint32_t input_count,
-                        const ps_operation_parameter_value_v8* parameters,
+                        const ps_operation_parameter_value_v9* parameters,
                         std::uint32_t parameter_count, std::uint32_t backend,
-                        ps_operation_cancelled_v8 cancelled,
+                        ps_operation_cancelled_v9 cancelled,
                         void* cancellation_context,
-                        const ps_operation_output_sink_v8* sink,
+                        const ps_operation_output_sink_v9* sink,
                         char* diagnostic,
                         std::size_t diagnostic_capacity) noexcept {
   static_cast<void>(user_data);
@@ -58,7 +58,7 @@ int execute_unreachable(void* user_data,
   if (diagnostic && diagnostic_capacity != 0U) {
     diagnostic[0] = '\0';
   }
-  return PS_OPERATION_RESULT_FAILURE_V8;
+  return PS_OPERATION_RESULT_FAILURE_V9;
 }
 
 /**
@@ -66,32 +66,49 @@ int execute_unreachable(void* user_data,
  * @return Descriptor whose fixed Float64 dense byte product overflows uint64.
  * @throws Nothing.
  */
-ps_operation_descriptor_v8 make_descriptor() noexcept {
-  return {sizeof(ps_operation_descriptor_v8),
+ps_operation_descriptor_v9 make_descriptor() noexcept {
+  return {sizeof(ps_operation_descriptor_v9),
           "fixture.dense_overflow",
           sizeof("fixture.dense_overflow") - 1U,
           0U,
           PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
               PS_OPERATION_FLAG_CPU,
           sizeof(double),
-          PS_OPERATION_ELEMENT_FLOAT64_V8,
-          1U,
-          overflowing_shape,
-          PS_OPERATION_SHAPE_FIXED_V8,
-          PS_OPERATION_REGION_WHOLE_V8,
-          0U,
           1U,
           0U,
           nullptr,
           0U,
           nullptr,
-          value_port,
           execute_unreachable,
-          nullptr};
+          nullptr,
+          0,
+          0,
+          0,
+          1,
+          {{sizeof(ps_operation_output_descriptor_v9),
+            "value",
+            5,
+            PS_OPERATION_ELEMENT_FLOAT64_V9,
+            1U,
+            overflowing_shape,
+            PS_OPERATION_SHAPE_FIXED_V9,
+            PS_OPERATION_REGION_WHOLE_V9,
+            0U,
+            value_port,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            NULL}}};
 }
 
 /** @brief Immutable dense-overflow descriptor rejected by the host loader. */
-const ps_operation_descriptor_v8 descriptor = make_descriptor();
+const ps_operation_descriptor_v9 descriptor = make_descriptor();
 
 /**
  * @brief Records exact release of the static malformed descriptor table.
@@ -100,7 +117,7 @@ const ps_operation_descriptor_v8 descriptor = make_descriptor();
  * @throws Nothing.
  * @note Static records need no allocation release.
  */
-void destroy_fixture(const ps_operation_descriptor_v8* operations,
+void destroy_fixture(const ps_operation_descriptor_v9* operations,
                      std::uint32_t operation_count) noexcept {
   if (operations == &descriptor && operation_count == 1U) {
     destroy_count.fetch_add(1U, std::memory_order_relaxed);
@@ -112,23 +129,23 @@ void destroy_fixture(const ps_operation_descriptor_v8* operations,
  * @return Complete version-three API table.
  * @throws Nothing.
  */
-ps_operation_plugin_api_v8 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v8), 1U, &descriptor, destroy_fixture};
+ps_operation_plugin_api_v9 make_api() noexcept {
+  return {sizeof(ps_operation_plugin_api_v9), 1U, &descriptor, destroy_fixture};
 }
 
 /** @brief Static API table owning the malformed fixed descriptor. */
-const ps_operation_plugin_api_v8 api = make_api();
+const ps_operation_plugin_api_v9 api = make_api();
 
 }  // namespace
 
 /**
  * @brief Returns the supported operation ABI version.
- * @return `PS_OPERATION_ABI_VERSION_8`.
+ * @return `PS_OPERATION_ABI_VERSION_9`.
  * @throws Nothing.
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_8;
+  return PS_OPERATION_ABI_VERSION_9;
 }
 
 /**
@@ -136,8 +153,8 @@ ps_operation_plugin_get_abi_version(void) {
  * @return Process-lifetime immutable API table.
  * @throws Nothing.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v8*
-ps_operation_plugin_get_api_v8(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v9*
+ps_operation_plugin_get_api_v9(void) {
   return &api;
 }
 

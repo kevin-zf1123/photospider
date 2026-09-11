@@ -87,9 +87,9 @@ Status register_mask_components(OperationRegistry* registry) {
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
   port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
-  t.output_element_type = ElementType::Int64;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.requires_dense_output = true;
+  t.outputs[0].output_element_type = ElementType::Int64;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].requires_dense_output = true;
 
   port.facets =
       true ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
@@ -98,12 +98,12 @@ Status register_mask_components(OperationRegistry* registry) {
   t.parameter_schema = {{"capacity", OperationParameterType::Int64, true, true,
                          1, 0x1fffffffffffffp0}};
 
-  t.output_facets = label_facets();
+  t.outputs[0].output_facets = label_facets();
   t.workspace_input_multiplier = 2;
   op.callback = components;
 
-  t.output_semantic_rule = OperationSemanticRule::Establish;
-  t.output_schema.kind = OperationPortKind::Typed;
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+  t.outputs[0].output_schema.kind = OperationPortKind::Typed;
 
   return registry->register_operation(std::move(op));
 }

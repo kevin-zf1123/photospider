@@ -109,8 +109,8 @@ int main(int argc, char** argv) {
       ExecutionContextConfig tight;
       tight.gpu_enabled = gpu;
       tight.maximum_live_bytes =
-          bad_plan.plan.steps()[0].traits.continuation_bytes + 4 + 24 + 65 * 4 +
-          32768;
+          bad_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 4 +
+          24 + 65 * 4 + 32768;
       ExecutionContext fresh(registry, tight);
       auto bad_frozen = fresh.freeze(bad_plan.plan, bindings).take_value();
       auto failed = fresh.execute_fragments(bad_frozen, {{"sum", point(0)}});

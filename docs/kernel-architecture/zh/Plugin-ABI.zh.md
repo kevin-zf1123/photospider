@@ -2,7 +2,7 @@
 
 Photospider 安装两份 narrow same-trust extension header：
 
-- operation ABI v8：copied semantic trait、closed typed parameter schema、
+- operation ABI v9：copied semantic trait、closed typed parameter schema、
   plan-derived input demand 与一个 synchronous Value callback；
 - data-provider ABI v1：copied schema key、element type 与 maximum rank。
 
@@ -140,10 +140,10 @@ certificate、package admission 或 process isolation。
 不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
 ABI 不构造 Value，也不提供 storage。
 
-## Version-eight 语义与输出契约
+## Version-nine 语义与输出契约
 
-Package 0.8.0、operation ABI/traits 8 替换 0.7/7。Host 先检查 version，再读取
-`get_api_v8`；无旧 table、symbol alias 或 image-v1 reader。WorkflowDocument schema 2、
+Package 0.9.0、operation ABI/traits 9 替换 0.8/8。Host 先检查 version，再读取
+`get_api_v9`；无旧 table、symbol alias 或 image-v1 reader。WorkflowDocument schema 2、
 provider ABI 1、C++17 保持。
 
 `data/semantic.hpp` 的 `SemanticDescriptor` 编码 image-v2/semantic-v1 facet，canonical
@@ -159,11 +159,11 @@ Image 为 Float32 HWC，typed image validation 支持 finite signed/HDR。Vector
 `element_type_mask` 低 0..3 位对应 UInt8/Int64/Float64/Float32，零表示无限制，
 与非零精确 `element_type` 互斥；未知位或冲突字段在注册时拒绝。复制的 mask 进入
 compiler/result identity。
-可选 operation contract 选择声明/输入/静态参数 dtype，rank 1..8 axes（常量、正 Int64
+每输出 contract 选择声明/输入/静态参数 dtype，rank 1..8 axes（常量、正 Int64
 参数、输入轴、实际输入数量）及 checked 非负偏移，output semantics 选择 drop、preserve
 input、establish facets 或静态 semantic 参数。固定前缀后可有一个同构重复组，启用时
 minimum>=1、maximum 有界，总输入<=1024。Loader 在原子发布前复制全部 record，lowering
-展开精确有序表。新增 axes、typed ports 和重复组使用 Whole，不引入 G4。
+展开精确有序表。每输出 Region 与分阶段依赖协议决定空间读取；Whole 保留保守需求。
 
 闭集 semantic 词汇还会根据输入元数据推断通道提取/选择/合并、alpha 关联和 RGB/XYZ/Lab
 变换。`IndexListCount` 与 swizzle 共享公开 canonical indices parser：1..64 个 [0,63]
@@ -197,9 +197,9 @@ canonical facet；磁盘格式 2 拒绝旧格式。Bounded scalar 接受兼容 c
 使用逻辑地址，支持 padding/stride。默认 registry 也提供 CPU Whole [数值算子](Numeric-Operations.zh.md)。
 通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
 
-## ABI 8 区域视图与宿主分配
+## ABI 9 区域视图与宿主分配
 
-ABI 8 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
+ABI 9 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
 输出 sink 提供精确 descriptor/Region 和 packed 字节数，allocate_output 返回宿主输出，
 allocate_scratch 返回回调局部临时缓冲区。发布宿主输出直接冻结；发布栈/调用方数据则
 通过相同宿主分配器复制。指针只在回调期间有效，禁止自行释放或保留。通用输入允许
@@ -209,13 +209,13 @@ backing padding，只能按 origin/stride 访问有效区域。首个发布即�
 
 ## S3 缩放端口
 
-ABI 8 包含 S3 引入的 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。
+ABI 9 包含 S3 引入的 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。
 有界 Int64 参数解析为 [1,16]，输出 H/W 向上取整，输入需求为裁剪 box。允许蒙版
 输出。未知布局、指针/数量失配、非法范围和旧 ABI 7 在发布前拒绝。
 
 ## S4 宿主 GPU 服务
 
-ABI 8 输出 sink 的 gpu 指向调用内 ps_gpu_service_v8，CPU 时为空。buffer 创建宿主
+ABI 9 输出 sink 的 gpu 指向调用内 ps_gpu_service_v9，CPU 时为空。buffer 创建宿主
 分配的有界 token，禁止写入已冻结输入；execute 验证 shader、entry、bindings、常量及
 grid，完成后才返回。参数失败粘滞，不能由 callback 成功覆盖。Token/指针不跨回调
 保留，提交后错误终止 Run；无发布的数值/后端拒绝允许按 trait 回退。CPU 与 C 模块
@@ -223,11 +223,28 @@ grid，完成后才返回。参数失败粘滞，不能由 callback 成功覆盖
 
 ## G4 观察与 continuation 契约
 
-ABI/Traits 8 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C
+ABI/Traits 9 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C
 descriptor 复制并校验这些字段，同步调用继续可用。`dependency_plugin_api.h`
 提供可选 C 分阶段程序表，使用宿主 continuation、精确关联、fragment 读取和跨 poll
-owner handle。PerAtomOutcome 保留但拒绝注册，必须先具备完整逐观察 outcome 交付。
+owner handle。ABI 9 增加可选 `ps_dependency_joint_program_v9`，使用相同服务与完成
+规则验证各成员 outcome，详见 Dependency-Data 的 M4 章节。
 
 C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply
-阶段执行。编译器检查全部输入祖先的 EffectiveAtomic，拒绝 RequestRecord 全部出边。
+阶段执行。编译器检查所选结果相关输入祖先的 EffectiveAtomic，拒绝 RequestRecord 到活跃消费者的执行边。排除的端口仅保留静态 metadata，不执行生产者。
 协议、allocator 生命周期和 CPU Run 行为见 [依赖数据与执行](Dependency-Data.zh.md)。
+
+## ABI 9 输出选择与联合执行
+
+`OperationTraits::outputs` 为非空有序 `OperationOutputTraits` 表，上限 64。
+每输出独立声明唯一端口名、schema、shape、facets、输入投影、Region、观察和失败
+契约；单输出内建声明 `value`。C ABI 内嵌有界输出表与数量。Shape axis 支持检查
+溢出的 ceil-div、参数减法和用于非整数 radius 的 `CeilParameter` 缩放。
+多输出算子必须确定且无外部副作用。
+
+Invocation/query/sink 携带原始 `output_index`；投影输入 view 保留原始
+`input_index`，不填 invalid Value。推导仍可获取完整静态输入元数据。
+C/C++ joint continuation 可选地处理每输出一个 Atomic 观察。服务、coverage、
+handle、读取关联和终态错误均按成员隔离；宿主拒绝重复、缺失、未知成员和过期或
+跨成员 handle。共享 work 服务只计费一次共同计算，错误具有粘性。
+Singleton 入口仍必需；RequestRecord 不参与联合执行。Provider ABI 保持 1。
+调度、资源、缓存和数值契约见 ADR 0021 与多输出算子指南。

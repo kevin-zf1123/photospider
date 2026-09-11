@@ -136,19 +136,19 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   auto& traits = definition.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.output_element_type = ElementType::Float32;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
   if (mode == 24 || mode == 25) {
-    traits.shape_rule = OperationShapeRule::Fixed;
-    traits.fixed_output_shape = {16};
+    traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+    traits.outputs[0].fixed_output_shape = {16};
   }
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
   traits.supports_gpu = true;
-  traits.continuation_bytes = sizeof(State);
-  traits.maximum_dependency_stages = 3;
+  traits.outputs[0].continuation_bytes = sizeof(State);
+  traits.outputs[0].maximum_dependency_stages = 3;
   if (mode == 28)
-    traits.observation_kind = ObservationKind::RequestRecord;
+    traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
   definition.start_dependency = [mode](const DependencyQuery&,
                                        const BufferAllocator& allocator) {
     return DependencyContinuation::make<State>(allocator, mode);
@@ -196,7 +196,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   gpu.buffer = [](const std::uint8_t*, std::uint64_t, bool) {
     return Result<std::uint64_t>(Status{ErrorCode::BackendUnavailable, {}});
   };
-  gpu.execute = [](const ps_gpu_dispatch_v8*, std::uint32_t) {
+  gpu.execute = [](const ps_gpu_dispatch_v9*, std::uint32_t) {
     return Status{ErrorCode::BackendUnavailable, {}};
   };
   gpu.allocate_discovery = [&](std::uint64_t bytes) {

@@ -19,9 +19,9 @@ Status register_component_area(OperationRegistry* registry) {
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
   port.element_type = static_cast<std::uint32_t>(ElementType::Int64);
-  t.output_element_type = ElementType::Int64;
-  t.shape_rule = OperationShapeRule::Scalar;
-  t.requires_dense_output = true;
+  t.outputs[0].output_element_type = ElementType::Int64;
+  t.outputs[0].shape_rule = OperationShapeRule::Scalar;
+  t.outputs[0].requires_dense_output = true;
 
   port.facets =
       false ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
@@ -30,8 +30,9 @@ Status register_component_area(OperationRegistry* registry) {
   t.parameter_schema = {{"capacity", OperationParameterType::Int64, true, true,
                          1, 0x1fffffffffffffp0}};
 
-  t.shape_rule = OperationShapeRule::Axes;
-  t.output_axes = {{OperationExtentSource::Parameter, 1, "capacity", 0, 0, 1}};
+  t.outputs[0].shape_rule = OperationShapeRule::Axes;
+  t.outputs[0].output_axes = {
+      {OperationExtentSource::Parameter, 1, "capacity", 0, 0, 1}};
 
   op.callback = [attribute = 3 - 2](const OperationInvocation& call) {
     return attributes(call, attribute);

@@ -621,9 +621,12 @@ int verify_dense_dso_fixture(const char* path, bool should_load,
         PS_CHECK(registry.keys() == std::vector<std::string>({expected_key}));
         auto traits = registry.find_traits(expected_key);
         PS_CHECK(traits.ok());
-        PS_CHECK(traits.value().output_element_type == ps::ElementType::UInt8);
-        PS_CHECK(traits.value().shape_rule == ps::OperationShapeRule::Fixed);
-        PS_CHECK(traits.value().fixed_output_shape == expected_shape);
+        PS_CHECK(traits.value().outputs[0].output_element_type ==
+                 ps::ElementType::UInt8);
+        PS_CHECK(traits.value().outputs[0].shape_rule ==
+                 ps::OperationShapeRule::Fixed);
+        PS_CHECK(traits.value().outputs[0].fixed_output_shape ==
+                 expected_shape);
       } else {
         PS_CHECK(registry.keys().empty());
       }
@@ -654,9 +657,9 @@ int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
   auto registry = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits traits;
   traits.estimated_bytes = sizeof(double);
-  traits.output_element_type = ps::ElementType::Float64;
-  traits.shape_rule = ps::OperationShapeRule::Fixed;
-  traits.fixed_output_shape = shape;
+  traits.outputs[0].output_element_type = ps::ElementType::Float64;
+  traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
+  traits.outputs[0].fixed_output_shape = shape;
   PS_CHECK(
       registry
           ->register_operation(ps::OperationDefinition{
@@ -676,7 +679,7 @@ int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
   auto copied_traits = registry->find_traits("fixture.fixed_broadcast");
   PS_CHECK(copied_traits.ok());
   PS_CHECK(copied_traits.value().estimated_bytes == sizeof(double));
-  PS_CHECK(copied_traits.value().fixed_output_shape == shape);
+  PS_CHECK(copied_traits.value().outputs[0].fixed_output_shape == shape);
   PS_CHECK(registry->freeze().ok());
 
   ps::WorkflowDocument document;
@@ -946,8 +949,9 @@ int verify_cpp_invocation_prevalidation() {
   preserve_traits.input_schema.resize(1);
   preserve_traits.input_schema[0].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
-  preserve_traits.output_element_type = ElementType::Float64;
-  preserve_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  preserve_traits.outputs[0].output_element_type = ElementType::Float64;
+  preserve_traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
   PS_CHECK(
       registry
           .register_operation(OperationDefinition{
@@ -966,8 +970,8 @@ int verify_cpp_invocation_prevalidation() {
   match_traits.input_schema.resize(2);
   for (auto& port : match_traits.input_schema)
     port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
-  match_traits.output_element_type = ElementType::Float64;
-  match_traits.shape_rule = OperationShapeRule::MatchAllInputs;
+  match_traits.outputs[0].output_element_type = ElementType::Float64;
+  match_traits.outputs[0].shape_rule = OperationShapeRule::MatchAllInputs;
   PS_CHECK(
       registry
           .register_operation(OperationDefinition{
@@ -1398,7 +1402,7 @@ int main() {
     auto traits = registry.find_traits("fixture.double");
     PS_CHECK(traits.ok());
     PS_CHECK(traits.value().input_count == 1U);
-    PS_CHECK(traits.value().version == 8U);
+    PS_CHECK(traits.value().version == 9U);
     PS_CHECK(traits.value().parameter_schema.size() == 1U);
     PS_CHECK(traits.value().parameter_schema.front().key == "scale");
     PS_CHECK(traits.value().parameter_schema.front().type ==

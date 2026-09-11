@@ -68,22 +68,25 @@ See [Cache Model](Cache-Model.md) for generic snapshot identity and ownership.
 
 ## Staged C++ programs and current Run integration
 
-OperationTraits 8 distinguishes local `Atomic` and terminal `RequestRecord`,
+OperationTraits 9 distinguishes local `Atomic` and terminal `RequestRecord`,
 request-only failure delivery, dependency protocol version, continuation byte
 bound and finite stage bound. Exactly one synchronous callback or staged start
 function is registered. Staged programs require deterministic, side-effect-free
 behavior. Version 1 requires RegionRule::Dependency; it permits
 static Typed/Axes/repeated inference without imposing Whole demand. Compilation
-rejects every declared edge out of RequestRecord, including unused paths, and
-computes EffectiveAtomic across all input ancestors. Dependency plans retain
-unresolved input demands instead of inventing a rectangular approximation.
+checks executable edges reachable from requested results and side-effect roots.
+Each result computes EffectiveAtomic over its declared relevant input ancestry;
+RequestRecord cannot feed an active consumer. Excluded ports retain static
+metadata without executing the producer or creating a producer certificate.
+Dependency plans retain unresolved input demands instead of inventing a
+rectangular approximation.
 
 `start_dependency` copies validated metadata, parameters, original Q and the
 immutable input-bundle identity. Generic Atomic starts accept at most one sample;
 image-v2 starts accept at most one complete pixel. RequestRecord starts preserve
-the complete original query. PerAtomOutcome is reserved and rejected until an
-actual per-observation outcome protocol is implemented. Changing its flag cannot
-make a request-only callback batch-safe.
+the complete original query. ABI 9 adds the validated `start_joint` driver for
+PerAtomOutcome Atomic outputs. Singleton starts still accept only one observation;
+changing a failure flag does not authorize multiple observations in that session.
 
 A continuation is placement-constructed in its host allocation. `poll` consumes
 only supplied fragments and either returns exact associated Needs or a complete
@@ -142,7 +145,7 @@ compilation and before direct Empty-query state decisions.
 
 ## C staged programs
 
-`dependency_plugin_api.h` supplies the ABI-8 C equivalent of the staged
+`dependency_plugin_api.h` supplies the ABI-9 C equivalent of the staged
 protocol. A descriptor supplies exactly one `execute` or `dependency_program`.
 The loader copies and validates the bounded program table, retaining its library
 through every active state and callback. Host-owned state bytes are zeroed before
@@ -322,7 +325,8 @@ lease retirement for that execution order, not an optimal scheduling guarantee.
 `request` and `execute_fragments` claim one Atomic sample/full image pixel or one
 complete terminal Q. The key binds the captured bundle identity, plan/operation
 contract, node, geometry, exact query and resource policy. Sharing requires
-deterministic, side-effect-free implementations throughout the input ancestry.
+deterministic, side-effect-free implementations throughout the selected result's
+relevant input ancestry. Projected-out inputs do not affect sharing or caching.
 A side-effectful/non-deterministic Whole ancestor therefore prevents downstream
 sharing even when the local callback is pure. Dispatch never expands Q or
 batches RequestFailureOnly observations.
@@ -457,3 +461,82 @@ compute failure reject; repeated failed requests invoke compute again.
 [Fragment Atlas](Fragment-Atlas.md) documents the implemented exact atlas/mask
 directory and SDK MSL lookup helper, including native transport verification.
 C++ staged GPU execution is integrated. C staged GPU execution is also integrated; bounded discovery is implemented in [GPU Discovery](GPU-Discovery.md).
+
+## Independent Atomic outcomes (M4, #307)
+
+`OperationDefinition::start_joint` is optional; the singleton staged start remains
+required. `OperationTraits` declares joint contract version 1, shared continuation
+bytes and shared scratch bytes. The direct `DependencyJointSession` owns 2..64
+distinct named Atomic members, one observation per output, with equal static input
+metadata, parameters, snapshot and CPU backend. Shapes and observation coordinates
+may differ. Cancelled members are omitted from shared start and reported locally.
+The shared implementation must support the remaining nonempty subset.
+
+Each poll borrows the ready members' phase services simultaneously. It returns
+exactly one `DependencyAtomOutcome` per borrowed member, in any order: Needs,
+complete fragments or a local error. Missing, duplicate and unknown output IDs
+fail the group as protocol errors. Existing member sessions validate each phase's
+reads, associations, exact coverage, numeric contract and sticky service errors.
+Different sessions may nest on one thread; same-group recursive/concurrent calls
+are rejected without changing active state. No borrowed phase survives return.
+
+Each member receives only its own exact supply union and snapshot. Success and
+local errors are terminal once; waiting and terminal members are absent from
+subsequent polls. An enclosing execution error retires the group. The runtime's
+retry and grouping policy is a separate M5 responsibility. Shared state and scratch
+use the host allocator once; state respects the minimum requested state limit.
+Proxy overhead is separately allocated without changing contract identity. Work
+charges use one shared bounded counter, including host member validation.
+
+The C joint table uses the same member service implementation and terminal
+validator as singleton C programs. A shared monotonic handle source and separate
+member maps reject cross-member owner/output/checkpoint handles. Shared payload
+is destroyed exactly once even after failed start. The tests in
+`test_dependency_joint` cover both languages, malformed membership, local/ignored
+service failures, independent supplies, recursive calls, 64 members, cancellation
+before and after start, shared work/state limits and final failed-supply cleanup.
+
+## Ready Atomic execution groups (M5, #308)
+
+`ExecutionPlan::execution_groups()` lists optional CPU alternatives for the
+retained singleton steps of one node. `ExecutionOptions::enable_joint` can disable
+this physical optimization without changing semantic output or cache identity.
+The coordinator registers all requested roots and every newly declared input
+port demand before evaluating producers. It immediately chooses at most one
+known observation per compatible output. It never waits to assemble future
+requests and never combines different Runs into a joint callback.
+
+The existing explicit singleton DFS remains the input evaluator. Nested joint
+input evaluation uses bounded coordinator scopes, capped at 16; deeper groups
+continue through singleton DFS. Workers run finite callbacks only. Each scope
+restores its own frames, cancellation and failure route, including failed host
+metadata allocation. Identical ready input sets share transport; each member
+retains its own source records and role associations.
+
+Each observation claims its own flight and checks its own content proof. An
+optional sibling claim that exceeds admission is skipped. Members already owned
+by another Run are subscribed separately and waited for after owned work is
+performed. Cached members do not join computation. Successful members independently
+publish evidence, flights and eligible cache entries; local errors remain attached
+to their result. Completed sibling values remain accounted until their registered
+consumer takes them. Shared backing uses the existing storage domain and unique
+owner cache accounting. Fallback ancestry remains per member and prevents caching
+that member without contaminating an independent sibling.
+
+The group reserves shared continuation plus host member adapters once. Every
+poll admits each ready member's output/workspace, its actual supplied-input
+multiplier, and shared scratch. Joint work is capped by the remaining Run budget
+at each round. Insufficient joint admission or an unattributable execution error
+releases shared resources before retrying unfinished members once as singleton.
+Cancellation, invalidation and protocol errors never retry. All member leases
+are refreshed during upstream work; only loss of every active member cancels
+shared computation. A cancelled original requester cannot cancel another Run's
+still-active waiter.
+
+`test_joint_execution` runs root and consumer-driven grouping, C members with
+different shape/ROI, independent requests, mixed cache hits, budget and flight
+admission fallback, per-member errors, shared owner counting, external-waiter
+cancellation, proportional scratch, deep dependency chains and GPU fallback
+ancestry. `joint_groups`, `joint_polls` and `joint_fallbacks` report the physical
+path actually taken. Unrequested pure siblings have no registered demand and do
+not run.

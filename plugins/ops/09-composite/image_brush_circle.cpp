@@ -53,18 +53,19 @@ Result<Value> brush_circle(const OperationInvocation& invocation) {
 Status register_image_brush_circle(OperationRegistry* registry) {
   OperationDefinition brush;
   brush.key = "image.brush_circle";
-  brush.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  brush.traits.outputs[0].output_semantic_rule =
+      OperationSemanticRule::PreserveInput;
   brush.callback = brush_circle;
   auto& traits = brush.traits;
   traits.supports_gpu = traits.allows_cpu_fallback = true;
   traits.workspace_input_multiplier = 1;
   traits.input_count = 8;
-  traits.output_element_type = ElementType::Float32;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Elementwise;
-  traits.output_schema.kind = OperationPortKind::RgbaFloat32;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
+  traits.outputs[0].output_schema.kind = OperationPortKind::RgbaFloat32;
   const float maximum = std::numeric_limits<float>::max();
-  traits.input_schema = {traits.output_schema,
+  traits.input_schema = {traits.outputs[0].output_schema,
                          {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar, -maximum, maximum},
                          {OperationPortKind::Float32Scalar,

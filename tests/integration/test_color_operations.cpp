@@ -103,11 +103,11 @@ Result<ExecutionResult> producer_run(const std::string& key, const Value& input,
   if (!status.ok())
     return Result<ExecutionResult>(status);
   OperationTraits source;
-  source.output_element_type = input.descriptor().element_type;
-  source.shape_rule = OperationShapeRule::Fixed;
-  source.fixed_output_shape = input.descriptor().shape;
-  source.output_semantic_rule = OperationSemanticRule::Establish;
-  source.output_facets = input.facets();
+  source.outputs[0].output_element_type = input.descriptor().element_type;
+  source.outputs[0].shape_rule = OperationShapeRule::Fixed;
+  source.outputs[0].fixed_output_shape = input.descriptor().shape;
+  source.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+  source.outputs[0].output_facets = input.facets();
   source.estimated_bytes = input.storage()->capacity();
   status = registry->register_operation(
       {"fixture.view", source,

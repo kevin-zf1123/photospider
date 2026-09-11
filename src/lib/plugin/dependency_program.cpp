@@ -176,7 +176,11 @@ struct DependencySession::Impl {
   CancellationToken auxiliary_cancellation;
   mutable std::recursive_mutex mutex;
   bool active_call = false;
+  // Only private joint-owned proxies opt in. They never escape the group,
+  // whose mutex/active guard serializes every call throughout nested polls.
+  bool joint_serialized = false;
   std::uint64_t remaining_work = 0;
+  std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
   std::string certificate_identity, block_identity;
   std::shared_ptr<std::atomic<ErrorCode>> service_failure =
@@ -211,6 +215,11 @@ struct DependencySession::Impl {
     if (count > remaining_work)
       return record_failure(Status::failure(
           ErrorCode::ResourceExhausted, "dependency discovery fuel exhausted"));
+    if (shared_work) {
+      auto shared = shared_work(count);
+      if (!shared.ok())
+        return record_failure(shared);
+    }
     remaining_work -= count;
     return Status::success();
   }
@@ -283,9 +292,16 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     const std::string& operation, OperationTraits traits,
     const DependencyStart& start, const DependencyValidator& validate,
     DependencyRequest request, const BufferAllocator& allocator,
-    std::shared_ptr<const void> definition) {
-  if (!start || traits.dependency_version != 1 || !traits.continuation_bytes ||
-      !traits.maximum_dependency_stages || request.snapshot_identity.empty() ||
+    std::shared_ptr<const void> definition, std::uint64_t host_proxy_bytes,
+    std::function<Status(std::uint64_t)> shared_work, bool joint_serialized) {
+  auto selected = select_operation_output(traits, request.output_index);
+  if (!selected.ok())
+    return Result<std::shared_ptr<DependencySession>>(selected.status());
+  traits = selected.take_value();
+  if (!start || traits.outputs[0].dependency_version != 1 ||
+      !traits.outputs[0].continuation_bytes ||
+      !traits.outputs[0].maximum_dependency_stages ||
+      request.snapshot_identity.empty() ||
       request.snapshot_identity.size() > 4096)
     return Result<std::shared_ptr<DependencySession>>(
         invalid("invalid dependency start contract"));
@@ -296,9 +312,6 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
       (request.backend == Backend::Gpu && !traits.supports_gpu))
     return Result<std::shared_ptr<DependencySession>>(Status::failure(
         ErrorCode::BackendUnavailable, "dependency backend unavailable"));
-  if (traits.failure_delivery != FailureDelivery::RequestFailureOnly)
-    return Result<std::shared_ptr<DependencySession>>(
-        invalid("per-atom outcome protocol required"));
   auto resolved = resolve_operation_traits(traits, request.inputs.size(),
                                            request.parameters);
   if (!resolved.ok())
@@ -320,14 +333,15 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                                              request.limits.sets);
   if (!observations.ok())
     return Result<std::shared_ptr<DependencySession>>(observations.status());
-  if (traits.observation_kind == ObservationKind::Atomic) {
+  if (traits.outputs[0].observation_kind == ObservationKind::Atomic) {
     auto count = observations.value().element_count();
     if (!count.ok())
       return Result<std::shared_ptr<DependencySession>>(count.status());
     if (count.value() > 1)
       return Result<std::shared_ptr<DependencySession>>(
           invalid("request-only atomic start requires one observation"));
-  } else if (traits.observation_kind != ObservationKind::RequestRecord) {
+  } else if (traits.outputs[0].observation_kind !=
+             ObservationKind::RequestRecord) {
     return Result<std::shared_ptr<DependencySession>>(
         invalid("unknown observation kind"));
   }
@@ -337,17 +351,23 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
         ErrorCode::ResourceExhausted, "zero dependency execution limit"));
   auto impl = std::make_unique<Impl>();
   impl->definition = std::move(definition);
+  impl->shared_work = std::move(shared_work);
+  impl->joint_serialized = joint_serialized;
   impl->traits = resolved.take_value();
   impl->limits = request.limits;
   impl->auxiliary_cancellation = request.limits.sets.cancellation;
   impl->limits.sets.cancellation = request.cancellation;
   impl->remaining_work = request.limits.maximum_work;
-  impl->query = {
-      std::move(request.inputs),     output.take_value(),
-      std::move(request.parameters), std::move(request.outputs),
-      observations.take_value(),     std::move(request.snapshot_identity),
-      traits.observation_kind,       request.backend,
-      request.cancellation};
+  impl->query = {std::move(request.inputs),
+                 output.take_value(),
+                 std::move(request.parameters),
+                 std::move(request.outputs),
+                 observations.take_value(),
+                 std::move(request.snapshot_identity),
+                 traits.outputs[0].observation_kind,
+                 request.backend,
+                 request.cancellation,
+                 request.output_index};
   content_internal::Sha256 identity;
   identity.text("photospider.dependency-contract.v1");
   identity.text(operation);
@@ -420,7 +440,9 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
       return Result<std::shared_ptr<DependencySession>>(status);
     try {
       auto limit = allocator.limited(
-          std::min(traits.continuation_bytes, impl->limits.maximum_state_bytes),
+          std::min(host_proxy_bytes ? host_proxy_bytes
+                                    : traits.outputs[0].continuation_bytes,
+                   impl->limits.maximum_state_bytes),
           [failure = impl->service_failure](ErrorCode code) {
             auto expected = ErrorCode::Ok;
             failure->compare_exchange_strong(expected, code);
@@ -461,8 +483,9 @@ Result<DependencyProgress> DependencySession::poll(
     const BufferAllocator& allocator,
     const DependencyCheckpointServices& checkpoints,
     const DependencyBlockServices& blocks, const DependencyGpuServices& gpu) {
-  std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
-  if (!lock.owns_lock() || impl_->active_call)
+  std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::defer_lock);
+  const bool serialized = impl_->joint_serialized || lock.try_lock();
+  if (!serialized || impl_->active_call)
     return Result<DependencyProgress>(
         invalid("concurrent or reentrant dependency poll"));
   struct Active {
@@ -482,8 +505,9 @@ Result<DependencyProgress> DependencySession::poll(
   status = impl_->consume(1);
   if (!status.ok())
     return Result<DependencyProgress>(impl_->retire(status));
-  if (impl_->polls >= std::min(impl_->traits.maximum_dependency_stages,
-                               impl_->limits.maximum_stages))
+  if (impl_->polls >=
+      std::min(impl_->traits.outputs[0].maximum_dependency_stages,
+               impl_->limits.maximum_stages))
     return Result<DependencyProgress>(impl_->retire(Status::failure(
         ErrorCode::ResourceExhausted, "dependency phase limit")));
   try {
@@ -819,7 +843,7 @@ Result<DependencyProgress> DependencySession::poll(
               impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
         }
       };
-      phase.gpu_execute = [&](const ps_gpu_dispatch_v8* commands,
+      phase.gpu_execute = [&](const ps_gpu_dispatch_v9* commands,
                               std::uint32_t count) -> Status {
         try {
           auto status = native_allowed();
@@ -909,7 +933,8 @@ Result<DependencyProgress> DependencySession::poll(
       ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||
-          impl_->traits.output_schema.kind != OperationPortKind::Value) {
+          impl_->traits.outputs[0].output_schema.kind !=
+              OperationPortKind::Value) {
         environment.emplace();
         if (!environment->active())
           return Result<DependencyProgress>(impl_->retire(Status::failure(
@@ -997,6 +1022,12 @@ Result<DependencyProgress> DependencySession::poll(
       if (!projected.ok())
         return Result<DependencyProgress>(impl_->retire(projected.status()));
       for (const auto& fetch : projected.value()) {
+        const auto& allowed = impl_->traits.outputs[0].input_indices;
+        if (allowed && std::find(allowed->begin(), allowed->end(),
+                                 fetch.port) == allowed->end())
+          return Result<DependencyProgress>(impl_->retire(
+              invalid("dependency reads an excluded input port")));
+
         status = impl_->consume(fetch.tags.size() +
                                 fetch.samples.boxes().size() + 1);
         if (!status.ok())
@@ -1049,8 +1080,8 @@ Result<DependencyProgress> DependencySession::poll(
                           "dependency result differs from inferred output")));
     for (const auto& fragment : result.fragments()) {
       status = input_internal::validate_port_value(
-          impl_->traits.output_schema, fragment, ErrorCode::OperationFailed,
-          [&] { return impl_->stop().code; });
+          impl_->traits.outputs[0].output_schema, fragment,
+          ErrorCode::OperationFailed, [&] { return impl_->stop().code; });
       if (!status.ok())
         return Result<DependencyProgress>(impl_->retire(status));
     }

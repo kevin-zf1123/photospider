@@ -1,6 +1,7 @@
 #include "execution/dependency_records.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -20,13 +21,17 @@ Status invalid(const char* message) {
 struct Target {
   bool input = false;
   std::uint64_t id = 0;
+  std::uint32_t output_index = 0;
+  ValueRef result_ref() const noexcept { return {id, output_index}; }
   bool operator<(const Target& other) const noexcept {
-    return std::tie(input, id) < std::tie(other.input, other.id);
+    return std::tie(input, id, output_index) <
+           std::tie(other.input, other.id, other.output_index);
   }
 };
 Target target(const ExecutionPlan& plan, const PlanInput& input) {
   if (const auto* step = std::get_if<PlanStepInput>(&input))
-    return {false, plan.steps().at(step->step_index).node_id};
+    return {false, plan.steps().at(step->step_index).node_id,
+            plan.steps().at(step->step_index).output_index};
   return {true, plan.input_declarations()
                     .at(std::get<PlanWorkflowInput>(input).declaration_index)
                     .id};
@@ -43,7 +48,7 @@ OperationMetadata metadata(const ExecutionPlan& plan, const PlanInput& input) {
 }  // namespace
 struct ExecutionDependencies::Impl {
   struct Record {
-    std::uint64_t node;
+    ValueRef result;
     OperationMetadata output;
     Footprint samples;
     std::vector<Target> inputs;
@@ -65,7 +70,7 @@ struct ExecutionDependencies::Impl {
   };
   std::map<std::string, Source> sources;
   std::vector<Record> records;
-  std::map<std::uint64_t, std::size_t> grouped;
+  std::map<ValueRef, std::size_t> grouped;
   std::map<Target, std::vector<Subscriber>> subscriptions;
   std::map<std::string, Root> outputs;
   std::uint64_t entries = 0;
@@ -124,9 +129,9 @@ std::size_t ExecutionDependencies::record_count() const noexcept {
   return impl_ ? impl_->records.size() : 0;
 }
 Result<DependencyCertificate> ExecutionDependencies::certificate(
-    std::uint64_t node) const {
+    ValueRef result) const {
   if (impl_) {
-    const auto found = impl_->grouped.find(node);
+    const auto found = impl_->grouped.find(result);
     if (found != impl_->grouped.end() &&
         impl_->records[found->second].certificate)
       return Result<DependencyCertificate>(
@@ -192,7 +197,9 @@ Result<std::map<std::string, Footprint>> ExecutionDependencies::potential_dirty(
       break;
     const auto& delta = *next.value();
     const auto& record = impl_->records.at(delta.record);
-    status = propagate({false, record.node}, {0, 7, delta.changed, {}});
+    status =
+        propagate({false, record.result.node_id, record.result.output_index},
+                  {0, 7, delta.changed, {}});
     if (!status.ok())
       return Result<Answer>(queue.fail(status));
   }
@@ -295,7 +302,7 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
       const auto& input = record.inputs.at(need.port);
       if (input.input || need.samples.empty())
         continue;
-      auto producer = impl_->grouped.find(input.id);
+      auto producer = impl_->grouped.find(input.result_ref());
       if (producer == impl_->grouped.end())
         return Answer(invalid("missing upstream dependency record"));
       auto status = wanted.receive(producer->second, need.samples);
@@ -317,7 +324,7 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
         const auto cost = 1 + old.inputs.size();
         if (cost > available || cost > work)
           return Result<Impl::Record>(Status{ErrorCode::ResourceExhausted, {}});
-        return Result<Impl::Record>(Impl::Record{old.node,
+        return Result<Impl::Record>(Impl::Record{old.result,
                                                  old.output,
                                                  samples,
                                                  old.inputs,
@@ -343,7 +350,7 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
     auto certificate = old.certificate->restrict(observations.value(), bounded);
     if (!certificate.ok())
       return Result<Impl::Record>(certificate.status());
-    return Result<Impl::Record>(Impl::Record{old.node,
+    return Result<Impl::Record>(Impl::Record{old.result,
                                              old.output,
                                              samples,
                                              old.inputs,
@@ -375,7 +382,7 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
     for (std::uint32_t port = 0; port < record.inputs.size(); ++port)
       result->subscriptions[record.inputs[port]].push_back({id, port});
     if (!record.terminal)
-      result->grouped.emplace(record.node, id);
+      result->grouped.emplace(record.result, id);
     result->records.push_back(std::move(record));
   }
   for (const auto& query : outputs) {
@@ -404,7 +411,7 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
       const auto id = result->records.size();
       ids.emplace(original, id);
       if (!record.terminal)
-        result->grouped.emplace(record.node, id);
+        result->grouped.emplace(record.result, id);
       result->records.push_back(std::move(record));
       found = ids.find(original);
     }
@@ -526,9 +533,9 @@ Status DependencyRecords::append_record(
     certificate = rebound.take_value();
   }
   const bool terminal =
-      step.traits.observation_kind == ObservationKind::RequestRecord;
+      step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord;
   ExecutionDependencies::Impl::Record candidate{
-      step.node_id,
+      step.result_ref(),
       {step.output_descriptor, step.output_facets},
       std::move(outputs),
       {},
@@ -537,7 +544,7 @@ Status DependencyRecords::append_record(
       terminal};
   for (const auto& input : step.inputs)
     candidate.inputs.push_back(target(*plan_, input));
-  const auto found = impl_->grouped.find(step.node_id);
+  const auto found = impl_->grouped.find(step.result_ref());
   if (!terminal && found != impl_->grouped.end()) {
     const auto& old = impl_->records.at(found->second);
     if (old.samples.empty()) {
@@ -590,7 +597,7 @@ Status DependencyRecords::append_record(
     impl_->subscriptions[candidate.inputs[port]].push_back({id, port});
   impl_->records.push_back(std::move(candidate));
   if (!terminal)
-    impl_->grouped.emplace(step.node_id, id);
+    impl_->grouped.emplace(step.result_ref(), id);
   impl_->entries += weight;
   return Status::success();
 }
@@ -609,6 +616,10 @@ Status DependencyRecords::append_legacy(std::size_t index,
   std::vector<std::vector<std::uint64_t>> shapes;
   for (std::uint32_t port = 0; port < inputs.size(); ++port) {
     shapes.push_back(metadata(*plan_, step.inputs[port]).descriptor.shape);
+    const auto& included = step.traits.outputs[0].input_indices;
+    if (included &&
+        std::find(included->begin(), included->end(), port) == included->end())
+      continue;
     // Synchronous callbacks and their typed validation observe their complete
     // declared regional input. Descriptor evidence exists even for empty data.
     needs.push_back({port, 5, inputs[port], {}});
@@ -618,7 +629,7 @@ Status DependencyRecords::append_legacy(std::size_t index,
     needs.push_back({port, 8, empty.take_value(), {{1, 0}}});
   }
   if (step.whole_boundary ||
-      step.traits.observation_kind == ObservationKind::RequestRecord)
+      step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord)
     return append_record(index, outputs, {}, std::move(needs));
   auto observations = operation_observations(
       {step.output_descriptor, step.output_facets}, outputs, limits_);
@@ -634,7 +645,8 @@ Status DependencyRecords::append_legacy(std::size_t index,
   if (!status.ok())
     return status;
   auto certificate = DependencyCertificate::create(
-      identity_ + "/legacy/" + std::to_string(step.node_id),
+      identity_ + "/legacy/" + std::to_string(step.node_id) + "/" +
+          std::to_string(step.output_index),
       observations.take_value(), std::move(shapes), std::move(rows), limits_);
   if (!certificate.ok())
     return certificate.status();
@@ -645,11 +657,11 @@ Status DependencyRecords::append_empty(std::size_t index,
   const auto& step = plan_->steps().at(index);
   if (!outputs.empty())
     return invalid("nonempty Empty record");
-  if (impl_->grouped.count(step.node_id))
+  if (impl_->grouped.count(step.result_ref()))
     return Status::success();
   std::optional<DependencyCertificate> certificate;
   if (!step.whole_boundary &&
-      step.traits.observation_kind == ObservationKind::Atomic) {
+      step.traits.outputs[0].observation_kind == ObservationKind::Atomic) {
     std::vector<std::vector<std::uint64_t>> inputs;
     for (const auto& input : step.inputs)
       inputs.push_back(metadata(*plan_, input).descriptor.shape);
@@ -658,7 +670,8 @@ Status DependencyRecords::append_empty(std::size_t index,
     if (!observations.ok())
       return observations.status();
     auto empty = DependencyCertificate::create(
-        identity_ + "/empty/" + std::to_string(step.node_id),
+        identity_ + "/empty/" + std::to_string(step.node_id) + "/" +
+            std::to_string(step.output_index),
         observations.take_value(), std::move(inputs), {}, limits_);
     if (!empty.ok())
       return empty.status();
@@ -729,7 +742,7 @@ Status DependencyRecords::rollback(const Checkpoint& checkpoint,
     const auto& record = impl_->records[i];
     impl_->entries += ExecutionDependencies::Impl::weight(record);
     if (!record.terminal)
-      impl_->grouped.emplace(record.node, i);
+      impl_->grouped.emplace(record.result, i);
     for (std::uint32_t port = 0; port < record.inputs.size(); ++port)
       impl_->subscriptions[record.inputs[port]].push_back({i, port});
   }
@@ -748,14 +761,14 @@ Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
     return Answer(Status{ErrorCode::Cancelled, {}});
   if (index >= plan_->steps().size())
     return Answer(invalid("invalid direct record identity"));
-  const auto node = plan_->steps()[index].node_id;
+  const auto route = plan_->steps()[index].result_ref();
   const ExecutionDependencies::Impl::Record* selected = nullptr;
-  const auto grouped = impl_->grouped.find(node);
+  const auto grouped = impl_->grouped.find(route);
   if (grouped != impl_->grouped.end()) {
     selected = &impl_->records[grouped->second];
   } else {
     for (auto i = impl_->records.rbegin(); i != impl_->records.rend(); ++i)
-      if (i->node == node && i->samples == samples) {
+      if (i->result == route && i->samples == samples) {
         selected = &*i;
         break;
       }
@@ -790,6 +803,106 @@ Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
   result->upstream = std::move(upstream);
   imported_.insert(result->identity);
   return Answer(std::move(result));
+}
+Result<std::shared_ptr<const DependencyRecord>>
+DependencyRecords::rebind_cached(
+    const std::shared_ptr<const DependencyRecord>& root, std::size_t index,
+    const std::map<std::size_t, std::vector<PlanInput>>& routes,
+    std::uint64_t* work) const {
+  using Answer = Result<std::shared_ptr<const DependencyRecord>>;
+  if (!root || index >= plan_->steps().size())
+    return Answer(invalid("invalid cache root"));
+  struct Pending {
+    std::shared_ptr<const DependencyRecord> record;
+    std::size_t step;
+    bool ready;
+  };
+  using Key = std::pair<const DependencyRecord*, std::size_t>;
+  const auto ordered = [](const Key& a, const Key& b) {
+    return a.first == b.first
+               ? a.second < b.second
+               : std::less<const DependencyRecord*>{}(a.first, b.first);
+  };
+  std::map<Key, std::shared_ptr<const DependencyRecord>, decltype(ordered)>
+      rebound(ordered);
+  // The cached proof precharges each old owner once. A topology that splits
+  // one owner into several new steps would duplicate that storage uncharged.
+  std::map<const DependencyRecord*, std::size_t> assignments;
+  std::vector<Pending> pending{{root, index, false}};
+  while (!pending.empty()) {
+    if (limits_.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    if (!*work || pending.size() > limits_.maximum_boxes ||
+        rebound.size() >= limits_.maximum_boxes)
+      return Answer(Status{ErrorCode::ResourceExhausted, {}});
+    --*work;
+    const auto item = pending.back();
+    pending.pop_back();
+    const auto assigned = assignments.emplace(item.record.get(), item.step);
+    if (!assigned.second && assigned.first->second != item.step)
+      return Answer(invalid("cache owner maps to multiple results"));
+    const Key key{item.record.get(), item.step};
+    if (rebound.count(key))
+      continue;
+    const auto route = routes.find(item.record->step);
+    if (route == routes.end() || item.step >= plan_->steps().size())
+      return Answer(invalid("missing cache route"));
+    const auto& inputs = plan_->steps()[item.step].inputs;
+    if (inputs.size() != route->second.size())
+      return Answer(invalid("cache route arity"));
+    std::vector<Key> children;
+    for (const auto& child : item.record->upstream) {
+      if (!child || child->step >= item.record->step)
+        return Answer(invalid("non-topological cache record"));
+      std::optional<std::size_t> target;
+      for (std::size_t port = 0; port < inputs.size(); ++port) {
+        if (!*work)
+          return Answer(Status{ErrorCode::ResourceExhausted, {}});
+        --*work;
+        const auto* old = std::get_if<PlanStepInput>(&route->second[port]);
+        if (!old || old->step_index != child->step)
+          continue;
+        const auto* current = std::get_if<PlanStepInput>(&inputs[port]);
+        if (!current || current->step_index >= item.step ||
+            (target && *target != current->step_index))
+          return Answer(invalid("ambiguous cache route"));
+        target = current->step_index;
+      }
+      if (!target)
+        return Answer(invalid("unmatched cache producer"));
+      children.emplace_back(child.get(), *target);
+    }
+    if (!item.ready) {
+      if (pending.size() >= limits_.maximum_boxes ||
+          children.size() >= limits_.maximum_boxes - pending.size())
+        return Answer(Status{ErrorCode::ResourceExhausted, {}});
+      pending.push_back({item.record, item.step, true});
+      for (std::size_t i = 0; i < children.size(); ++i)
+        pending.push_back(
+            {item.record->upstream[i], children[i].second, false});
+      continue;
+    }
+    auto copy = std::shared_ptr<DependencyRecord>(new DependencyRecord(),
+                                                  DependencyRecord::retire);
+    copy->step = item.step;
+    copy->samples = item.record->samples;
+    copy->identity = observation_identity(item.step, copy->samples);
+    if (item.record->certificate) {
+      const auto& source = *item.record->certificate;
+      auto certificate = DependencyCertificate::create(
+          certificate_identity(item.step), source.coverage(),
+          source.input_shapes(), source.rows(), limits_);
+      if (!certificate.ok())
+        return Answer(certificate.status());
+      copy->certificate = certificate.take_value();
+    } else {
+      copy->manifest = item.record->manifest;
+    }
+    for (const auto& child : children)
+      copy->upstream.push_back(rebound.at(child));
+    rebound.emplace(key, std::move(copy));
+  }
+  return Answer(rebound.at({root.get(), index}));
 }
 Status DependencyRecords::import(
     const std::shared_ptr<const DependencyRecord>& root) {
@@ -839,6 +952,7 @@ std::string DependencyRecords::certificate_identity(std::size_t index) const {
   hash.text(plan_->digest().value);
   hash.text(identity_);
   hash.integer(plan_->steps().at(index).node_id);
+  hash.integer(plan_->steps().at(index).output_index);
   return hash.finish();
 }
 std::string DependencyRecords::observation_identity(
@@ -858,13 +972,13 @@ Status DependencyRecords::output(const std::string& name, std::size_t index,
                                  const Footprint& samples) {
   const auto& step = plan_->steps().at(index);
   std::optional<std::size_t> id;
-  const auto found = impl_->grouped.find(step.node_id);
+  const auto found = impl_->grouped.find(step.result_ref());
   if (found != impl_->grouped.end()) {
     id = found->second;
   } else {
     for (std::size_t i = impl_->records.size(); i; --i) {
       const auto& record = impl_->records[i - 1];
-      if (record.node == step.node_id && record.terminal &&
+      if (record.result == step.result_ref() && record.terminal &&
           record.samples == samples) {
         id = i - 1;
         break;

@@ -19,13 +19,14 @@ Status register_analysis_histogram_out_of_range(OperationRegistry* registry) {
     port.element_type_mask = 12;
     port.rank = 2;
   }
-  t.requires_dense_output = true;
-  t.shape_rule = OperationShapeRule::Axes;
-  t.region_rule = OperationRegionRule::Whole;
-  t.output_dtype_rule = OperationDtypeRule::Declared;
+  t.outputs[0].requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::Axes;
+  t.outputs[0].region_rule = OperationRegionRule::Whole;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Declared;
   t.parameter_schema = {real("range_min"), real("range_max")};
-  t.output_element_type = ElementType::Int64;
-  t.output_axes = {{OperationExtentSource::Constant, 2, "", 0, 0, 0}};
+  t.outputs[0].output_element_type = ElementType::Int64;
+  t.outputs[0].output_axes = {
+      {OperationExtentSource::Constant, 2, "", 0, 0, 0}};
   std::sort(t.parameter_schema.begin(), t.parameter_schema.end(),
             [](const auto& a, const auto& b) { return a.key < b.key; });
   definition.callback = [traits = t](const OperationInvocation& invocation) {

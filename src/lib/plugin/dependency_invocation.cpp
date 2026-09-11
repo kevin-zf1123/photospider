@@ -46,24 +46,52 @@ Result<Value> OperationRegistry::invoke_dependency_current(
     auto found = find_traits(key);
     if (!found.ok())
       return failure(found.status());
+    auto selected =
+        select_operation_output(found.value(), invocation.output_index);
+    if (!selected.ok())
+      return failure(selected.status());
     auto resolved = resolve_operation_traits(
-        found.value(), invocation.inputs.size(), invocation.parameters);
+        selected.value(),
+        invocation.input_metadata.empty() ? invocation.inputs.size()
+                                          : invocation.input_metadata.size(),
+        invocation.parameters);
     if (!resolved.ok())
       return failure(resolved.status());
     if (invocation.input_demands.size() != invocation.inputs.size())
       return failure(
           Status::failure(ErrorCode::InvalidArgument,
                           "dependency invocation demand count mismatch"));
-    std::vector<OperationMetadata> metadata;
+    auto metadata = invocation.input_metadata;
+    if (metadata.empty())
+      metadata.resize(invocation.inputs.size());
+    if (!invocation.input_indices.empty() &&
+        invocation.input_indices.size() != invocation.inputs.size())
+      return failure(
+          Status{ErrorCode::InvalidArgument, "input index count mismatch"});
+    std::vector<std::size_t> slots(metadata.size(), SIZE_MAX);
     for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
+      const auto port =
+          invocation.input_indices.empty() ? i : invocation.input_indices[i];
+      if (port >= metadata.size() || slots[port] != SIZE_MAX)
+        return failure(
+            Status{ErrorCode::InvalidArgument, "invalid input projection"});
+      slots[port] = i;
       const auto& input = invocation.inputs[i];
       if (!input.valid())
-        return failure(Status::failure(ErrorCode::InvalidArgument,
-                                       "invalid direct dependency input"));
+        return failure(Status{ErrorCode::InvalidArgument,
+                              "invalid direct dependency input"});
       auto view = input.view(invocation.input_demands[i]);
       if (!view.ok())
         return failure(view.status());
-      metadata.push_back({input.descriptor(), input.facets()});
+      if (invocation.input_metadata.empty())
+        metadata[port] = {input.descriptor(), input.facets()};
+      else if (input.descriptor().element_type !=
+                   metadata[port].descriptor.element_type ||
+               input.descriptor().shape != metadata[port].descriptor.shape ||
+               !input_internal::same_facets(input.facets(),
+                                            metadata[port].facets))
+        return failure(Status{ErrorCode::TypeMismatch,
+                              "projected input metadata mismatch"});
     }
     auto inferred = infer_operation_output(resolved.value(), metadata,
                                            invocation.parameters);
@@ -111,6 +139,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                 invocation.backend,
                                 invocation.cancellation,
                                 {}};
+      request.output_index = invocation.output_index;
       auto started =
           start_dependency(key, std::move(request), invocation.allocator);
       if (!started.ok())
@@ -140,13 +169,22 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                 return Result<DependencyResult>(joined.status());
               needed = std::move(joined);
             }
-          auto supplied =
-              invocation.inputs[port].view(invocation.input_demands[port]);
-          if (!supplied.ok())
-            return Result<DependencyResult>(supplied.status());
+          std::vector<Value> values;
+          if (!needed.value().empty()) {
+            if (slots[port] == SIZE_MAX)
+              return Result<DependencyResult>(
+                  Status{ErrorCode::InvalidArgument,
+                         "required input was not supplied"});
+            const auto slot = slots[port];
+            auto supplied =
+                invocation.inputs[slot].view(invocation.input_demands[slot]);
+            if (!supplied.ok())
+              return Result<DependencyResult>(supplied.status());
+            values.push_back(supplied.take_value());
+          }
           auto fragments = ValueFragments::create(
               metadata[port].descriptor, metadata[port].facets,
-              needed.take_value(), {supplied.take_value()});
+              needed.take_value(), std::move(values));
           if (!fragments.ok())
             return Result<DependencyResult>(fragments.status());
           ready.push_back(fragments.take_value());
@@ -156,7 +194,8 @@ Result<Value> OperationRegistry::invoke_dependency_current(
           return Result<DependencyResult>(status);
       }
     };
-    if (resolved.value().observation_kind == ObservationKind::RequestRecord) {
+    if (resolved.value().outputs[0].observation_kind ==
+        ObservationKind::RequestRecord) {
       auto terminal = run(samples.value());
       if (!terminal.ok())
         return failure(terminal.status());

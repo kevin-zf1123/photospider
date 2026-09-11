@@ -76,3 +76,9 @@ Lab转换中 `f(t)=cbrt(t)` 当 `t>(6/29)^3`，否则 `t/(3(6/29)^2)+4/29`；`L*
 [^exr]: OpenEXR，[*Technical Introduction: Premultiplied vs. Un-Premultiplied Color Channels*](https://openexr.com/en/latest/TechnicalIntroduction.html#premultiplied-vs-un-premultiplied-color-channels)，滚动官方文档；零alpha发光颜色。
 
 Softproof接口参考：Little CMS，[*2.18 API*](https://www.littlecms.com/LittleCMS2.18%20API.pdf)，文档版本2.18、日期未核验；三profile、proofing intent与gamut checking。
+
+## 已实现的独立 420 平面
+
+`color.rgb_to_ycbcr420` 已实现 `y/cb/cr` 命名 HW 输出、BT.709 transfer/matrix、
+奇数边缘有效均值和可选 Atomic 联合执行。当前参数、元数据、精确读取及运行验证见
+[多输出算子](../../kernel-architecture/zh/Multi-Output-Operations.zh.md)。

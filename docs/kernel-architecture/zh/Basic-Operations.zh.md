@@ -22,7 +22,7 @@ dtype；二元数值、mask、image 还要求形状匹配。没有隐式广播�
 | `field.box_mean` | 场输出同 dtype/解释；Int64 radius 1..64，示例 1。 |
 | `field.gaussian_blur` | 同 box，增加有限 Float64 sigma 0..64，示例 1；零表示 identity。 |
 | `mask.dilate/erode` | coverage 输入输出；Int64 radius 0..64、String footprint=square/disk，示例 1、square。 |
-| `field.convolve/correlate` | 场及同 dtype 普通 `[Kh,Kw]` 核，输出普通场；非负 Int64 anchor_y/x，位于核内且 <=2^53-1；String boundary=clamp/zero。奇数核同样显式给 anchor。 |
+| `field.convolve/correlate` | 场及同 dtype 普通 `[Kh,Kw]` 核，输出普通场；非负 Int64 anchor_y/x，位于核内（相关另限制 <=2^53-1）；String boundary=clamp/zero。奇数核同样显式给 anchor。 |
 | `analysis.histogram` | 场到 Int64 `[bins]`；Int64 bins 1..1048576、有限 Float64 range_min<range_max，默认 256、0、1。 |
 | `analysis.histogram_out_of_range` | 场到 Int64 `[2]`，顺序 underflow、overflow；有限 Float64 range_min<range_max。 |
 | `grade.levels` | 场到同 dtype 普通场；有限 Float64 black<white、gamma>0、out_min<=out_max，默认 0、1、1、0、1。 |
@@ -65,8 +65,9 @@ min/max 的零 tie 选负零/正零，abs 把负零变正零。坐标为像素�
 ## 执行、错误与资源
 
 Elementwise：numeric min/max/abs、levels、smoothstep、mask Boolean、image mix。
-Halo：声明正半径的 box/Gaussian。Whole：曲线、field LUT、卷积/相关、直方图、
-形态学和无输入生成器。Whole 完整物化必须满足预算。静态 shape 改变需要重新编译，
+Halo：声明正半径的 box/Gaussian。Whole：曲线、field LUT、相关、直方图、
+形态学和无输入生成器。卷积使用精确分阶段 kernel/邻域读取，详见
+[多输出算子](Multi-Output-Operations.zh.md)。Whole 完整物化必须满足预算。静态 shape 改变需要重新编译，
 控制点、表和核样本是每次执行绑定。
 
 输入支持 byte offset、负/零 stride 和非零 storage origin。输出与 scratch 使用宿主

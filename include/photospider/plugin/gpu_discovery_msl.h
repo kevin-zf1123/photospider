@@ -9,7 +9,7 @@
  * writes outside the table. No numerical output may be published on overflow.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
-#define PS_GPU_DISCOVERY_MSL_V8                                           \
+#define PS_GPU_DISCOVERY_MSL_V9                                           \
   "#include <metal_stdlib>\nusing namespace metal;\n"                     \
   "bool ps_discovery_emit(device atomic_uint* table, uint capacity,"      \
   " uint port, uint roles, uint rank, thread const ulong* offsets,"       \

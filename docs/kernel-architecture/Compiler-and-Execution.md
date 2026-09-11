@@ -119,7 +119,7 @@ and [S4 Workflow](S4-Workflow.md).
 
 Every operation result is checked against the planned element type and shape.
 Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v8 input views receive that exact
+transfer or callback entry; callbacks and ABI v9 input views receive that exact
 demand. Image and regional-source Runs lazily materialize only demanded tiles;
 Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
 The execution context must use the same frozen registry that produced the
@@ -132,8 +132,8 @@ publication linearization point. A late cancelled/stale local result and its
 diagnostics are discarded, and all Values and resource owners retire without
 entering the caller-visible `ExecutionResult`.
 
-An operation ABI v8 callback can distinguish ordinary failure from backend
-unavailability. ABI 8 additionally provides host-owned synchronous native services. The
+An operation ABI v9 callback can distinguish ordinary failure from backend
+unavailability. ABI 9 additionally provides host-owned synchronous native services. The
 executor retries on CPU only when an optional GPU attempt returns the explicit
 backend-unavailable result without invoking its output sink and copied traits
 allow fallback. An output-publication attempt makes backend unavailability
@@ -229,8 +229,77 @@ LUT and component families now use these contracts. The self-contained
 
 ## G4 staged execution
 
-The current package 0.8/ABI and traits 8 adds dependency plan templates and the
+The current package 0.9/ABI and traits 9 adds dependency plan templates and the
 C++ start/poll/supply protocol. Whole inference rules remain available for
 synchronous implementations; dependency implementations can discover exact
 per-port fragments at run time. See [Dependency data and execution](Dependency-Data.md)
 for implemented behavior and the remaining integration work.
+
+## Independent result lowering
+
+M2 (#305) gives each SemanticNode an ordered `outputs` sequence of independently
+inferred descriptor/facets/EffectiveAtomic records. Workflow producer port names
+resolve to `ValueRef{node_id, output_index}`; a terminal RequestRecord port cannot
+feed a consumer, while an Atomic sibling remains composable. A PlanStep selects
+one original output index and carries a single projected output contract. Pure
+unreferenced result steps are removed; side-effecting singleton roots remain.
+Each retained producer reference names its selected physical step, so different
+shapes and types never share a node-only metadata slot. The semantic and physical
+v9 identities encode ordered outputs and selected result indices respectively.
+Pruning preserves the graph-selected staged execution family and its established
+Whole streaming behavior. Runtime routing and optional joint execution are implemented by #306–#308.
+
+## Independent result execution
+
+M3 (#306) routes certificates, subscriptions, dirty propagation, frozen snapshot
+results, flights, Whole reuse and diagnostics by `ValueRef`. Public certificate
+lookup takes a result reference; timing and backend records identify the selected
+result. Content witnesses encode the selected named contract without a global
+node ID. Static parameters remain complete; sample evidence follows actual reads.
+
+Synchronous callbacks receive only the selected output's declared inputs.
+`input_indices` preserves original port numbers and `input_metadata` describes
+the complete static input signature. The C value view exposes `input_index`.
+An explicit empty projection executes without fetching any input samples; absent
+projection retains all-input behavior. Staged reads outside the selected input
+projection fail validation. Empty input sets never evaluate their producers.
+
+`test_multi_output_execution` exercises independent sibling caches, certificates,
+dirty subscriptions, frozen snapshots, named C outputs and an unused failing
+producer. Existing single-output fallback messages retain their spelling; named
+outputs add the port name to identify the failing result.
+
+## Atomic execution groups
+
+The plan exposes optional CPU execution groups for distinct PerAtomOutcome
+results of the same semantic node. The coordinator registers all known root
+and newly discovered input demands before selecting ready observations. It
+immediately groups one observation per output without waiting for future work
+or combining Runs. Shapes and ROIs may differ. `enable_joint=false`, fewer than
+two available members, unsupported implementation or insufficient shared
+reservation selects singleton execution. Per-observation flights still share
+work across Runs, including mixed cache hits and externally owned flights.
+
+C/C++ joint polls validate independent Needs/Complete/error outcomes. Identical
+reads may share transport; each member retains its own associations and error.
+Successful members publish to their own flights/cache. Unattributable execution
+failure releases shared temporary resources and retries unfinished members
+once through singleton; cancellation, stale state and malformed protocol do
+not retry. Shared work and backing owners are charged once. A group's shared
+cancellation fires only after all remaining observations lose their waiters.
+Upstream errors retire just their member. RequestRecord stays independent.
+
+`test_dependency_joint`, `test_joint_execution` and `test_multi_output_ops`
+exercise the protocol, scheduler and real compositions. The installed
+[multi-output example](../../examples/multi_output_workflow/README.md) prints
+actual per-result attempts and source reads for both execution modes.
+
+Staged completed-content templates hash the selected output contract, static
+parameters and observable input metadata/producer contracts, without plan,
+graph, node or physical step IDs. Actual sample bits follow the retained
+Data/Control/Validation witness. Public binding names identify source routes.
+On a cross-plan hit, each record and certificate is rebound along corresponding
+input ports before publication; ambiguous topology is an optional cache miss.
+Flight identity remains plan/snapshot-specific. Template hashing and rebinding
+consume the optional cache-work budget. Node/declaration renumbering, sibling
+pruning and a multi-level cached producer DAG have direct regressions.

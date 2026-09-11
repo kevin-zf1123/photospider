@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -73,6 +74,14 @@ class DependencyRecords final {
       std::size_t step, const Footprint& samples,
       std::vector<std::shared_ptr<const DependencyRecord>> upstream);
   Status import(const std::shared_ptr<const DependencyRecord>& record);
+  /** @brief Rebinds a verified content witness through corresponding ports.
+   * Returns an optional cache miss for ambiguous/nonmatching graph routes.
+   * Copies no pixel owners and never mutates this Run's records on failure.
+   */
+  Result<std::shared_ptr<const DependencyRecord>> rebind_cached(
+      const std::shared_ptr<const DependencyRecord>& record, std::size_t step,
+      const std::map<std::size_t, std::vector<PlanInput>>& routes,
+      std::uint64_t* remaining_work) const;
   Status output(const std::string& name, std::size_t step,
                 const Footprint& samples);
   ExecutionDependencies finish() &&;

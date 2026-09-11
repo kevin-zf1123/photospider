@@ -122,8 +122,8 @@ int main() {
   OperationTraits unary;
   unary.input_count = 1;
   unary.input_schema.resize(1);
-  unary.shape_rule = OperationShapeRule::PreserveFirstInput;
-  unary.region_rule = OperationRegionRule::Elementwise;
+  unary.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  unary.outputs[0].region_rule = OperationRegionRule::Elementwise;
   PS_CHECK(registry
                ->register_operation(
                    {"left", unary,

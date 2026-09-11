@@ -21,16 +21,33 @@ namespace ps {
  */
 using ParameterValue = std::variant<std::int64_t, double, bool, std::string>;
 
+/** @brief One document-local result, independent of its physical step index.
+ * @note Declaration-order output indices are resolved from stable port names.
+ */
+struct PHOTOSPIDER_API ValueRef final {
+  std::uint64_t node_id = 0;
+  std::uint32_t output_index = 0;
+  bool operator==(const ValueRef& other) const noexcept {
+    return node_id == other.node_id && output_index == other.output_index;
+  }
+  bool operator!=(const ValueRef& other) const noexcept {
+    return !(*this == other);
+  }
+  bool operator<(const ValueRef& other) const noexcept {
+    return node_id < other.node_id ||
+           (node_id == other.node_id && output_index < other.output_index);
+  }
+};
+
 /**
  * @brief One directed input edge from a producer node.
  *
- * @note The current compiler models one output Value per node; `source_port`
- * remains explicit for document evolution and must currently be `value`.
+ * @note Each edge selects a declared producer output by its exact port name.
  */
 struct PHOTOSPIDER_API WorkflowNodeOutput final {
   /** @brief Nonzero producer node id. */
   std::uint64_t source_node = 0;
-  /** @brief Producer output port, currently `value`. */
+  /** @brief Declared producer output port; singleton default is `value`. */
   std::string source_port = "value";
 };
 
@@ -95,7 +112,8 @@ struct PHOTOSPIDER_API WorkflowOutput final {
   std::string name;
   /** @brief Nonzero source node id. */
   std::uint64_t node_id = 0;
-  /** @brief Selected node output port, currently `value`. */
+  /** @brief Selected declared node output port; singleton default is `value`.
+   */
   std::string port = "value";
 };
 

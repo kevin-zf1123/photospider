@@ -152,6 +152,8 @@ struct PHOTOSPIDER_API ExecutionOptions final {
    * that Run.
    */
   std::uint64_t maximum_dependency_cache_work = 1048576;
+  /** @brief Group already-ready Atomic outputs with optional CPU joint code. */
+  bool enable_joint = true;
 };
 
 /**
@@ -161,14 +163,14 @@ struct PHOTOSPIDER_API ExecutionOptions final {
  */
 struct PHOTOSPIDER_API OperationTiming final {
   /** @brief Stable source node id. */
-  std::uint64_t node_id = 0;
+  ValueRef output;
   /** @brief Attempted local physical backend. */
   Backend backend = Backend::Cpu;
   /** @brief Monotonic callback duration in microseconds. */
   std::uint64_t duration_us = 0;
   /** @brief Attempt outcome category. */
   ErrorCode outcome = ErrorCode::Ok;
-  /** @brief Number of attempts aggregated for this node/backend in regional
+  /** @brief Number of attempts aggregated for this result/backend in regional
    * execution. */
   std::uint64_t invocation_count = 1;
   /** @brief Total logical output elements computed by these attempts. */
@@ -196,13 +198,15 @@ struct ResultCacheStatistics final {
  * @note Diagnostics are observations, not verdicts, attestations, or receipts.
  */
 struct PHOTOSPIDER_API ExecutionDiagnostics final {
+  /** @brief Actual shared starts, polls and singleton group fallbacks. */
+  std::uint64_t joint_groups = 0, joint_polls = 0, joint_fallbacks = 0;
   /** @brief Total execute call duration in microseconds. */
   std::uint64_t execute_us = 0;
-  /** @brief Selected successful implementation backend per source node.
+  /** @brief Selected successful implementation backend per source result.
    * @note A staged GPU path may reuse completed state or resolve a constant
    * without new native work. Dispatch/submission fields report actual work.
    */
-  std::map<std::uint64_t, Backend> selected_backends;
+  std::map<ValueRef, Backend> selected_backends;
   /** @brief Number of explicit cross-backend input transfers. */
   std::uint64_t transfer_count = 0;
   /** @brief Sum of copied input bytes for explicit transfers. */

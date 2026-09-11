@@ -1,7 +1,7 @@
 # 通道、alpha 与颜色算子
 
 默认 registry 提供十个 CPU Whole 算子，使用 [ADR 0020](../../adr/0020-composable-operation-foundations.md)
-中的共享 ABI/Traits 8 描述推断，覆盖公开 compile/execute、直接调用及 C contract 加载。
+中的共享 ABI/Traits 9 描述推断，覆盖公开 compile/execute、直接调用及 C contract 加载。
 [英文实现说明](../Channel-and-Color-Operations.md) 为权威来源。输出为宿主分配的
 非空 packed Value；输入按 byte offset、storage origin、signed/zero strides 读取，
 不要求地址对齐。无隐式 resize、dtype 转换或 GPU 实现。

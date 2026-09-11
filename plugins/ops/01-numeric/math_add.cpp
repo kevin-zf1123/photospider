@@ -10,24 +10,27 @@ using namespace core_ops;  // NOLINT(build/namespaces)
 }  // namespace
 Status register_math_add(OperationRegistry* registry) {
   return registry->register_operation(OperationDefinition{
-      "math.add",
-      float64_inputs(OperationTraits{2U,
-                                     true,
-                                     true,
-                                     true,
-                                     simulated_gpu,
-                                     simulated_gpu,
-                                     sizeof(double),
-                                     8U,
-                                     true,
-                                     ElementType::Float64,
-                                     OperationShapeRule::MatchAllInputs,
-                                     OperationRegionRule::Elementwise,
-                                     0U,
-                                     {},
-                                     {},
-                                     std::vector<OperationPortConstraint>(2),
-                                     {/* output Value */}}),
+      "math.add", float64_inputs([&] {
+        OperationTraits t;
+        t.input_count = 2U;
+        t.deterministic = true;
+        t.side_effect_free = true;
+        t.supports_cpu = true;
+        t.supports_gpu = simulated_gpu;
+        t.allows_cpu_fallback = simulated_gpu;
+        t.estimated_bytes = sizeof(double);
+        t.version = 9U;
+        t.cacheable = true;
+        t.outputs[0].output_element_type = ElementType::Float64;
+        t.outputs[0].shape_rule = OperationShapeRule::MatchAllInputs;
+        t.outputs[0].region_rule = OperationRegionRule::Elementwise;
+        t.outputs[0].halo_radius = 0U;
+        t.parameter_schema = {};
+        t.outputs[0].fixed_output_shape = {};
+        t.input_schema = std::vector<OperationPortConstraint>(2);
+        t.outputs[0].output_schema = {/* output Value */};
+        return t;
+      }()),
       [](const OperationInvocation& invocation) -> Result<Value> {
         auto left = invocation.inputs[0].as_float64();
         auto right = invocation.inputs[1].as_float64();

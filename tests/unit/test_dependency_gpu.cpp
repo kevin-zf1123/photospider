@@ -56,13 +56,13 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
   auto& traits = definition.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.output_element_type = ElementType::Float32;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
   traits.supports_gpu = true;
-  traits.continuation_bytes = sizeof(State);
-  traits.maximum_dependency_stages = 2;
+  traits.outputs[0].continuation_bytes = sizeof(State);
+  traits.outputs[0].maximum_dependency_stages = 2;
   definition.start_dependency = [mode](const DependencyQuery&,
                                        const BufferAllocator& allocator) {
     return DependencyContinuation::make<State>(allocator, mode);
@@ -101,7 +101,7 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
     return Result<std::uint64_t>(
         Status{ErrorCode::InvalidArgument, "mock buffer failure"});
   };
-  gpu.execute = [](const ps_gpu_dispatch_v8*, std::uint32_t) {
+  gpu.execute = [](const ps_gpu_dispatch_v9*, std::uint32_t) {
     return Status{ErrorCode::OperationFailed, "mock execute failure"};
   };
   if (mode == 6)

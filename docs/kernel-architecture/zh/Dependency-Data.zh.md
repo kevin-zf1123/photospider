@@ -44,16 +44,18 @@ role/tag 隔离、迟到 dirty、dtype/stride/owner 上限和快照 COW。通用
 
 ## C++ 分阶段程序与当前 Run 集成
 
-OperationTraits 8 区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议
+OperationTraits 9 区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议
 版本、continuation 字节上限与有限阶段数。注册时必须选择一个同步 callback 或一个
 分阶段 start。分阶段程序要求 deterministic、side-effect-free。协议版本 1 使用 RegionRule::Dependency，允许 Typed/Axes/重复输入
-静态推断，无需强制 Whole demand。编译器拒绝 RequestRecord 的全部出边，包括未使用
-路径，并沿全部输入祖先计算 EffectiveAtomic。依赖计划保留未解析需求，不生成矩形近似。
+静态推断，无需强制 Whole demand。编译器检查所请求结果与副作用根可达的执行边，
+每个结果仅沿所声明的相关输入祖先计算 EffectiveAtomic。RequestRecord 不得供给
+活跃消费者；排除的端口仅保留静态 metadata，不执行生产者，也不创建生产者证书。依赖计划保留未解析需求，不生成矩形近似。
 
 `start_dependency` 复制校验后的 metadata、参数、original Q 与不可变输入 bundle
 identity。Generic Atomic 每次最多一个 sample，image v2 每次最多一个完整像素。
-RequestRecord 保留完整 Q。PerAtomOutcome 目前保留但拒绝注册，必须实现逐观察 outcome
-交付后才能启用；修改标志不能使请求级失败 callback 获得合批能力。
+RequestRecord 保留完整 Q。ABI 9 的 `start_joint` 支持 PerAtomOutcome，逐成员验证
+outcome。Singleton start 仍然每次只接受一个 observation；修改失败标志不能使
+该 session 接受多个 observation。
 
 Continuation 在宿主分配中原位构造。`poll` 只消费已提供 fragment，返回逐输出关联的
 Need 或完整结果。`supply` 的每个端口必须精确匹配取数并集及 bundle identity。
@@ -94,7 +96,7 @@ frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据�
 
 ## C 分阶段程序
 
-`dependency_plugin_api.h` 提供 ABI 8 的 C 分阶段协议。descriptor 必须恰好提供
+`dependency_plugin_api.h` 提供 ABI 9 的 C 分阶段协议。descriptor 必须恰好提供
 一个 `execute` 或 `dependency_program`。loader 复制并校验有界程序表，并在
 状态和回调存续期间保留动态库。宿主在 `start` 前将状态字节清零；只要进入
 start，destroy 就恰好执行一次，包括 start 失败。Empty 仍运行纯元数据校验，
@@ -215,7 +217,8 @@ continuation。恰好 4 MiB 在 A 的 callback 前拒绝；4 MiB 加该 state �
 
 `request` 和 `execute_fragments` 认领单个 Atomic 样本/完整图像像素，或完整 terminal Q。
 Key 绑定捕获的 bundle 身份、plan/operation 契约、节点、geometry、精确 query 和资源
-策略。共享要求全部输入祖先的实现都 deterministic 且 side-effect-free。因此，即使
+策略。共享要求所选结果相关输入祖先的实现都 deterministic 且 side-effect-free。
+排除的输入不影响共享或缓存资格。因此，即使
 本地 callback 是纯函数，带副作用或非确定性的 Whole 祖先也会阻止下游共享。Dispatch
 不扩大 Q，不合批 RequestFailureOnly 观察。
 
@@ -333,3 +336,59 @@ GPU discovery](GPU-Discovery.zh.md) 已实现。
 
 同步 GPU producer 也通过既有 native worker 执行，实际容量与 CPU 回退见
 [Fragment Atlas](Fragment-Atlas.zh.md)。
+
+## 独立 Atomic outcome（M4，#307）
+
+`OperationDefinition::start_joint` 为可选入口，singleton staged start 仍然必需。
+traits 声明联合契约版本 1、共享 continuation 与 scratch 字节数。直接调用
+`DependencyJointSession` 拥有 2..64 个不同输出成员，每输出一个 Atomic observation；
+静态输入元数据、参数、快照及 CPU 后端相同，shape 和坐标可以不同。已取消成员
+不传入共享 start，并单独报告取消；共享实现须支持剩余非空子集。
+
+每轮同时借用就绪成员的 phase 服务，返回每成员恰好一个 `DependencyAtomOutcome`：
+Needs、完整 fragments 或局部错误，顺序任意。缺失、重复和未知输出 ID 属于组协议
+错误。现有成员 session 分别验证读取、关联、coverage、数值契约及忽略的服务错误。
+同线程允许嵌套不同 session；同组并发或重入调用被拒绝且不破坏正在执行的状态。
+借用 phase 在返回时失效。
+
+成员只接收自己的精确 supply union 和快照；成功或局部错误仅终结该成员一次。
+后续 poll 不包含等待或终结成员。外层执行错误终结组，调度和回退策略由 M5 实现。
+共享 state/scratch 通过宿主 allocator 计费一次；state 受请求上限最小值约束。
+Proxy 单独分配且不修改契约身份。共享 work 计数包含宿主成员验证。
+
+C joint table 复用 singleton 的服务及完成验证器。共享单调句柄源与独立成员映射
+拒绝跨成员 owner/output/checkpoint 句柄。共享 payload 在进入 start 后恰好析构
+一次，包括启动失败。`test_dependency_joint` 覆盖双语言成员协议、局部和忽略的
+服务错误、独立供给、重入、64 成员、启动前后取消、共享 work/state 上限及供给
+失败后的最终回收。
+
+## 就绪 Atomic 执行组（M5，#308）
+
+`ExecutionPlan::execution_groups()` 列出同节点保留 singleton step 的可选 CPU
+执行组。`ExecutionOptions::enable_joint` 可以禁用这一物理优化，不改变语义输出
+或缓存身份。协调器在求生产者之前登记所有请求根及新声明的各输入端口需求，立即
+从兼容输出各取至多一个已知 observation。不等待未来请求，不跨 Run 合组。
+
+现有显式 singleton DFS 继续负责输入求值。嵌套联合输入求值使用有界协调器作用域，
+最多 16 层，更深处继续 singleton DFS。Worker 仅运行有限回调。每个作用域恢复自己
+的 frame、取消和失败路由，包括宿主元数据分配失败路径。相同就绪输入集合共享传输，
+各成员保留自己的源记录及角色关联。
+
+每个 observation 分别 claim flight 和检查内容证明。可选兄弟成员超过 admission
+时跳过；其他 Run 拥有的成员单独订阅，在本地拥有的计算完成后等待。缓存命中成员
+不参与计算。成功成员分别发布证据、flight 和符合条件的缓存；局部错误仍归属自己。
+已完成兄弟值保持计费，直至登记的消费者取用。共享 backing 使用既有 storage domain
+及唯一 owner 缓存计费。Fallback ancestry 按成员传播，只阻止该成员进入缓存。
+
+组仅分配一次共享 continuation 及宿主成员适配器。每轮 admission 包含就绪成员的
+输出、workspace、实际已供给输入的 multiplier 及共享 scratch。每轮 work 受 Run
+剩余预算限制。联合 admission 不足或无法归属成员的执行错误，会先释放共享资源，
+再对未完成成员各回退 singleton 一次。取消、失效和协议错误不重试。上游求值期间
+持续刷新所有成员 lease；全部成员均无活跃 waiter 时才取消共享计算。原请求取消
+不会取消另一个 Run 仍然活跃的 waiter。
+
+`test_joint_execution` 实际运行根与消费者驱动的分组、不同 shape/ROI 的 C 成员、
+独立请求、混合 cache hit、预算与 flight admission 回退、成员局部错误、共享 owner、
+外部 waiter 取消、输入比例 scratch、深依赖链及 GPU fallback ancestry。
+`joint_groups`、`joint_polls`、`joint_fallbacks` 报告实际物理路径。未请求的纯兄弟
+端口没有登记需求，因此不会执行。

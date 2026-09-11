@@ -45,14 +45,14 @@ struct Fixture {
     traits.input_schema = {{OperationPortKind::Float32Scalar,
                             -std::numeric_limits<float>::max(),
                             std::numeric_limits<float>::max()}};
-    traits.output_element_type = ElementType::Float32;
+    traits.outputs[0].output_element_type = ElementType::Float32;
     traits.estimated_bytes = 16;
     traits.parameter_schema = {
         {"layout", OperationParameterType::Int64, true, true, 0, 4},
         {"mode", OperationParameterType::Int64, true, true, 0, 3}};
     if (semantics) {
-      traits.output_semantic_rule = OperationSemanticRule::Establish;
-      traits.output_facets = {
+      traits.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+      traits.outputs[0].output_facets = {
           encode_semantic(scalar_semantic(semantics == 2)).take_value()};
     }
     s4_fixture::require(
@@ -95,7 +95,7 @@ struct Fixture {
                    auto bytes = allocation.take_value();
                    std::memset(bytes.data(), 0x7f, bytes.size());
                    std::memcpy(bytes.data() + addresses[layout], &output, 4);
-                   auto facets = traits.output_facets;
+                   auto facets = traits.outputs[0].output_facets;
                    if (mode == 3)
                      facets = {{"vendor.scalar", 1, {42}}};
                    return Value::from_storage(
@@ -343,15 +343,16 @@ int metadata_rejection(const std::shared_ptr<OperationRegistry>& base) {
   for (unsigned kind = 0; kind < 6; ++kind) {
     auto registry = std::make_shared<OperationRegistry>();
     OperationTraits producer;
-    producer.output_element_type =
+    producer.outputs[0].output_element_type =
         kind == 0 ? ElementType::Float64 : ElementType::Float32;
     if (kind == 1) {
-      producer.shape_rule = OperationShapeRule::Fixed;
-      producer.fixed_output_shape = {2};
+      producer.outputs[0].shape_rule = OperationShapeRule::Fixed;
+      producer.outputs[0].fixed_output_shape = {2};
     }
     if (kind >= 2) {
-      producer.output_semantic_rule = OperationSemanticRule::Establish;
-      producer.output_facets =
+      producer.outputs[0].output_semantic_rule =
+          OperationSemanticRule::Establish;
+      producer.outputs[0].output_facets =
           kind == 5 ? std::vector<ValueFacet>{{"vendor.scalar", 1, {}}}
                     : std::vector<ValueFacet>{
                           encode_semantic(scalar_semantic(kind != 2, "seconds"))
@@ -359,9 +360,10 @@ int metadata_rejection(const std::shared_ptr<OperationRegistry>& base) {
       if (kind == 4) {
         auto field = scalar_semantic(false);
         field.kind = SemanticKind::ScalarField;
-        producer.output_facets = {encode_semantic(field).take_value()};
-        producer.shape_rule = OperationShapeRule::Fixed;
-        producer.fixed_output_shape = {1, 1};
+        producer.outputs[0].output_facets = {
+            encode_semantic(field).take_value()};
+        producer.outputs[0].shape_rule = OperationShapeRule::Fixed;
+        producer.outputs[0].fixed_output_shape = {1, 1};
       }
     }
     PS_CHECK(registry

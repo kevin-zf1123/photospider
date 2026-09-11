@@ -27,6 +27,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_cache_identity.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -1119,7 +1120,7 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
 /** @brief Finds work needed for outputs, stopping at Run-local
  * materializations. */
 std::vector<bool> required_steps(const ExecutionPlan& plan,
-                                 const std::map<std::uint64_t, Value>& cached,
+                                 const std::map<ValueRef, Value>& cached,
                                  std::size_t future_whole_begin = SIZE_MAX) {
   std::vector<bool> required(plan.steps().size(), false);
   for (const auto& output : plan.outputs())
@@ -1129,7 +1130,7 @@ std::vector<bool> required_steps(const ExecutionPlan& plan,
       required[i] = true;
   for (std::size_t reverse = plan.steps().size(); reverse > 0; --reverse) {
     const auto i = reverse - 1;
-    if (!required[i] || cached.count(plan.steps()[i].node_id) != 0)
+    if (!required[i] || cached.count(plan.steps()[i].result_ref()) != 0)
       continue;
     for (const auto& source : plan.steps()[i].inputs)
       if (const auto* producer = std::get_if<PlanStepInput>(&source))
@@ -1253,12 +1254,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     if (!records.status().ok())
       return fail(records.status());
     const bool keep_record_graph =
-        flights || std::any_of(plan.steps().begin(), plan.steps().end(),
-                               [](const auto& step) {
-                                 return step.backend == Backend::Gpu &&
-                                        step.traits.dependency_version &&
-                                        step.traits.allows_cpu_fallback;
-                               });
+        flights || (options.enable_joint && !plan.execution_groups().empty()) ||
+        std::any_of(plan.steps().begin(), plan.steps().end(),
+                    [](const auto& step) {
+                      return step.backend == Backend::Gpu &&
+                             step.traits.outputs[0].dependency_version &&
+                             step.traits.allows_cpu_fallback;
+                    });
     const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& step = plan.steps().at(producer->step_index);
@@ -1291,6 +1293,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
       std::string record_identity;
       bool cache_hit = false;
+      bool joint_attempted = false;
       bool backend_selected = false, fallback_taint = false;
       Backend backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
@@ -1307,13 +1310,23 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     // This explicit stack is a deterministic ready order. Parent frames in
     // Waiting retain state and actual input owners, but no active reservation.
     std::vector<Frame> frames;
+    CancellationToken evaluation_token = cancellation;
+    bool evaluation_shared = false;
+    std::vector<const std::vector<Frame>*> parked_frames;
+    std::vector<std::function<void()>> group_pumps;
     const auto active_token = [&] {
       for (auto i = frames.rbegin(); i != frames.rend(); ++i)
         if (i->flight && i->flight->producer())
           return i->flight->token();
-      return cancellation;
+      return evaluation_token;
     };
     const auto pump = [&] {
+      for (const auto* parked : parked_frames)
+        for (const auto& frame : *parked)
+          if (frame.flight)
+            frame.flight->refresh();
+      for (const auto& refresh : group_pumps)
+        refresh();
       for (const auto& frame : frames)
         if (frame.flight)
           frame.flight->refresh();
@@ -1324,7 +1337,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (i->flight && i->flight->producer())
             return i->flight->token().cancelled() ? ErrorCode::Cancelled
                                                   : ErrorCode::Ok;
-        return binding_stop(plan, cancellation);
+        return evaluation_shared
+                   ? (evaluation_token.cancelled() ? ErrorCode::Cancelled
+                                                   : ErrorCode::Ok)
+                   : binding_stop(plan, evaluation_token);
       };
       abort_flights = [&](Status status) {
         for (auto i = frames.rbegin(); i != frames.rend(); ++i)
@@ -1334,15 +1350,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     const execution_internal::DependencyFlightValue>>(status));
       };
     }
+    const auto cache_templates =
+        dependency_cache
+            ? execution_internal::dependency_cache_templates(
+                  plan,
+                  native_device ? native_device->identity() : std::string{},
+                  &cache_work, cancellation)
+            : std::vector<std::string>(plan.steps().size());
     const auto observation_key =
         [&](std::size_t index, const Footprint& outputs, bool snapshot = true) {
           content_internal::Sha256 hash;
           hash.text(snapshot ? "photospider.dependency-flight.v1"
-                             : "photospider.dependency-cache-template.v1");
-          hash.text(plan.digest().value);
-          if (snapshot)
+                             : "photospider.dependency-cache-template.v2");
+          if (snapshot) {
+            hash.text(plan.digest().value);
             hash.text(identity);
-          hash.integer(plan.steps()[index].node_id);
+            hash.integer(plan.steps()[index].node_id);
+            hash.integer(plan.steps()[index].output_index);
+          } else {
+            hash.text(cache_templates[index]);
+          }
           hash.integer(plan.tile_width());
           hash.integer(plan.tile_height());
           hash.integer(options.dependencies.sets.maximum_boxes);
@@ -1367,6 +1394,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             const std::shared_ptr<const execution_internal::DependencyRecord>&
                 record,
             const ValueFragments& completed) {
+          if (cache_templates[index].empty())
+            return;
           // Retention is optional. Precharge the actual owner DAG before any
           // walk/copy; cache exhaustion cannot fail a valid computation.
           try {
@@ -1412,6 +1441,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             manifest->facets = completed.facets();
             manifest->outputs = completed.coverage();
             manifest->support = std::move(proof.support);
+            manifest->routes = std::move(proof.routes);
             manifest->content_identity = digest.take_value();
             manifest->epoch = cache_epoch;
             manifest->metadata_entries = proof.metadata_entries;
@@ -1513,11 +1543,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const auto& step = plan.steps()[i];
       shareable[i] = step.traits.deterministic && step.traits.side_effect_free;
       cacheable[i] = shareable[i] && step.traits.cacheable;
-      for (const auto& input : step.inputs)
-        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+      const auto& included = step.traits.outputs[0].input_indices;
+      for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+        if (included && std::find(included->begin(), included->end(), port) ==
+                            included->end())
+          continue;
+        if (const auto* producer =
+                std::get_if<PlanStepInput>(&step.inputs[port])) {
           shareable[i] = shareable[i] && shareable[producer->step_index];
           cacheable[i] = cacheable[i] && cacheable[producer->step_index];
         }
+      }
     }
     std::map<std::size_t, ValueFragments> whole_records;
     std::map<std::size_t, std::pair<Backend, bool>> whole_backends;
@@ -1531,7 +1567,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         // could fail admission for pixels that no current query needs.
         if (plan.steps()[i].whole_boundary &&
             !plan.steps()[i].traits.side_effect_free &&
-            plan.steps()[i].traits.observation_kind !=
+            plan.steps()[i].traits.outputs[0].observation_kind !=
                 ObservationKind::RequestRecord) {
           auto all =
               Footprint::all(plan.steps()[i].output_descriptor.shape, limits);
@@ -1544,8 +1580,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     for (const auto& named : wanted) {
       const auto step_index = plan.outputs().at(named.first);
       const auto& step = plan.steps()[step_index];
-      if (!sink ||
-          step.traits.observation_kind == ObservationKind::RequestRecord) {
+      if (!sink || step.traits.outputs[0].observation_kind ==
+                       ObservationKind::RequestRecord) {
         queries.push_back({step_index, named.first, named.second, false});
         continue;
       }
@@ -1598,11 +1634,100 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
     }
+    struct Evaluation {
+      ValueFragments value;
+      bool taint = false;
+      Backend backend = Backend::Cpu;
+      std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+          records;
+    };
+    std::function<Result<Evaluation>(PlanInput, const Footprint&, bool, bool,
+                                     bool)>
+        evaluate;
+    std::map<std::size_t, Footprint> known_demands;
+    std::map<std::string, Result<Evaluation>> joint_completed;
+    std::map<std::string,
+             std::shared_ptr<execution_internal::DependencyFlights::Lease>>
+        prepared_flights;
+    const auto register_demand = [&](const PlanInput& target,
+                                     const Footprint& samples) -> Status {
+      const auto* producer = std::get_if<PlanStepInput>(&target);
+      if (!options.enable_joint || !producer || samples.empty() ||
+          !plan.steps()[producer->step_index].traits.joint_contract)
+        return Status::success();
+      auto found = known_demands.find(producer->step_index);
+      if (found == known_demands.end()) {
+        known_demands.emplace(producer->step_index, samples);
+      } else {
+        auto joined = found->second.unite(samples, limits);
+        if (!joined.ok())
+          return joined.status();
+        found->second = joined.take_value();
+      }
+      return Status::success();
+    };
+    const auto retire_demand = [&](std::size_t step,
+                                   const Footprint& samples) -> Status {
+      auto found = known_demands.find(step);
+      if (found == known_demands.end())
+        return Status::success();
+      auto remaining = found->second.subtract(samples, limits);
+      if (!remaining.ok())
+        return remaining.status();
+      found->second = remaining.take_value();
+      return Status::success();
+    };
+    std::function<Status(std::size_t, const Footprint&, Frame&)> try_joint;
     for (const auto& named : queries) {
-      frames.emplace_back(PlanStepInput{named.step}, named.samples, false,
-                          !named.boundary);
+      auto status = register_demand(PlanStepInput{named.step}, named.samples);
+      if (!status.ok())
+        return fail(status);
+    }
+
+    evaluate = [&](PlanInput target, const Footprint& samples, bool unit,
+                   bool terminal_allowed,
+                   bool allow_joint) -> Result<Evaluation> {
+      // Nested input evaluation shares the Run's work/owners, with independent
+      // ancestor failure routing. No callback worker evaluates upstream work.
+      auto inherited = active_token();
+      bool inherited_shared = evaluation_shared;
+      for (const auto& frame : frames)
+        inherited_shared |= frame.flight && frame.flight->producer();
+      struct RestoreFrames {
+        std::vector<Frame>& current;
+        std::vector<Frame> saved;
+        CancellationToken& token;
+        CancellationToken previous;
+        bool& shared;
+        bool previous_shared;
+        std::vector<const std::vector<Frame>*>& parked;
+        bool registered = false;
+        ~RestoreFrames() {
+          current = std::move(saved);
+          token = previous;
+          shared = previous_shared;
+          if (registered)
+            parked.pop_back();
+        }
+      } restore{frames,           std::move(frames), evaluation_token,
+                evaluation_token, evaluation_shared, evaluation_shared,
+                parked_frames};
+      parked_frames.push_back(&restore.saved);
+      restore.registered = true;
+      evaluation_token = inherited;
+      evaluation_shared = inherited_shared;
+      const auto fail = [&](Status status) -> Result<Evaluation> {
+        const auto code = stop();
+        if (code != ErrorCode::Ok)
+          status = Status{code, {}};
+        if (abort_flights)
+          abort_flights(status);
+        return Result<Evaluation>(std::move(status));
+      };
+      frames.emplace_back(target, samples, unit, terminal_allowed);
       std::optional<ValueFragments> returned;
       bool returned_taint = false;
+      Backend returned_backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
           returned_records;
       while (!frames.empty()) {
@@ -1643,6 +1768,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
             const auto& step = plan.steps()[producer->step_index];
+            if (frame.unit) {
+              status = retire_demand(producer->step_index, frame.outputs);
+              if (!status.ok())
+                return fail(status);
+            }
             if (keep_record_graph && !frame.record &&
                 (frame.unit || frame.terminal_allowed) &&
                 !frame.record_identity.empty()) {
@@ -1671,7 +1801,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       std::move(value)));
             }
             if (step.whole_boundary && frame.unit &&
-                step.traits.observation_kind !=
+                step.traits.outputs[0].observation_kind !=
                     ObservationKind::RequestRecord) {
               auto whole = Footprint::all(step.output_descriptor.shape, limits);
               if (!whole.ok())
@@ -1690,6 +1820,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           returned = std::move(frame.complete);
           returned_taint = frame.fallback_taint;
+          returned_backend = frame.backend;
           if (frame.record)
             returned_records = {std::move(frame.record)};
           else
@@ -1700,8 +1831,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (frame.outputs.empty()) {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
-            if (plan.steps()[producer->step_index].traits.observation_kind ==
-                    ObservationKind::RequestRecord &&
+            if (plan.steps()[producer->step_index]
+                        .traits.outputs[0]
+                        .observation_kind == ObservationKind::RequestRecord &&
                 !frame.terminal_allowed)
               return fail(Status{ErrorCode::InvalidArgument,
                                  "RequestRecord cannot supply a DAG input"});
@@ -1851,8 +1983,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           frame.state = Frame::State::Complete;
           continue;
         }
-        const bool terminal =
-            step.traits.observation_kind == ObservationKind::RequestRecord;
+        const bool terminal = step.traits.outputs[0].observation_kind ==
+                              ObservationKind::RequestRecord;
         if (terminal && !frame.terminal_allowed)
           return fail(
               Status::failure(ErrorCode::InvalidArgument,
@@ -1862,7 +1994,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
         if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
-          if (step.traits.dependency_version == 0 && step.whole_boundary) {
+          if (step.traits.outputs[0].dependency_version == 0 &&
+              step.whole_boundary) {
             // The legacy Whole contract observes global validation for every
             // request. Preserve that actual dependency; never relabel a tile.
             auto whole = Footprint::all(output.descriptor.shape, limits);
@@ -1923,7 +2056,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Status::failure(ErrorCode::BackendUnavailable,
                               "native dependency worker unavailable");
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, frame.backend, 0, unavailable.code, 1, 0});
+              step.result_ref(), frame.backend, 0, unavailable.code, 1, 0});
           if (!fallback(unavailable))
             return fail(unavailable);
           if (frame.session) {
@@ -1934,9 +2067,53 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
         }
         if (frame.state == Frame::State::Initial) {
+          const auto observation = observation_key(step_index, frame.outputs);
+          auto completed = joint_completed.find(observation);
+          if (completed != joint_completed.end()) {
+            auto outcome = std::move(completed->second);
+            joint_completed.erase(completed);
+            if (!outcome.ok())
+              return fail(outcome.status());
+            auto result = outcome.take_value();
+            for (const auto& record : result.records) {
+              status = records.import(record);
+              if (!status.ok())
+                return fail(status);
+            }
+            frame.complete = std::move(result.value);
+            frame.fallback_taint = result.taint;
+            frame.backend = result.backend;
+            if (result.records.size() == 1)
+              frame.record = result.records[0];
+            else
+              frame.upstream = std::move(result.records);
+            frame.state = Frame::State::Complete;
+            continue;
+          }
+          auto prepared = prepared_flights.find(observation);
+          if (!frame.flight && prepared != prepared_flights.end()) {
+            frame.flight = prepared->second;
+            prepared_flights.erase(prepared);
+            frame.record_identity = observation;
+            if (!frame.flight->producer()) {
+              auto shared = frame.flight->wait(pump);
+              if (!shared.ok())
+                return fail(shared.status());
+              status = records.import(shared.value()->record);
+              if (!status.ok())
+                return fail(status);
+              frame.complete = shared.value()->value;
+              frame.record = shared.value()->record;
+              frame.backend = shared.value()->backend;
+              frame.fallback_taint = shared.value()->fallback_taint;
+              frame.state = Frame::State::Complete;
+              ++diagnostics.shared_computations;
+              continue;
+            }
+          }
           if (flights && shareable[step_index] && !frame.flight) {
             const auto parent_token = active_token();
-            bool parent_shared = false;
+            bool parent_shared = evaluation_shared;
             for (const auto& ancestor : frames)
               parent_shared |= ancestor.flight && ancestor.flight->producer();
             frame.record_identity = observation_key(step_index, frame.outputs);
@@ -1962,7 +2139,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               frame.backend = shared.value()->backend;
               frame.fallback_taint |= shared.value()->fallback_taint;
               ++diagnostics.shared_computations;
-              diagnostics.selected_backends[step.node_id] = frame.backend;
+              diagnostics.selected_backends[step.result_ref()] = frame.backend;
               diagnostics.shared_peak_live_bytes =
                   std::max(diagnostics.shared_peak_live_bytes,
                            shared.value()->producer_peak);
@@ -1971,7 +2148,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
             limits.cancellation = active_token();
             if (dependency_cache && cacheable[step_index] &&
-                !frame.fallback_taint && cache_work) {
+                !frame.fallback_taint && cache_work &&
+                !cache_templates[step_index].empty()) {
               const auto template_key =
                   observation_key(step_index, frame.outputs, false);
               for (const auto& candidate :
@@ -2004,27 +2182,46 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     candidate->outputs, std::move(pixels), limits);
                 if (!cached.ok())
                   continue;
-                status = records.import(candidate->record);
+                auto rebound =
+                    records.rebind_cached(candidate->record, step_index,
+                                          candidate->routes, &cache_work);
+                if (!rebound.ok())
+                  continue;
+                status = records.import(rebound.value());
                 if (!status.ok())
                   return fail(status);
                 frame.complete = cached.take_value();
-                frame.record = candidate->record;
+                frame.record = rebound.take_value();
                 frame.cache_hit = true;
                 frame.state = Frame::State::Complete;
                 ++diagnostics.cache_hits;
-                diagnostics.selected_backends[step.node_id] = frame.backend;
+                diagnostics.selected_backends[step.result_ref()] =
+                    frame.backend;
                 break;
               }
               if (frame.state == Frame::State::Complete)
                 continue;
             }
           }
+          if (allow_joint && options.enable_joint && !frame.joint_attempted &&
+              step.traits.joint_contract && frame.backend == Backend::Cpu &&
+              group_pumps.size() < 16) {
+            frame.joint_attempted = true;
+            status = try_joint(step_index, frame.outputs, frame);
+            if (!status.ok())
+              return fail(status);
+            if (joint_completed.count(observation))
+              continue;
+          }
+          status = retire_demand(step_index, frame.outputs);
+          if (!status.ok())
+            return fail(status);
           frame.parts.clear();
           frame.next = 0;
           if (keep_record_graph && frame.record_identity.empty())
             frame.record_identity =
                 records.observation_identity(step_index, frame.outputs);
-          if (step.traits.dependency_version == 1) {
+          if (step.traits.outputs[0].dependency_version == 1) {
             if (frame.backend == Backend::Gpu &&
                 step.traits.allows_cpu_fallback && !frame.attempt_records) {
               auto saved = records.checkpoint(&work);
@@ -2035,6 +2232,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             DependencyRequest request;
             for (const auto& input : step.inputs)
               request.inputs.push_back(metadata(input));
+            request.output_index = step.output_index;
             request.parameters = step.parameters;
             request.outputs = frame.outputs;
             request.snapshot_identity = identity;
@@ -2046,7 +2244,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             request.limits.maximum_work =
                 std::min(request.limits.maximum_work, work);
             auto reserved =
-                reserve(std::min(step.traits.continuation_bytes,
+                reserve(std::min(step.traits.outputs[0].continuation_bytes,
                                  options.dependencies.maximum_state_bytes));
             if (!reserved.ok())
               return fail(reserved.status());
@@ -2063,8 +2261,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 },
                 pump);
             if (!session.ok()) {
-              diagnostics.operation_timings.push_back(OperationTiming{
-                  step.node_id, frame.backend, 0, session.status().code, 1, 0});
+              diagnostics.operation_timings.push_back(
+                  OperationTiming{step.result_ref(), frame.backend, 0,
+                                  session.status().code, 1, 0});
               if (fallback(session.status())) {
                 status = restart_cpu();
                 if (!status.ok())
@@ -2084,6 +2283,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                           "synchronous terminal requires a "
                                           "rectangular complete request"));
             for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+              const auto& included = step.traits.outputs[0].input_indices;
+              if (included && std::find(included->begin(), included->end(),
+                                        port) == included->end()) {
+                auto none = Footprint::none(
+                    metadata(step.inputs[port]).descriptor.shape, limits);
+                if (!none.ok())
+                  return fail(none.status());
+                frame.parts.push_back(none.take_value());
+                continue;
+              }
               auto demand = input_internal::derive_input_demand(
                   step.traits, frame.outputs.boxes()[0],
                   output.descriptor.shape,
@@ -2102,10 +2311,28 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
         }
         if (frame.state == Frame::State::Waiting) {
+          if (frame.next == 0) {
+            for (std::size_t port = 0; port < frame.parts.size(); ++port) {
+              status = register_demand(step.inputs[port], frame.parts[port]);
+              if (!status.ok())
+                return fail(status);
+            }
+          }
           if (frame.next < frame.parts.size()) {
             const auto port = frame.next++;
             const auto query = frame.parts[port];
             const auto target = step.inputs[port];
+            const auto& ports = step.traits.outputs[0].input_indices;
+            if (query.empty() && ports &&
+                std::find(ports->begin(), ports->end(), port) == ports->end()) {
+              const auto input = metadata(target);
+              auto empty = ValueFragments::create(
+                  input.descriptor, input.facets, query, {}, limits);
+              if (!empty.ok())
+                return fail(empty.status());
+              frame.ready.push_back(empty.take_value());
+              continue;
+            }
             frames.emplace_back(target, query);
             continue;
           }
@@ -2146,6 +2373,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           // The pending input footprint remains available after supply moved
           // ready owners into the session. It describes exact stage scratch.
           for (std::size_t port = 0; port < frame.parts.size(); ++port) {
+            if (frame.parts[port].empty())
+              continue;
             auto count = frame.parts[port].element_count();
             const auto input_width = Value::element_size(
                 metadata(step.inputs[port]).descriptor.element_type);
@@ -2189,7 +2418,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       std::chrono::steady_clock::now();
                   DependencyCheckpointServices services;
                   if (shareable[step_index] && !frame.fallback_taint &&
-                      step.traits.observation_kind == ObservationKind::Atomic) {
+                      step.traits.outputs[0].observation_kind ==
+                          ObservationKind::Atomic) {
                     auto& scope = checkpoint_scopes[step_index];
                     if (!scope) {
                       if (checkpoints) {
@@ -2359,7 +2589,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                  ? Result<std::uint64_t>(token)
                                  : Result<std::uint64_t>(native->status());
                     };
-                    gpu.execute = [&](const ps_gpu_dispatch_v8* commands,
+                    gpu.execute = [&](const ps_gpu_dispatch_v9* commands,
                                       std::uint32_t count) {
                       const auto* api = native->service();
                       api->execute(api->context, commands, count);
@@ -2387,7 +2617,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(status);
             if (!progress.ok()) {
               diagnostics.operation_timings.push_back(
-                  OperationTiming{step.node_id, frame.backend, callback_us,
+                  OperationTiming{step.result_ref(), frame.backend, callback_us,
                                   progress.status().code, 1, 0});
               diagnostics.operation_timings.back().native_dispatch_count =
                   native_stats.dispatches;
@@ -2466,8 +2696,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   }
                   std::vector<Value> inputs;
                   std::vector<Region> demands;
+                  std::vector<std::uint32_t> input_indices;
                   for (std::size_t port = 0; port < frame.parts.size();
                        ++port) {
+                    if (frame.parts[port].empty())
+                      continue;
+                    input_indices.push_back(static_cast<std::uint32_t>(port));
                     const auto& box = frame.parts[port].boxes().at(0);
                     auto dense =
                         frame.ready[port].collect(box, allocator, limits);
@@ -2485,6 +2719,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       inputs,        demands,        step.parameters,
                       frame.backend, active_token(), frame.outputs.boxes()[0],
                       allocator};
+                  call.output_index = step.output_index;
+                  call.input_indices = std::move(input_indices);
+                  for (const auto& input : step.inputs)
+                    call.input_metadata.push_back(metadata(input));
                   if (native)
                     call.gpu = native->service();
                   const auto callback_started =
@@ -2520,7 +2758,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 pump);
             if (!value.ok()) {
               diagnostics.operation_timings.push_back(
-                  OperationTiming{step.node_id, frame.backend, callback_us,
+                  OperationTiming{step.result_ref(), frame.backend, callback_us,
                                   value.status().code, 1, 0});
               diagnostics.operation_timings.back().native_dispatch_count =
                   native_stats.dispatches;
@@ -2544,9 +2782,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             frame.state = Frame::State::Complete;
           }
           diagnostics.peak_active_tasks = 1;
-          diagnostics.selected_backends[step.node_id] = frame.backend;
+          diagnostics.selected_backends[step.result_ref()] = frame.backend;
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, frame.backend, callback_us, ErrorCode::Ok, 1,
+              step.result_ref(), frame.backend, callback_us, ErrorCode::Ok, 1,
               frame.state == Frame::State::Complete ? elements.value() : 0});
           diagnostics.operation_timings.back().native_dispatch_count =
               native_stats.dispatches;
@@ -2557,6 +2795,573 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (!returned)
         return fail(Status::failure(ErrorCode::Internal,
                                     "dependency output record missing"));
+      return Result<Evaluation>(Evaluation{std::move(*returned), returned_taint,
+                                           returned_backend,
+                                           std::move(returned_records)});
+    };
+    try_joint = [&](std::size_t selected, const Footprint& selected_samples,
+                    Frame& selected_frame) -> Status {
+      const auto& selected_step = plan.steps()[selected];
+      auto group =
+          std::find_if(plan.execution_groups().begin(),
+                       plan.execution_groups().end(), [&](const auto& group) {
+                         return group.node_id == selected_step.node_id;
+                       });
+      if (group == plan.execution_groups().end())
+        return Status::success();
+      struct Member {
+        std::size_t step;
+        Footprint samples;
+        std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
+        bool done = false, waiting = false, taint = false;
+        std::vector<Footprint> parts;
+        std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+            upstream;
+        std::set<std::string> upstream_ids;
+        Member(std::size_t step, Footprint samples,
+               std::shared_ptr<execution_internal::DependencyFlights::Lease>
+                   flight)
+            : step(step),
+              samples(std::move(samples)),
+              flight(std::move(flight)) {}
+      };
+      std::vector<Member> members;
+      members.emplace_back(selected, selected_samples, selected_frame.flight);
+      const auto parent_token = active_token();
+      bool parent_shared = evaluation_shared;
+      for (const auto& frame : frames)
+        parent_shared |= frame.flight && frame.flight->producer();
+      for (const auto index : group->members) {
+        if (index == selected)
+          continue;
+        auto known = known_demands.find(index);
+        if (known == known_demands.end() || known->second.empty())
+          continue;
+        const auto& step = plan.steps()[index];
+        auto observations =
+            operation_observations({step.output_descriptor, step.output_facets},
+                                   known->second, limits);
+        if (!observations.ok())
+          return observations.status();
+        std::vector<RegionDimension> dimensions;
+        for (const auto& dim : observations.value().boxes()[0].dimensions())
+          dimensions.push_back({dim.offset, 1});
+        auto atom = Footprint::from_regions(observations.value().shape(),
+                                            {Region(dimensions)}, limits);
+        if (!atom.ok())
+          return atom.status();
+        auto samples = observation_samples(
+            {step.output_descriptor, step.output_facets}, atom.value(), limits);
+        if (!samples.ok())
+          return samples.status();
+        auto key = observation_key(index, samples.value());
+        if (joint_completed.count(key) || prepared_flights.count(key))
+          continue;
+        std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
+        if (flights && shareable[index]) {
+          auto claimed =
+              flights->claim(key, [parent_token, parent_shared, &plan] {
+                if (parent_token.cancelled())
+                  return ErrorCode::Cancelled;
+                return parent_shared || plan.current() ? ErrorCode::Ok
+                                                       : ErrorCode::Stale;
+              });
+          if (!claimed.ok())
+            continue;  // Optional sibling admission cannot fail the selected
+                       // output.
+          flight = claimed.take_value();
+          // A sibling owned by another Run is never awaited before local work.
+          if (!flight->producer()) {
+            prepared_flights.emplace(key, flight);
+            continue;
+          }
+        }
+        bool hit = false;
+        if (dependency_cache && cacheable[index] && cache_work &&
+            !cache_templates[index].empty()) {
+          for (const auto& candidate : dependency_cache->dependency_candidates(
+                   observation_key(index, samples.value(), false))) {
+            if (candidate->metadata_entries > cache_work) {
+              cache_work = 0;
+              break;
+            }
+            cache_work -= candidate->metadata_entries;
+            auto digest = dependency_stage<std::string>(
+                pool, admission,
+                [&] {
+                  return execution_internal::dependency_content_identity(
+                      bindings, candidate->support, &cache_work, parent_token);
+                },
+                pump);
+            if (!digest.ok() || digest.value() != candidate->content_identity)
+              continue;
+            auto pixels = dependency_cache->dependency_values(*candidate);
+            if (pixels.empty())
+              continue;
+            auto cached = ValueFragments::create(
+                candidate->descriptor, candidate->facets, candidate->outputs,
+                std::move(pixels), limits);
+            if (!cached.ok())
+              continue;
+            auto rebound = records.rebind_cached(
+                candidate->record, index, candidate->routes, &cache_work);
+            if (!rebound.ok())
+              continue;
+            auto status = records.import(rebound.value());
+            if (!status.ok())
+              return status;
+            Evaluation value{cached.take_value(),
+                             false,
+                             Backend::Cpu,
+                             {rebound.value()}};
+            if (flight) {
+              auto published =
+                  std::make_shared<execution_internal::DependencyFlightValue>();
+              published->value = value.value;
+              published->record = rebound.value();
+              published->producer_peak = budget->peaks(observation).first;
+              flight->complete(
+                  Result<std::shared_ptr<
+                      const execution_internal::DependencyFlightValue>>(
+                      published));
+            }
+            joint_completed.emplace(key, Result<Evaluation>(std::move(value)));
+            status = retire_demand(index, samples.value());
+            if (!status.ok())
+              return status;
+            ++diagnostics.cache_hits;
+            hit = true;
+            break;
+          }
+        }
+        if (!hit)
+          members.emplace_back(index, samples.take_value(), std::move(flight));
+      }
+      if (members.size() < 2)
+        return Status::success();
+      // Isolate member work from the initiating output's cancellation. Refresh
+      // all leases; only the absence of every active member cancels shared
+      // work.
+      CancellationSource all_cancelled;
+      auto limits = options.dependencies.sets;
+      limits.cancellation = all_cancelled.token();
+      struct RestoreGroup {
+        std::vector<Frame>& frames;
+        std::vector<Frame> saved;
+        CancellationToken& token;
+        CancellationToken previous;
+        bool& shared;
+        bool previous_shared;
+        std::vector<const std::vector<Frame>*>& parked;
+        std::vector<std::function<void()>>& pumps;
+        bool parked_registered = false, pump_registered = false;
+        ~RestoreGroup() {
+          frames = std::move(saved);
+          token = previous;
+          shared = previous_shared;
+          if (parked_registered)
+            parked.pop_back();
+          if (pump_registered)
+            pumps.pop_back();
+        }
+      } restore{frames,           std::move(frames), evaluation_token,
+                evaluation_token, evaluation_shared, evaluation_shared,
+                parked_frames,    group_pumps};
+      parked_frames.push_back(&restore.saved);
+      restore.parked_registered = true;
+      evaluation_token = all_cancelled.token();
+      evaluation_shared = parent_shared || flights;
+      group_pumps.push_back([&] {
+        bool active = false;
+        for (const auto& member : members) {
+          if (member.done)
+            continue;
+          if (member.flight)
+            member.flight->refresh();
+          active |= !(member.flight ? member.flight->token() : parent_token)
+                         .cancelled();
+        }
+        if (!active)
+          all_cancelled.cancel();
+      });
+      restore.pump_registered = true;
+      std::shared_ptr<DependencyJointSession> session;
+      const auto publish_failure = [&](Member& member, Status status) {
+        if (session && member.waiting)
+          static_cast<void>(session->fail_input(
+              plan.steps()[member.step].output_index, status));
+        auto key = observation_key(member.step, member.samples);
+        if (member.flight)
+          member.flight->complete(
+              Result<std::shared_ptr<
+                  const execution_internal::DependencyFlightValue>>(status));
+        joint_completed.insert_or_assign(key, Result<Evaluation>(status));
+        member.done = true;
+      };
+      const auto fallback = [&]() -> Status {
+        ++diagnostics.joint_fallbacks;
+        for (auto& member : members) {
+          if (member.done)
+            continue;
+          auto key = observation_key(member.step, member.samples);
+          if (member.flight)
+            prepared_flights.insert_or_assign(key, member.flight);
+          auto result = evaluate(PlanStepInput{member.step}, member.samples,
+                                 true, false, false);
+          joint_completed.insert_or_assign(key, std::move(result));
+          member.done = true;
+        }
+        return Status::success();
+      };
+      auto state_capacity = checked_add(
+          selected_step.traits.joint_continuation_bytes,
+          members.size() * DependencyJointSession::member_state_bytes());
+      if (!state_capacity.ok())
+        return fallback();
+      auto reserved = reserve(state_capacity.value());
+      if (!reserved.ok())
+        return fallback();
+      {
+        Seal seal{reserved.take_value()};
+        std::vector<DependencyRequest> requests;
+        for (const auto& member : members) {
+          const auto& step = plan.steps()[member.step];
+          DependencyRequest request;
+          for (const auto& input : step.inputs)
+            request.inputs.push_back(metadata(input));
+          request.parameters = step.parameters;
+          request.outputs = member.samples;
+          request.snapshot_identity = identity;
+          request.output_index = step.output_index;
+          request.cancellation =
+              member.flight ? member.flight->token() : parent_token;
+          request.limits = options.dependencies;
+          request.limits.sets.cancellation = request.cancellation;
+          request.limits.maximum_work =
+              std::min(request.limits.maximum_work, work);
+          requests.push_back(std::move(request));
+        }
+        auto started =
+            dependency_stage<std::shared_ptr<DependencyJointSession>>(
+                pool, admission,
+                [&] {
+                  return operations->start_joint(selected_step.operation,
+                                                 std::move(requests),
+                                                 seal.reservation->allocator());
+                },
+                pump);
+        if (!started.ok()) {
+          // Release joint reservation before any singleton admission.
+          seal.reservation->seal();
+          seal.reservation.reset();
+          if (started.status().code == ErrorCode::InvalidArgument ||
+              started.status().code == ErrorCode::Cancelled ||
+              started.status().code == ErrorCode::Stale) {
+            for (auto& member : members)
+              publish_failure(member, started.status());
+            return Status::success();
+          }
+          return fallback();
+        }
+        session = started.take_value();
+      }
+      ++diagnostics.joint_groups;
+      diagnostics.peak_active_tasks =
+          std::max(diagnostics.peak_active_tasks, std::uint32_t{1});
+      auto charged = consume(session->consumed_work());
+      if (!charged.ok()) {
+        session.reset();
+        for (auto& member : members)
+          publish_failure(member, charged);
+        return Status::success();
+      }
+      while (std::any_of(members.begin(), members.end(),
+                         [](const auto& member) { return !member.done; })) {
+        pump();
+        std::uint64_t capacity = selected_step.traits.joint_workspace_bytes;
+        for (const auto& member : members) {
+          if (member.done || member.waiting)
+            continue;
+          const auto& step = plan.steps()[member.step];
+          auto count = member.samples.element_count();
+          const auto width =
+              Value::element_size(step.output_descriptor.element_type);
+          if (!count.ok() || count.value() > UINT64_MAX / width) {
+            session.reset();
+            return fallback();
+          }
+          auto bytes = checked_add(
+              capacity,
+              std::max(step.traits.estimated_bytes, count.value() * width));
+          if (bytes.ok())
+            bytes = checked_add(bytes.value(), step.traits.workspace_bytes);
+          if (!bytes.ok()) {
+            session.reset();
+            return fallback();
+          }
+          capacity = bytes.value();
+          if (step.traits.workspace_input_multiplier) {
+            for (std::size_t port = 0; port < member.parts.size(); ++port) {
+              auto elements = member.parts[port].element_count();
+              const auto scale =
+                  Value::element_size(
+                      metadata(step.inputs[port]).descriptor.element_type) *
+                  step.traits.workspace_input_multiplier;
+              if (!elements.ok() ||
+                  elements.value() > (UINT64_MAX - capacity) / scale) {
+                session.reset();
+                return fallback();
+              }
+              capacity += elements.value() * scale;
+            }
+          }
+        }
+        auto admitted = reserve(capacity);
+        if (!admitted.ok()) {
+          session.reset();
+          return fallback();
+        }
+        std::vector<DependencyAtomProgress> events;
+        {
+          Seal seal{admitted.take_value()};
+          const auto before = session->consumed_work();
+          auto polled = dependency_stage<std::vector<DependencyAtomProgress>>(
+              pool, admission,
+              [&] {
+                return session->poll(seal.reservation->allocator(), work);
+              },
+              pump);
+          ++diagnostics.joint_polls;
+          charged = consume(session->consumed_work() - before);
+          if (!polled.ok() || !charged.ok()) {
+            auto status = polled.ok() ? charged : polled.status();
+            session.reset();
+            seal.reservation->seal();
+            seal.reservation.reset();
+            if (status.code == ErrorCode::InvalidArgument ||
+                status.code == ErrorCode::Cancelled ||
+                status.code == ErrorCode::Stale) {
+              for (auto& member : members)
+                if (!member.done)
+                  publish_failure(member, status);
+              break;
+            }
+            return fallback();
+          }
+          events = polled.take_value();
+          for (auto& event : events) {
+            auto found = std::find_if(
+                members.begin(), members.end(), [&](const auto& member) {
+                  return plan.steps()[member.step].output_index ==
+                         event.output_index;
+                });
+            auto& member = *found;
+            const auto& step = plan.steps()[member.step];
+            if (!event.outcome.ok()) {
+              publish_failure(member, event.outcome.status());
+              continue;
+            }
+            auto progress = event.outcome.take_value();
+            if (auto* complete = std::get_if<DependencyResult>(&progress)) {
+              auto status = records.append(member.step, *complete);
+              if (!status.ok()) {
+                publish_failure(member, status);
+                continue;
+              }
+              std::vector<Value> owners;
+              auto allocator = seal.reservation->allocator();
+              for (const auto& fragment : complete->value.fragments()) {
+                if (allocator.owns(*fragment.storage()) ||
+                    external.count(fragment.storage().get())) {
+                  owners.push_back(fragment);
+                } else {
+                  auto imported = transfer_value(fragment, allocator, true);
+                  if (!imported.ok()) {
+                    status = imported.status();
+                    break;
+                  }
+                  owners.push_back(imported.take_value());
+                }
+              }
+              if (!status.ok()) {
+                publish_failure(member, status);
+                continue;
+              }
+              auto value = ValueFragments::create(
+                  step.output_descriptor, step.output_facets, member.samples,
+                  std::move(owners), limits);
+              if (!value.ok()) {
+                publish_failure(member, value.status());
+                continue;
+              }
+              auto captured = records.capture(member.step, member.samples,
+                                              std::move(member.upstream));
+              if (!captured.ok()) {
+                publish_failure(member, captured.status());
+                continue;
+              }
+              auto record = captured.take_value();
+              Evaluation published{value.take_value(),
+                                   member.taint,
+                                   Backend::Cpu,
+                                   {record}};
+              if (dependency_cache && cacheable[member.step] && !member.taint &&
+                  cache_work)
+                retain_cache(member.step, record, published.value);
+              if (member.flight) {
+                auto flight_value = std::make_shared<
+                    execution_internal::DependencyFlightValue>();
+                flight_value->value = published.value;
+                flight_value->fallback_taint = member.taint;
+                flight_value->record = record;
+                flight_value->producer_peak = budget->peaks(observation).first;
+                member.flight->complete(
+                    Result<std::shared_ptr<
+                        const execution_internal::DependencyFlightValue>>(
+                        flight_value));
+              }
+              joint_completed.insert_or_assign(
+                  observation_key(member.step, member.samples),
+                  Result<Evaluation>(std::move(published)));
+              member.done = true;
+              diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+            } else {
+              member.waiting = true;
+            }
+            diagnostics.operation_timings.push_back(OperationTiming{
+                step.result_ref(), Backend::Cpu, 0, ErrorCode::Ok, 1,
+                member.done ? member.samples.element_count().value() : 0});
+          }
+        }
+        // Register every new input demand before evaluating the first producer.
+        struct InputRead {
+          PlanInput target;
+          Footprint samples;
+          bool metadata_only = false;
+          std::optional<Result<Evaluation>> result;
+        };
+        std::vector<InputRead> reads;
+        std::map<std::size_t, std::vector<std::size_t>> member_reads;
+        for (std::size_t mi = 0; mi < members.size(); ++mi) {
+          auto& member = members[mi];
+          if (member.done || !member.waiting)
+            continue;
+          const auto& step = plan.steps()[member.step];
+          auto pending = session->pending_reads(step.output_index);
+          if (!pending.ok()) {
+            publish_failure(member, pending.status());
+            continue;
+          }
+          std::vector<Footprint> needs;
+          for (const auto& input : step.inputs)
+            needs.push_back(
+                Footprint::none(metadata(input).descriptor.shape, limits)
+                    .take_value());
+          for (const auto& need : pending.value()) {
+            auto joined = needs[need.port].unite(need.samples, limits);
+            if (!joined.ok()) {
+              publish_failure(member, joined.status());
+              break;
+            }
+            needs[need.port] = joined.take_value();
+          }
+          if (member.done)
+            continue;
+          member.parts = needs;
+          for (std::size_t port = 0; port < needs.size(); ++port) {
+            auto status = register_demand(step.inputs[port], needs[port]);
+            if (!status.ok()) {
+              publish_failure(member, status);
+              break;
+            }
+            // All siblings share the original input signature. Reuse identical
+            // transfers; differing sets retain separate error and evidence
+            // scope.
+            const auto& ports = step.traits.outputs[0].input_indices;
+            const bool metadata_only =
+                needs[port].empty() && ports &&
+                std::find(ports->begin(), ports->end(), port) == ports->end();
+            std::size_t found = reads.size();
+            for (std::size_t i = 0; i < reads.size(); ++i)
+              if (reads[i].target.index() == step.inputs[port].index() &&
+                  (std::holds_alternative<PlanStepInput>(reads[i].target)
+                       ? std::get<PlanStepInput>(reads[i].target).step_index ==
+                             std::get<PlanStepInput>(step.inputs[port])
+                                 .step_index
+                       : std::get<PlanWorkflowInput>(reads[i].target)
+                                 .declaration_index ==
+                             std::get<PlanWorkflowInput>(step.inputs[port])
+                                 .declaration_index) &&
+                  reads[i].samples == needs[port] &&
+                  reads[i].metadata_only == metadata_only) {
+                found = i;
+                break;
+              }
+            if (found == reads.size())
+              reads.push_back(
+                  {step.inputs[port], needs[port], metadata_only, {}});
+            member_reads[mi].push_back(found);
+          }
+        }
+        for (auto& read : reads) {
+          if (read.metadata_only) {
+            const auto input = metadata(read.target);
+            auto empty = ValueFragments::create(input.descriptor, input.facets,
+                                                read.samples, {}, limits);
+            if (empty.ok())
+              read.result.emplace(
+                  Evaluation{empty.take_value(), false, Backend::Cpu, {}});
+            else
+              read.result.emplace(empty.status());
+          } else {
+            read.result.emplace(
+                evaluate(read.target, read.samples, false, false, true));
+          }
+        }
+        for (const auto& entry : member_reads) {
+          auto& member = members[entry.first];
+          if (member.done)
+            continue;
+          std::vector<ValueFragments> supplied;
+          for (auto read_index : entry.second) {
+            auto& read = *reads[read_index].result;
+            if (!read.ok()) {
+              publish_failure(member, read.status());
+              break;
+            }
+            member.taint |= read.value().taint;
+            supplied.push_back(read.value().value);
+            for (const auto& record : read.value().records) {
+              auto key =
+                  records.observation_identity(record->step, record->samples);
+              if (member.upstream_ids.insert(key).second)
+                member.upstream.push_back(record);
+            }
+          }
+          if (member.done)
+            continue;
+          auto status = session->supply(plan.steps()[member.step].output_index,
+                                        std::move(supplied), identity);
+          if (!status.ok())
+            publish_failure(member, status);
+          member.waiting = false;
+        }
+      }
+      session.reset();
+      for (const auto& member : members) {
+        auto status = retire_demand(member.step, member.samples);
+        if (!status.ok())
+          return status;
+      }
+      return Status::success();
+    };
+    for (const auto& named : queries) {
+      auto evaluated = evaluate(PlanStepInput{named.step}, named.samples, false,
+                                !named.boundary, true);
+      if (!evaluated.ok())
+        return fail(evaluated.status());
+      auto returned =
+          std::optional<ValueFragments>(evaluated.take_value().value);
       if (named.boundary)
         continue;
       auto recorded = records.output(named.name, named.step, named.samples);
@@ -2704,8 +3509,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           invoke,
       const ExecutionPlan* plan, std::vector<Value> bindings,
       CancellationToken cancellation, std::uint32_t maximum_parallelism,
-      bool regional = false, const std::map<std::uint64_t, Value>& cached = {},
-      const std::map<std::uint64_t, Backend>& cached_backends = {},
+      bool regional = false, const std::map<ValueRef, Value>& cached = {},
+      const std::map<ValueRef, Backend>& cached_backends = {},
       std::function<void(std::size_t, const Value&, Backend)> retain = {},
       std::shared_ptr<gpu_internal::Device> native_device = {},
       execution_internal::ResultCache* native_cache = nullptr,
@@ -2753,13 +3558,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                               ? required_steps(*plan_, cached)
                               : std::vector<bool>(plan_->steps().size(), true);
     for (std::size_t i = 0; i < plan_->steps().size(); ++i) {
-      const auto found = cached.find(plan_->steps()[i].node_id);
+      const auto found = cached.find(plan_->steps()[i].result_ref());
       if (!required[i] || found != cached.end()) {
         completed_[i] = true;
         ++completed_count_;
         if (found != cached.end()) {
           values_[i] = found->second;
-          const auto backend = cached_backends.find(plan_->steps()[i].node_id);
+          const auto backend =
+              cached_backends.find(plan_->steps()[i].result_ref());
           if (backend != cached_backends.end())
             value_backends_[i] = backend->second;
           fallback_taint_[i] = value_backends_[i] != plan_->steps()[i].backend;
@@ -2991,11 +3797,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             !cancellation_.cancelled() && plan_->current();
         {
           std::lock_guard<std::mutex> lock(mutex_);
-          diagnostics_.operation_timings.push_back(OperationTiming{
-              step.node_id, Backend::Gpu, 0U, ErrorCode::BackendUnavailable});
+          diagnostics_.operation_timings.push_back(
+              OperationTiming{step.result_ref(), Backend::Gpu, 0U,
+                              ErrorCode::BackendUnavailable});
           if (can_fallback) {
             diagnostics_.fallback_reasons.push_back(
                 "node " + std::to_string(step.node_id) +
+                (step.traits.outputs[0].key == "value"
+                     ? ""
+                     : "/" + step.traits.outputs[0].key) +
                 ": optional local GPU lane is unavailable");
           }
         }
@@ -3306,6 +4116,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                cancellation_,
                                regional_ ? step.output_demand : Region{},
                                callback_allocator};
+      call.output_index = step.output_index;
       if (native_device_ && backend == Backend::Gpu) {
         native.emplace(native_device_, cancellation_);
         call.gpu = native->service();
@@ -3333,8 +4144,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       bool should_fallback = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        diagnostics_.operation_timings.push_back(OperationTiming{
-            step.node_id, backend, elapsed, invocation_result.status().code});
+        diagnostics_.operation_timings.push_back(
+            OperationTiming{step.result_ref(), backend, elapsed,
+                            invocation_result.status().code});
         if (native) {
           diagnostics_.native_dispatch_count += native->statistics().dispatches;
           diagnostics_.native_submission_count +=
@@ -3372,8 +4184,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             !cancellation_.cancelled() && plan_->current();
         if (should_fallback) {
           diagnostics_.fallback_reasons.push_back(
-              "node " + std::to_string(step.node_id) + ": " +
-              invocation_result.status().message);
+              "node " + std::to_string(step.node_id) +
+              (step.traits.outputs[0].key == "value"
+                   ? ""
+                   : "/" + step.traits.outputs[0].key) +
+              ": " + invocation_result.status().message);
         }
       }
 
@@ -3477,8 +4292,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     value_backends_[step_index] = backend;
     completed_[step_index] = true;
     ++completed_count_;
-    diagnostics_.selected_backends.emplace(plan_->steps()[step_index].node_id,
-                                           backend);
+    diagnostics_.selected_backends.emplace(
+        plan_->steps()[step_index].result_ref(), backend);
     for (std::size_t dependent : dependents_[step_index]) {
       if (remaining_dependencies_[dependent] == 0U) {
         finish_failure_locked(Status::failure(ErrorCode::Internal,
@@ -3961,7 +4776,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
     if (item.second.empty()) {
       const auto& step =
           frozen.plan_.steps().at(frozen.plan_.outputs().at(item.first));
-      if (step.traits.dependency_version == 1) {
+      if (step.traits.outputs[0].dependency_version == 1) {
         std::vector<OperationMetadata> inputs;
         for (const auto& input : step.inputs) {
           if (const auto* source = std::get_if<PlanStepInput>(&input)) {
@@ -4323,9 +5138,10 @@ Result<ExecutionResult> ExecutionContext::execute(
                            options);
   const bool spatial = std::any_of(
       plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
-        return step.traits.output_schema.kind ==
+        return step.traits.outputs[0].output_schema.kind ==
                    OperationPortKind::RgbaFloat32 ||
-               step.traits.output_schema.kind == OperationPortKind::Float32Mask;
+               step.traits.outputs[0].output_schema.kind ==
+                   OperationPortKind::Float32Mask;
       });
   const bool regional_demand = std::any_of(
       plan.outputs().begin(), plan.outputs().end(), [&](const auto& output) {
@@ -4431,7 +5247,7 @@ Result<ExecutionResult> ExecutionContext::execute(
                                             [&plan] { return plan.current(); });
         },
         &plan, prepared.take_value(), cancellation, parallelism, false,
-        std::map<std::uint64_t, Value>{}, std::map<std::uint64_t, Backend>{},
+        std::map<ValueRef, Value>{}, std::map<ValueRef, Backend>{},
         std::function<void(std::size_t, const Value&, Backend)>{},
         impl_->native_device, impl_->cache.get(),
         impl_->cache ? impl_->cache->epoch() : 0);
@@ -4507,11 +5323,11 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           });
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
-    std::map<std::uint64_t, Value> cached;
-    std::map<std::uint64_t, Backend> cached_backends;
+    std::map<ValueRef, Value> cached;
+    std::map<ValueRef, Backend> cached_backends;
     // Whole values survive separate materializations within this Run. Their
     // actual backend alone cannot describe fallback ancestry/cache eligibility.
-    std::set<std::uint64_t> uncacheable_whole;
+    std::set<ValueRef> uncacheable_whole;
     ExecutionDiagnostics diagnostics;
     diagnostics.plan_digest = plan.digest().value;
     if (impl_->cache && impl_->native_device &&
@@ -4567,7 +5383,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         auto found = std::find_if(diagnostics.operation_timings.begin(),
                                   diagnostics.operation_timings.end(),
                                   [&](const OperationTiming& prior) {
-                                    return prior.node_id == timing.node_id &&
+                                    return prior.output == timing.output &&
                                            prior.backend == timing.backend;
                                   });
         if (found == diagnostics.operation_timings.end()) {
@@ -4655,8 +5471,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     const auto run_tile =
         [this, snapshot, observation, parallelism](
             const ExecutionPlan& tile,
-            const std::map<std::uint64_t, Value>& tile_cached,
-            const std::map<std::uint64_t, Backend>& tile_backends,
+            const std::map<ValueRef, Value>& tile_cached,
+            const std::map<ValueRef, Backend>& tile_backends,
             const std::vector<std::string>& keys, std::uint64_t cache_epoch,
             const CancellationToken& token) -> Result<ExecutionResult> {
       const auto stop = [&] { return binding_stop(tile, token); };
@@ -4666,7 +5482,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       std::uint64_t working = 0;
       for (std::size_t i = 0; i < tile.steps().size(); ++i) {
         const auto& step = tile.steps()[i];
-        if (!required[i] || tile_cached.count(step.node_id))
+        if (!required[i] || tile_cached.count(step.result_ref()))
           continue;
         auto sum = checked_add(working, step.planned_bytes);
         if (!sum.ok())
@@ -4896,7 +5712,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         // Invalidate before lookup: a cached Whole value may be GPU-backed
         // while still derived from a CPU fallback earlier in this Run.
         for (std::size_t i = 0; i < tile.steps().size(); ++i) {
-          if (uncacheable_whole.count(tile.steps()[i].node_id))
+          if (uncacheable_whole.count(tile.steps()[i].result_ref()))
             keys[i].clear();
           for (const auto& source : tile.steps()[i].inputs)
             if (const auto* producer = std::get_if<PlanStepInput>(&source))
@@ -4908,7 +5724,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           needed[output.second] = true;
         for (std::size_t reverse = keys.size(); reverse > 0; --reverse) {
           const auto i = reverse - 1;
-          if (!needed[i] || tile_cached.count(tile.steps()[i].node_id))
+          if (!needed[i] || tile_cached.count(tile.steps()[i].result_ref()))
             continue;
           auto retained = impl_->cache->get_output(
               keys[i], tile.steps()[i], stop,
@@ -4926,9 +5742,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               impl_->cache->put(keys[i], hit, cache_epoch);
           }
           if (hit.valid()) {
-            tile_cached[tile.steps()[i].node_id] = std::move(hit);
-            tile_backends[tile.steps()[i].node_id] = tile.steps()[i].backend;
-            diagnostics.selected_backends[tile.steps()[i].node_id] =
+            tile_cached[tile.steps()[i].result_ref()] = std::move(hit);
+            tile_backends[tile.steps()[i].result_ref()] =
+                tile.steps()[i].backend;
+            diagnostics.selected_backends[tile.steps()[i].result_ref()] =
                 tile.steps()[i].backend;
             ++diagnostics.cache_hits;
           } else {
@@ -4944,7 +5761,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       const auto required = required_steps(tile, tile_cached);
       for (std::size_t i = 0; i < tile.steps().size(); ++i) {
         const auto& step = tile.steps()[i];
-        if (!required[i] || tile_cached.count(step.node_id))
+        if (!required[i] || tile_cached.count(step.result_ref()))
           continue;
         for (const auto& source : step.inputs)
           if (const auto* producer = std::get_if<PlanStepInput>(&source))
@@ -4985,36 +5802,38 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         if (share && !completed.diagnostics.selected_backends.empty()) {
           const auto selected =
               completed.diagnostics.selected_backends.begin()->second;
-          completed.diagnostics.selected_backends = {{step.node_id, selected}};
+          completed.diagnostics.selected_backends = {
+              {step.result_ref(), selected}};
         }
         auto status = accumulate(completed.diagnostics);
         if (!status.ok())
           return Result<ExecutionResult>(status);
-        tile_cached[step.node_id] = completed.values.at(name);
+        tile_cached[step.result_ref()] = completed.values.at(name);
         const auto backend =
-            completed.diagnostics.selected_backends.find(step.node_id);
-        tile_backends[step.node_id] =
+            completed.diagnostics.selected_backends.find(step.result_ref());
+        tile_backends[step.result_ref()] =
             backend == completed.diagnostics.selected_backends.end()
                 ? step.backend
                 : backend->second;
-        if (tile_backends[step.node_id] != step.backend)
+        if (tile_backends[step.result_ref()] != step.backend)
           keys[i].clear();
         // Keep only ancestors still read by an unfinished node or output.
         const auto remaining = required_steps(tile, tile_cached);
         for (std::size_t j = 0; j < tile.steps().size(); ++j)
           if (!remaining[j]) {
-            tile_cached.erase(tile.steps()[j].node_id);
-            tile_backends.erase(tile.steps()[j].node_id);
+            tile_cached.erase(tile.steps()[j].result_ref());
+            tile_backends.erase(tile.steps()[j].result_ref());
           }
       }
       for (const auto& output : tile.outputs())
         if (tile.steps()[output.second].whole_boundary &&
             keys[output.second].empty())
-          uncacheable_whole.insert(tile.steps()[output.second].node_id);
+          uncacheable_whole.insert(tile.steps()[output.second].result_ref());
       ExecutionResult result;
       for (const auto& output : tile.outputs())
         result.values.emplace(
-            output.first, tile_cached.at(tile.steps()[output.second].node_id));
+            output.first,
+            tile_cached.at(tile.steps()[output.second].result_ref()));
       return Result<ExecutionResult>(std::move(result));
     };
     // Materialize Whole/effect boundaries once in source-topological order.
@@ -5036,9 +5855,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       auto status = accumulate(result.value().diagnostics);
       if (!status.ok())
         return failure(status);
-      cached[step.node_id] = result.value().values.at(name);
-      const auto backend = diagnostics.selected_backends.find(step.node_id);
-      cached_backends[step.node_id] =
+      cached[step.result_ref()] = result.value().values.at(name);
+      const auto backend =
+          diagnostics.selected_backends.find(step.result_ref());
+      cached_backends[step.result_ref()] =
           backend == diagnostics.selected_backends.end() ? step.backend
                                                          : backend->second;
       // Completed boundaries cut their ancestors from future demands. Retain
@@ -5046,16 +5866,16 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       const auto future = required_steps(plan, cached, i + 1);
       for (std::size_t prior = 0; prior <= i; ++prior)
         if (!future[prior]) {
-          cached.erase(plan.steps()[prior].node_id);
-          cached_backends.erase(plan.steps()[prior].node_id);
+          cached.erase(plan.steps()[prior].result_ref());
+          cached_backends.erase(plan.steps()[prior].result_ref());
         }
     }
     // Whole results with no output-side reader can retire before streaming.
     const auto needed = required_steps(plan, cached);
     for (std::size_t i = 0; i < plan.steps().size(); ++i)
       if (!needed[i]) {
-        cached.erase(plan.steps()[i].node_id);
-        cached_backends.erase(plan.steps()[i].node_id);
+        cached.erase(plan.steps()[i].result_ref());
+        cached_backends.erase(plan.steps()[i].result_ref());
       }
 
     ExecutionPlan remaining_outputs = plan;
@@ -5137,8 +5957,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       const auto future_needed = required_steps(remaining_outputs, cached);
       for (std::size_t i = 0; i < plan.steps().size(); ++i)
         if (!future_needed[i]) {
-          cached.erase(plan.steps()[i].node_id);
-          cached_backends.erase(plan.steps()[i].node_id);
+          cached.erase(plan.steps()[i].result_ref());
+          cached_backends.erase(plan.steps()[i].result_ref());
         }
     }
     cached.clear();
@@ -5157,8 +5977,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     std::sort(diagnostics.operation_timings.begin(),
               diagnostics.operation_timings.end(),
               [](const OperationTiming& a, const OperationTiming& b) {
-                return a.node_id != b.node_id ? a.node_id < b.node_id
-                                              : a.backend < b.backend;
+                return a.output != b.output ? a.output < b.output
+                                            : a.backend < b.backend;
               });
     if (!sink)
       diagnostics.result_digest = result_digest(result.values);

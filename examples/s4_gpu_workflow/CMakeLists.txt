@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderS4GpuWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.8 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.9 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_s4_gpu_workflow main.cpp)
 target_include_directories(photospider_s4_gpu_workflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)

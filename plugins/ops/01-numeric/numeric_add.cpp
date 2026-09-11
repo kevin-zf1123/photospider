@@ -14,13 +14,13 @@ Status register_numeric_add(OperationRegistry* registry) {
   auto& t = operation.traits;
   t.input_schema.resize(1);
   t.input_schema[0].element_type_mask = 12;
-  t.requires_dense_output = true;
+  t.outputs[0].requires_dense_output = true;
 
   t.repeated_minimum = t.repeated_maximum = 2;
   t.repeated_match = 1;
 
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
 
   operation.callback = [](const OperationInvocation& call) {
     const bool fp32 =

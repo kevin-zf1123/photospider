@@ -25,10 +25,10 @@ Status register_numeric_abs(OperationRegistry* registry) {
     port.element_type_mask = 12;
     port.rank = 0;
   }
-  t.requires_dense_output = true;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.region_rule = OperationRegionRule::Elementwise;
-  t.output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].region_rule = OperationRegionRule::Elementwise;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
   std::sort(t.parameter_schema.begin(), t.parameter_schema.end(),
             [](const auto& a, const auto& b) { return a.key < b.key; });
   definition.callback = [traits = t](const OperationInvocation& invocation) {

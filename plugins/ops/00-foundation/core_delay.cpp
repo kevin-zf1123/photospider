@@ -10,26 +10,28 @@ using namespace core_ops;  // NOLINT(build/namespaces)
 }  // namespace
 Status register_core_delay(OperationRegistry* registry) {
   return registry->register_operation(OperationDefinition{
-      "core.delay",
-      preserving(OperationTraits{
-          1U,
-          true,
-          true,
-          true,
-          false,
-          false,
-          0U,
-          8U,
-          false,
-          ElementType::Float64,
-          OperationShapeRule::PreserveFirstInput,
-          OperationRegionRule::Whole,
-          0U,
-          {OperationParameterSpec{"milliseconds", OperationParameterType::Int64,
-                                  true}},
-          {},
-          std::vector<OperationPortConstraint>(1),
-          {/* output Value */}}),
+      "core.delay", preserving([&] {
+        OperationTraits t;
+        t.input_count = 1U;
+        t.deterministic = true;
+        t.side_effect_free = true;
+        t.supports_cpu = true;
+        t.supports_gpu = false;
+        t.allows_cpu_fallback = false;
+        t.estimated_bytes = 0U;
+        t.version = 9U;
+        t.cacheable = false;
+        t.outputs[0].output_element_type = ElementType::Float64;
+        t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+        t.outputs[0].region_rule = OperationRegionRule::Whole;
+        t.outputs[0].halo_radius = 0U;
+        t.parameter_schema = {OperationParameterSpec{
+            "milliseconds", OperationParameterType::Int64, true}};
+        t.outputs[0].fixed_output_shape = {};
+        t.input_schema = std::vector<OperationPortConstraint>(1);
+        t.outputs[0].output_schema = {/* output Value */};
+        return t;
+      }()),
       [](const OperationInvocation& invocation) -> Result<Value> {
         auto milliseconds =
             integer_parameter(invocation.parameters, "milliseconds");

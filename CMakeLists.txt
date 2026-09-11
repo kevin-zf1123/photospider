@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.8.0
+  VERSION 0.9.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -102,6 +102,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/02-format-color/color_assign.cpp
   plugins/ops/02-format-color/color_lab_to_xyz.cpp
   plugins/ops/02-format-color/color_rgb_to_xyz.cpp
+  plugins/ops/02-format-color/color_rgb_to_ycbcr420.cpp
   plugins/ops/02-format-color/color_xyz_to_lab.cpp
   plugins/ops/02-format-color/color_xyz_to_rgb.cpp
   plugins/ops/03-generation/field_constant.cpp
@@ -120,10 +121,13 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/05-filter/field_correlate.cpp
   plugins/ops/05-filter/field_gaussian_blur.cpp
   plugins/ops/05-filter/image_gaussian_blur.cpp
+  plugins/ops/05-filter/image_gaussian_blur_with_kernel.cpp
+  plugins/ops/05-filter/image_convolve_channels.cpp
   plugins/ops/07-grade/grade_levels.cpp
   plugins/ops/07-grade/image_exposure_gain.cpp
   plugins/ops/08-transform/dependency_sampling.cpp
   plugins/ops/08-transform/image_downsample_box.cpp
+  plugins/ops/08-transform/image_split_horizontal.cpp
   plugins/ops/08-transform/mask_downsample_box.cpp
   plugins/ops/09-composite/image_brush_circle.cpp
   plugins/ops/09-composite/image_mask.cpp
@@ -151,6 +155,7 @@ set(
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/dependency_block.cpp
   src/lib/plugin/dependency_invocation.cpp
@@ -343,8 +348,13 @@ add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
+  foreach(_joint on off)
+    add_test(NAME test_multi_output_workflow_${_joint}
+      COMMAND photospider_multi_output_workflow --scenario all --joint ${_joint})
+  endforeach()
   foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
     add_test(NAME test_s4_${_scenario} COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native)
     add_test(NAME test_s4_${_scenario}_plugin COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native --module $<TARGET_FILE:photospider_rgba32f_ops>)
@@ -483,6 +493,17 @@ if(BUILD_TESTING)
     data_provider_invalid_utf8_overlong_fixture 1)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
 
+  add_library(multi_output_fixture MODULE tests/fixtures/multi_output_fixture.c)
+  target_link_libraries(multi_output_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(multi_output_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  photospider_add_test(test_multi_output_contract Photospider::kernel tests/unit/test_multi_output_contract.cpp)
+  target_compile_definitions(test_multi_output_contract PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
+  add_dependencies(test_multi_output_contract multi_output_fixture)
+  photospider_add_test(test_multi_output_ops Photospider::kernel tests/integration/test_multi_output_ops.cpp)
+  photospider_add_test(test_joint_execution Photospider::kernel tests/integration/test_joint_execution.cpp)
+  photospider_add_test(test_multi_output_execution Photospider::kernel tests/integration/test_multi_output_execution.cpp)
+  target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
+  add_dependencies(test_multi_output_execution multi_output_fixture)
   photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
   add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
@@ -541,6 +562,7 @@ if(BUILD_TESTING)
   target_include_directories(test_basic_operations PRIVATE examples)
   photospider_add_test(test_component_operations Photospider::kernel tests/integration/test_component_operations.cpp)
   add_dependencies(test_component_operations photospider_foundations_workflow)
+  add_dependencies(test_multi_output_ops photospider_multi_output_workflow)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
   add_library(expression_contract_fixture MODULE tests/fixtures/expression_contract_fixture.c)
   target_link_libraries(expression_contract_fixture PRIVATE Photospider::operation_sdk)
@@ -581,6 +603,14 @@ if(BUILD_TESTING)
   endif()
   target_compile_definitions(dependency_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(dependency_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  add_library(dependency_joint_fixture MODULE tests/fixtures/dependency_joint_fixture.c)
+  target_link_libraries(dependency_joint_fixture PRIVATE Photospider::operation_sdk)
+  photospider_add_test(test_dependency_joint Photospider::kernel tests/integration/test_dependency_joint.cpp)
+  set_tests_properties(test_dependency_joint PROPERTIES TIMEOUT 120)
+  target_compile_definitions(test_dependency_joint PRIVATE PS_DEPENDENCY_JOINT_FIXTURE="$<TARGET_FILE:dependency_joint_fixture>")
+  add_dependencies(test_dependency_joint dependency_joint_fixture)
+  target_compile_definitions(test_joint_execution PRIVATE PS_DEPENDENCY_JOINT_FIXTURE="$<TARGET_FILE:dependency_joint_fixture>")
+  add_dependencies(test_joint_execution dependency_joint_fixture)
   photospider_add_test(test_dependency_plugin Photospider::kernel tests/integration/test_dependency_plugin.cpp)
   target_link_libraries(test_dependency_plugin PRIVATE ${CMAKE_DL_LIBS})
   target_compile_definitions(test_dependency_plugin PRIVATE PS_DEPENDENCY_FIXTURE="$<TARGET_FILE:dependency_fixture>")

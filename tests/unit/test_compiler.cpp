@@ -115,16 +115,16 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  PS_CHECK(positive_zero.value().semantic.digest().value == "77bb4e3df7321f17");
+  PS_CHECK(positive_zero.value().semantic.digest().value == "fa823db20af19779");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "d306a3427d672c0d");
-  PS_CHECK(positive_zero.value().plan.digest().value == "b4868b143131836c");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "8fc5667dc9ba640e");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "b581262c362e1e97");
+           "40a29dbed8282be1");
+  PS_CHECK(positive_zero.value().plan.digest().value == "342052993f751924");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "416344d4c789bb11");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "c7dcaaa37a37f2f9");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "37567b91e9123a05");
-  PS_CHECK(negative_zero.value().plan.digest().value == "5e5525227a32c5ba");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "bd50f71a1bcddd12");
+           "260f8825154cc599");
+  PS_CHECK(negative_zero.value().plan.digest().value == "937ca99d318e2f19");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "29999b7a03871df0");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=

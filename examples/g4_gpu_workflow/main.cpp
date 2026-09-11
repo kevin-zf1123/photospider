@@ -13,7 +13,7 @@ namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 constexpr std::uint64_t length = 8192;
 // NOLINTBEGIN(whitespace/indent_namespace)
-constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V8
+constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V9
     "kernel void sparse_sum(device const uchar* data [[buffer(0)]],"
     " device const ulong* directory [[buffer(1)]],"
     " device uint* output [[buffer(2)]], constant ulong* c [[buffer(3)]]) {"
@@ -105,17 +105,17 @@ struct SparseState {
             if (!data.ok() || !directory.ok() || !destination.ok())
               return Result<Value>(
                   Status{ErrorCode::OperationFailed, "native view failed"});
-            ps_gpu_buffer_binding_v8 bindings[] = {
-                {sizeof(ps_gpu_buffer_binding_v8), 0, data.value(), 0,
+            ps_gpu_buffer_binding_v9 bindings[] = {
+                {sizeof(ps_gpu_buffer_binding_v9), 0, data.value(), 0,
                  atlas.payload.bytes().size(), 0},
-                {sizeof(ps_gpu_buffer_binding_v8), 1, directory.value(), 0,
+                {sizeof(ps_gpu_buffer_binding_v9), 1, directory.value(), 0,
                  atlas.directory.bytes().size(), 0},
-                {sizeof(ps_gpu_buffer_binding_v8), 2, destination.value(), 0,
+                {sizeof(ps_gpu_buffer_binding_v9), 2, destination.value(), 0,
                  memory.size(), 1}};
             const std::uint64_t constants[] = {
                 atlas.slot_count, length, atlas.tile_shape[0],
                 atlas.payload_bytes, block_offset};
-            ps_gpu_dispatch_v8 command{};
+            ps_gpu_dispatch_v9 command{};
             command.struct_size = sizeof(command);
             command.source = shader;
             command.source_size = sizeof(shader) - 1;
@@ -188,14 +188,14 @@ int main() {
   auto& traits = definition.traits;
   traits.input_count = 2;
   traits.input_schema.resize(2);
-  traits.output_element_type = ElementType::Float32;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
   traits.supports_gpu = true;
-  traits.continuation_bytes = sizeof(SparseState);
+  traits.outputs[0].continuation_bytes = sizeof(SparseState);
   traits.workspace_bytes = 32;
-  traits.maximum_dependency_stages = 4;
+  traits.outputs[0].maximum_dependency_stages = 4;
   definition.start_dependency = [](const DependencyQuery&,
                                    const BufferAllocator& allocator) {
     return DependencyContinuation::make<SparseState>(allocator);
@@ -206,7 +206,7 @@ int main() {
   CancellationSource auxiliary;
   auto cancel_definition = definition;
   cancel_definition.key = "example.native_cancel";
-  cancel_definition.traits.continuation_bytes = sizeof(CancelState);
+  cancel_definition.traits.outputs[0].continuation_bytes = sizeof(CancelState);
   cancel_definition.start_dependency =
       [auxiliary](const DependencyQuery&, const BufferAllocator& allocator) {
         return DependencyContinuation::make<CancelState>(allocator, auxiliary);
@@ -310,7 +310,7 @@ int main() {
     if (check(diagnostics.native_dispatch_count == (gpu ? 2 : 0),
               "native dispatch count failed"))
       return 1;
-    if (check(diagnostics.selected_backends.at(1) ==
+    if (check(diagnostics.selected_backends.at({1, 0}) ==
                       (gpu ? Backend::Gpu : Backend::Cpu) &&
                   diagnostics.block_cache_hits == (gpu ? 1 : 0),
               "backend or block cache diagnostics failed"))

@@ -1,7 +1,7 @@
 # 有界 GPU 依赖发现
 
 C++ `DependencyPhase::discover(capacity, candidates, compute)` 与 C
-`ps_dependency_services_v8::discover` 在已供给输入上执行独立有界 discovery callback。
+`ps_dependency_services_v9::discover` 在已供给输入上执行独立有界 discovery callback。
 宿主通过既有 MemoryBudget 分配清零 native table，同步执行并 drain 后冻结、校验，再把
 需求附加到当前 poll。不存在额外 page-fault executor 或任意 shader 自动追踪。
 
@@ -14,7 +14,7 @@ C++ `DependencyPhase::discover(capacity, candidates, compute)` 与 C
 
 ## 格式与资源
 
-`PS_GPU_DISCOVERY_MSL_V8` 提供 `ps_discovery_emit`。16 字节 little-endian header
+`PS_GPU_DISCOVERY_MSL_V9` 提供 `ps_discovery_emit`。16 字节 little-endian header
 为四个 uint32：尝试次数、overflow、零、零。随后 capacity 个 144 字节 record：
 uint32 port/roles/rank/零；uint64 offsets[8]；uint64 extents[8]。原子计数包括每次尝试；
 超过 capacity 设置 overflow 且不越界写。callback 必须遵守声明的正数 candidates 上界，

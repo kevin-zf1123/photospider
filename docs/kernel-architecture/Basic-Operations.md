@@ -25,7 +25,7 @@ required; defaults below are explicit choices in workflow construction.
 | `field.box_mean` | Field to same-dtype/interpretation field; Int64 `radius` 1..64, example 1. |
 | `field.gaussian_blur` | As box, plus finite Float64 `sigma` 0..64, example 1. Sigma zero is identity. |
 | `mask.dilate`, `mask.erode` | Coverage to coverage; Int64 `radius` 0..64, String `footprint=square/disk`; examples 1,square. |
-| `field.convolve`, `field.correlate` | Field plus same-dtype generic `[Kh,Kw]` kernel to generic field. Nonnegative Int64 `anchor_y/x` within kernel and <=2^53-1; String `boundary=clamp/zero`. Every anchor is explicit, including odd kernels. |
+| `field.convolve`, `field.correlate` | Field plus same-dtype generic `[Kh,Kw]` kernel to generic field. Nonnegative Int64 `anchor_y/x` within kernel (correlation additionally bounds them to <=2^53-1); String `boundary=clamp/zero`. Every anchor is explicit, including odd kernels. |
 | `analysis.histogram` | Field to Int64 `[bins]`; Int64 `bins` 1..1048576, finite Float64 `range_min < range_max`; defaults 256,0,1. |
 | `analysis.histogram_out_of_range` | Field to Int64 `[2]` ordered underflow,overflow; finite Float64 `range_min < range_max`. |
 | `grade.levels` | Field to same-dtype generic field; finite Float64 `black < white`, `gamma > 0`, `out_min <= out_max`; defaults 0,1,1,0,1. |
@@ -82,7 +82,8 @@ x increases rightward and y downward. A single normalized pixel is .5.
 
 Elementwise: numeric min/max/abs, levels, smoothstep, mask Boolean and image mix.
 Halo: box/Gaussian with the declared positive radius. Whole: curves, field LUT,
-convolution/correlation, histogram, morphology and no-input generators. Whole
+correlation, histogram, morphology and no-input generators. Convolution uses
+exact staged kernel/neighborhood reads; see [multi-output operations](Multi-Output-Operations.md). Whole
 materialization must fit the execution budget. Static shape changes require
 recompilation; control/table/kernel samples are execution bindings.
 

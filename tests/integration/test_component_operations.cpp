@@ -63,12 +63,12 @@ Result<ExecutionResult> run(const Value& input, std::vector<WorkflowNode> nodes,
   auto base = make_default_operation_registry();
   auto registry = std::make_shared<OperationRegistry>();
   OperationTraits source;
-  source.output_element_type = input.descriptor().element_type;
+  source.outputs[0].output_element_type = input.descriptor().element_type;
   source.estimated_bytes = input.storage()->capacity();
-  source.shape_rule = OperationShapeRule::Fixed;
-  source.fixed_output_shape = input.descriptor().shape;
-  source.output_semantic_rule = OperationSemanticRule::Establish;
-  source.output_facets = input.facets();
+  source.outputs[0].shape_rule = OperationShapeRule::Fixed;
+  source.outputs[0].fixed_output_shape = input.descriptor().shape;
+  source.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+  source.outputs[0].output_facets = input.facets();
   auto status = registry->register_operation(
       {"fixture.input", source,
        [input](const OperationInvocation&) { return Result<Value>(input); }});
