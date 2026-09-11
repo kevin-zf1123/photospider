@@ -106,7 +106,7 @@ concurrent destruction is forbidden. State must use the granted allocator.
 
 `ExecutionContext` currently drives dependency templates through an explicit
 record stack in ExecutionRun. Each start, poll and source callback uses the
-existing CPU worker queue and shared waiting admission. Waiting records hold no
+existing CPU worker queue or the selected native GPU queue and shared waiting admission. Waiting records hold no
 worker and no unused active reservation. Every stage performs nonblocking byte
 admission against the same MemoryBudget; sealing releases unused capacity while
 retained state/input/output leases stay charged. Requests beyond the realizable
@@ -132,7 +132,8 @@ behavior, one-worker progress, finite admission, cancellation and frozen input
 ownership. Successful dependency Runs now publish immutable structural evidence as described
 below. Live demand replacement, shared Flights and dependency result cache
 reuse are implemented as described below and in [Cache Model](Cache-Model.md).
-Native GPU fragment access remains ongoing G4 implementation.
+C++ staged GPU fragment access is integrated through [Fragment Atlas](Fragment-Atlas.md).
+Bounded native discovery and the staged C GPU bridge remain G4 work.
 
 The [dependency sampling operations](Dependency-Sampling.md) implement STMap and
 dynamic radius gather/scatter. Optional pure static validators run during
@@ -450,4 +451,4 @@ compute failure reject; repeated failed requests invoke compute again.
 
 [Fragment Atlas](Fragment-Atlas.md) documents the implemented exact atlas/mask
 directory and SDK MSL lookup helper, including native transport verification.
-Staged GPU execution and discovery integration remain in progress.
+C++ staged GPU execution is integrated. Bounded discovery and the staged C GPU bridge remain in progress.

@@ -1153,14 +1153,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * worker waits for an upstream record or holds unused stage reservations.
    */
   static Result<ExecutionResult> run_dependencies(
-      ThreadPool* pool, WaitingAdmission* admission,
-      const std::shared_ptr<MemoryBudget>& budget,
+      ThreadPool* pool, ThreadPool* gpu_pool,
+      const std::shared_ptr<gpu_internal::Device>& native_device,
+      WaitingAdmission* admission, const std::shared_ptr<MemoryBudget>& budget,
       const std::shared_ptr<OperationRegistry>& operations,
       const std::function<Result<Value>(const std::string&,
                                         const OperationInvocation&)>& invoke,
       const ExecutionPlan& plan, std::vector<ExecutionBinding> bindings,
-      const CancellationToken& cancellation, const ExecutionOptions& options,
-      const ExecutionSink* sink,
+      const CancellationToken& caller_cancellation,
+      const ExecutionOptions& options, const ExecutionSink* sink,
       const std::function<void(std::uint64_t)>& reclaim,
       const DemandQuery* requested = nullptr,
       std::map<std::string, ValueFragments>* fragment_outputs = nullptr,
@@ -1169,6 +1170,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       execution_internal::ResultCache* dependency_cache = nullptr,
       execution_internal::DependencyCheckpoints* checkpoints = nullptr) {
     const auto started = std::chrono::steady_clock::now();
+    auto combined_cancellation = CancellationToken::combine(
+        {caller_cancellation, options.dependencies.sets.cancellation});
+    if (!combined_cancellation.ok())
+      return Result<ExecutionResult>(combined_cancellation.status());
+    const auto cancellation = combined_cancellation.take_value();
     std::function<ErrorCode()> shared_stop;
     std::function<void(Status)> abort_flights;
     const auto stop = [&] {
@@ -1424,8 +1430,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       template_key, manifest->content_identity,
                       fragment.region()));
             }
+            std::vector<bool> native_pixels;
+            for (const auto& pixel : pixels)
+              native_pixels.push_back(native_device &&
+                                      native_device->owns(*pixel.storage()));
             dependency_cache->put_dependency(template_key, std::move(manifest),
-                                             pixels);
+                                             pixels, native_pixels);
           } catch (...) {
           }
         };
@@ -1786,10 +1796,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return fail(
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
-        if (step.backend != Backend::Cpu)
+        if (step.backend == Backend::Gpu &&
+            (!native_device || !native_device->available() || !gpu_pool ||
+             step.traits.dependency_version != 1))
           return fail(Status::failure(
               ErrorCode::BackendUnavailable,
-              "native dependency stage requires fragment access plan"));
+              "native dependency worker or staged program unavailable"));
         if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
           if (step.traits.dependency_version == 0 && step.whole_boundary) {
             // The legacy Whole contract observes global validation for every
@@ -1938,6 +1950,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             request.parameters = step.parameters;
             request.outputs = frame.outputs;
             request.snapshot_identity = identity;
+            request.backend = step.backend;
             request.cancellation = active_token();
             request.limits = options.dependencies;
             if (flights)
@@ -2016,9 +2029,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (!elements.ok() || elements.value() > UINT64_MAX / width)
             return fail(Status::failure(ErrorCode::ResourceExhausted,
                                         "dependency output bytes overflow"));
-          auto capacity = checked_add(
-              std::max(step.traits.estimated_bytes, elements.value() * width),
-              step.traits.workspace_bytes);
+          auto output_bytes = elements.value() * width;
+          if (step.backend == Backend::Gpu) {
+            output_bytes = 0;
+            for (const auto& box : frame.outputs.boxes()) {
+              const auto bytes = gpu_internal::allocation_capacity(
+                  box.element_count().value() * width);
+              if (!bytes || bytes > UINT64_MAX - output_bytes)
+                return fail(Status::failure(ErrorCode::ResourceExhausted,
+                                            "native output capacity overflow"));
+              output_bytes += bytes;
+            }
+          }
+          auto capacity =
+              checked_add(std::max(step.traits.estimated_bytes, output_bytes),
+                          step.traits.workspace_bytes);
           if (!capacity.ok())
             return fail(capacity.status());
           // The pending input footprint remains available after supply moved
@@ -2045,10 +2070,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             return fail(reserved.status());
           Seal seal{reserved.take_value()};
           std::uint64_t callback_us = 0;
+          gpu_internal::Statistics native_stats;
           if (frame.session) {
             const auto charged_before = frame.session->consumed_work();
             auto progress = dependency_stage<DependencyProgress>(
-                pool, admission,
+                step.backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&] {
                   if (stop() != ErrorCode::Ok)
                     return Result<DependencyProgress>(Status{stop(), {}});
@@ -2159,13 +2185,77 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     };
                     blocks.publish = [&](const std::string& key,
                                          const Value& value) {
-                      dependency_cache->put("g4-block/" + key, value,
-                                            cache_epoch);
+                      dependency_cache->put(
+                          "g4-block/" + key, value, cache_epoch,
+                          native_device &&
+                              native_device->owns(*value.storage()));
                       return Status::success();
                     };
                   }
-                  auto result = frame.session->poll(
-                      seal.reservation->allocator(), services, blocks);
+                  auto allocator = seal.reservation->allocator();
+                  DependencyGpuServices gpu;
+                  std::optional<gpu_internal::Invocation> native;
+                  if (step.backend == Backend::Gpu) {
+                    allocator = native_device->allocator(allocator);
+                    native.emplace(native_device, active_token());
+                    gpu.allocation_capacity = gpu_internal::allocation_capacity;
+                    gpu.materialize = [&](const FragmentAtlasPlan& plan,
+                                          const ValueFragments& input,
+                                          const FootprintLimits& bounds) {
+                      const auto payload = gpu_internal::allocation_capacity(
+                          plan.payload_allocation_bytes());
+                      const auto directory = gpu_internal::allocation_capacity(
+                          plan.directory_allocation_bytes());
+                      if (!payload || !directory ||
+                          directory > UINT64_MAX - payload)
+                        return Result<FragmentAtlas>(
+                            Status::failure(ErrorCode::ResourceExhausted,
+                                            "native atlas capacity overflow"));
+                      auto admitted = reserve(payload + directory);
+                      if (!admitted.ok())
+                        return Result<FragmentAtlas>(admitted.status());
+                      Seal atlas_seal{admitted.take_value()};
+                      auto packed = plan.materialize(
+                          input,
+                          native_device->allocator(
+                              atlas_seal.reservation->allocator()),
+                          bounds);
+                      if (packed.ok()) {
+                        diagnostics.transfer_count += 2;
+                        diagnostics.transfer_bytes +=
+                            plan.payload_allocation_bytes() +
+                            plan.directory_allocation_bytes();
+                      }
+                      return packed;
+                    };
+                    gpu.buffer = [&](const std::uint8_t* bytes,
+                                     std::uint64_t size, bool writable) {
+                      std::uint64_t token = 0;
+                      const auto* api = native->service();
+                      api->buffer(api->context, bytes, size, writable, &token);
+                      return native->status().ok()
+                                 ? Result<std::uint64_t>(token)
+                                 : Result<std::uint64_t>(native->status());
+                    };
+                    gpu.execute = [&](const ps_gpu_dispatch_v8* commands,
+                                      std::uint32_t count) {
+                      const auto* api = native->service();
+                      api->execute(api->context, commands, count);
+                      return native->status();
+                    };
+                  }
+                  auto result =
+                      frame.session->poll(allocator, services, blocks, gpu);
+                  if (native) {
+                    const auto& stats = native->statistics();
+                    native_stats = stats;
+                    diagnostics.native_dispatch_count += stats.dispatches;
+                    diagnostics.native_submission_count += stats.submissions;
+                    diagnostics.native_compute_us += stats.device_us;
+                    diagnostics.native_constant_bytes += stats.constant_bytes;
+                    if (result.ok() && !native->status().ok())
+                      result = Result<DependencyProgress>(native->status());
+                  }
                   callback_us = duration_us(callback_started);
                   return result;
                 },
@@ -2279,10 +2369,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             frame.state = Frame::State::Complete;
           }
           diagnostics.peak_active_tasks = 1;
-          diagnostics.selected_backends[step.node_id] = Backend::Cpu;
+          diagnostics.selected_backends[step.node_id] = step.backend;
           diagnostics.operation_timings.push_back(OperationTiming{
-              step.node_id, Backend::Cpu, callback_us, ErrorCode::Ok, 1,
+              step.node_id, step.backend, callback_us, ErrorCode::Ok, 1,
               frame.state == Frame::State::Complete ? elements.value() : 0});
+          diagnostics.operation_timings.back().native_dispatch_count =
+              native_stats.dispatches;
+          diagnostics.operation_timings.back().native_compute_us =
+              native_stats.device_us;
         }
       }
       if (!returned)
@@ -3712,8 +3806,8 @@ Result<DemandResult> ExecutionContext::execute_fragments(
     }
   DemandResult result;
   auto run = ExecutionRun::run_dependencies(
-      &impl_->cpu_pool, &impl_->waiting_admission, impl_->budget,
-      impl_->operation_registry,
+      &impl_->cpu_pool, impl_->gpu_pool.get(), impl_->native_device,
+      &impl_->waiting_admission, impl_->budget, impl_->operation_registry,
       [operations = impl_->operation_registry](
           const std::string& key, const OperationInvocation& call) {
         return operations->invoke_current(key, call, [] { return true; });
@@ -4222,8 +4316,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     auto snapshot = validated.take_value();
     if (plan.dependency_network())
       return ExecutionRun::run_dependencies(
-          &impl_->cpu_pool, &impl_->waiting_admission, impl_->budget,
-          impl_->operation_registry,
+          &impl_->cpu_pool, impl_->gpu_pool.get(), impl_->native_device,
+          &impl_->waiting_admission, impl_->budget, impl_->operation_registry,
           [operations = impl_->operation_registry, &plan](
               const std::string& key, const OperationInvocation& call) {
             return operations->invoke_current(

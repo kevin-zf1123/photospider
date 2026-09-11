@@ -459,7 +459,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
 Result<DependencyProgress> DependencySession::poll(
     const BufferAllocator& allocator,
     const DependencyCheckpointServices& checkpoints,
-    const DependencyBlockServices& blocks) {
+    const DependencyBlockServices& blocks, const DependencyGpuServices& gpu) {
   std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
   if (!lock.owns_lock() || impl_->active_call)
     return Result<DependencyProgress>(
@@ -508,8 +508,26 @@ Result<DependencyProgress> DependencySession::poll(
         return Result<DependencyProgress>(impl_->retire(
             Status::failure(ErrorCode::ResourceExhausted,
                             "dependency output capacity overflow")));
+      std::uint64_t output_bytes = elements.value() * width;
+      if (impl_->query.backend == Backend::Gpu) {
+        if (!gpu.allocation_capacity || !gpu.materialize || !gpu.buffer ||
+            !gpu.execute)
+          return Result<DependencyProgress>(impl_->retire(
+              Status::failure(ErrorCode::BackendUnavailable,
+                              "native dependency services unavailable")));
+        output_bytes = 0;
+        for (const auto& box : impl_->query.outputs.boxes()) {
+          const auto count = box.element_count().value();
+          const auto bytes = gpu.allocation_capacity(count * width);
+          if (!bytes || bytes > UINT64_MAX - output_bytes)
+            return Result<DependencyProgress>(impl_->retire(
+                Status::failure(ErrorCode::ResourceExhausted,
+                                "native dependency capacity overflow")));
+          output_bytes += bytes;
+        }
+      }
       std::uint64_t capacity =
-          std::max(impl_->traits.estimated_bytes, elements.value() * width);
+          std::max(impl_->traits.estimated_bytes, output_bytes);
       if (impl_->traits.workspace_bytes > UINT64_MAX - capacity)
         return Result<DependencyProgress>(impl_->retire(Status::failure(
             ErrorCode::ResourceExhausted, "dependency workspace overflow")));
@@ -698,6 +716,9 @@ Result<DependencyProgress> DependencySession::poll(
                             impl_->limits.sets,
                             checkpoint_find,
                             checkpoint_publish,
+                            {},
+                            {},
+                            {},
                             {}};
       phase.block = [&](std::uint32_t kind, std::uint64_t begin,
                         std::uint64_t end, std::uint64_t mode,
@@ -713,6 +734,87 @@ Result<DependencyProgress> DependencySession::poll(
         } catch (...) {
           return Result<Value>(
               impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
+        }
+      };
+      std::map<std::uint32_t, FragmentAtlas> atlases;
+      const auto native_allowed = [&]() {
+        auto status = impl_->consume(1);
+        if (!status.ok())
+          return status;
+        if (impl_->query.backend != Backend::Gpu)
+          return impl_->record_failure(
+              invalid("native service on CPU dependency"));
+        return Status::success();
+      };
+      phase.atlas = [&](std::uint32_t port) -> Result<FragmentAtlas> {
+        try {
+          auto status = native_allowed();
+          if (!status.ok())
+            return Result<FragmentAtlas>(status);
+          if (port >= impl_->ready.size())
+            return Result<FragmentAtlas>(impl_->record_failure(
+                invalid("native atlas port is not supplied")));
+          const auto found = atlases.find(port);
+          if (found != atlases.end())
+            return Result<FragmentAtlas>(found->second);
+          auto limits = impl_->limits.sets;
+          limits.maximum_work =
+              std::min(limits.maximum_work, impl_->remaining_work);
+          auto prepared =
+              FragmentAtlasPlan::prepare(impl_->ready[port], {}, limits);
+          if (!prepared.ok())
+            return Result<FragmentAtlas>(
+                impl_->record_failure(prepared.status()));
+          auto plan = prepared.take_value();
+          status = impl_->consume(plan.preparation_work());
+          if (status.ok())
+            status = impl_->consume(plan.materialization_work());
+          if (!status.ok())
+            return Result<FragmentAtlas>(status);
+          auto packed = gpu.materialize(plan, impl_->ready[port], limits);
+          if (!packed.ok())
+            return Result<FragmentAtlas>(
+                impl_->record_failure(packed.status()));
+          atlases.emplace(port, packed.value());
+          return packed;
+        } catch (const std::bad_alloc&) {
+          return Result<FragmentAtlas>(
+              impl_->record_failure(Status{ErrorCode::ResourceExhausted, {}}));
+        } catch (...) {
+          return Result<FragmentAtlas>(
+              impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
+        }
+      };
+      phase.gpu_buffer = [&](const std::uint8_t* bytes, std::uint64_t size,
+                             bool writable) -> Result<std::uint64_t> {
+        try {
+          auto status = native_allowed();
+          if (!status.ok())
+            return Result<std::uint64_t>(status);
+          auto view = gpu.buffer(bytes, size, writable);
+          if (!view.ok())
+            return Result<std::uint64_t>(impl_->record_failure(view.status()));
+          return view;
+        } catch (const std::bad_alloc&) {
+          return Result<std::uint64_t>(
+              impl_->record_failure(Status{ErrorCode::ResourceExhausted, {}}));
+        } catch (...) {
+          return Result<std::uint64_t>(
+              impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
+        }
+      };
+      phase.gpu_execute = [&](const ps_gpu_dispatch_v8* commands,
+                              std::uint32_t count) -> Status {
+        try {
+          auto status = native_allowed();
+          if (status.ok())
+            status = gpu.execute(commands, count);
+          return status.ok() ? status : impl_->record_failure(status);
+        } catch (const std::bad_alloc&) {
+          return impl_->record_failure(
+              Status{ErrorCode::ResourceExhausted, {}});
+        } catch (...) {
+          return impl_->record_failure(Status{ErrorCode::OperationFailed, {}});
         }
       };
       ++impl_->polls;

@@ -15,7 +15,9 @@
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/data/dependency.hpp"
+#include "photospider/data/fragment_atlas.hpp"
 #include "photospider/data/value_fragments.hpp"
+#include "photospider/plugin/operation_plugin_api.h"
 #include "photospider/plugin/operation_types.hpp"
 
 namespace ps {
@@ -140,6 +142,30 @@ struct DependencyBlockServices final {
   /** @brief Optionally retains a completed state; failures are sticky. */
   std::function<Status(const std::string&, const Value&)> publish;
 };
+/** @brief Optional native services owned by the enclosing host Run.
+ * @note All callbacks are synchronous and borrowed until poll returns. The
+ * host uses its existing native worker, device and allocation budget. Each
+ * materialization must pack exactly the provided validated input and plan,
+ * account the separately rounded payload/directory capacities, and retain
+ * owners through native drain. Services may not start upstream evaluation.
+ * Errors and exceptions become sticky even when the program ignores them.
+ */
+struct DependencyGpuServices final {
+  /** @brief Actual native allocation capacity, or zero on overflow. */
+  // Function signature, not a scalar cast.
+  // NOLINTNEXTLINE(readability/casting)
+  std::function<std::uint64_t(std::uint64_t)> allocation_capacity;
+  /** @brief Materializes the exact plan under finite nonblocking admission. */
+  std::function<Result<FragmentAtlas>(
+      const FragmentAtlasPlan&, const ValueFragments&, const FootprintLimits&)>
+      materialize;
+  /** @brief Acquires a native view; same bounds as ps_gpu_service_v8::buffer.
+   */
+  std::function<Result<std::uint64_t>(const std::uint8_t*, std::uint64_t, bool)>
+      buffer;
+  /** @brief Executes and drains 1..32 bounded ps_gpu_dispatch_v8 records. */
+  std::function<Status(const ps_gpu_dispatch_v8*, std::uint32_t)> execute;
+};
 /** @brief Services borrowed only for one finite, nonblocking poll.
  * @note inputs contains only this stage's ready authorized fragments. No read
  * starts upstream execution. State must copy needed data through its accounted
@@ -193,6 +219,25 @@ struct PHOTOSPIDER_API DependencyPhase final {
                               const Value& incoming,
                               const std::function<Result<Value>()>& compute)>
       block;
+  /** @brief Packs this stage's authorized port into a bounded native atlas.
+   * @note Repeated calls for one port reuse the same immutable atlas during
+   * this poll. Missing ports, CPU queries and unavailable services fail;
+   * no earlier-stage fragments become accessible. Preparation and packing
+   * consume invocation work before allocation. Returned owners remain charged.
+   */
+  std::function<Result<FragmentAtlas>(std::uint32_t)> atlas;
+  /** @brief Native view acquisition, borrowed only until this poll returns.
+   * @note Only native host buffers qualify; immutable bytes cannot be promoted
+   * to writable. Errors remain local to this observation and are sticky.
+   */
+  std::function<Result<std::uint64_t>(const std::uint8_t*, std::uint64_t, bool)>
+      gpu_buffer;
+  /** @brief Finite synchronous native dispatch; drains on failure/cancellation.
+   * @note Source is trusted registered code. A missing atlas sample must be
+   * handled explicitly; publishing a numerical result after an unresolved
+   * read is invalid. GPU services never infer dependencies from shader code.
+   */
+  std::function<Status(const ps_gpu_dispatch_v8*, std::uint32_t)> gpu_execute;
   /** @brief Charged, bounds-checked sample read; no missing-page zero fallback.
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,
@@ -299,12 +344,18 @@ class PHOTOSPIDER_API DependencySession final {
    * @param allocator Stage-local host output/scratch allocator.
    * @param checkpoints Optional borrowed host services, valid until poll
    * returns.
+   * @param gpu Required complete host services for a GPU query; CPU queries
+   * cannot invoke them. Atlas memory is admitted separately from the declared
+   * stage output/workspace capacity. GPU workspace bounds count actual native
+   * allocation capacity, including device rounding for each allocation.
+   * A completed cached or control-only path may submit zero native dispatches.
    * @throws std::bad_alloc For caller-side metadata copying.
    */
   Result<DependencyProgress> poll(
       const BufferAllocator& allocator = BufferAllocator{},
       const DependencyCheckpointServices& checkpoints = {},
-      const DependencyBlockServices& blocks = {});
+      const DependencyBlockServices& blocks = {},
+      const DependencyGpuServices& gpu = {});
   /** @brief Supplies exactly the pending transport union for every input port.
    * @param inputs Exact matching metadata and authorized sets, including empty
    * entries for unused ports. Owners remain held only until the next poll

@@ -69,7 +69,7 @@ Discovery 工作量、poll 数、continuation 字节及阶段输出/scratch 有�
 在返回后失效；禁止并发析构。State 必须使用授予的 allocator。
 
 `ExecutionContext` 当前在 ExecutionRun 中用显式记录栈推进依赖模板。每个 start、poll
-和 source callback 使用既有 CPU 队列与共享 waiting admission。Waiting 记录不占 worker
+和 source callback 使用既有 CPU 或选定的 GPU 队列与共享 waiting admission。Waiting 记录不占 worker
 或未使用的活动预留。阶段在同一 MemoryBudget 中非阻塞申请；seal 归还未使用容量，
 实际 state/input/output lease 继续计费。无法容纳最小工作集时返回 ResourceExhausted。
 Source callback 精确填写请求矩形；稀疏端口仍通过 ValueFragments 供给。返回的外部分配
@@ -86,7 +86,7 @@ maximum parallelism 上限。Legacy Whole 记录在实际请求时每 Run 至多
 legacy→staged→legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及
 frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据，见下文。活跃 demand
 替换、共享 Flight 与依赖 result cache 复用已按下文及[缓存模型](Cache-Model.zh.md)
-实现。原生 GPU fragment 访问仍是本轮 G4 的未完成部分。
+实现。C++ staged GPU fragment 访问已接入，详见 Fragment Atlas；有界 discovery 与 staged C GPU 桥接仍待实现。
 
 [依赖采样算子](Dependency-Sampling.zh.md) 已实现 STMap 和动态 radius gather/scatter。
 可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。
@@ -196,7 +196,7 @@ bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不�
 metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache；当前调用
 通过 context-owned Flights 共享同一不可变 bundle 中重叠的活跃观察，执行仍使用既有
 CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的内容缓存复用既有像素 LRU 和有界结构证明，见
-[缓存模型](Cache-Model.zh.md)。GPU fragment 执行仍是未完成的 G4 集成。
+[缓存模型](Cache-Model.zh.md)。C++ staged GPU fragment 已接入，有界 discovery 与 staged C GPU 桥接仍待实现。
 
 `test_execution_demand` 覆盖稀疏结果、各 dtype snapshot、连续 dirty 累积、frozen
 隔离、陈旧发布、独立取消及 context 排空。真实 C terminal fixture 检查稀疏 Q 仅调用
@@ -320,4 +320,10 @@ transition 必须使用不同身份。C11 scan workflow 检查初次六次计算
 ## 稀疏 GPU 传输
 
 [Fragment Atlas](Fragment-Atlas.zh.md) 说明已实现的精确 atlas/mask 目录、SDK MSL
-lookup helper 及原生传输验证。Staged GPU 执行和 discovery 接入仍在进行。
+lookup helper 及原生传输验证。C++ staged GPU 执行已接入，有界 discovery 仍待实现。
+
+
+C++ staged GPU 已通过 [Fragment Atlas](Fragment-Atlas.zh.md) 接入现有 GPU worker 与
+共同 admission。每阶段按需 materialize 精确端口，工作量预扣、真实 native 容量独立计费，
+错误 sticky，普通/stream/frozen Run 均保持辅助取消优先级。有界 GPU discovery 与 staged
+C GPU 桥接仍属 G4 剩余工作。

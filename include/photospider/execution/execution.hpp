@@ -198,7 +198,10 @@ struct ResultCacheStatistics final {
 struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Total execute call duration in microseconds. */
   std::uint64_t execute_us = 0;
-  /** @brief Successful physical backend per source node. */
+  /** @brief Selected successful implementation backend per source node.
+   * @note A staged GPU path may reuse completed state or resolve a constant
+   * without new native work. Dispatch/submission fields report actual work.
+   */
   std::map<std::uint64_t, Backend> selected_backends;
   /** @brief Number of explicit cross-backend input transfers. */
   std::uint64_t transfer_count = 0;

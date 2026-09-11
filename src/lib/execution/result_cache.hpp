@@ -154,11 +154,12 @@ class ResultCache final {
    */
   void put_dependency(const std::string& key,
                       std::shared_ptr<const DependencyCacheManifest> manifest,
-                      const std::vector<Value>& values) noexcept {
+                      const std::vector<Value>& values,
+                      const std::vector<bool>& native = {}) noexcept {
     try {
-      if (!manifest || manifest->fragment_keys.size() != values.size() ||
-          values.empty() || values.size() > 4096 ||
-          !manifest->metadata_entries ||
+      if ((!native.empty() && native.size() != values.size()) || !manifest ||
+          manifest->fragment_keys.size() != values.size() || values.empty() ||
+          values.size() > 4096 || !manifest->metadata_entries ||
           manifest->metadata_entries > dependency_metadata_limit_)
         return;
       BufferAllocator domain({}, budget_);
@@ -175,7 +176,8 @@ class ResultCache final {
         }
       }
       for (std::size_t i = 0; i < values.size(); ++i)
-        put(manifest->fragment_keys[i], values[i], manifest->epoch);
+        put(manifest->fragment_keys[i], values[i], manifest->epoch,
+            !native.empty() && native[i]);
       std::lock_guard<std::mutex> lock(mutex_);
       if (manifest->epoch != epoch_ || closing_)
         return;

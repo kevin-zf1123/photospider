@@ -49,10 +49,10 @@ buffers are needed regardless of fragment count. Boundary mapping must occur in
 global coordinates before lookup. An absent mask bit/slot is an explicit missing
 sample, never a zero value or per-fragment clamp.
 
-This is implemented transport and shader lookup. Integration with staged GPU
-scheduling and bounded GPU discovery is still G4 work; existing dependency Runs
-continue to reject native stages until that path is connected. Raw Float64/Int64
-transport does not assert native floating-point arithmetic support.
+C++ staged GPU Runs now integrate this transport as described below. Bounded
+GPU discovery and the staged C GPU bridge remain G4 work. Legacy synchronous
+GPU producers within dependency templates also remain unsupported. Raw
+Float64/Int64 transport does not assert native floating-point arithmetic support.
 
 ## Public and native verification
 
@@ -82,4 +82,54 @@ including 65 separate fragments with four bindings, directory capacity rounding
 above 16 KiB, a one-byte-below native allocation failure, global out-of-domain
 queries and internal holes. Exit 77 means native Metal is unavailable and is a
 skip, not native success. The successful transport result does not establish
-staged GPU/discovery workflow completion.
+bounded GPU discovery completion.
+
+
+## Staged native execution
+
+A GPU `DependencySession::poll` requires complete `DependencyGpuServices` from
+its host. The Run uses the existing GPU worker, waiting admission, native device
+and synchronous `Invocation`; start/source callbacks retain the CPU worker.
+There is no second executor or shader page-fault mechanism. State-cache hits and
+control/constant-only paths may complete with zero new dispatches. Selected
+backend identifies the implementation/numeric contract; actual native work is
+reported separately in dispatch/submission/device-time counters and poll timings.
+
+`phase.atlas(port)` lazily prepares and materializes only that stage's validated
+port coverage. It charges preparation and packing work before the host allocates
+and reuses the same atlas on repeated calls within a poll. Missing stage ports
+and CPU use fail. Native buffer acquisition and execution are fenced and sticky;
+ignored failures cannot publish success. The host keeps all acquired native
+views until the synchronous callback drains. Caller and auxiliary set
+cancellation are combined for ordinary, streamed and frozen dependency Runs;
+cancellation wins over an earlier native service error.
+
+Each atlas has a separate nonblocking MemoryBudget reservation for the exact
+native payload and directory capacities. Stage output bytes round each requested
+rectangle separately; declared workspace bounds count actual native capacity.
+Sealing releases only unused reservation bytes. Live atlases, state, scratch and
+outputs remain charged until their last owner retires. A stage that cannot fit
+with its retained owners fails finitely. Atlas leases never authorize additional
+input samples, batching or changes to per-output certificates.
+
+The public [G4 GPU workflow](../../examples/g4_gpu_workflow/main.cpp) reads one
+Int64 control per observation on the host, declares 65 isolated Float32 samples,
+and performs a real Metal atlas sum with three bindings. Independent arithmetic
+requires results 2145, 4290 and 2145. Two observations dispatch; the third reuses
+a pure block with identical incoming control/state and currently supplied data,
+while preserving its own control `{2}` evidence. The shader explicitly checks
+missing samples before numerical publication. Additional runs verify the exact
+33079/33080-byte failed/successful stage reservation frontier and owner reuse,
+plus ordinary streaming cancellation after a native service error.
+
+```sh
+cmake --build build/issue257-static --target photospider_g4_gpu_workflow test_dependency_gpu -j 8
+ctest --test-dir build/issue257-static -R '^(test_dependency_gpu|photospider_g4_gpu_workflow)$' --output-on-failure
+build/issue257-static/photospider_g4_gpu_workflow
+```
+
+`test_dependency_gpu` uses explicitly nonnative mocks for protocol-only service
+absence, CPU misuse, host exceptions, ignored errors, work-before-allocation and
+atlas reuse/retirement. It does not count as native evidence. Installed static
+and shared consumers run that test and compile the same public workflow. The
+workflow returns 77 on hosts without native Metal, after verifying its CPU oracle.

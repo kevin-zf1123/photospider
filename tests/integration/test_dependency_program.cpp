@@ -150,9 +150,10 @@ Value values(ElementType type, const std::vector<T>& samples) {
 Result<DependencyResult> drive(
     const std::shared_ptr<DependencySession>& session,
     const std::vector<Value>& inputs,
-    const BufferAllocator& allocator = BufferAllocator{}) {
+    const BufferAllocator& allocator = BufferAllocator{},
+    const DependencyGpuServices& gpu = {}) {
   for (;;) {
-    auto progress = session->poll(allocator);
+    auto progress = session->poll(allocator, {}, {}, gpu);
     if (!progress.ok())
       return Result<DependencyResult>(progress.status());
     auto event = progress.take_value();
@@ -634,7 +635,25 @@ int service_and_identity_regressions() {
                .take_value();
   PS_CHECK(a.certificate->merge(*b.certificate).ok());
   request.backend = Backend::Gpu;
-  auto gpu = drive(left.start_dependency("probe", request).take_value(), {})
+  // This probe verifies backend identity only. It performs no native work;
+  // unavailable mock services reject any unexpected GPU access.
+  DependencyGpuServices identity_services;
+  identity_services.allocation_capacity = [](std::uint64_t bytes) {
+    return bytes;
+  };
+  identity_services.materialize = [](const FragmentAtlasPlan&,
+                                     const ValueFragments&,
+                                     const FootprintLimits&) {
+    return Result<FragmentAtlas>(Status{ErrorCode::BackendUnavailable, {}});
+  };
+  identity_services.buffer = [](const std::uint8_t*, std::uint64_t, bool) {
+    return Result<std::uint64_t>(Status{ErrorCode::BackendUnavailable, {}});
+  };
+  identity_services.execute = [](const ps_gpu_dispatch_v8*, std::uint32_t) {
+    return Status{ErrorCode::BackendUnavailable, {}};
+  };
+  auto gpu = drive(left.start_dependency("probe", request).take_value(), {},
+                   BufferAllocator{}, identity_services)
                  .take_value();
   PS_CHECK(!a.certificate->merge(*gpu.certificate).ok());
   request.backend = Backend::Cpu;
