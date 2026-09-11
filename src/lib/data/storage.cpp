@@ -100,12 +100,16 @@ BufferAllocator BufferAllocator::limited(std::uint64_t maximum_bytes,
 }
 bool BufferAllocator::owns_allocation(
     const MutableBuffer& buffer) const noexcept {
-  if (allocation_scopes_.empty() || !buffer.storage_)
+  return buffer.storage_ && owns_allocation(*buffer.storage_);
+}
+bool BufferAllocator::owns_allocation(
+    const CpuStorage& storage) const noexcept {
+  if (allocation_scopes_.empty())
     return false;
   const auto& scope = allocation_scopes_.back();
-  return std::find(buffer.storage_->allocation_scopes_.begin(),
-                   buffer.storage_->allocation_scopes_.end(),
-                   scope) != buffer.storage_->allocation_scopes_.end();
+  return std::find(storage.allocation_scopes_.begin(),
+                   storage.allocation_scopes_.end(),
+                   scope) != storage.allocation_scopes_.end();
 }
 Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
   const auto reject = [&](Status status) {

@@ -20,6 +20,7 @@ array, which can then be explicitly interpreted by another operation.
 | `numeric.add`, `numeric.subtract`, `numeric.multiply`, `numeric.divide` | Two Float32 or two Float64 arrays | None |
 | `numeric.clamp` | One Float32/Float64 array | Finite inclusive Float64 `min`, `max`, with `min <= max` |
 | `numeric.mean`, `numeric.variance` | One Float32/Float64 array | Optional Int64 `block_size` in [1,65536], default 64 |
+| `numeric.ordered_scan` | One rank-1 Float64 array; same-shape generic output | Optional Int64 `block_size` in [1,65536], default 64 |
 
 Constructors explicitly write `rounding="ties_even"` and `overflow="reject"`
 for the default behavior. The registry never supplies missing parameters.
@@ -70,8 +71,7 @@ live fragments use the current ExecutionContext worker/admission/allocator.
 Empty exact scalar queries read nothing; resource/discovery/cancellation bounds
 remain explicit. Source data can exceed the live payload budget when its blocks
 fit. Completed exact-demand cache hits retain the complete global source support;
-changing any observed input invalidates the scalar result. Internal scan/carry
-block sharing is a separate remaining G4 integration.
+changing any observed input invalidates the scalar result. Cross-bundle incoming-state block caching remains a G4 integration task.
 
 `test_ordered_reduction` checks bitwise results over five block sizes and ranks
 1, 4 and 8, Float32/Float64, cache cold/warm, original error sample indices,
@@ -79,6 +79,26 @@ second-pass cancellation/recovery, typed channel closure, and a 32 KiB source
 under a 1 KiB controlled live budget. Its independent arithmetic oracle uses an
 explicit binary64 left fold. The [G4 public workflow](../../examples/g4_workflow/README.md)
 checks mean 1.5 and variance 1.25 over repeated `[0,1,2,3]` with bounded source reads.
+
+`numeric.ordered_scan` computes inclusive prefixes with a positive-zero Float64
+initial carry, strict left-to-right addition, nearest-even rounding and gradual
+underflow. It restores the caller's environment. Output j observes input `[0,j]`;
+no read or arithmetic extends past j. The first nonfinite input or accumulator
+fails with `nonfinite scan input i` or `scan overflow i`. Therefore `[1,inf]`
+queried at `{0}` succeeds with 1, while `{1}` or `{0,1}` fails at input 1.
+RequestFailureOnly still invokes each output independently.
+
+Successful prefix carries can be reused through completed-only checkpoints in
+the same active input bundle. Each borrowed checkpoint imports its full direct
+input witness and upstream structural records. There are no cached failures or
+worker waits. Checkpoints use existing host allocator leases and bounded optional
+metadata retention; eviction can cause recomputation. A dense 256-output source
+test reads exactly 256 inputs once. Private execution-hook tests hold a real
+published prefix to check both waiter start orders, owner cancellation, warm
+result caching and exact imported source support. Direct/manual protocol tests
+check allocator ownership, scope/sequence rejection and witness limits.
+Cross-bundle blocks keyed by incoming state and input bits are not yet retained;
+completed output caching still verifies its full transitive prefix support.
 
 The implementation reads logical coordinates using storage origin, byte offset
 and signed strides, including unaligned and zero-stride views. It allocates

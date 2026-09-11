@@ -18,6 +18,7 @@ coverage mask 乘二得到 generic 数组，之后可由其他算子显式赋予
 | `numeric.add`、`numeric.subtract`、`numeric.multiply`、`numeric.divide` | 两个 Float32 或两个 Float64 数组 | 无 |
 | `numeric.clamp` | 一个 Float32/Float64 数组 | finite inclusive Float64 `min`、`max`，`min <= max` |
 | `numeric.mean`、`numeric.variance` | 一个 Float32/Float64 数组 | 可选 Int64 `block_size`，范围 [1,65536]、默认 64 |
+| `numeric.ordered_scan` | 一个 rank-1 Float64 数组；同 shape generic 输出 | 可选 Int64 `block_size`，范围 [1,65536]、默认 64 |
 
 默认行为由构造端显式写入 `rounding="ties_even"`、`overflow="reject"`；registry
 不补参数。Dither 固定关闭，无 dither 参数。Range 对声明区间进行仿射映射，源区间外
@@ -86,10 +87,25 @@ Opaque vendor facets 不增加验证扫描。
 State 和活跃 fragment 使用当前 ExecutionContext worker/admission/allocator。精确 Empty
 scalar 查询不读样本，资源、发现和取消限额保持显式。源数据可以超过 live payload
 预算，只需正在读取的块能够容纳。已完成精确 demand 的缓存命中保留完整全局源支持；
-任何被观察输入变化均使 scalar 结果失效。内部 scan/carry 块共享仍为本轮 G4 的后续工作。
+任何被观察输入变化均使 scalar 结果失效。跨 bundle 的 incoming-state 块缓存仍为本轮 G4 的后续工作。
 
 `test_ordered_reduction` 检查五种块大小、rank 1/4/8、Float32/Float64、冷热缓存的位级
 结果，原错误 sample index、第二遍取消与恢复、typed channel closure，以及 1 KiB
 受控预算下的 32 KiB 源。独立算术 oracle 显式执行 binary64 left fold。
 [G4 公开 workflow](../../../examples/g4_workflow/README.md) 用有界读取验证重复
 `[0,1,2,3]` 的 mean=1.5、variance=1.25。
+
+
+`numeric.ordered_scan` 使用正零 Float64 初始 carry、严格从左到右加法、nearest-even
+舍入和渐进下溢，计算 inclusive prefix，随后恢复调用方环境。输出 j 观察输入 `[0,j]`，
+不越过 j 读取或计算。首个非有限输入或累加器分别报 `nonfinite scan input i` 或
+`scan overflow i`。因此 `[1,inf]` 查询 `{0}` 成功得到 1，查询 `{1}` 或 `{0,1}` 在
+输入 1 失败。RequestFailureOnly 仍逐输出独立调用。
+
+同一活跃输入 bundle 可以通过只保存完成状态的 checkpoint 复用成功前缀 carry。
+借用时导入完整直接输入证据和上游结构记录，不缓存失败、不等待 worker。Checkpoint
+使用现有宿主 allocator lease 和有界可选元数据保留，驱逐后可以重算。256 个密集输出
+的源测试恰好读取 256 个输入一次。私有 execution hook 测试暂停真实成功前缀发布，
+检查两种 waiter 启动顺序、发布者取消、暖结果缓存和精确源支持导入。Direct/manual
+协议测试检查 allocator 归属、scope/sequence 拒绝及证据限额。跨 bundle、以 incoming
+state 和输入 bits 为 key 的块暂未保留；已完成输出缓存仍核验完整传递前缀支持。

@@ -27,6 +27,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
 #include "execution/dependency_records.hpp"
@@ -883,6 +884,9 @@ struct ExecutionContext::Impl final {
     dependency_flights =
         std::make_unique<execution_internal::DependencyFlights>(
             requested.maximum_dependency_flights);
+    dependency_checkpoints =
+        std::make_unique<execution_internal::DependencyCheckpoints>(
+            requested.maximum_dependency_flights);
     if (!requested.maximum_dependency_cache_metadata ||
         requested.maximum_dependency_cache_metadata > 1048576)
       throw std::invalid_argument("invalid dependency cache metadata limit");
@@ -930,6 +934,8 @@ struct ExecutionContext::Impl final {
   std::unique_ptr<execution_internal::ResultCache> cache;
   std::shared_ptr<execution_internal::DemandCoordinator> demands;
   std::unique_ptr<execution_internal::DependencyFlights> dependency_flights;
+  std::unique_ptr<execution_internal::DependencyCheckpoints>
+      dependency_checkpoints;
 };
 
 namespace {
@@ -1160,7 +1166,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::map<std::string, ValueFragments>* fragment_outputs = nullptr,
       const std::string& snapshot_identity = {},
       execution_internal::DependencyFlights* flights = nullptr,
-      execution_internal::ResultCache* dependency_cache = nullptr) {
+      execution_internal::ResultCache* dependency_cache = nullptr,
+      execution_internal::DependencyCheckpoints* checkpoints = nullptr) {
     const auto started = std::chrono::steady_clock::now();
     std::function<ErrorCode()> shared_stop;
     std::function<void(Status)> abort_flights;
@@ -1194,6 +1201,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return fail(bytes.status());
         diagnostics.retained_input_bytes = bytes.value();
       }
+    std::map<std::size_t, std::shared_ptr<execution_internal::CheckpointScope>>
+        checkpoint_scopes;
     struct Seal {
       std::shared_ptr<MemoryReservation> reservation;
       ~Seal() {
@@ -1204,6 +1213,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     const auto reserve = [&](std::uint64_t bytes) {
       if (reclaim)
         reclaim(bytes);
+      if (bytes > budget->available())
+        for (const auto& scope : checkpoint_scopes)
+          if (scope.second)
+            scope.second->clear();
       // Deliberately omit the blocking stop callback. All already-live owners
       // remain charged; an impossible minimum stage fails finitely.
       return budget->reserve(bytes, {}, observation);
@@ -2041,8 +2054,91 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     return Result<DependencyProgress>(Status{stop(), {}});
                   const auto callback_started =
                       std::chrono::steady_clock::now();
-                  auto result =
-                      frame.session->poll(seal.reservation->allocator());
+                  DependencyCheckpointServices services;
+                  if (shareable[step_index] &&
+                      step.traits.observation_kind == ObservationKind::Atomic) {
+                    auto& scope = checkpoint_scopes[step_index];
+                    if (!scope) {
+                      if (checkpoints) {
+                        auto all = Footprint::none(step.output_descriptor.shape,
+                                                   limits);
+                        if (!all.ok())
+                          return Result<DependencyProgress>(all.status());
+                        scope = checkpoints->acquire(
+                            observation_key(step_index, all.value()),
+                            limits.maximum_boxes);
+                      } else {
+                        scope = std::make_shared<
+                            execution_internal::CheckpointScope>(
+                            limits.maximum_boxes);
+                      }
+                    }
+                    if (scope) {
+                      auto empty =
+                          Footprint::none(step.output_descriptor.shape, limits);
+                      if (!empty.ok())
+                        return Result<DependencyProgress>(empty.status());
+                      services.identity =
+                          observation_key(step_index, empty.value());
+                      services.find = [&, scope](std::uint32_t phase,
+                                                 std::uint64_t before)
+                          -> Result<std::optional<DependencyCheckpoint>> {
+                        auto found = scope->find(phase, before);
+                        if (!found)
+                          return Result<std::optional<DependencyCheckpoint>>(
+                              std::optional<DependencyCheckpoint>{});
+                        auto charged = consume(found->weight);
+                        if (!charged.ok())
+                          return Result<std::optional<DependencyCheckpoint>>(
+                              charged);
+                        for (const auto& upstream : found->upstream) {
+                          auto status = records.import(upstream);
+                          if (!status.ok())
+                            return Result<std::optional<DependencyCheckpoint>>(
+                                status);
+                          const auto id = records.observation_identity(
+                              upstream->step, upstream->samples);
+                          if (frame.upstream_ids.insert(id).second)
+                            frame.upstream.push_back(upstream);
+                        }
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+                        execution_testing::notify_checkpoint_borrowed();
+#endif
+                        return Result<std::optional<DependencyCheckpoint>>(
+                            found->checkpoint);
+                      };
+                      services.publish = [&, scope](const DependencyCheckpoint&
+                                                        checkpoint) {
+                        std::uint64_t weight = checkpoint.metadata_entries() +
+                                               frame.upstream.size();
+                        if (weight > cache_work)
+                          return Status::success();
+                        cache_work -= weight;
+                        for (const auto& upstream : frame.upstream) {
+                          auto proof =
+                              execution_internal::dependency_cache_proof(
+                                  plan, upstream, limits.maximum_boxes,
+                                  &cache_work,
+                                  &diagnostics.dependency_cache_records_visited,
+                                  limits);
+                          if (!proof.ok() ||
+                              proof.value().metadata_entries >
+                                  limits.maximum_boxes -
+                                      std::min(weight, limits.maximum_boxes))
+                            return Status::success();
+                          weight += proof.value().metadata_entries;
+                        }
+                        if (scope->put({checkpoint, frame.upstream, weight})) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+                          execution_testing::notify_checkpoint_published();
+#endif
+                        }
+                        return Status::success();
+                      };
+                    }
+                  }
+                  auto result = frame.session->poll(
+                      seal.reservation->allocator(), services);
                   callback_us = duration_us(callback_started);
                   return result;
                 },
@@ -3312,6 +3408,7 @@ DiskCacheStatistics ExecutionContext::disk_cache_statistics() const {
 }
 void ExecutionContext::clear_result_cache() {
   impl_->dependency_flights->clear();
+  impl_->dependency_checkpoints->clear();
   if (impl_->cache)
     impl_->cache->clear();
 }
@@ -3602,7 +3699,8 @@ Result<DemandResult> ExecutionContext::execute_fragments(
           impl_->cache->reclaim_for(bytes);
       },
       &query, &result.values, frozen.execution_identity_,
-      impl_->dependency_flights.get(), impl_->cache.get());
+      impl_->dependency_flights.get(), impl_->cache.get(),
+      impl_->dependency_checkpoints.get());
   if (!run.ok())
     return failure(run.status());
   auto completed = run.take_value();

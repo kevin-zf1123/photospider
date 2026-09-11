@@ -151,6 +151,11 @@ class PHOTOSPIDER_API BufferAllocator final {
    * retires.
    */
   bool owns_allocation(const MutableBuffer& buffer) const noexcept;
+  /** @brief Checks the same scoped provenance after immutable publication.
+   * @note A shared context domain alone is insufficient; this checks the
+   * allocator's exact live sublimit or one of its descendants.
+   */
+  bool owns_allocation(const CpuStorage& storage) const noexcept;
 
  private:
   friend class gpu_internal::Device;

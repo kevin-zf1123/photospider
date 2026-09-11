@@ -50,7 +50,13 @@ requires exactly 64 Float64 samples. Uniform `[0,1,2,3]` repetitions independent
 give mean 1.5 and population variance 1.25; one mean pass and two variance passes
 read exactly 98304 bytes. Runtime evidence retains the complete global support.
 The scalar operations use ordered incoming accumulators, never partial block
-sums. Scan carry sharing remains a separate G4 implementation task.
+sums.
+
+The `scan` scenario computes 128 inclusive prefixes of `[1,2,...,128]`. The
+triangular-number oracle checks every output, ending at 8256, while source
+callbacks reject any repeated prefix read. Completed carries let all 128 outputs
+read exactly 128 inputs. A separate `[1,inf,...]` binding then proves `{0}`
+succeeds with 1 and `{0,1}` reports the error at input 1.
 
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
@@ -69,6 +75,7 @@ demand: Q={0,4}, latest=[10,14], frozen=[1,5], generation=3, accumulated_dirty={
 shared: callbacks=1, first=Cancelled, second=7, evidence=present
 cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, values=[1,5], cleared_pixels=0, data3_dirty={0,4}
 reductions: mean=1.5, variance=1.25, block=64, source_bytes=98304, live_budget=1024, global_support=present
+scan: outputs=128, source_reads=128, last=8256, short_query=1, joint_query=nonfinite_input_1
 ```
 
 It also builds as a standalone installed public package consumer:

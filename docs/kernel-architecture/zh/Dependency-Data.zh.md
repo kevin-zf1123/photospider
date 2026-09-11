@@ -242,5 +242,28 @@ demand 调用后再销毁 worker。`clear_result_cache()` 同时递增 dependenc
 证明 callback 只执行一次，一个 waiter 取消，另一个得到 7 及完整 identity 依赖证据。
 带 barrier 的 terminal 用例证明相同稀疏 Q 只共享一次、较小 Q 单独执行，导入的 terminal
 证据仍拒绝子集 restriction。含非有限样本的显式联合请求失败时，共享的正常点 waiter
-仍成功；后序原子先完成也不改变联合请求的规范错误。该 generic callback 检查不能替代
-尚待实现的 ordered-scan/carry 集成。
+仍成功；后序原子先完成也不改变联合请求的规范错误。独立 `test_scan_waiters` 现在用真实
+`numeric.ordered_scan` 和共享成功前缀状态检查这些边界。
+
+
+## 已完成内部 checkpoint
+
+C++ `DependencyPhase` 提供 `checkpoint_before(phase, sequence)` 和
+`checkpoint_publish(phase, sequence, state)`，用于纯 Atomic 程序的可选完成状态服务。
+RequestRecord 调用产生 sticky InvalidArgument，即使 callback 忽略错误也拒绝。
+不可变 state 必须由当前阶段 allocator 分配，同属宿主但来自其他阶段的分配不接受。
+宿主复制已成功供给的规范 history 前计量 metadata/work。查找验证 operation/static
+contract、backend、输入 bundle、宿主节点 scope 与 sequence，并导入完整 witness。
+Checkpoint 不授权读取当前阶段未供给的 fragment。
+
+每个活跃 context scope 在精确集合元数据限额内至多保留 64 个 checkpoint；context
+目录由 `maximum_dependency_flights` 限制，仅持有 scope 弱引用。State payload 纳入
+现有 live allocation budget。内存 admission 可以清除可选状态；清除结果缓存会分离旧
+scope。已借用 state 随自身 lease 退休。查找不等待 producer，此接口不发布错误或取消
+结果。因此查询可以复用另一活跃查询的成功前缀，而不继承后续错误或取消。
+
+保留证据构造使用有界可选 dependency-cache work allowance，耗尽后可以重算；导入
+使用普通 dependency work 限额。目前实现活跃同 bundle carry 复用，跨 bundle 块内容
+缓存仍需将实际 incoming state、phase/range、input bits、numeric mode 和 controls
+纳入 key。C 分阶段桥尚未提供 checkpoint service table，既有有限 poll/read/supply
+协议保持有效。

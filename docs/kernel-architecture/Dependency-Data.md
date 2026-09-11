@@ -342,8 +342,37 @@ The gated terminal case proves identical sparse Q shares once while a smaller Q
 executes separately; imported terminal evidence still rejects subset restriction.
 An explicit joint request containing a nonfinite sample fails while a shared
 normal-only waiter succeeds, and a later atom finishing first does not change the
-joint request's canonical error. This generic callback check does not replace the
-remaining ordered-scan/carry integration.
+joint request's canonical error. The separate `test_scan_waiters` now checks these boundaries with the real
+`numeric.ordered_scan` implementation and successful shared prefix states.
 The public workflow uses two exact waiters and a bounded callback barrier to
 prove one callback, one cancelled waiter and the other waiter's value 7 with
 complete identity dependency evidence.
+
+
+## Completed internal checkpoints
+
+A C++ `DependencyPhase` offers `checkpoint_before(phase, sequence)` and
+`checkpoint_publish(phase, sequence, state)`. These are optional completed-state
+services for pure Atomic programs. RequestRecord use is a sticky InvalidArgument,
+including when the callback ignores the error. An immutable checkpoint state
+must be allocated by the current stage allocator; sibling stage allocations are
+not accepted. The host captures the already supplied canonical history, charging
+metadata/work before copying it. Lookup validates operation/static contract,
+backend, input bundle, host node scope and sequence, then imports its full witness.
+A checkpoint does not authorize reading fragments omitted from the current stage.
+
+Each active context scope retains at most 64 checkpoints within exact-set metadata
+limits. The context directory is bounded by `maximum_dependency_flights` and holds
+only weak scope owners. State payload remains in the existing live allocation
+budget. Memory admission can clear optional states; result-cache clear detaches
+old scopes. Borrowed states stay alive until their own leases retire. Lookup never
+waits for a producer, and no error or cancelled outcome is published through this
+interface. A query can therefore reuse a valid prefix of another still-active
+query without inheriting that query's later error or cancellation.
+
+Retention proof construction uses the bounded optional dependency-cache work
+allowance; exhausted retention can recompute. Import uses ordinary dependency
+work limits. This is active same-bundle carry reuse, not cross-bundle block-content
+caching. The latter still needs actual incoming state, phase/range, input bits,
+numeric mode and controls in its key. The C staged bridge currently has no
+checkpoint service table; its existing finite poll/read/supply protocol is intact.

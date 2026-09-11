@@ -78,6 +78,53 @@ struct DependencyNeedBatch final {
  * belongs only to this single observation or identical terminal full request.
  */
 using DependencyPoll = std::variant<DependencyNeedBatch, ValueFragments>;
+/** @brief Completed internal state with the exact input witness that produced
+ * it.
+ * @note This is not a public output observation or a RequestRecord. A consumer
+ * inherits its complete witness; lookup never waits or evaluates a producer.
+ * Only the host constructs checkpoints from a successfully supplied history.
+ */
+class PHOTOSPIDER_API DependencyCheckpoint final {
+ public:
+  DependencyCheckpoint() = default;
+  bool valid() const noexcept { return impl_ != nullptr; }
+  /** @brief Algorithm phase identifier; throws logic_error if invalid. */
+  std::uint32_t phase() const;
+  /** @brief Last completed logical position; throws logic_error if invalid. */
+  std::uint64_t sequence() const;
+  /** @brief Immutable accounted state, borrowed for this handle lifetime.
+   * @throws std::logic_error If the handle is invalid.
+   */
+  const Value& state() const;
+  /** @brief Conservative host metadata units; throws logic_error if invalid. */
+  std::uint64_t metadata_entries() const;
+
+ private:
+  friend class DependencySession;
+  struct Impl;
+  std::shared_ptr<const Impl> impl_;
+};
+/** @brief Optional host-owned, completed-only state services for one poll.
+ * @note One service scope must name the same operation instance, immutable
+ * input bundle and static contract. Never share it across different bindings.
+ * find returns the greatest available sequence <= before in the named phase.
+ * publish may decline optional retention by returning success. No service may
+ * block waiting for computation. State owners remain accounted until
+ * retirement. RequestRecord programs cannot use these services. Source/waiter
+ * errors are never stored as checkpoints or broadcast through this interface.
+ * Service exceptions are fenced and sticky even if plugin code ignores errors.
+ */
+struct DependencyCheckpointServices final {
+  /** @brief Nonempty host operation-instance scope, at most 4096 bytes.
+   * @note Included in checkpoint provenance; plugin callbacks cannot inspect
+   * it.
+   */
+  std::string identity;
+  std::function<Result<std::optional<DependencyCheckpoint>>(
+      std::uint32_t phase, std::uint64_t before)>
+      find;
+  std::function<Status(const DependencyCheckpoint&)> publish;
+};
 /** @brief Services borrowed only for one finite, nonblocking poll.
  * @note inputs contains only this stage's ready authorized fragments. No read
  * starts upstream execution. State must copy needed data through its accounted
@@ -98,6 +145,20 @@ struct PHOTOSPIDER_API DependencyPhase final {
    * their contribution to metadata/work bounds.
    */
   FootprintLimits sets = {};
+  /** @brief Imports a completed checkpoint and its full successful witness.
+   * Missing optional services return an empty result; this never starts work.
+   */
+  std::function<Result<std::optional<DependencyCheckpoint>>(std::uint32_t,
+                                                            std::uint64_t)>
+      checkpoint_before;
+  /** @brief Publishes host-allocated immutable state from the supplied history.
+   * @note The sequence/phase identifies the algorithm's complete state,
+   * including its processed index and numeric mode. A changed incoming state
+   * must be computed again; equality of an outgoing accumulator is not a block
+   * key.
+   */
+  std::function<Status(std::uint32_t, std::uint64_t, const Value&)>
+      checkpoint_publish;
   /** @brief Charged, bounds-checked sample read; no missing-page zero fallback.
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,
@@ -202,10 +263,13 @@ class PHOTOSPIDER_API DependencySession final {
    * @return NeedBatch or complete result, or a fenced typed failure. Polling
    * while waiting for supply or after a terminal result fails InvalidArgument.
    * @param allocator Stage-local host output/scratch allocator.
+   * @param checkpoints Optional borrowed host services, valid until poll
+   * returns.
    * @throws std::bad_alloc For caller-side metadata copying.
    */
   Result<DependencyProgress> poll(
-      const BufferAllocator& allocator = BufferAllocator{});
+      const BufferAllocator& allocator = BufferAllocator{},
+      const DependencyCheckpointServices& checkpoints = {});
   /** @brief Supplies exactly the pending transport union for every input port.
    * @param inputs Exact matching metadata and authorized sets, including empty
    * entries for unused ports. Owners remain held only until the next poll

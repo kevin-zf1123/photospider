@@ -2,6 +2,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -85,6 +86,23 @@ Result<Value> OperationRegistry::invoke_dependency_current(
     auto identity = invocation_identity();
     if (!identity.ok())
       return failure(identity.status());
+    std::map<std::uint32_t, DependencyCheckpoint> completed;
+    DependencyCheckpointServices checkpoints;
+    checkpoints.identity = identity.value();
+    checkpoints.find = [&](std::uint32_t phase, std::uint64_t before)
+        -> Result<std::optional<DependencyCheckpoint>> {
+      const auto found = completed.find(phase);
+      if (found == completed.end() || found->second.sequence() > before)
+        return Result<std::optional<DependencyCheckpoint>>(
+            std::optional<DependencyCheckpoint>{});
+      return Result<std::optional<DependencyCheckpoint>>(found->second);
+    };
+    checkpoints.publish = [&](const DependencyCheckpoint& checkpoint) {
+      if (checkpoint.metadata_entries() <= 65536 &&
+          (completed.count(checkpoint.phase()) || completed.size() < 64))
+        completed.insert_or_assign(checkpoint.phase(), checkpoint);
+      return Status::success();
+    };
     auto run = [&](const Footprint& outputs) -> Result<DependencyResult> {
       DependencyRequest request{metadata,
                                 invocation.parameters,
@@ -101,7 +119,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
       for (;;) {
         if (stop() != ErrorCode::Ok)
           return Result<DependencyResult>(Status{stop(), {}});
-        auto progress = session->poll(invocation.allocator);
+        auto progress = session->poll(invocation.allocator, checkpoints);
         if (!progress.ok())
           return Result<DependencyResult>(progress.status());
         auto event = progress.take_value();

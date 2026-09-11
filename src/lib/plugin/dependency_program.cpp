@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -136,6 +137,33 @@ DependencyContinuation& DependencyContinuation::operator=(
     poll_ = std::exchange(other.poll_, nullptr);
   }
   return *this;
+}
+struct DependencyCheckpoint::Impl {
+  std::uint32_t phase = 0;
+  std::uint64_t sequence = 0, entries = 0;
+  std::string identity;
+  Value state;
+  std::vector<DependencyNeed> witness;
+};
+std::uint32_t DependencyCheckpoint::phase() const {
+  if (!impl_)
+    throw std::logic_error("invalid dependency checkpoint");
+  return impl_->phase;
+}
+std::uint64_t DependencyCheckpoint::sequence() const {
+  if (!impl_)
+    throw std::logic_error("invalid dependency checkpoint");
+  return impl_->sequence;
+}
+const Value& DependencyCheckpoint::state() const {
+  if (!impl_)
+    throw std::logic_error("invalid dependency checkpoint");
+  return impl_->state;
+}
+std::uint64_t DependencyCheckpoint::metadata_entries() const {
+  if (!impl_)
+    throw std::logic_error("invalid dependency checkpoint");
+  return impl_->entries;
 }
 struct DependencySession::Impl {
   // State is declared last so its plugin destructor runs before the definition.
@@ -424,7 +452,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
           new DependencySession(std::move(impl))));
 }
 Result<DependencyProgress> DependencySession::poll(
-    const BufferAllocator& allocator) {
+    const BufferAllocator& allocator,
+    const DependencyCheckpointServices& checkpoints) {
   std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
   if (!lock.owns_lock() || impl_->active_call)
     return Result<DependencyProgress>(
@@ -497,9 +526,168 @@ Result<DependencyProgress> DependencySession::poll(
             auto expected = ErrorCode::Ok;
             failure->compare_exchange_strong(expected, code);
           });
+      const auto checkpoint_allowed = [&]() -> Status {
+        auto status = impl_->consume(1);
+        if (!status.ok())
+          return status;
+        if ((checkpoints.find || checkpoints.publish) &&
+            (checkpoints.identity.empty() ||
+             checkpoints.identity.size() > 4096))
+          return impl_->record_failure(
+              invalid("invalid checkpoint host scope"));
+        if (impl_->query.kind != ObservationKind::Atomic ||
+            !impl_->traits.deterministic || !impl_->traits.side_effect_free)
+          return impl_->record_failure(
+              invalid("checkpoint requires pure atomic program"));
+        return Status::success();
+      };
+      const auto checkpoint_find_impl = [&](std::uint32_t phase,
+                                            std::uint64_t before)
+          -> Result<std::optional<DependencyCheckpoint>> {
+        using Answer = Result<std::optional<DependencyCheckpoint>>;
+        auto status = checkpoint_allowed();
+        if (!status.ok())
+          return Answer(status);
+        if (!checkpoints.find)
+          return Answer(std::optional<DependencyCheckpoint>{});
+        auto found = checkpoints.find(phase, before);
+        if (!found.ok())
+          return Answer(impl_->record_failure(found.status()));
+        if (!found.value())
+          return found;
+        const auto& checkpoint = *found.value();
+        if (!checkpoint.valid() || checkpoint.phase() != phase ||
+            checkpoint.sequence() > before ||
+            checkpoint.impl_->identity !=
+                impl_->certificate_identity + "/" + checkpoints.identity)
+          return Answer(
+              impl_->record_failure(invalid("checkpoint scope mismatch")));
+        status = impl_->consume(checkpoint.metadata_entries());
+        if (!status.ok())
+          return Answer(status);
+        std::uint64_t raw = impl_->rows.size();
+        const auto count_raw = [&](const std::vector<DependencyNeed>& needs) {
+          for (const auto& need : needs) {
+            const auto cost =
+                1 + need.tags.size() + need.samples.boxes().size();
+            if (cost > impl_->limits.sets.maximum_boxes ||
+                raw > impl_->limits.sets.maximum_boxes - cost)
+              return false;
+            raw += cost;
+          }
+          return true;
+        };
+        for (const auto& row : impl_->rows)
+          if (!count_raw(row.inputs) || !count_raw(checkpoint.impl_->witness))
+            return Answer(impl_->record_failure(
+                Status{ErrorCode::ResourceExhausted, {}}));
+        status = impl_->consume(raw);
+        if (!status.ok())
+          return Answer(status);
+        for (auto& row : impl_->rows)
+          row.inputs.insert(row.inputs.end(), checkpoint.impl_->witness.begin(),
+                            checkpoint.impl_->witness.end());
+        auto certificate = impl_->certificate();
+        if (!certificate.ok())
+          return Answer(impl_->record_failure(certificate.status()));
+        impl_->rows = certificate.value().rows();
+        return found;
+      };
+      const auto checkpoint_publish_impl = [&](std::uint32_t phase,
+                                               std::uint64_t sequence,
+                                               const Value& state) -> Status {
+        auto status = checkpoint_allowed();
+        if (!status.ok())
+          return status;
+        if (!state.valid() ||
+            !stage_allocator.owns_allocation(*state.storage()))
+          return impl_->record_failure(
+              invalid("checkpoint state must use its host allocator"));
+        if (!checkpoints.publish)
+          return Status::success();
+        // Atomic sessions have exactly one already-canonical history row.
+        // Borrow it here; do not rebuild/project a large certificate before
+        // checking the remaining discovery fuel or before copying its witness.
+        if (impl_->rows.size() != 1)
+          return impl_->record_failure(
+              invalid("checkpoint requires one history row"));
+        const auto& witness = impl_->rows.front().inputs;
+        status = impl_->consume(witness.size() + 1);
+        if (!status.ok())
+          return status;
+        std::uint64_t entries = 1 + state.descriptor().shape.size() * 4 +
+                                impl_->certificate_identity.size() +
+                                checkpoints.identity.size();
+        status = impl_->consume(entries + state.facets().size());
+        if (!status.ok())
+          return status;
+        for (const auto& facet : state.facets()) {
+          const auto cost = 1 + facet.key.size() + facet.payload.size();
+          status = impl_->consume(cost);
+          if (!status.ok())
+            return status;
+          entries += cost;
+        }
+        std::uint64_t raw = 1;
+        for (const auto& need : witness) {
+          const auto raw_cost =
+              1 + need.tags.size() + need.samples.boxes().size();
+          if (raw_cost > impl_->limits.sets.maximum_boxes ||
+              raw > impl_->limits.sets.maximum_boxes - raw_cost)
+            return impl_->record_failure(
+                Status{ErrorCode::ResourceExhausted, {}});
+          raw += raw_cost;
+          const auto cost = 1 + need.tags.size() * 2 +
+                            need.samples.shape().size() +
+                            need.samples.boxes().size() *
+                                (1 + 2 * need.samples.shape().size());
+          status = impl_->consume(cost);
+          if (!status.ok())
+            return status;
+          entries += cost;
+        }
+        auto stored = std::make_shared<DependencyCheckpoint::Impl>();
+        stored->phase = phase;
+        stored->sequence = sequence;
+        stored->entries = entries;
+        stored->identity =
+            impl_->certificate_identity + "/" + checkpoints.identity;
+        stored->state = state;
+        stored->witness = witness;
+        DependencyCheckpoint checkpoint;
+        checkpoint.impl_ = std::move(stored);
+        status = checkpoints.publish(checkpoint);
+        return status.ok() ? status : impl_->record_failure(status);
+      };
+      const auto checkpoint_find = [&](std::uint32_t phase,
+                                       std::uint64_t before)
+          -> Result<std::optional<DependencyCheckpoint>> {
+        try {
+          return checkpoint_find_impl(phase, before);
+        } catch (const std::bad_alloc&) {
+          return Result<std::optional<DependencyCheckpoint>>(
+              impl_->record_failure(Status{ErrorCode::ResourceExhausted, {}}));
+        } catch (...) {
+          return Result<std::optional<DependencyCheckpoint>>(
+              impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
+        }
+      };
+      const auto checkpoint_publish = [&](std::uint32_t phase,
+                                          std::uint64_t sequence,
+                                          const Value& state) -> Status {
+        try {
+          return checkpoint_publish_impl(phase, sequence, state);
+        } catch (const std::bad_alloc&) {
+          return impl_->record_failure(
+              Status{ErrorCode::ResourceExhausted, {}});
+        } catch (...) {
+          return impl_->record_failure(Status{ErrorCode::OperationFailed, {}});
+        }
+      };
       const DependencyPhase phase{impl_->query,    impl_->ready,
                                   stage_allocator, consume,
-                                  report,          impl_->limits.sets};
+                                  report,          impl_->limits.sets,
+                                  checkpoint_find, checkpoint_publish};
       ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||

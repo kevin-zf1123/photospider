@@ -88,6 +88,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_encode_range.cpp
   plugins/ops/01-numeric/numeric_maximum.cpp
   plugins/ops/01-numeric/numeric_mean.cpp
+  plugins/ops/01-numeric/numeric_ordered_scan.cpp
   plugins/ops/01-numeric/numeric_minimum.cpp
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
@@ -557,6 +558,9 @@ if(BUILD_TESTING)
     PS_BAD_CHANNEL_2="$<TARGET_FILE:channel_contract_2>")
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_ordered_reduction Photospider::kernel tests/integration/test_ordered_reduction.cpp)
+  photospider_add_test(test_ordered_scan Photospider::kernel tests/integration/test_ordered_scan.cpp)
+  photospider_add_test(test_scan_waiters photospider_test_kernel tests/integration/test_scan_waiters.cpp)
+  target_include_directories(test_scan_waiters PRIVATE src/lib)
   photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
   target_include_directories(test_computed_scalar PRIVATE examples)
   add_dependencies(test_computed_scalar photospider_rgba32f_ops)

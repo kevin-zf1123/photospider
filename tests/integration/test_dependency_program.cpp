@@ -373,6 +373,69 @@ DependencyRequest probe_request() {
                            "bundle"};
 }
 int service_and_identity_regressions() {
+  {
+    auto counts = std::make_shared<Counts>();
+    auto terminal = probe_definition(counts, [](const DependencyPhase& phase) {
+      static_cast<void>(phase.checkpoint_before(1, 0));
+      return constant_result(phase);
+    });
+    terminal.traits.observation_kind = ObservationKind::RequestRecord;
+    OperationRegistry registry;
+    PS_CHECK(registry.register_operation(terminal).ok());
+    auto session =
+        registry.start_dependency("probe", probe_request()).take_value();
+    PS_CHECK(session->poll().status().code == ErrorCode::InvalidArgument);
+    PS_CHECK(counts->destroyed == 1);
+  }
+  for (bool publish : {false, true}) {
+    for (bool allocation_failure : {false, true}) {
+      auto counts = std::make_shared<Counts>();
+      bool called = false, escaped = false;
+      auto definition =
+          probe_definition(counts, [&](const DependencyPhase& phase) {
+            try {
+              if (publish) {
+                auto made =
+                    MutableValue::allocate({ElementType::Float64, {1}},
+                                           Region::whole({1}), phase.allocator);
+                auto state =
+                    std::move(made.take_value()).publish().take_value();
+                static_cast<void>(phase.checkpoint_publish(1, 0, state));
+              } else {
+                static_cast<void>(phase.checkpoint_before(1, 0));
+              }
+            } catch (...) {
+              escaped = true;
+            }
+            return constant_result(phase);
+          });
+      OperationRegistry registry;
+      PS_CHECK(registry.register_operation(definition).ok());
+      DependencyCheckpointServices services;
+      services.identity = "throwing-host";
+      const auto fail = [&]() -> Status {
+        called = true;
+        if (allocation_failure)
+          throw std::bad_alloc();
+        throw std::runtime_error("checkpoint host failure");
+      };
+      services.find =
+          [&](std::uint32_t,
+              std::uint64_t) -> Result<std::optional<DependencyCheckpoint>> {
+        return Result<std::optional<DependencyCheckpoint>>(fail());
+      };
+      services.publish = [&](const DependencyCheckpoint&) { return fail(); };
+      auto session =
+          registry.start_dependency("probe", probe_request()).take_value();
+      auto result = session->poll(BufferAllocator{}, services);
+      PS_CHECK(called && !escaped);
+      PS_CHECK(result.status().code == (allocation_failure
+                                            ? ErrorCode::ResourceExhausted
+                                            : ErrorCode::OperationFailed));
+      PS_CHECK(counts->destroyed == 1);
+    }
+  }
+
   for (unsigned action = 0; action < 5; ++action) {
     auto counts = std::make_shared<Counts>();
     auto definition = probe_definition(counts);

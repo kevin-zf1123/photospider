@@ -131,6 +131,11 @@ struct ExecutionTestHooks final {
   PostSubmitObservationHook post_submit_observation = nullptr;
   /** @brief Called after the callback body, before queue ownership retires. */
   FinalResultReadyHook callback_body_finished = nullptr;
+  /** @brief Called after successful checkpoint retention, outside its lock. */
+  FinalResultReadyHook checkpoint_published = nullptr;
+  /** @brief Called after a completed checkpoint and its provenance are found.
+   */
+  FinalResultReadyHook checkpoint_borrowed = nullptr;
 };
 
 /**
@@ -205,5 +210,13 @@ void notify_post_submit_observation() noexcept;
  * @note Private test-only point, outside queue and Run locks; hook is noexcept.
  */
 void notify_callback_body_finished() noexcept;
+
+/** @brief Observes retained state before the publishing callback returns.
+ * @note Private test-only point; must not re-enter the publishing Run.
+ */
+void notify_checkpoint_published() noexcept;
+/** @brief Observes a successful checkpoint lookup outside its directory lock.
+ */
+void notify_checkpoint_borrowed() noexcept;
 
 }  // namespace ps::execution_testing

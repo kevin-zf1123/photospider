@@ -13,6 +13,7 @@ Status register_numeric_multiply(OperationRegistry* registry);
 Status register_numeric_divide(OperationRegistry* registry);
 Status register_numeric_clamp(OperationRegistry* registry);
 Status register_numeric_mean(OperationRegistry* registry);
+Status register_numeric_ordered_scan(OperationRegistry* registry);
 Status register_numeric_variance(OperationRegistry* registry);
 Status register_channel_extract(OperationRegistry* registry);
 Status register_channel_swizzle(OperationRegistry* registry);
