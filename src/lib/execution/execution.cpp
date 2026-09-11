@@ -1253,7 +1253,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     if (!records.status().ok())
       return fail(records.status());
     const bool keep_record_graph =
-        flights ||
+        flights || (options.enable_joint && !plan.execution_groups().empty()) ||
         std::any_of(plan.steps().begin(), plan.steps().end(),
                     [](const auto& step) {
                       return step.backend == Backend::Gpu &&
@@ -1292,6 +1292,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
       std::string record_identity;
       bool cache_hit = false;
+      bool joint_attempted = false;
       bool backend_selected = false, fallback_taint = false;
       Backend backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
@@ -1308,13 +1309,23 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     // This explicit stack is a deterministic ready order. Parent frames in
     // Waiting retain state and actual input owners, but no active reservation.
     std::vector<Frame> frames;
+    CancellationToken evaluation_token = cancellation;
+    bool evaluation_shared = false;
+    std::vector<const std::vector<Frame>*> parked_frames;
+    std::vector<std::function<void()>> group_pumps;
     const auto active_token = [&] {
       for (auto i = frames.rbegin(); i != frames.rend(); ++i)
         if (i->flight && i->flight->producer())
           return i->flight->token();
-      return cancellation;
+      return evaluation_token;
     };
     const auto pump = [&] {
+      for (const auto* parked : parked_frames)
+        for (const auto& frame : *parked)
+          if (frame.flight)
+            frame.flight->refresh();
+      for (const auto& refresh : group_pumps)
+        refresh();
       for (const auto& frame : frames)
         if (frame.flight)
           frame.flight->refresh();
@@ -1325,7 +1336,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (i->flight && i->flight->producer())
             return i->flight->token().cancelled() ? ErrorCode::Cancelled
                                                   : ErrorCode::Ok;
-        return binding_stop(plan, cancellation);
+        return evaluation_shared
+                   ? (evaluation_token.cancelled() ? ErrorCode::Cancelled
+                                                   : ErrorCode::Ok)
+                   : binding_stop(plan, evaluation_token);
       };
       abort_flights = [&](Status status) {
         for (auto i = frames.rbegin(); i != frames.rend(); ++i)
@@ -1600,11 +1614,100 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
     }
+    struct Evaluation {
+      ValueFragments value;
+      bool taint = false;
+      Backend backend = Backend::Cpu;
+      std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+          records;
+    };
+    std::function<Result<Evaluation>(PlanInput, const Footprint&, bool, bool,
+                                     bool)>
+        evaluate;
+    std::map<std::size_t, Footprint> known_demands;
+    std::map<std::string, Result<Evaluation>> joint_completed;
+    std::map<std::string,
+             std::shared_ptr<execution_internal::DependencyFlights::Lease>>
+        prepared_flights;
+    const auto register_demand = [&](const PlanInput& target,
+                                     const Footprint& samples) -> Status {
+      const auto* producer = std::get_if<PlanStepInput>(&target);
+      if (!options.enable_joint || !producer || samples.empty() ||
+          !plan.steps()[producer->step_index].traits.joint_contract)
+        return Status::success();
+      auto found = known_demands.find(producer->step_index);
+      if (found == known_demands.end()) {
+        known_demands.emplace(producer->step_index, samples);
+      } else {
+        auto joined = found->second.unite(samples, limits);
+        if (!joined.ok())
+          return joined.status();
+        found->second = joined.take_value();
+      }
+      return Status::success();
+    };
+    const auto retire_demand = [&](std::size_t step,
+                                   const Footprint& samples) -> Status {
+      auto found = known_demands.find(step);
+      if (found == known_demands.end())
+        return Status::success();
+      auto remaining = found->second.subtract(samples, limits);
+      if (!remaining.ok())
+        return remaining.status();
+      found->second = remaining.take_value();
+      return Status::success();
+    };
+    std::function<Status(std::size_t, const Footprint&, Frame&)> try_joint;
     for (const auto& named : queries) {
-      frames.emplace_back(PlanStepInput{named.step}, named.samples, false,
-                          !named.boundary);
+      auto status = register_demand(PlanStepInput{named.step}, named.samples);
+      if (!status.ok())
+        return fail(status);
+    }
+
+    evaluate = [&](PlanInput target, const Footprint& samples, bool unit,
+                   bool terminal_allowed,
+                   bool allow_joint) -> Result<Evaluation> {
+      // Nested input evaluation shares the Run's work/owners, with independent
+      // ancestor failure routing. No callback worker evaluates upstream work.
+      auto inherited = active_token();
+      bool inherited_shared = evaluation_shared;
+      for (const auto& frame : frames)
+        inherited_shared |= frame.flight && frame.flight->producer();
+      struct RestoreFrames {
+        std::vector<Frame>& current;
+        std::vector<Frame> saved;
+        CancellationToken& token;
+        CancellationToken previous;
+        bool& shared;
+        bool previous_shared;
+        std::vector<const std::vector<Frame>*>& parked;
+        bool registered = false;
+        ~RestoreFrames() {
+          current = std::move(saved);
+          token = previous;
+          shared = previous_shared;
+          if (registered)
+            parked.pop_back();
+        }
+      } restore{frames,           std::move(frames), evaluation_token,
+                evaluation_token, evaluation_shared, evaluation_shared,
+                parked_frames};
+      parked_frames.push_back(&restore.saved);
+      restore.registered = true;
+      evaluation_token = inherited;
+      evaluation_shared = inherited_shared;
+      const auto fail = [&](Status status) -> Result<Evaluation> {
+        const auto code = stop();
+        if (code != ErrorCode::Ok)
+          status = Status{code, {}};
+        if (abort_flights)
+          abort_flights(status);
+        return Result<Evaluation>(std::move(status));
+      };
+      frames.emplace_back(target, samples, unit, terminal_allowed);
       std::optional<ValueFragments> returned;
       bool returned_taint = false;
+      Backend returned_backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
           returned_records;
       while (!frames.empty()) {
@@ -1645,6 +1748,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
             const auto& step = plan.steps()[producer->step_index];
+            if (frame.unit) {
+              status = retire_demand(producer->step_index, frame.outputs);
+              if (!status.ok())
+                return fail(status);
+            }
             if (keep_record_graph && !frame.record &&
                 (frame.unit || frame.terminal_allowed) &&
                 !frame.record_identity.empty()) {
@@ -1692,6 +1800,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           returned = std::move(frame.complete);
           returned_taint = frame.fallback_taint;
+          returned_backend = frame.backend;
           if (frame.record)
             returned_records = {std::move(frame.record)};
           else
@@ -1938,9 +2047,53 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
         }
         if (frame.state == Frame::State::Initial) {
+          const auto observation = observation_key(step_index, frame.outputs);
+          auto completed = joint_completed.find(observation);
+          if (completed != joint_completed.end()) {
+            auto outcome = std::move(completed->second);
+            joint_completed.erase(completed);
+            if (!outcome.ok())
+              return fail(outcome.status());
+            auto result = outcome.take_value();
+            for (const auto& record : result.records) {
+              status = records.import(record);
+              if (!status.ok())
+                return fail(status);
+            }
+            frame.complete = std::move(result.value);
+            frame.fallback_taint = result.taint;
+            frame.backend = result.backend;
+            if (result.records.size() == 1)
+              frame.record = result.records[0];
+            else
+              frame.upstream = std::move(result.records);
+            frame.state = Frame::State::Complete;
+            continue;
+          }
+          auto prepared = prepared_flights.find(observation);
+          if (!frame.flight && prepared != prepared_flights.end()) {
+            frame.flight = prepared->second;
+            prepared_flights.erase(prepared);
+            frame.record_identity = observation;
+            if (!frame.flight->producer()) {
+              auto shared = frame.flight->wait(pump);
+              if (!shared.ok())
+                return fail(shared.status());
+              status = records.import(shared.value()->record);
+              if (!status.ok())
+                return fail(status);
+              frame.complete = shared.value()->value;
+              frame.record = shared.value()->record;
+              frame.backend = shared.value()->backend;
+              frame.fallback_taint = shared.value()->fallback_taint;
+              frame.state = Frame::State::Complete;
+              ++diagnostics.shared_computations;
+              continue;
+            }
+          }
           if (flights && shareable[step_index] && !frame.flight) {
             const auto parent_token = active_token();
-            bool parent_shared = false;
+            bool parent_shared = evaluation_shared;
             for (const auto& ancestor : frames)
               parent_shared |= ancestor.flight && ancestor.flight->producer();
             frame.record_identity = observation_key(step_index, frame.outputs);
@@ -2024,6 +2177,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 continue;
             }
           }
+          if (allow_joint && options.enable_joint && !frame.joint_attempted &&
+              step.traits.joint_contract && frame.backend == Backend::Cpu &&
+              group_pumps.size() < 16) {
+            frame.joint_attempted = true;
+            status = try_joint(step_index, frame.outputs, frame);
+            if (!status.ok())
+              return fail(status);
+            if (joint_completed.count(observation))
+              continue;
+          }
+          status = retire_demand(step_index, frame.outputs);
+          if (!status.ok())
+            return fail(status);
           frame.parts.clear();
           frame.next = 0;
           if (keep_record_graph && frame.record_identity.empty())
@@ -2119,6 +2285,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
         }
         if (frame.state == Frame::State::Waiting) {
+          if (frame.next == 0) {
+            for (std::size_t port = 0; port < frame.parts.size(); ++port) {
+              status = register_demand(step.inputs[port], frame.parts[port]);
+              if (!status.ok())
+                return fail(status);
+            }
+          }
           if (frame.next < frame.parts.size()) {
             const auto port = frame.next++;
             const auto query = frame.parts[port];
@@ -2585,6 +2758,546 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (!returned)
         return fail(Status::failure(ErrorCode::Internal,
                                     "dependency output record missing"));
+      return Result<Evaluation>(Evaluation{std::move(*returned), returned_taint,
+                                           returned_backend,
+                                           std::move(returned_records)});
+    };
+    try_joint = [&](std::size_t selected, const Footprint& selected_samples,
+                    Frame& selected_frame) -> Status {
+      const auto& selected_step = plan.steps()[selected];
+      auto group =
+          std::find_if(plan.execution_groups().begin(),
+                       plan.execution_groups().end(), [&](const auto& group) {
+                         return group.node_id == selected_step.node_id;
+                       });
+      if (group == plan.execution_groups().end())
+        return Status::success();
+      struct Member {
+        std::size_t step;
+        Footprint samples;
+        std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
+        bool done = false, waiting = false, taint = false;
+        std::vector<Footprint> parts;
+        std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
+            upstream;
+        std::set<std::string> upstream_ids;
+        Member(std::size_t step, Footprint samples,
+               std::shared_ptr<execution_internal::DependencyFlights::Lease>
+                   flight)
+            : step(step),
+              samples(std::move(samples)),
+              flight(std::move(flight)) {}
+      };
+      std::vector<Member> members;
+      members.emplace_back(selected, selected_samples, selected_frame.flight);
+      const auto parent_token = active_token();
+      bool parent_shared = evaluation_shared;
+      for (const auto& frame : frames)
+        parent_shared |= frame.flight && frame.flight->producer();
+      for (const auto index : group->members) {
+        if (index == selected)
+          continue;
+        auto known = known_demands.find(index);
+        if (known == known_demands.end() || known->second.empty())
+          continue;
+        const auto& step = plan.steps()[index];
+        auto observations =
+            operation_observations({step.output_descriptor, step.output_facets},
+                                   known->second, limits);
+        if (!observations.ok())
+          return observations.status();
+        std::vector<RegionDimension> dimensions;
+        for (const auto& dim : observations.value().boxes()[0].dimensions())
+          dimensions.push_back({dim.offset, 1});
+        auto atom = Footprint::from_regions(observations.value().shape(),
+                                            {Region(dimensions)}, limits);
+        if (!atom.ok())
+          return atom.status();
+        auto samples = observation_samples(
+            {step.output_descriptor, step.output_facets}, atom.value(), limits);
+        if (!samples.ok())
+          return samples.status();
+        auto key = observation_key(index, samples.value());
+        if (joint_completed.count(key) || prepared_flights.count(key))
+          continue;
+        std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
+        if (flights && shareable[index]) {
+          auto claimed =
+              flights->claim(key, [parent_token, parent_shared, &plan] {
+                if (parent_token.cancelled())
+                  return ErrorCode::Cancelled;
+                return parent_shared || plan.current() ? ErrorCode::Ok
+                                                       : ErrorCode::Stale;
+              });
+          if (!claimed.ok())
+            continue;  // Optional sibling admission cannot fail the selected
+                       // output.
+          flight = claimed.take_value();
+          // A sibling owned by another Run is never awaited before local work.
+          if (!flight->producer()) {
+            prepared_flights.emplace(key, flight);
+            continue;
+          }
+        }
+        bool hit = false;
+        if (dependency_cache && cacheable[index] && cache_work) {
+          for (const auto& candidate : dependency_cache->dependency_candidates(
+                   observation_key(index, samples.value(), false))) {
+            if (candidate->metadata_entries > cache_work) {
+              cache_work = 0;
+              break;
+            }
+            cache_work -= candidate->metadata_entries;
+            auto digest = dependency_stage<std::string>(
+                pool, admission,
+                [&] {
+                  return execution_internal::dependency_content_identity(
+                      bindings, candidate->support, &cache_work, parent_token);
+                },
+                pump);
+            if (!digest.ok() || digest.value() != candidate->content_identity)
+              continue;
+            auto pixels = dependency_cache->dependency_values(*candidate);
+            if (pixels.empty())
+              continue;
+            auto cached = ValueFragments::create(
+                candidate->descriptor, candidate->facets, candidate->outputs,
+                std::move(pixels), limits);
+            if (!cached.ok())
+              continue;
+            auto status = records.import(candidate->record);
+            if (!status.ok())
+              return status;
+            Evaluation value{cached.take_value(),
+                             false,
+                             Backend::Cpu,
+                             {candidate->record}};
+            if (flight) {
+              auto published =
+                  std::make_shared<execution_internal::DependencyFlightValue>();
+              published->value = value.value;
+              published->record = candidate->record;
+              published->producer_peak = budget->peaks(observation).first;
+              flight->complete(
+                  Result<std::shared_ptr<
+                      const execution_internal::DependencyFlightValue>>(
+                      published));
+            }
+            joint_completed.emplace(key, Result<Evaluation>(std::move(value)));
+            status = retire_demand(index, samples.value());
+            if (!status.ok())
+              return status;
+            ++diagnostics.cache_hits;
+            hit = true;
+            break;
+          }
+        }
+        if (!hit)
+          members.emplace_back(index, samples.take_value(), std::move(flight));
+      }
+      if (members.size() < 2)
+        return Status::success();
+      // Isolate member work from the initiating output's cancellation. Refresh
+      // all leases; only the absence of every active member cancels shared
+      // work.
+      CancellationSource all_cancelled;
+      auto limits = options.dependencies.sets;
+      limits.cancellation = all_cancelled.token();
+      struct RestoreGroup {
+        std::vector<Frame>& frames;
+        std::vector<Frame> saved;
+        CancellationToken& token;
+        CancellationToken previous;
+        bool& shared;
+        bool previous_shared;
+        std::vector<const std::vector<Frame>*>& parked;
+        std::vector<std::function<void()>>& pumps;
+        bool parked_registered = false, pump_registered = false;
+        ~RestoreGroup() {
+          frames = std::move(saved);
+          token = previous;
+          shared = previous_shared;
+          if (parked_registered)
+            parked.pop_back();
+          if (pump_registered)
+            pumps.pop_back();
+        }
+      } restore{frames,           std::move(frames), evaluation_token,
+                evaluation_token, evaluation_shared, evaluation_shared,
+                parked_frames,    group_pumps};
+      parked_frames.push_back(&restore.saved);
+      restore.parked_registered = true;
+      evaluation_token = all_cancelled.token();
+      evaluation_shared = parent_shared || flights;
+      group_pumps.push_back([&] {
+        bool active = false;
+        for (const auto& member : members) {
+          if (member.done)
+            continue;
+          if (member.flight)
+            member.flight->refresh();
+          active |= !(member.flight ? member.flight->token() : parent_token)
+                         .cancelled();
+        }
+        if (!active)
+          all_cancelled.cancel();
+      });
+      restore.pump_registered = true;
+      const auto publish_failure = [&](Member& member, Status status) {
+        auto key = observation_key(member.step, member.samples);
+        if (member.flight)
+          member.flight->complete(
+              Result<std::shared_ptr<
+                  const execution_internal::DependencyFlightValue>>(status));
+        joint_completed.insert_or_assign(key, Result<Evaluation>(status));
+        member.done = true;
+      };
+      const auto fallback = [&]() -> Status {
+        ++diagnostics.joint_fallbacks;
+        for (auto& member : members) {
+          if (member.done)
+            continue;
+          auto key = observation_key(member.step, member.samples);
+          if (member.flight)
+            prepared_flights.insert_or_assign(key, member.flight);
+          auto result = evaluate(PlanStepInput{member.step}, member.samples,
+                                 true, false, false);
+          joint_completed.insert_or_assign(key, std::move(result));
+          member.done = true;
+        }
+        return Status::success();
+      };
+      auto state_capacity = checked_add(
+          selected_step.traits.joint_continuation_bytes,
+          members.size() * DependencyJointSession::member_state_bytes());
+      if (!state_capacity.ok())
+        return fallback();
+      auto reserved = reserve(state_capacity.value());
+      if (!reserved.ok())
+        return fallback();
+      std::shared_ptr<DependencyJointSession> session;
+      {
+        Seal seal{reserved.take_value()};
+        std::vector<DependencyRequest> requests;
+        for (const auto& member : members) {
+          const auto& step = plan.steps()[member.step];
+          DependencyRequest request;
+          for (const auto& input : step.inputs)
+            request.inputs.push_back(metadata(input));
+          request.parameters = step.parameters;
+          request.outputs = member.samples;
+          request.snapshot_identity = identity;
+          request.output_index = step.output_index;
+          request.cancellation =
+              member.flight ? member.flight->token() : parent_token;
+          request.limits = options.dependencies;
+          request.limits.sets.cancellation = request.cancellation;
+          request.limits.maximum_work =
+              std::min(request.limits.maximum_work, work);
+          requests.push_back(std::move(request));
+        }
+        auto started =
+            dependency_stage<std::shared_ptr<DependencyJointSession>>(
+                pool, admission,
+                [&] {
+                  return operations->start_joint(selected_step.operation,
+                                                 std::move(requests),
+                                                 seal.reservation->allocator());
+                },
+                pump);
+        if (!started.ok()) {
+          // Release joint reservation before any singleton admission.
+          seal.reservation->seal();
+          seal.reservation.reset();
+          if (started.status().code == ErrorCode::InvalidArgument ||
+              started.status().code == ErrorCode::Cancelled ||
+              started.status().code == ErrorCode::Stale) {
+            for (auto& member : members)
+              publish_failure(member, started.status());
+            return Status::success();
+          }
+          return fallback();
+        }
+        session = started.take_value();
+      }
+      ++diagnostics.joint_groups;
+      diagnostics.peak_active_tasks =
+          std::max(diagnostics.peak_active_tasks, std::uint32_t{1});
+      auto charged = consume(session->consumed_work());
+      if (!charged.ok()) {
+        session.reset();
+        for (auto& member : members)
+          publish_failure(member, charged);
+        return Status::success();
+      }
+      while (std::any_of(members.begin(), members.end(),
+                         [](const auto& member) { return !member.done; })) {
+        pump();
+        std::uint64_t capacity = selected_step.traits.joint_workspace_bytes;
+        for (const auto& member : members) {
+          if (member.done || member.waiting)
+            continue;
+          const auto& step = plan.steps()[member.step];
+          auto count = member.samples.element_count();
+          const auto width =
+              Value::element_size(step.output_descriptor.element_type);
+          if (!count.ok() || count.value() > UINT64_MAX / width) {
+            session.reset();
+            return fallback();
+          }
+          auto bytes = checked_add(
+              capacity,
+              std::max(step.traits.estimated_bytes, count.value() * width));
+          if (bytes.ok())
+            bytes = checked_add(bytes.value(), step.traits.workspace_bytes);
+          if (!bytes.ok()) {
+            session.reset();
+            return fallback();
+          }
+          capacity = bytes.value();
+          if (step.traits.workspace_input_multiplier) {
+            for (std::size_t port = 0; port < member.parts.size(); ++port) {
+              auto elements = member.parts[port].element_count();
+              const auto scale =
+                  Value::element_size(
+                      metadata(step.inputs[port]).descriptor.element_type) *
+                  step.traits.workspace_input_multiplier;
+              if (!elements.ok() ||
+                  elements.value() > (UINT64_MAX - capacity) / scale) {
+                session.reset();
+                return fallback();
+              }
+              capacity += elements.value() * scale;
+            }
+          }
+        }
+        auto admitted = reserve(capacity);
+        if (!admitted.ok()) {
+          session.reset();
+          return fallback();
+        }
+        std::vector<DependencyAtomProgress> events;
+        {
+          Seal seal{admitted.take_value()};
+          const auto before = session->consumed_work();
+          auto polled = dependency_stage<std::vector<DependencyAtomProgress>>(
+              pool, admission,
+              [&] {
+                return session->poll(seal.reservation->allocator(), work);
+              },
+              pump);
+          ++diagnostics.joint_polls;
+          charged = consume(session->consumed_work() - before);
+          if (!polled.ok() || !charged.ok()) {
+            auto status = polled.ok() ? charged : polled.status();
+            session.reset();
+            seal.reservation->seal();
+            seal.reservation.reset();
+            if (status.code == ErrorCode::InvalidArgument ||
+                status.code == ErrorCode::Cancelled ||
+                status.code == ErrorCode::Stale) {
+              for (auto& member : members)
+                if (!member.done)
+                  publish_failure(member, status);
+              break;
+            }
+            return fallback();
+          }
+          events = polled.take_value();
+          for (auto& event : events) {
+            auto found = std::find_if(
+                members.begin(), members.end(), [&](const auto& member) {
+                  return plan.steps()[member.step].output_index ==
+                         event.output_index;
+                });
+            auto& member = *found;
+            const auto& step = plan.steps()[member.step];
+            if (!event.outcome.ok()) {
+              publish_failure(member, event.outcome.status());
+              continue;
+            }
+            auto progress = event.outcome.take_value();
+            if (auto* complete = std::get_if<DependencyResult>(&progress)) {
+              auto status = records.append(member.step, *complete);
+              if (!status.ok()) {
+                publish_failure(member, status);
+                continue;
+              }
+              std::vector<Value> owners;
+              auto allocator = seal.reservation->allocator();
+              for (const auto& fragment : complete->value.fragments()) {
+                if (allocator.owns(*fragment.storage()) ||
+                    external.count(fragment.storage().get())) {
+                  owners.push_back(fragment);
+                } else {
+                  auto imported = transfer_value(fragment, allocator, true);
+                  if (!imported.ok()) {
+                    status = imported.status();
+                    break;
+                  }
+                  owners.push_back(imported.take_value());
+                }
+              }
+              if (!status.ok()) {
+                publish_failure(member, status);
+                continue;
+              }
+              auto value = ValueFragments::create(
+                  step.output_descriptor, step.output_facets, member.samples,
+                  std::move(owners), limits);
+              if (!value.ok()) {
+                publish_failure(member, value.status());
+                continue;
+              }
+              auto captured = records.capture(member.step, member.samples,
+                                              std::move(member.upstream));
+              if (!captured.ok()) {
+                publish_failure(member, captured.status());
+                continue;
+              }
+              auto record = captured.take_value();
+              Evaluation published{value.take_value(),
+                                   member.taint,
+                                   Backend::Cpu,
+                                   {record}};
+              if (dependency_cache && cacheable[member.step] && !member.taint &&
+                  cache_work)
+                retain_cache(member.step, record, published.value);
+              if (member.flight) {
+                auto flight_value = std::make_shared<
+                    execution_internal::DependencyFlightValue>();
+                flight_value->value = published.value;
+                flight_value->fallback_taint = member.taint;
+                flight_value->record = record;
+                flight_value->producer_peak = budget->peaks(observation).first;
+                member.flight->complete(
+                    Result<std::shared_ptr<
+                        const execution_internal::DependencyFlightValue>>(
+                        flight_value));
+              }
+              joint_completed.insert_or_assign(
+                  observation_key(member.step, member.samples),
+                  Result<Evaluation>(std::move(published)));
+              member.done = true;
+              diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+            } else {
+              member.waiting = true;
+            }
+            diagnostics.operation_timings.push_back(OperationTiming{
+                step.result_ref(), Backend::Cpu, 0, ErrorCode::Ok, 1,
+                member.done ? member.samples.element_count().value() : 0});
+          }
+        }
+        // Register every new input demand before evaluating the first producer.
+        struct InputRead {
+          PlanInput target;
+          Footprint samples;
+          std::optional<Result<Evaluation>> result;
+        };
+        std::vector<InputRead> reads;
+        std::map<std::size_t, std::vector<std::size_t>> member_reads;
+        for (std::size_t mi = 0; mi < members.size(); ++mi) {
+          auto& member = members[mi];
+          if (member.done || !member.waiting)
+            continue;
+          const auto& step = plan.steps()[member.step];
+          auto pending = session->pending_reads(step.output_index);
+          if (!pending.ok()) {
+            publish_failure(member, pending.status());
+            continue;
+          }
+          std::vector<Footprint> needs;
+          for (const auto& input : step.inputs)
+            needs.push_back(
+                Footprint::none(metadata(input).descriptor.shape, limits)
+                    .take_value());
+          for (const auto& need : pending.value()) {
+            auto joined = needs[need.port].unite(need.samples, limits);
+            if (!joined.ok()) {
+              publish_failure(member, joined.status());
+              break;
+            }
+            needs[need.port] = joined.take_value();
+          }
+          if (member.done)
+            continue;
+          member.parts = needs;
+          for (std::size_t port = 0; port < needs.size(); ++port) {
+            auto status = register_demand(step.inputs[port], needs[port]);
+            if (!status.ok()) {
+              publish_failure(member, status);
+              break;
+            }
+            // All siblings share the original input signature. Reuse identical
+            // transfers; differing sets retain separate error and evidence
+            // scope.
+            std::size_t found = reads.size();
+            for (std::size_t i = 0; i < reads.size(); ++i)
+              if (reads[i].target.index() == step.inputs[port].index() &&
+                  (std::holds_alternative<PlanStepInput>(reads[i].target)
+                       ? std::get<PlanStepInput>(reads[i].target).step_index ==
+                             std::get<PlanStepInput>(step.inputs[port])
+                                 .step_index
+                       : std::get<PlanWorkflowInput>(reads[i].target)
+                                 .declaration_index ==
+                             std::get<PlanWorkflowInput>(step.inputs[port])
+                                 .declaration_index) &&
+                  reads[i].samples == needs[port]) {
+                found = i;
+                break;
+              }
+            if (found == reads.size())
+              reads.push_back({step.inputs[port], needs[port], {}});
+            member_reads[mi].push_back(found);
+          }
+        }
+        for (auto& read : reads)
+          read.result.emplace(
+              evaluate(read.target, read.samples, false, false, true));
+        for (const auto& entry : member_reads) {
+          auto& member = members[entry.first];
+          if (member.done)
+            continue;
+          std::vector<ValueFragments> supplied;
+          for (auto read_index : entry.second) {
+            auto& read = *reads[read_index].result;
+            if (!read.ok()) {
+              publish_failure(member, read.status());
+              break;
+            }
+            member.taint |= read.value().taint;
+            supplied.push_back(read.value().value);
+            for (const auto& record : read.value().records) {
+              auto key =
+                  records.observation_identity(record->step, record->samples);
+              if (member.upstream_ids.insert(key).second)
+                member.upstream.push_back(record);
+            }
+          }
+          if (member.done)
+            continue;
+          auto status = session->supply(plan.steps()[member.step].output_index,
+                                        std::move(supplied), identity);
+          if (!status.ok())
+            publish_failure(member, status);
+          member.waiting = false;
+        }
+      }
+      session.reset();
+      for (const auto& member : members) {
+        auto status = retire_demand(member.step, member.samples);
+        if (!status.ok())
+          return status;
+      }
+      return Status::success();
+    };
+    for (const auto& named : queries) {
+      auto evaluated = evaluate(PlanStepInput{named.step}, named.samples, false,
+                                !named.boundary, true);
+      if (!evaluated.ok())
+        return fail(evaluated.status());
+      auto returned =
+          std::optional<ValueFragments>(evaluated.take_value().value);
       if (named.boundary)
         continue;
       auto recorded = records.output(named.name, named.step, named.samples);

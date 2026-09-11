@@ -1134,6 +1134,18 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         ErrorCode::InvalidArgument,
         "planning options contain too many named output Regions"));
   }
+  std::map<std::uint64_t, std::vector<std::size_t>> groups;
+  for (std::size_t i = 0; i < plan.steps_.size(); ++i) {
+    const auto& step = plan.steps_[i];
+    if (step.traits.joint_contract && step.backend == Backend::Cpu &&
+        step.traits.outputs[0].observation_kind == ObservationKind::Atomic &&
+        step.traits.outputs[0].failure_delivery ==
+            FailureDelivery::PerAtomOutcome)
+      groups[step.node_id].push_back(i);
+  }
+  for (auto& group : groups)
+    if (group.second.size() > 1)
+      plan.execution_groups_.push_back({group.first, std::move(group.second)});
   if (plan.dependency_network()) {
     for (const auto& requested : options.output_regions)
       if (!plan.outputs_.count(requested.first))

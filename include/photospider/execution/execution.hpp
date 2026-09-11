@@ -152,6 +152,8 @@ struct PHOTOSPIDER_API ExecutionOptions final {
    * that Run.
    */
   std::uint64_t maximum_dependency_cache_work = 1048576;
+  /** @brief Group already-ready Atomic outputs with optional CPU joint code. */
+  bool enable_joint = true;
 };
 
 /**
@@ -196,6 +198,8 @@ struct ResultCacheStatistics final {
  * @note Diagnostics are observations, not verdicts, attestations, or receipts.
  */
 struct PHOTOSPIDER_API ExecutionDiagnostics final {
+  /** @brief Actual shared starts, polls and singleton group fallbacks. */
+  std::uint64_t joint_groups = 0, joint_polls = 0, joint_fallbacks = 0;
   /** @brief Total execute call duration in microseconds. */
   std::uint64_t execute_us = 0;
   /** @brief Selected successful implementation backend per source result.

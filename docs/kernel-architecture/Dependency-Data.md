@@ -491,3 +491,48 @@ is destroyed exactly once even after failed start. The tests in
 `test_dependency_joint` cover both languages, malformed membership, local/ignored
 service failures, independent supplies, recursive calls, 64 members, cancellation
 before and after start, shared work/state limits and final failed-supply cleanup.
+
+## Ready Atomic execution groups (M5, #308)
+
+`ExecutionPlan::execution_groups()` lists optional CPU alternatives for the
+retained singleton steps of one node. `ExecutionOptions::enable_joint` can disable
+this physical optimization without changing semantic output or cache identity.
+The coordinator registers all requested roots and every newly declared input
+port demand before evaluating producers. It immediately chooses at most one
+known observation per compatible output. It never waits to assemble future
+requests and never combines different Runs into a joint callback.
+
+The existing explicit singleton DFS remains the input evaluator. Nested joint
+input evaluation uses bounded coordinator scopes, capped at 16; deeper groups
+continue through singleton DFS. Workers run finite callbacks only. Each scope
+restores its own frames, cancellation and failure route, including failed host
+metadata allocation. Identical ready input sets share transport; each member
+retains its own source records and role associations.
+
+Each observation claims its own flight and checks its own content proof. An
+optional sibling claim that exceeds admission is skipped. Members already owned
+by another Run are subscribed separately and waited for after owned work is
+performed. Cached members do not join computation. Successful members independently
+publish evidence, flights and eligible cache entries; local errors remain attached
+to their result. Completed sibling values remain accounted until their registered
+consumer takes them. Shared backing uses the existing storage domain and unique
+owner cache accounting. Fallback ancestry remains per member and prevents caching
+that member without contaminating an independent sibling.
+
+The group reserves shared continuation plus host member adapters once. Every
+poll admits each ready member's output/workspace, its actual supplied-input
+multiplier, and shared scratch. Joint work is capped by the remaining Run budget
+at each round. Insufficient joint admission or an unattributable execution error
+releases shared resources before retrying unfinished members once as singleton.
+Cancellation, invalidation and protocol errors never retry. All member leases
+are refreshed during upstream work; only loss of every active member cancels
+shared computation. A cancelled original requester cannot cancel another Run's
+still-active waiter.
+
+`test_joint_execution` runs root and consumer-driven grouping, C members with
+different shape/ROI, independent requests, mixed cache hits, budget and flight
+admission fallback, per-member errors, shared owner counting, external-waiter
+cancellation, proportional scratch, deep dependency chains and GPU fallback
+ancestry. `joint_groups`, `joint_polls` and `joint_fallbacks` report the physical
+path actually taken. Unrequested pure siblings have no registered demand and do
+not run.

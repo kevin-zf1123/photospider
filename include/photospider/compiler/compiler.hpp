@@ -398,6 +398,14 @@ struct PHOTOSPIDER_API PlanStep final {
  *
  * @note Plans contain no native handles, callback pointers, or daemon objects.
  */
+struct PHOTOSPIDER_API PlanExecutionGroup final {
+  /** @brief Semantic node owning these optional singleton step alternatives. */
+  std::uint64_t node_id = 0;
+  /** @brief Contract-compatible Atomic CPU steps; runtime selects ready
+   * members. */
+  std::vector<std::size_t> members;
+};
+
 class PHOTOSPIDER_API ExecutionPlan final {
  public:
   /**
@@ -422,6 +430,10 @@ class PHOTOSPIDER_API ExecutionPlan final {
    */
   [[nodiscard]] const std::vector<PlanStep>& steps() const noexcept {
     return steps_;
+  }
+  /** @brief Optional execution groups; no group changes singleton semantics. */
+  const std::vector<PlanExecutionGroup>& execution_groups() const noexcept {
+    return execution_groups_;
   }
   /**
    * @brief Returns named output to step-index mapping.
@@ -527,6 +539,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
    */
   bool dependency_protocol_ = false;
   std::vector<PhysicalStep> physical_steps_;
+  std::vector<PlanExecutionGroup> execution_groups_;
   std::uint64_t tile_height_ = 128;
   std::uint64_t tile_width_ = 128;
   /** @brief Canonical copied input metadata, with no runtime owners. */

@@ -518,10 +518,20 @@ struct DependencyAtomProgress final {
 class PHOTOSPIDER_API DependencyJointSession final {
  public:
   ~DependencyJointSession() noexcept;
+  /** @brief Accounted host adapter bytes per member, additional to shared
+   * state. */
+  static std::uint64_t member_state_bytes() noexcept;
   DependencyJointSession(const DependencyJointSession&) = delete;
   DependencyJointSession& operator=(const DependencyJointSession&) = delete;
+  /** @brief Advances the currently ready members using borrowed stage
+   * allocation.
+   * @param maximum_additional_work Further caps group fuel for this and later
+   * rounds, allowing a host to enforce its remaining Run budget after upstream
+   * work. UINT64_MAX preserves the existing group limit.
+   */
   Result<std::vector<DependencyAtomProgress>> poll(
-      const BufferAllocator& allocator = BufferAllocator{});
+      const BufferAllocator& allocator = BufferAllocator{},
+      std::uint64_t maximum_additional_work = UINT64_MAX);
   Status supply(std::uint32_t output_index, std::vector<ValueFragments> inputs,
                 const std::string& snapshot_identity);
   Result<std::vector<DependencyNeed>> pending_reads(

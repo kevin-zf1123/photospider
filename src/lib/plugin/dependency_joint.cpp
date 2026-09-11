@@ -94,6 +94,9 @@ struct DependencyJointSession::Impl {
 DependencyJointSession::DependencyJointSession(std::shared_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 DependencyJointSession::~DependencyJointSession() noexcept = default;
+std::uint64_t DependencyJointSession::member_state_bytes() noexcept {
+  return sizeof(Impl::Proxy);
+}
 Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
     const std::string& operation, const OperationTraits& traits,
     const DependencyJointStart& start, const DependencyValidator& validate,
@@ -201,13 +204,16 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
   }
 }
 Result<std::vector<DependencyAtomProgress>> DependencyJointSession::poll(
-    const BufferAllocator& allocator) {
+    const BufferAllocator& allocator, std::uint64_t maximum_additional_work) {
   using Answer = Result<std::vector<DependencyAtomProgress>>;
   std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
   if (!lock.owns_lock() || impl_->active)
     return Answer(invalid("concurrent or recursive joint call"));
   if (impl_->terminal)
     return Answer(invalid("retired joint session"));
+  impl_->maximum_work =
+      impl_->work +
+      std::min(impl_->maximum_work - impl_->work, maximum_additional_work);
   impl_->active = true;
   struct Reset {
     Impl* impl;

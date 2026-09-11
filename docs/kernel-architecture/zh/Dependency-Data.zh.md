@@ -359,3 +359,34 @@ C joint table 复用 singleton 的服务及完成验证器。共享单调句柄�
 一次，包括启动失败。`test_dependency_joint` 覆盖双语言成员协议、局部和忽略的
 服务错误、独立供给、重入、64 成员、启动前后取消、共享 work/state 上限及供给
 失败后的最终回收。
+
+## 就绪 Atomic 执行组（M5，#308）
+
+`ExecutionPlan::execution_groups()` 列出同节点保留 singleton step 的可选 CPU
+执行组。`ExecutionOptions::enable_joint` 可以禁用这一物理优化，不改变语义输出
+或缓存身份。协调器在求生产者之前登记所有请求根及新声明的各输入端口需求，立即
+从兼容输出各取至多一个已知 observation。不等待未来请求，不跨 Run 合组。
+
+现有显式 singleton DFS 继续负责输入求值。嵌套联合输入求值使用有界协调器作用域，
+最多 16 层，更深处继续 singleton DFS。Worker 仅运行有限回调。每个作用域恢复自己
+的 frame、取消和失败路由，包括宿主元数据分配失败路径。相同就绪输入集合共享传输，
+各成员保留自己的源记录及角色关联。
+
+每个 observation 分别 claim flight 和检查内容证明。可选兄弟成员超过 admission
+时跳过；其他 Run 拥有的成员单独订阅，在本地拥有的计算完成后等待。缓存命中成员
+不参与计算。成功成员分别发布证据、flight 和符合条件的缓存；局部错误仍归属自己。
+已完成兄弟值保持计费，直至登记的消费者取用。共享 backing 使用既有 storage domain
+及唯一 owner 缓存计费。Fallback ancestry 按成员传播，只阻止该成员进入缓存。
+
+组仅分配一次共享 continuation 及宿主成员适配器。每轮 admission 包含就绪成员的
+输出、workspace、实际已供给输入的 multiplier 及共享 scratch。每轮 work 受 Run
+剩余预算限制。联合 admission 不足或无法归属成员的执行错误，会先释放共享资源，
+再对未完成成员各回退 singleton 一次。取消、失效和协议错误不重试。上游求值期间
+持续刷新所有成员 lease；全部成员均无活跃 waiter 时才取消共享计算。原请求取消
+不会取消另一个 Run 仍然活跃的 waiter。
+
+`test_joint_execution` 实际运行根与消费者驱动的分组、不同 shape/ROI 的 C 成员、
+独立请求、混合 cache hit、预算与 flight admission 回退、成员局部错误、共享 owner、
+外部 waiter 取消、输入比例 scratch、深依赖链及 GPU fallback ancestry。
+`joint_groups`、`joint_polls`、`joint_fallbacks` 报告实际物理路径。未请求的纯兄弟
+端口没有登记需求，因此不会执行。
