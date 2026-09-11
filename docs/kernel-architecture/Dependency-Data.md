@@ -444,3 +444,10 @@ The C11 scan workflow observes six initial computations and three computations
 plus three hits after the reconverging edit, with complete current source support.
 Null callbacks, ignored invalid reads, NEED returns, scratch exhaustion and ordinary
 compute failure reject; repeated failed requests invoke compute again.
+
+
+## Sparse GPU transport
+
+[Fragment Atlas](Fragment-Atlas.md) documents the implemented exact atlas/mask
+directory and SDK MSL lookup helper, including native transport verification.
+Staged GPU execution and discovery integration remain in progress.

@@ -144,6 +144,7 @@ set(
   src/lib/data/dependency.cpp
   src/lib/data/footprint.cpp
   src/lib/data/value_fragments.cpp
+  src/lib/data/fragment_atlas.cpp
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/value.cpp
@@ -603,6 +604,7 @@ if(BUILD_TESTING)
   add_test(NAME test_g4_data COMMAND photospider_g4_workflow)
   photospider_add_test(test_footprint Photospider::kernel tests/unit/test_footprint.cpp)
   photospider_add_test(test_value_fragments Photospider::kernel tests/unit/test_value_fragments.cpp)
+  photospider_add_test(test_fragment_atlas Photospider::kernel tests/unit/test_fragment_atlas.cpp)
   photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
@@ -619,6 +621,9 @@ if(BUILD_TESTING)
   set_tests_properties(test_metal_images test_metal_images_plugin PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_fragment_atlas_gpu photospider_test_kernel tests/unit/test_fragment_atlas_gpu.cpp)
+  target_include_directories(test_fragment_atlas_gpu PRIVATE src/lib)
+  set_tests_properties(test_fragment_atlas_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_gpu photospider_test_kernel tests/unit/test_native_gpu.cpp)
   target_include_directories(test_native_gpu PRIVATE src/lib)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)

@@ -13,6 +13,7 @@
 #include "photospider/core/status.hpp"
 #include "photospider/data/dependency.hpp"
 #include "photospider/data/footprint.hpp"
+#include "photospider/data/fragment_atlas.hpp"
 #include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/region.hpp"
 #include "photospider/data/storage.hpp"

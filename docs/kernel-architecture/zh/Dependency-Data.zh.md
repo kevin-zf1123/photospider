@@ -315,3 +315,9 @@ C callback 的 `user` 仅能传递由 key 输入确定的数据或固定的注�
 transition 必须使用不同身份。C11 scan workflow 检查初次六次计算、重汇合编辑后三次
 计算加三次命中，以及完整当前源支持。空 callback、忽略非法 read、NEED 返回、scratch
 耗尽和普通 compute 失败均拒绝；重复失败请求仍实际调用 compute。
+
+
+## 稀疏 GPU 传输
+
+[Fragment Atlas](Fragment-Atlas.zh.md) 说明已实现的精确 atlas/mask 目录、SDK MSL
+lookup helper 及原生传输验证。Staged GPU 执行和 discovery 接入仍在进行。
