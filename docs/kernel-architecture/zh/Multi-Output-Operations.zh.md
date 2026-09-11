@@ -41,6 +41,25 @@ v1 payload 包含平面角色、BT.709 transfer、sRGB 原色、白点、referen
 既有 image-v2 继续要求完整像素 Float32 HWC；平面元数据不会使部分 HWC 通道成为
 合法 image。
 
+## `image.split_horizontal`
+
+输入为 Float32 HWC Image，必填 Int64 参数 `split_x` 满足 `0 < split_x < W`，
+没有默认切分位置。输出保留源颜色、alpha 和通道解释：
+
+| 端口 | shape | 源映射 |
+| --- | --- | --- |
+| `full` | `{H,W,C}` | `(y,x,c)` |
+| `left` | `{H,split_x,C}` | `(y,x,c)` |
+| `right` | `{H,W-split_x,C}` | `(y,x+split_x,c)` |
+
+各输出在自己的坐标中接受独立的完整像素 Region。分阶段读取精确声明映射后的源
+像素。发布的 Value 是不可变视图，具有检查过的 origin-relative layout 并保留源
+storage owner；收集成稠密结果时可能复制视图。联合成员在需求相等时共享源传输，
+同时保留独立偏移证据。参数与尺寸减法在读取样本前验证。
+
+集成测试请求三个不同偏移 ROI，在 joint 开关两种模式下检查源值、facet 和 owner
+身份，验证 dirty 映射，并拒绝负数、零及超出宽度的切分位置。
+
 ## 当前可运行验证
 
 ```sh

@@ -47,6 +47,29 @@ order. Sampling positions are nominal metadata, independent from exact source
 support in dependency certificates. Existing image-v2 remains complete-pixel
 Float32 HWC. Plane metadata does not turn a partial HWC image into a valid image.
 
+## `image.split_horizontal`
+
+One Float32 HWC Image input and required Int64 `split_x`, with
+`0 < split_x < W`. There is no default split. Outputs preserve the source color,
+alpha and channel interpretation:
+
+| Port | Shape | Source mapping |
+| --- | --- | --- |
+| `full` | `{H,W,C}` | `(y,x,c)` |
+| `left` | `{H,split_x,C}` | `(y,x,c)` |
+| `right` | `{H,W-split_x,C}` | `(y,x+split_x,c)` |
+
+Each output accepts independent complete-pixel Regions in its own coordinates.
+The staged reader declares exactly the mapped source pixels. Published Values
+are immutable views with checked origin-relative layouts and the source storage
+owner. Collecting a dense result may copy those views. Joint members share source
+transport where equal and preserve their independent offset evidence. Parameters
+and shape subtraction are validated before reading samples.
+
+The integration test requests three different offset ROIs, checks exact source
+values, facets and owner identity with joint enabled/disabled, verifies dirty
+mapping and rejects negative, zero and out-of-width splits.
+
 ## Current executable validation
 
 ```sh

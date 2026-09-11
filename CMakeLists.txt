@@ -125,6 +125,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/07-grade/image_exposure_gain.cpp
   plugins/ops/08-transform/dependency_sampling.cpp
   plugins/ops/08-transform/image_downsample_box.cpp
+  plugins/ops/08-transform/image_split_horizontal.cpp
   plugins/ops/08-transform/mask_downsample_box.cpp
   plugins/ops/09-composite/image_brush_circle.cpp
   plugins/ops/09-composite/image_mask.cpp

@@ -39,6 +39,7 @@ Status register_image_gaussian_blur(OperationRegistry* registry);
 Status register_image_mask(OperationRegistry* registry);
 Status register_image_source_over(OperationRegistry* registry);
 Status register_dependency_sampling(OperationRegistry* registry);
+Status register_image_split_horizontal(OperationRegistry* registry);
 Status register_image_downsample_box(OperationRegistry* registry);
 Status register_mask_downsample_box(OperationRegistry* registry);
 Status register_image_brush_circle(OperationRegistry* registry);

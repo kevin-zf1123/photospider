@@ -183,8 +183,81 @@ int ycbcr420() {
   PS_CHECK(!Compiler(registry).compile(alpha).ok());
   return 0;
 }
+int split_horizontal() {
+  auto registry = make_default_operation_registry();
+  std::vector<float> numbers(3 * 5 * 3);
+  for (std::size_t i = 0; i < numbers.size(); ++i)
+    numbers[i] = static_cast<float>(i);
+  auto input =
+      samples({3, 5, 3}, numbers, {encode_semantic(rgb()).take_value()});
+  WorkflowDocument document;
+  document.inputs = {declaration(1, "image", input)};
+  document.nodes = {{1,
+                     "image.split_horizontal",
+                     {WorkflowInputReference{1}},
+                     {{"split_x", std::int64_t{2}}}}};
+  document.outputs = {{"full", 1, "full"},
+                      {"left", 1, "left"},
+                      {"right", 1, "right"}};
+  GraphContext graph(document);
+  auto compiled = Compiler(registry).compile(graph);
+  PS_CHECK(compiled.ok());
+  for (bool joint : {false, true}) {
+    ExecutionContext execution(registry);
+    auto frozen = execution.freeze(compiled.value().plan, {{{"image", input}}})
+                      .take_value();
+    DemandQuery query{
+        {"full",
+         Footprint::from_regions({3, 5, 3}, {Region({{2, 1}, {4, 1}, {0, 3}})})
+             .take_value()},
+        {"left",
+         Footprint::from_regions({3, 2, 3}, {Region({{1, 1}, {1, 1}, {0, 3}})})
+             .take_value()},
+        {"right",
+         Footprint::from_regions({3, 3, 3}, {Region({{0, 1}, {2, 1}, {0, 3}})})
+             .take_value()}};
+    ExecutionOptions options;
+    options.enable_joint = joint;
+    auto result = execution.execute_fragments(frozen, query, {}, options);
+    if (!result.ok())
+      std::cerr << result.status().message << '\n';
+    PS_CHECK(result.ok());
+    PS_CHECK((result.value().diagnostics.joint_groups == 1) == joint);
+    for (const auto& entry : query) {
+      const auto& output = result.value().values.at(entry.first);
+      PS_CHECK(output.fragments()[0].storage() == input.storage());
+      PS_CHECK(output.facets()[0].payload == input.facets()[0].payload);
+      const auto& dimensions = entry.second.boxes()[0].dimensions();
+      for (std::uint64_t c = 0; c < 3; ++c) {
+        float actual;
+        PS_CHECK(output
+                     .read({dimensions[0].offset, dimensions[1].offset, c},
+                           &actual, sizeof(actual))
+                     .ok());
+        const auto source_x =
+            dimensions[1].offset + (entry.first == "right" ? 2 : 0);
+        PS_CHECK(actual ==
+                 numbers[(dimensions[0].offset * 5 + source_x) * 3 + c]);
+      }
+    }
+    auto dirty = result.value().dependencies.potential_dirty(
+        "image",
+        Footprint::from_regions({3, 5, 3}, {Region({{0, 1}, {4, 1}, {0, 3}})})
+            .take_value());
+    PS_CHECK(dirty.ok() && dirty.value().at("right").contains({0, 2, 0}));
+    PS_CHECK(dirty.value().at("left").empty() &&
+             dirty.value().at("full").empty());
+  }
+  for (std::int64_t split : {-1, 0, 5, 6}) {
+    document.nodes[0].parameters["split_x"] = split;
+    GraphContext invalid(document);
+    PS_CHECK(!Compiler(registry).compile(invalid).ok());
+  }
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(ycbcr420() == 0);
+  PS_CHECK(split_horizontal() == 0);
   return 0;
 }
