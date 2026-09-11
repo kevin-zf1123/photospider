@@ -143,7 +143,8 @@ OperationContractIrStage exercise_operation_contract_ir_input(
 }  // namespace ps::fuzz_testing
 
 /**
- * @brief Fuzzes operation-v4 vocabulary, parameter schema, and typed IR gates.
+ * @brief Fuzzes operation ABI 9 vocabulary, parameter schema, and typed IR
+ * gates.
  * @param data Arbitrary libFuzzer bytes.
  * @param size Exact byte count.
  * @return Always zero after bounded validation/compile attempts.

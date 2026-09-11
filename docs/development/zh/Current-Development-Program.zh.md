@@ -1,9 +1,10 @@
 # 当前开发计划
 
 - 快照日期：2026-09-12
-- 交付基线：ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458，包 0.8.0 / ABI 8
-- 当前里程碑：[#302 独立结果与 Atomic 联合执行](https://github.com/kevin-zf1123/photospider/issues/302)
-- 开发分支：codex/multi-output-semantics，仅合并到 ops
+- 审核起始基线：ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458，包 0.8.0 / ABI 8
+- 已实现里程碑：[#302 独立结果与 Atomic 联合执行](https://github.com/kevin-zf1123/photospider/issues/302)
+- 交付记录：[#314](https://github.com/kevin-zf1123/photospider/pull/314)，目标 ops
+- CI、bot、合并、Issue 结算和分支清理实时状态由 [#302](https://github.com/kevin-zf1123/photospider/issues/302) 维护
 
 GitHub Issue 为实时交付状态权威。ADR 0021 记录已接受目标，接受不表示实现完成。
 基线已经包含算子基础与 G4 执行能力。历史 main@fba06270 和 ops-foundations 快照只说明
@@ -17,7 +18,8 @@ joint on/off 消费者验证，以及参数化 kernel 的共享视图片段合�
 workflow 生成完整 129×129 kernel，匹配核与卷积 oracle，kernel-only 图像读取为零。新的全面审查发现输入置换、投影 Region、分阶段内容身份、浮点环境四项契约缺口，
 以及随后发现的缓存克隆预算边界；现已修复，独立复审无剩余 blocker/required。
 static/shared 各 14 项检查和安装消费者通过，新增 owner 分裂缓存回归也通过。
-公共交付仍待 PR、CI、bot、合并等最终门禁。
+本仓库快照记录已实现行为与本地验证；PR #314 与 #302 记录实时交付状态。
+完整 CI 中的种子 fixture 已迁移为 ABI 9，并增加 traits-v8 明确拒绝回归。
 
 ## 执行顺序
 

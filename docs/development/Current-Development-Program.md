@@ -1,9 +1,10 @@
 # Current Development Program
 
 - Snapshot date: 2026-09-12
-- Delivery baseline: `ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458`, package 0.8.0 / ABI 8
-- Current milestone: [independent results and Atomic joint execution #302](https://github.com/kevin-zf1123/photospider/issues/302)
-- Branch: `codex/multi-output-semantics` into `ops`; no main or daemon delivery
+- Audited starting baseline: `ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458`, package 0.8.0 / ABI 8
+- Implemented milestone: [independent results and Atomic joint execution #302](https://github.com/kevin-zf1123/photospider/issues/302)
+- Delivery record: [PR #314](https://github.com/kevin-zf1123/photospider/pull/314) into `ops`; no main or daemon delivery
+- Live CI, bot review, merge, Issue settlement and branch cleanup: [#302](https://github.com/kevin-zf1123/photospider/issues/302)
 
 ## Authority and current state
 
@@ -42,7 +43,9 @@ projected Region checks, graph-independent staged cache identity and floating
 environment). Those and the follow-up cache-clone budget boundary are fixed;
 targeted independent rereview has no remaining blocker/required. Static/shared
 14-check suites and installed consumers passed, followed by the new owner-split
-cache regression. Public delivery is pending PR/CI/bot/merge gates below. Final delivery requires a
+cache regression. This repository snapshot records implemented behavior and local verification;
+PR #314 and #302 own the live delivery state. The full-CI seed fixture was
+migrated to ABI 9, with an explicit traits-v8 rejection regression. Final delivery requires a
 fresh independent comprehensive review, required fixes, one PR to ops, all six
 existing CI jobs and Codex bot review on the final HEAD, a merge commit, explicit
 Issue settlement, local ops synchronization and task-branch cleanup. Only the
