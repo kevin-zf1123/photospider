@@ -46,8 +46,12 @@ Result<Value> OperationRegistry::invoke_dependency_current(
     auto found = find_traits(key);
     if (!found.ok())
       return failure(found.status());
+    auto selected =
+        select_operation_output(found.value(), invocation.output_index);
+    if (!selected.ok())
+      return failure(selected.status());
     auto resolved = resolve_operation_traits(
-        found.value(), invocation.inputs.size(), invocation.parameters);
+        selected.value(), invocation.inputs.size(), invocation.parameters);
     if (!resolved.ok())
       return failure(resolved.status());
     if (invocation.input_demands.size() != invocation.inputs.size())
@@ -111,6 +115,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                 invocation.backend,
                                 invocation.cancellation,
                                 {}};
+      request.output_index = invocation.output_index;
       auto started =
           start_dependency(key, std::move(request), invocation.allocator);
       if (!started.ok())
@@ -156,7 +161,8 @@ Result<Value> OperationRegistry::invoke_dependency_current(
           return Result<DependencyResult>(status);
       }
     };
-    if (resolved.value().observation_kind == ObservationKind::RequestRecord) {
+    if (resolved.value().outputs[0].observation_kind ==
+        ObservationKind::RequestRecord) {
       auto terminal = run(samples.value());
       if (!terminal.ok())
         return failure(terminal.status());

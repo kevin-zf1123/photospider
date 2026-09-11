@@ -180,7 +180,8 @@ int main(int argc, char** argv) {
     // Table: 18448 logical bytes -> 32768 native capacity. Control atlas:
     // 8+160.
     const auto minimum =
-        large_plan.plan.steps()[0].traits.continuation_bytes + 12 + 32768 + 168;
+        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 12 +
+        32768 + 168;
     for (auto bytes : {minimum - 1, minimum}) {
       ExecutionContextConfig tight;
       tight.gpu_enabled = true;

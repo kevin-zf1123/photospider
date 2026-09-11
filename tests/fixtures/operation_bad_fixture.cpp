@@ -15,7 +15,7 @@ std::atomic<std::uint32_t> calls{0};
  */
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return 7U;
+  return 8U;
 }
 
 /**
@@ -24,8 +24,8 @@ ps_operation_plugin_get_abi_version(void) {
  * @throws Nothing.
  * @note A correct host never calls this after the version mismatch.
  */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v8*
-ps_operation_plugin_get_api_v8(void) {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v9*
+ps_operation_plugin_get_api_v9(void) {
   ++calls;
   return nullptr;
 }

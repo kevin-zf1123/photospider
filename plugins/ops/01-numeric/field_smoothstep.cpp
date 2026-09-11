@@ -31,14 +31,15 @@ Status register_field_smoothstep(OperationRegistry* registry) {
     port.element_type_mask = 12;
     port.rank = 2;
   }
-  t.requires_dense_output = true;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.region_rule = OperationRegionRule::Elementwise;
-  t.output_dtype_rule = OperationDtypeRule::Declared;
+  t.outputs[0].requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].region_rule = OperationRegionRule::Elementwise;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Declared;
   t.parameter_schema = {real("edge0"), real("edge1")};
-  t.output_element_type = ElementType::Float32;
-  t.output_semantic_rule = OperationSemanticRule::Establish;
-  t.output_facets = {encode_semantic(coverage_semantics()).take_value()};
+  t.outputs[0].output_element_type = ElementType::Float32;
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+  t.outputs[0].output_facets = {
+      encode_semantic(coverage_semantics()).take_value()};
   std::sort(t.parameter_schema.begin(), t.parameter_schema.end(),
             [](const auto& a, const auto& b) { return a.key < b.key; });
   definition.callback = [traits = t](const OperationInvocation& invocation) {

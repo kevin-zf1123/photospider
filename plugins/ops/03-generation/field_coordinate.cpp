@@ -16,15 +16,16 @@ Status register_field_coordinate(OperationRegistry* registry) {
   auto& t = definition.traits;
   t.input_count = 0;
   t.input_schema.resize(0);
-  t.requires_dense_output = true;
-  t.shape_rule = OperationShapeRule::Axes;
-  t.region_rule = OperationRegionRule::Whole;
-  t.output_dtype_rule = OperationDtypeRule::Parameter;
+  t.outputs[0].requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::Axes;
+  t.outputs[0].region_rule = OperationRegionRule::Whole;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Parameter;
   t.parameter_schema = {natural("height", 1, 0x1fffffffffffff),
                         natural("width", 1, 0x1fffffffffffff), string("dtype")};
-  t.output_dtype_parameter = "dtype";
-  t.output_axes = {{OperationExtentSource::Parameter, 1, "height", 0, 0, 0},
-                   {OperationExtentSource::Parameter, 1, "width", 0, 0, 0}};
+  t.outputs[0].output_dtype_parameter = "dtype";
+  t.outputs[0].output_axes = {
+      {OperationExtentSource::Parameter, 1, "height", 0, 0, 0},
+      {OperationExtentSource::Parameter, 1, "width", 0, 0, 0}};
   t.parameter_schema.push_back(string("axis"));
   t.parameter_schema.push_back(string("space"));
   std::sort(t.parameter_schema.begin(), t.parameter_schema.end(),

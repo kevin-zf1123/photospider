@@ -1146,10 +1146,10 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
     std::shared_ptr<ps::Region> observed) {
   auto registry = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits source_traits;
-  source_traits.output_element_type = ps::ElementType::Float64;
-  source_traits.shape_rule = ps::OperationShapeRule::Fixed;
-  source_traits.fixed_output_shape = {10U};
-  source_traits.region_rule = ps::OperationRegionRule::Whole;
+  source_traits.outputs[0].output_element_type = ps::ElementType::Float64;
+  source_traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
+  source_traits.outputs[0].fixed_output_shape = {10U};
+  source_traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   ps::Status status = registry->register_operation(ps::OperationDefinition{
       "test.region_source", source_traits,
       [](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
@@ -1161,10 +1161,11 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
   ps::OperationTraits consumer_traits;
   consumer_traits.input_count = 1U;
   consumer_traits.input_schema.resize(1);
-  consumer_traits.output_element_type = ps::ElementType::Float64;
-  consumer_traits.shape_rule = ps::OperationShapeRule::PreserveFirstInput;
-  consumer_traits.region_rule = rule;
-  consumer_traits.halo_radius = halo_radius;
+  consumer_traits.outputs[0].output_element_type = ps::ElementType::Float64;
+  consumer_traits.outputs[0].shape_rule =
+      ps::OperationShapeRule::PreserveFirstInput;
+  consumer_traits.outputs[0].region_rule = rule;
+  consumer_traits.outputs[0].halo_radius = halo_radius;
   status = registry->register_operation(ps::OperationDefinition{
       "test.region", consumer_traits,
       [observed](
@@ -1427,7 +1428,8 @@ int main() {
   effect_sink_traits.deterministic = true;
   effect_sink_traits.side_effect_free = false;
   effect_sink_traits.cacheable = false;
-  effect_sink_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  effect_sink_traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
   PS_CHECK(effect_operations
                ->register_operation(OperationDefinition{
                    "test.effect_sink", effect_sink_traits,
@@ -2506,7 +2508,7 @@ int main() {
 
   auto facet_operations = std::make_shared<OperationRegistry>();
   OperationTraits facet_source_traits;
-  facet_source_traits.output_element_type = ElementType::UInt8;
+  facet_source_traits.outputs[0].output_element_type = ElementType::UInt8;
   PS_CHECK(facet_operations
                ->register_operation(OperationDefinition{
                    "test.facet_source", facet_source_traits,
@@ -2521,9 +2523,11 @@ int main() {
   facet_identity_traits.input_count = 1U;
   facet_identity_traits.input_schema.resize(1);
   facet_identity_traits.supports_gpu = true;
-  facet_identity_traits.output_element_type = ElementType::UInt8;
-  facet_identity_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  facet_identity_traits.region_rule = OperationRegionRule::Elementwise;
+  facet_identity_traits.outputs[0].output_element_type = ElementType::UInt8;
+  facet_identity_traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
+  facet_identity_traits.outputs[0].region_rule =
+      OperationRegionRule::Elementwise;
   PS_CHECK(facet_operations
                ->register_operation(OperationDefinition{
                    "test.facet_identity", facet_identity_traits,

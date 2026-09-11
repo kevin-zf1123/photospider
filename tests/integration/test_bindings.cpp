@@ -151,13 +151,14 @@ int binding_failures() {
   std::atomic<unsigned> callbacks{0};
   OperationTraits traits;
   traits.input_count = 2;
-  traits.output_element_type = ElementType::Float32;
-  traits.output_semantic_rule = ps::OperationSemanticRule::PreserveInput;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Elementwise;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].output_semantic_rule =
+      ps::OperationSemanticRule::PreserveInput;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0},
                          {OperationPortKind::Float32Scalar, 0, 16}};
-  traits.output_schema = traits.input_schema[0];
+  traits.outputs[0].output_schema = traits.input_schema[0];
   PS_CHECK(
       operations
           ->register_operation({"image.exposure_gain", traits,
@@ -453,14 +454,14 @@ int static_constraint_identity() {
     OperationTraits traits;
     traits.input_count = 1;
     traits.input_schema.resize(1);
-    traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-    traits.output_element_type = ElementType::Float32;
+    traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+    traits.outputs[0].output_element_type = ElementType::Float32;
     if (mode == 4)
       traits.input_schema[0] = {OperationPortKind::Float32Scalar, 0, 1};
     if (mode == 5)
       traits.input_schema[0] = {OperationPortKind::Float32Scalar, 0, 2};
     if (mode >= 4)
-      traits.shape_rule = OperationShapeRule::Scalar;
+      traits.outputs[0].shape_rule = OperationShapeRule::Scalar;
     PS_CHECK(registry
                  ->register_operation({"source", traits,
                                        [](const OperationInvocation& call) {
@@ -509,15 +510,15 @@ int schemas_halo_and_snapshots() {
     if (mode == 4)
       traits.input_schema[0].minimum = -0.0F;
     if (mode == 5)
-      traits.output_schema.kind = OperationPortKind::Float32Scalar;
+      traits.outputs[0].output_schema.kind = OperationPortKind::Float32Scalar;
     if (mode == 6)
-      traits.shape_rule = OperationShapeRule::MatchAllInputs;
+      traits.outputs[0].shape_rule = OperationShapeRule::MatchAllInputs;
     if (mode == 7)
       traits.input_schema[0] = traits.input_schema[1];
     if (mode == 8)
-      traits.output_schema = {};
+      traits.outputs[0].output_schema = {};
     if (mode == 9)
-      traits.output_element_type = ElementType::UInt8;
+      traits.outputs[0].output_element_type = ElementType::UInt8;
     OperationRegistry registry;
     PS_CHECK(registry
                  .register_operation({"invalid", traits,
@@ -529,8 +530,8 @@ int schemas_halo_and_snapshots() {
   }
   auto halo_registry = std::make_shared<OperationRegistry>();
   auto halo_traits = image_traits;
-  halo_traits.region_rule = OperationRegionRule::Halo;
-  halo_traits.halo_radius = 1;
+  halo_traits.outputs[0].region_rule = OperationRegionRule::Halo;
+  halo_traits.outputs[0].halo_radius = 1;
   PS_CHECK(halo_registry
                ->register_operation({"halo", halo_traits,
                                      [](const OperationInvocation& call) {

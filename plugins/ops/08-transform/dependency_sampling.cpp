@@ -253,10 +253,10 @@ OperationTraits staged(std::uint64_t state_bytes) {
   OperationTraits traits;
   traits.input_count = 2;
   traits.input_schema.resize(2);
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
-  traits.continuation_bytes = state_bytes;
-  traits.maximum_dependency_stages = 1048576;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
+  traits.outputs[0].continuation_bytes = state_bytes;
+  traits.outputs[0].maximum_dependency_stages = 1048576;
   return traits;
 }
 }  // namespace
@@ -265,17 +265,18 @@ Status register_dependency_sampling(OperationRegistry* registry) {
   stmap.key = "image.stmap";
   stmap.traits = staged(sizeof(StmapState));
   auto& t = stmap.traits;
-  t.output_element_type = ElementType::Float32;
-  t.output_schema.kind = OperationPortKind::RgbaFloat32;
-  t.input_schema[0] = t.output_schema;
+  t.outputs[0].output_element_type = ElementType::Float32;
+  t.outputs[0].output_schema.kind = OperationPortKind::RgbaFloat32;
+  t.input_schema[0] = t.outputs[0].output_schema;
   t.input_schema[1].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   t.input_schema[1].rank = 3;
-  t.shape_rule = OperationShapeRule::Axes;
-  t.output_axes = {{OperationExtentSource::InputAxis, 1, {}, 1, 0, 0},
-                   {OperationExtentSource::InputAxis, 1, {}, 1, 1, 0},
-                   {OperationExtentSource::Constant, 4, {}, 0, 0, 0}};
-  t.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  t.outputs[0].shape_rule = OperationShapeRule::Axes;
+  t.outputs[0].output_axes = {
+      {OperationExtentSource::InputAxis, 1, {}, 1, 0, 0},
+      {OperationExtentSource::InputAxis, 1, {}, 1, 1, 0},
+      {OperationExtentSource::Constant, 4, {}, 0, 0, 0}};
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::PreserveInput;
   t.parameter_schema = {{"boundary", OperationParameterType::String, true}};
   stmap.validate_dependency =
       [](const std::vector<OperationMetadata>& inputs,
@@ -311,7 +312,8 @@ Status register_dependency_sampling(OperationRegistry* registry) {
     OperationDefinition radius;
     radius.key = scatter ? "numeric.radius_scatter" : "numeric.radius_gather";
     radius.traits = staged(sizeof(RadiusState));
-    radius.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+    radius.traits.outputs[0].shape_rule =
+        OperationShapeRule::PreserveFirstInput;
     radius.traits.input_schema[0].element_type =
         static_cast<std::uint32_t>(ElementType::Float64);
     radius.traits.input_schema[1].element_type =

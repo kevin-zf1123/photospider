@@ -55,7 +55,7 @@ inline Result<Value> channels(const OperationInvocation& call,
   if (!made.ok())
     return Result<Value>(made.status());
   auto output = made.take_value();
-  const auto rule = traits.output_semantic_rule;
+  const auto rule = traits.outputs[0].output_semantic_rule;
   const bool extract = rule == OperationSemanticRule::ExtractChannel;
   const bool merge = rule == OperationSemanticRule::MergeChannelsParameter;
   std::vector<std::uint32_t> indices;
@@ -150,7 +150,8 @@ inline Result<Value> colors(const OperationInvocation& call,
     return Result<Value>(made.status());
   auto output = made.take_value();
   const auto& input = call.inputs[0];
-  if (traits.output_semantic_rule == OperationSemanticRule::Parameter) {
+  if (traits.outputs[0].output_semantic_rule ==
+      OperationSemanticRule::Parameter) {
     auto status = numeric_internal::visit(
         input, call.cancellation, [&](auto index, const auto& coordinate) {
           std::memcpy(
@@ -163,7 +164,7 @@ inline Result<Value> colors(const OperationInvocation& call,
     return publish(std::move(output), meta.facets, call.cancellation);
   }
   const auto source = semantic(input);
-  const auto rule = traits.output_semantic_rule;
+  const auto rule = traits.outputs[0].output_semantic_rule;
   const bool associate = rule == OperationSemanticRule::AssociateAlpha;
   const bool alpha_only =
       associate || rule == OperationSemanticRule::UnassociateAlpha;

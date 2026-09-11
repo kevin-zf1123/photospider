@@ -12,23 +12,24 @@ Status register_channel_extract(OperationRegistry* registry) {
   OperationDefinition operation;
   operation.key = "channel.extract";
   auto& t = operation.traits;
-  t.output_semantic_rule = OperationSemanticRule::ExtractChannel;
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::ExtractChannel;
   t.input_count = 1;
   t.input_schema.resize(1);
   auto& port = t.input_schema[0];
   port.kind = OperationPortKind::Typed;
   port.rank = 3;
   port.element_type_mask = 12;
-  t.output_schema.kind = OperationPortKind::Typed;
-  t.output_dtype_rule = OperationDtypeRule::Input;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.requires_dense_output = true;
+  t.outputs[0].output_schema.kind = OperationPortKind::Typed;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].requires_dense_output = true;
 
-  t.shape_rule = OperationShapeRule::Axes;
-  t.output_axes = {{OperationExtentSource::InputAxis, 1, {}, 0, 0, 0},
-                   {OperationExtentSource::InputAxis, 1, {}, 0, 1, 0}};
+  t.outputs[0].shape_rule = OperationShapeRule::Axes;
+  t.outputs[0].output_axes = {
+      {OperationExtentSource::InputAxis, 1, {}, 0, 0, 0},
+      {OperationExtentSource::InputAxis, 1, {}, 0, 1, 0}};
 
-  t.output_semantic_parameter = "index";
+  t.outputs[0].output_semantic_parameter = "index";
   t.parameter_schema = {
       {"index", OperationParameterType::Int64, true, true, 0, 63}};
 

@@ -284,8 +284,14 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     const DependencyStart& start, const DependencyValidator& validate,
     DependencyRequest request, const BufferAllocator& allocator,
     std::shared_ptr<const void> definition) {
-  if (!start || traits.dependency_version != 1 || !traits.continuation_bytes ||
-      !traits.maximum_dependency_stages || request.snapshot_identity.empty() ||
+  auto selected = select_operation_output(traits, request.output_index);
+  if (!selected.ok())
+    return Result<std::shared_ptr<DependencySession>>(selected.status());
+  traits = selected.take_value();
+  if (!start || traits.outputs[0].dependency_version != 1 ||
+      !traits.outputs[0].continuation_bytes ||
+      !traits.outputs[0].maximum_dependency_stages ||
+      request.snapshot_identity.empty() ||
       request.snapshot_identity.size() > 4096)
     return Result<std::shared_ptr<DependencySession>>(
         invalid("invalid dependency start contract"));
@@ -296,7 +302,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
       (request.backend == Backend::Gpu && !traits.supports_gpu))
     return Result<std::shared_ptr<DependencySession>>(Status::failure(
         ErrorCode::BackendUnavailable, "dependency backend unavailable"));
-  if (traits.failure_delivery != FailureDelivery::RequestFailureOnly)
+  if (traits.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly)
     return Result<std::shared_ptr<DependencySession>>(
         invalid("per-atom outcome protocol required"));
   auto resolved = resolve_operation_traits(traits, request.inputs.size(),
@@ -320,14 +326,15 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                                              request.limits.sets);
   if (!observations.ok())
     return Result<std::shared_ptr<DependencySession>>(observations.status());
-  if (traits.observation_kind == ObservationKind::Atomic) {
+  if (traits.outputs[0].observation_kind == ObservationKind::Atomic) {
     auto count = observations.value().element_count();
     if (!count.ok())
       return Result<std::shared_ptr<DependencySession>>(count.status());
     if (count.value() > 1)
       return Result<std::shared_ptr<DependencySession>>(
           invalid("request-only atomic start requires one observation"));
-  } else if (traits.observation_kind != ObservationKind::RequestRecord) {
+  } else if (traits.outputs[0].observation_kind !=
+             ObservationKind::RequestRecord) {
     return Result<std::shared_ptr<DependencySession>>(
         invalid("unknown observation kind"));
   }
@@ -342,12 +349,16 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   impl->auxiliary_cancellation = request.limits.sets.cancellation;
   impl->limits.sets.cancellation = request.cancellation;
   impl->remaining_work = request.limits.maximum_work;
-  impl->query = {
-      std::move(request.inputs),     output.take_value(),
-      std::move(request.parameters), std::move(request.outputs),
-      observations.take_value(),     std::move(request.snapshot_identity),
-      traits.observation_kind,       request.backend,
-      request.cancellation};
+  impl->query = {std::move(request.inputs),
+                 output.take_value(),
+                 std::move(request.parameters),
+                 std::move(request.outputs),
+                 observations.take_value(),
+                 std::move(request.snapshot_identity),
+                 traits.outputs[0].observation_kind,
+                 request.backend,
+                 request.cancellation,
+                 request.output_index};
   content_internal::Sha256 identity;
   identity.text("photospider.dependency-contract.v1");
   identity.text(operation);
@@ -419,12 +430,13 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     if (!status.ok())
       return Result<std::shared_ptr<DependencySession>>(status);
     try {
-      auto limit = allocator.limited(
-          std::min(traits.continuation_bytes, impl->limits.maximum_state_bytes),
-          [failure = impl->service_failure](ErrorCode code) {
-            auto expected = ErrorCode::Ok;
-            failure->compare_exchange_strong(expected, code);
-          });
+      auto limit =
+          allocator.limited(std::min(traits.outputs[0].continuation_bytes,
+                                     impl->limits.maximum_state_bytes),
+                            [failure = impl->service_failure](ErrorCode code) {
+                              auto expected = ErrorCode::Ok;
+                              failure->compare_exchange_strong(expected, code);
+                            });
       auto state = start(impl->query, limit);
       if (!state.ok())
         return Result<std::shared_ptr<DependencySession>>(
@@ -482,8 +494,9 @@ Result<DependencyProgress> DependencySession::poll(
   status = impl_->consume(1);
   if (!status.ok())
     return Result<DependencyProgress>(impl_->retire(status));
-  if (impl_->polls >= std::min(impl_->traits.maximum_dependency_stages,
-                               impl_->limits.maximum_stages))
+  if (impl_->polls >=
+      std::min(impl_->traits.outputs[0].maximum_dependency_stages,
+               impl_->limits.maximum_stages))
     return Result<DependencyProgress>(impl_->retire(Status::failure(
         ErrorCode::ResourceExhausted, "dependency phase limit")));
   try {
@@ -819,7 +832,7 @@ Result<DependencyProgress> DependencySession::poll(
               impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
         }
       };
-      phase.gpu_execute = [&](const ps_gpu_dispatch_v8* commands,
+      phase.gpu_execute = [&](const ps_gpu_dispatch_v9* commands,
                               std::uint32_t count) -> Status {
         try {
           auto status = native_allowed();
@@ -909,7 +922,8 @@ Result<DependencyProgress> DependencySession::poll(
       ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||
-          impl_->traits.output_schema.kind != OperationPortKind::Value) {
+          impl_->traits.outputs[0].output_schema.kind !=
+              OperationPortKind::Value) {
         environment.emplace();
         if (!environment->active())
           return Result<DependencyProgress>(impl_->retire(Status::failure(
@@ -1049,8 +1063,8 @@ Result<DependencyProgress> DependencySession::poll(
                           "dependency result differs from inferred output")));
     for (const auto& fragment : result.fragments()) {
       status = input_internal::validate_port_value(
-          impl_->traits.output_schema, fragment, ErrorCode::OperationFailed,
-          [&] { return impl_->stop().code; });
+          impl_->traits.outputs[0].output_schema, fragment,
+          ErrorCode::OperationFailed, [&] { return impl_->stop().code; });
       if (!status.ok())
         return Result<DependencyProgress>(impl_->retire(status));
     }

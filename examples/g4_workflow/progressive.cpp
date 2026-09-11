@@ -85,11 +85,11 @@ void progressive_workflow() {
   follow.traits.input_schema[1].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   follow.traits.input_schema[1].rank = 1;
-  follow.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  follow.traits.region_rule = OperationRegionRule::Dependency;
-  follow.traits.dependency_version = 1;
-  follow.traits.continuation_bytes = sizeof(Follow);
-  follow.traits.maximum_dependency_stages = 8;
+  follow.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  follow.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  follow.traits.outputs[0].dependency_version = 1;
+  follow.traits.outputs[0].continuation_bytes = sizeof(Follow);
+  follow.traits.outputs[0].maximum_dependency_stages = 8;
   follow.start_dependency = [](const DependencyQuery&,
                                const BufferAllocator& allocator) {
     return DependencyContinuation::make<Follow>(allocator);

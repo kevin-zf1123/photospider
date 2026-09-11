@@ -46,10 +46,10 @@ inline Result<Value> gpu_image(const OperationInvocation& call,
           (output.descriptor.shape[axis] % factor != 0);
   }
   const auto count = call.inputs.size();
-  std::vector<ps_operation_value_view_v8> views(count);
+  std::vector<ps_operation_value_view_v9> views(count);
   std::vector<std::vector<std::uint64_t>> origins(count), offsets(count),
       extents(count), demands(count), demand_extents(count);
-  std::vector<std::vector<ps_operation_facet_view_v8>> facets(count);
+  std::vector<std::vector<ps_operation_facet_view_v9>> facets(count);
   for (std::size_t i = 0; i < count; ++i) {
     const auto& input = call.inputs[i];
     auto& v = views[i];
@@ -79,24 +79,24 @@ inline Result<Value> gpu_image(const OperationInvocation& call,
     v.demand_offsets = demands[i].data();
     v.demand_extents = demand_extents[i].data();
     for (const auto& f : input.facets())
-      facets[i].push_back({sizeof(ps_operation_facet_view_v8), f.key.data(),
+      facets[i].push_back({sizeof(ps_operation_facet_view_v9), f.key.data(),
                            static_cast<std::uint32_t>(f.key.size()), f.version,
                            f.payload.data(),
                            static_cast<std::uint32_t>(f.payload.size())});
     v.facets = facets[i].data();
     v.facet_count = facets[i].size();
   }
-  std::vector<ps_operation_parameter_value_v8> parameters;
+  std::vector<ps_operation_parameter_value_v9> parameters;
   for (const auto& entry : call.parameters) {
-    ps_operation_parameter_value_v8 p{};
+    ps_operation_parameter_value_v9 p{};
     p.struct_size = sizeof(p);
     p.key = entry.first.data();
     p.key_size = entry.first.size();
     if (const auto* number = std::get_if<double>(&entry.second)) {
-      p.type = PS_OPERATION_PARAMETER_FLOAT64_V8;
+      p.type = PS_OPERATION_PARAMETER_FLOAT64_V9;
       p.float64_value = *number;
     } else {
-      p.type = PS_OPERATION_PARAMETER_INT64_V8;
+      p.type = PS_OPERATION_PARAMETER_INT64_V9;
       p.int64_value = std::get<std::int64_t>(entry.second);
     }
     parameters.push_back(p);
@@ -106,7 +106,7 @@ inline Result<Value> gpu_image(const OperationInvocation& call,
     out_offsets.push_back(d.offset);
     out_extents.push_back(d.extent);
   }
-  ps_operation_output_sink_v8 sink{};
+  ps_operation_output_sink_v9 sink{};
   sink.struct_size = sizeof(sink);
   sink.context = &output;
   sink.output_rank = output.descriptor.shape.size();
@@ -144,7 +144,7 @@ inline Result<Value> gpu_image(const OperationInvocation& call,
     return state.scratch.back().data();
   };
   sink.publish = [](void* context, std::uint32_t, const std::uint64_t*,
-                    std::uint32_t, const ps_operation_facet_view_v8*,
+                    std::uint32_t, const ps_operation_facet_view_v9*,
                     std::uint32_t, const std::uint8_t* data, std::uint64_t) {
     auto& state = *static_cast<Output*>(context);
     if (!state.value || state.value->data() != data)
@@ -161,11 +161,11 @@ inline Result<Value> gpu_image(const OperationInvocation& call,
       cancelled, const_cast<CancellationToken*>(&call.cancellation), &sink);
   if (!output.failure.ok())
     return Result<Value>(output.failure);
-  if (result == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V8)
+  if (result == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V9)
     return Result<Value>(
         Status::failure(ErrorCode::BackendUnavailable,
                         "Metal FP32 numeric or shape eligibility"));
-  if (result == PS_OPERATION_RESULT_CANCELLED_V8)
+  if (result == PS_OPERATION_RESULT_CANCELLED_V9)
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "native image cancelled"));
   return std::move(output.result);

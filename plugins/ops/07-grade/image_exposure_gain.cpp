@@ -54,17 +54,20 @@ Result<Value> execute_image(const OperationInvocation& invocation,
 }  // namespace
 Status register_image_exposure_gain(OperationRegistry* registry) {
   OperationDefinition operation;
-  operation.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  operation.traits.outputs[0].output_semantic_rule =
+      OperationSemanticRule::PreserveInput;
   operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
   operation.key = "image.exposure_gain";
   operation.traits.input_count = 2;
-  operation.traits.output_element_type = ElementType::Float32;
-  operation.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  operation.traits.region_rule = OperationRegionRule::Elementwise;
+  operation.traits.outputs[0].output_element_type = ElementType::Float32;
+  operation.traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
+  operation.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   operation.traits.input_schema = {
       {OperationPortKind::RgbaFloat32, 0, 0},
       {OperationPortKind::Float32Scalar, 0, 16.0F}};
-  operation.traits.output_schema = operation.traits.input_schema.front();
+  operation.traits.outputs[0].output_schema =
+      operation.traits.input_schema.front();
   operation.callback = [](const OperationInvocation& invocation) {
     return execute_image(invocation, false);
   };

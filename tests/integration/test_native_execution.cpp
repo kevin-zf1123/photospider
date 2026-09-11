@@ -39,11 +39,11 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
         api->buffer(api->context, output.data(), output.size(), 1, &result))
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::OperationFailed, "native binding failed"));
-    ps_gpu_buffer_binding_v8 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v8), 0, input, 0,
+    ps_gpu_buffer_binding_v9 buffers[] = {
+        {sizeof(ps_gpu_buffer_binding_v9), 0, input, 0,
          call.inputs[0].bytes().size(), 0},
-        {sizeof(ps_gpu_buffer_binding_v8), 1, result, 0, output.size(), 1}};
-    ps_gpu_dispatch_v8 command{};
+        {sizeof(ps_gpu_buffer_binding_v9), 1, result, 0, output.size(), 1}};
+    ps_gpu_dispatch_v9 command{};
     command.struct_size = sizeof(command);
     command.source = source;
     command.source_size = sizeof(source) - 1;
@@ -66,9 +66,9 @@ int main() {
   ps::OperationTraits traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
-  traits.output_element_type = ps::ElementType::Float32;
-  traits.shape_rule = ps::OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = ps::OperationRegionRule::Elementwise;
+  traits.outputs[0].output_element_type = ps::ElementType::Float32;
+  traits.outputs[0].shape_rule = ps::OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = ps::OperationRegionRule::Elementwise;
   traits.supports_gpu = traits.allows_cpu_fallback = true;
   std::function<void()> after_dispatch;
   PS_CHECK(registry
@@ -214,9 +214,9 @@ int main() {
   auto ranks_registry = std::make_shared<ps::OperationRegistry>();
   auto source_traits = ps::OperationTraits{};
   source_traits.estimated_bytes = value.storage()->capacity();
-  source_traits.output_element_type = ps::ElementType::Float32;
-  source_traits.shape_rule = ps::OperationShapeRule::Fixed;
-  source_traits.fixed_output_shape = rank_five.descriptor().shape;
+  source_traits.outputs[0].output_element_type = ps::ElementType::Float32;
+  source_traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
+  source_traits.outputs[0].fixed_output_shape = rank_five.descriptor().shape;
   PS_CHECK(
       ranks_registry
           ->register_operation({"source.five", source_traits,
@@ -224,7 +224,7 @@ int main() {
                                   return ps::Result<ps::Value>(rank_five);
                                 }})
           .ok());
-  source_traits.fixed_output_shape = rank_four.descriptor().shape;
+  source_traits.outputs[0].fixed_output_shape = rank_four.descriptor().shape;
   PS_CHECK(
       ranks_registry
           ->register_operation({"source.four", source_traits,

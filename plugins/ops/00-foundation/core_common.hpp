@@ -67,8 +67,8 @@ inline constexpr bool simulated_gpu = true;
 inline constexpr bool simulated_gpu = false;
 #endif
 inline OperationTraits preserving(OperationTraits traits) {
-  traits.output_dtype_rule = OperationDtypeRule::Input;
-  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  traits.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  traits.outputs[0].output_semantic_rule = OperationSemanticRule::PreserveInput;
   return traits;
 }
 inline OperationTraits float64_inputs(OperationTraits traits) {

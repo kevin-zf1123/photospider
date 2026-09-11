@@ -80,16 +80,16 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ByteReader reader(data, size);
   auto operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits traits;
-  traits.version = reader.next() % (PS_OPERATION_ABI_VERSION_8 + 1U);
-  traits.output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V8);
-  traits.shape_rule =
+  traits.version = reader.next() % (PS_OPERATION_ABI_VERSION_9 + 1U);
+  traits.outputs[0].output_element_type = static_cast<ps::ElementType>(
+      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V9);
+  traits.outputs[0].shape_rule =
       static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
-  traits.region_rule =
+  traits.outputs[0].region_rule =
       static_cast<ps::OperationRegionRule>((reader.next() % 6U) + 1U);
-  traits.halo_radius = reader.next();
-  if (traits.shape_rule == ps::OperationShapeRule::Fixed) {
-    traits.fixed_output_shape = {
+  traits.outputs[0].halo_radius = reader.next();
+  if (traits.outputs[0].shape_rule == ps::OperationShapeRule::Fixed) {
+    traits.outputs[0].fixed_output_shape = {
         static_cast<std::uint64_t>(reader.next() % 16U)};
   }
   bool duplicate_schema = false;

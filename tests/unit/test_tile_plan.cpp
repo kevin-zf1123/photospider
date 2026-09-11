@@ -13,13 +13,14 @@ namespace {
 ps::OperationTraits image_traits(std::uint32_t inputs) {
   ps::OperationTraits traits;
   traits.input_count = inputs;
-  traits.output_element_type = ps::ElementType::Float32;
-  traits.output_semantic_rule = ps::OperationSemanticRule::PreserveInput;
-  traits.shape_rule = ps::OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = ps::OperationRegionRule::Elementwise;
+  traits.outputs[0].output_element_type = ps::ElementType::Float32;
+  traits.outputs[0].output_semantic_rule =
+      ps::OperationSemanticRule::PreserveInput;
+  traits.outputs[0].shape_rule = ps::OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = ps::OperationRegionRule::Elementwise;
   traits.input_schema.resize(inputs,
                              {ps::OperationPortKind::RgbaFloat32, 0, 0});
-  traits.output_schema = traits.input_schema[0];
+  traits.outputs[0].output_schema = traits.input_schema[0];
   return traits;
 }
 bool region(const ps::Region& r, std::uint64_t y, std::uint64_t h,
@@ -50,10 +51,11 @@ int inferred_image_regions() {
     OperationTraits traits;
     traits.input_count = 1;
     traits.input_schema.resize(1);
-    traits.output_element_type = ElementType::Float32;
-    traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-    traits.region_rule = OperationRegionRule::Elementwise;
-    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+    traits.outputs[0].output_element_type = ElementType::Float32;
+    traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+    traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
+    traits.outputs[0].output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     PS_CHECK(regional
                  .register_operation({"regional", traits,
                                       [&](const OperationInvocation& call) {
@@ -181,8 +183,8 @@ int main() {
     return Result<Value>(call.inputs[0]);
   };
   auto blur = image_traits(1);
-  blur.region_rule = OperationRegionRule::Halo;
-  blur.halo_radius_parameter = "radius";
+  blur.outputs[0].region_rule = OperationRegionRule::Halo;
+  blur.outputs[0].halo_radius_parameter = "radius";
   blur.parameter_schema = {
       {"radius", OperationParameterType::Int64, true, true, 1, 64},
       {"sigma", OperationParameterType::Float64, true, true, .1, 64}};
@@ -197,7 +199,7 @@ int main() {
   PS_CHECK(registry->register_operation({"mask", mask, dummy}).ok());
   PS_CHECK(registry->register_operation({"over", image_traits(2), dummy}).ok());
   auto whole = image_traits(1);
-  whole.region_rule = OperationRegionRule::Whole;
+  whole.outputs[0].region_rule = OperationRegionRule::Whole;
   PS_CHECK(registry->register_operation({"whole", whole, dummy}).ok());
   auto effect = image_traits(1);
   effect.side_effect_free = false;
@@ -205,10 +207,10 @@ int main() {
   PS_CHECK(registry->register_operation({"effect", effect, dummy}).ok());
   auto generic = image_traits(1);
   generic.input_schema[0] = {};
-  generic.output_schema = {};
+  generic.outputs[0].output_schema = {};
   PS_CHECK(
       registry->register_operation({"generic_preserve", generic, dummy}).ok());
-  generic.output_semantic_rule = OperationSemanticRule::Drop;
+  generic.outputs[0].output_semantic_rule = OperationSemanticRule::Drop;
   PS_CHECK(registry->register_operation({"generic", generic, dummy}).ok());
   PS_CHECK(registry->freeze().ok());
 
@@ -267,7 +269,7 @@ int main() {
   PS_CHECK(compiled.ok());
   const auto& plan = compiled.value().plan;
   PS_CHECK(plan.tile_height() == 1 && plan.tile_width() == 2);
-  PS_CHECK(plan.steps()[0].traits.halo_radius == 2);
+  PS_CHECK(plan.steps()[0].traits.outputs[0].halo_radius == 2);
   auto tile = plan.tile_plan("result", Region({{2, 1}, {3, 2}, {0, 4}}));
   PS_CHECK(tile.ok() && tile.value().steps().size() == 4);
   PS_CHECK(region(tile.value().steps()[0].input_demands[0], 0, 5, 1, 6));

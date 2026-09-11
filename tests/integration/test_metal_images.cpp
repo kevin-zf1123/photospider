@@ -31,10 +31,10 @@ ps::Result<ps::Value> padded_image(const ps::OperationInvocation& call,
       "kernel void pad(device const uchar* a [[buffer(0)]], "
       "device uchar* b [[buffer(1)]], constant uint& shift [[buffer(2)]], "
       "uint i [[thread_position_in_grid]]){b[i+shift]=a[i];}";
-  ps_gpu_buffer_binding_v8 buffers[] = {
-      {sizeof(ps_gpu_buffer_binding_v8), 0, input_token, 0, 16, 0},
-      {sizeof(ps_gpu_buffer_binding_v8), 1, output_token, 0, output.size(), 1}};
-  ps_gpu_dispatch_v8 command{};
+  ps_gpu_buffer_binding_v9 buffers[] = {
+      {sizeof(ps_gpu_buffer_binding_v9), 0, input_token, 0, 16, 0},
+      {sizeof(ps_gpu_buffer_binding_v9), 1, output_token, 0, output.size(), 1}};
+  ps_gpu_dispatch_v9 command{};
   command.struct_size = sizeof(command);
   command.source = shader;
   command.source_size = sizeof(shader) - 1;

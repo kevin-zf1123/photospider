@@ -47,19 +47,20 @@ Status register_mask_threshold(OperationRegistry* registry) {
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
   port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
-  t.output_element_type = ElementType::Float32;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.requires_dense_output = true;
+  t.outputs[0].output_element_type = ElementType::Float32;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].requires_dense_output = true;
 
   port.semantic_kind = static_cast<std::uint32_t>(SemanticKind::ScalarField);
-  t.output_facets = {encode_semantic(coverage_semantics()).take_value()};
+  t.outputs[0].output_facets = {
+      encode_semantic(coverage_semantics()).take_value()};
   t.parameter_schema = {{"threshold", OperationParameterType::Float64, true,
                          true, -std::numeric_limits<double>::max(),
                          std::numeric_limits<double>::max()}};
   op.callback = threshold;
 
-  t.output_semantic_rule = OperationSemanticRule::Establish;
-  t.output_schema.kind = OperationPortKind::Typed;
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+  t.outputs[0].output_schema.kind = OperationPortKind::Typed;
 
   return registry->register_operation(std::move(op));
 }

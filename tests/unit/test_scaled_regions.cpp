@@ -12,16 +12,17 @@ int main() {
   for (bool image : {false, true}) {
     OperationTraits traits;
     traits.input_count = 1;
-    traits.output_element_type = ElementType::Float32;
-    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
-    traits.shape_rule = OperationShapeRule::Shrink;
-    traits.region_rule = OperationRegionRule::Shrink;
-    traits.spatial_factor_parameter = "factor";
+    traits.outputs[0].output_element_type = ElementType::Float32;
+    traits.outputs[0].output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
+    traits.outputs[0].shape_rule = OperationShapeRule::Shrink;
+    traits.outputs[0].region_rule = OperationRegionRule::Shrink;
+    traits.outputs[0].spatial_factor_parameter = "factor";
     traits.parameter_schema = {
         {"factor", OperationParameterType::Int64, true, true, 1, 16}};
-    traits.output_schema.kind =
+    traits.outputs[0].output_schema.kind =
         image ? OperationPortKind::RgbaFloat32 : OperationPortKind::Float32Mask;
-    traits.input_schema = {traits.output_schema};
+    traits.input_schema = {traits.outputs[0].output_schema};
     auto registry = std::make_shared<OperationRegistry>();
     PS_CHECK(registry
                  ->register_operation({"shrink", traits,
@@ -78,7 +79,7 @@ int main() {
     dirty_dims[1] = {7, 2};
     auto dirty = operation_dirty_region(step.traits, Region(dirty_dims), shape,
                                         step.output_descriptor.shape,
-                                        traits.output_schema.kind);
+                                        traits.outputs[0].output_schema.kind);
     PS_CHECK(dirty.ok() && dirty.value().dimensions()[0].extent == 2 &&
              dirty.value().dimensions()[1].extent == 2);
     for (std::int64_t bad : {0, 17}) {

@@ -124,12 +124,12 @@ Status register_numeric_ordered_scan(OperationRegistry* registry) {
   traits.input_schema[0].element_type =
       static_cast<std::uint32_t>(ElementType::Float64);
   traits.input_schema[0].rank = 1;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
-  traits.continuation_bytes = sizeof(ScanState);
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
+  traits.outputs[0].continuation_bytes = sizeof(ScanState);
   traits.workspace_bytes = 8;
-  traits.maximum_dependency_stages = 1048576;
+  traits.outputs[0].maximum_dependency_stages = 1048576;
   traits.parameter_schema = {
       {"block_size", OperationParameterType::Int64, false, true, 1, 65536}};
   operation.start_dependency = [](const DependencyQuery& query,

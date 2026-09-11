@@ -188,12 +188,12 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   traits.input_count = 1;
   traits.input_schema.resize(1);
   traits.input_schema[0].element_type_mask = 12;
-  traits.requires_dense_output = true;
-  traits.region_rule = OperationRegionRule::Dependency;
-  traits.dependency_version = 1;
-  traits.continuation_bytes = sizeof(OrderedReductionState);
+  traits.outputs[0].requires_dense_output = true;
+  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].dependency_version = 1;
+  traits.outputs[0].continuation_bytes = sizeof(OrderedReductionState);
   traits.workspace_bytes = 24;
-  traits.maximum_dependency_stages = 1048576;
+  traits.outputs[0].maximum_dependency_stages = 1048576;
   traits.parameter_schema = {
       {"block_size", OperationParameterType::Int64, false, true, 1, 65536}};
   operation.validate_dependency = [](const auto& inputs, const auto&) {

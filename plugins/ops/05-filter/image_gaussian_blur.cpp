@@ -94,20 +94,23 @@ Result<Value> gaussian(const OperationInvocation& invocation) {
 }  // namespace
 Status register_image_gaussian_blur(OperationRegistry* registry) {
   OperationDefinition operation;
-  operation.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  operation.traits.outputs[0].output_semantic_rule =
+      OperationSemanticRule::PreserveInput;
   operation.traits.supports_gpu = operation.traits.allows_cpu_fallback = true;
   operation.key = "image.gaussian_blur";
   operation.traits.input_count = 1;
-  operation.traits.output_element_type = ElementType::Float32;
-  operation.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  operation.traits.region_rule = OperationRegionRule::Halo;
+  operation.traits.outputs[0].output_element_type = ElementType::Float32;
+  operation.traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
+  operation.traits.outputs[0].region_rule = OperationRegionRule::Halo;
   operation.traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
-  operation.traits.output_schema = operation.traits.input_schema.front();
+  operation.traits.outputs[0].output_schema =
+      operation.traits.input_schema.front();
 
   operation.traits.parameter_schema = {
       {"radius", OperationParameterType::Int64, true, true, 1, 64},
       {"sigma", OperationParameterType::Float64, true, true, 0.1, 64}};
-  operation.traits.halo_radius_parameter = "radius";
+  operation.traits.outputs[0].halo_radius_parameter = "radius";
   operation.traits.workspace_bytes = 129 * 8;
   operation.traits.workspace_input_multiplier = 1;
   operation.callback = gaussian;

@@ -526,7 +526,7 @@ Status DependencyRecords::append_record(
     certificate = rebound.take_value();
   }
   const bool terminal =
-      step.traits.observation_kind == ObservationKind::RequestRecord;
+      step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord;
   ExecutionDependencies::Impl::Record candidate{
       step.node_id,
       {step.output_descriptor, step.output_facets},
@@ -618,7 +618,7 @@ Status DependencyRecords::append_legacy(std::size_t index,
     needs.push_back({port, 8, empty.take_value(), {{1, 0}}});
   }
   if (step.whole_boundary ||
-      step.traits.observation_kind == ObservationKind::RequestRecord)
+      step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord)
     return append_record(index, outputs, {}, std::move(needs));
   auto observations = operation_observations(
       {step.output_descriptor, step.output_facets}, outputs, limits_);
@@ -649,7 +649,7 @@ Status DependencyRecords::append_empty(std::size_t index,
     return Status::success();
   std::optional<DependencyCertificate> certificate;
   if (!step.whole_boundary &&
-      step.traits.observation_kind == ObservationKind::Atomic) {
+      step.traits.outputs[0].observation_kind == ObservationKind::Atomic) {
     std::vector<std::vector<std::uint64_t>> inputs;
     for (const auto& input : step.inputs)
       inputs.push_back(metadata(*plan_, input).descriptor.shape);

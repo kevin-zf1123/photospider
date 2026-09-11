@@ -45,7 +45,7 @@ inline std::vector<std::string> result_keys(
     if (prior != memo.end())
       return prior->second;
     content_internal::Sha256 hash;
-    hash.text("photospider.result-region.v4");
+    hash.text("photospider.result-region.v5");
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
     if (step.backend == Backend::Gpu)
@@ -54,11 +54,11 @@ inline std::vector<std::string> result_keys(
     contract_internal::append_traits(&hash, t);
     contract_internal::append_facets(&hash, step.output_facets);
     hash.integer(t.version);
-    hash.integer(static_cast<std::uint32_t>(t.shape_rule));
-    hash.integer(static_cast<std::uint32_t>(t.region_rule));
-    hash.integer(t.halo_radius);
-    hash.integer(t.spatial_factor);
-    hash.integer(static_cast<std::uint32_t>(t.output_schema.kind));
+    hash.integer(static_cast<std::uint32_t>(t.outputs[0].shape_rule));
+    hash.integer(static_cast<std::uint32_t>(t.outputs[0].region_rule));
+    hash.integer(t.outputs[0].halo_radius);
+    hash.integer(t.outputs[0].spatial_factor);
+    hash.integer(static_cast<std::uint32_t>(t.outputs[0].output_schema.kind));
     hash.integer(
         static_cast<std::uint32_t>(step.output_descriptor.element_type));
     hash.integer(step.output_descriptor.shape.size());

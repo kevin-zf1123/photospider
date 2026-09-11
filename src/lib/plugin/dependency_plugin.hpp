@@ -6,7 +6,7 @@
 namespace ps::plugin_internal {
 /** @brief Copies a validated C program while retaining its DSO owner. */
 Status prepare_dependency_plugin(OperationDefinition* definition,
-                                 const ps_dependency_program_v8* program,
+                                 const ps_dependency_program_v9* program,
                                  void* user_data,
                                  std::shared_ptr<const void> library);
 }  // namespace ps::plugin_internal

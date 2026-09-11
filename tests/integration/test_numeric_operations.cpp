@@ -59,14 +59,14 @@ Result<ExecutionResult> run(const std::string& operation,
   auto base = make_default_operation_registry();
   auto registry = std::make_shared<OperationRegistry>();
   auto traits = base->find_traits(operation).take_value();
-  if (traits.dependency_version) {
+  if (traits.outputs[0].dependency_version) {
     // This fixture is a synchronous outer wrapper around the real public
     // direct staged invocation. Reserve its live state and scalar assembly.
-    traits.workspace_bytes += traits.continuation_bytes + 16;
-    traits.dependency_version = 0;
-    traits.continuation_bytes = 0;
-    traits.maximum_dependency_stages = 0;
-    traits.region_rule = OperationRegionRule::Whole;
+    traits.workspace_bytes += traits.outputs[0].continuation_bytes + 16;
+    traits.outputs[0].dependency_version = 0;
+    traits.outputs[0].continuation_bytes = 0;
+    traits.outputs[0].maximum_dependency_stages = 0;
+    traits.outputs[0].region_rule = OperationRegionRule::Whole;
   }
   auto registered = registry->register_operation(
       {operation, traits,
@@ -81,12 +81,12 @@ Result<ExecutionResult> run(const std::string& operation,
   std::vector<WorkflowInput> references;
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     OperationTraits source;
-    source.output_element_type = inputs[i].descriptor().element_type;
-    source.shape_rule = OperationShapeRule::Fixed;
-    source.fixed_output_shape = inputs[i].descriptor().shape;
+    source.outputs[0].output_element_type = inputs[i].descriptor().element_type;
+    source.outputs[0].shape_rule = OperationShapeRule::Fixed;
+    source.outputs[0].fixed_output_shape = inputs[i].descriptor().shape;
     source.estimated_bytes = inputs[i].storage()->capacity();
-    source.output_semantic_rule = OperationSemanticRule::Establish;
-    source.output_facets = inputs[i].facets();
+    source.outputs[0].output_semantic_rule = OperationSemanticRule::Establish;
+    source.outputs[0].output_facets = inputs[i].facets();
     const auto key = "fixture.input" + std::to_string(i);
     auto status = registry->register_operation(
         {key, source, [value = inputs[i]](const OperationInvocation&) {

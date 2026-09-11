@@ -88,12 +88,13 @@ OperationDefinition generator() {
   OperationDefinition d;
   d.key = "test.generate";
   auto& t = d.traits;
-  t.shape_rule = OperationShapeRule::Axes;
-  t.output_axes = {{OperationExtentSource::Parameter, 1, "count", 0, 0, 0}};
-  t.output_dtype_rule = OperationDtypeRule::Parameter;
-  t.output_dtype_parameter = "dtype";
-  t.output_semantic_rule = OperationSemanticRule::Parameter;
-  t.output_semantic_parameter = "semantic";
+  t.outputs[0].shape_rule = OperationShapeRule::Axes;
+  t.outputs[0].output_axes = {
+      {OperationExtentSource::Parameter, 1, "count", 0, 0, 0}};
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Parameter;
+  t.outputs[0].output_dtype_parameter = "dtype";
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::Parameter;
+  t.outputs[0].output_semantic_parameter = "semantic";
   t.parameter_schema = {{"count", OperationParameterType::Int64, true},
                         {"dtype", OperationParameterType::String, true},
                         {"semantic", OperationParameterType::String, true}};
@@ -120,7 +121,7 @@ int inference() {
   PS_CHECK(registry->register_operation(d).ok());
   auto bad = d;
   bad.key = "bad";
-  bad.traits.output_axes[0].parameter = "absent";
+  bad.traits.outputs[0].output_axes[0].parameter = "absent";
   PS_CHECK(!registry->register_operation(bad).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument doc;
@@ -163,11 +164,12 @@ int inference() {
   repeated.input_schema[0].rank = 2;
   repeated.repeated_minimum = 1;
   repeated.repeated_maximum = 4;
-  repeated.shape_rule = OperationShapeRule::Axes;
-  repeated.output_dtype_rule = OperationDtypeRule::Input;
-  repeated.output_axes = {{OperationExtentSource::InputAxis, 1, {}, 0, 0, 0},
-                          {OperationExtentSource::InputAxis, 1, {}, 0, 1, 0},
-                          {OperationExtentSource::InputCount, 1, {}, 0, 0, 0}};
+  repeated.outputs[0].shape_rule = OperationShapeRule::Axes;
+  repeated.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
+  repeated.outputs[0].output_axes = {
+      {OperationExtentSource::InputAxis, 1, {}, 0, 0, 0},
+      {OperationExtentSource::InputAxis, 1, {}, 0, 1, 0},
+      {OperationExtentSource::InputCount, 1, {}, 0, 0, 0}};
   auto resolved = resolve_operation_traits(repeated, 3, {});
   PS_CHECK(resolved.ok() && resolved.value().input_schema.size() == 3);
   const OperationMetadata field{{ElementType::Float32, {2, 4}}, {}};
@@ -181,28 +183,28 @@ int inference() {
                 .ok());
   PS_CHECK(!resolve_operation_traits(repeated, 0, {}).ok());
   PS_CHECK(!resolve_operation_traits(repeated, 5, {}).ok());
-  repeated.output_axes[0].offset = UINT64_MAX;
+  repeated.outputs[0].output_axes[0].offset = UINT64_MAX;
   auto overflow = resolve_operation_traits(repeated, 1, {}).take_value();
   PS_CHECK(infer_operation_output(overflow, {field}, {}).status().code ==
            ErrorCode::ResourceExhausted);
   auto preserve = repeated;
   preserve.repeated_minimum = preserve.repeated_maximum = 0;
   preserve.input_count = 1;
-  preserve.shape_rule = OperationShapeRule::PreserveFirstInput;
-  preserve.output_axes.clear();
-  preserve.output_dtype_rule = OperationDtypeRule::Declared;
-  preserve.output_element_type = ElementType::Float64;
+  preserve.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  preserve.outputs[0].output_axes.clear();
+  preserve.outputs[0].output_dtype_rule = OperationDtypeRule::Declared;
+  preserve.outputs[0].output_element_type = ElementType::Float64;
   auto independent = infer_operation_output(preserve, {field}, {});
   PS_CHECK(independent.ok() &&
            independent.value().descriptor.element_type == ElementType::Float64);
   OperationTraits image;
   image.input_count = 1;
   image.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
-  image.output_schema = image.input_schema[0];
-  image.output_element_type = ElementType::Float32;
-  image.shape_rule = OperationShapeRule::PreserveFirstInput;
-  image.output_semantic_rule = OperationSemanticRule::Parameter;
-  image.output_semantic_parameter = "semantic";
+  image.outputs[0].output_schema = image.input_schema[0];
+  image.outputs[0].output_element_type = ElementType::Float32;
+  image.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  image.outputs[0].output_semantic_rule = OperationSemanticRule::Parameter;
+  image.outputs[0].output_semantic_parameter = "semantic";
   image.parameter_schema = {{"semantic", OperationParameterType::String, true}};
   auto straight = rgba_semantics();
   straight.association = "straight";
@@ -231,11 +233,11 @@ int explicit_drop() {
     OperationTraits traits;
     traits.input_count = 1;
     traits.input_schema.resize(1);
-    traits.output_element_type = ElementType::Float32;
-    traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+    traits.outputs[0].output_element_type = ElementType::Float32;
+    traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
     traits.input_schema[0].kind = kind;
-    traits.output_schema.kind = kind;
-    traits.output_semantic_rule = OperationSemanticRule::Drop;
+    traits.outputs[0].output_schema.kind = kind;
+    traits.outputs[0].output_semantic_rule = OperationSemanticRule::Drop;
     PS_CHECK(infer_operation_output(traits, {input}, {}).status().code ==
              ErrorCode::TypeMismatch);
     OperationRegistry invalid;
@@ -246,14 +248,15 @@ int explicit_drop() {
     PS_CHECK(rejected.code == ErrorCode::InvalidArgument);
     PS_CHECK(invalid.keys().empty());
     auto preserved = traits;
-    preserved.output_semantic_rule = OperationSemanticRule::PreserveInput;
+    preserved.outputs[0].output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     PS_CHECK(invalid
                  .register_operation({"preserve", preserved,
                                       [](const OperationInvocation& call) {
                                         return Result<Value>(call.inputs[0]);
                                       }})
                  .ok());
-    traits.output_schema = {};
+    traits.outputs[0].output_schema = {};
     auto dropped = infer_operation_output(traits, {input}, {});
     PS_CHECK(dropped.ok() && dropped.value().facets.empty());
     auto registry = std::make_shared<OperationRegistry>();
@@ -262,7 +265,8 @@ int explicit_drop() {
     };
     PS_CHECK(registry->register_operation({"drop", traits, callback}).ok());
     traits.input_schema[0].kind = kind;
-    traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+    traits.outputs[0].output_semantic_rule =
+        OperationSemanticRule::PreserveInput;
     PS_CHECK(registry->register_operation({"typed", traits, callback}).ok());
     PS_CHECK(registry->freeze().ok());
     auto typed =
@@ -288,8 +292,9 @@ int dtype_masks() {
   definition.key = "test.floating";
   definition.traits.input_count = 1;
   definition.traits.input_schema.resize(1);
-  definition.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  definition.traits.output_dtype_rule = OperationDtypeRule::Input;
+  definition.traits.outputs[0].shape_rule =
+      OperationShapeRule::PreserveFirstInput;
+  definition.traits.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
   definition.callback = [](const OperationInvocation& call) {
     return Result<Value>(call.inputs[0]);
   };

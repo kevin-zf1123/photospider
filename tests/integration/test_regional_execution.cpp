@@ -318,7 +318,7 @@ int main() {
   OperationTraits constant_traits, chain_traits;
   chain_traits.input_count = 1;
   chain_traits.input_schema.resize(1);
-  chain_traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  chain_traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
   PS_CHECK(
       chain_registry
           ->register_operation({"allocate", constant_traits, allocate_scalar})
@@ -357,11 +357,11 @@ int main() {
   PS_CHECK(whole_registry->load_plugin(PS_IMAGE_FIXTURE_PATH).ok());
   OperationTraits traits;
   traits.input_count = 1;
-  traits.output_element_type = ElementType::Float32;
-  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].output_semantic_rule = OperationSemanticRule::PreserveInput;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
   traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
-  traits.output_schema = traits.input_schema[0];
+  traits.outputs[0].output_schema = traits.input_schema[0];
   std::atomic<unsigned int> whole_calls{0}, effects{0};
   PS_CHECK(
       whole_registry
@@ -383,11 +383,12 @@ int main() {
                                      }})
                .ok());
   OperationTraits mask_traits;
-  mask_traits.output_element_type = ElementType::Float32;
-  mask_traits.shape_rule = OperationShapeRule::Fixed;
-  mask_traits.fixed_output_shape = {5, 7};
-  mask_traits.output_semantic_rule = OperationSemanticRule::Establish;
-  mask_traits.output_facets = {
+  mask_traits.outputs[0].output_element_type = ElementType::Float32;
+  mask_traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+  mask_traits.outputs[0].fixed_output_shape = {5, 7};
+  mask_traits.outputs[0].output_semantic_rule =
+      OperationSemanticRule::Establish;
+  mask_traits.outputs[0].output_facets = {
       encode_semantic(coverage_semantics()).take_value()};
   float computed_mask = -1;
   PS_CHECK(whole_registry
@@ -404,7 +405,7 @@ int main() {
                            offset += 4)
                         std::memcpy(writer.data() + offset, &computed_mask, 4);
                       return std::move(writer).publish(
-                          mask_traits.output_facets);
+                          mask_traits.outputs[0].output_facets);
                     }})
                .ok());
   PS_CHECK(whole_registry->freeze().ok());

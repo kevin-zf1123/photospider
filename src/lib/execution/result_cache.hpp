@@ -32,16 +32,17 @@ inline bool dynamic_opaque_output(const ExecutionPlan& plan,
       return false;
     const auto& step = plan.steps()[index];
     const auto& traits = step.traits;
-    if (traits.output_schema.kind != OperationPortKind::Value ||
+    if (traits.outputs[0].output_schema.kind != OperationPortKind::Value ||
         !step.output_facets.empty())
       return false;
-    if (traits.output_semantic_rule == OperationSemanticRule::Drop)
+    if (traits.outputs[0].output_semantic_rule == OperationSemanticRule::Drop)
       return true;
-    if (traits.output_semantic_rule != OperationSemanticRule::PreserveInput ||
-        traits.output_semantic_input >= step.inputs.size())
+    if (traits.outputs[0].output_semantic_rule !=
+            OperationSemanticRule::PreserveInput ||
+        traits.outputs[0].output_semantic_input >= step.inputs.size())
       return false;
-    const auto* producer =
-        std::get_if<PlanStepInput>(&step.inputs[traits.output_semantic_input]);
+    const auto* producer = std::get_if<PlanStepInput>(
+        &step.inputs[traits.outputs[0].output_semantic_input]);
     if (!producer)
       return false;
     index = producer->step_index;
@@ -247,11 +248,12 @@ class ResultCache final {
       return Result<Value>(Value{});
     const bool allow_opaque =
         dynamic_opaque && step.output_facets.empty() &&
-        step.traits.output_schema.kind == OperationPortKind::Value;
+        step.traits.outputs[0].output_schema.kind == OperationPortKind::Value;
     const bool exact =
-        !allow_opaque &&
-        (step.traits.output_schema.kind != OperationPortKind::Value ||
-         step.traits.output_semantic_rule != OperationSemanticRule::Drop);
+        !allow_opaque && (step.traits.outputs[0].output_schema.kind !=
+                              OperationPortKind::Value ||
+                          step.traits.outputs[0].output_semantic_rule !=
+                              OperationSemanticRule::Drop);
     const bool facets_match =
         exact ? value.facets().size() == step.output_facets.size() &&
                     std::equal(value.facets().begin(), value.facets().end(),

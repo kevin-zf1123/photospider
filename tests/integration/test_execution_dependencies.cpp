@@ -64,11 +64,11 @@ int late_delta() {
       op.key = key;
       op.traits.input_count = choose ? 2 : 1;
       op.traits.input_schema.resize(op.traits.input_count);
-      op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-      op.traits.region_rule = OperationRegionRule::Dependency;
-      op.traits.dependency_version = 1;
-      op.traits.continuation_bytes = sizeof(Route);
-      op.traits.maximum_dependency_stages = 4;
+      op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+      op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+      op.traits.outputs[0].dependency_version = 1;
+      op.traits.outputs[0].continuation_bytes = sizeof(Route);
+      op.traits.outputs[0].maximum_dependency_stages = 4;
       op.start_dependency = [choose](const DependencyQuery&,
                                      const BufferAllocator& allocator) {
         return DependencyContinuation::make<Route>(allocator, choose);
@@ -211,8 +211,8 @@ int whole_record() {
   global.key = "global";
   global.traits.input_count = 100;
   global.traits.input_schema.resize(100);
-  global.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  global.traits.region_rule = OperationRegionRule::Whole;
+  global.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  global.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   global.callback = [](const OperationInvocation& call) {
     return Result<Value>(call.inputs[0]);
   };
@@ -221,11 +221,11 @@ int whole_record() {
   leaf.key = "leaf";
   leaf.traits.input_count = 1;
   leaf.traits.input_schema.resize(1);
-  leaf.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  leaf.traits.region_rule = OperationRegionRule::Dependency;
-  leaf.traits.dependency_version = 1;
-  leaf.traits.continuation_bytes = sizeof(Route);
-  leaf.traits.maximum_dependency_stages = 4;
+  leaf.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  leaf.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  leaf.traits.outputs[0].dependency_version = 1;
+  leaf.traits.outputs[0].continuation_bytes = sizeof(Route);
+  leaf.traits.outputs[0].maximum_dependency_stages = 4;
   leaf.start_dependency = [](const DependencyQuery&,
                              const BufferAllocator& allocator) {
     return DependencyContinuation::make<Route>(allocator, false);
@@ -299,11 +299,11 @@ int metadata_bounds() {
   op.key = "copy";
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  op.traits.region_rule = OperationRegionRule::Dependency;
-  op.traits.dependency_version = 1;
-  op.traits.continuation_bytes = sizeof(Route);
-  op.traits.maximum_dependency_stages = 4;
+  op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  op.traits.outputs[0].dependency_version = 1;
+  op.traits.outputs[0].continuation_bytes = sizeof(Route);
+  op.traits.outputs[0].maximum_dependency_stages = 4;
   op.start_dependency = [](const DependencyQuery&,
                            const BufferAllocator& allocator) {
     return DependencyContinuation::make<Route>(allocator, false);

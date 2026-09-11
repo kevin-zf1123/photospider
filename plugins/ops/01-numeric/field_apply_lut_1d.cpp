@@ -64,10 +64,10 @@ Status register_field_apply_lut_1d(OperationRegistry* registry) {
     port.element_type_mask = 12;
     port.rank = 2;
   }
-  t.requires_dense_output = true;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.region_rule = OperationRegionRule::Whole;
-  t.output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].region_rule = OperationRegionRule::Whole;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
   t.parameter_schema = {real("domain_min"), real("domain_max"),
                         string("out_of_domain")};
   t.input_schema[1].rank = 1;

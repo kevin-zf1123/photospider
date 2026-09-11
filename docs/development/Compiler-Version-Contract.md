@@ -142,3 +142,17 @@ content-result reuse. Native fragment atlases, bounded GPU discovery and CPU
 fallback use the same protocol. See [Dependency data and execution](../kernel-architecture/Dependency-Data.md)
 and the [G4 workflows](../../examples/g4_workflow/README.md) for implemented
 contracts and executable acceptance cases.
+
+## Independent result contracts
+
+The #302 branch targets package 0.9.0 and operation ABI/traits 9 under ADR 0021.
+M1 (#304) introduces ordered named output contracts and selected-output C/C++
+invocations, with static metadata inference for all results. Repository singleton
+callers now explicitly configure outputs[0]; ABI 8 is rejected before table access.
+C v9 descriptors contain 1..64 active output records in a bounded inline table.
+Semantic/physical-plan/plan-cache domains use v9 and result-region keys use v5;
+complete output declarations, input projections and checked extent arithmetic
+enter identities. Schema 2, provider ABI 1, C++17, image v2, conservative optimizer
+v5 and result digest v2 remain. C++ consumers rebuild; 0.8 package consumers reject.
+Multi-output planning, execution identities and Atomic joint execution have their
+own later acceptance leaves; M1 does not claim those runtime gates complete.

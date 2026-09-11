@@ -94,7 +94,8 @@ int stored_contract() {
   step.output_descriptor = image.descriptor();
   step.output_demand = image.region();
   step.output_facets = image.facets();
-  step.traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
+  step.traits.outputs[0].output_semantic_rule =
+      OperationSemanticRule::PreserveInput;
   cache.put("image", image, cache.epoch());
   auto retained = cache.get_output("image", step, {});
   PS_CHECK(retained.ok() && typed_images::same(retained.value(), image));
@@ -223,11 +224,11 @@ int dependency_cache_proof_limits() {
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition leaf;
   leaf.key = "leaf";
-  leaf.traits.output_element_type = ElementType::Float32;
+  leaf.traits.outputs[0].output_element_type = ElementType::Float32;
   leaf.traits.input_count = 1;
   leaf.traits.input_schema.resize(1);
-  leaf.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  leaf.traits.region_rule = OperationRegionRule::Elementwise;
+  leaf.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  leaf.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   leaf.callback = [](const OperationInvocation& call) {
     return Result<Value>(call.inputs[0]);
   };
@@ -409,12 +410,12 @@ int main() {
   CancellationToken observed;
   OperationTraits traits;
   traits.input_count = 1;
-  traits.output_element_type = ElementType::Float32;
-  traits.output_semantic_rule = OperationSemanticRule::PreserveInput;
-  traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  traits.region_rule = OperationRegionRule::Elementwise;
+  traits.outputs[0].output_element_type = ElementType::Float32;
+  traits.outputs[0].output_semantic_rule = OperationSemanticRule::PreserveInput;
+  traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   traits.input_schema = {{OperationPortKind::RgbaFloat32, 0, 0}};
-  traits.output_schema = traits.input_schema[0];
+  traits.outputs[0].output_schema = traits.input_schema[0];
   PS_CHECK(gated
                ->register_operation(
                    {"gated", traits,

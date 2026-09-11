@@ -117,3 +117,14 @@ C++ 与 C 分阶段程序通过既有 Run 和 allocator 执行，支持精确 fr
 及 CPU fallback 使用同一协议。已实现契约和可执行验收案例见
 [依赖数据与执行](../../kernel-architecture/zh/Dependency-Data.zh.md)及
 [G4 workflows](../../../examples/g4_workflow/README.zh.md)。
+
+## 独立结果契约
+
+#302 分支依 ADR 0021 以包 0.9.0、operation ABI/traits 9 为目标。M1（#304）引入有序
+命名输出契约、所选输出的 C/C++ 调用以及全部结果的静态 metadata 推导。自有单输出
+调用者显式配置 outputs[0]；ABI 8 在访问 API table 前拒绝。C v9 descriptor 的有界
+内联表包含 1..64 个有效输出记录。semantic/physical-plan/plan-cache 域为 v9，
+result-region key 为 v5；完整输出声明、输入投影和检查过的 extent 算术进入身份。
+schema 2、provider ABI 1、C++17、image v2、保守 optimizer v5、result digest v2 保持。
+C++ 消费者须重编译，0.8 包消费者被拒绝。多输出规划、执行身份及 Atomic 联合执行
+由后续独立叶项验收，M1 不宣称这些运行时条件已完成。

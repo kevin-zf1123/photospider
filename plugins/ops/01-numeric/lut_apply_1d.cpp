@@ -154,11 +154,11 @@ Status register_lut_apply_1d(OperationRegistry* registry) {
   t.input_schema[0].semantic_kind =
       static_cast<std::uint32_t>(SemanticKind::SampledSignal);
   t.input_schema[1].rank = 1;
-  t.output_element_type = ElementType::Float32;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.output_semantic_rule = OperationSemanticRule::ApplyLut1d;
-  t.output_semantic_parameter = "out_of_domain";
-  t.requires_dense_output = true;
+  t.outputs[0].output_element_type = ElementType::Float32;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].output_semantic_rule = OperationSemanticRule::ApplyLut1d;
+  t.outputs[0].output_semantic_parameter = "out_of_domain";
+  t.outputs[0].requires_dense_output = true;
   t.parameter_schema = {
       {"out_of_domain", OperationParameterType::String, true}};
   lut.callback = [traits = t](const OperationInvocation& call) {

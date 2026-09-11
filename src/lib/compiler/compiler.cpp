@@ -203,7 +203,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v8");
+  digest.text("semantic-graph-ir-v9");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -276,7 +276,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v8");
+  digest.text("physical-plan-v9");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -456,7 +456,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v8");
+  digest.text("plan-cache-key-v9");
   digest.text(plan);
   return digest.finish();
 }
@@ -515,7 +515,7 @@ std::uint64_t microseconds(
 
 bool ExecutionPlan::dependency_network() const noexcept {
   for (const auto& step : steps_)
-    if (step.traits.dependency_version || !step.effective_atomic)
+    if (step.traits.outputs[0].dependency_version || !step.effective_atomic)
       return true;
   return false;
 }
@@ -606,8 +606,8 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
       packed.shape[axis] = step.output_demand.dimensions()[axis].extent;
     auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok() &&
-        step.traits.output_schema.kind == OperationPortKind::RgbaFloat32)
+    if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
+                           OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
     step.planned_bytes =
         std::max(step.traits.estimated_bytes,
@@ -765,7 +765,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       return Result<SemanticGraphIR>(parameter_status);
     }
     indegree.emplace(node.id, 0);
-    local_observations.emplace(node.id, traits.value().observation_kind);
+    local_observations.emplace(node.id,
+                               traits.value().outputs[0].observation_kind);
   }
 
   for (const WorkflowNode& node : document.nodes) {
@@ -840,7 +841,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       return Result<SemanticGraphIR>(resolved.status());
     node.traits = resolved.take_value();
     node.effective_atomic =
-        node.traits.observation_kind == ObservationKind::Atomic;
+        node.traits.outputs[0].observation_kind == ObservationKind::Atomic;
     node.inputs.reserve(source.inputs.size());
     std::vector<OperationMetadata> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
@@ -889,7 +890,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!output.ok()) {
       return Result<SemanticGraphIR>(output.status());
     }
-    if (node.traits.dependency_version) {
+    if (node.traits.outputs[0].dependency_version) {
       const auto validated = operations_->validate_dependency_metadata(
           node.operation, input_descriptors, node.parameters);
       if (!validated.ok())
@@ -897,8 +898,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     }
     node.output_descriptor = output.value().descriptor;
     node.output_facets = output.value().facets;
-    for (std::size_t i = 0;
-         i < input_descriptors.size() && !node.traits.dependency_version; ++i) {
+    for (std::size_t i = 0; i < input_descriptors.size() &&
+                            !node.traits.outputs[0].dependency_version;
+         ++i) {
       auto demand = input_internal::derive_input_demand(
           node.traits, Region::whole(node.output_descriptor.shape),
           node.output_descriptor.shape, input_descriptors[i].descriptor.shape,
@@ -1017,7 +1019,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     step.traits = node.traits;
     step.effective_atomic = node.effective_atomic;
     step.whole_boundary =
-        node.traits.region_rule == OperationRegionRule::Whole ||
+        node.traits.outputs[0].region_rule == OperationRegionRule::Whole ||
         !node.traits.deterministic || !node.traits.side_effect_free;
     step.output_descriptor = node.output_descriptor;
     step.output_facets = node.output_facets;
@@ -1031,8 +1033,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                           "operation has no required CPU implementation"));
     }
     auto dense_output = input_internal::dense_metadata(step.output_descriptor);
-    if (!dense_output.ok() &&
-        node.traits.output_schema.kind == OperationPortKind::RgbaFloat32)
+    if (!dense_output.ok() && node.traits.outputs[0].output_schema.kind ==
+                                  OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense_output.status());
     step.planned_bytes = std::max(
         node.traits.estimated_bytes,
@@ -1200,8 +1202,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
       packed.shape[axis] = coverage.dimensions()[axis].extent;
     auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok() &&
-        step.traits.output_schema.kind == OperationPortKind::RgbaFloat32)
+    if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
+                           OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
     step.planned_bytes =
         std::max(step.traits.estimated_bytes,

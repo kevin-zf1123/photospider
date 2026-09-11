@@ -7,7 +7,7 @@
  * performed in global coordinates before lookup. False is an explicit missing
  * sample; callers must not silently substitute it for a present source value.
  */
-#define PS_FRAGMENT_ATLAS_MSL_V8                                               \
+#define PS_FRAGMENT_ATLAS_MSL_V9                                               \
   "#include <metal_stdlib>\n"                                                  \
   "using namespace metal;\n"                                                   \
   "inline bool ps_atlas_address(device const ulong* directory, ulong slots,\n" \

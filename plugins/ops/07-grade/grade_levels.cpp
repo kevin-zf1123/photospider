@@ -41,10 +41,10 @@ Status register_grade_levels(OperationRegistry* registry) {
     port.element_type_mask = 12;
     port.rank = 2;
   }
-  t.requires_dense_output = true;
-  t.shape_rule = OperationShapeRule::PreserveFirstInput;
-  t.region_rule = OperationRegionRule::Elementwise;
-  t.output_dtype_rule = OperationDtypeRule::Input;
+  t.outputs[0].requires_dense_output = true;
+  t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  t.outputs[0].region_rule = OperationRegionRule::Elementwise;
+  t.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
   t.parameter_schema = {real("black"), real("white"), real("gamma", 0),
                         real("out_min"), real("out_max")};
   std::sort(t.parameter_schema.begin(), t.parameter_schema.end(),

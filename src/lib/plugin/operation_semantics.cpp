@@ -45,9 +45,9 @@ Facets infer_transformed_facets(
     const OperationTraits& t, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters,
     const ValueDescriptor& output) {
-  const auto rule = t.output_semantic_rule;
+  const auto rule = t.outputs[0].output_semantic_rule;
   if (rule == OperationSemanticRule::MergeChannelsParameter) {
-    const auto found = parameters.find(t.output_semantic_parameter);
+    const auto found = parameters.find(t.outputs[0].output_semantic_parameter);
     if (found == parameters.end() ||
         !std::holds_alternative<std::string>(found->second))
       return Facets(invalid("missing channel target semantic parameter"));
@@ -84,9 +84,9 @@ Facets infer_transformed_facets(
     }
     return encode(s);
   }
-  if (t.output_semantic_input >= inputs.size())
+  if (t.outputs[0].output_semantic_input >= inputs.size())
     return Facets(mismatch("semantic source input absent"));
-  const auto& input = inputs[t.output_semantic_input];
+  const auto& input = inputs[t.outputs[0].output_semantic_input];
   if (rule == OperationSemanticRule::SampleExpression) {
     input_internal::Float32Environment environment;
     if (!environment.active())
@@ -101,7 +101,8 @@ Facets infer_transformed_facets(
         output.shape[0] > 1048576)
       return Facets(
           mismatch("expression coefficient/output descriptor outside limits"));
-    const auto expression = parameters.find(t.output_semantic_parameter);
+    const auto expression =
+        parameters.find(t.outputs[0].output_semantic_parameter);
     const auto start = parameters.find("start"), step = parameters.find("step");
     if (expression == parameters.end() ||
         !std::holds_alternative<std::string>(expression->second) ||
@@ -135,7 +136,7 @@ Facets infer_transformed_facets(
     if (!environment.active())
       return Facets(Status::failure(ErrorCode::OperationFailed,
                                     "LUT metadata environment unavailable"));
-    if (inputs.size() != 2 || t.output_semantic_input ||
+    if (inputs.size() != 2 || t.outputs[0].output_semantic_input ||
         input.descriptor.element_type != ElementType::Float32 ||
         output.element_type != ElementType::Float32 ||
         output.shape != input.descriptor.shape ||
@@ -155,7 +156,7 @@ Facets infer_transformed_facets(
          s.kind != SemanticKind::Lut) ||
         s.channels.size() != 1 || query.value().unit != s.sample_axis_unit)
       return Facets(mismatch("LUT query samples must use the table axis unit"));
-    const auto policy = parameters.find(t.output_semantic_parameter);
+    const auto policy = parameters.find(t.outputs[0].output_semantic_parameter);
     if (policy == parameters.end() ||
         !std::holds_alternative<std::string>(policy->second) ||
         (std::get<std::string>(policy->second) != "reject" &&
@@ -171,7 +172,7 @@ Facets infer_transformed_facets(
   if (rule == OperationSemanticRule::SwizzleChannels) {
     if (input.descriptor.shape.size() != 3)
       return Facets(mismatch("swizzle requires HWC"));
-    const auto found = parameters.find(t.output_semantic_parameter);
+    const auto found = parameters.find(t.outputs[0].output_semantic_parameter);
     if (found == parameters.end() ||
         !std::holds_alternative<std::string>(found->second))
       return Facets(invalid("missing channel selection parameter"));
@@ -214,7 +215,7 @@ Facets infer_transformed_facets(
   if (rule == OperationSemanticRule::ExtractChannel) {
     if (!channel_array(s.kind) || input.descriptor.shape.size() != 3)
       return Facets(mismatch("extract requires typed HWC channels"));
-    const auto found = parameters.find(t.output_semantic_parameter);
+    const auto found = parameters.find(t.outputs[0].output_semantic_parameter);
     if (found == parameters.end() ||
         !std::holds_alternative<std::int64_t>(found->second))
       return Facets(invalid("missing channel extraction index"));

@@ -1253,12 +1253,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     if (!records.status().ok())
       return fail(records.status());
     const bool keep_record_graph =
-        flights || std::any_of(plan.steps().begin(), plan.steps().end(),
-                               [](const auto& step) {
-                                 return step.backend == Backend::Gpu &&
-                                        step.traits.dependency_version &&
-                                        step.traits.allows_cpu_fallback;
-                               });
+        flights ||
+        std::any_of(plan.steps().begin(), plan.steps().end(),
+                    [](const auto& step) {
+                      return step.backend == Backend::Gpu &&
+                             step.traits.outputs[0].dependency_version &&
+                             step.traits.allows_cpu_fallback;
+                    });
     const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& step = plan.steps().at(producer->step_index);
@@ -1531,7 +1532,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         // could fail admission for pixels that no current query needs.
         if (plan.steps()[i].whole_boundary &&
             !plan.steps()[i].traits.side_effect_free &&
-            plan.steps()[i].traits.observation_kind !=
+            plan.steps()[i].traits.outputs[0].observation_kind !=
                 ObservationKind::RequestRecord) {
           auto all =
               Footprint::all(plan.steps()[i].output_descriptor.shape, limits);
@@ -1544,8 +1545,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     for (const auto& named : wanted) {
       const auto step_index = plan.outputs().at(named.first);
       const auto& step = plan.steps()[step_index];
-      if (!sink ||
-          step.traits.observation_kind == ObservationKind::RequestRecord) {
+      if (!sink || step.traits.outputs[0].observation_kind ==
+                       ObservationKind::RequestRecord) {
         queries.push_back({step_index, named.first, named.second, false});
         continue;
       }
@@ -1671,7 +1672,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       std::move(value)));
             }
             if (step.whole_boundary && frame.unit &&
-                step.traits.observation_kind !=
+                step.traits.outputs[0].observation_kind !=
                     ObservationKind::RequestRecord) {
               auto whole = Footprint::all(step.output_descriptor.shape, limits);
               if (!whole.ok())
@@ -1700,8 +1701,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (frame.outputs.empty()) {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
-            if (plan.steps()[producer->step_index].traits.observation_kind ==
-                    ObservationKind::RequestRecord &&
+            if (plan.steps()[producer->step_index]
+                        .traits.outputs[0]
+                        .observation_kind == ObservationKind::RequestRecord &&
                 !frame.terminal_allowed)
               return fail(Status{ErrorCode::InvalidArgument,
                                  "RequestRecord cannot supply a DAG input"});
@@ -1851,8 +1853,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           frame.state = Frame::State::Complete;
           continue;
         }
-        const bool terminal =
-            step.traits.observation_kind == ObservationKind::RequestRecord;
+        const bool terminal = step.traits.outputs[0].observation_kind ==
+                              ObservationKind::RequestRecord;
         if (terminal && !frame.terminal_allowed)
           return fail(
               Status::failure(ErrorCode::InvalidArgument,
@@ -1862,7 +1864,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
         if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
-          if (step.traits.dependency_version == 0 && step.whole_boundary) {
+          if (step.traits.outputs[0].dependency_version == 0 &&
+              step.whole_boundary) {
             // The legacy Whole contract observes global validation for every
             // request. Preserve that actual dependency; never relabel a tile.
             auto whole = Footprint::all(output.descriptor.shape, limits);
@@ -2024,7 +2027,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (keep_record_graph && frame.record_identity.empty())
             frame.record_identity =
                 records.observation_identity(step_index, frame.outputs);
-          if (step.traits.dependency_version == 1) {
+          if (step.traits.outputs[0].dependency_version == 1) {
             if (frame.backend == Backend::Gpu &&
                 step.traits.allows_cpu_fallback && !frame.attempt_records) {
               auto saved = records.checkpoint(&work);
@@ -2046,7 +2049,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             request.limits.maximum_work =
                 std::min(request.limits.maximum_work, work);
             auto reserved =
-                reserve(std::min(step.traits.continuation_bytes,
+                reserve(std::min(step.traits.outputs[0].continuation_bytes,
                                  options.dependencies.maximum_state_bytes));
             if (!reserved.ok())
               return fail(reserved.status());
@@ -2189,7 +2192,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       std::chrono::steady_clock::now();
                   DependencyCheckpointServices services;
                   if (shareable[step_index] && !frame.fallback_taint &&
-                      step.traits.observation_kind == ObservationKind::Atomic) {
+                      step.traits.outputs[0].observation_kind ==
+                          ObservationKind::Atomic) {
                     auto& scope = checkpoint_scopes[step_index];
                     if (!scope) {
                       if (checkpoints) {
@@ -2359,7 +2363,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                  ? Result<std::uint64_t>(token)
                                  : Result<std::uint64_t>(native->status());
                     };
-                    gpu.execute = [&](const ps_gpu_dispatch_v8* commands,
+                    gpu.execute = [&](const ps_gpu_dispatch_v9* commands,
                                       std::uint32_t count) {
                       const auto* api = native->service();
                       api->execute(api->context, commands, count);
@@ -3961,7 +3965,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
     if (item.second.empty()) {
       const auto& step =
           frozen.plan_.steps().at(frozen.plan_.outputs().at(item.first));
-      if (step.traits.dependency_version == 1) {
+      if (step.traits.outputs[0].dependency_version == 1) {
         std::vector<OperationMetadata> inputs;
         for (const auto& input : step.inputs) {
           if (const auto* source = std::get_if<PlanStepInput>(&input)) {
@@ -4323,9 +4327,10 @@ Result<ExecutionResult> ExecutionContext::execute(
                            options);
   const bool spatial = std::any_of(
       plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
-        return step.traits.output_schema.kind ==
+        return step.traits.outputs[0].output_schema.kind ==
                    OperationPortKind::RgbaFloat32 ||
-               step.traits.output_schema.kind == OperationPortKind::Float32Mask;
+               step.traits.outputs[0].output_schema.kind ==
+                   OperationPortKind::Float32Mask;
       });
   const bool regional_demand = std::any_of(
       plan.outputs().begin(), plan.outputs().end(), [&](const auto& output) {

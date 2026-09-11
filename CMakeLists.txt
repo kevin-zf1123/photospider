@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.8.0
+  VERSION 0.9.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -483,6 +483,12 @@ if(BUILD_TESTING)
     data_provider_invalid_utf8_overlong_fixture 1)
   photospider_add_provider_utf8_fixture(data_provider_unicode_fixture 2)
 
+  add_library(multi_output_fixture MODULE tests/fixtures/multi_output_fixture.c)
+  target_link_libraries(multi_output_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(multi_output_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  photospider_add_test(test_multi_output_contract Photospider::kernel tests/unit/test_multi_output_contract.cpp)
+  target_compile_definitions(test_multi_output_contract PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
+  add_dependencies(test_multi_output_contract multi_output_fixture)
   photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
   add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)

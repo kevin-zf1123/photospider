@@ -233,8 +233,8 @@ std::shared_ptr<OperationRegistry> gated_registry(
   op.traits.allows_cpu_fallback = gpu_fallback;
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  op.traits.region_rule =
+  op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  op.traits.outputs[0].region_rule =
       whole ? OperationRegionRule::Whole : OperationRegionRule::Elementwise;
   op.callback = [gate](const OperationInvocation& call) -> Result<Value> {
     ++gate->active;
@@ -282,12 +282,12 @@ std::shared_ptr<OperationRegistry> gated_registry(
     return std::move(output).publish();
   };
   if (staged) {
-    op.traits.region_rule = OperationRegionRule::Dependency;
-    op.traits.dependency_version = 1;
-    op.traits.continuation_bytes = sizeof(StagedGate);
-    op.traits.maximum_dependency_stages = 4;
+    op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+    op.traits.outputs[0].dependency_version = 1;
+    op.traits.outputs[0].continuation_bytes = sizeof(StagedGate);
+    op.traits.outputs[0].maximum_dependency_stages = 4;
     if (terminal)
-      op.traits.observation_kind = ObservationKind::RequestRecord;
+      op.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
     op.start_dependency = [callback = std::move(op.callback), terminal](
                               const DependencyQuery&,
                               const BufferAllocator& allocator) {
@@ -302,8 +302,8 @@ std::shared_ptr<OperationRegistry> gated_registry(
     effect.traits.deterministic = false;
     effect.traits.side_effect_free = false;
     effect.traits.cacheable = false;
-    effect.traits.shape_rule = OperationShapeRule::Fixed;
-    effect.traits.fixed_output_shape = {2};
+    effect.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
+    effect.traits.outputs[0].fixed_output_shape = {2};
     effect.callback =
         [effects](const OperationInvocation& call) -> Result<Value> {
       const double value = ++*effects;

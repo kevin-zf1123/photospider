@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 #include <utility>
@@ -21,14 +22,25 @@ const T* parameter(const std::map<std::string, ParameterValue>& values,
 }
 }  // namespace
 
+Result<OperationTraits> select_operation_output(const OperationTraits& traits,
+                                                std::uint32_t output_index) {
+  if (output_index >= traits.outputs.size())
+    return Result<OperationTraits>(invalid("unknown output index"));
+  auto selected = traits;
+  selected.outputs = {traits.outputs[output_index]};
+  return Result<OperationTraits>(std::move(selected));
+}
+
 Result<OperationTraits> resolve_operation_traits(
     const OperationTraits& traits, std::size_t count,
     const std::map<std::string, ParameterValue>& parameters) {
+  if (traits.outputs.empty() || traits.outputs.size() > 64)
+    return Result<OperationTraits>(invalid("invalid output count"));
   auto status = validate_operation_parameters(traits, parameters);
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 8)
+  if (count > 1024 || traits.version != 9)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -45,19 +57,21 @@ Result<OperationTraits> resolve_operation_traits(
              traits.input_schema.size() != count) {
     return Result<OperationTraits>(invalid("operation input count mismatch"));
   }
-  if (!traits.halo_radius_parameter.empty()) {
-    const auto* value =
-        parameter<std::int64_t>(parameters, traits.halo_radius_parameter);
-    if (!value || *value <= 0 || *value > UINT32_MAX)
-      return Result<OperationTraits>(invalid("invalid static halo"));
-    result.halo_radius = static_cast<std::uint32_t>(*value);
-  }
-  if (!traits.spatial_factor_parameter.empty()) {
-    const auto* value =
-        parameter<std::int64_t>(parameters, traits.spatial_factor_parameter);
-    if (!value || *value < 1 || *value > 16)
-      return Result<OperationTraits>(invalid("invalid static shrink factor"));
-    result.spatial_factor = static_cast<std::uint32_t>(*value);
+  for (auto& output : result.outputs) {
+    if (!output.halo_radius_parameter.empty()) {
+      const auto* value =
+          parameter<std::int64_t>(parameters, output.halo_radius_parameter);
+      if (!value || *value <= 0 || *value > UINT32_MAX)
+        return Result<OperationTraits>(invalid("invalid static halo"));
+      output.halo_radius = static_cast<std::uint32_t>(*value);
+    }
+    if (!output.spatial_factor_parameter.empty()) {
+      const auto* value =
+          parameter<std::int64_t>(parameters, output.spatial_factor_parameter);
+      if (!value || *value < 1 || *value > 16)
+        return Result<OperationTraits>(invalid("invalid static shrink factor"));
+      output.spatial_factor = static_cast<std::uint32_t>(*value);
+    }
   }
   return Result<OperationTraits>(std::move(result));
 }
@@ -65,6 +79,9 @@ Result<OperationTraits> resolve_operation_traits(
 Result<OperationMetadata> infer_operation_output(
     const OperationTraits& t, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
+  if (t.outputs.size() != 1)
+    return Result<OperationMetadata>(
+        invalid("select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
     return Result<OperationMetadata>(
         Status::failure(ErrorCode::TypeMismatch, message));
@@ -88,15 +105,15 @@ Result<OperationMetadata> infer_operation_output(
         return mismatch("homogeneous repeated input descriptors differ");
   }
   OperationMetadata result;
-  result.descriptor.element_type = t.output_element_type;
-  if (t.output_dtype_rule == OperationDtypeRule::Input) {
-    if (t.output_dtype_input >= inputs.size())
+  result.descriptor.element_type = t.outputs[0].output_element_type;
+  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input) {
+    if (t.outputs[0].output_dtype_input >= inputs.size())
       return mismatch("output dtype input is absent");
     result.descriptor.element_type =
-        inputs[t.output_dtype_input].descriptor.element_type;
-  } else if (t.output_dtype_rule == OperationDtypeRule::Parameter) {
+        inputs[t.outputs[0].output_dtype_input].descriptor.element_type;
+  } else if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Parameter) {
     const auto* value =
-        parameter<std::string>(parameters, t.output_dtype_parameter);
+        parameter<std::string>(parameters, t.outputs[0].output_dtype_parameter);
     if (!value)
       return Result<OperationMetadata>(invalid("missing dtype parameter"));
     if (*value == "uint8")
@@ -109,16 +126,16 @@ Result<OperationMetadata> infer_operation_output(
       result.descriptor.element_type = ElementType::Float64;
     else
       return Result<OperationMetadata>(invalid("unknown output dtype"));
-  } else if (t.output_dtype_rule != OperationDtypeRule::Declared) {
+  } else if (t.outputs[0].output_dtype_rule != OperationDtypeRule::Declared) {
     return Result<OperationMetadata>(invalid("unknown output dtype rule"));
   }
   auto& shape = result.descriptor.shape;
-  switch (t.shape_rule) {
+  switch (t.outputs[0].shape_rule) {
     case OperationShapeRule::Scalar:
       shape = {1};
       break;
     case OperationShapeRule::Fixed:
-      shape = t.fixed_output_shape;
+      shape = t.outputs[0].fixed_output_shape;
       break;
     case OperationShapeRule::PreserveFirstInput:
     case OperationShapeRule::MatchAllInputs:
@@ -126,20 +143,21 @@ Result<OperationMetadata> infer_operation_output(
       if (inputs.empty())
         return mismatch("shape inference requires an input");
       shape = inputs[0].descriptor.shape;
-      if (t.shape_rule == OperationShapeRule::MatchAllInputs)
+      if (t.outputs[0].shape_rule == OperationShapeRule::MatchAllInputs)
         for (const auto& input : inputs)
           if (input.descriptor.shape != shape)
             return mismatch("input shapes differ");
-      if (t.shape_rule == OperationShapeRule::Shrink) {
-        if (shape.size() < 2 || t.spatial_factor < 1 || t.spatial_factor > 16)
+      if (t.outputs[0].shape_rule == OperationShapeRule::Shrink) {
+        if (shape.size() < 2 || t.outputs[0].spatial_factor < 1 ||
+            t.outputs[0].spatial_factor > 16)
           return mismatch("invalid shrink shape/factor");
         for (std::size_t i = 0; i < 2; ++i)
-          shape[i] =
-              shape[i] / t.spatial_factor + (shape[i] % t.spatial_factor != 0);
+          shape[i] = shape[i] / t.outputs[0].spatial_factor +
+                     (shape[i] % t.outputs[0].spatial_factor != 0);
       }
       break;
     case OperationShapeRule::Axes:
-      for (const auto& axis : t.output_axes) {
+      for (const auto& axis : t.outputs[0].output_axes) {
         std::uint64_t n = axis.constant;
         switch (axis.source) {
           case OperationExtentSource::Constant:
@@ -165,6 +183,15 @@ Result<OperationMetadata> infer_operation_output(
             n = indices.value().size();
             break;
           }
+          case OperationExtentSource::CeilParameter: {
+            const auto* value = parameter<double>(parameters, axis.parameter);
+            if (!value || !std::isfinite(*value) || *value < 0 ||
+                *value >= std::ldexp(1.0, 64))
+              return Result<OperationMetadata>(
+                  invalid("invalid ceil extent parameter"));
+            n = static_cast<std::uint64_t>(std::ceil(*value));
+            break;
+          }
           case OperationExtentSource::Parameter: {
             const auto* value =
                 parameter<std::int64_t>(parameters, axis.parameter);
@@ -177,6 +204,23 @@ Result<OperationMetadata> infer_operation_output(
           default:
             return Result<OperationMetadata>(invalid("unknown extent source"));
         }
+        if (!axis.subtract_parameter.empty()) {
+          const auto* subtract =
+              parameter<std::int64_t>(parameters, axis.subtract_parameter);
+          if (!subtract || *subtract < 0 ||
+              static_cast<std::uint64_t>(*subtract) > n)
+            return Result<OperationMetadata>(
+                invalid("invalid extent subtraction"));
+          n -= static_cast<std::uint64_t>(*subtract);
+        }
+        if (!axis.divisor || !axis.multiplier)
+          return Result<OperationMetadata>(
+              invalid("zero extent divisor/multiplier"));
+        n = n / axis.divisor + (n % axis.divisor != 0);
+        if (n > UINT64_MAX / axis.multiplier)
+          return Result<OperationMetadata>(Status::failure(
+              ErrorCode::ResourceExhausted, "axis multiplier overflows"));
+        n *= axis.multiplier;
         if (n > UINT64_MAX - axis.offset)
           return Result<OperationMetadata>(Status::failure(
               ErrorCode::ResourceExhausted, "axis offset overflows"));
@@ -189,28 +233,28 @@ Result<OperationMetadata> infer_operation_output(
   if (shape.empty() || shape.size() > 8 ||
       std::any_of(shape.begin(), shape.end(), [](auto n) { return n == 0; }))
     return mismatch("output requires nonzero rank-1..8 shape");
-  if (t.shape_rule == OperationShapeRule::Axes ||
-      (t.requires_dense_output &&
-       (t.shape_rule == OperationShapeRule::Fixed ||
-        t.region_rule == OperationRegionRule::Whole))) {
+  if (t.outputs[0].shape_rule == OperationShapeRule::Axes ||
+      (t.outputs[0].requires_dense_output &&
+       (t.outputs[0].shape_rule == OperationShapeRule::Fixed ||
+        t.outputs[0].region_rule == OperationRegionRule::Whole))) {
     auto dense = input_internal::dense_metadata(result.descriptor);
     if (!dense.ok())
       return Result<OperationMetadata>(dense.status());
   }
-  switch (t.output_semantic_rule) {
+  switch (t.outputs[0].output_semantic_rule) {
     case OperationSemanticRule::Drop:
       break;
     case OperationSemanticRule::PreserveInput:
-      if (t.output_semantic_input >= inputs.size())
+      if (t.outputs[0].output_semantic_input >= inputs.size())
         return mismatch("semantic input is absent");
-      result.facets = inputs[t.output_semantic_input].facets;
+      result.facets = inputs[t.outputs[0].output_semantic_input].facets;
       break;
     case OperationSemanticRule::Establish:
-      result.facets = t.output_facets;
+      result.facets = t.outputs[0].output_facets;
       break;
     case OperationSemanticRule::Parameter: {
-      const auto* value =
-          parameter<std::string>(parameters, t.output_semantic_parameter);
+      const auto* value = parameter<std::string>(
+          parameters, t.outputs[0].output_semantic_parameter);
       if (!value)
         return Result<OperationMetadata>(invalid("missing semantic parameter"));
       auto semantic = semantic_from_parameter(*value);
@@ -244,7 +288,7 @@ Result<OperationMetadata> infer_operation_output(
       return Result<OperationMetadata>(invalid("unknown output semantic rule"));
   }
   auto status = input_internal::validate_port_metadata(
-      t.output_schema, result.descriptor, result.facets);
+      t.outputs[0].output_schema, result.descriptor, result.facets);
   if (!status.ok())
     return Result<OperationMetadata>(status);
   for (const auto& facet : result.facets)
@@ -260,22 +304,43 @@ Result<OperationMetadata> infer_operation_output(
     }
   return Result<OperationMetadata>(std::move(result));
 }
+Result<std::vector<OperationMetadata>> infer_operation_outputs(
+    const OperationTraits& traits, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) {
+  if (traits.outputs.empty() || traits.outputs.size() > 64)
+    return Result<std::vector<OperationMetadata>>(
+        invalid("invalid output count"));
+  std::vector<OperationMetadata> results;
+  for (std::uint32_t i = 0; i < traits.outputs.size(); ++i) {
+    auto selected = select_operation_output(traits, i);
+    auto output = infer_operation_output(selected.value(), inputs, parameters);
+    if (!output.ok())
+      return Result<std::vector<OperationMetadata>>(output.status());
+    results.push_back(output.take_value());
+  }
+  return Result<std::vector<OperationMetadata>>(std::move(results));
+}
 namespace input_internal {
 Status validate_operation_contract(const OperationTraits& t) {
-  if (t.dependency_version && (!t.deterministic || !t.side_effect_free))
+  if (t.outputs.size() != 1)
+    return invalid("select one output contract");
+  if (t.outputs[0].dependency_version &&
+      (!t.deterministic || !t.side_effect_free))
     return invalid(
         "staged programs require deterministic side-effect-free behavior");
-  if ((t.observation_kind != ObservationKind::Atomic &&
-       t.observation_kind != ObservationKind::RequestRecord) ||
-      t.failure_delivery != FailureDelivery::RequestFailureOnly ||
-      t.dependency_version > 1 ||
-      ((t.dependency_version == 1) !=
-       (t.region_rule == OperationRegionRule::Dependency)) ||
-      (t.dependency_version == 0 &&
-       (t.continuation_bytes || t.maximum_dependency_stages)) ||
-      (t.dependency_version == 1 &&
-       (!t.continuation_bytes || !t.maximum_dependency_stages ||
-        t.maximum_dependency_stages > 1048576)))
+  if ((t.outputs[0].observation_kind != ObservationKind::Atomic &&
+       t.outputs[0].observation_kind != ObservationKind::RequestRecord) ||
+      t.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly ||
+      t.outputs[0].dependency_version > 1 ||
+      ((t.outputs[0].dependency_version == 1) !=
+       (t.outputs[0].region_rule == OperationRegionRule::Dependency)) ||
+      (t.outputs[0].dependency_version == 0 &&
+       (t.outputs[0].continuation_bytes ||
+        t.outputs[0].maximum_dependency_stages)) ||
+      (t.outputs[0].dependency_version == 1 &&
+       (!t.outputs[0].continuation_bytes ||
+        !t.outputs[0].maximum_dependency_stages ||
+        t.outputs[0].maximum_dependency_stages > 1048576)))
     return invalid("invalid dependency observation/phase contract");
   const auto spec = [&](const std::string& name, OperationParameterType type) {
     return std::any_of(t.parameter_schema.begin(), t.parameter_schema.end(),
@@ -290,32 +355,41 @@ Status validate_operation_contract(const OperationTraits& t) {
       (!t.repeated_maximum && t.repeated_minimum))
     return invalid("invalid repeated input template");
   const auto maximum = t.input_count + t.repeated_maximum;
-  if (t.output_dtype_rule == OperationDtypeRule::Input) {
-    if (t.output_dtype_input >= maximum || !t.output_dtype_parameter.empty())
+  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input) {
+    if (t.outputs[0].output_dtype_input >= maximum ||
+        !t.outputs[0].output_dtype_parameter.empty())
       return invalid("invalid output dtype input");
-  } else if (t.output_dtype_rule == OperationDtypeRule::Parameter) {
-    if (t.output_dtype_input ||
-        !spec(t.output_dtype_parameter, OperationParameterType::String))
+  } else if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Parameter) {
+    if (t.outputs[0].output_dtype_input ||
+        !spec(t.outputs[0].output_dtype_parameter,
+              OperationParameterType::String))
       return invalid("invalid output dtype parameter");
-  } else if (t.output_dtype_rule != OperationDtypeRule::Declared ||
-             t.output_dtype_input || !t.output_dtype_parameter.empty()) {
+  } else if (t.outputs[0].output_dtype_rule != OperationDtypeRule::Declared ||
+             t.outputs[0].output_dtype_input ||
+             !t.outputs[0].output_dtype_parameter.empty()) {
     return invalid("invalid declared output dtype");
   }
-  if (t.shape_rule == OperationShapeRule::Axes) {
-    if (t.output_axes.empty() || t.output_axes.size() > 8 ||
-        (t.region_rule != OperationRegionRule::Whole &&
-         t.region_rule != OperationRegionRule::Dependency))
+  if (t.outputs[0].shape_rule == OperationShapeRule::Axes) {
+    if (t.outputs[0].output_axes.empty() ||
+        t.outputs[0].output_axes.size() > 8 ||
+        (t.outputs[0].region_rule != OperationRegionRule::Whole &&
+         t.outputs[0].region_rule != OperationRegionRule::Dependency))
       return invalid("axes require bounded rank and Whole region");
-  } else if (!t.output_axes.empty()) {
+  } else if (!t.outputs[0].output_axes.empty()) {
     return invalid("unexpected output axes");
   }
-  for (const auto& axis : t.output_axes) {
-    if (static_cast<std::uint32_t>(axis.source) > 4 ||
+  for (const auto& axis : t.outputs[0].output_axes) {
+    if (static_cast<std::uint32_t>(axis.source) > 5 || !axis.divisor ||
+        !axis.multiplier ||
+        (!axis.subtract_parameter.empty() &&
+         !spec(axis.subtract_parameter, OperationParameterType::Int64)) ||
         (axis.source == OperationExtentSource::Constant && !axis.constant) ||
         (axis.source != OperationExtentSource::Constant &&
          axis.constant != 1) ||
         (axis.source == OperationExtentSource::Parameter
              ? !spec(axis.parameter, OperationParameterType::Int64)
+         : axis.source == OperationExtentSource::CeilParameter
+             ? !spec(axis.parameter, OperationParameterType::Float64)
          : axis.source == OperationExtentSource::IndexListCount
              ? !spec(axis.parameter, OperationParameterType::String)
              : !axis.parameter.empty()) ||
@@ -325,41 +399,46 @@ Status validate_operation_contract(const OperationTraits& t) {
       return invalid("invalid static output axis");
   }
   if ((t.repeated_maximum ||
-       t.output_schema.kind == OperationPortKind::Typed) &&
-      (t.region_rule != OperationRegionRule::Whole &&
-       t.region_rule != OperationRegionRule::Dependency))
+       t.outputs[0].output_schema.kind == OperationPortKind::Typed) &&
+      (t.outputs[0].region_rule != OperationRegionRule::Whole &&
+       t.outputs[0].region_rule != OperationRegionRule::Dependency))
     return invalid("new typed/repeated contract requires Whole");
   for (const auto& port : t.input_schema)
     if (port.kind == OperationPortKind::Typed &&
-        (t.region_rule != OperationRegionRule::Whole &&
-         t.region_rule != OperationRegionRule::Dependency))
+        (t.outputs[0].region_rule != OperationRegionRule::Whole &&
+         t.outputs[0].region_rule != OperationRegionRule::Dependency))
       return invalid("typed inputs require Whole");
-  auto facets = t.output_facets;
+  auto facets = t.outputs[0].output_facets;
   if (!canonicalize_facets(&facets).ok() ||
-      !same_facets(facets, t.output_facets))
+      !same_facets(facets, t.outputs[0].output_facets))
     return invalid("invalid canonical output facets");
-  switch (t.output_semantic_rule) {
+  switch (t.outputs[0].output_semantic_rule) {
     case OperationSemanticRule::Drop:
-      if (t.output_schema.kind == OperationPortKind::RgbaFloat32 ||
-          t.output_schema.kind == OperationPortKind::Float32Mask ||
-          t.output_schema.kind == OperationPortKind::Typed)
+      if (t.outputs[0].output_schema.kind == OperationPortKind::RgbaFloat32 ||
+          t.outputs[0].output_schema.kind == OperationPortKind::Float32Mask ||
+          t.outputs[0].output_schema.kind == OperationPortKind::Typed)
         return invalid("typed output requires an explicit semantic rule");
-      if (t.output_semantic_input || !t.output_facets.empty() ||
-          !t.output_semantic_parameter.empty())
+      if (t.outputs[0].output_semantic_input ||
+          !t.outputs[0].output_facets.empty() ||
+          !t.outputs[0].output_semantic_parameter.empty())
         return invalid("unexpected dropped semantic fields");
       break;
     case OperationSemanticRule::PreserveInput:
-      if (t.output_semantic_input >= maximum || !t.output_facets.empty() ||
-          !t.output_semantic_parameter.empty())
+      if (t.outputs[0].output_semantic_input >= maximum ||
+          !t.outputs[0].output_facets.empty() ||
+          !t.outputs[0].output_semantic_parameter.empty())
         return invalid("invalid semantic input");
       break;
     case OperationSemanticRule::Establish:
-      if (t.output_semantic_input || !t.output_semantic_parameter.empty())
+      if (t.outputs[0].output_semantic_input ||
+          !t.outputs[0].output_semantic_parameter.empty())
         return invalid("invalid established semantic fields");
       break;
     case OperationSemanticRule::Parameter:
-      if (t.output_semantic_input || !t.output_facets.empty() ||
-          !spec(t.output_semantic_parameter, OperationParameterType::String))
+      if (t.outputs[0].output_semantic_input ||
+          !t.outputs[0].output_facets.empty() ||
+          !spec(t.outputs[0].output_semantic_parameter,
+                OperationParameterType::String))
         return invalid("invalid semantic parameter");
       break;
     case OperationSemanticRule::ExtractChannel:
@@ -373,23 +452,26 @@ Status validate_operation_contract(const OperationTraits& t) {
     case OperationSemanticRule::LabToXyz:
     case OperationSemanticRule::SampleExpression:
     case OperationSemanticRule::ApplyLut1d: {
-      const auto rule = t.output_semantic_rule;
-      if ((t.region_rule != OperationRegionRule::Whole &&
-           t.region_rule != OperationRegionRule::Dependency) ||
-          !t.output_facets.empty() || t.output_semantic_input >= maximum ||
+      const auto rule = t.outputs[0].output_semantic_rule;
+      if ((t.outputs[0].region_rule != OperationRegionRule::Whole &&
+           t.outputs[0].region_rule != OperationRegionRule::Dependency) ||
+          !t.outputs[0].output_facets.empty() ||
+          t.outputs[0].output_semantic_input >= maximum ||
           (rule == OperationSemanticRule::MergeChannelsParameter &&
-           t.output_semantic_input))
+           t.outputs[0].output_semantic_input))
         return invalid("invalid semantic transform source/region");
       if (rule == OperationSemanticRule::ExtractChannel) {
-        if (!spec(t.output_semantic_parameter, OperationParameterType::Int64))
+        if (!spec(t.outputs[0].output_semantic_parameter,
+                  OperationParameterType::Int64))
           return invalid("extract requires an Int64 index parameter");
       } else if (rule == OperationSemanticRule::SwizzleChannels ||
                  rule == OperationSemanticRule::MergeChannelsParameter ||
                  rule == OperationSemanticRule::SampleExpression ||
                  rule == OperationSemanticRule::ApplyLut1d) {
-        if (!spec(t.output_semantic_parameter, OperationParameterType::String))
+        if (!spec(t.outputs[0].output_semantic_parameter,
+                  OperationParameterType::String))
           return invalid("channel transform requires a String parameter");
-      } else if (!t.output_semantic_parameter.empty()) {
+      } else if (!t.outputs[0].output_semantic_parameter.empty()) {
         return invalid("unexpected color transform parameter");
       }
       if (rule == OperationSemanticRule::SampleExpression &&
@@ -398,7 +480,8 @@ Status validate_operation_contract(const OperationTraits& t) {
         return invalid(
             "expression domain requires Float64 start/step parameters");
       if (rule == OperationSemanticRule::ApplyLut1d &&
-          (maximum != 2 || t.output_semantic_input || t.repeated_maximum))
+          (maximum != 2 || t.outputs[0].output_semantic_input ||
+           t.repeated_maximum))
         return invalid("LUT contract requires ordered query/table inputs");
       break;
     }

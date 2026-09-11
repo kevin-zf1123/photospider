@@ -4,47 +4,64 @@
 #include "photospider/plugin/operation_plugin_api.h"
 
 namespace {
-ps_operation_port_constraint_v8 port = {
-    sizeof(ps_operation_port_constraint_v8), PS_OPERATION_PORT_VALUE_V8, 0,
+ps_operation_port_constraint_v9 port = {
+    sizeof(ps_operation_port_constraint_v9), PS_OPERATION_PORT_VALUE_V9, 0,
     0};  // NOLINT(whitespace/indent_namespace)
-alignas(ps_operation_port_constraint_v8) unsigned char misaligned[32]{};
-int unreachable(void*, const ps_operation_value_view_v8*, std::uint32_t,
-                const ps_operation_parameter_value_v8*, std::uint32_t,
-                std::uint32_t, ps_operation_cancelled_v8, void*,
-                const ps_operation_output_sink_v8*, char*, std::size_t) {
-  return PS_OPERATION_RESULT_FAILURE_V8;
+alignas(ps_operation_port_constraint_v9) unsigned char misaligned[32]{};
+int unreachable(void*, const ps_operation_value_view_v9*, std::uint32_t,
+                const ps_operation_parameter_value_v9*, std::uint32_t,
+                std::uint32_t, ps_operation_cancelled_v9, void*,
+                const ps_operation_output_sink_v9*, char*, std::size_t) {
+  return PS_OPERATION_RESULT_FAILURE_V9;
 }
-void destroy(const ps_operation_descriptor_v8*, std::uint32_t) {}
-ps_operation_descriptor_v8 descriptors[2]{};
-ps_operation_plugin_api_v8 api{};
+void destroy(const ps_operation_descriptor_v9*, std::uint32_t) {}
+ps_operation_descriptor_v9 descriptors[2]{};
+ps_operation_plugin_api_v9 api{};
 }  // namespace
 extern "C" PS_OPERATION_EXPORT std::uint32_t
 ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_8;
+  return PS_OPERATION_ABI_VERSION_9;
 }
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v8*
-ps_operation_plugin_get_api_v8(void) {
-  descriptors[0] = {sizeof(ps_operation_descriptor_v8),
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v9*
+ps_operation_plugin_get_api_v9(void) {
+  descriptors[0] = {sizeof(ps_operation_descriptor_v9),
                     "valid.prefix",
                     12,
                     0,
                     PS_OPERATION_FLAG_CPU,
                     0,
-                    PS_OPERATION_ELEMENT_FLOAT64_V8,
-                    0,
-                    nullptr,
-                    PS_OPERATION_SHAPE_SCALAR_V8,
-                    PS_OPERATION_REGION_WHOLE_V8,
-                    0,
                     0,
                     0,
                     nullptr,
                     0,
                     nullptr,
-                    {sizeof(ps_operation_port_constraint_v8),
-                     PS_OPERATION_PORT_VALUE_V8, 0, 0},
                     unreachable,
-                    nullptr};
+                    nullptr,
+                    0,
+                    0,
+                    0,
+                    1,
+                    {{sizeof(ps_operation_output_descriptor_v9),
+                      "value",
+                      5,
+                      PS_OPERATION_ELEMENT_FLOAT64_V9,
+                      0,
+                      nullptr,
+                      PS_OPERATION_SHAPE_SCALAR_V9,
+                      PS_OPERATION_REGION_WHOLE_V9,
+                      0,
+                      {sizeof(ps_operation_port_constraint_v9),
+                       PS_OPERATION_PORT_VALUE_V9, 0, 0},
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      0,
+                      NULL}}};
   descriptors[1] = descriptors[0];
   descriptors[1].key = "invalid.port";
   descriptors[1].input_count = 1;
@@ -56,7 +73,7 @@ ps_operation_plugin_get_api_v8(void) {
   descriptors[1].input_schema = nullptr;
 #elif PS_BAD_PORT_CASE == 3
   descriptors[1].input_schema =
-      reinterpret_cast<const ps_operation_port_constraint_v8*>(misaligned + 1);
+      reinterpret_cast<const ps_operation_port_constraint_v9*>(misaligned + 1);
 #elif PS_BAD_PORT_CASE == 4
   port.struct_size -= 1;
 #elif PS_BAD_PORT_CASE == 5
@@ -64,11 +81,11 @@ ps_operation_plugin_get_api_v8(void) {
 #elif PS_BAD_PORT_CASE == 6
   port.minimum_bits = 0x80000000U;
 #elif PS_BAD_PORT_CASE == 7
-  port.kind = PS_OPERATION_PORT_FLOAT32_SCALAR_V8;
+  port.kind = PS_OPERATION_PORT_FLOAT32_SCALAR_V9;
   port.maximum_bits = 0x7f800000U;
 #elif PS_BAD_PORT_CASE == 8
-  descriptors[1].output_schema.struct_size -= 1;
+  descriptors[1].outputs[0].output_schema.struct_size -= 1;
 #endif
-  api = {sizeof(ps_operation_plugin_api_v8), 2, descriptors, destroy};
+  api = {sizeof(ps_operation_plugin_api_v9), 2, descriptors, destroy};
   return &api;
 }

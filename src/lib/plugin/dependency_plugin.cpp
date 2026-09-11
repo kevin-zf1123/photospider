@@ -25,24 +25,24 @@ bool records(const T* data, std::uint64_t count, std::uint64_t limit) {
 }
 Status outcome(int code) {
   switch (code) {
-    case PS_OPERATION_RESULT_SUCCESS_V8:
+    case PS_OPERATION_RESULT_SUCCESS_V9:
       return Status::success();
-    case PS_OPERATION_RESULT_CANCELLED_V8:
+    case PS_OPERATION_RESULT_CANCELLED_V9:
       return Status{ErrorCode::Cancelled, {}};
-    case PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V8:
+    case PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V9:
       return Status{ErrorCode::BackendUnavailable, {}};
-    case PS_DEPENDENCY_RESOURCE_EXHAUSTED_V8:
+    case PS_DEPENDENCY_RESOURCE_EXHAUSTED_V9:
       return Status{ErrorCode::ResourceExhausted, {}};
-    case PS_DEPENDENCY_TYPE_MISMATCH_V8:
+    case PS_DEPENDENCY_TYPE_MISMATCH_V9:
       return Status{ErrorCode::TypeMismatch, {}};
-    case PS_DEPENDENCY_INVALID_ARGUMENT_V8:
+    case PS_DEPENDENCY_INVALID_ARGUMENT_V9:
       return Status{ErrorCode::InvalidArgument, {}};
     default:
       return Status{ErrorCode::OperationFailed, {}};
   }
 }
-ps_dependency_run_v8 encode_run(const Region& region) {
-  ps_dependency_run_v8 run{};
+ps_dependency_run_v9 encode_run(const Region& region) {
+  ps_dependency_run_v9 run{};
   run.struct_size = sizeof(run);
   run.rank = region.rank();
   for (std::size_t i = 0; i < region.rank(); ++i) {
@@ -51,7 +51,7 @@ ps_dependency_run_v8 encode_run(const Region& region) {
   }
   return run;
 }
-Result<Region> decode_run(const ps_dependency_run_v8* run,
+Result<Region> decode_run(const ps_dependency_run_v9* run,
                           const std::vector<std::uint64_t>& shape) {
   if (!records(run, 1, 1) || run->struct_size != sizeof(*run) ||
       run->rank != shape.size())
@@ -70,14 +70,14 @@ Result<Region> decode_run(const ps_dependency_run_v8* run,
   return Result<Region>(std::move(result));
 }
 struct Metadata {
-  ps_dependency_metadata_query_v8 query{};
-  std::vector<ps_dependency_metadata_v8> inputs;
-  std::vector<std::vector<ps_operation_facet_view_v8>> facets;
-  std::vector<ps_operation_parameter_value_v8> parameters;
-  static ps_dependency_metadata_v8 encode(
+  ps_dependency_metadata_query_v9 query{};
+  std::vector<ps_dependency_metadata_v9> inputs;
+  std::vector<std::vector<ps_operation_facet_view_v9>> facets;
+  std::vector<ps_operation_parameter_value_v9> parameters;
+  static ps_dependency_metadata_v9 encode(
       const OperationMetadata& input,
-      std::vector<ps_operation_facet_view_v8>* facets) {
-    ps_dependency_metadata_v8 result{};
+      std::vector<ps_operation_facet_view_v9>* facets) {
+    ps_dependency_metadata_v9 result{};
     result.struct_size = sizeof(result);
     result.element_type =
         static_cast<std::uint32_t>(input.descriptor.element_type);
@@ -85,7 +85,7 @@ struct Metadata {
     std::copy(input.descriptor.shape.begin(), input.descriptor.shape.end(),
               result.shape);
     for (const auto& facet : input.facets)
-      facets->push_back({sizeof(ps_operation_facet_view_v8), facet.key.data(),
+      facets->push_back({sizeof(ps_operation_facet_view_v9), facet.key.data(),
                          static_cast<std::uint32_t>(facet.key.size()),
                          facet.version,
                          facet.payload.empty() ? nullptr : facet.payload.data(),
@@ -100,7 +100,7 @@ struct Metadata {
     for (std::size_t i = 0; i < metadata.size(); ++i)
       inputs.push_back(encode(metadata[i], &facets[i]));
     for (const auto& entry : values) {
-      ps_operation_parameter_value_v8 parameter{};
+      ps_operation_parameter_value_v9 parameter{};
       parameter.struct_size = sizeof(parameter);
       parameter.key = entry.first.data();
       parameter.key_size = entry.first.size();
@@ -132,15 +132,16 @@ struct Metadata {
 };
 struct Query {
   Metadata metadata;
-  std::vector<ps_operation_facet_view_v8> facets;
-  std::vector<ps_dependency_run_v8> outputs;
-  ps_dependency_query_v8 query{};
+  std::vector<ps_operation_facet_view_v9> facets;
+  std::vector<ps_dependency_run_v9> outputs;
+  ps_dependency_query_v9 query{};
   explicit Query(const DependencyQuery& input)
       : metadata(input.inputs, input.parameters) {
     query.struct_size = sizeof(query);
     query.metadata = metadata.query;
     query.output = Metadata::encode(input.output, &facets);
     query.observation_kind = static_cast<std::uint32_t>(input.kind);
+    query.output_index = input.output_index;
     query.backend = static_cast<std::uint32_t>(input.backend);
     for (const auto& box : input.outputs.boxes())
       outputs.push_back(encode_run(box));
@@ -163,7 +164,7 @@ struct Phase {
   std::vector<MutableBuffer> scratch;
   std::map<std::uint64_t, DependencyCheckpoint> checkpoints;
   std::map<std::uint64_t, std::uint64_t> gpu_tokens;
-  std::map<std::uint32_t, ps_dependency_atlas_v8> atlases;
+  std::map<std::uint32_t, ps_dependency_atlas_v9> atlases;
   std::uint64_t metadata_entries = 0;
   bool reject(Status status) {
     if (failure.ok())
@@ -205,14 +206,14 @@ struct Phase {
   }
 };
 struct CState {
-  ps_dependency_program_v8 program;
+  ps_dependency_program_v9 program;
   void* user = nullptr;
   MutableBuffer payload;
   std::shared_ptr<const void> library;
   bool entered = false;
   std::uint64_t next = 1;
   std::map<std::uint64_t, ValueFragments> retained;
-  CState(ps_dependency_program_v8 program, void* user, MutableBuffer payload,
+  CState(ps_dependency_program_v9 program, void* user, MutableBuffer payload,
          std::shared_ptr<const void> library)
       : program(program),
         user(user),
@@ -244,7 +245,7 @@ struct CState {
   Result<DependencyPoll> poll(const DependencyPhase& phase);
 };
 int associate(void* context,
-              const ps_dependency_association_v8* association) noexcept {
+              const ps_dependency_association_v9* association) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
     return {};
@@ -301,7 +302,7 @@ int associate(void* context,
       return p->reject(samples.status());
     DependencyNeed need{a.port, a.roles, samples.take_value(), {}};
     for (std::uint32_t i = 0; i < a.tag_count; ++i) {
-      if (a.tags[i].struct_size != sizeof(ps_dependency_tag_v8) ||
+      if (a.tags[i].struct_size != sizeof(ps_dependency_tag_v9) ||
           !a.tags[i].kind)
         return p->reject(invalid("invalid C dependency tag"));
       need.tags.push_back({a.tags[i].kind, a.tags[i].id});
@@ -345,7 +346,7 @@ std::uint32_t fragment_count(void* context, std::uint32_t port) noexcept {
   return count;
 }
 int fragment(void* context, std::uint32_t port, std::uint32_t index,
-             ps_dependency_fragment_v8* destination) noexcept {
+             ps_dependency_fragment_v9* destination) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
     return {};
@@ -356,7 +357,7 @@ int fragment(void* context, std::uint32_t port, std::uint32_t index,
     const auto* value = p->fragment(port, index);
     if (!value)
       return false;
-    ps_dependency_fragment_v8 result{};
+    ps_dependency_fragment_v9 result{};
     result.struct_size = sizeof(result);
     result.rank = value->descriptor().shape.size();
     result.element_type =
@@ -433,7 +434,7 @@ int release_owner(void* context, std::uint64_t id) noexcept {
            p->reject(invalid("unknown C retained owner"));
   });
 }
-std::uint8_t* allocate_output(void* context, const ps_dependency_run_v8* region,
+std::uint8_t* allocate_output(void* context, const ps_dependency_run_v9* region,
                               std::uint64_t* handle) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
@@ -522,7 +523,7 @@ int is_cancelled(void* context) noexcept {
          static_cast<Phase*>(context)->phase.query.cancellation.cancelled();
 }
 int checkpoint_before(void* context, std::uint32_t phase, std::uint64_t before,
-                      ps_dependency_checkpoint_v8* destination) noexcept {
+                      ps_dependency_checkpoint_v9* destination) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
     return 0;
@@ -534,7 +535,7 @@ int checkpoint_before(void* context, std::uint32_t phase, std::uint64_t before,
     auto found = p->phase.checkpoint_before(phase, before);
     if (!found.ok())
       return p->reject(found.status());
-    ps_dependency_checkpoint_v8 result{};
+    ps_dependency_checkpoint_v9 result{};
     result.struct_size = sizeof(result);
     if (found.value()) {
       if (p->checkpoints.size() >=
@@ -634,7 +635,7 @@ int gpu_buffer(void* context, const std::uint8_t* bytes, std::uint64_t size,
   });
 }
 int atlas(void* context, std::uint32_t port,
-          ps_dependency_atlas_v8* destination) noexcept {
+          ps_dependency_atlas_v9* destination) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
     return 0;
@@ -652,7 +653,7 @@ int atlas(void* context, std::uint32_t port,
     if (!packed.ok())
       return p->reject(packed.status());
     const auto& value = packed.value();
-    ps_dependency_atlas_v8 result{};
+    ps_dependency_atlas_v9 result{};
     result.struct_size = sizeof(result);
     result.rank = value.descriptor.shape.size();
     result.element_type =
@@ -675,7 +676,7 @@ int atlas(void* context, std::uint32_t port,
     return true;
   });
 }
-int gpu_execute(void* context, const ps_gpu_dispatch_v8* commands,
+int gpu_execute(void* context, const ps_gpu_dispatch_v9* commands,
                 std::uint32_t count) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
@@ -688,7 +689,7 @@ int gpu_execute(void* context, const ps_gpu_dispatch_v8* commands,
       return p->reject(charged);
     std::uint64_t work = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
-      if (commands[i].struct_size != sizeof(ps_gpu_dispatch_v8) ||
+      if (commands[i].struct_size != sizeof(ps_gpu_dispatch_v9) ||
           !records(commands[i].buffers, commands[i].buffer_count, 31))
         return p->reject(invalid("invalid C native binding list"));
       work += commands[i].buffer_count;
@@ -696,8 +697,8 @@ int gpu_execute(void* context, const ps_gpu_dispatch_v8* commands,
     charged = p->phase.consume_work(work);
     if (!charged.ok())
       return p->reject(charged);
-    std::vector<ps_gpu_dispatch_v8> translated(commands, commands + count);
-    std::vector<std::vector<ps_gpu_buffer_binding_v8>> bindings(count);
+    std::vector<ps_gpu_dispatch_v9> translated(commands, commands + count);
+    std::vector<std::vector<ps_gpu_buffer_binding_v9>> bindings(count);
     for (std::uint32_t i = 0; i < count; ++i) {
       auto& output = bindings[i];
       for (std::uint32_t j = 0; j < commands[i].buffer_count; ++j) {
@@ -717,15 +718,15 @@ int gpu_execute(void* context, const ps_gpu_dispatch_v8* commands,
   });
 }
 int discover(void* context, std::uint32_t capacity, std::uint32_t candidates,
-             ps_dependency_discovery_compute_v8 compute, void* user) noexcept {
+             ps_dependency_discovery_compute_v9 compute, void* user) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
     return 0;
   return p->fence([&] {
     if (!compute)
       return p->reject(invalid("null C GPU discovery callback"));
-    const ps_dependency_discovery_services_v8 services{
-        sizeof(ps_dependency_discovery_services_v8),
+    const ps_dependency_discovery_services_v9 services{
+        sizeof(ps_dependency_discovery_services_v9),
         0,
         p,
         read,
@@ -747,7 +748,7 @@ int discover(void* context, std::uint32_t capacity, std::uint32_t candidates,
 int block(void* context, std::uint32_t phase, std::uint64_t begin,
           std::uint64_t end, std::uint64_t mode, const std::uint8_t* incoming,
           std::uint64_t size, std::uint8_t* outgoing,
-          ps_dependency_block_compute_v8 compute, void* user) noexcept {
+          ps_dependency_block_compute_v9 compute, void* user) noexcept {
   auto* p = static_cast<Phase*>(context);
   if (!p)
     return 0;
@@ -770,8 +771,8 @@ int block(void* context, std::uint32_t phase, std::uint64_t begin,
     auto state = std::move(writer).publish();
     if (!state.ok())
       return p->reject(state.status());
-    const ps_dependency_block_services_v8 services{
-        sizeof(ps_dependency_block_services_v8),
+    const ps_dependency_block_services_v9 services{
+        sizeof(ps_dependency_block_services_v9),
         0,
         p,
         read,
@@ -811,7 +812,7 @@ int block(void* context, std::uint32_t phase, std::uint64_t begin,
 Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
   Phase p{phase, *this, {}, {}, {}, {}, {}, {}, {}, {}};
   Query query(phase.query);
-  const ps_dependency_services_v8 services{sizeof(ps_dependency_services_v8),
+  const ps_dependency_services_v9 services{sizeof(ps_dependency_services_v9),
                                            0,
                                            &p,
                                            associate,
@@ -838,7 +839,7 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
       program.poll(&query.query, payload.data(), &services, user);
   if (!p.failure.ok())
     return Result<DependencyPoll>(p.failure);
-  if (result == PS_DEPENDENCY_NEED_V8) {
+  if (result == PS_DEPENDENCY_NEED_V9) {
     if (!p.outputs.empty())
       return Result<DependencyPoll>(
           invalid("C Need cannot publish or allocate output"));
@@ -868,7 +869,7 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
 }
 }  // namespace
 Status prepare_dependency_plugin(OperationDefinition* definition,
-                                 const ps_dependency_program_v8* pointer,
+                                 const ps_dependency_program_v9* pointer,
                                  void* user,
                                  std::shared_ptr<const void> library) {
   if (!records(pointer, 1, 1) || pointer->struct_size != sizeof(*pointer) ||
@@ -879,9 +880,11 @@ Status prepare_dependency_plugin(OperationDefinition* definition,
       pointer->maximum_retained_owners > 65536)
     return invalid("invalid C dependency program table");
   const auto program = *pointer;
-  definition->traits.dependency_version = 1;
-  definition->traits.continuation_bytes = program.state_bytes + sizeof(CState);
-  definition->traits.maximum_dependency_stages = program.maximum_stages;
+  for (auto& output : definition->traits.outputs) {
+    output.dependency_version = 1;
+    output.continuation_bytes = program.state_bytes + sizeof(CState);
+    output.maximum_dependency_stages = program.maximum_stages;
+  }
   if (program.validate) {
     definition->validate_dependency =
         [library, program, user](const auto& inputs, const auto& parameters) {

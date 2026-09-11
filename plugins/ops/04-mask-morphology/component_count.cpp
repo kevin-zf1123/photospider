@@ -19,9 +19,9 @@ Status register_component_count(OperationRegistry* registry) {
   port.kind = OperationPortKind::Typed;
   port.rank = 2;
   port.element_type = static_cast<std::uint32_t>(ElementType::Int64);
-  t.output_element_type = ElementType::Int64;
-  t.shape_rule = OperationShapeRule::Scalar;
-  t.requires_dense_output = true;
+  t.outputs[0].output_element_type = ElementType::Int64;
+  t.outputs[0].shape_rule = OperationShapeRule::Scalar;
+  t.outputs[0].requires_dense_output = true;
 
   port.facets =
       false ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())

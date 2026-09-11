@@ -58,12 +58,12 @@ Result<Value> increment(const OperationInvocation& call, bool can_fail) {
         api->buffer(api->context, output.data(), output.size(), 1,
                     &destination))
       return Result<Value>(Status{ErrorCode::OperationFailed, "native buffer"});
-    ps_gpu_buffer_binding_v8 bindings[] = {
-        {sizeof(ps_gpu_buffer_binding_v8), 0, source, 0,
+    ps_gpu_buffer_binding_v9 bindings[] = {
+        {sizeof(ps_gpu_buffer_binding_v9), 0, source, 0,
          call.inputs[0].bytes().size(), 0},
-        {sizeof(ps_gpu_buffer_binding_v8), 1, destination, 0, output.size(),
+        {sizeof(ps_gpu_buffer_binding_v9), 1, destination, 0, output.size(),
          1}};
-    ps_gpu_dispatch_v8 command{};
+    ps_gpu_dispatch_v9 command{};
     command.struct_size = sizeof(command);
     command.source = shader;
     command.source_size = sizeof(shader) - 1;
@@ -182,10 +182,12 @@ int fallback_records(const ExecutionBindings& bindings) {
     ancestor.key = "ancestor";
     ancestor.traits.input_count = 1;
     ancestor.traits.input_schema.resize(1);
-    ancestor.traits.output_element_type = ElementType::Float32;
-    ancestor.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-    ancestor.traits.region_rule = mode >= 2 ? OperationRegionRule::Whole
-                                            : OperationRegionRule::Elementwise;
+    ancestor.traits.outputs[0].output_element_type = ElementType::Float32;
+    ancestor.traits.outputs[0].shape_rule =
+        OperationShapeRule::PreserveFirstInput;
+    ancestor.traits.outputs[0].region_rule =
+        mode >= 2 ? OperationRegionRule::Whole
+                  : OperationRegionRule::Elementwise;
     ancestor.callback = [&](const OperationInvocation& call) {
       ++ancestors;
       return Result<Value>(call.inputs[0]);
@@ -195,12 +197,12 @@ int fallback_records(const ExecutionBindings& bindings) {
     auto child = ancestor;
     child.key = "fallback";
     child.callback = {};
-    child.traits.region_rule = OperationRegionRule::Dependency;
-    child.traits.dependency_version = 1;
+    child.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+    child.traits.outputs[0].dependency_version = 1;
     child.traits.supports_gpu = true;
     child.traits.allows_cpu_fallback = true;
-    child.traits.continuation_bytes = sizeof(FallbackReads);
-    child.traits.maximum_dependency_stages = 4;
+    child.traits.outputs[0].continuation_bytes = sizeof(FallbackReads);
+    child.traits.outputs[0].maximum_dependency_stages = 4;
     child.start_dependency = [mode](const DependencyQuery&,
                                     const BufferAllocator& allocator) {
       return DependencyContinuation::make<FallbackReads>(
@@ -277,25 +279,25 @@ int main() {
   op.key = "example.increment";
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
-  op.traits.output_element_type = ElementType::Float32;
-  op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  op.traits.region_rule = OperationRegionRule::Elementwise;
+  op.traits.outputs[0].output_element_type = ElementType::Float32;
+  op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+  op.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
   op.traits.supports_gpu = true;
   op.traits.allows_cpu_fallback = true;
   op.callback = [](const auto& call) { return increment(call, false); };
   if (check(registry->register_operation(op).ok(), "register increment"))
     return 1;
   op.key = "example.whole";
-  op.traits.region_rule = OperationRegionRule::Whole;
+  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
   op.callback = [](const auto& call) { return increment(call, true); };
   if (check(registry->register_operation(op).ok(), "register Whole"))
     return 1;
   op.key = "example.staged";
-  op.traits.region_rule = OperationRegionRule::Dependency;
-  op.traits.dependency_version = 1;
+  op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  op.traits.outputs[0].dependency_version = 1;
   op.callback = {};
-  op.traits.continuation_bytes = sizeof(Stage);
-  op.traits.maximum_dependency_stages = 4;
+  op.traits.outputs[0].continuation_bytes = sizeof(Stage);
+  op.traits.outputs[0].maximum_dependency_stages = 4;
   op.traits.workspace_bytes = 4;
   op.start_dependency = [](const DependencyQuery&,
                            const BufferAllocator& allocator) {
