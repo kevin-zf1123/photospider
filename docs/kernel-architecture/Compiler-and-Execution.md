@@ -293,3 +293,13 @@ Upstream errors retire just their member. RequestRecord stays independent.
 exercise the protocol, scheduler and real compositions. The installed
 [multi-output example](../../examples/multi_output_workflow/README.md) prints
 actual per-result attempts and source reads for both execution modes.
+
+Staged completed-content templates hash the selected output contract, static
+parameters and observable input metadata/producer contracts, without plan,
+graph, node or physical step IDs. Actual sample bits follow the retained
+Data/Control/Validation witness. Public binding names identify source routes.
+On a cross-plan hit, each record and certificate is rebound along corresponding
+input ports before publication; ambiguous topology is an optional cache miss.
+Flight identity remains plan/snapshot-specific. Template hashing and rebinding
+consume the optional cache-work budget. Node/declaration renumbering, sibling
+pruning and a multi-level cached producer DAG have direct regressions.

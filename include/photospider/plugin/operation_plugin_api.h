@@ -285,7 +285,7 @@ typedef struct ps_gpu_service_v9 {
    * @param byte_size Positive view size within the allocation payload.
    * @param writable Zero or one; immutable inputs cannot become writable.
    * @param token Nonnull destination for the invocation-local token.
-   * @return A PS_OPERATION_RESULT_*_V8 code; failure becomes sticky.
+   * @return A PS_OPERATION_RESULT_*_V9 code; failure becomes sticky.
    * @note At most 1024 views per invocation; publication revokes write access.
    */
   int (*buffer)(void* context, const uint8_t* bytes, uint64_t byte_size,
@@ -294,7 +294,7 @@ typedef struct ps_gpu_service_v9 {
    * @param context This service's host state.
    * @param commands Naturally aligned borrowed dispatch array.
    * @param command_count Array size in 1..32.
-   * @return A PS_OPERATION_RESULT_*_V8 code; submitted device failure ends Run.
+   * @return A PS_OPERATION_RESULT_*_V9 code; submitted device failure ends Run.
    * @note Successful return permits CPU access to the completed shared bytes.
    * Retained pipelines are internal; callers must not retain service pointers.
    */
@@ -536,7 +536,7 @@ typedef struct ps_operation_contract_v9 {
 typedef struct ps_operation_port_constraint_v9 {
   /** @brief Exact structure byte size. */
   uint32_t struct_size;
-  /** @brief One PS_OPERATION_PORT_*_V8 kind. */
+  /** @brief One PS_OPERATION_PORT_*_V9 kind. */
   uint32_t kind;
   /** @brief Numeric uint32 binary32 lower-bound bits, decoded with memcpy. */
   uint32_t minimum_bits;

@@ -27,6 +27,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_cache_identity.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -1349,16 +1350,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     const execution_internal::DependencyFlightValue>>(status));
       };
     }
+    const auto cache_templates =
+        dependency_cache
+            ? execution_internal::dependency_cache_templates(
+                  plan,
+                  native_device ? native_device->identity() : std::string{},
+                  &cache_work, cancellation)
+            : std::vector<std::string>(plan.steps().size());
     const auto observation_key =
         [&](std::size_t index, const Footprint& outputs, bool snapshot = true) {
           content_internal::Sha256 hash;
           hash.text(snapshot ? "photospider.dependency-flight.v1"
-                             : "photospider.dependency-cache-template.v1");
-          hash.text(plan.digest().value);
-          if (snapshot)
+                             : "photospider.dependency-cache-template.v2");
+          if (snapshot) {
+            hash.text(plan.digest().value);
             hash.text(identity);
-          hash.integer(plan.steps()[index].node_id);
-          hash.integer(plan.steps()[index].output_index);
+            hash.integer(plan.steps()[index].node_id);
+            hash.integer(plan.steps()[index].output_index);
+          } else {
+            hash.text(cache_templates[index]);
+          }
           hash.integer(plan.tile_width());
           hash.integer(plan.tile_height());
           hash.integer(options.dependencies.sets.maximum_boxes);
@@ -1383,6 +1394,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             const std::shared_ptr<const execution_internal::DependencyRecord>&
                 record,
             const ValueFragments& completed) {
+          if (cache_templates[index].empty())
+            return;
           // Retention is optional. Precharge the actual owner DAG before any
           // walk/copy; cache exhaustion cannot fail a valid computation.
           try {
@@ -1428,6 +1441,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             manifest->facets = completed.facets();
             manifest->outputs = completed.coverage();
             manifest->support = std::move(proof.support);
+            manifest->routes = std::move(proof.routes);
             manifest->content_identity = digest.take_value();
             manifest->epoch = cache_epoch;
             manifest->metadata_entries = proof.metadata_entries;
@@ -2128,7 +2142,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
             limits.cancellation = active_token();
             if (dependency_cache && cacheable[step_index] &&
-                !frame.fallback_taint && cache_work) {
+                !frame.fallback_taint && cache_work &&
+                !cache_templates[step_index].empty()) {
               const auto template_key =
                   observation_key(step_index, frame.outputs, false);
               for (const auto& candidate :
@@ -2161,11 +2176,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     candidate->outputs, std::move(pixels), limits);
                 if (!cached.ok())
                   continue;
-                status = records.import(candidate->record);
+                auto rebound =
+                    records.rebind_cached(candidate->record, step_index,
+                                          candidate->routes, &cache_work);
+                if (!rebound.ok())
+                  continue;
+                status = records.import(rebound.value());
                 if (!status.ok())
                   return fail(status);
                 frame.complete = cached.take_value();
-                frame.record = candidate->record;
+                frame.record = rebound.take_value();
                 frame.cache_hit = true;
                 frame.state = Frame::State::Complete;
                 ++diagnostics.cache_hits;
@@ -2840,7 +2860,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
         }
         bool hit = false;
-        if (dependency_cache && cacheable[index] && cache_work) {
+        if (dependency_cache && cacheable[index] && cache_work &&
+            !cache_templates[index].empty()) {
           for (const auto& candidate : dependency_cache->dependency_candidates(
                    observation_key(index, samples.value(), false))) {
             if (candidate->metadata_entries > cache_work) {
@@ -2865,18 +2886,22 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 std::move(pixels), limits);
             if (!cached.ok())
               continue;
-            auto status = records.import(candidate->record);
+            auto rebound = records.rebind_cached(
+                candidate->record, index, candidate->routes, &cache_work);
+            if (!rebound.ok())
+              continue;
+            auto status = records.import(rebound.value());
             if (!status.ok())
               return status;
             Evaluation value{cached.take_value(),
                              false,
                              Backend::Cpu,
-                             {candidate->record}};
+                             {rebound.value()}};
             if (flight) {
               auto published =
                   std::make_shared<execution_internal::DependencyFlightValue>();
               published->value = value.value;
-              published->record = candidate->record;
+              published->record = rebound.value();
               published->producer_peak = budget->peaks(observation).first;
               flight->complete(
                   Result<std::shared_ptr<

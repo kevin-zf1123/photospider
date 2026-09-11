@@ -37,7 +37,12 @@ kernels. The local static/shared builds, thirteen focused tests per linkage,
 and installed consumers passed on 2026-09-12; M10's final thirteen-check runs per linkage also passed after
 the compaction fix. The installed static maximum-radius workflow produced the
 complete 129×129 matrix, matched the independent kernel/convolution oracles,
-and recorded zero image reads for its kernel-only run. Public delivery is pending the following gates. Final delivery requires a
+and recorded zero image reads for its kernel-only run. Fresh comprehensive review found four contract gaps (input permutation,
+projected Region checks, graph-independent staged cache identity and floating
+environment). Those and the follow-up cache-clone budget boundary are fixed;
+targeted independent rereview has no remaining blocker/required. Static/shared
+14-check suites and installed consumers passed, followed by the new owner-split
+cache regression. Public delivery is pending PR/CI/bot/merge gates below. Final delivery requires a
 fresh independent comprehensive review, required fixes, one PR to ops, all six
 existing CI jobs and Codex bot review on the final HEAD, a merge commit, explicit
 Issue settlement, local ops synchronization and task-branch cleanup. Only the

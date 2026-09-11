@@ -220,3 +220,10 @@ C/C++ joint poll 独立验证各成员 Needs/Complete/error。相同读取可共
 仅当所有剩余观察均无 waiter 时取消共享计算；上游错误只退休对应成员。
 RequestRecord 保持独立。协议、调度与真实组合分别由 `test_dependency_joint`、
 `test_joint_execution`、`test_multi_output_ops` 及安装示例验证。
+
+分阶段完成结果的内容模板编码所选输出契约、静态参数、可观察输入元数据与生产者
+契约，不包含 plan、graph、node 或物理 step ID。实际样本身份来自 Data/Control/
+Validation witness；公开 binding name 标识输入路由。跨 plan 命中时，按对应
+输入端口重绑定各 record 与 certificate，再发布；歧义拓扑只导致可选缓存未命中。
+Flight 身份仍限定 plan/snapshot。模板 hash 与重绑定计入 cache-work 预算。
+回归覆盖节点/输入声明重编号、兄弟裁剪和多层缓存生产者 DAG。

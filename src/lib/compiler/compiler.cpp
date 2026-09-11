@@ -916,6 +916,11 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       auto selected = select_operation_output(node.traits, oi).take_value();
       for (std::size_t i = 0;
            i < input_descriptors.size() && !contract.dependency_version; ++i) {
+        if (contract.input_indices &&
+            std::find(contract.input_indices->begin(),
+                      contract.input_indices->end(),
+                      i) == contract.input_indices->end())
+          continue;
         auto demand = input_internal::derive_input_demand(
             selected, Region::whole(metadata.descriptor.shape),
             metadata.descriptor.shape, input_descriptors[i].descriptor.shape,

@@ -150,3 +150,9 @@ checks odd edges and dirty support, requests Y alone, rejects bad sample domains
 and alpha, and verifies channel ordering and reference metadata. The installed
 [four-scenario example](../../examples/multi_output_workflow/README.md) exposes
 editable graphs, actual source read sets and independent oracles.
+
+Convolution and Gaussian coefficient generation establish the default
+round-to-nearest/gradual-underflow environment and restore the caller's prior
+floating environment. Direct generic field/kernel outputs therefore agree with
+typed image and joint paths even when the caller selected upward/downward
+rounding. Both public direct invocation paths have environment regressions.

@@ -1,6 +1,7 @@
 #include "execution/dependency_records.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -802,6 +803,106 @@ Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
   result->upstream = std::move(upstream);
   imported_.insert(result->identity);
   return Answer(std::move(result));
+}
+Result<std::shared_ptr<const DependencyRecord>>
+DependencyRecords::rebind_cached(
+    const std::shared_ptr<const DependencyRecord>& root, std::size_t index,
+    const std::map<std::size_t, std::vector<PlanInput>>& routes,
+    std::uint64_t* work) const {
+  using Answer = Result<std::shared_ptr<const DependencyRecord>>;
+  if (!root || index >= plan_->steps().size())
+    return Answer(invalid("invalid cache root"));
+  struct Pending {
+    std::shared_ptr<const DependencyRecord> record;
+    std::size_t step;
+    bool ready;
+  };
+  using Key = std::pair<const DependencyRecord*, std::size_t>;
+  const auto ordered = [](const Key& a, const Key& b) {
+    return a.first == b.first
+               ? a.second < b.second
+               : std::less<const DependencyRecord*>{}(a.first, b.first);
+  };
+  std::map<Key, std::shared_ptr<const DependencyRecord>, decltype(ordered)>
+      rebound(ordered);
+  // The cached proof precharges each old owner once. A topology that splits
+  // one owner into several new steps would duplicate that storage uncharged.
+  std::map<const DependencyRecord*, std::size_t> assignments;
+  std::vector<Pending> pending{{root, index, false}};
+  while (!pending.empty()) {
+    if (limits_.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    if (!*work || pending.size() > limits_.maximum_boxes ||
+        rebound.size() >= limits_.maximum_boxes)
+      return Answer(Status{ErrorCode::ResourceExhausted, {}});
+    --*work;
+    const auto item = pending.back();
+    pending.pop_back();
+    const auto assigned = assignments.emplace(item.record.get(), item.step);
+    if (!assigned.second && assigned.first->second != item.step)
+      return Answer(invalid("cache owner maps to multiple results"));
+    const Key key{item.record.get(), item.step};
+    if (rebound.count(key))
+      continue;
+    const auto route = routes.find(item.record->step);
+    if (route == routes.end() || item.step >= plan_->steps().size())
+      return Answer(invalid("missing cache route"));
+    const auto& inputs = plan_->steps()[item.step].inputs;
+    if (inputs.size() != route->second.size())
+      return Answer(invalid("cache route arity"));
+    std::vector<Key> children;
+    for (const auto& child : item.record->upstream) {
+      if (!child || child->step >= item.record->step)
+        return Answer(invalid("non-topological cache record"));
+      std::optional<std::size_t> target;
+      for (std::size_t port = 0; port < inputs.size(); ++port) {
+        if (!*work)
+          return Answer(Status{ErrorCode::ResourceExhausted, {}});
+        --*work;
+        const auto* old = std::get_if<PlanStepInput>(&route->second[port]);
+        if (!old || old->step_index != child->step)
+          continue;
+        const auto* current = std::get_if<PlanStepInput>(&inputs[port]);
+        if (!current || current->step_index >= item.step ||
+            (target && *target != current->step_index))
+          return Answer(invalid("ambiguous cache route"));
+        target = current->step_index;
+      }
+      if (!target)
+        return Answer(invalid("unmatched cache producer"));
+      children.emplace_back(child.get(), *target);
+    }
+    if (!item.ready) {
+      if (pending.size() >= limits_.maximum_boxes ||
+          children.size() >= limits_.maximum_boxes - pending.size())
+        return Answer(Status{ErrorCode::ResourceExhausted, {}});
+      pending.push_back({item.record, item.step, true});
+      for (std::size_t i = 0; i < children.size(); ++i)
+        pending.push_back(
+            {item.record->upstream[i], children[i].second, false});
+      continue;
+    }
+    auto copy = std::shared_ptr<DependencyRecord>(new DependencyRecord(),
+                                                  DependencyRecord::retire);
+    copy->step = item.step;
+    copy->samples = item.record->samples;
+    copy->identity = observation_identity(item.step, copy->samples);
+    if (item.record->certificate) {
+      const auto& source = *item.record->certificate;
+      auto certificate = DependencyCertificate::create(
+          certificate_identity(item.step), source.coverage(),
+          source.input_shapes(), source.rows(), limits_);
+      if (!certificate.ok())
+        return Answer(certificate.status());
+      copy->certificate = certificate.take_value();
+    } else {
+      copy->manifest = item.record->manifest;
+    }
+    for (const auto& child : children)
+      copy->upstream.push_back(rebound.at(child));
+    rebound.emplace(key, std::move(copy));
+  }
+  return Answer(rebound.at({root.get(), index}));
 }
 Status DependencyRecords::import(
     const std::shared_ptr<const DependencyRecord>& root) {

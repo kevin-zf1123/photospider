@@ -14,7 +14,10 @@ M0–M9 实现提交为 `fd796975` 至 `9193d9ac`。M10 提供
 joint on/off 消费者验证，以及参数化 kernel 的共享视图片段合并。
 2026-09-12 本地 static/shared 增量构建、每种链接 13 项 focused tests 和
 安装消费者已通过；片段合并后每种链接的 13 项最终检查同样通过。安装版 static 最大 radius
-workflow 生成完整 129×129 kernel，匹配核与卷积 oracle，kernel-only 图像读取为零。公共交付仍待下列最终门禁。
+workflow 生成完整 129×129 kernel，匹配核与卷积 oracle，kernel-only 图像读取为零。新的全面审查发现输入置换、投影 Region、分阶段内容身份、浮点环境四项契约缺口，
+以及随后发现的缓存克隆预算边界；现已修复，独立复审无剩余 blocker/required。
+static/shared 各 14 项检查和安装消费者通过，新增 owner 分裂缓存回归也通过。
+公共交付仍待 PR、CI、bot、合并等最终门禁。
 
 ## 执行顺序
 

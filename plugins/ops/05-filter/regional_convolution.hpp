@@ -10,6 +10,7 @@
 
 #include "00-foundation/basic_common.hpp"
 #include "00-foundation/multi_output.hpp"
+#include "data/input_validation.hpp"
 
 namespace ps::plugin_internal::convolution {
 inline Status invalid(const char* message) {
@@ -102,6 +103,10 @@ struct State {
   std::uint32_t channel = 0;
   State(bool image, std::uint32_t channel) : image(image), channel(channel) {}
   Result<DependencyPoll> poll(const DependencyPhase& phase) {
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Result<DependencyPoll>(Status{ErrorCode::OperationFailed,
+                                           "convolution floating environment"});
     const auto output = phase.query.output_index;
     const auto kernel_port = image ? output + 1 : 1;
     const auto name = prefix(output, image);

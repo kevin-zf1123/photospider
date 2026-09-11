@@ -41,12 +41,14 @@ struct DependencyCacheManifest final {
   std::vector<ValueFacet> facets;
   Footprint outputs;
   std::map<std::string, Footprint> support;
+  std::map<std::size_t, std::vector<PlanInput>> routes;
   std::string content_identity;
   std::vector<std::string> fragment_keys;
   std::uint64_t metadata_entries = 0, epoch = 0;
 };
 struct DependencyCacheProof final {
   std::map<std::string, Footprint> support;
+  std::map<std::size_t, std::vector<PlanInput>> routes;
   std::uint64_t metadata_entries = 0;
 };
 /** @brief Projects the actual retained record DAG with a single shared budget.
@@ -100,6 +102,11 @@ inline Result<DependencyCacheProof> dependency_cache_proof(
         !charge(record->upstream.size()))
       return Answer(Status{ErrorCode::ResourceExhausted, {}});
     seen.insert(record);
+    if (!result.routes.count(record->step)) {
+      if (!charge(2 + step.inputs.size() * 2))
+        return Answer(Status{ErrorCode::ResourceExhausted, {}});
+      result.routes.emplace(record->step, step.inputs);
+    }
     const auto needs =
         [&](const std::vector<DependencyNeed>& inputs) -> Status {
       if (!charge(inputs.size()))

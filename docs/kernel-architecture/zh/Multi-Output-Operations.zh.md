@@ -123,3 +123,7 @@ Singleton 在读取图像前检查点保存宿主拥有的核表；joint 共享�
 
 安装版四场景示例、执行次数、源读取集合与运行方法见
 [示例说明](../../../examples/multi_output_workflow/README.zh.md)。
+
+卷积和高斯核生成建立默认最近舍入/渐进下溢环境，结束后恢复调用者原环境。
+调用线程使用向上或向下舍入时，直接 generic field/kernel 输出仍与 typed image
+及 joint 路径一致；两种公开直接调用均有环境恢复回归。

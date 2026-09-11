@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cfenv>  // NOLINT(build/c++11)
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -421,6 +422,29 @@ Result<Value> gaussian_kernel(
   invocation.output_index = 1;
   return registry->invoke("image.gaussian_blur_with_kernel", invocation);
 }
+int convolution_environment() {
+  auto registry = make_default_operation_registry();
+  const std::vector<Value> inputs{samples({1, 1}, {.1F}),
+                                  samples({1, 1}, {.1F})};
+  const std::vector<Region> demands{inputs[0].region(), inputs[1].region()};
+  const std::map<std::string, ParameterValue> parameters{
+      {"anchor_y", std::int64_t{0}},
+      {"anchor_x", std::int64_t{0}},
+      {"boundary", std::string("zero")}};
+  OperationInvocation call(inputs, demands, parameters);
+  auto baseline =
+      registry->invoke("field.convolve", call).take_value().copy_bytes();
+  for (auto mode : {FE_UPWARD, FE_DOWNWARD}) {
+    const auto previous = std::fegetround();
+    PS_CHECK(std::fesetround(mode) == 0);
+    auto result = registry->invoke("field.convolve", call);
+    const bool restored = std::fegetround() == mode;
+    PS_CHECK(std::fesetround(previous) == 0);
+    PS_CHECK(restored && result.ok() &&
+             result.value().copy_bytes() == baseline);
+  }
+  return 0;
+}
 int gaussian_parameters() {
   auto registry = make_default_operation_registry();
   const std::vector<double> radii{0,
@@ -472,6 +496,17 @@ int gaussian_parameters() {
       std::memcpy(&boundary, result.value().bytes().data() + 2 * 4, 4);
       PS_CHECK(boundary > 0);
     }
+  }
+  const auto baseline =
+      gaussian_kernel(registry, 1.25, 1).take_value().copy_bytes();
+  for (const auto mode : {FE_UPWARD, FE_DOWNWARD}) {
+    const auto previous = std::fegetround();
+    PS_CHECK(std::fesetround(mode) == 0);
+    auto rounded = gaussian_kernel(registry, 1.25, 1);
+    const bool restored = std::fegetround() == mode;
+    PS_CHECK(std::fesetround(previous) == 0);
+    PS_CHECK(restored && rounded.ok() &&
+             rounded.value().copy_bytes() == baseline);
   }
   for (double sigma : {0., std::numeric_limits<double>::denorm_min()}) {
     auto impulse = gaussian_kernel(registry, 1.25, sigma);
@@ -589,6 +624,7 @@ int main() {
   PS_CHECK(split_horizontal() == 0);
   PS_CHECK(channel_convolution() == 0);
   PS_CHECK(gaussian_parameters() == 0);
+  PS_CHECK(convolution_environment() == 0);
   PS_CHECK(gaussian_workflow() == 0);
   return 0;
 }

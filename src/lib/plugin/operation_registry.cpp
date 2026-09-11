@@ -1865,9 +1865,16 @@ Result<Value> OperationRegistry::invoke_current(
   if (!resolved_result.ok())
     return Result<Value>(resolved_result.status());
   auto resolved_shape = resolved_result.take_value();
+  auto complete_metadata = invocation.input_metadata;
+  if (complete_metadata.empty()) {
+    complete_metadata.resize(metadata_count);
+    for (std::size_t i = 0; i < invocation.inputs.size(); ++i)
+      complete_metadata[positions[i]] = {invocation.inputs[i].descriptor(),
+                                         invocation.inputs[i].facets()};
+  }
   auto expected_output = expected_callback_output_descriptor(
       resolved_shape, invocation.inputs, invocation.parameters,
-      invocation.input_metadata);
+      complete_metadata);
   if (!expected_output.ok()) {
     return Result<Value>(expected_output.status());
   }
@@ -1940,11 +1947,7 @@ Result<Value> OperationRegistry::invoke_current(
     normalized.gpu = invocation.gpu;
     normalized.output_index = invocation.output_index;
     normalized.input_indices = projected_positions;
-    normalized.input_metadata = invocation.input_metadata;
-    if (normalized.input_metadata.empty())
-      for (const auto& input : invocation.inputs)
-        normalized.input_metadata.push_back(
-            {input.descriptor(), input.facets()});
+    normalized.input_metadata = std::move(complete_metadata);
     if (normalized.output_region.rank() == 0)
       normalized.output_region =
           Region::whole(expected_output.value().descriptor.shape);

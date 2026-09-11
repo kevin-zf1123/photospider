@@ -11,6 +11,7 @@
 
 #include "00-foundation/basic_common.hpp"
 #include "00-foundation/multi_output.hpp"
+#include "data/input_validation.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -42,6 +43,10 @@ struct Parameters {
 Result<Value> make_kernel(const Parameters& parameters,
                           const BufferAllocator& allocator,
                           const std::function<Status(std::uint64_t)>& consume) {
+  input_internal::Float32Environment environment;
+  if (!environment.active())
+    return Result<Value>(
+        Status{ErrorCode::OperationFailed, "kernel floating environment"});
   const auto side = static_cast<std::uint64_t>(parameters.side);
   auto status = consume(2 * side * side);
   if (!status.ok())
