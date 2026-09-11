@@ -13,6 +13,7 @@ void progressive_workflow();
 void dynamic_workflow();
 void demand_workflow();
 void sharing_workflow();
+void cache_workflow();
 void measure_workflow();
 
 namespace {
@@ -120,6 +121,7 @@ int main(int argc, char** argv) {
     dynamic_workflow();
     demand_workflow();
     sharing_workflow();
+    cache_workflow();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

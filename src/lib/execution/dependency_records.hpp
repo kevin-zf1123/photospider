@@ -57,8 +57,10 @@ class DependencyRecords final {
   Status append_legacy(std::size_t step, const Footprint& outputs,
                        const std::vector<Footprint>& inputs);
   Status append_empty(std::size_t step, const Footprint& outputs);
+  std::string observation_identity(std::size_t step,
+                                   const Footprint& samples) const;
   Result<std::shared_ptr<const DependencyRecord>> capture(
-      std::string identity, std::size_t step, const Footprint& samples,
+      std::size_t step, const Footprint& samples,
       std::vector<std::shared_ptr<const DependencyRecord>> upstream);
   Status import(const std::shared_ptr<const DependencyRecord>& record);
   Status output(const std::string& name, std::size_t step,
@@ -71,6 +73,7 @@ class DependencyRecords final {
   Status append_record(std::size_t step, Footprint outputs,
                        std::optional<DependencyCertificate> certificate,
                        std::vector<DependencyNeed> manifest);
+  std::string certificate_identity(std::size_t step) const;
   std::shared_ptr<ExecutionDependencies::Impl> impl_;
   FootprintLimits limits_;
   const ExecutionPlan* plan_;

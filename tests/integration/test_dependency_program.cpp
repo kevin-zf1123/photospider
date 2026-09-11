@@ -641,7 +641,8 @@ struct SiblingState {
 };
 int sibling_admission() {
   // U2: A and B each fit alone (1 MiB result + 3 MiB scratch), but retaining
-  // A while admitting B requires 5 MiB. Failure must retire actual owners.
+  // A while admitting B requires 5 MiB plus the live parent continuation.
+  // Failure must retire actual owners, including the waiting parent's state.
   constexpr std::uint64_t mib = 1024 * 1024;
   auto registry = std::make_shared<OperationRegistry>();
   unsigned calls[2]{};
@@ -693,7 +694,12 @@ int sibling_admission() {
   document.outputs = {{"sum", 3, "value"}};
   GraphContext graph(document);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext limited(registry, {1, false, 4, 4 * mib});
+  ExecutionContext no_state_room(registry, {1, false, 4, 4 * mib});
+  PS_CHECK(no_state_room.execute(plan).status().code ==
+           ErrorCode::ResourceExhausted);
+  PS_CHECK(calls[0] == 0 && calls[1] == 0);
+  ExecutionContext limited(registry,
+                           {1, false, 4, 4 * mib + sizeof(SiblingState)});
   auto failed = limited.execute(plan);
   PS_CHECK(failed.status().code == ErrorCode::ResourceExhausted);
   PS_CHECK(calls[0] == 1 && calls[1] == 0 && retained[0].expired());
@@ -709,12 +715,14 @@ int sibling_admission() {
   PS_CHECK(recovered.value().diagnostics.peak_live_bytes == 4 * mib);
   recovered = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
   PS_CHECK(retained[0].expired());
-  ExecutionContext sufficient(registry, {1, false, 4, 5 * mib});
+  ExecutionContext sufficient(registry,
+                              {1, false, 4, 5 * mib + sizeof(SiblingState)});
   auto complete = sufficient.execute(plan);
   PS_CHECK(complete.ok() && calls[0] == 3 && calls[1] == 1);
   double sum = 0;
   std::memcpy(&sum, complete.value().values.at("sum").bytes().data(), 8);
-  PS_CHECK(sum == 3 && complete.value().diagnostics.peak_live_bytes == 5 * mib);
+  PS_CHECK(sum == 3 && complete.value().diagnostics.peak_live_bytes ==
+                           5 * mib + sizeof(SiblingState));
   PS_CHECK(retained[0].expired() && retained[1].expired());
   return 0;
 }

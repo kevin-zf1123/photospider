@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "execution/dependency_cache.hpp"
 #include "execution/memory_budget.hpp"
 #include "photospider/execution/execution.hpp"
 
@@ -55,10 +56,12 @@ inline bool dynamic_opaque_output(const ExecutionPlan& plan,
 class ResultCache final {
  public:
   ResultCache(std::uint64_t limit, std::shared_ptr<MemoryBudget> budget,
-              std::size_t workers, std::size_t waiting)
+              std::size_t workers, std::size_t waiting,
+              std::uint64_t dependency_metadata_limit = 65536)
       : limit_(limit),
         budget_(std::move(budget)),
-        maximum_pending_(workers + waiting) {
+        maximum_pending_(workers + waiting),
+        dependency_metadata_limit_(dependency_metadata_limit) {
     try {
       for (std::size_t i = 0; i < workers; ++i)
         workers_.emplace_back([this] { worker(); });
@@ -101,11 +104,114 @@ class ResultCache final {
     std::lock_guard<std::mutex> lock(mutex_);
     return epoch_;
   }
+  std::uint64_t dependency_metadata_limit() const noexcept {
+    return dependency_metadata_limit_;
+  }
   void clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     ++epoch_;
     while (!entries_.empty())
       evict();
+    dependency_manifests_.clear();
+    dependency_metadata_ = 0;
+  }
+  /** @brief Copies bounded proof references without pinning cached pixels. */
+  std::vector<std::shared_ptr<const DependencyCacheManifest>>
+  dependency_candidates(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = dependency_manifests_.find(key);
+    return found == dependency_manifests_.end()
+               ? std::vector<std::shared_ptr<const DependencyCacheManifest>>{}
+               : found->second;
+  }
+  /** @brief Atomically acquires every fragment after external proof validation.
+   * @note Missing pixels or a changed epoch are a miss, never partial success.
+   */
+  std::vector<Value> dependency_values(
+      const DependencyCacheManifest& manifest) {
+    std::vector<Value> result;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (manifest.epoch != epoch_ || closing_) {
+      ++stats_.misses;
+      return result;
+    }
+    for (const auto& key : manifest.fragment_keys)
+      if (!entries_.count(key)) {
+        ++stats_.misses;
+        return result;
+      }
+    for (const auto& key : manifest.fragment_keys) {
+      auto& entry = entries_.at(key);
+      result.push_back(entry.value);
+      lru_.splice(lru_.end(), lru_, entry.order);
+    }
+    ++stats_.hits;
+    return result;
+  }
+  /** @brief Installs a complete proof only when all ordinary LRU pixels exist.
+   * @note Optional retention failure never fails the completed computation.
+   * Caller values must already belong to this context's accounted allocator.
+   */
+  void put_dependency(const std::string& key,
+                      std::shared_ptr<const DependencyCacheManifest> manifest,
+                      const std::vector<Value>& values) noexcept {
+    try {
+      if (!manifest || manifest->fragment_keys.size() != values.size() ||
+          values.empty() || values.size() > 4096 ||
+          !manifest->metadata_entries ||
+          manifest->metadata_entries > dependency_metadata_limit_)
+        return;
+      BufferAllocator domain({}, budget_);
+      std::set<const CpuStorage*> owners;
+      std::uint64_t capacity = 0;
+      for (const auto& value : values) {
+        if (!value.valid() || !domain.owns(*value.storage()))
+          return;
+        if (owners.insert(value.storage().get()).second) {
+          const auto bytes = value.storage()->capacity();
+          if (bytes > limit_ || capacity > limit_ - bytes)
+            return;
+          capacity += bytes;
+        }
+      }
+      for (std::size_t i = 0; i < values.size(); ++i)
+        put(manifest->fragment_keys[i], values[i], manifest->epoch);
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (manifest->epoch != epoch_ || closing_)
+        return;
+      for (const auto& pixel : manifest->fragment_keys)
+        if (!entries_.count(pixel))
+          return;
+      auto prior = dependency_manifests_.find(key);
+      if (prior != dependency_manifests_.end())
+        for (const auto& candidate : prior->second)
+          if (candidate->content_identity == manifest->content_identity &&
+              candidate->fragment_keys == manifest->fragment_keys)
+            return;
+      while (!dependency_manifests_.empty() &&
+             dependency_metadata_ >
+                 dependency_metadata_limit_ - manifest->metadata_entries) {
+        auto oldest = dependency_manifests_.begin();
+        for (const auto& removed : oldest->second)
+          dependency_metadata_ -= removed->metadata_entries;
+        dependency_manifests_.erase(oldest);
+      }
+      const auto found = dependency_manifests_.find(key);
+      auto candidates =
+          found == dependency_manifests_.end()
+              ? std::vector<std::shared_ptr<const DependencyCacheManifest>>{}
+              : found->second;
+      std::uint64_t removed = 0;
+      if (candidates.size() == 8) {
+        removed = candidates.front()->metadata_entries;
+        candidates.erase(candidates.begin());
+      }
+      candidates.push_back(std::move(manifest));
+      const auto added = candidates.back()->metadata_entries;
+      dependency_manifests_.insert_or_assign(key, std::move(candidates));
+      dependency_metadata_ = dependency_metadata_ - removed + added;
+    } catch (...) {
+    }
   }
   Value get(const std::string& key) {
     if (key.empty())
@@ -367,6 +473,11 @@ class ResultCache final {
   const std::uint64_t limit_;
   std::shared_ptr<MemoryBudget> budget_;
   const std::size_t maximum_pending_;
+  const std::uint64_t dependency_metadata_limit_;
+  std::uint64_t dependency_metadata_ = 0;
+  std::map<std::string,
+           std::vector<std::shared_ptr<const DependencyCacheManifest>>>
+      dependency_manifests_;
   mutable std::mutex mutex_;
   std::condition_variable changed_;
   bool closing_ = false;

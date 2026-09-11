@@ -36,8 +36,13 @@ The `shared` scenario submits two exact waiters against one immutable bundle.
 A bounded barrier in a registered identity callback lets the second waiter join
 the actual in-flight observation before the first is cancelled. Exactly one
 callback runs; the second waiter still receives 7 and complete identity evidence.
-Shared active work is available with result retention disabled. Completed
-dependency pixel-cache reuse remains unfinished.
+Shared active work is available with result retention disabled.
+
+The `cache` scenario enables the existing result LRU and reuses two exact
+observations. An unrelated data edit still hits both. A changed control with
+unchanged numeric output recomputes both and installs the new data edge. Clearing
+cached pixels leaves that new dirty relation available in the returned evidence.
+The independent radius predicate still gives values `[1,5]`.
 
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
@@ -54,6 +59,7 @@ radius: scatter_before=1, scatter_after=5, gather=1, frozen=1
 dependencies: radius[3] -> scatter{0}, gather{}, new_data_edge=present, frozen_data_edge=absent
 demand: Q={0,4}, latest=[10,14], frozen=[1,5], generation=3, accumulated_dirty={0,4}, release=ok
 shared: callbacks=1, first=Cancelled, second=7, evidence=present
+cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, values=[1,5], cleared_pixels=0, data3_dirty={0,4}
 ```
 
 It also builds as a standalone installed public package consumer:

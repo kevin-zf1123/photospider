@@ -27,6 +27,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
 #include "execution/dependency_records.hpp"
 #include "execution/disk_cache.hpp"
@@ -882,6 +883,9 @@ struct ExecutionContext::Impl final {
     dependency_flights =
         std::make_unique<execution_internal::DependencyFlights>(
             requested.maximum_dependency_flights);
+    if (!requested.maximum_dependency_cache_metadata ||
+        requested.maximum_dependency_cache_metadata > 1048576)
+      throw std::invalid_argument("invalid dependency cache metadata limit");
     if (requested.result_cache_bytes > requested.maximum_live_bytes)
       throw std::invalid_argument("cache limit exceeds execution budget");
     if (requested.disk_cache) {
@@ -897,7 +901,8 @@ struct ExecutionContext::Impl final {
       cache = std::make_unique<execution_internal::ResultCache>(
           requested.result_cache_bytes, budget,
           std::min<std::uint32_t>(cpu_worker_count, 4),
-          maximum_waiting_callbacks);
+          maximum_waiting_callbacks,
+          requested.maximum_dependency_cache_metadata);
     if (gpu_available) {
       gpu_pool = std::make_unique<ThreadPool>(1U, Backend::Gpu);
     }
@@ -1154,7 +1159,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const DemandQuery* requested = nullptr,
       std::map<std::string, ValueFragments>* fragment_outputs = nullptr,
       const std::string& snapshot_identity = {},
-      execution_internal::DependencyFlights* flights = nullptr) {
+      execution_internal::DependencyFlights* flights = nullptr,
+      execution_internal::ResultCache* dependency_cache = nullptr) {
     const auto started = std::chrono::steady_clock::now();
     std::function<ErrorCode()> shared_stop;
     std::function<void(Status)> abort_flights;
@@ -1203,6 +1209,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       return budget->reserve(bytes, {}, observation);
     };
     std::uint64_t work = options.maximum_dependency_work;
+    std::uint64_t cache_work = options.maximum_dependency_cache_work;
+    const auto cache_epoch = dependency_cache ? dependency_cache->epoch() : 0;
     const auto consume = [&](std::uint64_t count = 1) -> Status {
       if (stop() != ErrorCode::Ok)
         return Status{stop(), {}};
@@ -1254,6 +1262,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::optional<ValueFragments> complete;
       std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
       std::string record_identity;
+      bool cache_hit = false;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
           upstream;
       std::set<std::string> upstream_ids;
@@ -1295,31 +1304,118 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     const execution_internal::DependencyFlightValue>>(status));
       };
     }
-    const auto observation_key = [&](std::size_t index,
-                                     const Footprint& outputs) {
-      content_internal::Sha256 hash;
-      hash.text("photospider.dependency-flight.v1");
-      hash.text(plan.digest().value);
-      hash.text(identity);
-      hash.integer(plan.steps()[index].node_id);
-      hash.integer(plan.tile_width());
-      hash.integer(plan.tile_height());
-      hash.integer(options.dependencies.sets.maximum_boxes);
-      hash.integer(options.dependencies.sets.maximum_work);
-      hash.integer(options.dependencies.maximum_work);
-      hash.integer(options.dependencies.maximum_state_bytes);
-      hash.integer(options.dependencies.maximum_stages);
-      hash.integer(options.maximum_dependency_work);
-      for (const auto n : outputs.shape())
-        hash.integer(n);
-      hash.integer(outputs.boxes().size());
-      for (const auto& box : outputs.boxes())
-        for (const auto& d : box.dimensions()) {
-          hash.integer(d.offset);
-          hash.integer(d.extent);
-        }
-      return hash.finish();
-    };
+    const auto observation_key =
+        [&](std::size_t index, const Footprint& outputs, bool snapshot = true) {
+          content_internal::Sha256 hash;
+          hash.text(snapshot ? "photospider.dependency-flight.v1"
+                             : "photospider.dependency-cache-template.v1");
+          hash.text(plan.digest().value);
+          if (snapshot)
+            hash.text(identity);
+          hash.integer(plan.steps()[index].node_id);
+          hash.integer(plan.tile_width());
+          hash.integer(plan.tile_height());
+          hash.integer(options.dependencies.sets.maximum_boxes);
+          hash.integer(options.dependencies.sets.maximum_work);
+          hash.integer(options.dependencies.maximum_work);
+          hash.integer(options.dependencies.maximum_state_bytes);
+          hash.integer(options.dependencies.maximum_stages);
+          hash.integer(options.maximum_dependency_work);
+          for (const auto n : outputs.shape())
+            hash.integer(n);
+          hash.integer(outputs.boxes().size());
+          for (const auto& box : outputs.boxes())
+            for (const auto& d : box.dimensions()) {
+              hash.integer(d.offset);
+              hash.integer(d.extent);
+            }
+          return hash.finish();
+        };
+    const auto retain_cache =
+        [&](std::size_t index,
+            const std::shared_ptr<const execution_internal::DependencyRecord>&
+                record,
+            const ValueFragments& completed) {
+          // Retention is optional. Precharge the actual owner DAG before any
+          // walk/copy; cache exhaustion cannot fail a valid computation.
+          try {
+            auto collected = execution_internal::dependency_cache_proof(
+                plan, record, dependency_cache->dependency_metadata_limit(),
+                &cache_work, &diagnostics.dependency_cache_records_visited,
+                limits);
+            if (!collected.ok())
+              return;
+            auto proof = collected.take_value();
+            const auto charge = [&](std::uint64_t count) {
+              if (count > cache_work) {
+                cache_work = 0;
+                return false;
+              }
+              cache_work -= count;
+              const auto cap = dependency_cache->dependency_metadata_limit();
+              if (count > cap || proof.metadata_entries > cap - count)
+                return false;
+              proof.metadata_entries += count;
+              return true;
+            };
+            if (!charge(8 + completed.descriptor().shape.size() +
+                        completed.coverage().boxes().size() +
+                        completed.fragments().size() * 2))
+              return;
+            for (const auto& facet : completed.facets())
+              if (!charge(1 + facet.key.size() + facet.payload.size()))
+                return;
+            auto digest = dependency_stage<std::string>(
+                pool, admission,
+                [&] {
+                  return execution_internal::dependency_content_identity(
+                      bindings, proof.support, &cache_work, active_token());
+                },
+                pump);
+            if (!digest.ok())
+              return;
+            auto manifest =
+                std::make_shared<execution_internal::DependencyCacheManifest>();
+            manifest->record = record;
+            manifest->descriptor = completed.descriptor();
+            manifest->facets = completed.facets();
+            manifest->outputs = completed.coverage();
+            manifest->support = std::move(proof.support);
+            manifest->content_identity = digest.take_value();
+            manifest->epoch = cache_epoch;
+            manifest->metadata_entries = proof.metadata_entries;
+            const auto template_key =
+                observation_key(index, completed.coverage(), false);
+            std::vector<Value> pixels;
+            BufferAllocator domain({}, budget);
+            for (const auto& fragment : completed.fragments()) {
+              if (domain.owns(*fragment.storage())) {
+                pixels.push_back(fragment);
+              } else {
+                auto bytes =
+                    region_bytes(fragment.descriptor(), fragment.region());
+                if (!bytes.ok())
+                  return;
+                auto reserved = reserve(bytes.value());
+                if (!reserved.ok())
+                  return;
+                Seal seal{reserved.take_value()};
+                auto copied = transfer_value(
+                    fragment, seal.reservation->allocator(), true);
+                if (!copied.ok())
+                  return;
+                pixels.push_back(copied.take_value());
+              }
+              manifest->fragment_keys.push_back(
+                  execution_internal::dependency_fragment_key(
+                      template_key, manifest->content_identity,
+                      fragment.region()));
+            }
+            dependency_cache->put_dependency(template_key, std::move(manifest),
+                                             pixels);
+          } catch (...) {
+          }
+        };
     struct Query {
       std::size_t step;
       std::string name;
@@ -1377,12 +1473,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     [](const auto& q) { return !q.second.empty(); });
     std::vector<Query> queries;
     std::vector<bool> shareable(plan.steps().size(), false);
+    std::vector<bool> cacheable(plan.steps().size(), false);
     for (std::size_t i = 0; i < plan.steps().size(); ++i) {
       const auto& step = plan.steps()[i];
       shareable[i] = step.traits.deterministic && step.traits.side_effect_free;
+      cacheable[i] = shareable[i] && step.traits.cacheable;
       for (const auto& input : step.inputs)
-        if (const auto* producer = std::get_if<PlanStepInput>(&input))
+        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
           shareable[i] = shareable[i] && shareable[producer->step_index];
+          cacheable[i] = cacheable[i] && cacheable[producer->step_index];
+        }
     }
     std::map<std::size_t, ValueFragments> whole_records;
     std::map<std::size_t,
@@ -1390,7 +1490,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         whole_evidence;
     if (nonempty) {
       for (std::size_t i = 0; i < plan.steps().size(); ++i) {
+        // Pure Whole records are resolved lazily through their real users.
+        // Eager evaluation would bypass a valid descendant cache proof and
+        // could fail admission for pixels that no current query needs.
         if (plan.steps()[i].whole_boundary &&
+            !plan.steps()[i].traits.side_effect_free &&
             plan.steps()[i].traits.observation_kind !=
                 ObservationKind::RequestRecord) {
           auto all =
@@ -1474,10 +1578,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         const auto output = metadata(frame.target);
         if (returned) {
           for (auto& record : returned_records) {
-            if (!frame.upstream_ids.count(record->identity)) {
+            const auto record_id =
+                records.observation_identity(record->step, record->samples);
+            if (!frame.upstream_ids.count(record_id)) {
               if (frame.upstream.size() >= limits.maximum_boxes)
                 return fail(Status{ErrorCode::ResourceExhausted, {}});
-              frame.upstream_ids.insert(record->identity);
+              frame.upstream_ids.insert(record_id);
               frame.upstream.push_back(std::move(record));
             }
           }
@@ -1503,13 +1609,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 (frame.unit || frame.terminal_allowed) &&
                 !frame.record_identity.empty()) {
               auto captured =
-                  records.capture(frame.record_identity, producer->step_index,
-                                  frame.outputs, std::move(frame.upstream));
+                  records.capture(producer->step_index, frame.outputs,
+                                  std::move(frame.upstream));
               if (!captured.ok())
                 return fail(captured.status());
               frame.record = captured.take_value();
             }
             if (frame.flight && frame.flight->producer()) {
+              if (dependency_cache && cacheable[producer->step_index] &&
+                  !frame.cache_hit && cache_work)
+                retain_cache(producer->step_index, frame.record,
+                             *frame.complete);
               auto value =
                   std::make_shared<execution_internal::DependencyFlightValue>();
               value->value = *frame.complete;
@@ -1758,6 +1868,53 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               continue;
             }
             limits.cancellation = active_token();
+            if (dependency_cache && cacheable[step_index] && cache_work) {
+              const auto template_key =
+                  observation_key(step_index, frame.outputs, false);
+              for (const auto& candidate :
+                   dependency_cache->dependency_candidates(template_key)) {
+                if (candidate->metadata_entries > cache_work) {
+                  cache_work = 0;
+                  break;
+                }
+                cache_work -= candidate->metadata_entries;
+                auto digest = dependency_stage<std::string>(
+                    pool, admission,
+                    [&] {
+                      return execution_internal::dependency_content_identity(
+                          bindings, candidate->support, &cache_work,
+                          active_token());
+                    },
+                    pump);
+                if (!digest.ok()) {
+                  if (digest.status().code == ErrorCode::Cancelled)
+                    return fail(digest.status());
+                  break;
+                }
+                if (digest.value() != candidate->content_identity)
+                  continue;
+                auto pixels = dependency_cache->dependency_values(*candidate);
+                if (pixels.empty())
+                  continue;
+                auto cached = ValueFragments::create(
+                    candidate->descriptor, candidate->facets,
+                    candidate->outputs, std::move(pixels), limits);
+                if (!cached.ok())
+                  continue;
+                status = records.import(candidate->record);
+                if (!status.ok())
+                  return fail(status);
+                frame.complete = cached.take_value();
+                frame.record = candidate->record;
+                frame.cache_hit = true;
+                frame.state = Frame::State::Complete;
+                ++diagnostics.cache_hits;
+                diagnostics.selected_backends[step.node_id] = step.backend;
+                break;
+              }
+              if (frame.state == Frame::State::Complete)
+                continue;
+            }
           }
           frame.parts.clear();
           frame.next = 0;
@@ -2072,6 +2229,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     diagnostics.peak_live_bytes = peaks.first;
     diagnostics.planned_peak_bytes = peaks.second;
     diagnostics.execute_us = duration_us(started);
+    diagnostics.dependency_cache_work =
+        options.maximum_dependency_cache_work - cache_work;
     result.dependencies = std::move(records).finish();
     if (!sink && !fragment_outputs)
       diagnostics.result_digest = result_digest(result.values);
@@ -3443,7 +3602,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
           impl_->cache->reclaim_for(bytes);
       },
       &query, &result.values, frozen.execution_identity_,
-      impl_->dependency_flights.get());
+      impl_->dependency_flights.get(), impl_->cache.get());
   if (!run.ok())
     return failure(run.status());
   auto completed = run.take_value();

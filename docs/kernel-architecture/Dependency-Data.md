@@ -121,18 +121,18 @@ queries. A terminal request executes once at full original Q. The direct
 `OperationRegistry::invoke` convenience entry follows the same observation rule
 with already supplied immutable input Values. Frozen execution retains its
 captured graph and input owners. CPU dependency execution currently uses a
-serial ready order. Legacy Whole/effect boundaries run once per Run, including
-unconnected effects. Atomic streams deliver configured tiles and release each
+serial ready order. Legacy Whole records run at most once per Run when actually requested;
+unconnected effects still execute once. Pure Whole ancestry is resolved lazily
+so a valid descendant cache hit need not rematerialize its pixels. Atomic streams deliver configured tiles and release each
 tile before advancing; terminal streams preserve full original Q. This respects the caller's maximum parallelism bound.
 
 The public progressive workflow and `test_dependency_program` exercise real
 source discovery, legacy-to-staged-to-legacy composition, full-Q terminal
 behavior, one-worker progress, finite admission, cancellation and frozen input
 ownership. Successful dependency Runs now publish immutable structural evidence as described
-below. Context-owned live demand replacement, shared Flights, dependency result
-cache reuse and native GPU fragment access remain part of the ongoing G4
-implementation. The direct certificate API is implemented independently
-of those pending cache/scheduler integrations.
+below. Live demand replacement, shared Flights and dependency result cache
+reuse are implemented as described below and in [Cache Model](Cache-Model.md).
+Native GPU fragment access remains ongoing G4 implementation.
 
 The [dependency sampling operations](Dependency-Sampling.md) implement STMap and
 dynamic radius gather/scatter. Optional pure static validators run during
@@ -278,9 +278,9 @@ and one coordinator slot. `DemandConfig::maximum_metadata_entries` bounds each
 handle's retained query/evidence/dirty metadata (1..1048576, default 65536).
 The handle owns no workers or pixel cache. Exact demand calls use context-owned
 Flights for overlapping active observations in the same immutable bundle, through
-the existing CPU pool, WaitingAdmission and accounted allocator. Completed
-dependency content-cache reuse and GPU fragment execution remain unfinished G4
-integration.
+the existing CPU pool, WaitingAdmission and accounted allocator. Completed dependency content-cache reuse uses the existing pixel LRU with
+bounded structural proofs, as described in [Cache Model](Cache-Model.md). GPU
+fragment execution remains unfinished G4 integration.
 
 `test_execution_demand` covers sparse results, typed snapshots, continuous dirty
 accumulation, frozen isolation, stale publication, independent cancellation and
@@ -290,10 +290,12 @@ endpoint scatter sums before/after two replacements against a direct oracle.
 
 The U2 sibling working-set counterexample is a real `test_dependency_program`
 workflow: A and B each allocate a 1 MiB output and 3 MiB scratch from the context
-allocator. With 4 MiB, A completes but B is rejected before its callback; A's
-storage owner expires on failure. The same context can then execute A with an
-observed 4 MiB allocation peak. With 5 MiB, the parent receives both results and
-returns 3, with an observed 5 MiB peak. This verifies finite rejection and actual
+allocator. The lazily resolved children also retain the parent's one-byte
+continuation. Exactly 4 MiB rejects A before its callback; 4 MiB plus that state
+lets A complete but rejects B, and A's storage owner expires on failure. The same
+context can then execute A alone with an observed 4 MiB peak. With 5 MiB plus the
+state, the parent receives both results and returns 3, with the corresponding
+observed allocation peak. This verifies finite rejection and actual
 lease retirement for that execution order, not an optimal scheduling guarantee.
 
 ## Shared exact-observation Flights
@@ -319,8 +321,7 @@ Last-waiter cancellation prevents new joins; a later request claims a new
 FlightId. Late completion removes the directory entry only if its ID still
 matches, so retiring P0 cannot erase P1. Context shutdown cancels active producers
 and drains demand calls before destroying workers. `clear_result_cache()` also
-advances the dependency epoch; completed dependency cache retention is not yet
-enabled. `maximum_dependency_flights` separately bounds active Flights and their
+advances the dependency epoch and invalidates completed retention eligibility. `maximum_dependency_flights` separately bounds active Flights and their
 total subscribers, each by the same configured count (1..1048576, default 65536).
 Exhaustion returns ResourceExhausted without a wait for metadata capacity.
 

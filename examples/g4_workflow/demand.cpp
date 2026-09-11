@@ -76,3 +76,58 @@ void demand_workflow() {
   std::cout << "demand: Q={0,4}, latest=[10,14], frozen=[1,5], "
                "generation=3, accumulated_dirty={0,4}, release=ok\n";
 }
+
+void cache_workflow() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  auto data = values<double>(ElementType::Float64, {1, 2, 3, 0, 5});
+  auto radius = values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0});
+  WorkflowDocument document;
+  document.inputs = {
+      {1, "data", data.descriptor(), data.region(), data.layout(), {}},
+      {2, "radius", radius.descriptor(), radius.region(), radius.layout(), {}}};
+  document.nodes = {{1,
+                     "numeric.radius_scatter",
+                     {WorkflowInputReference{1}, WorkflowInputReference{2}},
+                     {}}};
+  document.outputs = {{"sum", 1, "value"}};
+  auto operations = make_default_operation_registry();
+  GraphContext graph(document);
+  auto plan = checked(Compiler(operations).compile(graph)).plan;
+  ExecutionContext context(operations, {1, false, 8, 4096, 2048});
+  ExecutionBindings bindings{{{"data", data}, {"radius", radius}}};
+  auto demand = checked(context.open_demand(plan, bindings));
+  const auto q = checked(
+      Footprint::from_regions({5}, {Region({{0, 1}}), Region({{4, 1}})}));
+  const DemandQuery query{{"sum", q}};
+  require(checked(demand.request(query)).diagnostics.cache_hits == 0);
+  auto warm = checked(demand.request(query));
+  require(warm.diagnostics.cache_hits == 2 &&
+          warm.diagnostics.operation_timings.empty());
+  bindings.inputs[0].value =
+      values<double>(ElementType::Float64, {1, 2, 777, 0, 5});
+  require(checked(demand.replace_bindings(bindings))
+              .potential_dirty.at("sum")
+              .empty());
+  require(checked(demand.request(query)).diagnostics.cache_hits == 2);
+  bindings.inputs[1].value =
+      values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0});
+  require(
+      checked(demand.replace_bindings(bindings)).potential_dirty.at("sum") ==
+      q);
+  auto changed = checked(demand.request(query));
+  require(changed.diagnostics.cache_hits == 0);
+  // Direct radius predicate: source 3 now contributes zero to both endpoints.
+  double first = 0, last = 0;
+  require(changed.values.at("sum").read({0}, &first, 8).ok());
+  require(changed.values.at("sum").read({4}, &last, 8).ok());
+  require(first == 1 && last == 5);
+  context.clear_result_cache();
+  const auto data3 = checked(Footprint::from_regions({5}, {Region({{3, 1}})}));
+  require(context.cache_statistics().retained_bytes == 0);
+  require(
+      checked(changed.dependencies.potential_dirty("data", data3)).at("sum") ==
+      q);
+  std::cout
+      << "cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, "
+         "values=[1,5], cleared_pixels=0, data3_dirty={0,4}\n";
+}

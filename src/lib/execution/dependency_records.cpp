@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "data/content_digest.hpp"
 #include "execution/dependency_dirty.hpp"
 
 namespace ps {
@@ -504,6 +505,14 @@ Status DependencyRecords::append_record(
   if (limits_.cancellation.cancelled())
     return Status{ErrorCode::Cancelled, {}};
   const auto& step = plan_->steps().at(index);
+  if (certificate) {
+    auto rebound = DependencyCertificate::create(
+        certificate_identity(index), certificate->coverage(),
+        certificate->input_shapes(), certificate->rows(), limits_);
+    if (!rebound.ok())
+      return rebound.status();
+    certificate = rebound.take_value();
+  }
   const bool terminal =
       step.traits.observation_kind == ObservationKind::RequestRecord;
   ExecutionDependencies::Impl::Record candidate{
@@ -532,9 +541,23 @@ Status DependencyRecords::append_record(
         return samples.status();
       candidate.samples = samples.take_value();
     } else {
-      // Whole records execute once, so repeated publication cannot introduce
-      // unverified replacement manifests.
-      return invalid("duplicate indivisible dependency record");
+      // A descendant hit may import Whole evidence after its pixels were
+      // evicted. A later actual request can recompute those pixels once.
+      // Reuse only an identical complete manifest, never replace support.
+      if (ExecutionDependencies::Impl::weight(old) > limits_.maximum_work ||
+          ExecutionDependencies::Impl::weight(candidate) > limits_.maximum_work)
+        return Status{ErrorCode::ResourceExhausted, {}};
+      if (old.certificate || candidate.certificate ||
+          old.samples != candidate.samples ||
+          old.manifest.size() != candidate.manifest.size() ||
+          !std::equal(old.manifest.begin(), old.manifest.end(),
+                      candidate.manifest.begin(),
+                      [](const auto& a, const auto& b) {
+                        return a.port == b.port && a.roles == b.roles &&
+                               a.samples == b.samples && a.tags == b.tags;
+                      }))
+        return invalid("conflicting indivisible dependency record");
+      return Status::success();
     }
     const auto new_weight = ExecutionDependencies::Impl::weight(candidate);
     const auto remainder =
@@ -636,13 +659,12 @@ std::uint64_t DependencyRecords::metadata_size(
   return evidence.impl_ ? evidence.impl_->entries : 0;
 }
 Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
-    std::string identity, std::size_t index, const Footprint& samples,
+    std::size_t index, const Footprint& samples,
     std::vector<std::shared_ptr<const DependencyRecord>> upstream) {
   using Answer = Result<std::shared_ptr<const DependencyRecord>>;
   if (limits_.cancellation.cancelled())
     return Answer(Status{ErrorCode::Cancelled, {}});
-  if (identity.empty() || identity.size() > 4096 ||
-      index >= plan_->steps().size())
+  if (index >= plan_->steps().size())
     return Answer(invalid("invalid direct record identity"));
   const auto node = plan_->steps()[index].node_id;
   const ExecutionDependencies::Impl::Record* selected = nullptr;
@@ -665,7 +687,7 @@ Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
   auto result = std::shared_ptr<DependencyRecord>(new DependencyRecord(),
                                                   DependencyRecord::retire);
-  result->identity = std::move(identity);
+  result->identity = observation_identity(index, samples);
   result->step = index;
   result->samples = samples;
   if (selected->certificate) {
@@ -703,7 +725,8 @@ Status DependencyRecords::import(
     pending.pop_back();
     if (!record || record->step >= plan_->steps().size())
       return invalid("invalid imported dependency record");
-    if (imported_.count(record->identity))
+    const auto identity = observation_identity(record->step, record->samples);
+    if (imported_.count(identity))
       continue;
     if (imported_.size() >= limits_.maximum_boxes ||
         pending.size() >= limits_.maximum_boxes ||
@@ -724,9 +747,30 @@ Status DependencyRecords::import(
                                 record->certificate, record->manifest);
     if (!status.ok())
       return status;
-    imported_.insert(record->identity);
+    imported_.insert(identity);
   }
   return Status::success();
+}
+std::string DependencyRecords::certificate_identity(std::size_t index) const {
+  content_internal::Sha256 hash;
+  hash.text("photospider.execution-certificate.v1");
+  hash.text(plan_->digest().value);
+  hash.text(identity_);
+  hash.integer(plan_->steps().at(index).node_id);
+  return hash.finish();
+}
+std::string DependencyRecords::observation_identity(
+    std::size_t index, const Footprint& samples) const {
+  content_internal::Sha256 hash;
+  hash.text("photospider.execution-record.v1");
+  hash.text(certificate_identity(index));
+  hash.integer(samples.boxes().size());
+  for (const auto& box : samples.boxes())
+    for (const auto& dimension : box.dimensions()) {
+      hash.integer(dimension.offset);
+      hash.integer(dimension.extent);
+    }
+  return hash.finish();
 }
 Status DependencyRecords::output(const std::string& name, std::size_t index,
                                  const Footprint& samples) {

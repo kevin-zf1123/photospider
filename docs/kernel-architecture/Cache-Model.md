@@ -153,3 +153,53 @@ Typed native residency uses a public pure byte-copy operation: each of the nine
 image descriptors must preserve exact bytes/facets, dispatch once cold and zero
 times on a cache hit. This validates storage and reuse without introducing a
 color conversion operation. Existing native cancellation and budget cases remain.
+
+## G4 exact dependency content cache
+
+`DemandHandle::request` and `execute_fragments` retain successful exact
+observations in the same context pixel LRU when `result_cache_bytes` is positive.
+The cache remains process-local; this path does not write dependency records to
+disk. Every ancestor must be deterministic, side-effect-free and cacheable. A
+manifest holds structural record links, the complete transitive source
+Data/Control/Validation footprint, content identity and fragment keys. It retains
+no input/snapshot/pixel owner. Source bytes from all old positive and negative
+control evidence must match the current immutable bindings before any pixels
+are reused. Equal output bytes alone cannot establish that match.
+
+The candidate template binds the plan, node, exact Q and resource policy, while
+source identity uses the canonical snapshot v2 framing for all four dtypes.
+Value and snapshot sources use the same logical bytes, independent of block or
+stride layout. Snapshot/session identity is provenance only; deterministic
+programs cannot derive values or dependencies from its spelling. The template is
+conservative across graph/plan changes. Up to eight bounded content versions may
+be retained per template. A hit imports per-output associations under the current
+bundle identity, allowing cached and newly computed rows to merge safely.
+
+Every fragment key includes its actual logical Region. Legal repartitioning
+cannot mix old and new overlapping pieces after partial eviction. All keys must
+still exist in the current epoch before the LRU acquires their Values together;
+any missing piece makes the candidate a miss. Only the producer can populate the
+captured epoch. `clear_result_cache` prevents its late completion from backfilling
+that epoch. Foreign output storage is copied through the existing accounted
+allocator before retention. Active results and demand evidence survive eviction
+or clear without retaining cache eligibility.
+
+`maximum_dependency_cache_metadata` bounds retained proof units (1..1048576,
+default 65536). Accounting traverses actual distinct record owners, including
+recomputed equal observations, their rows/tags/coordinates and source witnesses;
+shared pointer owners within one manifest count once. It does not substitute the
+smaller merged public certificate size. `maximum_dependency_cache_work` supplies
+one separate optional per-Run budget (default 1048576; zero disables this cache).
+Traversal/copy/hash work is charged before execution; exact-set normalization gets
+a precharged finite allowance. Optional proof exhaustion skips reuse/retention
+and continues computation. `dependency_cache_records_visited` counts newly visited
+proof records; `dependency_cache_work` reports consumed/precharged work units,
+including reserved normalization work rather than CPU instructions or time.
+
+The G4 public workflow checks unchanged-content hits, unrelated edits, changed
+control with equal numeric output, and retained dirty evidence after clear.
+Focused regressions additionally cover snapshot/Value bit identity, sparse
+mixed hit/miss certificates, frozen versions, adaptive fragment partitions after
+partial eviction, duplicate record owners, tiny shared proof budgets, and a real
+producer completing after clear. These checks do not complete ordered-scan carry
+reuse or native GPU fragment execution.

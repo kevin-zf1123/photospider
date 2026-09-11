@@ -224,15 +224,16 @@ struct StagedGate {
 };
 std::shared_ptr<OperationRegistry> gated_registry(
     const std::shared_ptr<Gate>& gate, bool staged = false,
-    std::shared_ptr<std::atomic<unsigned>> effects = {},
-    bool terminal = false) {
+    std::shared_ptr<std::atomic<unsigned>> effects = {}, bool terminal = false,
+    bool whole = false) {
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition op;
   op.key = "wait";
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
   op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
-  op.traits.region_rule = OperationRegionRule::Elementwise;
+  op.traits.region_rule =
+      whole ? OperationRegionRule::Whole : OperationRegionRule::Elementwise;
   op.callback = [gate](const OperationInvocation& call) -> Result<Value> {
     ++gate->active;
     struct Active {
@@ -270,7 +271,12 @@ std::shared_ptr<OperationRegistry> gated_registry(
     auto output = MutableValue::allocate(call.inputs[0].descriptor(),
                                          call.output_region, call.allocator)
                       .take_value();
-    std::memcpy(output.data(), &value, 8);
+    for (std::uint64_t i = 0; i < call.output_region.dimensions()[0].extent;
+         ++i) {
+      const auto source = call.inputs[0].byte_address({at + i}).take_value();
+      std::memcpy(output.data() + i * 8, call.inputs[0].bytes().data() + source,
+                  8);
+    }
     return std::move(output).publish();
   };
   if (staged) {
@@ -776,7 +782,7 @@ int shared_terminal() {
   document.inputs[0].region = Region::whole({3});
   GraphContext graph(document);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096});
+  ExecutionContext context(registry, {2, false, 8, 4096, 512});
   auto demand =
       context
           .open_demand(
@@ -807,6 +813,252 @@ int shared_terminal() {
   PS_CHECK(c.value().values.at("y").read({0}, &value, 8).ok() && value == 8);
   PS_CHECK(b.value().diagnostics.shared_computations == 1 &&
            c.value().diagnostics.shared_computations == 0);
+  auto warm = demand.request({{"y", wide}});
+  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 1 &&
+           gate->entered == 2);
+  PS_CHECK(!warm.value().dependencies.restrict({{"y", point(0, 3)}}).ok());
+  auto changed = demand.replace_bindings(
+      {{{"x", values<double>(ElementType::Float64, {7, 8, 222})}}});
+  PS_CHECK(changed.ok() && changed.value().potential_dirty.at("y").empty());
+  auto content_hit = demand.request({{"y", wide}});
+  PS_CHECK(content_hit.ok() &&
+           content_hit.value().diagnostics.cache_hits == 1 &&
+           gate->entered == 2);
+  PS_CHECK(content_hit.value().values.at("y").read({2}, &value, 8).ok() &&
+           value == 9);
+  return 0;
+}
+int cache_work_and_epoch() {
+  auto gate = std::make_shared<Gate>();
+  auto registry = gated_registry(gate, true);
+  auto document = gate_document();
+  for (std::uint64_t i = 2; i <= 64; ++i)
+    document.nodes.push_back(
+        {i, "wait", {WorkflowNodeOutput{i - 1, "value"}}, {}});
+  document.outputs = {{"y", 64, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {1, false, 8, 65536, 32768});
+  auto demand =
+      context
+          .open_demand(plan,
+                       {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+          .take_value();
+  gate->open();
+  ExecutionOptions options;
+  options.maximum_dependency_cache_work = 1;
+  auto bounded = demand.request({{"y", point(0, 2)}}, {}, options);
+  PS_CHECK(bounded.ok() && gate->entered == 64);
+  PS_CHECK(bounded.value().diagnostics.dependency_cache_records_visited == 0 &&
+           bounded.value().diagnostics.dependency_cache_work == 1);
+  PS_CHECK(context.cache_statistics().retained_bytes == 0);
+  // A real outstanding producer captured the old epoch. Its successful late
+  // completion cannot repopulate a cleared cache, even with a live waiter.
+  GraphContext short_graph(gate_document());
+  auto short_plan = Compiler(registry).compile(short_graph).take_value().plan;
+  auto short_demand =
+      context
+          .open_demand(short_plan,
+                       {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+          .take_value();
+  {
+    std::lock_guard<std::mutex> lock(gate->mutex);
+    gate->release = false;
+    gate->entered = 0;
+  }
+  auto pending = std::async(std::launch::async, [&] {
+    return short_demand.request({{"y", point(0, 2)}});
+  });
+  PS_CHECK(gate->await(1));
+  context.clear_result_cache();
+  gate->open();
+  PS_CHECK(pending.get().ok() &&
+           context.cache_statistics().retained_bytes == 0);
+  PS_CHECK(short_demand.request({{"y", point(0, 2)}})
+               .value()
+               .diagnostics.cache_hits == 0);
+  PS_CHECK(short_demand.request({{"y", point(0, 2)}})
+               .value()
+               .diagnostics.cache_hits == 1);
+  PS_CHECK(gate->entered == 2);
+  return 0;
+}
+int cached_whole_ancestor() {
+  auto gate = std::make_shared<Gate>();
+  gate->open();
+  auto registry = gated_registry(gate, false, {}, false, true);
+  auto document = gate_document();
+  document.nodes.push_back({2, "wait", {WorkflowNodeOutput{1, "value"}}, {}});
+  document.outputs = {{"y", 2, "value"}, {"ancestor", 1, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {1, false, 8, 4096, 512});
+  auto demand =
+      context
+          .open_demand(plan,
+                       {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+          .take_value();
+  auto first = demand.request({{"y", point(0, 2)}});
+  PS_CHECK(first.ok() && gate->entered == 2);
+  auto warm = demand.request({{"y", point(0, 2)}});
+  PS_CHECK(warm.ok() && gate->entered == 2 &&
+           warm.value().diagnostics.cache_hits == 1);
+  PS_CHECK(warm.value().diagnostics.operation_timings.empty());
+  PS_CHECK(warm.value().dependencies.source_support().value().at("x") ==
+           Footprint::all({2}).take_value());
+  double value = 0;
+  PS_CHECK(warm.value().values.at("y").read({0}, &value, 8).ok() && value == 7);
+  // The root's 16-byte result survives while its Whole ancestor's pixels
+  // are evicted. Importing its evidence must not block a later actual read.
+  document.outputs = {{"a_desc", 2, "value"}, {"z_ancestor", 1, "value"}};
+  GraphContext named_graph(document);
+  auto named_plan = Compiler(registry).compile(named_graph).take_value().plan;
+  ExecutionContext tight(registry, {1, false, 8, 4096, 16});
+  auto query =
+      tight
+          .open_demand(named_plan,
+                       {{{"x", values<double>(ElementType::Float64, {7, 9})}}})
+          .take_value();
+  PS_CHECK(query.request({{"a_desc", point(0, 2)}}).ok());
+  const auto previous = gate->entered;
+  auto both =
+      query.request({{"a_desc", point(0, 2)}, {"z_ancestor", point(1, 2)}});
+  PS_CHECK(both.ok() && both.value().diagnostics.cache_hits == 1 &&
+           gate->entered == previous + 1);
+  PS_CHECK(both.value().values.at("z_ancestor").read({1}, &value, 8).ok() &&
+           value == 9);
+  PS_CHECK(both.value().dependencies.source_support().value().at("x") ==
+           Footprint::all({2}).take_value());
+  return 0;
+}
+int cache_snapshot_bits() {
+  auto registry = make_default_operation_registry();
+  for (auto type : {ElementType::UInt8, ElementType::Int64,
+                    ElementType::Float32, ElementType::Float64}) {
+    const auto width = Value::element_size(type);
+    std::vector<std::uint8_t> bytes(width * 3);
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+      bytes[i] = static_cast<std::uint8_t>(255 - i);
+    auto reversed =
+        Value::create({type, {3}}, Region::whole({3}),
+                      {width * 2, {-static_cast<std::int64_t>(width)}}, bytes)
+            .take_value();
+    auto writer = MutableValue::allocate({type, {3}}, Region::whole({3}),
+                                         BufferAllocator{})
+                      .take_value();
+    for (std::size_t i = 0; i < 3; ++i)
+      std::memcpy(writer.data() + i * width, bytes.data() + (2 - i) * width,
+                  width);
+    auto packed = std::move(writer).publish().take_value();
+    auto document = typed_images::document(packed);
+    GraphContext graph(document);
+    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    ExecutionContext context(registry, {1, false, 8, 4096, 512});
+    auto demand = context.open_demand(plan, {{{"image", packed}}}).take_value();
+    const auto q = point(0, 3).unite(point(2, 3)).take_value();
+    auto initial = demand.request({{"result", q}});
+    PS_CHECK(initial.ok() && initial.value().diagnostics.cache_hits == 0);
+    InputSnapshotStore store({1024, 1});
+    auto snapshot = std::make_shared<const InputSnapshot>(
+        store.import_value(reversed).take_value());
+    auto edited = demand.replace_bindings({{{"image", {}, {}, snapshot}}});
+    PS_CHECK(edited.ok() &&
+             edited.value().potential_dirty.at("result").empty());
+    auto same = demand.request({{"result", q}});
+    PS_CHECK(same.ok() && same.value().diagnostics.cache_hits == 2);
+    for (auto at : {0U, 2U}) {
+      std::uint8_t observed[8]{};
+      PS_CHECK(
+          same.value().values.at("result").read({at}, observed, width).ok());
+      PS_CHECK(std::memcmp(observed, bytes.data() + (2 - at) * width, width) ==
+               0);
+    }
+  }
+  return 0;
+}
+int content_cache() {
+  auto registry = make_default_operation_registry();
+  GraphContext graph(scatter_document());
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContextConfig config{1, false, 8, 4096};
+  config.result_cache_bytes = 2048;
+  ExecutionContext context(registry, config);
+  ExecutionBindings bindings{
+      {{"data", values<double>(ElementType::Float64, {1, 2, 3, 0, 5})},
+       {"radius", values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0})}}};
+  auto demand = context.open_demand(plan, bindings).take_value();
+  const auto q = point(0).unite(point(4)).take_value();
+  DemandQuery query{{"sum", q}};
+  auto first = demand.request(query);
+  PS_CHECK(first.ok() && first.value().diagnostics.cache_hits == 0);
+  auto frozen = demand.freeze().take_value();
+  auto warm = demand.request(query);
+  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 2 &&
+           warm.value().diagnostics.operation_timings.empty());
+  bindings.inputs[0].value =
+      values<double>(ElementType::Float64, {1, 2, 777, 0, 5});
+  PS_CHECK(demand.replace_bindings(bindings)
+               .value()
+               .potential_dirty.at("sum")
+               .empty());
+  auto unchanged = demand.request(query);
+  PS_CHECK(unchanged.ok() && unchanged.value().diagnostics.cache_hits == 2);
+  PS_CHECK(unchanged.value().dependencies.certificate(1).value().identity() !=
+           first.value().dependencies.certificate(1).value().identity());
+  // Cached and freshly computed rows must merge under the current identity.
+  auto mixed = demand.request({{"sum", point(0).unite(point(1)).take_value()}});
+  PS_CHECK(mixed.ok() && mixed.value().diagnostics.cache_hits == 1);
+  bindings.inputs[1].value =
+      values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0});
+  PS_CHECK(demand.replace_bindings(bindings).ok());
+  auto changed_relation = demand.request(query);
+  PS_CHECK(changed_relation.ok() &&
+           changed_relation.value().diagnostics.cache_hits == 0);
+  double answer = 0;
+  PS_CHECK(
+      changed_relation.value().values.at("sum").read({0}, &answer, 8).ok() &&
+      answer == 1);
+  PS_CHECK(changed_relation.value()
+               .dependencies.potential_dirty("data", point(3))
+               .value()
+               .at("sum") == q);
+  PS_CHECK(demand.request(query).value().diagnostics.cache_hits == 2);
+  auto old = context.execute_fragments(frozen, query);
+  PS_CHECK(old.ok() && old.value().diagnostics.cache_hits == 2);
+  PS_CHECK(old.value()
+               .dependencies.potential_dirty("data", point(3))
+               .value()
+               .at("sum")
+               .empty());
+  bindings.inputs[0].value =
+      values<double>(ElementType::Float64, {1, 2, 777, 9, 5});
+  PS_CHECK(demand.replace_bindings(bindings).ok());
+  auto latest = demand.request(query);
+  PS_CHECK(latest.ok() && latest.value().diagnostics.cache_hits == 0);
+  PS_CHECK(latest.value().values.at("sum").read({4}, &answer, 8).ok() &&
+           answer == 14);
+  context.clear_result_cache();
+  PS_CHECK(context.cache_statistics().retained_bytes == 0);
+  PS_CHECK(latest.value()
+               .dependencies.potential_dirty("data", point(3))
+               .value()
+               .at("sum") == q);
+  PS_CHECK(demand.request(query).value().diagnostics.cache_hits == 0);
+  config.result_cache_bytes = 16;
+  ExecutionContext small(registry, config);
+  auto limited = small.open_demand(plan, bindings).take_value();
+  PS_CHECK(limited.request({{"sum", point(0)}}).ok());
+  auto all = limited.request({{"sum", Footprint::all({5}).take_value()}});
+  PS_CHECK(all.ok() && small.cache_statistics().evictions > 0);
+  PS_CHECK(all.value()
+               .dependencies.potential_dirty("radius", point(3))
+               .value()
+               .at("sum") == Footprint::all({5}).take_value());
+  bindings.inputs[0].value =
+      values<double>(ElementType::Float64, {1, 2, 777, 10, 5});
+  auto edit = limited.replace_bindings(bindings);
+  PS_CHECK(edit.ok() && edit.value().potential_dirty.at("sum") ==
+                            Footprint::all({5}).take_value());
   return 0;
 }
 int joint_failure_isolation() {
@@ -872,5 +1124,9 @@ int main() {
   PS_CHECK(late_flight_and_frozen() == 0);
   PS_CHECK(shared_terminal() == 0);
   PS_CHECK(joint_failure_isolation() == 0);
+  PS_CHECK(content_cache() == 0);
+  PS_CHECK(cache_work_and_epoch() == 0);
+  PS_CHECK(cache_snapshot_bits() == 0);
+  PS_CHECK(cached_whole_ancestor() == 0);
   return 0;
 }

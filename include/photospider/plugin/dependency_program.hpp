@@ -33,7 +33,9 @@ struct DependencyLimits final {
  * @note Inputs and parameters are copied before callbacks. snapshot_identity
  * denotes one immutable supplied input bundle; supply must name the same
  * bundle. It is not a persistent content digest or a caller claim authorizing
- * cache hits.
+ * cache hits. It is provenance for routing/validation, not a semantic input:
+ * deterministic programs must not derive output values or dependency choices
+ * from the spelling of this identity, allocator addresses or invocation timing.
  */
 struct DependencyRequest final {
   std::vector<OperationMetadata> inputs;

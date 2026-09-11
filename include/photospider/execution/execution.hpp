@@ -66,6 +66,12 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   std::uint32_t maximum_demands = 1024;
   /** @brief Concurrent dependency Flights and subscribers, each 1..1048576. */
   std::uint64_t maximum_dependency_flights = 65536;
+  /** @brief Retained dependency-cache proof units, 1..1048576.
+   * @note Counts actual record owners, row/tag/coordinate storage and source
+   * witnesses per manifest; shared owners in one manifest count once. Optional
+   * exhaustion skips retention. Independent from the pixel allocation limit.
+   */
+  std::uint64_t maximum_dependency_cache_metadata = 65536;
 };
 
 /**
@@ -138,6 +144,13 @@ struct PHOTOSPIDER_API ExecutionOptions final {
   DependencyLimits dependencies = {};
   /** @brief Run-wide bound on demand records and stage transitions. */
   std::uint64_t maximum_dependency_work = 1048576;
+  /** @brief Separate optional cache-proof traversal/sample budget per Run.
+   * @note One shared budget precharges structural traversal, metadata copies,
+   * source sample/facet hashing and finite normalization allowances. Optional
+   * exhaustion skips verification/retention without failing computation.
+   * Zero disables dependency cache verification and retention for that Run.
+   */
+  std::uint64_t maximum_dependency_cache_work = 1048576;
 };
 
 /**
@@ -221,10 +234,18 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   std::uint32_t peak_active_tasks = 0;
   /** @brief Successfully delivered output tile count, across named outputs. */
   std::uint64_t tile_count = 0;
-  /** @brief Successful regional source reads and bytes; Value bindings are
-   * separate. */
+  /** @brief Successful completed-result cache observations reused by this Run.
+   */
   std::uint64_t cache_hits = 0;
+  /** @brief Actual direct records visited by optional dependency cache proofs.
+   */
+  std::uint64_t dependency_cache_records_visited = 0;
+  /** @brief Precharged proof traversal, normalization and sample work. */
+  std::uint64_t dependency_cache_work = 0;
+  /** @brief Active computations joined without duplicating producer timings. */
   std::uint64_t shared_computations = 0;
+  /** @brief Successful regional source reads; direct Value bindings are
+   * separate. */
   std::uint64_t source_read_count = 0;
   std::uint64_t source_read_bytes = 0;
   /** @brief Human-readable CPU fallback reasons in occurrence order. */
@@ -466,7 +487,12 @@ class PHOTOSPIDER_API ExecutionContext final {
   /** @brief Executes arbitrary exact subsets against independently frozen work.
    * @note Empty revalidates static metadata and skips start/poll/source.
    * Complete terminal RequestRecord Q stays intact, including noncontiguous
-   * requests. Caller must not race direct execution with context destruction.
+   * requests. With a positive result cache, deterministic/side-effect-free/
+   * cacheable ancestry may reuse successful exact observations after matching
+   * the complete old source witness against current immutable bindings. Hits
+   * preserve per-output evidence under the current bundle identity. Optional
+   * cache limits do not change the observation or failure-isolation contract.
+   * Caller must not race direct execution with context destruction.
    */
   Result<DemandResult> execute_fragments(
       const FrozenExecution& frozen, const DemandQuery& query,

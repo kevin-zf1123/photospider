@@ -79,15 +79,14 @@ Source callback 精确填写请求矩形；稀疏端口仍通过 ValueFragments 
 不能据此扩大分阶段 sample 查询。终端按完整 original Q 执行一次。直接
 `OperationRegistry::invoke` 对已提供的不可变 Value 采用同一观察规则。Frozen 执行
 保留捕获的图和输入 owner。当前 CPU 依赖执行按串行 ready 顺序推进，符合调用者的
-maximum parallelism 上限。Legacy Whole/effect 边界每个 Run 执行一次，包括未连边
-effect。Atomic stream 按配置的 tile 交付并释放，终端 stream 保留完整 original Q。
+maximum parallelism 上限。Legacy Whole 记录在实际请求时每 Run 至多执行一次，未连边 effect 仍执行一次。
+纯 Whole 祖先延迟解析，后代合法缓存命中无需再次物化祖先像素。Atomic stream 按配置的 tile 交付并释放，终端 stream 保留完整 original Q。
 
 公开 progressive workflow 与 `test_dependency_program` 覆盖真实源发现、
 legacy→staged→legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及
-frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据，见下文。Context-owned
-活跃 demand 替换、共享 Flight、依赖 result cache 复用和原生 GPU fragment 访问
-继续属于本轮 G4。
-直接证书 API 已独立实现，不能据此声称这些缓存与调度集成已完成。
+frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据，见下文。活跃 demand
+替换、共享 Flight 与依赖 result cache 复用已按下文及[缓存模型](Cache-Model.zh.md)
+实现。原生 GPU fragment 访问仍是本轮 G4 的未完成部分。
 
 [依赖采样算子](Dependency-Sampling.zh.md) 已实现 STMap 和动态 radius gather/scatter。
 可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。
@@ -196,8 +195,8 @@ bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不�
 `DemandConfig::maximum_metadata_entries` 限制每个 handle 保留的 query/evidence/dirty
 metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache；当前调用
 通过 context-owned Flights 共享同一不可变 bundle 中重叠的活跃观察，执行仍使用既有
-CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的 content-cache
-复用及 GPU fragment 执行仍是未完成的 G4 集成。
+CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的内容缓存复用既有像素 LRU 和有界结构证明，见
+[缓存模型](Cache-Model.zh.md)。GPU fragment 执行仍是未完成的 G4 集成。
 
 `test_execution_demand` 覆盖稀疏结果、各 dtype snapshot、连续 dirty 累积、frozen
 隔离、陈旧发布、独立取消及 context 排空。真实 C terminal fixture 检查稀疏 Q 仅调用
@@ -205,10 +204,11 @@ CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的 conte
 scatter 两端的结果。
 
 U2 兄弟工作集反例已成为真实 `test_dependency_program` workflow：A、B 各从 context
-allocator 分配 1 MiB 输出和 3 MiB scratch。预算 4 MiB 时 A 完成，B 在 callback
-开始前被拒绝；失败返回后 A 的 storage owner 已释放。同一 context 随后仍可执行 A，
-观察分配峰值为 4 MiB。预算 5 MiB 时父节点取得两个结果并返回 3，观察峰值为 5 MiB。
-该测试验证此执行顺序的有限拒绝和真实 lease 退休，不承诺最优调度。
+allocator 分配 1 MiB 输出和 3 MiB scratch。延迟解析子节点时还保留父节点的一个字节
+continuation。恰好 4 MiB 在 A 的 callback 前拒绝；4 MiB 加该 state 可使 A 完成，但 B
+在 callback 前被拒绝，失败返回后 A 的 storage owner 已释放。同一 context 随后仍可
+单独执行 A，观察峰值为 4 MiB。5 MiB 加该 state 时父节点取得两个结果并返回 3，
+观察峰值包含上述真实分配。该测试验证此顺序的有限拒绝和真实 lease 退休，不承诺最优调度。
 
 ## 共享精确观察 Flight
 
@@ -226,8 +226,7 @@ replacement 后变为 Stale 时，frozen waiter 同样可取得旧 bundle 的成
 
 最后一个 waiter 取消后禁止新加入，后续请求认领新 FlightId。晚完成只有在目录 ID 仍
 匹配时才删除该项，因此 P0 退休不能删除 P1。Context 关闭会取消活跃 producer，排空
-demand 调用后再销毁 worker。`clear_result_cache()` 同时递增 dependency epoch；目前
-尚未启用已完成 dependency cache 保留。`maximum_dependency_flights` 用同一个配置数值
+demand 调用后再销毁 worker。`clear_result_cache()` 同时递增 dependency epoch 并使已完成缓存的保留资格失效。`maximum_dependency_flights` 用同一个配置数值
 分别限制活跃 Flight 和全部订阅者的数量，范围 1..1048576、默认 65536。Metadata 容量
 耗尽直接返回 ResourceExhausted，不等待容量。
 
