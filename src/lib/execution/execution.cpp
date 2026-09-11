@@ -2137,8 +2137,35 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       };
                     }
                   }
+                  DependencyBlockServices blocks;
+                  if (dependency_cache && shareable[step_index] &&
+                      step.traits.cacheable) {
+                    blocks.consume_work = [&](std::uint64_t cost) {
+                      if (cost > cache_work) {
+                        cache_work = 0;
+                        return false;
+                      }
+                      cache_work -= cost;
+                      return true;
+                    };
+                    blocks.find = [&](const std::string& key) {
+                      auto value =
+                          dependency_cache->get("g4-block/" + key, cache_epoch);
+                      if (value.valid())
+                        ++diagnostics.block_cache_hits;
+                      else
+                        ++diagnostics.block_cache_misses;
+                      return Result<Value>(std::move(value));
+                    };
+                    blocks.publish = [&](const std::string& key,
+                                         const Value& value) {
+                      dependency_cache->put("g4-block/" + key, value,
+                                            cache_epoch);
+                      return Status::success();
+                    };
+                  }
                   auto result = frame.session->poll(
-                      seal.reservation->allocator(), services);
+                      seal.reservation->allocator(), services, blocks);
                   callback_us = duration_us(callback_started);
                   return result;
                 },
@@ -4245,6 +4272,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             diagnostics.shared_peak_live_bytes,
             std::max(part.shared_peak_live_bytes, part.peak_live_bytes));
       diagnostics.cache_hits += part.cache_hits;
+      diagnostics.block_cache_hits += part.block_cache_hits;
+      diagnostics.block_cache_misses += part.block_cache_misses;
       diagnostics.shared_computations += part.shared_computations;
       diagnostics.source_read_count += part.source_read_count;
       diagnostics.source_read_bytes += part.source_read_bytes;

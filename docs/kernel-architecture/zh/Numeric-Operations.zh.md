@@ -87,7 +87,7 @@ Opaque vendor facets 不增加验证扫描。
 State 和活跃 fragment 使用当前 ExecutionContext worker/admission/allocator。精确 Empty
 scalar 查询不读样本，资源、发现和取消限额保持显式。源数据可以超过 live payload
 预算，只需正在读取的块能够容纳。已完成精确 demand 的缓存命中保留完整全局源支持；
-任何被观察输入变化均使 scalar 结果失效。跨 bundle 的 incoming-state 块缓存仍为本轮 G4 的后续工作。
+任何被观察输入变化均使 scalar 结果失效。已完成内部 transition 也可复用下述块缓存。
 
 `test_ordered_reduction` 检查五种块大小、rank 1/4/8、Float32/Float64、冷热缓存的位级
 结果，原错误 sample index、第二遍取消与恢复、typed channel closure，以及 1 KiB
@@ -107,5 +107,12 @@ scalar 查询不读样本，资源、发现和取消限额保持显式。源数�
 使用现有宿主 allocator lease 和有界可选元数据保留，驱逐后可以重算。256 个密集输出
 的源测试恰好读取 256 个输入一次。私有 execution hook 测试暂停真实成功前缀发布，
 检查两种 waiter 启动顺序、发布者取消、暖结果缓存和精确源支持导入。Direct/manual
-协议测试检查 allocator 归属、scope/sequence 拒绝及证据限额。跨 bundle、以 incoming
-state 和输入 bits 为 key 的块暂未保留；已完成输出缓存仍核验完整传递前缀支持。
+协议测试检查 allocator 归属、scope/sequence 拒绝及证据限额。Scan 与 mean/variance 现通过既有结果 LRU 跨 bundle 保留已完成内部 transition。
+Key 包含精确供给集合/输入 bits、实际 incoming state bits、phase、range 及固定
+nearest-even/渐进下溢模式。Variance 第二遍每个 incoming state 包含固定 mean。
+宿主在普通 fragment 验证后哈希；命中将 state 复制到当前阶段 allocator，保留当前
+依赖证据。仅保存成功 transition，不额外读取输入、不合批输出观察。Incoming 改变时
+当前块重算；后续 incoming 重汇合且输入相同时才可命中。`block_cache_hits/misses`
+单独计数内部查找；可选 cache work 耗尽时跳过查找/保留。公开 workflow 与测试验证
+`[1,2^54]` 重汇合边界、frozen/current 输出差异及 mean 改变使第二遍失效。
+已完成输出缓存仍核验完整传递前缀支持。

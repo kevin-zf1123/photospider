@@ -71,7 +71,7 @@ live fragments use the current ExecutionContext worker/admission/allocator.
 Empty exact scalar queries read nothing; resource/discovery/cancellation bounds
 remain explicit. Source data can exceed the live payload budget when its blocks
 fit. Completed exact-demand cache hits retain the complete global source support;
-changing any observed input invalidates the scalar result. Cross-bundle incoming-state block caching remains a G4 integration task.
+changing any observed input invalidates the scalar result. Completed internal transitions can also reuse the block cache described below.
 
 `test_ordered_reduction` checks bitwise results over five block sizes and ranks
 1, 4 and 8, Float32/Float64, cache cold/warm, original error sample indices,
@@ -97,8 +97,20 @@ test reads exactly 256 inputs once. Private execution-hook tests hold a real
 published prefix to check both waiter start orders, owner cancellation, warm
 result caching and exact imported source support. Direct/manual protocol tests
 check allocator ownership, scope/sequence rejection and witness limits.
-Cross-bundle blocks keyed by incoming state and input bits are not yet retained;
-completed output caching still verifies its full transitive prefix support.
+Scan and mean/variance now retain completed internal transitions across bundles
+through the existing result LRU. Keys include exact supplied sets/input bits,
+actual incoming state bits, phase, range and fixed nearest-even/gradual numeric
+mode. Variance includes its fixed mean in every second-pass incoming state.
+The host hashes supplied fragments after their normal validation; a hit copies
+state into the current stage allocator and retains current dependency evidence.
+Only successful transforms are stored, with no additional input reads or output
+batching. Changed incoming state forces the current block to recompute. Later
+blocks may hit after their incoming state reconverges and their inputs match.
+`block_cache_hits/misses` count these internal lookups separately from completed
+output `cache_hits`; optional cache-work exhaustion skips lookup/retention.
+The public block workflow and tests verify the `[1,2^54]` reconvergence boundary,
+frozen/current output differences, and second-pass invalidation when mean changes.
+Completed output caching still verifies its full transitive prefix support.
 
 The implementation reads logical coordinates using storage origin, byte offset
 and signed strides, including unaligned and zero-stride views. It allocates

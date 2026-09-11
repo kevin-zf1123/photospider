@@ -71,42 +71,12 @@ struct OrderedReductionState final {
       // Supply has already validated each declared typed fragment. Validation
       // pass needs no extra sample read and retains no payload after this poll.
       if (pass != 0) {
-        std::vector<std::uint64_t> at(input.shape.size());
-        for (auto index = cursor; index < end; ++index) {
-          auto remainder = index;
-          for (std::size_t axis = at.size(); axis; --axis) {
-            at[axis - 1] = remainder % input.shape[axis - 1];
-            remainder /= input.shape[axis - 1];
-          }
-          double value = 0;
-          Status status;
-          if (input.element_type == ElementType::Float32) {
-            float sample = 0;
-            status = phase.read(0, at, &sample, 4);
-            value = sample;
-          } else {
-            status = phase.read(0, at, &value, 8);
-          }
-          if (!status.ok())
-            return Result<DependencyPoll>(status);
-          if (pass == 1) {
-            if (!std::isfinite(value))
-              return Result<DependencyPoll>(numeric_internal::numeric_failure(
-                  index, "reduction input is nonfinite"));
-            sum += value;
-            if (!std::isfinite(sum))
-              return Result<DependencyPoll>(numeric_internal::numeric_failure(
-                  index, "reduction sum overflow"));
-          } else {
-            const double difference = value - mean;
-            const double square = difference * difference;
-            sum += square;
-            if (!std::isfinite(sum))
-              return Result<DependencyPoll>(numeric_internal::numeric_failure(
-                  index, "variance overflow"));
-          }
-        }
+        auto advanced = advance(phase);
+        if (!advanced.ok())
+          return Result<DependencyPoll>(advanced.status());
+        std::memcpy(&sum, advanced.value().bytes().data(), 8);
       }
+
       cursor = end;
       if (cursor == total) {
         if (pass == 0) {
@@ -154,6 +124,62 @@ struct OrderedReductionState final {
         {{{0}, {{0, pass == 0 ? 4U : 5U, samples.take_value(), {}}}}},
         {}});
   }
+  Result<Value> advance(const DependencyPhase& phase) const {
+    const auto& input = phase.query.inputs[0].descriptor;
+    const auto state = [&](double value) -> Result<Value> {
+      auto made = MutableValue::allocate({ElementType::Float64, {2}},
+                                         Region::whole({2}), phase.allocator);
+      if (!made.ok())
+        return Result<Value>(made.status());
+      auto writer = made.take_value();
+      std::memcpy(writer.data(), &value, 8);
+      std::memcpy(writer.data() + 8, &mean, 8);
+      return std::move(writer).publish();
+    };
+    auto incoming = state(sum);
+    if (!incoming.ok())
+      return incoming;
+    return phase.block(
+        pass, cursor, end, 1, incoming.value(), [&]() -> Result<Value> {
+          double outgoing = sum;
+          std::vector<std::uint64_t> at(input.shape.size());
+          for (auto index = cursor; index < end; ++index) {
+            auto remainder = index;
+            for (std::size_t axis = at.size(); axis; --axis) {
+              at[axis - 1] = remainder % input.shape[axis - 1];
+              remainder /= input.shape[axis - 1];
+            }
+            double value = 0;
+            Status status;
+            if (input.element_type == ElementType::Float32) {
+              float sample = 0;
+              status = phase.read(0, at, &sample, 4);
+              value = sample;
+            } else {
+              status = phase.read(0, at, &value, 8);
+            }
+            if (!status.ok())
+              return Result<Value>(status);
+            if (pass == 1) {
+              if (!std::isfinite(value))
+                return Result<Value>(numeric_internal::numeric_failure(
+                    index, "reduction input is nonfinite"));
+              outgoing += value;
+              if (!std::isfinite(outgoing))
+                return Result<Value>(numeric_internal::numeric_failure(
+                    index, "reduction sum overflow"));
+            } else {
+              const double difference = value - mean;
+              const double square = difference * difference;
+              outgoing += square;
+              if (!std::isfinite(outgoing))
+                return Result<Value>(numeric_internal::numeric_failure(
+                    index, "variance overflow"));
+            }
+          }
+          return state(outgoing);
+        });
+  }
 };
 inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   OperationDefinition operation;
@@ -166,6 +192,7 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   traits.region_rule = OperationRegionRule::Dependency;
   traits.dependency_version = 1;
   traits.continuation_bytes = sizeof(OrderedReductionState);
+  traits.workspace_bytes = 24;
   traits.maximum_dependency_stages = 1048576;
   traits.parameter_schema = {
       {"block_size", OperationParameterType::Int64, false, true, 1, 65536}};

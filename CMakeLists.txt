@@ -150,6 +150,7 @@ set(
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_block.cpp
   src/lib/plugin/dependency_invocation.cpp
   src/lib/plugin/operation_contract.cpp
   src/lib/plugin/operation_semantics.cpp

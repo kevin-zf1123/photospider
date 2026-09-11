@@ -206,6 +206,8 @@ int edited_prefixes() {
   auto changed = demand.request(query);
   auto old = context.execute_fragments(frozen, query);
   PS_CHECK(changed.ok() && old.ok());
+  PS_CHECK(changed.value().diagnostics.block_cache_hits == 1 &&
+           changed.value().diagnostics.block_cache_misses == 2);
   for (unsigned i = 1; i < 4; ++i) {
     double before = 0, after = 0, pinned = 0;
     PS_CHECK(initial.value().values.at("y").read({i}, &before, 8).ok());
@@ -217,6 +219,48 @@ int edited_prefixes() {
     // final outgoing accumulator reconverges at 2^54 by nearest-even rounding.
     PS_CHECK(after == (i == 1 ? 2 : expected));
   }
+  return 0;
+}
+int block_reconvergence() {
+  auto registry = make_default_operation_registry();
+  GraphContext graph(document(6, 1));
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, {1, false, 8, 4096, 512});
+  std::vector<double> numbers{0, 1, 0x1p54, 4, 5, 6};
+  auto demand =
+      context.open_demand(plan, {{{"x", values(numbers)}}}).take_value();
+  DemandQuery query{{"y", point(5, 6)}};
+  auto initial = demand.request(query);
+  PS_CHECK(initial.ok() && initial.value().diagnostics.block_cache_hits == 0 &&
+           initial.value().diagnostics.block_cache_misses == 6);
+  numbers[0] = 1;
+  PS_CHECK(demand.replace_bindings({{{"x", values(numbers)}}}).ok());
+  auto changed = demand.request(query);
+  PS_CHECK(changed.ok() && changed.value().diagnostics.block_cache_hits == 3 &&
+           changed.value().diagnostics.block_cache_misses == 3);
+  volatile double expected = 0;
+  for (const auto number : numbers)
+    expected = expected + number;
+  double actual = 0;
+  PS_CHECK(changed.value().values.at("y").read({5}, &actual, 8).ok() &&
+           actual == expected);
+  auto evidence = changed.value().dependencies.source_support();
+  PS_CHECK(evidence.ok() &&
+           evidence.value().at("x") == Footprint::all({6}).value());
+  auto dirty = changed.value().dependencies.potential_dirty("x", point(0, 6));
+  PS_CHECK(dirty.ok() && dirty.value().at("y") == point(5, 6));
+  context.clear_result_cache();
+  auto cleared = demand.request(query);
+  PS_CHECK(cleared.ok() && cleared.value().diagnostics.block_cache_hits == 0 &&
+           cleared.value().diagnostics.block_cache_misses == 6);
+  ExecutionOptions disabled;
+  disabled.maximum_dependency_cache_work = 0;
+  auto plain = demand.request(query, {}, disabled);
+  PS_CHECK(plain.ok() && plain.value().diagnostics.cache_hits == 0 &&
+           plain.value().diagnostics.block_cache_hits == 0 &&
+           plain.value().diagnostics.block_cache_misses == 0);
+  PS_CHECK(plain.value().values.at("y").read({5}, &actual, 8).ok() &&
+           actual == expected);
   return 0;
 }
 int errors_and_order() {
@@ -274,5 +318,6 @@ int main() {
   PS_CHECK(exact_reads(true) == 0);
   PS_CHECK(errors_and_order() == 0);
   PS_CHECK(edited_prefixes() == 0);
+  PS_CHECK(block_reconvergence() == 0);
   return 0;
 }

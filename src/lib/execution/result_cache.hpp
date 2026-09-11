@@ -213,12 +213,13 @@ class ResultCache final {
     } catch (...) {
     }
   }
-  Value get(const std::string& key) {
+  Value get(const std::string& key, std::uint64_t expected_epoch = UINT64_MAX) {
     if (key.empty())
       return {};
     std::lock_guard<std::mutex> lock(mutex_);
     auto found = entries_.find(key);
-    if (found == entries_.end()) {
+    if (found == entries_.end() ||
+        (expected_epoch != UINT64_MAX && expected_epoch != epoch_)) {
       ++stats_.misses;
       return {};
     }

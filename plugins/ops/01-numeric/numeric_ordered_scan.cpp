@@ -41,32 +41,12 @@ struct ScanState final {
       }
     }
     if (ready) {
-      for (auto i = cursor; i < end; ++i) {
-        double value = 0;
-        auto status = phase.read(0, {i}, &value, 8);
-        if (!status.ok())
-          return Result<DependencyPoll>(status);
-        if (!std::isfinite(value))
-          return Result<DependencyPoll>(
-              Status{ErrorCode::OperationFailed,
-                     "nonfinite scan input " + std::to_string(i)});
-        carry += value;
-        if (!std::isfinite(carry))
-          return Result<DependencyPoll>(
-              Status{ErrorCode::OperationFailed,
-                     "scan overflow " + std::to_string(i)});
-      }
+      auto outgoing = advance(phase);
+      if (!outgoing.ok())
+        return Result<DependencyPoll>(outgoing.status());
+      carry = outgoing.value().as_float64().value();
       cursor = end;
-      auto made = MutableValue::allocate({ElementType::Float64, {1}},
-                                         Region::whole({1}), phase.allocator);
-      if (!made.ok())
-        return Result<DependencyPoll>(made.status());
-      auto writer = made.take_value();
-      std::memcpy(writer.data(), &carry, 8);
-      auto state = std::move(writer).publish();
-      if (!state.ok())
-        return Result<DependencyPoll>(state.status());
-      auto status = phase.checkpoint_publish(1, cursor - 1, state.value());
+      auto status = phase.checkpoint_publish(1, cursor - 1, outgoing.value());
       if (!status.ok())
         return Result<DependencyPoll>(status);
     }
@@ -98,6 +78,40 @@ struct ScanState final {
     return Result<DependencyPoll>(
         DependencyNeedBatch{{{{target}, {{0, 5, samples.take_value(), {}}}}},
                             {}});
+  }
+  Result<Value> advance(const DependencyPhase& phase) const {
+    const auto state = [&](double value) -> Result<Value> {
+      auto made = MutableValue::allocate({ElementType::Float64, {1}},
+                                         Region::whole({1}), phase.allocator);
+      if (!made.ok())
+        return Result<Value>(made.status());
+      auto writer = made.take_value();
+      std::memcpy(writer.data(), &value, 8);
+      return std::move(writer).publish();
+    };
+    auto incoming = state(carry);
+    if (!incoming.ok())
+      return incoming;
+    return phase.block(
+        1, cursor, end, 1, incoming.value(), [&]() -> Result<Value> {
+          double outgoing = carry;
+          for (auto i = cursor; i < end; ++i) {
+            double value = 0;
+            auto status = phase.read(0, {i}, &value, 8);
+            if (!status.ok())
+              return Result<Value>(status);
+            if (!std::isfinite(value))
+              return Result<Value>(
+                  Status{ErrorCode::OperationFailed,
+                         "nonfinite scan input " + std::to_string(i)});
+            outgoing += value;
+            if (!std::isfinite(outgoing))
+              return Result<Value>(
+                  Status{ErrorCode::OperationFailed,
+                         "scan overflow " + std::to_string(i)});
+          }
+          return state(outgoing);
+        });
   }
 };
 }  // namespace

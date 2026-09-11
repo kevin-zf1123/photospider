@@ -146,9 +146,10 @@ struct PHOTOSPIDER_API ExecutionOptions final {
   std::uint64_t maximum_dependency_work = 1048576;
   /** @brief Separate optional cache-proof traversal/sample budget per Run.
    * @note One shared budget precharges structural traversal, metadata copies,
-   * source sample/facet hashing and finite normalization allowances. Optional
-   * exhaustion skips verification/retention without failing computation.
-   * Zero disables dependency cache verification and retention for that Run.
+   * source sample/facet hashing, internal block keys and finite normalization.
+   * Optional exhaustion skips verification/retention without failing
+   * computation. Zero disables dependency cache verification and retention for
+   * that Run.
    */
   std::uint64_t maximum_dependency_cache_work = 1048576;
 };
@@ -240,8 +241,12 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Actual direct records visited by optional dependency cache proofs.
    */
   std::uint64_t dependency_cache_records_visited = 0;
-  /** @brief Precharged proof traversal, normalization and sample work. */
+  /** @brief Precharged proof, normalization, sample and internal block-key
+   * work. */
   std::uint64_t dependency_cache_work = 0;
+  /** @brief Completed internal state transitions reused/computed after keyed
+   * lookup. */
+  std::uint64_t block_cache_hits = 0, block_cache_misses = 0;
   /** @brief Active computations joined without duplicating producer timings. */
   std::uint64_t shared_computations = 0;
   /** @brief Successful regional source reads; direct Value bindings are

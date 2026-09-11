@@ -15,6 +15,7 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/dependency_block.hpp"
 #include "plugin/operation_identity.hpp"
 
 namespace ps {
@@ -176,7 +177,7 @@ struct DependencySession::Impl {
   bool active_call = false;
   std::uint64_t remaining_work = 0;
   std::uint32_t polls = 0;
-  std::string certificate_identity;
+  std::string certificate_identity, block_identity;
   std::shared_ptr<std::atomic<ErrorCode>> service_failure =
       std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
   bool waiting = false, terminal = false;
@@ -351,7 +352,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   identity.text(operation);
   identity.integer(static_cast<std::uint32_t>(impl->query.backend));
   contract_internal::append_traits(&identity, impl->traits);
-  identity.text(impl->query.snapshot_identity);
+
   identity.integer(impl->query.parameters.size());
   for (const auto& entry : impl->query.parameters) {
     identity.text(entry.first);
@@ -379,7 +380,11 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   metadata_identity(impl->query.output);
   for (const auto& input : impl->query.inputs)
     metadata_identity(input);
-  impl->certificate_identity = identity.finish();
+  impl->block_identity = identity.finish();
+  content_internal::Sha256 scoped;
+  scoped.text(impl->block_identity);
+  scoped.text(impl->query.snapshot_identity);
+  impl->certificate_identity = scoped.finish();
   auto status = impl->stop();
   if (!status.ok())
     return Result<std::shared_ptr<DependencySession>>(status);
@@ -453,7 +458,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
 }
 Result<DependencyProgress> DependencySession::poll(
     const BufferAllocator& allocator,
-    const DependencyCheckpointServices& checkpoints) {
+    const DependencyCheckpointServices& checkpoints,
+    const DependencyBlockServices& blocks) {
   std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
   if (!lock.owns_lock() || impl_->active_call)
     return Result<DependencyProgress>(
@@ -684,10 +690,31 @@ Result<DependencyProgress> DependencySession::poll(
           return impl_->record_failure(Status{ErrorCode::OperationFailed, {}});
         }
       };
-      const DependencyPhase phase{impl_->query,    impl_->ready,
-                                  stage_allocator, consume,
-                                  report,          impl_->limits.sets,
-                                  checkpoint_find, checkpoint_publish};
+      DependencyPhase phase{impl_->query,
+                            impl_->ready,
+                            stage_allocator,
+                            consume,
+                            report,
+                            impl_->limits.sets,
+                            checkpoint_find,
+                            checkpoint_publish,
+                            {}};
+      phase.block = [&](std::uint32_t kind, std::uint64_t begin,
+                        std::uint64_t end, std::uint64_t mode,
+                        const Value& incoming,
+                        const std::function<Result<Value>()>& compute) {
+        try {
+          return plugin_internal::evaluate_dependency_block(
+              impl_->block_identity, phase, blocks, kind, begin, end, mode,
+              incoming, compute);
+        } catch (const std::bad_alloc&) {
+          return Result<Value>(
+              impl_->record_failure(Status{ErrorCode::ResourceExhausted, {}}));
+        } catch (...) {
+          return Result<Value>(
+              impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
+        }
+      };
       ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||
@@ -705,9 +732,14 @@ Result<DependencyProgress> DependencySession::poll(
     status = impl_->stop();
     if (!status.ok())
       return Result<DependencyProgress>(impl_->retire(status));
-    if (impl_->service_failure->load() != ErrorCode::Ok)
-      return Result<DependencyProgress>(
-          impl_->retire(Status{impl_->service_failure->load(), {}}));
+    if (impl_->service_failure->load() != ErrorCode::Ok) {
+      const auto code = impl_->service_failure->load();
+      // Preserve a propagated service diagnostic (including the numeric sample
+      // index), while an ignored failure still overrides callback success.
+      return Result<DependencyProgress>(impl_->retire(
+          !polled.ok() && polled.status().code == code ? polled.status()
+                                                       : Status{code, {}}));
+    }
     if (!polled.ok())
       return Result<DependencyProgress>(impl_->retire(polled.status()));
     auto value = polled.take_value();

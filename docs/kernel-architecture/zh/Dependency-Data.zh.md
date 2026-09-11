@@ -263,9 +263,7 @@ scope。已借用 state 随自身 lease 退休。查找不等待 producer，此�
 结果。因此查询可以复用另一活跃查询的成功前缀，而不继承后续错误或取消。
 
 保留证据构造使用有界可选 dependency-cache work allowance，耗尽后可以重算；导入
-使用普通 dependency work 限额。目前实现活跃同 bundle carry 复用，跨 bundle 块内容
-缓存仍需将实际 incoming state、phase/range、input bits、numeric mode 和 controls
-纳入 key。C 分阶段桥通过阶段内 opaque handle 和复制的字节 state 提供这些服务。
+使用普通 dependency work 限额。Checkpoint 提供活跃同 bundle carry 复用；跨 bundle 的纯块 transition 使用下述独立服务。C 分阶段桥通过阶段内 opaque handle 和复制的字节 state 提供这些服务。
 
 
 C checkpoint 服务为 `checkpoint_before`、`checkpoint_read` 和
@@ -280,3 +278,31 @@ Publish 从当前阶段 allocator 分配 packed UInt8 Value 并复制正长度 o
 C checkpoint 回归检查部分字节读取、carry 副本、过期阶段 handle、非法地址/区间、
 terminal 拒绝、前缀证据导入，以及五个输出恰好读取五个输入的真实 C scan。
 相同 C11 module 和测试源码参与静态/共享安装包消费检查。
+
+
+## 纯块 transition 缓存
+
+`DependencyPhase::block` 求值有限纯内部状态 transition。Compute 只依赖当前供给输入、
+显式 incoming state、静态算子参数/metadata、phase、半开 range 与 mode。所有 carry
+控制和数值均编码进 incoming，不读取原输出 Q、此前未供给 fragment、时序或隐藏可变
+状态。这是可信算子契约，不分析任意代码、不授权 RequestFailureOnly 输出合批；
+RequestRecord 调用拒绝。
+
+Session key 哈希不可变 registry/operation 契约、输入/state metadata、规范精确供给
+集合及实际 dtype 宽度 bits、phase/range/mode 和实际 incoming state。Snapshot identity
+与原 Q 仅为 provenance，故不进入 transition key；不同 registry 自带唯一运行时实现
+身份。不保存失败块。命中要求 descriptor、region、facets 与 incoming 相同，并复制到
+当前阶段 allocator；新算出的 state 也必须由该 allocator 分配。保留当前供给/history
+作为证据，不通过块缓存导入旧前缀证书。
+
+ExecutionContext 的可选 `DependencyBlockServices` 使用现有计量结果 LRU，仅接受纯且
+cacheable 的祖先链。样本哈希前扣除 `maximum_dependency_cache_work`；零或耗尽时
+直接求值、不查找/保留。查找和发布核对 epoch，防止旧 Run 重新填入已清除的缓存。
+借用 Value 的 lease 保持驱逐后的寿命。内部 hit/miss 与完成输出 `cache_hits` 分开计数。
+Direct host 可提供相同服务，异常及被忽略的失败仍 sticky。
+
+真实 scan 回归将 `[1,2^54]` 前的 incoming 0 改为 1：改变的块重算、早期输出从 1
+变为 2，仅在完整 carry 重汇合后复用后续匹配块。Mean/variance 检查第一遍未变块复用
+及 mean 改变后的第二遍 miss。Direct 协议测试让两个不同实现 registry 共用一个 host
+cache，另检查错误 metadata、外部分配和忽略 host 错误均拒绝。C 桥当前提供已完成
+checkpoint 服务；纯 block callback 服务是 C++ phase 能力。

@@ -372,6 +372,112 @@ DependencyRequest probe_request() {
                            point(0),
                            "bundle"};
 }
+int block_services() {
+  std::map<std::string, Value> cache;
+  unsigned computations = 0;
+  DependencyBlockServices services;
+  services.consume_work = [](std::uint64_t) { return true; };
+  services.find = [&](const std::string& key) {
+    const auto found = cache.find(key);
+    return Result<Value>(found == cache.end() ? Value{} : found->second);
+  };
+  services.publish = [&](const std::string& key, const Value& value) {
+    cache[key] = value;
+    return Status::success();
+  };
+  const auto definition = [&](double increment, bool foreign = false) {
+    auto operation = probe_definition(
+        std::make_shared<Counts>(),
+        [&, increment,
+         foreign](const DependencyPhase& phase) -> Result<DependencyPoll> {
+          const auto state = [&](double number) -> Result<Value> {
+            auto allocated =
+                MutableValue::allocate({ElementType::Float64, {1}},
+                                       Region::whole({1}), phase.allocator);
+            if (!allocated.ok())
+              return Result<Value>(allocated.status());
+            auto writer = allocated.take_value();
+            std::memcpy(writer.data(), &number, 8);
+            return std::move(writer).publish();
+          };
+          auto incoming = state(1);
+          if (!incoming.ok())
+            return Result<DependencyPoll>(incoming.status());
+          auto result = phase.block(1, 0, 1, 1, incoming.value(), [&] {
+            ++computations;
+            return foreign ? Result<Value>(Value::from_float64(2))
+                           : state(1 + increment);
+          });
+          // Deliberately ignore service errors to verify their sticky boundary.
+          if (!result.ok())
+            return constant_result(phase);
+          auto allocated = MutableValue::allocate(
+              phase.query.output.descriptor, phase.query.outputs.boxes()[0],
+              phase.allocator);
+          if (!allocated.ok())
+            return Result<DependencyPoll>(allocated.status());
+          auto writer = allocated.take_value();
+          const auto number = result.value().as_float64().value();
+          std::memcpy(writer.data(), &number, 8);
+          auto output = std::move(writer).publish().take_value();
+          return Result<DependencyPoll>(
+              ValueFragments::create(phase.query.output.descriptor, {},
+                                     phase.query.outputs, {output})
+                  .take_value());
+        });
+    operation.traits.workspace_bytes = 16;
+    return operation;
+  };
+  OperationRegistry first, second;
+  PS_CHECK(first.register_operation(definition(1)).ok());
+  PS_CHECK(second.register_operation(definition(2)).ok());
+  for (unsigned run = 0; run < 3; ++run) {
+    auto request = probe_request();
+    request.outputs = point(run);
+    request.snapshot_identity = std::to_string(run);
+    auto& registry = run == 2 ? second : first;
+    auto session = registry.start_dependency("probe", request).take_value();
+    auto result = session->poll(BufferAllocator{}, {}, services);
+    PS_CHECK(result.ok());
+    double actual = 0;
+    PS_CHECK(std::get<DependencyResult>(result.value())
+                 .value.read({run}, &actual, 8)
+                 .ok());
+    PS_CHECK(actual == (run == 2 ? 3 : 2));
+    PS_CHECK(computations == (run == 2 ? 2U : 1U));
+  }
+  for (unsigned bad = 0; bad < 5; ++bad) {
+    OperationRegistry registry;
+    auto operation = definition(1, bad == 3);
+    if (bad == 4)
+      operation.traits.observation_kind = ObservationKind::RequestRecord;
+    PS_CHECK(registry.register_operation(operation).ok());
+    auto broken = services;
+    if (bad == 0) {
+      broken.find = [](const std::string&) -> Result<Value> {
+        throw std::bad_alloc();
+      };
+    }
+    if (bad == 1) {
+      broken.publish = [](const std::string&, const Value&) -> Status {
+        throw std::runtime_error("block host");
+      };
+    }
+    if (bad == 2) {
+      broken.find = [](const std::string&) {
+        return Value::create({ElementType::Int64, {1}}, Region::whole({1}),
+                             {0, {8}}, std::vector<std::uint8_t>(8));
+      };
+    }
+    auto session =
+        registry.start_dependency("probe", probe_request()).take_value();
+    auto result = session->poll(BufferAllocator{}, {}, broken);
+    PS_CHECK(result.status().code == (bad == 0   ? ErrorCode::ResourceExhausted
+                                      : bad == 1 ? ErrorCode::OperationFailed
+                                                 : ErrorCode::InvalidArgument));
+  }
+  return 0;
+}
 int service_and_identity_regressions() {
   {
     auto counts = std::make_shared<Counts>();
@@ -1150,6 +1256,7 @@ int main() {
   PS_CHECK(terminal_and_graph() == 0);
   PS_CHECK(allocator_lifetime() == 0);
   PS_CHECK(service_and_identity_regressions() == 0);
+  PS_CHECK(block_services() == 0);
   PS_CHECK(concurrent_and_reentrant() == 0);
   return 0;
 }

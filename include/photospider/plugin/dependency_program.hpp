@@ -125,6 +125,21 @@ struct DependencyCheckpointServices final {
       find;
   std::function<Status(const DependencyCheckpoint&)> publish;
 };
+/** @brief Optional host cache for pure internal block transforms.
+ * @note Keys are computed by the session from the static operation contract,
+ * phase/range/mode, exact supplied input sets and bits, and actual incoming
+ * state bits. Values contain no old source witness. Hosts retain only completed
+ * immutable states, account their owners, and never wait for a producer.
+ */
+struct DependencyBlockServices final {
+  /** @brief Charges optional key work before hashing. False bypasses retention.
+   */
+  std::function<bool(std::uint64_t)> consume_work;
+  /** @brief Returns a completed state, or an invalid Value for a cache miss. */
+  std::function<Result<Value>(const std::string&)> find;
+  /** @brief Optionally retains a completed state; failures are sticky. */
+  std::function<Status(const std::string&, const Value&)> publish;
+};
 /** @brief Services borrowed only for one finite, nonblocking poll.
  * @note inputs contains only this stage's ready authorized fragments. No read
  * starts upstream execution. State must copy needed data through its accounted
@@ -159,6 +174,23 @@ struct PHOTOSPIDER_API DependencyPhase final {
    */
   std::function<Status(std::uint32_t, std::uint64_t, const Value&)>
       checkpoint_publish;
+  /** @brief Evaluates one pure state transition, optionally reusing its result.
+   * @note compute must depend only on incoming state, current supplied inputs,
+   * static parameters/metadata, phase, [begin,end) and mode. It must encode all
+   * carried controls/numeric state in incoming, and must not inspect original
+   * Q, earlier unsupplied fragments or external/mutable state. This trusted
+   * contract does not infer purity from arbitrary C++ code. Output state must
+   * match the incoming descriptor, region and facets and use this stage
+   * allocator. Successful hits are copied into the stage allocator and preserve
+   * current input evidence; they never import an obsolete prefix relation.
+   * Errors remain local to the current Atomic observation. No output batching
+   * is authorized.
+   */
+  std::function<Result<Value>(std::uint32_t phase, std::uint64_t begin,
+                              std::uint64_t end, std::uint64_t mode,
+                              const Value& incoming,
+                              const std::function<Result<Value>()>& compute)>
+      block;
   /** @brief Charged, bounds-checked sample read; no missing-page zero fallback.
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,
@@ -269,7 +301,8 @@ class PHOTOSPIDER_API DependencySession final {
    */
   Result<DependencyProgress> poll(
       const BufferAllocator& allocator = BufferAllocator{},
-      const DependencyCheckpointServices& checkpoints = {});
+      const DependencyCheckpointServices& checkpoints = {},
+      const DependencyBlockServices& blocks = {});
   /** @brief Supplies exactly the pending transport union for every input port.
    * @param inputs Exact matching metadata and authorized sets, including empty
    * entries for unused ports. Owners remain held only until the next poll

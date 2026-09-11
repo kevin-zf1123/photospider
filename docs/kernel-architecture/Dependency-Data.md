@@ -388,7 +388,45 @@ query without inheriting that query's later error or cancellation.
 
 Retention proof construction uses the bounded optional dependency-cache work
 allowance; exhausted retention can recompute. Import uses ordinary dependency
-work limits. This is active same-bundle carry reuse, not cross-bundle block-content
-caching. The latter still needs actual incoming state, phase/range, input bits,
-numeric mode and controls in its key. The C staged bridge exposes these services
+work limits. These checkpoints provide active same-bundle carry reuse. Cross-bundle pure
+block transforms use the separate keyed service below. The C staged bridge exposes these services
 through phase-local opaque handles and copied byte states, as described above.
+
+
+## Pure block transition cache
+
+`DependencyPhase::block` evaluates a finite pure internal state transition. Its
+compute callback may depend only on the supplied phase inputs, explicit incoming
+state, static operation parameters/metadata, phase, half-open range and mode.
+Every carried control and numerical value belongs in incoming state; the callback
+cannot depend on original output Q, earlier unsupplied fragments, timing or hidden
+mutable state. This is a trusted operation contract, not code analysis or a grant
+to batch RequestFailureOnly output observations. RequestRecord use rejects.
+
+The session key hashes the immutable registry/operation contract, input/state
+metadata, exact canonical supplied sets and bits at their actual dtype width,
+phase/range/mode and actual incoming state. Snapshot identity and original Q are
+excluded because they are provenance rather than transition inputs. Distinct
+registries already have unique runtime implementation identities. Failed blocks
+are never retained. A hit must match the incoming state's descriptor, region and
+facets, and is copied into the current stage allocator. A computed state must use
+that allocator. The current successful supply/history remains the evidence; old
+prefix certificates are never imported through this cache.
+
+ExecutionContext supplies optional `DependencyBlockServices` backed by its existing
+accounted result LRU. Only pure/cacheable ancestry participates. Optional key work
+uses `maximum_dependency_cache_work`, charged before sample hashing; zero or
+exhaustion runs the transition without lookup/retention. Epoch-checked lookup and
+publication prevent old Runs from repopulating a cleared cache. Borrowed values
+survive eviction through their existing allocation leases. Internal hit/miss
+counters are separate from completed-output `cache_hits`. Direct hosts can provide
+the same services; service exceptions and ignored failures are sticky.
+
+The real scan regression changes incoming 0 to 1 before `[1,2^54]`: the changed
+blocks recompute, their earlier output changes from 1 to 2, and only subsequent
+matching transitions hit after complete carry reconvergence. Mean/variance tests
+check unchanged first-pass reuse and second-pass misses when mean changes. Direct
+protocol tests share one host cache across two registries with distinct pure
+implementations, and reject wrong state metadata, foreign allocations and ignored
+host errors. The C bridge currently exposes completed checkpoint services; the
+pure block callback service is a C++ phase facility.

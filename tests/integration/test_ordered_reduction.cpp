@@ -285,6 +285,36 @@ int typed_channels_and_cancellation() {
                .value() == 0);
   return 0;
 }
+int edited_block_cache() {
+  auto registry = make_default_operation_registry();
+  for (bool variance : {false, true}) {
+    std::vector<double> numbers{1, 2, 3, 4};
+    auto source = input({4}, numbers);
+    GraphContext graph(
+        document(source, variance ? "numeric.variance" : "numeric.mean", 2));
+    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    ExecutionContext context(registry, {1, false, 8, 4096, 512});
+    auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
+    DemandQuery q{{"result", Footprint::all({1}).take_value()}};
+    auto initial = demand.request(q);
+    PS_CHECK(initial.ok() && initial.value().diagnostics.block_cache_misses ==
+                                 (variance ? 4 : 2));
+    // The unchanged first block retains its incoming sum. Variance pass two
+    // must miss even that block because its fixed mean changes from 2.5 to 3.5.
+    numbers[3] = 8;
+    PS_CHECK(demand.replace_bindings({{{"x", input({4}, numbers)}}}).ok());
+    auto changed = demand.request(q);
+    PS_CHECK(
+        changed.ok() && changed.value().diagnostics.block_cache_hits == 1 &&
+        changed.value().diagnostics.block_cache_misses == (variance ? 3 : 1));
+    double actual = 0, expected = oracle(numbers, variance, false);
+    PS_CHECK(changed.value().values.at("result").read({0}, &actual, 8).ok());
+    PS_CHECK(std::memcmp(&actual, &expected, 8) == 0);
+    PS_CHECK(changed.value().dependencies.source_support().value().at("x") ==
+             Footprint::all({4}).value());
+  }
+  return 0;
+}
 int failures_and_environment() {
   auto registry = make_default_operation_registry();
   const double maximum = std::numeric_limits<double>::max();
@@ -339,6 +369,7 @@ int failures_and_environment() {
 }  // namespace
 int main() {
   PS_CHECK(order_and_cache() == 0);
+  PS_CHECK(edited_block_cache() == 0);
   PS_CHECK(bounded_source() == 0);
   PS_CHECK(failures_and_environment() == 0);
   PS_CHECK(typed_channels_and_cancellation() == 0);

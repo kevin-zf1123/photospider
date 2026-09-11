@@ -58,6 +58,13 @@ callbacks reject any repeated prefix read. Completed carries let all 128 outputs
 read exactly 128 inputs. A separate `[1,inf,...]` binding then proves `{0}`
 succeeds with 1 and `{0,1}` reports the error at input 1.
 
+The `blocks` scenario edits the first input in `[0,1,2^54,4,5,6]` to 1.
+The first three one-sample transitions must recompute; after the accumulator
+reconverges at `2^54`, the last three transitions reuse completed states. The
+prefix ending at input 1 is now 2. A separate volatile binary64 left fold checks
+the final output; runtime evidence still records the complete current source
+prefix. Cache keys include incoming state, not just equal outgoing carries.
+
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
 build/issue257-static/examples/g4_workflow/photospider_g4_workflow
@@ -76,6 +83,7 @@ shared: callbacks=1, first=Cancelled, second=7, evidence=present
 cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, values=[1,5], cleared_pixels=0, data3_dirty={0,4}
 reductions: mean=1.5, variance=1.25, block=64, source_bytes=98304, live_budget=1024, global_support=present
 scan: outputs=128, source_reads=128, last=8256, short_query=1, joint_query=nonfinite_input_1
+blocks: first_misses=6, edit_misses=3, edit_hits=3, prefix1=2, source_support=all
 ```
 
 It also builds as a standalone installed public package consumer:
