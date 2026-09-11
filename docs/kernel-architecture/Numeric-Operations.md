@@ -5,20 +5,21 @@ operations through the public WorkflowDocument, Compiler and ExecutionContext
 interfaces. The accepted boundary is [ADR 0020](../adr/0020-composable-operation-foundations.md).
 The [Chinese mirror](zh/Numeric-Operations.zh.md) describes the same implementation.
 
-All operations use Whole input/output demands and return packed generic Values
-with empty facets. Rank-1..8 nonzero shapes remain required. Cast, range, clamp
+Cast, range, clamp and arithmetic use Whole input/output demands. Reductions
+read complete logical input support through sequential bounded stages. All return
+packed generic Values with empty facets. Rank-1..8 nonzero shapes remain required. Cast, range, clamp
 and arithmetic preserve shape; reductions return Float64 `{1}`. Binary inputs
 must have identical dtype and shape. There is no implicit broadcasting, casting
 or semantic preservation: multiplying a coverage mask by two produces a generic
 array, which can then be explicitly interpreted by another operation.
 
-| Key | Inputs | Required static parameters |
+| Key | Inputs | Static parameters |
 | --- | --- | --- |
 | `numeric.cast` | One UInt8/Int64/Float32/Float64 array | String `dtype`: `uint8`, `int64`, `float32`, `float64`; String `rounding`: `ties_even`; String `overflow`: `reject` or `clip` |
 | `numeric.encode_range` | One array of any of the four dtypes | Cast parameters plus finite Float64 `src_min`, `src_max`, `dst_min`, `dst_max`; both intervals strictly increasing |
 | `numeric.add`, `numeric.subtract`, `numeric.multiply`, `numeric.divide` | Two Float32 or two Float64 arrays | None |
 | `numeric.clamp` | One Float32/Float64 array | Finite inclusive Float64 `min`, `max`, with `min <= max` |
-| `numeric.mean`, `numeric.variance` | One Float32/Float64 array | None |
+| `numeric.mean`, `numeric.variance` | One Float32/Float64 array | Optional Int64 `block_size` in [1,65536], default 64 |
 
 Constructors explicitly write `rounding="ties_even"` and `overflow="reject"`
 for the default behavior. The registry never supplies missing parameters.
@@ -52,6 +53,32 @@ Float32 narrowing; large unused Float64 endpoints are legal. Mean accumulates in
 Float64 in fixed logical row-major order; population variance uses two passes
 (mean, then squared deviations, `ddof=0`). Non-finite accumulated results fail.
 There is no implicit parallel or reassociated reduction.
+
+Mean/variance use the staged dependency protocol with one scalar observation.
+`block_size` bounds requested samples per phase; image inputs round it upward to
+complete pixels, and exact row-major intervals decompose across rank-1..8 axes
+without reading a bounding-box gap. Each block continues the incoming Float64
+accumulator directly, preserving the order and global sample index of nonfinite
+input, sum-overflow and variance-overflow checks. Variance finishes the first
+pass before retaining its exact mean for every second-pass block. Block size is
+an input-read granularity, not a batch of output observations.
+
+Typed input semantics receive a complete validation pass before arithmetic,
+using the existing supplied-fragment validator and full image C. Opaque vendor
+facets do not add a validation scan. All state and
+live fragments use the current ExecutionContext worker/admission/allocator.
+Empty exact scalar queries read nothing; resource/discovery/cancellation bounds
+remain explicit. Source data can exceed the live payload budget when its blocks
+fit. Completed exact-demand cache hits retain the complete global source support;
+changing any observed input invalidates the scalar result. Internal scan/carry
+block sharing is a separate remaining G4 integration.
+
+`test_ordered_reduction` checks bitwise results over five block sizes and ranks
+1, 4 and 8, Float32/Float64, cache cold/warm, original error sample indices,
+second-pass cancellation/recovery, typed channel closure, and a 32 KiB source
+under a 1 KiB controlled live budget. Its independent arithmetic oracle uses an
+explicit binary64 left fold. The [G4 public workflow](../../examples/g4_workflow/README.md)
+checks mean 1.5 and variance 1.25 over repeated `[0,1,2,3]` with bounded source reads.
 
 The implementation reads logical coordinates using storage origin, byte offset
 and signed strides, including unaligned and zero-stride views. It allocates

@@ -5,18 +5,19 @@ Compiler、ExecutionContext 提供以下 CPU 算子。接受边界见
 [ADR 0020](../../adr/0020-composable-operation-foundations.md)，
 [英文实现说明](../Numeric-Operations.md) 为权威来源。
 
-全部算子使用 Whole 输入/输出需求，输出 packed generic Value，facets 为空。Shape
+Cast、range、clamp 和算术使用 Whole 输入/输出需求；归约通过有界顺序阶段读取完整
+逻辑输入支持。全部输出 packed generic Value，facets 为空。Shape
 仍要求 rank 1..8 且各轴非零。Cast、range、clamp 和算术保留 shape，归约输出
 Float64 `{1}`。二元输入 dtype 和 shape 必须相同。无隐式广播、转换或语义保留：
 coverage mask 乘二得到 generic 数组，之后可由其他算子显式赋予解释。
 
-| Key | 输入 | 必填静态参数 |
+| Key | 输入 | 静态参数 |
 | --- | --- | --- |
 | `numeric.cast` | 一个 UInt8/Int64/Float32/Float64 数组 | String `dtype`：`uint8`、`int64`、`float32`、`float64`；String `rounding`：`ties_even`；String `overflow`：`reject` 或 `clip` |
 | `numeric.encode_range` | 现有四 dtype 中任一数组 | Cast 参数以及 finite Float64 `src_min`、`src_max`、`dst_min`、`dst_max`；两个区间均严格递增 |
 | `numeric.add`、`numeric.subtract`、`numeric.multiply`、`numeric.divide` | 两个 Float32 或两个 Float64 数组 | 无 |
 | `numeric.clamp` | 一个 Float32/Float64 数组 | finite inclusive Float64 `min`、`max`，`min <= max` |
-| `numeric.mean`、`numeric.variance` | 一个 Float32/Float64 数组 | 无 |
+| `numeric.mean`、`numeric.variance` | 一个 Float32/Float64 数组 | 可选 Int64 `block_size`，范围 [1,65536]、默认 64 |
 
 默认行为由构造端显式写入 `rounding="ties_even"`、`overflow="reject"`；registry
 不补参数。Dither 固定关闭，无 dither 参数。Range 对声明区间进行仿射映射，源区间外
@@ -72,3 +73,23 @@ typed mask 语义移除；非有限、溢出、shape/dtype、分配与取消错�
 每次消费前检查结果。[通道/颜色算子](Channel-and-Color-Operations.zh.md) 提供显式组合。
 [Expression/LUT](Expression-and-LUT-Operations.zh.md) 已提供动态系数采样；
 [独立安装 foundations 示例](../../../examples/foundations_workflow)已提供公开组合运行。
+
+Mean/variance 使用分阶段依赖协议，输出仍为单个 scalar 观察。可选 Int64 参数
+`block_size` 范围 [1,65536]，默认 64，控制每阶段请求样本数；image 输入向上取整到
+完整像素。精确 row-major 区间跨 rank-1..8 轴分解，不读取 bounding-box 的间隙。
+各块直接继续 incoming Float64 累加器，保持非有限输入、sum overflow、variance
+溢出检查的顺序和全局 sample index。Variance 第一遍完成后保留精确 mean，再用于
+全部第二遍块。块大小表示输入读取粒度，不表示多个输出观察的合批。
+
+Typed 输入在算术前完成全域验证阶段，沿用供给 fragment validator，image 保持完整 C。
+Opaque vendor facets 不增加验证扫描。
+State 和活跃 fragment 使用当前 ExecutionContext worker/admission/allocator。精确 Empty
+scalar 查询不读样本，资源、发现和取消限额保持显式。源数据可以超过 live payload
+预算，只需正在读取的块能够容纳。已完成精确 demand 的缓存命中保留完整全局源支持；
+任何被观察输入变化均使 scalar 结果失效。内部 scan/carry 块共享仍为本轮 G4 的后续工作。
+
+`test_ordered_reduction` 检查五种块大小、rank 1/4/8、Float32/Float64、冷热缓存的位级
+结果，原错误 sample index、第二遍取消与恢复、typed channel closure，以及 1 KiB
+受控预算下的 32 KiB 源。独立算术 oracle 显式执行 binary64 left fold。
+[G4 公开 workflow](../../../examples/g4_workflow/README.md) 用有界读取验证重复
+`[0,1,2,3]` 的 mean=1.5、variance=1.25。

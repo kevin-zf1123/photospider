@@ -44,6 +44,14 @@ unchanged numeric output recomputes both and installs the new data edge. Clearin
 cached pixels leaves that new dirty relation available in the returned evidence.
 The independent radius predicate still gives values `[1,5]`.
 
+The `reductions` scenario streams a logical 32 KiB source through `numeric.mean`
+and `numeric.variance` under a 1 KiB controlled live budget. Each source callback
+requires exactly 64 Float64 samples. Uniform `[0,1,2,3]` repetitions independently
+give mean 1.5 and population variance 1.25; one mean pass and two variance passes
+read exactly 98304 bytes. Runtime evidence retains the complete global support.
+The scalar operations use ordered incoming accumulators, never partial block
+sums. Scan carry sharing remains a separate G4 implementation task.
+
 ```sh
 cmake --build build/issue257-static --target photospider_g4_workflow -j 8
 build/issue257-static/examples/g4_workflow/photospider_g4_workflow
@@ -60,6 +68,7 @@ dependencies: radius[3] -> scatter{0}, gather{}, new_data_edge=present, frozen_d
 demand: Q={0,4}, latest=[10,14], frozen=[1,5], generation=3, accumulated_dirty={0,4}, release=ok
 shared: callbacks=1, first=Cancelled, second=7, evidence=present
 cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, values=[1,5], cleared_pixels=0, data3_dirty={0,4}
+reductions: mean=1.5, variance=1.25, block=64, source_bytes=98304, live_budget=1024, global_support=present
 ```
 
 It also builds as a standalone installed public package consumer:
