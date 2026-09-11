@@ -80,3 +80,8 @@ missing-device fallback, Whole and staged restart with native descendants,
 rejected attempt diagnostics, cache isolation and exact 65535/65536-byte
 admission. No Metal returns 77 only after the CPU fallback checks. See
 [Fragment Atlas](../../docs/kernel-architecture/Fragment-Atlas.md#synchronous-producers-and-cpu-fallback).
+
+The same workflow checks rollback after a GPU poll has already requested an
+ancestor: CPU constant retries fit 16-entry Elementwise and 12-entry Whole
+record limits. Earlier output rows survive, abandoned rows disappear, and
+requested Whole results retain complete evidence without recomputing pixels.

@@ -142,6 +142,134 @@ int verify(const Result<DemandResult>& result, std::uint64_t at,
                    actual == expected,
                "independent increment oracle failed");
 }
+struct FallbackReads {
+  bool supplied = false;
+  bool cpu_read;
+  explicit FallbackReads(bool read) : cpu_read(read) {}
+  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+    const bool gpu = phase.query.backend == Backend::Gpu;
+    if (!supplied && (gpu || cpu_read)) {
+      supplied = true;
+      return Result<DependencyPoll>(
+          DependencyNeedBatch{{{{0}, {{0, 1, point(gpu ? 1 : 2), {}}}}}, {}});
+    }
+    if (gpu)
+      return Result<DependencyPoll>(
+          Status{ErrorCode::BackendUnavailable, "after ancestor completion"});
+    auto writer =
+        MutableValue::allocate(phase.query.output.descriptor,
+                               phase.query.outputs.boxes()[0], phase.allocator)
+            .take_value();
+    float value = 7;
+    if (cpu_read) {
+      auto status = phase.read(0, {2}, &value, 4);
+      if (!status.ok())
+        return Result<DependencyPoll>(status);
+    }
+    std::memcpy(writer.data(), &value, 4);
+    return Result<DependencyPoll>(
+        ValueFragments::create(phase.query.output.descriptor, {},
+                               phase.query.outputs,
+                               {std::move(writer).publish().take_value()})
+            .take_value());
+  }
+};
+int fallback_records(const ExecutionBindings& bindings) {
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    auto registry = std::make_shared<OperationRegistry>();
+    unsigned ancestors = 0;
+    OperationDefinition ancestor;
+    ancestor.key = "ancestor";
+    ancestor.traits.input_count = 1;
+    ancestor.traits.input_schema.resize(1);
+    ancestor.traits.output_element_type = ElementType::Float32;
+    ancestor.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+    ancestor.traits.region_rule = mode >= 2 ? OperationRegionRule::Whole
+                                            : OperationRegionRule::Elementwise;
+    ancestor.callback = [&](const OperationInvocation& call) {
+      ++ancestors;
+      return Result<Value>(call.inputs[0]);
+    };
+    if (check(registry->register_operation(ancestor).ok(), "ancestor"))
+      return 1;
+    auto child = ancestor;
+    child.key = "fallback";
+    child.callback = {};
+    child.traits.region_rule = OperationRegionRule::Dependency;
+    child.traits.dependency_version = 1;
+    child.traits.supports_gpu = true;
+    child.traits.allows_cpu_fallback = true;
+    child.traits.continuation_bytes = sizeof(FallbackReads);
+    child.traits.maximum_dependency_stages = 4;
+    child.start_dependency = [mode](const DependencyQuery&,
+                                    const BufferAllocator& allocator) {
+      return DependencyContinuation::make<FallbackReads>(
+          allocator, mode == 1 || mode == 2);
+    };
+    if (check(
+            registry->register_operation(child).ok() && registry->freeze().ok(),
+            "fallback registration"))
+      return 1;
+    auto doc = document("ancestor", false);
+    doc.nodes.push_back({2, "fallback", {WorkflowNodeOutput{1, "value"}}, {}});
+    doc.outputs = {{"y", 2, "value"}};
+    DemandQuery query{{"y", point(0)}};
+    if (mode == 1) {
+      doc.outputs.push_back({"a", 1, "value"});
+      query.emplace("a", point(0));
+    }
+    GraphContext graph(doc);
+    PlanningOptions planning;
+    planning.execution_mode = ExecutionMode::MetalFp32;
+    auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
+    ExecutionContext context(registry, {1, true, 8, 1 << 20, 0});
+    auto frozen = context.freeze(plan, bindings).take_value();
+    ExecutionOptions options;
+    options.dependencies.sets.maximum_boxes = mode == 0   ? 16
+                                              : mode == 3 ? 12
+                                                          : 64;
+    auto result = context.execute_fragments(frozen, query, {}, options);
+    if (verify(result, 0, mode == 0 || mode == 3 ? 7 : 2))
+      return 1;
+    const auto& evidence = result.value().dependencies;
+    if (mode == 0 || mode == 3) {
+      if (check(evidence.record_count() == 1 &&
+                    evidence.source_support().value().empty(),
+                "abandoned GPU ancestor retained"))
+        return 1;
+      auto tile = plan.tile_plan("y", Region({{0, 1}})).take_value();
+      auto ordinary = context.execute(tile, bindings, {}, options);
+      if (check(ordinary.ok() &&
+                    ordinary.value().dependencies.record_count() == 1,
+                "ordinary fallback retained abandoned records"))
+        return 1;
+    } else if (mode == 1) {
+      if (check(evidence.certificate(1).value().coverage() ==
+                        point(0).unite(point(2)).take_value() &&
+                    ancestors == 3,
+                "rollback lost prior rows or retained abandoned rows"))
+        return 1;
+    } else if (check(
+                   ancestors == 1 && evidence.record_count() == 2 &&
+                       evidence.source_support().value().at("x") ==
+                           Footprint::all({length}).take_value(),
+                   "Whole owner/evidence must survive fallback exactly once")) {
+      return 1;
+    }
+    if (mode == 2) {
+      auto tile = plan.tile_plan("y", Region({{0, 1}})).take_value();
+      auto ordinary = context.execute(tile, bindings, {}, options);
+      if (check(ordinary.ok() && ancestors == 2 &&
+                    ordinary.value().dependencies.source_support().value().at(
+                        "x") == Footprint::all({length}).take_value(),
+                "ordinary Whole fallback must restore complete evidence once"))
+        return 1;
+    }
+  }
+  std::cout << "fallback record rollback: bounded retry, prior rows and Whole "
+               "evidence passed\n";
+  return 0;
+}
 }  // namespace
 int main() {
   auto registry = std::make_shared<OperationRegistry>();
@@ -292,6 +420,8 @@ int main() {
         return 1;
     }
   }
+  if (fallback_records(bindings))
+    return 1;
   // Whole dense input/output allocations each round independently to 32 KiB.
   GraphContext whole(document("example.whole", false));
   auto plan = Compiler(registry).compile(whole, planning).take_value().plan;

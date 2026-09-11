@@ -113,8 +113,17 @@ per-session 限额，所有 attempt 计入同一 Run 工作上限。诊断记录
 attempt。回退来源随子结果、shared Flight、Whole record 传播；禁止保留 dependency
 结果缓存，后续阶段也不使用或保留 checkpoint/pure block。waiter 取消继续独立。
 
+staged GPU attempt 前，Run 保存有界记录覆盖域。CPU 重启恢复该覆盖域（包含此前
+合并的 rows），重建本地索引，弃用的祖先不再占用重试的记录额度。保存和恢复计入
+工作量，GPU discovery 已消耗的工作不退还。共享不可变记录、Flight 与 cache epoch
+保持不变。Whole 像素及完整结构 DAG 保持每 Run 至多一次的生命周期，仅在重启路径
+实际请求这些像素时重新导入证据。
+
 公开 `sync_main.cpp` 以 `x+1` 独立 oracle 检查离散 `{0,2}` 得到 1、3，验证真实 Metal、
 无设备 CPU 回退、Whole 和 staged 中途回退后再消费的 GPU 后代、attempt 诊断、无旧
 缓存命中的 native 重试及 Whole 全域证据。两个 20000 字节 payload 的 native 分配各取整为 32768 字节，总预算
 65535 失败、65536 成功；在同一预算内释放前次输出后也可完成回退与再次 native 重算。无 Metal 时先检查无设备回退再返回 77。
 `test_execution_demand` 另检查共享回退中的 owner waiter 取消及零缓存保留。命令见英文。
+新增原生案例验证 Elementwise 祖先后 16-entry、Whole 祖先后 12-entry 预算内的
+CPU 常数回退，以及此前输出 rows 恢复、普通与 frozen 执行的 Whole 复用和完整证据。
+可移植记录测试验证本地回滚后，独立共享的祖先/子节点 DAG 仍可重新导入。

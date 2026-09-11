@@ -670,6 +670,76 @@ std::uint64_t DependencyRecords::metadata_size(
     const ExecutionDependencies& evidence) noexcept {
   return evidence.impl_ ? evidence.impl_->entries : 0;
 }
+Result<DependencyRecords::Checkpoint> DependencyRecords::checkpoint(
+    std::uint64_t* remaining_work) const {
+  using Answer = Result<Checkpoint>;
+  if (!remaining_work || !failure_.ok())
+    return Answer(remaining_work ? failure_ : invalid("missing work budget"));
+  if (limits_.cancellation.cancelled())
+    return Answer(Status{ErrorCode::Cancelled, {}});
+  std::uint64_t cost = impl_->records.size();
+  for (const auto& record : impl_->records)
+    cost += record.samples.boxes().size();
+  if (cost > limits_.maximum_boxes || cost > limits_.maximum_work ||
+      cost > *remaining_work)
+    return Answer(Status{ErrorCode::ResourceExhausted, {}});
+  *remaining_work -= cost;
+  Checkpoint result;
+  result.reserve(impl_->records.size());
+  for (const auto& record : impl_->records)
+    result.push_back(record.samples);
+  return Answer(std::move(result));
+}
+Status DependencyRecords::rollback(const Checkpoint& checkpoint,
+                                   std::uint64_t* remaining_work) {
+  if (!remaining_work || checkpoint.size() > impl_->records.size())
+    return invalid("invalid dependency checkpoint");
+  if (limits_.cancellation.cancelled())
+    return Status{ErrorCode::Cancelled, {}};
+  if (impl_->entries > limits_.maximum_work || impl_->entries > *remaining_work)
+    return Status{ErrorCode::ResourceExhausted, {}};
+  *remaining_work -= impl_->entries;
+  for (std::size_t i = 0; i < checkpoint.size(); ++i) {
+    auto& record = impl_->records[i];
+    if (record.samples == checkpoint[i])
+      continue;
+    if (record.certificate) {
+      auto observations =
+          operation_observations(record.output, checkpoint[i], limits_);
+      if (!observations.ok())
+        return observations.status();
+      auto narrowed =
+          record.certificate->restrict(observations.value(), limits_);
+      if (!narrowed.ok())
+        return narrowed.status();
+      record.certificate = narrowed.take_value();
+    } else if (checkpoint[i].empty()) {
+      record.manifest.clear();
+    } else {
+      return invalid("changed indivisible dependency checkpoint");
+    }
+    record.samples = checkpoint[i];
+  }
+  impl_->records.resize(checkpoint.size());
+  impl_->grouped.clear();
+  impl_->subscriptions.clear();
+  imported_.clear();
+  impl_->entries = impl_->sources.size();
+  for (std::size_t i = 0; i < impl_->records.size(); ++i) {
+    const auto& record = impl_->records[i];
+    impl_->entries += ExecutionDependencies::Impl::weight(record);
+    if (!record.terminal)
+      impl_->grouped.emplace(record.node, i);
+    for (std::uint32_t port = 0; port < record.inputs.size(); ++port)
+      impl_->subscriptions[record.inputs[port]].push_back({i, port});
+  }
+  for (const auto& root : impl_->outputs) {
+    if (root.second.record >= impl_->records.size())
+      return invalid("output published during dependency attempt");
+    impl_->entries += 1 + root.second.samples.boxes().size();
+  }
+  return Status::success();
+}
 Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
     std::size_t index, const Footprint& samples,
     std::vector<std::shared_ptr<const DependencyRecord>> upstream) {

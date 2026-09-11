@@ -57,6 +57,16 @@ class DependencyRecords final {
   Status append_legacy(std::size_t step, const Footprint& outputs,
                        const std::vector<Footprint>& inputs);
   Status append_empty(std::size_t step, const Footprint& outputs);
+  /** @brief Covered rows before a speculative backend attempt; no pixel owners.
+   * @note Copies only bounded coverage, not nested dependency manifests.
+   */
+  using Checkpoint = std::vector<Footprint>;
+  Result<Checkpoint> checkpoint(std::uint64_t* remaining_work) const;
+  /** @brief Restores prior rows and indexes without mutating shared records.
+   * @note Outputs cannot be added between checkpoint and rollback. Successful
+   * retained Whole records must be reimported when their pixels are requested.
+   */
+  Status rollback(const Checkpoint& checkpoint, std::uint64_t* remaining_work);
   std::string observation_identity(std::size_t step,
                                    const Footprint& samples) const;
   Result<std::shared_ptr<const DependencyRecord>> capture(

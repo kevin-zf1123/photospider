@@ -1266,8 +1266,58 @@ int execution_network() {
   return 0;
 }
 
+int dependency_record_rollback() {
+  auto registry = std::make_shared<OperationRegistry>();
+  OperationDefinition op;
+  op.key = "copy";
+  op.traits.input_count = 1;
+  op.traits.input_schema.resize(1);
+  op.traits.shape_rule = OperationShapeRule::PreserveFirstInput;
+  op.traits.region_rule = OperationRegionRule::Elementwise;
+  op.callback = [](const OperationInvocation& call) {
+    return Result<Value>(call.inputs[0]);
+  };
+  PS_CHECK(registry->register_operation(op).ok() && registry->freeze().ok());
+  WorkflowDocument doc;
+  doc.inputs = {{1,
+                 "x",
+                 {ElementType::Float64, {16}},
+                 Region::whole({16}),
+                 {0, {8}},
+                 {}}};
+  doc.nodes = {{1, "copy", {WorkflowInputReference{1}}, {}},
+               {2, "copy", {WorkflowNodeOutput{1, "value"}}, {}}};
+  doc.outputs = {{"a", 1, "value"}, {"b", 2, "value"}};
+  GraphContext graph(doc);
+  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  execution_internal::DependencyRecords records(plan, "snapshot", {});
+  PS_CHECK(records.append_legacy(0, point(0), {point(0)}).ok());
+  PS_CHECK(records.output("a", 0, point(0)).ok());
+  std::uint64_t work = 1024;
+  auto checkpoint = records.checkpoint(&work).take_value();
+  const auto after_checkpoint = work;
+  PS_CHECK(records.append_legacy(0, point(1), {point(1)}).ok());
+  auto shared_ancestor = records.capture(0, point(1), {}).take_value();
+  PS_CHECK(records.append_legacy(1, point(1), {point(1)}).ok());
+  auto shared_child =
+      records.capture(1, point(1), {shared_ancestor}).take_value();
+  PS_CHECK(records.rollback(checkpoint, &work).ok() && work < after_checkpoint);
+  // Other waiters' immutable completed records remain usable after local undo.
+  PS_CHECK(shared_ancestor->certificate->coverage() == point(1));
+  PS_CHECK(records.import(shared_child).ok());
+  PS_CHECK(records.output("b", 1, point(1)).ok());
+  auto result = std::move(records).finish();
+  PS_CHECK(result.record_count() == 2);
+  PS_CHECK(result.certificate(1).value().coverage() ==
+           point(0).unite(point(1)).take_value());
+  PS_CHECK(result.potential_dirty("x", point(0)).value().at("a") == point(0));
+  PS_CHECK(result.potential_dirty("x", point(0)).value().at("b").empty());
+  PS_CHECK(result.potential_dirty("x", point(1)).value().at("b") == point(1));
+  return 0;
+}
 }  // namespace
 int main() {
+  PS_CHECK(dependency_record_rollback() == 0);
   PS_CHECK(flight_lifetime() == 0);
   PS_CHECK(sibling_admission() == 0);
   PS_CHECK(execution_network() == 0);

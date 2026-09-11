@@ -1252,6 +1252,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     execution_internal::DependencyRecords records(plan, identity, limits);
     if (!records.status().ok())
       return fail(records.status());
+    const bool keep_record_graph =
+        flights || std::any_of(plan.steps().begin(), plan.steps().end(),
+                               [](const auto& step) {
+                                 return step.backend == Backend::Gpu &&
+                                        step.traits.dependency_version &&
+                                        step.traits.allows_cpu_fallback;
+                               });
     const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& step = plan.steps().at(producer->step_index);
@@ -1278,6 +1285,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::vector<Value> values;
       std::vector<ValueFragments> ready;
       std::shared_ptr<DependencySession> session;
+      std::optional<execution_internal::DependencyRecords::Checkpoint>
+          attempt_records;
       std::optional<ValueFragments> complete;
       std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
       std::string record_identity;
@@ -1634,7 +1643,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
             const auto& step = plan.steps()[producer->step_index];
-            if (flights && !frame.record &&
+            if (keep_record_graph && !frame.record &&
                 (frame.unit || frame.terminal_allowed) &&
                 !frame.record_identity.empty()) {
               auto captured =
@@ -1803,7 +1812,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             diagnostics.fallback_reasons.push_back(reason);
           return true;
         };
-        const auto restart_cpu = [&] {
+        const auto restart_cpu = [&]() -> Status {
           // The failed worker has drained. Retire its continuation and input
           // owners before restarting the same observation on the CPU pool.
           frame.session.reset();
@@ -1813,6 +1822,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           frame.upstream_ids.clear();
           frame.next = 0;
           frame.state = Frame::State::Initial;
+          if (frame.attempt_records) {
+            auto restored = records.rollback(*frame.attempt_records, &work);
+            frame.attempt_records.reset();
+            if (!restored.ok())
+              return restored;
+          }
+          return Status::success();
         };
         const auto retained = whole_records.find(step_index);
         if (frame.state == Frame::State::Initial &&
@@ -1824,8 +1840,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           frame.backend = whole_backends.at(step_index).first;
           frame.fallback_taint |= whole_backends.at(step_index).second;
           const auto evidence = whole_evidence.find(step_index);
-          if (evidence != whole_evidence.end())
+          if (evidence != whole_evidence.end()) {
+            // Fallback can remove the builder record while Whole pixels and
+            // their complete DAG retain at-most-once Run ownership.
+            status = records.import(evidence->second);
+            if (!status.ok())
+              return fail(status);
             frame.record = evidence->second;
+          }
           frame.state = Frame::State::Complete;
           continue;
         }
@@ -1905,7 +1927,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (!fallback(unavailable))
             return fail(unavailable);
           if (frame.session) {
-            restart_cpu();
+            status = restart_cpu();
+            if (!status.ok())
+              return fail(status);
             continue;
           }
         }
@@ -1997,7 +2021,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           frame.parts.clear();
           frame.next = 0;
+          if (keep_record_graph && frame.record_identity.empty())
+            frame.record_identity =
+                records.observation_identity(step_index, frame.outputs);
           if (step.traits.dependency_version == 1) {
+            if (frame.backend == Backend::Gpu &&
+                step.traits.allows_cpu_fallback && !frame.attempt_records) {
+              auto saved = records.checkpoint(&work);
+              if (!saved.ok())
+                return fail(saved.status());
+              frame.attempt_records = saved.take_value();
+            }
             DependencyRequest request;
             for (const auto& input : step.inputs)
               request.inputs.push_back(metadata(input));
@@ -2032,7 +2066,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               diagnostics.operation_timings.push_back(OperationTiming{
                   step.node_id, frame.backend, 0, session.status().code, 1, 0});
               if (fallback(session.status())) {
-                restart_cpu();
+                status = restart_cpu();
+                if (!status.ok())
+                  return fail(status);
                 continue;
               }
               return fail(session.status());
@@ -2358,7 +2394,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               diagnostics.operation_timings.back().native_compute_us =
                   native_stats.device_us;
               if (fallback(progress.status())) {
-                restart_cpu();
+                status = restart_cpu();
+                if (!status.ok())
+                  return fail(status);
                 continue;
               }
               return fail(progress.status());

@@ -199,6 +199,14 @@ Whole records. Such results cannot populate dependency result caches, and their
 stages cannot use or retain checkpoints or pure blocks under native identities.
 Independent waiter cancellation still cannot abort a producer another waiter needs.
 
+Before a staged GPU attempt, the Run saves bounded record coverage. CPU restart
+restores that coverage, including previously merged rows, and rebuilds local
+indexes so abandoned ancestors do not consume the retry's record allowance.
+The save/restore work is charged without refunding GPU discovery work. Shared
+immutable records, Flights and cache epochs are unchanged. Whole pixels and
+their complete structural DAG retain their at-most-once lifetime; their evidence
+is reimported only if the restarted path actually requests those pixels.
+
 The public `sync_main.cpp` workflow checks separated samples `{0,2}` against the
 independent `x+1` oracle (1 and 3), real Metal dispatches, missing-device CPU
 fallback, synchronous Whole and mid-program staged fallback followed by a GPU
@@ -210,6 +218,11 @@ native retry also fit that same budget after earlier output owners retire. Its
 nonnative fallback checks run
 before returning 77 on hosts without Metal. `test_execution_demand` also checks
 shared fallback with producer-waiter cancellation and zero cache retention.
+Additional native cases verify CPU constant fallback within 16 metadata entries
+after an Elementwise ancestor and 12 after a Whole ancestor, restoration of a
+prior output's rows, and Whole reuse with complete evidence in ordinary and
+frozen execution. A portable record test preserves an independently shared
+ancestor/child DAG across local rollback and reimport.
 
 ```sh
 cmake --build build/issue257-static --target photospider_g4_sync_gpu_workflow -j 4
