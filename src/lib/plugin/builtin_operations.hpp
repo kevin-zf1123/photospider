@@ -20,6 +20,7 @@ Status register_channel_swizzle(OperationRegistry* registry);
 Status register_channel_merge(OperationRegistry* registry);
 Status register_alpha_associate(OperationRegistry* registry);
 Status register_alpha_unassociate(OperationRegistry* registry);
+Status register_color_rgb_to_ycbcr420(OperationRegistry* registry);
 Status register_color_rgb_to_xyz(OperationRegistry* registry);
 Status register_color_xyz_to_rgb(OperationRegistry* registry);
 Status register_color_xyz_to_lab(OperationRegistry* registry);

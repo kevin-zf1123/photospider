@@ -13,7 +13,7 @@
 
 namespace ps {
 namespace {
-constexpr std::array<const char*, 10> kinds = {
+constexpr std::array<const char*, 11> kinds = {
     "",
     "scalar",
     "image",
@@ -24,6 +24,7 @@ constexpr std::array<const char*, 10> kinds = {
     "sampled_signal",
     "lut",
     "byte_resource",
+    "image_plane",
 };
 Status invalid(const char* message) {
   return Status::failure(ErrorCode::InvalidArgument, message);
@@ -39,7 +40,7 @@ bool text_valid(const std::string& text) {
 }
 Status validate(const SemanticDescriptor& s) {
   const auto kind = static_cast<std::uint32_t>(s.kind);
-  if (kind == 0 || kind > 9 || s.channels.size() > 64)
+  if (kind == 0 || kind > 10 || s.channels.size() > 64)
     return invalid("invalid semantic kind/channel count");
   for (const auto* text : {&s.model, &s.primaries, &s.transfer, &s.reference,
                            &s.unit, &s.association, &s.coordinate_space,
@@ -55,6 +56,7 @@ Status validate(const SemanticDescriptor& s) {
   if (s.unit.empty())
     return invalid("semantic value unit is required");
   const bool image = s.kind == SemanticKind::Image;
+  const bool plane = s.kind == SemanticKind::ImagePlane;
   const bool sampled =
       s.kind == SemanticKind::SampledSignal || s.kind == SemanticKind::Lut;
   if (!std::isfinite(s.sample_origin) || !std::isfinite(s.sample_step) ||
@@ -62,7 +64,23 @@ Status validate(const SemanticDescriptor& s) {
                : s.sample_origin != 0 || s.sample_step != 0 ||
                      !s.sample_axis_unit.empty()))
     return invalid("invalid sampling domain");
-  if (image) {
+  for (std::size_t axis = 0; axis < 2; ++axis)
+    if (!std::isfinite(s.plane_origin[axis]) ||
+        !std::isfinite(s.plane_step[axis]) ||
+        (plane ? s.plane_step[axis] <= 0
+               : s.plane_origin[axis] != 0 || s.plane_step[axis] != 0))
+      return invalid("invalid plane sampling domain");
+  if (plane) {
+    if (s.model != "ycbcr" || s.primaries != "srgb" || s.transfer != "bt709" ||
+        !one_of(s.reference, {"scene", "display"}) || s.association != "none" ||
+        s.unit != "relative" || s.channels.size() != 1 ||
+        !one_of(s.channels[0].role,
+                {"luma", "blue_difference", "red_difference"}) ||
+        s.channels[0].unit != "relative" || s.white[1] != 1 ||
+        std::any_of(s.white.begin(), s.white.end(),
+                    [](double x) { return !std::isfinite(x) || x <= 0; }))
+      return invalid("invalid YCbCr plane color semantics");
+  } else if (image) {
     if (!one_of(s.model, {"rgb", "xyz", "lab"}) ||
         !one_of(s.association,
                 {"none", "straight", "coverage_premultiplied"}) ||
@@ -241,6 +259,12 @@ Result<ValueFacet> encode_semantic(const SemanticDescriptor& s) {
   number(out, s.sample_step);
   string(out, s.sample_axis_unit);
   string(out, s.media_type);
+  if (s.kind == SemanticKind::ImagePlane) {
+    for (auto coordinate : s.plane_origin)
+      number(out, coordinate);
+    for (auto step : s.plane_step)
+      number(out, step);
+  }
   if (out->size() > 4096)
     return Result<ValueFacet>(invalid("semantic payload exceeds 4096 bytes"));
   return Result<ValueFacet>(std::move(facet));
@@ -254,7 +278,7 @@ Result<SemanticDescriptor> decode_semantic(const ValueFacet& facet) {
   const auto kind = r.string();
   SemanticDescriptor s;
   s.kind = static_cast<SemanticKind>(0);
-  for (std::uint32_t i = 1; i <= 9; ++i)
+  for (std::uint32_t i = 1; i <= 10; ++i)
     if (kind == kinds[i])
       s.kind = static_cast<SemanticKind>(i);
   const auto count = r.integer(4);
@@ -277,6 +301,12 @@ Result<SemanticDescriptor> decode_semantic(const ValueFacet& facet) {
   s.sample_step = r.number();
   s.sample_axis_unit = r.string();
   s.media_type = r.string();
+  if (s.kind == SemanticKind::ImagePlane) {
+    for (auto& coordinate : s.plane_origin)
+      coordinate = r.number();
+    for (auto& step : s.plane_step)
+      step = r.number();
+  }
   if (!r.complete())
     return Result<SemanticDescriptor>(
         invalid("truncated or trailing semantic bytes"));
@@ -393,6 +423,7 @@ Status validate_semantic_descriptor(const SemanticDescriptor& s,
           d.shape[2] != s.channels.size())
         return mismatch();
       break;
+    case SemanticKind::ImagePlane:
     case SemanticKind::Mask:
       if (d.element_type != ElementType::Float32 || d.shape.size() != 2)
         return mismatch();

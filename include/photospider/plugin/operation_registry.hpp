@@ -214,7 +214,12 @@ enum class OperationSemanticRule : std::uint32_t {
    * increasing domain. The String parameter selects reject/clip outside it.
    * Output preserves query shape and drops semantic guarantees.
    */
-  ApplyLut1d = 14
+  ApplyLut1d = 14,
+  /** @brief Establish a YCbCr ImagePlane template from linear sRGB D65 without
+   * alpha, preserving scene/display reference and white. output_facets contains
+   * one plane descriptor with the desired role and nominal sampling geometry.
+   */
+  YCbCrPlane = 15
 };
 
 /** @brief Static contract for one named result, independent of sibling outputs.

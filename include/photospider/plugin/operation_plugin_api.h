@@ -471,6 +471,8 @@ typedef struct ps_operation_semantic_constraint_v9 {
  * dropped.
  */
 #define PS_OPERATION_SEMANTIC_APPLY_LUT_1D_V9 14U
+/** @brief Establish a YCbCr plane template, retaining RGB source reference. */
+#define PS_OPERATION_SEMANTIC_YCBCR_PLANE_V9 15U
 
 /** @brief Ceil a finite nonnegative Float64 parameter before checked extent
  * arithmetic. */

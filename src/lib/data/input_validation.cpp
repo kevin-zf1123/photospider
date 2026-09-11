@@ -25,7 +25,7 @@ std::uint32_t float_bits(float value) noexcept {
   return bits;
 }
 bool valid_constraint(const OperationPortConstraint& port) {
-  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 9 ||
+  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 10 ||
       (port.element_type_mask & ~UINT32_C(15)) ||
       (port.element_type && port.element_type_mask))
     return false;

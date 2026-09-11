@@ -87,6 +87,24 @@ Facets infer_transformed_facets(
   if (t.outputs[0].output_semantic_input >= inputs.size())
     return Facets(mismatch("semantic source input absent"));
   const auto& input = inputs[t.outputs[0].output_semantic_input];
+  if (rule == OperationSemanticRule::YCbCrPlane) {
+    auto source = typed(input);
+    if (!source.ok())
+      return Facets(source.status());
+    const auto& image = source.value();
+    if (image.kind != SemanticKind::Image || image.model != "rgb" ||
+        image.primaries != "srgb" || image.transfer != "linear" ||
+        image.association != "none" || image.white != rgba_semantics().white ||
+        t.outputs[0].output_facets.size() != 1)
+      return Facets(mismatch("YCbCr requires linear sRGB D65 without alpha"));
+    auto plane = decode_semantic(t.outputs[0].output_facets[0]);
+    if (!plane.ok() || plane.value().kind != SemanticKind::ImagePlane)
+      return Facets(mismatch("missing plane template"));
+    auto result = plane.take_value();
+    result.reference = image.reference;
+    result.white = image.white;
+    return encode(result);
+  }
   if (rule == OperationSemanticRule::SampleExpression) {
     input_internal::Float32Environment environment;
     if (!environment.active())

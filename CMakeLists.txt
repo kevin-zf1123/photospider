@@ -102,6 +102,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/02-format-color/color_assign.cpp
   plugins/ops/02-format-color/color_lab_to_xyz.cpp
   plugins/ops/02-format-color/color_rgb_to_xyz.cpp
+  plugins/ops/02-format-color/color_rgb_to_ycbcr420.cpp
   plugins/ops/02-format-color/color_xyz_to_lab.cpp
   plugins/ops/02-format-color/color_xyz_to_rgb.cpp
   plugins/ops/03-generation/field_constant.cpp
@@ -490,6 +491,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_multi_output_contract Photospider::kernel tests/unit/test_multi_output_contract.cpp)
   target_compile_definitions(test_multi_output_contract PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
   add_dependencies(test_multi_output_contract multi_output_fixture)
+  photospider_add_test(test_multi_output_ops Photospider::kernel tests/integration/test_multi_output_ops.cpp)
   photospider_add_test(test_joint_execution Photospider::kernel tests/integration/test_joint_execution.cpp)
   photospider_add_test(test_multi_output_execution Photospider::kernel tests/integration/test_multi_output_execution.cpp)
   target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")

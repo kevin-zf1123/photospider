@@ -276,6 +276,7 @@ Result<OperationMetadata> infer_operation_output(
     case OperationSemanticRule::XyzToLab:
     case OperationSemanticRule::LabToXyz:
     case OperationSemanticRule::SampleExpression:
+    case OperationSemanticRule::YCbCrPlane:
     case OperationSemanticRule::ApplyLut1d: {
       auto transformed = contract_internal::infer_transformed_facets(
           t, inputs, parameters, result.descriptor);
@@ -433,6 +434,18 @@ Status validate_operation_contract(const OperationTraits& t) {
           !t.outputs[0].output_semantic_parameter.empty())
         return invalid("invalid semantic input");
       break;
+    case OperationSemanticRule::YCbCrPlane: {
+      if (t.outputs[0].output_semantic_input >= maximum ||
+          !t.outputs[0].output_semantic_parameter.empty() ||
+          t.outputs[0].output_facets.size() != 1 ||
+          (t.outputs[0].region_rule != OperationRegionRule::Whole &&
+           t.outputs[0].region_rule != OperationRegionRule::Dependency))
+        return invalid("invalid YCbCr plane template");
+      auto plane = decode_semantic(t.outputs[0].output_facets[0]);
+      if (!plane.ok() || plane.value().kind != SemanticKind::ImagePlane)
+        return invalid("YCbCr template requires plane semantics");
+      break;
+    }
     case OperationSemanticRule::Establish:
       if (t.outputs[0].output_semantic_input ||
           !t.outputs[0].output_semantic_parameter.empty())
