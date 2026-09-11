@@ -213,6 +213,15 @@ int cancellation_and_limits() {
   auto counts = std::make_shared<Counters>();
   OperationRegistry registry;
   PS_CHECK(registry.register_operation(definition(counts, 0, 64)).ok());
+  auto all = registry.start_joint("test.joint", requests(64)).take_value();
+  bool full_group_reentry_rejected = false;
+  counts->hook = [&] { full_group_reentry_rejected = !all->poll().ok(); };
+  auto complete = all->poll();
+  counts->hook = {};
+  PS_CHECK(complete.ok() && complete.value().size() == 64 &&
+           full_group_reentry_rejected);
+  for (const auto& member : complete.value())
+    PS_CHECK(member.outcome.ok());
   for (unsigned cancelled : {0U, 31U, 63U}) {
     auto query = requests(64);
     CancellationSource cancellation;

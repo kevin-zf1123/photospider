@@ -163,7 +163,8 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
                             "joint work budget exhausted"};
             owner->work += amount;
             return Status::success();
-          });
+          },
+          true);
       if (!member.ok()) {
         if (member.status().code != ErrorCode::Cancelled)
           return Answer(member.status());

@@ -176,6 +176,9 @@ struct DependencySession::Impl {
   CancellationToken auxiliary_cancellation;
   mutable std::recursive_mutex mutex;
   bool active_call = false;
+  // Only private joint-owned proxies opt in. They never escape the group,
+  // whose mutex/active guard serializes every call throughout nested polls.
+  bool joint_serialized = false;
   std::uint64_t remaining_work = 0;
   std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
@@ -290,7 +293,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     const DependencyStart& start, const DependencyValidator& validate,
     DependencyRequest request, const BufferAllocator& allocator,
     std::shared_ptr<const void> definition, std::uint64_t host_proxy_bytes,
-    std::function<Status(std::uint64_t)> shared_work) {
+    std::function<Status(std::uint64_t)> shared_work, bool joint_serialized) {
   auto selected = select_operation_output(traits, request.output_index);
   if (!selected.ok())
     return Result<std::shared_ptr<DependencySession>>(selected.status());
@@ -349,6 +352,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   auto impl = std::make_unique<Impl>();
   impl->definition = std::move(definition);
   impl->shared_work = std::move(shared_work);
+  impl->joint_serialized = joint_serialized;
   impl->traits = resolved.take_value();
   impl->limits = request.limits;
   impl->auxiliary_cancellation = request.limits.sets.cancellation;
@@ -479,8 +483,9 @@ Result<DependencyProgress> DependencySession::poll(
     const BufferAllocator& allocator,
     const DependencyCheckpointServices& checkpoints,
     const DependencyBlockServices& blocks, const DependencyGpuServices& gpu) {
-  std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::try_to_lock);
-  if (!lock.owns_lock() || impl_->active_call)
+  std::unique_lock<std::recursive_mutex> lock(impl_->mutex, std::defer_lock);
+  const bool serialized = impl_->joint_serialized || lock.try_lock();
+  if (!serialized || impl_->active_call)
     return Result<DependencyProgress>(
         invalid("concurrent or reentrant dependency poll"));
   struct Active {

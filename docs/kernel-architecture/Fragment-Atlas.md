@@ -42,7 +42,7 @@ can account these operations. Cancellation after either allocation, including an
 empty input, retires all newly owned buffers and publishes no atlas.
 
 The public `FragmentAtlas::address` and the C-compatible SDK macro
-`PS_FRAGMENT_ATLAS_MSL_V8` implement matching lookup. The latter defines
+`PS_FRAGMENT_ATLAS_MSL_V9` implement matching lookup. The latter defines
 `ps_atlas_address` for a Metal shader. The host supplies actual binding spans,
 slot count, shape, tile extents and payload byte count. Only payload and directory
 buffers are needed regardless of fragment count. Boundary mapping must occur in

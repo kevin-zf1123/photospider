@@ -175,6 +175,94 @@ double number(const DemandResult& result, const std::string& key) {
     throw std::runtime_error("sample");
   return value;
 }
+int projected_request_record() {
+  for (bool joint : {false, true}) {
+    auto counts = std::make_shared<Counts>();
+    auto registry = std::make_shared<OperationRegistry>();
+    auto op = definition(counts, 0, false);
+    op.traits.input_count = 3;
+    op.traits.input_schema.resize(3);
+    auto bad = op.traits.outputs[0];
+    bad.key = "bad";
+    bad.input_indices = std::vector<std::uint32_t>{2};
+    op.traits.outputs.push_back(bad);
+    PS_CHECK(registry->register_operation(op).ok());
+    auto terminal = definition(std::make_shared<Counts>(), 0, false);
+    terminal.key = "test.record";
+    terminal.traits.input_count = 1;
+    terminal.traits.input_schema.resize(1);
+    terminal.traits.outputs.resize(1);
+    terminal.traits.outputs[0].key = "value";
+    terminal.traits.outputs[0].observation_kind =
+        ObservationKind::RequestRecord;
+    terminal.traits.outputs[0].failure_delivery =
+        FailureDelivery::RequestFailureOnly;
+    terminal.traits.joint_contract = 0;
+    terminal.traits.joint_continuation_bytes = 0;
+    terminal.start_joint = {};
+    auto record_calls = std::make_shared<std::atomic<unsigned>>(0);
+    terminal.start_dependency = [record_calls](const DependencyQuery&,
+                                               const BufferAllocator&) {
+      ++*record_calls;
+      return Result<DependencyContinuation>(Status{
+          ErrorCode::OperationFailed, "excluded RequestRecord executed"});
+    };
+    PS_CHECK(registry->register_operation(terminal).ok());
+    PS_CHECK(registry->freeze().ok());
+    auto doc = document();
+    doc.nodes[0].inputs.push_back(WorkflowNodeOutput{2, "value"});
+    doc.nodes.push_back({2, terminal.key, {WorkflowInputReference{1}}, {}});
+    // A downstream consumer must inherit only the selected safe result's
+    // relevant ancestry, even though its sibling has a RequestRecord input.
+    doc.nodes.push_back(
+        {3,
+         op.key,
+         {WorkflowNodeOutput{1, "left"}, WorkflowNodeOutput{1, "right"},
+          WorkflowNodeOutput{2, "value"}},
+         {}});
+    doc.outputs = {{"left", 3, "left"}, {"right", 3, "right"}};
+    GraphContext graph(doc);
+    auto compiled = Compiler(registry).compile(graph);
+    if (!compiled.ok())
+      std::cerr << compiled.status().message << '\n';
+    PS_CHECK(compiled.ok());
+    for (const auto& node : compiled.value().semantic.nodes())
+      if (node.id != 2) {
+        PS_CHECK(node.outputs[0].effective_atomic);
+        PS_CHECK(node.outputs[1].effective_atomic);
+        PS_CHECK(!node.outputs[2].effective_atomic);
+      }
+    ExecutionContext execution(registry, {1, false, 32, 4096, 2048});
+    auto frozen =
+        execution
+            .freeze(compiled.value().plan, {{{"a", Value::from_float64(7)},
+                                             {"b", Value::from_float64(11)}}})
+            .take_value();
+    ExecutionOptions options;
+    options.enable_joint = joint;
+    auto result = execution.execute_fragments(
+        frozen,
+        {{"left", Footprint::all({1}).take_value()},
+         {"right", Footprint::all({1}).take_value()}},
+        {}, options);
+    if (!result.ok())
+      std::cerr << result.status().message << '\n';
+    PS_CHECK(result.ok() && record_calls->load() == 0);
+    PS_CHECK(number(result.value(), "left") == 7 &&
+             number(result.value(), "right") == 11);
+    PS_CHECK((result.value().diagnostics.joint_groups > 0) == joint);
+    PS_CHECK(!result.value().dependencies.certificate({2, 0}).ok());
+    for (bool both : {false, true}) {
+      doc.outputs = {{"bad", 1, "bad"}};
+      if (both)
+        doc.outputs.push_back({"left", 3, "left"});
+      GraphContext forbidden(doc);
+      PS_CHECK(Compiler(registry).compile(forbidden).status().code ==
+               ErrorCode::InvalidArgument);
+    }
+  }
+  return 0;
+}
 int scenarios() {
   for (int scenario = 0; scenario < 7; ++scenario) {
     const bool disabled = scenario == 1, large = scenario == 2;
@@ -516,6 +604,7 @@ int c_joint_roi() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(projected_request_record() == 0);
   PS_CHECK(c_joint_roi() == 0);
   PS_CHECK(proportional_workspace_and_depth() == 0);
   PS_CHECK(fallback_ancestry() == 0);

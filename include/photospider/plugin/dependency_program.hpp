@@ -496,7 +496,8 @@ class PHOTOSPIDER_API DependencySession final {
       DependencyRequest request, const BufferAllocator& allocator,
       std::shared_ptr<const void> definition,
       std::uint64_t host_proxy_bytes = 0,
-      std::function<Status(std::uint64_t)> shared_work = {});
+      std::function<Status(std::uint64_t)> shared_work = {},
+      bool joint_serialized = false);
   static Status validate_static(
       const DependencyValidator& validate,
       const std::vector<OperationMetadata>& inputs,

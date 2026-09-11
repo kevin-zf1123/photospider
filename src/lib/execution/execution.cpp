@@ -1543,11 +1543,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const auto& step = plan.steps()[i];
       shareable[i] = step.traits.deterministic && step.traits.side_effect_free;
       cacheable[i] = shareable[i] && step.traits.cacheable;
-      for (const auto& input : step.inputs)
-        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+      const auto& included = step.traits.outputs[0].input_indices;
+      for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+        if (included && std::find(included->begin(), included->end(), port) ==
+                            included->end())
+          continue;
+        if (const auto* producer =
+                std::get_if<PlanStepInput>(&step.inputs[port])) {
           shareable[i] = shareable[i] && shareable[producer->step_index];
           cacheable[i] = cacheable[i] && cacheable[producer->step_index];
         }
+      }
     }
     std::map<std::size_t, ValueFragments> whole_records;
     std::map<std::size_t, std::pair<Backend, bool>> whole_backends;
@@ -2316,6 +2322,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             const auto port = frame.next++;
             const auto query = frame.parts[port];
             const auto target = step.inputs[port];
+            const auto& ports = step.traits.outputs[0].input_indices;
+            if (query.empty() && ports &&
+                std::find(ports->begin(), ports->end(), port) == ports->end()) {
+              const auto input = metadata(target);
+              auto empty = ValueFragments::create(
+                  input.descriptor, input.facets, query, {}, limits);
+              if (!empty.ok())
+                return fail(empty.status());
+              frame.ready.push_back(empty.take_value());
+              continue;
+            }
             frames.emplace_back(target, query);
             continue;
           }
@@ -3220,6 +3237,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         struct InputRead {
           PlanInput target;
           Footprint samples;
+          bool metadata_only = false;
           std::optional<Result<Evaluation>> result;
         };
         std::vector<InputRead> reads;
@@ -3259,6 +3277,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             // All siblings share the original input signature. Reuse identical
             // transfers; differing sets retain separate error and evidence
             // scope.
+            const auto& ports = step.traits.outputs[0].input_indices;
+            const bool metadata_only =
+                needs[port].empty() && ports &&
+                std::find(ports->begin(), ports->end(), port) == ports->end();
             std::size_t found = reads.size();
             for (std::size_t i = 0; i < reads.size(); ++i)
               if (reads[i].target.index() == step.inputs[port].index() &&
@@ -3270,18 +3292,32 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                  .declaration_index ==
                              std::get<PlanWorkflowInput>(step.inputs[port])
                                  .declaration_index) &&
-                  reads[i].samples == needs[port]) {
+                  reads[i].samples == needs[port] &&
+                  reads[i].metadata_only == metadata_only) {
                 found = i;
                 break;
               }
             if (found == reads.size())
-              reads.push_back({step.inputs[port], needs[port], {}});
+              reads.push_back(
+                  {step.inputs[port], needs[port], metadata_only, {}});
             member_reads[mi].push_back(found);
           }
         }
-        for (auto& read : reads)
-          read.result.emplace(
-              evaluate(read.target, read.samples, false, false, true));
+        for (auto& read : reads) {
+          if (read.metadata_only) {
+            const auto input = metadata(read.target);
+            auto empty = ValueFragments::create(input.descriptor, input.facets,
+                                                read.samples, {}, limits);
+            if (empty.ok())
+              read.result.emplace(
+                  Evaluation{empty.take_value(), false, Backend::Cpu, {}});
+            else
+              read.result.emplace(empty.status());
+          } else {
+            read.result.emplace(
+                evaluate(read.target, read.samples, false, false, true));
+          }
+        }
         for (const auto& entry : member_reads) {
           auto& member = members[entry.first];
           if (member.done)

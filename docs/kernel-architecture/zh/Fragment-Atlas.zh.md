@@ -25,7 +25,7 @@ Prepare 在物化前报告两份逻辑 allocation 大小。GPU 宿主应分别�
 成功 plan 提供 `preparation_work()` 和 `materialization_work()` 供外层 Run 计量。
 任一 allocation 后取消（包括 Empty）都会释放新 owner，不发布 atlas。
 
-公开 `FragmentAtlas::address` 与 C 兼容 SDK 宏 `PS_FRAGMENT_ATLAS_MSL_V8` 的查找
+公开 `FragmentAtlas::address` 与 C 兼容 SDK 宏 `PS_FRAGMENT_ATLAS_MSL_V9` 的查找
 一致，后者定义 Metal `ps_atlas_address`。宿主提供真实 binding span、slot 数、shape、
 tile extents 和 payload 字节数。任意 fragment 数仅需 payload 与目录两个 binding。
 边界映射必须先作用于全局坐标。缺失 slot/mask bit 是明确缺页，不是零值或逐 fragment

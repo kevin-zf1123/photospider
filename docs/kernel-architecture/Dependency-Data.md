@@ -68,15 +68,18 @@ See [Cache Model](Cache-Model.md) for generic snapshot identity and ownership.
 
 ## Staged C++ programs and current Run integration
 
-OperationTraits 8 distinguishes local `Atomic` and terminal `RequestRecord`,
+OperationTraits 9 distinguishes local `Atomic` and terminal `RequestRecord`,
 request-only failure delivery, dependency protocol version, continuation byte
 bound and finite stage bound. Exactly one synchronous callback or staged start
 function is registered. Staged programs require deterministic, side-effect-free
 behavior. Version 1 requires RegionRule::Dependency; it permits
 static Typed/Axes/repeated inference without imposing Whole demand. Compilation
-rejects every declared edge out of RequestRecord, including unused paths, and
-computes EffectiveAtomic across all input ancestors. Dependency plans retain
-unresolved input demands instead of inventing a rectangular approximation.
+checks executable edges reachable from requested results and side-effect roots.
+Each result computes EffectiveAtomic over its declared relevant input ancestry;
+RequestRecord cannot feed an active consumer. Excluded ports retain static
+metadata without executing the producer or creating a producer certificate.
+Dependency plans retain unresolved input demands instead of inventing a
+rectangular approximation.
 
 `start_dependency` copies validated metadata, parameters, original Q and the
 immutable input-bundle identity. Generic Atomic starts accept at most one sample;
@@ -322,7 +325,8 @@ lease retirement for that execution order, not an optimal scheduling guarantee.
 `request` and `execute_fragments` claim one Atomic sample/full image pixel or one
 complete terminal Q. The key binds the captured bundle identity, plan/operation
 contract, node, geometry, exact query and resource policy. Sharing requires
-deterministic, side-effect-free implementations throughout the input ancestry.
+deterministic, side-effect-free implementations throughout the selected result's
+relevant input ancestry. Projected-out inputs do not affect sharing or caching.
 A side-effectful/non-deterministic Whole ancestor therefore prevents downstream
 sharing even when the local callback is pure. Dispatch never expands Q or
 batches RequestFailureOnly observations.

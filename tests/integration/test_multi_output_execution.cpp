@@ -188,16 +188,34 @@ int staged_outputs() {
   return 0;
 }
 
-int projected_sync_inputs() {
+int projected_sync_inputs(bool terminal) {
   auto registry = std::make_shared<OperationRegistry>();
   auto unwanted_calls = std::make_shared<std::atomic<unsigned>>(0);
   OperationDefinition unwanted;
   unwanted.key = "test.unwanted";
+  unwanted.traits.deterministic = false;
+  unwanted.traits.cacheable = false;
   unwanted.callback = [unwanted_calls](const OperationInvocation&) {
     ++*unwanted_calls;
     return Result<Value>(
         Status{ErrorCode::OperationFailed, "unrequested input evaluated"});
   };
+  if (terminal) {
+    unwanted.traits.deterministic = true;
+    unwanted.callback = {};
+    auto& output = unwanted.traits.outputs[0];
+    output.observation_kind = ObservationKind::RequestRecord;
+    output.region_rule = OperationRegionRule::Dependency;
+    output.dependency_version = 1;
+    output.continuation_bytes = sizeof(SelectState);
+    output.maximum_dependency_stages = 2;
+    unwanted.start_dependency = [unwanted_calls](const DependencyQuery&,
+                                                 const BufferAllocator&) {
+      ++*unwanted_calls;
+      return Result<DependencyContinuation>(Status{
+          ErrorCode::OperationFailed, "excluded RequestRecord executed"});
+    };
+  }
   PS_CHECK(registry->register_operation(unwanted).ok());
   OperationDefinition projected;
   projected.key = "test.projected";
@@ -208,7 +226,10 @@ int projected_sync_inputs() {
   projected.traits.outputs[0].input_indices = std::vector<std::uint32_t>{0};
   projected.traits.outputs[1].key = "constant";
   projected.traits.outputs[1].input_indices = std::vector<std::uint32_t>{};
-  projected.callback = [](const OperationInvocation& call) -> Result<Value> {
+  auto projected_calls = std::make_shared<Counts>();
+  projected.callback =
+      [projected_calls](const OperationInvocation& call) -> Result<Value> {
+    ++(*projected_calls)[call.output_index];
     if (call.input_metadata.size() != 2)
       return Result<Value>(
           Status{ErrorCode::OperationFailed, "missing static metadata"});
@@ -246,7 +267,7 @@ int projected_sync_inputs() {
   GraphContext graph(document);
   auto compiled = Compiler(registry).compile(graph);
   PS_CHECK(compiled.ok());
-  ExecutionContext execution(registry, {1, false, 8, 4096});
+  ExecutionContext execution(registry, {1, false, 8, 4096, 2048});
   auto result = execution.execute(compiled.value().plan,
                                   {{{"a", Value::from_float64(7)}}});
   if (!result.ok())
@@ -255,6 +276,18 @@ int projected_sync_inputs() {
   PS_CHECK(test::named_scalar(result.value(), "pass") == 7);
   PS_CHECK(test::named_scalar(result.value(), "constant") == 29);
   PS_CHECK(unwanted_calls->load() == 0);
+  auto frozen =
+      execution.freeze(compiled.value().plan, {{{"a", Value::from_float64(7)}}})
+          .take_value();
+  const DemandQuery only_constant{
+      {"constant", Footprint::all({1}).take_value()}};
+  const auto before = (*projected_calls)[1].load();
+  auto first = execution.execute_fragments(frozen, only_constant);
+  auto cached = execution.execute_fragments(frozen, only_constant);
+  PS_CHECK(first.ok() && cached.ok() &&
+           cached.value().diagnostics.cache_hits == 1);
+  PS_CHECK((*projected_calls)[1] == before + 1 && unwanted_calls->load() == 0);
+  PS_CHECK(number(cached.value(), "constant") == 29);
   return 0;
 }
 
@@ -362,6 +395,7 @@ int main() {
   PS_CHECK(staged_outputs() == 0);
   PS_CHECK(projected_shapes_and_permutation() == 0);
   PS_CHECK(synchronous_outputs() == 0);
-  PS_CHECK(projected_sync_inputs() == 0);
+  PS_CHECK(projected_sync_inputs(false) == 0);
+  PS_CHECK(projected_sync_inputs(true) == 0);
   return 0;
 }

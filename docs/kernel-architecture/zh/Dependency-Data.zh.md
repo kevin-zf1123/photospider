@@ -44,11 +44,12 @@ role/tag 隔离、迟到 dirty、dtype/stride/owner 上限和快照 COW。通用
 
 ## C++ 分阶段程序与当前 Run 集成
 
-OperationTraits 8 区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议
+OperationTraits 9 区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议
 版本、continuation 字节上限与有限阶段数。注册时必须选择一个同步 callback 或一个
 分阶段 start。分阶段程序要求 deterministic、side-effect-free。协议版本 1 使用 RegionRule::Dependency，允许 Typed/Axes/重复输入
-静态推断，无需强制 Whole demand。编译器拒绝 RequestRecord 的全部出边，包括未使用
-路径，并沿全部输入祖先计算 EffectiveAtomic。依赖计划保留未解析需求，不生成矩形近似。
+静态推断，无需强制 Whole demand。编译器检查所请求结果与副作用根可达的执行边，
+每个结果仅沿所声明的相关输入祖先计算 EffectiveAtomic。RequestRecord 不得供给
+活跃消费者；排除的端口仅保留静态 metadata，不执行生产者，也不创建生产者证书。依赖计划保留未解析需求，不生成矩形近似。
 
 `start_dependency` 复制校验后的 metadata、参数、original Q 与不可变输入 bundle
 identity。Generic Atomic 每次最多一个 sample，image v2 每次最多一个完整像素。
@@ -216,7 +217,8 @@ continuation。恰好 4 MiB 在 A 的 callback 前拒绝；4 MiB 加该 state �
 
 `request` 和 `execute_fragments` 认领单个 Atomic 样本/完整图像像素，或完整 terminal Q。
 Key 绑定捕获的 bundle 身份、plan/operation 契约、节点、geometry、精确 query 和资源
-策略。共享要求全部输入祖先的实现都 deterministic 且 side-effect-free。因此，即使
+策略。共享要求所选结果相关输入祖先的实现都 deterministic 且 side-effect-free。
+排除的输入不影响共享或缓存资格。因此，即使
 本地 callback 是纯函数，带副作用或非确定性的 Whole 祖先也会阻止下游共享。Dispatch
 不扩大 Q，不合批 RequestFailureOnly 观察。
 

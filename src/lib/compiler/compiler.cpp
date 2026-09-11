@@ -735,7 +735,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   nodes_by_id.reserve(document.nodes.size());
   std::unordered_map<std::uint64_t, std::size_t> indegree;
   std::map<std::pair<std::uint64_t, std::string>, ValueRef> result_ports;
-  std::map<ValueRef, ObservationKind> local_observations;
   std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> dependents;
   for (const WorkflowNode& node : document.nodes) {
     if (node.id == 0U || !valid_text(node.operation, 1024U) ||
@@ -777,7 +776,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       const auto& output = traits.value().outputs[i];
       const ValueRef ref{node.id, i};
       result_ports.emplace(std::make_pair(node.id, output.key), ref);
-      local_observations.emplace(ref, output.observation_kind);
     }
   }
 
@@ -791,12 +789,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
               Status::failure(ErrorCode::NotFound,
                               "workflow input references a missing producer"));
         }
-        if (local_observations.at(
-                result_ports.at({source->source_node, source->source_port})) ==
-            ObservationKind::RequestRecord)
-          return Result<SemanticGraphIR>(Status::failure(
-              ErrorCode::InvalidArgument,
-              "RequestRecord output cannot feed any DAG consumer"));
         dependents[source->source_node].push_back(node.id);
         ++indegree[node.id];
       } else if (declaration_by_id.count(
@@ -854,7 +846,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     if (!resolved.ok())
       return Result<SemanticGraphIR>(resolved.status());
     node.traits = resolved.take_value();
-    bool ancestors_atomic = true;
+    std::vector<bool> input_atomic(source.inputs.size(), true);
     node.inputs.reserve(source.inputs.size());
     std::vector<OperationMetadata> input_descriptors;
     input_descriptors.reserve(source.inputs.size());
@@ -868,11 +860,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
         const auto ref =
             result_ports.at({producer->source_node, producer->source_port});
-        if (!effective_atomic.at(ref))
-          return Result<SemanticGraphIR>(Status::failure(
-              ErrorCode::InvalidArgument,
-              "consumer requires EffectiveAtomic input ancestry"));
-        ancestors_atomic = ancestors_atomic && effective_atomic.at(ref);
+        input_atomic[position] = effective_atomic.at(ref);
         descriptor = output_by_value.at(ref);
         facets = output_facets.at(ref);
       } else {
@@ -928,6 +916,13 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
         if (!demand.ok())
           return Result<SemanticGraphIR>(demand.status());
       }
+      bool ancestors_atomic = true;
+      for (std::size_t i = 0; i < input_atomic.size(); ++i)
+        if (!contract.input_indices ||
+            std::find(contract.input_indices->begin(),
+                      contract.input_indices->end(),
+                      i) != contract.input_indices->end())
+          ancestors_atomic = ancestors_atomic && input_atomic[i];
       const bool atomic =
           contract.observation_kind == ObservationKind::Atomic &&
           ancestors_atomic;
@@ -954,6 +949,35 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   if (semantic.nodes_.size() != document.nodes.size()) {
     return Result<SemanticGraphIR>(
         Status::failure(ErrorCode::Cycle, "workflow graph contains a cycle"));
+  }
+  // Static metadata covers the complete signature, but executable ancestry is
+  // selected per result. An excluded RequestRecord port is metadata only.
+  std::set<ValueRef> required;
+  for (const auto& output : document.outputs)
+    required.insert(result_ports.at({output.node_id, output.port}));
+  for (auto it = semantic.nodes_.rbegin(); it != semantic.nodes_.rend(); ++it) {
+    const auto& node = *it;
+    if (!node.traits.side_effect_free)
+      required.insert({node.id, 0});
+    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi) {
+      if (!required.count({node.id, oi}))
+        continue;
+      const auto& ports = node.traits.outputs[oi].input_indices;
+      for (std::size_t i = 0; i < node.inputs.size(); ++i) {
+        if (ports && std::find(ports->begin(), ports->end(), i) == ports->end())
+          continue;
+        if (const auto* producer =
+                std::get_if<WorkflowNodeOutput>(&node.inputs[i])) {
+          const auto ref =
+              result_ports.at({producer->source_node, producer->source_port});
+          if (!effective_atomic.at(ref))
+            return Result<SemanticGraphIR>(Status::failure(
+                ErrorCode::InvalidArgument,
+                "consumer requires EffectiveAtomic input ancestry"));
+          required.insert(ref);
+        }
+      }
+    }
   }
   semantic.outputs_ = document.outputs;
   std::sort(semantic.outputs_.begin(), semantic.outputs_.end(),
@@ -1032,8 +1056,9 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi)
       result_ports.emplace(std::make_pair(node.id, node.outputs[oi].key),
                            ValueRef{node.id, oi});
-  // Keep only output-reachable pure results. Side-effecting singleton roots
-  // remain explicit even when no named result consumes them.
+  // Retain the metadata closure of output-reachable results, including excluded
+  // ports. Runtime demand only follows selected relevant ports. Side-effecting
+  // singleton roots remain explicit even without a named consumer.
   std::set<ValueRef> needed;
   for (const auto& output : optimized.outputs())
     needed.insert(result_ports.at({output.node_id, output.port}));

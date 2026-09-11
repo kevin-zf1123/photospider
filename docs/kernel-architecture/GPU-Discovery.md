@@ -24,7 +24,7 @@ checkpoint or block services. Errors remain sticky even if ignored.
 
 ## Wire format and bounds
 
-`PS_GPU_DISCOVERY_MSL_V8` supplies the Metal `ps_discovery_emit` helper. The table
+`PS_GPU_DISCOVERY_MSL_V9` supplies the Metal `ps_discovery_emit` helper. The table
 starts with four little-endian uint32 words: attempted emit count, overflow,
 zero and zero. It is followed by `capacity` records of 144 bytes each:
 

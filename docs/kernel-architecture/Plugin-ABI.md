@@ -284,8 +284,9 @@ associations, fragment reads and cross-poll owner handles. ABI 9 adds the option
 the same services and completion rules. See the M4 section in Dependency-Data.
 
 The C++ registry accepts an alternative `start_dependency` with bounded host
-continuation, poll and supply phases. The compiler checks EffectiveAtomic on all
-input ancestors and forbids every outgoing RequestRecord edge. Actual protocol,
+continuation, poll and supply phases. The compiler checks EffectiveAtomic on each selected result's
+relevant input ancestry and rejects active consumer edges from RequestRecord.
+Excluded ports retain static metadata and cause no producer execution. Actual protocol,
 allocator lifetime and CPU Run behavior are documented in
 [Dependency data and execution](Dependency-Data.md).
 

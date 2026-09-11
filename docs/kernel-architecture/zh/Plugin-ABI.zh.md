@@ -230,7 +230,7 @@ owner handle。ABI 9 增加可选 `ps_dependency_joint_program_v9`，使用相�
 规则验证各成员 outcome，详见 Dependency-Data 的 M4 章节。
 
 C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply
-阶段执行。编译器检查全部输入祖先的 EffectiveAtomic，拒绝 RequestRecord 全部出边。
+阶段执行。编译器检查所选结果相关输入祖先的 EffectiveAtomic，拒绝 RequestRecord 到活跃消费者的执行边。排除的端口仅保留静态 metadata，不执行生产者。
 协议、allocator 生命周期和 CPU Run 行为见 [依赖数据与执行](Dependency-Data.zh.md)。
 
 ## ABI 9 输出选择与联合执行
