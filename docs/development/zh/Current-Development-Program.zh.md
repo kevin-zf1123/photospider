@@ -9,6 +9,13 @@ GitHub Issue 为实时交付状态权威。ADR 0021 记录已接受目标，接�
 基线已经包含算子基础与 G4 执行能力。历史 main@fba06270 和 ops-foundations 快照只说明
 历史里程碑，本快照不审核或改变 main。ADR 0015 保持产品边界权威。
 
+M0–M9 实现提交为 `fd796975` 至 `9193d9ac`。M10 提供
+[安装版公开 workflow](../../../examples/multi_output_workflow/README.zh.md)、
+joint on/off 消费者验证，以及参数化 kernel 的共享视图片段合并。
+2026-09-12 本地 static/shared 增量构建、每种链接 13 项 focused tests 和
+安装消费者已通过；片段合并后每种链接的 13 项最终检查同样通过。安装版 static 最大 radius
+workflow 生成完整 129×129 kernel，匹配核与卷积 oracle，kernel-only 图像读取为零。公共交付仍待下列最终门禁。
+
 ## 执行顺序
 
 - M0 / #303：研究与契约

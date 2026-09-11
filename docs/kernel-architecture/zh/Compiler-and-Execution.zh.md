@@ -93,7 +93,7 @@ CPU 访问不强制再次复制。原生输入/输出/scratch/保留副本共用
 模式关闭磁盘读写。参见 Cache-Model 与 S4-Workflow。
 
 每个 operation result 都会按 planned element type/shape 检查。每个 producer Value 在
-transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v8 input
+transfer/callback entry 前必须覆盖 consumer planned input demand；callback 与 ABI v9 input
 view 会接收该精确 demand。图像和区域源 Run 惰性物化需求 tile，Whole/副作用边界每个 Run
 完整物化一次，参见[区域语义](Region-Semantics.zh.md)。Execution context 必须使用
 产生 plan 的同一 frozen registry。Work 前、completion 期间、result assembly 前，以及
@@ -103,7 +103,7 @@ cancellation 与 plan currentness。Run 在最终 cancellation-then-currentness 
 linearization point。Late cancelled/stale local result 及其 diagnostic 会被丢弃，全部 Value
 与 resource owner 正常退役，不能进入 caller-visible `ExecutionResult`。
 
-Operation ABI v8 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
+Operation ABI v9 增加宿主管理同步 GPU 服务，callback 能区分 ordinary
 failure 与 backend unavailable。只有 optional GPU attempt 返回显式 backend-unavailable
 result、没有调用 output sink，且 copied trait 允许 fallback 时，executor 才会在 CPU
 上重试。只要尝试发布 output，backend unavailable 就变为 terminal：accepted output
@@ -174,7 +174,7 @@ S4 diagnostic 增加每算子 native dispatch/设备时间、输入复制、收�
 
 ## G4 分阶段执行
 
-当前 package 0.8、ABI/traits 8 增加依赖计划模板与 C++ start/poll/supply 协议。
+当前 package 0.9、ABI/traits 9 增加依赖计划模板与 C++ start/poll/supply 协议。
 同步实现保留 Whole 推断规则；依赖实现可在运行期发现逐端口精确 fragment。
 已实现行为和剩余集成范围见 [依赖数据与执行](Dependency-Data.zh.md)。
 
@@ -202,4 +202,21 @@ Whole 复用与诊断。公开证书查询接受结果引用；耗时与后端�
 
 `test_multi_output_execution` 覆盖独立兄弟缓存、证书、脏区订阅、冻结快照、
 命名 C 输出及未使用的失败生产者。既有单输出 fallback 文本保持原样；命名
-输出附加端口名称以标识失败结果。联合执行仍由 #307–#308 交付。
+输出附加端口名称以标识失败结果。可选联合执行已由 #307–#308 实现。
+
+
+## Atomic 执行组
+
+Plan 对同一语义节点的不同 PerAtomOutcome 结果暴露可选 CPU 执行组。
+Coordinator 先登记全部已知根需求和新发现的输入需求，再立即从每输出选择一个
+就绪观察，不等待未来请求，也不跨 Run 合组。成员 shape/ROI 可不同。
+关闭 `enable_joint`、不足两个成员、无联合实现或共享预算不足时使用 singleton。
+跨 Run 继续按 observation 共享 flight，允许混合 cache hit 和已有 flight。
+
+C/C++ joint poll 独立验证各成员 Needs/Complete/error。相同读取可共享传输，
+各成员保留独立关联与错误。成功成员独立完成 flight 并缓存。无法归属成员的
+执行错误先释放共享临时资源，再逐一 singleton 重试尚未完成的成员一次；
+取消、失效和协议错误不重试。共享 work/backing owner 只计费一次。
+仅当所有剩余观察均无 waiter 时取消共享计算；上游错误只退休对应成员。
+RequestRecord 保持独立。协议、调度与真实组合分别由 `test_dependency_joint`、
+`test_joint_execution`、`test_multi_output_ops` 及安装示例验证。

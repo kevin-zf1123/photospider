@@ -299,8 +299,14 @@ target_link_libraries(photospider_ordered_reduction_consumer PRIVATE Photospider
 target_compile_options(photospider_ordered_reduction_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_ordered_reduction_consumer PRIVATE ${_photospider_consumer_link_options})
 
+add_subdirectory(../../examples/multi_output_workflow multi-output)
+target_compile_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_link_options})
+
 add_custom_target(
   run_photospider_consumer
+  COMMAND "$<TARGET_FILE:photospider_multi_output_workflow>" --scenario all
+  COMMAND "$<TARGET_FILE:photospider_multi_output_workflow>" --scenario all --joint off
   COMMAND "$<TARGET_FILE:photospider_consumer>"
   COMMAND "$<TARGET_FILE:photospider_dependency_consumer>"
   COMMAND "$<TARGET_FILE:photospider_execution_dependencies_consumer>"
@@ -332,6 +338,6 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  DEPENDS photospider_multi_output_workflow photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)

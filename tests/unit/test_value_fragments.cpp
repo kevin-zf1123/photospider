@@ -86,6 +86,41 @@ int main() {
                    .take_value();
   PS_CHECK(!ValueFragments::create(value.descriptor(), {}, all, {value, other})
                 .ok());
+  // A shared parameter-sized table stays compact even with atomic publication.
+  const ValueDescriptor table_descriptor{ElementType::UInt8, {129, 129}};
+  auto table = Value::create(table_descriptor, Region::whole({129, 129}),
+                             {0, {129, 1}}, std::vector<std::uint8_t>(16641, 7))
+                   .take_value();
+  std::vector<Value> atoms;
+  for (std::uint64_t y = 0; y < 129; ++y)
+    for (std::uint64_t x = 0; x < 129; ++x)
+      atoms.push_back(table.view(Region({{y, 1}, {x, 1}})).take_value());
+  auto compact = ValueFragments::create(
+      table_descriptor, {}, Footprint::all({129, 129}).take_value(), atoms);
+  PS_CHECK(compact.ok() && compact.value().fragments().size() == 1);
+  PS_CHECK(compact.value().retained_bytes().value() ==
+           table.storage()->capacity());
+  std::uint8_t last = 0;
+  PS_CHECK(compact.value().read({128, 128}, &last, 1).ok() && last == 7);
+  // Adjacent logical regions with a different mapping must not be coalesced.
+  auto reversed_tail = Value::from_storage(value.descriptor(), Region({{2, 2}}),
+                                           {3, {-1}, {2}}, value.storage())
+                           .take_value();
+  auto mixed = ValueFragments::create(
+      value.descriptor(), {}, all,
+      {value.view(Region({{0, 2}})).take_value(), reversed_tail});
+  PS_CHECK(mixed.ok() && mixed.value().fragments().size() == 2);
+  PS_CHECK(mixed.value().read({2}, &last, 1).ok() && last == 4);
+  // A reversed contiguous mapping may coalesce without changing its samples.
+  auto reverse = Value::from_storage(value.descriptor(), value.region(),
+                                     {3, {-1}, {0}}, value.storage())
+                     .take_value();
+  auto reverse_parts =
+      ValueFragments::create(value.descriptor(), {}, all,
+                             {reverse.view(Region({{0, 2}})).take_value(),
+                              reverse.view(Region({{2, 2}})).take_value()});
+  PS_CHECK(reverse_parts.ok() && reverse_parts.value().fragments().size() == 1);
+  PS_CHECK(reverse_parts.value().read({3}, &last, 1).ok() && last == 1);
   // Generic rank-three data may select channels; typed image-v2 may not.
   const ValueDescriptor image{ElementType::Float32, {1, 1, 4}};
   const auto channel =

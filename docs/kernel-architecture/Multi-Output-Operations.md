@@ -148,4 +148,5 @@ The public-API integration test constructs a 3×5 RGB workflow, checks all three
 ports against an independent long-double oracle, compares joint/singleton bits,
 checks odd edges and dirty support, requests Y alone, rejects bad sample domains
 and alpha, and verifies channel ordering and reference metadata. The installed
-four-scenario example is delivered by M10 (#313).
+[four-scenario example](../../examples/multi_output_workflow/README.md) exposes
+editable graphs, actual source read sets and independent oracles.

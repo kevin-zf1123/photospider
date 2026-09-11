@@ -30,7 +30,14 @@ This snapshot does not audit or change main. ADR 0015 retains product authority.
 | M10 | [#313](https://github.com/kevin-zf1123/photospider/issues/313) | Installed workflows and combined acceptance |
 
 Each leaf depends on the preceding slice and has a separate validated commit.
-M0 records accepted contracts; implementation follows. Final delivery requires a
+Implementation commits M0–M9 are `fd796975` through `9193d9ac`. M10 adds the
+[installed public workflow](../../examples/multi_output_workflow/README.md),
+its joint on/off consumer gate, and shared-view compaction for parameter-sized
+kernels. The local static/shared builds, thirteen focused tests per linkage,
+and installed consumers passed on 2026-09-12; M10's final thirteen-check runs per linkage also passed after
+the compaction fix. The installed static maximum-radius workflow produced the
+complete 129×129 matrix, matched the independent kernel/convolution oracles,
+and recorded zero image reads for its kernel-only run. Public delivery is pending the following gates. Final delivery requires a
 fresh independent comprehensive review, required fixes, one PR to ops, all six
 existing CI jobs and Codex bot review on the final HEAD, a merge commit, explicit
 Issue settlement, local ops synchronization and task-branch cleanup. Only the

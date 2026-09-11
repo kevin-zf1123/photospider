@@ -66,6 +66,10 @@
 !examples/foundations_workflow/*.md
 !examples/foundations_workflow/CMakeLists.txt
 !examples/
+!examples/multi_output_workflow/
+!examples/multi_output_workflow/*.cpp
+!examples/multi_output_workflow/*.md
+!examples/multi_output_workflow/CMakeLists.txt
 !examples/image_vertical/
 !examples/image_vertical/*.cpp
 !examples/image_vertical/*.hpp

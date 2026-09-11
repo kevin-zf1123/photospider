@@ -24,6 +24,8 @@ class PHOTOSPIDER_API ValueFragments final {
    * @param authorized Exact permitted set, in the descriptor domain.
    * @param fragments Immutable owners; metadata must match. Overlaps are legal
    * only for identical storage and address mappings. Identical overlaps dedup.
+   * Rectangular neighbors with the same owner/mapping may coalesce; returned
+   * fragment count and partition need not equal the supplied partition.
    * @param limits Bounds normalization, including cancellation.
    * @return Complete fragments or InvalidArgument/TypeMismatch/NotFound (hole),
    * ResourceExhausted/Cancelled. Typed images require full C in every fragment.

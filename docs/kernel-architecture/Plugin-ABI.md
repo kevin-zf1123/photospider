@@ -2,7 +2,7 @@
 
 Photospider installs two narrow same-trust extension headers:
 
-- operation ABI v8: copied semantic traits, closed typed parameter schema,
+- operation ABI v9: copied semantic traits, closed typed parameter schema,
   ordered scalar/image port constraints, plan-derived input demands, and one synchronous Value callback;
 - data-provider ABI v1: copied schema key, element type, and maximum rank.
 
@@ -176,10 +176,10 @@ certificate, package-admission, or process-isolation system.
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
 
-## Version-eight semantic and output contracts
+## Version-nine semantic and output contracts
 
-Package 0.8.0/operation ABI and traits 8 replace 0.7/7. The host checks version
-before `get_api_v8`; no old table, symbol alias or image-v1 reader remains.
+Package 0.9.0/operation ABI and traits 9 replace 0.8/8. The host checks version
+before `get_api_v9`; no old table, symbol alias or image-v1 reader remains.
 WorkflowDocument schema 2/provider ABI 1/C++17 remain.
 
 `SemanticDescriptor` in `data/semantic.hpp` encodes image-v2 and semantic-v1
@@ -200,15 +200,15 @@ facets, dtype and rank. `element_type_mask` optionally accepts a dtype set:
 low bits 0..3 mean UInt8/Int64/Float64/Float32, zero is unrestricted, and it is
 mutually exclusive with nonzero exact `element_type`. Unknown bits and conflicting
 fields reject registration. The copied mask enters compiler and result identities.
-An optional operation contract selects declared/input/
+Each output contract selects declared/input/
 static-parameter dtype, rank-1..8 axes (constant, positive Int64 parameter,
 input axis or actual input count) with checked nonnegative offset, and output
 semantics (drop, preserve input, establish facets or static semantic parameter).
 The fixed input prefix may be followed by one homogeneous group; active groups
 have minimum>=1 and bounded maximum, with total input count <=1024. The loader
 copies all records before atomic publication. Lowering expands a template to
-its exact ordered input table. New axes, typed ports and repeated groups use
-Whole. No per-port G4 spatial inference is introduced.
+its exact ordered input table. Output-specific Region rules and staged dependency programs determine spatial
+reads; a Whole contract retains conservative Whole demand.
 
 The closed semantic vocabulary additionally infers channel extraction/selection/
 merging, alpha association and RGB/XYZ/Lab transformations from input metadata.
@@ -259,11 +259,11 @@ representations; the eight existing operation ports require canonical RGBA.
 
 ## S3 scaled ports
 
-ABI 8 includes the S3 Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 7 fail before publication.
+ABI 9 includes the S3 Shrink shape/Region rules and a required spatial_factor_parameter pointer/length pair. The bounded Int64 parameter resolves in [1,16], producing ceil-divided H/W and clipped box input demand. Masks can be outputs. Unknown layouts, pointer/count mismatch, invalid bounds and old ABI 7 fail before publication.
 
 ## S4 host GPU service
 
-The ABI 8 output sink carries an invocation-local ps_gpu_service_v8 pointer,
+The ABI 9 output sink carries an invocation-local ps_gpu_service_v9 pointer,
 null on CPU. buffer() creates a bounded token for host allocation and cannot
 promote frozen inputs to writable. execute() validates source/entry, bindings,
 constants and grid, and returns only after native completion. Failures are
@@ -275,7 +275,7 @@ See the public C header and [S4 Workflow](S4-Workflow.md).
 
 ## G4 observation and continuation contract
 
-ABI/Traits 8 adds Atomic versus terminal RequestRecord and explicit
+ABI/Traits 9 adds Atomic versus terminal RequestRecord and explicit
 RequestFailureOnly delivery. The current C descriptor copies and validates these
 fields; its synchronous invocation remains available. `dependency_plugin_api.h`
 adds the alternative C staged program table with host-owned continuation, exact
@@ -288,3 +288,27 @@ continuation, poll and supply phases. The compiler checks EffectiveAtomic on all
 input ancestors and forbids every outgoing RequestRecord edge. Actual protocol,
 allocator lifetime and CPU Run behavior are documented in
 [Dependency data and execution](Dependency-Data.md).
+
+## ABI 9 selected outputs and joint execution
+
+`OperationTraits::outputs` is an ordered nonempty table (at most 64) of
+`OperationOutputTraits`. Each entry names its port and owns schema, shape,
+facets, input projection, Region, observation and failure rules. Names are
+unique; singleton built-ins declare `value`. The C ABI embeds the bounded
+output table and its count. Shape axes support checked ceil-div, parameter
+subtraction and `CeilParameter` scaling for noninteger radius. Multi-output
+operations must be deterministic and free of external side effects.
+
+Invocation/query/sink carry the original `output_index`. Projected input
+views retain their original `input_index`; no invalid Value fills an omitted
+input. Complete static input metadata remains available for inference.
+`DependencyJointContinuation` and the C joint callbacks optionally process
+one Atomic observation per selected output. Services, coverage, handles,
+read associations and terminal errors remain member-specific. The host rejects
+duplicate, missing or unknown members and expired/cross-member handles.
+A shared work service charges common arithmetic once, with sticky failure.
+The singleton entry remains mandatory. RequestRecord is never joint.
+
+See [ADR 0021](../adr/0021-independent-node-results.md) and the
+[multi-output operator guide](Multi-Output-Operations.md) for scheduling,
+resource, cache and numerical contracts. Provider ABI remains 1.

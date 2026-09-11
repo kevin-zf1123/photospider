@@ -11,7 +11,7 @@ The installed `Photospider::kernel` target provides:
 
 - schema-2 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v8 semantic traits with closed typed parameter schemas,
+- operation ABI v9 semantic traits with closed typed parameter schemas,
   optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - eight signed/HDR Float32 image-v2/mask operations with composable bounded scalars;
@@ -124,3 +124,6 @@ compatibility shim, disabled legacy product, or archived-source copy.
 Photospider is licensed under the [MIT License](LICENSE).
 
 Copyright (c) 2026 Zhu Feng.
+
+Runnable named-output graphs, numerical oracles and static/shared installation
+commands: [multi-output workflow](examples/multi_output_workflow/README.md).

@@ -77,9 +77,9 @@ seal 只释放未用 reservation；atlas、state、scratch/output 活跃 owner �
 
 ## C staged GPU 桥接
 
-`ps_dependency_services_v8` 与 `ps_dependency_block_services_v8` 均提供 `atlas`、
-`gpu_buffer`、`gpu_execute`，返回布尔 1 成功/0 失败，与 `ps_gpu_service_v8` 结果码不同。
-`ps_dependency_atlas_v8` 给出全域 shape/tile、slot 数、有效样本字节、真实 binding span
+`ps_dependency_services_v9` 与 `ps_dependency_block_services_v9` 均提供 `atlas`、
+`gpu_buffer`、`gpu_execute`，返回布尔 1 成功/0 失败，与 `ps_gpu_service_v9` 结果码不同。
+`ps_dependency_atlas_v9` 给出全域 shape/tile、slot 数、有效样本字节、真实 binding span
 和不可变 payload/目录 token，不增加源读取权限。同 poll 同端口复用 token；CPU 调用拒绝。
 
 适配器把 native view token 映射成会话内单调 C handle，只接受当前 poll 的映射，旧 poll、
@@ -104,7 +104,7 @@ Float32 样本，独立预期均为 2145。实际 1 dispatch + 1 block hit；第
 
 依赖 Run 通过 context 原有 native worker 调用同步 GPU producer。host 按声明的矩形
 输入需求收集到紧密 native storage，分别计入实际取整容量，并在 callback 生命周期内
-提供 `ps_gpu_service_v8`。GPU callback 必须提交真实 native work。Invocation view
+提供 `ps_gpu_service_v9`。GPU callback 必须提交真实 native work。Invocation view
 在 owner 退休或 CPU 重试前完成 drain；Whole 保持全域验证与证据。
 
 仅 `BackendUnavailable`、支持 CPU 且 `allows_cpu_fallback` 时重试。staged 失败后

@@ -95,7 +95,7 @@ frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据�
 
 ## C 分阶段程序
 
-`dependency_plugin_api.h` 提供 ABI 8 的 C 分阶段协议。descriptor 必须恰好提供
+`dependency_plugin_api.h` 提供 ABI 9 的 C 分阶段协议。descriptor 必须恰好提供
 一个 `execute` 或 `dependency_program`。loader 复制并校验有界程序表，并在
 状态和回调存续期间保留动态库。宿主在 `start` 前将状态字节清零；只要进入
 start，destroy 就恰好执行一次，包括 start 失败。Empty 仍运行纯元数据校验，

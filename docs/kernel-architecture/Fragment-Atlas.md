@@ -138,10 +138,10 @@ workflow returns 77 on hosts without native Metal, after verifying its CPU oracl
 
 ## C staged GPU bridge
 
-Both `ps_dependency_services_v8` and `ps_dependency_block_services_v8` expose
+Both `ps_dependency_services_v9` and `ps_dependency_block_services_v9` expose
 `atlas`, `gpu_buffer` and `gpu_execute`, with Boolean 1 success / 0 failure.
-This return convention differs from `ps_gpu_service_v8` result codes. A
-`ps_dependency_atlas_v8` reports full-domain shape/tile geometry, slot count,
+This return convention differs from `ps_gpu_service_v9` result codes. A
+`ps_dependency_atlas_v9` reports full-domain shape/tile geometry, slot count,
 valid sample bytes, physical binding spans and immutable payload/directory
 view tokens. It exposes no new source reads. Repeated same-port lookup returns
 the same tokens within a poll. CPU use fails with InvalidArgument.
@@ -185,7 +185,7 @@ success. The bridge also exposes [bounded discovery](GPU-Discovery.md) through a
 Dependency Runs also invoke existing synchronous GPU producers on the context's
 native worker. The host collects each declared rectangular input demand into
 packed native storage, independently charges its rounded capacity, and supplies
-`ps_gpu_service_v8` for the callback lifetime. GPU callbacks must submit actual
+`ps_gpu_service_v9` for the callback lifetime. GPU callbacks must submit actual
 native work. Native invocation views drain before owners retire or CPU retry.
 Whole producers preserve their full-domain validation and evidence.
 

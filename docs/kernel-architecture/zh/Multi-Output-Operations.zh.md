@@ -120,3 +120,6 @@ Singleton 在读取图像前检查点保存宿主拥有的核表；joint 共享�
 `test_multi_output_ops` 检查 radius 为 0、0.25、1、1.25、2、64 的完整矩阵，
 整数两侧相邻浮点值、零与极小 sigma、非法参数、kernel-only 零图像读取，
 以及两种 boundary 和 joint 开关下公开 `field.convolve` 的精确复算。
+
+安装版四场景示例、执行次数、源读取集合与运行方法见
+[示例说明](../../../examples/multi_output_workflow/README.zh.md)。

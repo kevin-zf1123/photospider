@@ -25,7 +25,7 @@ semantic, optimized, plan, runtime Value, and daemon identities are separate.
 | compiler | fail-closed parameter validation, typed IR, conservative no-op optimization, demand-aware local plan, typed digests/key |
 | execution | bounded CPU pool, optional native Metal queue/lane, private Run, cancellation, byte ledger, raw diagnostics |
 | data | regional immutable `Value` and CPU-accessible/native storage, rank-general `Region`, `StridedLayout` |
-| plugin | exact operation ABI v8/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
+| plugin | exact operation ABI v9/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
 | benchmark | raw compile/plan/execute observations plus named correctness-oracle or explicit unchecked status; execution cancellation aborts the complete run without a report |
 
 CPU exact execution is required. Explicit MetalFp32 selects declared native

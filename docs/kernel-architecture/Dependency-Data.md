@@ -142,7 +142,7 @@ compilation and before direct Empty-query state decisions.
 
 ## C staged programs
 
-`dependency_plugin_api.h` supplies the ABI-8 C equivalent of the staged
+`dependency_plugin_api.h` supplies the ABI-9 C equivalent of the staged
 protocol. A descriptor supplies exactly one `execute` or `dependency_program`.
 The loader copies and validates the bounded program table, retaining its library
 through every active state and callback. Host-owned state bytes are zeroed before
