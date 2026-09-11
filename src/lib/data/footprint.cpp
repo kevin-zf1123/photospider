@@ -31,9 +31,14 @@ struct Stop final {
 struct Work final {
   const FootprintLimits& limits;
   std::uint64_t remaining;
-  explicit Work(const FootprintLimits& value)
-      : limits(value), remaining(value.maximum_work) {
+  std::uint64_t* consumed;
+  explicit Work(const FootprintLimits& value, std::uint64_t* measured = nullptr)
+      : limits(value), remaining(value.maximum_work), consumed(measured) {
     check();
+  }
+  ~Work() {
+    if (consumed)
+      *consumed = limits.maximum_work - remaining;
   }
   void check() const {
     if (limits.cancellation.cancelled())
@@ -140,12 +145,15 @@ Result<std::vector<Region>> combine(const std::vector<std::uint64_t>& shape,
                                     const std::vector<Region>& a,
                                     const std::vector<Region>& b,
                                     Combine operation,
-                                    const FootprintLimits& limits) {
+                                    const FootprintLimits& limits,
+                                    std::uint64_t* consumed = nullptr) {
+  if (consumed)
+    *consumed = 0;
   auto status = shape_status(shape);
   if (!status.ok())
     return Result<std::vector<Region>>(status);
   try {
-    Work work(limits);
+    Work work(limits, consumed);
     Boxes left, right;
     for (int operand = 0; operand < 2; ++operand) {
       const auto* regions = operand == 0 ? &a : &b;
@@ -174,8 +182,10 @@ Result<std::vector<Region>> combine(const std::vector<std::uint64_t>& shape,
 
 Result<Footprint> Footprint::from_regions(std::vector<std::uint64_t> shape,
                                           const std::vector<Region>& boxes,
-                                          const FootprintLimits& limits) {
-  auto normalized = combine(shape, boxes, {}, Combine::Union, limits);
+                                          const FootprintLimits& limits,
+                                          std::uint64_t* consumed_work) {
+  auto normalized =
+      combine(shape, boxes, {}, Combine::Union, limits, consumed_work);
   if (!normalized.ok())
     return Result<Footprint>(normalized.status());
   Footprint result;

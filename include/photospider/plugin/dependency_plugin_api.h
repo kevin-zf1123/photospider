@@ -131,6 +131,31 @@ typedef struct ps_dependency_block_services_v8 {
 typedef int (*ps_dependency_block_compute_v8)(
     const ps_dependency_block_services_v8*, const uint8_t* incoming,
     uint8_t* outgoing, uint64_t state_bytes, void* user);
+/** @brief Borrowed services for one GPU discovery dispatch callback.
+ * @note Only current ready inputs and accounted scratch are accessible. No
+ * recursive discovery, pure block caching, output publication or associations
+ * are available here. Boolean service returns use 1 success / 0 failure.
+ */
+typedef struct ps_dependency_discovery_services_v8 {
+  uint32_t struct_size, reserved;
+  void* context;
+  int (*read)(void*, uint32_t, const uint64_t*, uint32_t, void*, uint64_t);
+  uint8_t* (*allocate_scratch)(void*, uint64_t);
+  int (*consume_work)(void*, uint64_t);
+  int (*is_cancelled)(void*);
+  int (*atlas)(void*, uint32_t, ps_dependency_atlas_v8*);
+  int (*gpu_buffer)(void*, const uint8_t*, uint64_t, uint32_t, uint64_t*);
+  int (*gpu_execute)(void*, const ps_gpu_dispatch_v8*, uint32_t);
+} ps_dependency_discovery_services_v8;
+/** @brief Populates a zeroed native request table using bounded discovery.
+ * @note Table layout is PS_GPU_DISCOVERY_MSL_V8. Make no more emit attempts
+ * than the enclosing discover call declares. Pointers expire at compute return;
+ * host freezing then revokes native write access. Return SUCCESS or an error,
+ * never NEED. Numerical results must wait for the subsequent supply/poll.
+ */
+typedef int (*ps_dependency_discovery_compute_v8)(
+    const ps_dependency_discovery_services_v8*, uint8_t* table,
+    uint64_t byte_size, uint32_t capacity, void* user);
 /** @brief Finite, nonblocking phase services; every failure is sticky.
  * @note Service/context/input/scratch pointers expire at poll return. Output
  * pointers expire immediately on successful publish_output, or at poll return
@@ -220,6 +245,16 @@ typedef struct ps_dependency_services_v8 {
    * Scratch, state and output workspace count actual native capacity.
    */
   int (*gpu_execute)(void*, const ps_gpu_dispatch_v8*, uint32_t);
+  /** @brief Runs bounded GPU discovery and attaches decoded needs to this poll.
+   * @note capacity is positive and at most the host bound (hard limit 65536).
+   * candidates bounds all emit attempts, including duplicates and overflow,
+   * and is charged before compute. Overflow is sticky ResourceExhausted;
+   * malformed records fail. After nonempty discovery, return NEED; the host
+   * preserves per-output associations and rejects numerical completion before
+   * supply. Empty tables add no dependencies. No table pointer may be retained.
+   */
+  int (*discover)(void*, uint32_t capacity, uint32_t candidates,
+                  ps_dependency_discovery_compute_v8 compute, void* user);
 } ps_dependency_services_v8;
 /** @brief Copied staged callbacks for trusted in-process C implementations.
  * @note Exactly one synchronous execute or dependency_program is supplied.

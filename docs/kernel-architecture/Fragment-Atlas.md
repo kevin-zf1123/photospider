@@ -50,7 +50,8 @@ global coordinates before lookup. An absent mask bit/slot is an explicit missing
 sample, never a zero value or per-fragment clamp.
 
 C++ staged GPU Runs now integrate this transport as described below. Bounded
-GPU discovery remains G4 work; the C staged bridge shares this transport. Legacy synchronous
+GPU discovery is integrated through [bounded request tables](GPU-Discovery.md);
+the C staged bridge shares this transport. Legacy synchronous
 GPU producers within dependency templates also remain unsupported. Raw
 Float64/Int64 transport does not assert native floating-point arithmetic support.
 
@@ -176,4 +177,4 @@ build/issue257-static/photospider_g4_c_gpu_workflow
 The standalone example CMake project and static/shared installed consumers also
 build this C11 module and its public loader. An optional loader argument selects
 a module path. Exit 77 means native unavailable after CPU checks, never native
-success. This bridge does not itself implement a discovery request table.
+success. The bridge also exposes [bounded discovery](GPU-Discovery.md) through a dedicated callback.

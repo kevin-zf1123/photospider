@@ -16,6 +16,7 @@
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/dependency_block.hpp"
+#include "plugin/dependency_discovery.hpp"
 #include "plugin/operation_identity.hpp"
 
 namespace ps {
@@ -487,6 +488,9 @@ Result<DependencyProgress> DependencySession::poll(
         ErrorCode::ResourceExhausted, "dependency phase limit")));
   try {
     Result<DependencyPoll> polled(invalid("uninitialized poll"));
+    std::vector<DependencyNeed> discovered;
+    std::uint64_t discovery_metadata = 1;
+    bool block_active = false, discovery_active = false;
     if (impl_->query.outputs.empty()) {
       auto empty = ValueFragments::create(
           impl_->query.output.descriptor, impl_->query.output.facets,
@@ -719,12 +723,24 @@ Result<DependencyProgress> DependencySession::poll(
                             {},
                             {},
                             {},
+                            {},
                             {}};
       phase.block = [&](std::uint32_t kind, std::uint64_t begin,
                         std::uint64_t end, std::uint64_t mode,
                         const Value& incoming,
                         const std::function<Result<Value>()>& compute) {
         try {
+          if (discovery_active)
+            return Result<Value>(impl_->record_failure(
+                invalid("pure block inside GPU discovery")));
+          struct BlockScope {
+            bool& active;
+            bool prior;
+            explicit BlockScope(bool& value) : active(value), prior(value) {
+              active = true;
+            }
+            ~BlockScope() { active = prior; }
+          } scope(block_active);
           return plugin_internal::evaluate_dependency_block(
               impl_->block_identity, phase, blocks, kind, begin, end, mode,
               incoming, compute);
@@ -817,6 +833,79 @@ Result<DependencyProgress> DependencySession::poll(
           return impl_->record_failure(Status{ErrorCode::OperationFailed, {}});
         }
       };
+      phase.discover =
+          [&](std::uint32_t capacity, std::uint32_t candidates,
+              const std::function<Status(const DependencyGpuRequestTable&)>&
+                  compute) -> Status {
+        try {
+          auto status = native_allowed();
+          if (!status.ok())
+            return status;
+          if (block_active || discovery_active || !compute || !candidates)
+            return impl_->record_failure(
+                invalid("invalid GPU discovery callback"));
+          if (!capacity || capacity > 65536 ||
+              capacity > impl_->limits.maximum_gpu_requests ||
+              capacity > impl_->limits.sets.maximum_boxes)
+            return impl_->record_failure(Status{ErrorCode::ResourceExhausted,
+                                                "GPU discovery table limit"});
+          if (!gpu.allocate_discovery)
+            return impl_->record_failure(
+                Status{ErrorCode::BackendUnavailable,
+                       "GPU discovery allocator unavailable"});
+          const auto bytes = 16 + static_cast<std::uint64_t>(capacity) * 144;
+          status = impl_->consume(candidates);
+          if (status.ok())
+            status = impl_->consume(bytes * 2);
+          if (!status.ok())
+            return status;
+          auto allocated = gpu.allocate_discovery(bytes);
+          if (!allocated.ok())
+            return impl_->record_failure(allocated.status());
+          auto table = allocated.take_value();
+          if (table.size() != bytes)
+            return impl_->record_failure(
+                invalid("GPU discovery allocator span mismatch"));
+          status = impl_->consume(0);
+          if (!status.ok())
+            return status;
+          std::memset(table.data(), 0, static_cast<std::size_t>(bytes));
+          struct DiscoveryScope {
+            bool& active;
+            explicit DiscoveryScope(bool& value) : active(value) {
+              active = true;
+            }
+            ~DiscoveryScope() { active = false; }
+          } scope(discovery_active);
+          status = compute({table.data(), bytes, capacity});
+          auto frozen = std::move(table).freeze();
+          if (!status.ok())
+            return impl_->record_failure(status);
+          status = impl_->consume(0);
+          if (!status.ok())
+            return status;
+          auto limits = impl_->limits.sets;
+          limits.maximum_work =
+              std::min(limits.maximum_work, impl_->remaining_work);
+          auto decoded = plugin_internal::decode_discovery(
+              *frozen, capacity, candidates, impl_->query, limits,
+              &impl_->remaining_work, &discovery_metadata);
+          if (!decoded.ok())
+            return impl_->record_failure(decoded.status());
+          if (decoded.value().size() > limits.maximum_boxes ||
+              discovered.size() > limits.maximum_boxes - decoded.value().size())
+            return impl_->record_failure(Status{ErrorCode::ResourceExhausted,
+                                                "GPU discovery need limit"});
+          for (auto& need : decoded.value())
+            discovered.push_back(std::move(need));
+          return Status::success();
+        } catch (const std::bad_alloc&) {
+          return impl_->record_failure(
+              Status{ErrorCode::ResourceExhausted, {}});
+        } catch (...) {
+          return impl_->record_failure(Status{ErrorCode::OperationFailed, {}});
+        }
+      };
       ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||
@@ -845,6 +934,54 @@ Result<DependencyProgress> DependencySession::poll(
     if (!polled.ok())
       return Result<DependencyProgress>(impl_->retire(polled.status()));
     auto value = polled.take_value();
+    if (!discovered.empty()) {
+      auto* need = std::get_if<DependencyNeedBatch>(&value);
+      if (!need)
+        return Result<DependencyProgress>(impl_->retire(
+            invalid("GPU discovery requires supply before completion")));
+      if (need->associations.size() > impl_->limits.sets.maximum_boxes ||
+          need->request_needs.size() > impl_->limits.sets.maximum_boxes)
+        return Result<DependencyProgress>(
+            impl_->retire(Status{ErrorCode::ResourceExhausted,
+                                 "GPU discovery raw attachment limit"}));
+      // Charge the association search before inspecting caller rows. The later
+      // normal protocol traversal has its own existing work charge.
+      status = impl_->consume(need->associations.size());
+      if (!status.ok())
+        return Result<DependencyProgress>(impl_->retire(status));
+      auto append = [&](std::vector<DependencyNeed>* destination) {
+        const auto maximum = impl_->limits.sets.maximum_boxes;
+        if (discovered.size() > maximum ||
+            destination->size() > maximum - discovered.size())
+          return Status{ErrorCode::ResourceExhausted,
+                        "GPU discovery attachment limit"};
+        for (auto& request : discovered)
+          destination->push_back(std::move(request));
+        return Status::success();
+      };
+      if (impl_->query.kind == ObservationKind::RequestRecord) {
+        status = append(&need->request_needs);
+      } else {
+        std::vector<std::uint64_t> atom;
+        for (const auto& axis :
+             impl_->query.observations.boxes()[0].dimensions())
+          atom.push_back(axis.offset);
+        auto row = std::find_if(
+            need->associations.begin(), need->associations.end(),
+            [&](const auto& candidate) { return candidate.output == atom; });
+        if (row == need->associations.end()) {
+          if (need->associations.size() >= impl_->limits.sets.maximum_boxes)
+            return Result<DependencyProgress>(
+                impl_->retire(Status{ErrorCode::ResourceExhausted, {}}));
+          need->associations.push_back(
+              {std::move(atom), std::move(discovered)});
+        } else {
+          status = append(&row->inputs);
+        }
+      }
+      if (!status.ok())
+        return Result<DependencyProgress>(impl_->retire(status));
+    }
     if (auto* need = std::get_if<DependencyNeedBatch>(&value)) {
       if ((impl_->query.kind == ObservationKind::Atomic &&
            !need->request_needs.empty()) ||

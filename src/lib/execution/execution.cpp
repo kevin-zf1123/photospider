@@ -1339,6 +1339,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           hash.integer(options.dependencies.maximum_work);
           hash.integer(options.dependencies.maximum_state_bytes);
           hash.integer(options.dependencies.maximum_stages);
+          hash.integer(options.dependencies.maximum_gpu_requests);
           hash.integer(options.maximum_dependency_work);
           for (const auto n : outputs.shape())
             hash.integer(n);
@@ -2199,6 +2200,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     allocator = native_device->allocator(allocator);
                     native.emplace(native_device, active_token());
                     gpu.allocation_capacity = gpu_internal::allocation_capacity;
+                    gpu.allocate_discovery = [&](std::uint64_t bytes) {
+                      const auto capacity =
+                          gpu_internal::allocation_capacity(bytes);
+                      if (!capacity)
+                        return Result<MutableBuffer>(
+                            Status{ErrorCode::ResourceExhausted,
+                                   "GPU discovery capacity overflow"});
+                      auto admitted = reserve(capacity);
+                      if (!admitted.ok())
+                        return Result<MutableBuffer>(admitted.status());
+                      Seal discovery_seal{admitted.take_value()};
+                      return native_device
+                          ->allocator(discovery_seal.reservation->allocator())
+                          .allocate(bytes);
+                    };
                     gpu.materialize = [&](const FragmentAtlasPlan& plan,
                                           const ValueFragments& input,
                                           const FootprintLimits& bounds) {

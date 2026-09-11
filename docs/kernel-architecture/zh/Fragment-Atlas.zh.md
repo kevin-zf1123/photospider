@@ -31,7 +31,7 @@ tile extents 和 payload 字节数。任意 fragment 数仅需 payload 与目录
 边界映射必须先作用于全局坐标。缺失 slot/mask bit 是明确缺页，不是零值或逐 fragment
 clamp。
 
-C++ staged GPU Run 已接入下述 transport。C staged GPU 桥接已接入；有界 GPU discovery 和
+C++ staged GPU Run 已接入下述 transport。C staged GPU 桥接已接入；[有界 GPU discovery](GPU-Discovery.zh.md) 已接入；
 依赖模板中的旧同步 GPU producer 仍待实现。Float64/Int64 原始 bits 传输不代表已支持
 相应 GPU 浮点算术。
 
@@ -97,4 +97,4 @@ Float32 样本，独立预期均为 2145。实际 1 dispatch + 1 block hit；第
 
 英文文档提供命令。standalone CMake 与 static/shared 安装 consumer 均编译该 C11
 模块及公开 loader；loader 可传模块路径。无 native 时先验证 CPU，再返回 77。
-此桥接自身尚不实现 discovery request table。
+此桥接通过独立 callback 提供[有界 discovery request table](GPU-Discovery.zh.md)。

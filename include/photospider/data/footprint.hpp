@@ -37,10 +37,15 @@ class PHOTOSPIDER_API Footprint final {
    * @param boxes Rectangles in this domain; empty rectangles contribute
    * nothing.
    * @param limits Bounds checked before intermediate set growth.
+   * @param consumed_work Optional nonaliased caller-owned counter, borrowed
+   * until return. Once entered, zeroed before validation and set to charged
+   * work on success, failure or exception. Compound callers can share one
+   * budget across normalizations.
    */
   static Result<Footprint> from_regions(std::vector<std::uint64_t> shape,
                                         const std::vector<Region>& boxes,
-                                        const FootprintLimits& limits = {});
+                                        const FootprintLimits& limits = {},
+                                        std::uint64_t* consumed_work = nullptr);
   /** @brief Creates All without enumerating samples. */
   static Result<Footprint> all(std::vector<std::uint64_t> shape,
                                const FootprintLimits& limits = {});

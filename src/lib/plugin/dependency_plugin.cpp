@@ -716,6 +716,34 @@ int gpu_execute(void* context, const ps_gpu_dispatch_v8* commands,
     return status.ok() || p->reject(status);
   });
 }
+int discover(void* context, std::uint32_t capacity, std::uint32_t candidates,
+             ps_dependency_discovery_compute_v8 compute, void* user) noexcept {
+  auto* p = static_cast<Phase*>(context);
+  if (!p)
+    return 0;
+  return p->fence([&] {
+    if (!compute)
+      return p->reject(invalid("null C GPU discovery callback"));
+    const ps_dependency_discovery_services_v8 services{
+        sizeof(ps_dependency_discovery_services_v8),
+        0,
+        p,
+        read,
+        scratch,
+        consume_work,
+        is_cancelled,
+        atlas,
+        gpu_buffer,
+        gpu_execute};
+    auto status = p->phase.discover(
+        capacity, candidates, [&](const DependencyGpuRequestTable& table) {
+          const auto result = outcome(compute(
+              &services, table.bytes, table.byte_size, table.capacity, user));
+          return p->failure.ok() ? result : p->failure;
+        });
+    return status.ok() || p->reject(status);
+  });
+}
 int block(void* context, std::uint32_t phase, std::uint64_t begin,
           std::uint64_t end, std::uint64_t mode, const std::uint8_t* incoming,
           std::uint64_t size, std::uint8_t* outgoing,
@@ -804,7 +832,8 @@ Result<DependencyPoll> CState::poll(const DependencyPhase& phase) {
                                            block,
                                            atlas,
                                            gpu_buffer,
-                                           gpu_execute};
+                                           gpu_execute,
+                                           discover};
   const auto result =
       program.poll(&query.query, payload.data(), &services, user);
   if (!p.failure.ok())

@@ -151,6 +151,7 @@ set(
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/dependency_block.cpp
   src/lib/plugin/dependency_invocation.cpp
   src/lib/plugin/operation_contract.cpp
@@ -622,6 +623,15 @@ if(BUILD_TESTING)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_dependency_gpu Photospider::kernel tests/unit/test_dependency_gpu.cpp)
+  photospider_add_test(test_gpu_discovery Photospider::kernel tests/unit/test_gpu_discovery.cpp)
+  add_library(g4_discovery_plugin MODULE examples/g4_gpu_workflow/discovery_plugin.c)
+  target_link_libraries(g4_discovery_plugin PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(g4_discovery_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(g4_discovery_plugin PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_test(photospider_g4_discovery_workflow Photospider::kernel examples/g4_gpu_workflow/discovery_main.cpp)
+  target_compile_definitions(photospider_g4_discovery_workflow PRIVATE PS_G4_DISCOVERY_PLUGIN="$<TARGET_FILE:g4_discovery_plugin>")
+  add_dependencies(photospider_g4_discovery_workflow g4_discovery_plugin)
+  set_tests_properties(photospider_g4_discovery_workflow PROPERTIES SKIP_RETURN_CODE 77)
   add_library(g4_c_gpu_plugin MODULE examples/g4_gpu_workflow/c_plugin.c)
   target_link_libraries(g4_c_gpu_plugin PRIVATE Photospider::operation_sdk)
   target_compile_definitions(g4_c_gpu_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)

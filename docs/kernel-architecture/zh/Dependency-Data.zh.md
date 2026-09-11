@@ -86,7 +86,7 @@ maximum parallelism 上限。Legacy Whole 记录在实际请求时每 Run 至多
 legacy→staged→legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及
 frozen 输入所有权。成功的依赖 Run 现已发布不可变结构证据，见下文。活跃 demand
 替换、共享 Flight 与依赖 result cache 复用已按下文及[缓存模型](Cache-Model.zh.md)
-实现。C++ staged GPU fragment 访问已接入，详见 Fragment Atlas；C staged GPU 桥接同样已接入，有界 discovery 仍待实现。
+实现。C++ staged GPU fragment 访问已接入，详见 Fragment Atlas；C staged GPU 桥接同样已接入，[有界 discovery](GPU-Discovery.zh.md) 已实现。
 
 [依赖采样算子](Dependency-Sampling.zh.md) 已实现 STMap 和动态 radius gather/scatter。
 可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。
@@ -196,7 +196,7 @@ bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不�
 metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache；当前调用
 通过 context-owned Flights 共享同一不可变 bundle 中重叠的活跃观察，执行仍使用既有
 CPU pool、WaitingAdmission 和计费 allocator。已完成 dependency 的内容缓存复用既有像素 LRU 和有界结构证明，见
-[缓存模型](Cache-Model.zh.md)。C++ staged GPU fragment 已接入，C staged GPU 桥接同样已接入，有界 discovery 仍待实现。
+[缓存模型](Cache-Model.zh.md)。C++ staged GPU fragment 已接入，C staged GPU 桥接同样已接入，[有界 discovery](GPU-Discovery.zh.md) 已实现。
 
 `test_execution_demand` 覆盖稀疏结果、各 dtype snapshot、连续 dirty 累积、frozen
 隔离、陈旧发布、独立取消及 context 排空。真实 C terminal fixture 检查稀疏 Q 仅调用
@@ -320,10 +320,10 @@ transition 必须使用不同身份。C11 scan workflow 检查初次六次计算
 ## 稀疏 GPU 传输
 
 [Fragment Atlas](Fragment-Atlas.zh.md) 说明已实现的精确 atlas/mask 目录、SDK MSL
-lookup helper 及原生传输验证。C++ staged GPU 执行已接入，有界 discovery 仍待实现。
+lookup helper 及原生传输验证。C++ staged GPU 执行已接入，[有界 discovery](GPU-Discovery.zh.md) 已实现。
 
 
 C++ staged GPU 已通过 [Fragment Atlas](Fragment-Atlas.zh.md) 接入现有 GPU worker 与
 共同 admission。每阶段按需 materialize 精确端口，工作量预扣、真实 native 容量独立计费，
-错误 sticky，普通/stream/frozen Run 均保持辅助取消优先级。C staged GPU 桥接同样已接入，有界
-GPU discovery 仍属 G4 剩余工作。
+错误 sticky，普通/stream/frozen Run 均保持辅助取消优先级。C staged GPU 桥接同样已接入，[有界
+GPU discovery](GPU-Discovery.zh.md) 已实现。

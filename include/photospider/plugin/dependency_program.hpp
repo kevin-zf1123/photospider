@@ -29,6 +29,10 @@ struct DependencyLimits final {
   std::uint64_t maximum_work = 1048576;
   std::uint64_t maximum_state_bytes = 1048576;
   std::uint32_t maximum_stages = 4096;
+  /** @brief Maximum slots in one GPU discovery table, 0 disables discovery.
+   * @note Host hard limit is 65536; work and live-byte bounds also apply.
+   */
+  std::uint32_t maximum_gpu_requests = 65536;
 };
 /** @brief Caller-owned metadata and exact requested sample set for direct
  * start.
@@ -142,6 +146,18 @@ struct DependencyBlockServices final {
   /** @brief Optionally retains a completed state; failures are sticky. */
   std::function<Status(const std::string&, const Value&)> publish;
 };
+/** @brief Host-owned zeroed request table borrowed during discovery compute.
+ * @note Wire layout follows PS_GPU_DISCOVERY_MSL_V8. The callback must use a
+ * separate finite discovery dispatch, never publish numerical output, and make
+ * at most the declared candidates emit attempts across all dispatches. It may
+ * read only already supplied control/data. Pointers expire at compute return;
+ * the host freezes the table before decoding and revokes native write access.
+ */
+struct DependencyGpuRequestTable final {
+  std::uint8_t* bytes = nullptr;
+  std::uint64_t byte_size = 0;
+  std::uint32_t capacity = 0;
+};
 /** @brief Optional native services owned by the enclosing host Run.
  * @note All callbacks are synchronous and borrowed until poll returns. The
  * host uses its existing native worker, device and allocation budget. Each
@@ -165,6 +181,11 @@ struct DependencyGpuServices final {
       buffer;
   /** @brief Executes and drains 1..32 bounded ps_gpu_dispatch_v8 records. */
   std::function<Status(const ps_gpu_dispatch_v8*, std::uint32_t)> execute;
+  /** @brief Separately admits an exact native discovery allocation.
+   * @note The Session bounds size before calling. Returned mutable storage
+   * must have exactly the requested byte span and remain charged until retired.
+   */
+  std::function<Result<MutableBuffer>(std::uint64_t)> allocate_discovery;
 };
 /** @brief Services borrowed only for one finite, nonblocking poll.
  * @note inputs contains only this stage's ready authorized fragments. No read
@@ -238,6 +259,22 @@ struct PHOTOSPIDER_API DependencyPhase final {
    * read is invalid. GPU services never infer dependencies from shader code.
    */
   std::function<Status(const ps_gpu_dispatch_v8*, std::uint32_t)> gpu_execute;
+  /** @brief Runs bounded discovery and appends decoded needs to this poll.
+   * @note capacity is 1..maximum_gpu_requests and <=65536. candidates is a
+   * positive upper bound on all emit attempts, <=UINT32_MAX, charged before
+   * dispatch; raw table initialization/decoding is charged before allocation.
+   * Successful nonempty discovery requires this poll to return NeedBatch;
+   * the host attaches exact rows for the current observation or terminal Q.
+   * The next supply/poll resumes normally. Overflow fails ResourceExhausted;
+   * malformed records, partial image channels and ignored errors are sticky.
+   * No numerical completion can bypass unresolved table requests. Empty
+   * tables add no needs. Existing work/stage limits bound repeated discovery.
+   * This service is unavailable inside a pure block transition.
+   */
+  std::function<Status(
+      std::uint32_t capacity, std::uint32_t candidates,
+      const std::function<Status(const DependencyGpuRequestTable&)>& compute)>
+      discover;
   /** @brief Charged, bounds-checked sample read; no missing-page zero fallback.
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,

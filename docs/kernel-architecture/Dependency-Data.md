@@ -133,7 +133,7 @@ ownership. Successful dependency Runs now publish immutable structural evidence 
 below. Live demand replacement, shared Flights and dependency result cache
 reuse are implemented as described below and in [Cache Model](Cache-Model.md).
 C++ staged GPU fragment access is integrated through [Fragment Atlas](Fragment-Atlas.md).
-C staged GPU services share that path. Bounded native discovery remains G4 work.
+C staged GPU services share that path. Bounded native discovery is implemented in [GPU Discovery](GPU-Discovery.md).
 
 The [dependency sampling operations](Dependency-Sampling.md) implement STMap and
 dynamic radius gather/scatter. Optional pure static validators run during
@@ -451,4 +451,4 @@ compute failure reject; repeated failed requests invoke compute again.
 
 [Fragment Atlas](Fragment-Atlas.md) documents the implemented exact atlas/mask
 directory and SDK MSL lookup helper, including native transport verification.
-C++ staged GPU execution is integrated. C staged GPU execution is also integrated; bounded discovery remains in progress.
+C++ staged GPU execution is integrated. C staged GPU execution is also integrated; bounded discovery is implemented in [GPU Discovery](GPU-Discovery.md).
