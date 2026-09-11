@@ -238,9 +238,10 @@ upstream sample record proves a clean result.
 
 `restrict({name: subset})` walks the stored direct associations backward and
 restricts all contributing Atomic rows and subscriptions together, discarding
-unused records and roots. Unknown coverage is rejected. Whole retains its
-complete global manifest; terminal RequestRecord permits only its identical full
-Q. Empty Atomic coverage is known empty, while an omitted output name is absent.
+unused records and roots. Unknown coverage is rejected. Nonempty Whole subsets
+retain their complete global manifest; Empty Whole subsets have no payload
+support. Terminal RequestRecord permits only its identical full Q. Empty Atomic
+coverage is known empty, while an omitted output name is absent.
 This operation reads no pixels and does not invoke callbacks.
 
 `test_execution_dependencies` runs a short/long diamond whose B and T records
@@ -416,7 +417,10 @@ that allocator. The current successful supply/history remains the evidence; old
 prefix certificates are never imported through this cache.
 
 ExecutionContext supplies optional `DependencyBlockServices` backed by its existing
-accounted result LRU. Only pure/cacheable ancestry participates. Optional key work
+accounted result LRU. The operation must be cacheable and its ancestry pure.
+Every block lookup uses the current supplied input bytes, including recomputed
+outputs of noncacheable ancestors. Completed-output caching separately requires
+cacheable ancestry because it can skip those ancestor invocations. Optional key work
 uses `maximum_dependency_cache_work`, charged before sample hashing; zero or
 exhaustion runs the transition without lookup/retention. Epoch-checked lookup and
 publication prevent old Runs from repopulating a cleared cache. Borrowed values

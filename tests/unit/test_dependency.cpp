@@ -106,6 +106,19 @@ int boundaries() {
                                           {{{0}, {{0, 15, bits(1), {{1, 1}}}}}},
                                           limits)
                 .ok());
+  limits.maximum_work = 1;
+  // Even unmatched rows consume traversal work; no intermediate intersection
+  // or nonempty output exists to enforce this budget on the caller's behalf.
+  PS_CHECK(identity.transpose({0, 8, bits(1), {}}, limits).status().code ==
+           ErrorCode::ResourceExhausted);
+  limits.maximum_work = 1048576;
+  limits.maximum_boxes = 2;
+  PS_CHECK(identity.merge(identity, limits).status().code ==
+           ErrorCode::ResourceExhausted);
+  PS_CHECK(identity.transpose({0, 1, bits(7), {}}, limits).status().code ==
+           ErrorCode::ResourceExhausted);
+  limits.maximum_boxes = 9;
+  PS_CHECK(identity.merge(identity, limits).ok());
   CancellationSource cancellation;
   cancellation.cancel();
   limits.cancellation = cancellation.token();

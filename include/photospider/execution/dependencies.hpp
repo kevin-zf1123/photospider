@@ -42,8 +42,9 @@ class PHOTOSPIDER_API ExecutionDependencies final {
    * @param outputs Named subsets of coverage(); omitted names are removed.
    * @param limits Bounds copied records and backward traversal.
    * @return Independent immutable evidence or a typed limit/domain failure.
-   * Whole manifests retain their complete global observation. RequestRecord
-   * roots accept only the identical complete query. Unknown rows reject.
+   * Nonempty Whole subsets retain their complete global observation; Empty
+   * subsets have no payload support. RequestRecord roots accept only the
+   * identical complete query. Unknown rows reject.
    * @throws std::bad_alloc For metadata allocation; no pixel reads occur.
    */
   Result<ExecutionDependencies> restrict(

@@ -313,6 +313,18 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
   const auto narrowed = [&](const Impl::Record& old, const Footprint& samples,
                             std::uint64_t available) -> Result<Impl::Record> {
     if (!old.certificate) {
+      if (samples.empty()) {
+        const auto cost = 1 + old.inputs.size();
+        if (cost > available || cost > work)
+          return Result<Impl::Record>(Status{ErrorCode::ResourceExhausted, {}});
+        return Result<Impl::Record>(Impl::Record{old.node,
+                                                 old.output,
+                                                 samples,
+                                                 old.inputs,
+                                                 {},
+                                                 {},
+                                                 old.terminal});
+      }
       const auto cost = Impl::weight(old);
       if (cost > available || cost > work)
         return Result<Impl::Record>(Status{ErrorCode::ResourceExhausted, {}});

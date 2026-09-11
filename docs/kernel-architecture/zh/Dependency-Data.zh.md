@@ -153,7 +153,8 @@ Atomic rows；未知 node、Whole 和 terminal 均返回 NotFound，不能据此
 不把缺少 metadata-only 上游样本记录误判为 clean。
 
 `restrict({name: subset})` 沿已保存直接关联后向收缩所有相关 Atomic rows 和订阅，
-移除不再需要的记录和 root。未知覆盖域拒绝；Whole 保留完整全局 manifest；
+移除不再需要的记录和 root。未知覆盖域拒绝；非空 Whole 子集保留完整全局 manifest，
+Empty Whole 子集没有 payload 支持；
 terminal RequestRecord 仅接受相同完整 Q。Atomic Empty 是已知空，省略的输出名
 则不在结果中。该操作不读取像素或调用算子。
 
@@ -295,8 +296,10 @@ Session key 哈希不可变 registry/operation 契约、输入/state metadata、
 当前阶段 allocator；新算出的 state 也必须由该 allocator 分配。保留当前供给/history
 作为证据，不通过块缓存导入旧前缀证书。
 
-ExecutionContext 的可选 `DependencyBlockServices` 使用现有计量结果 LRU，仅接受纯且
-cacheable 的祖先链。样本哈希前扣除 `maximum_dependency_cache_work`；零或耗尽时
+ExecutionContext 的可选 `DependencyBlockServices` 使用现有计量结果 LRU，要求当前
+算子 cacheable 且祖先链纯。每次块查找都使用当前供给的输入字节，包含不可缓存祖先
+重新计算的输出。完成输出缓存可能跳过祖先调用，因此另行要求整个祖先链 cacheable。
+样本哈希前扣除 `maximum_dependency_cache_work`；零或耗尽时
 直接求值、不查找/保留。查找和发布核对 epoch，防止旧 Run 重新填入已清除的缓存。
 借用 Value 的 lease 保持驱逐后的寿命。内部 hit/miss 与完成输出 `cache_hits` 分开计数。
 Direct host 可提供相同服务，异常及被忽略的失败仍 sticky。

@@ -26,6 +26,32 @@ Status bounded(std::uint64_t count, const FootprintLimits& limits) {
                            "dependency metadata limit");
   return Status::success();
 }
+Status consume_work(std::uint64_t count, std::uint64_t* remaining,
+                    const FootprintLimits& limits) {
+  auto status = stopped(limits);
+  if (!status.ok())
+    return status;
+  if (count > *remaining)
+    return Status{ErrorCode::ResourceExhausted, {}};
+  *remaining -= count;
+  return Status::success();
+}
+Result<std::uint64_t> row_weight(const AtomCertificate& row,
+                                 const FootprintLimits& limits) {
+  std::uint64_t total = 1;
+  for (const auto& need : row.inputs) {
+    const auto extra = 1 + need.tags.size() + need.samples.boxes().size();
+    if (extra > limits.maximum_boxes || total > limits.maximum_boxes - extra)
+      return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
+    total += extra;
+    auto status = bounded(total, limits);
+    if (!status.ok())
+      return Result<std::uint64_t>(status);
+  }
+  auto status = bounded(total, limits);
+  return status.ok() ? Result<std::uint64_t>(total)
+                     : Result<std::uint64_t>(status);
+}
 bool same_need(const DependencyNeed& a, const DependencyNeed& b) {
   return a.port == b.port && a.roles == b.roles && a.samples == b.samples &&
          a.tags == b.tags;
@@ -228,9 +254,16 @@ Result<Footprint> DependencyCertificate::transpose(
     if (!tag.kind)
       return Result<Footprint>(invalid("zero dirty tag kind"));
   std::vector<Region> affected;
+  std::uint64_t work = limits.maximum_work;
   for (const auto& row : rows_) {
+    status = consume_work(1, &work, limits);
+    if (!status.ok())
+      return Result<Footprint>(status);
     bool hit = false;
     for (const auto& need : row.inputs) {
+      status = consume_work(1 + dirty.tags.size(), &work, limits);
+      if (!status.ok())
+        return Result<Footprint>(status);
       if (need.port != dirty.port || !(need.roles & dirty.roles))
         continue;
       auto overlap = need.samples.intersect(dirty.samples, limits);
@@ -241,6 +274,8 @@ Result<Footprint> DependencyCertificate::transpose(
         hit |= std::binary_search(need.tags.begin(), need.tags.end(), tag);
     }
     if (hit) {
+      if (affected.size() >= limits.maximum_boxes)
+        return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
       std::vector<RegionDimension> dims;
       for (const auto coordinate : row.output)
         dims.push_back({coordinate, 1});
@@ -258,19 +293,53 @@ Result<DependencyCertificate> DependencyCertificate::merge(
   auto coverage = coverage_.unite(other.coverage_, limits);
   if (!coverage.ok())
     return Result<DependencyCertificate>(coverage.status());
-  auto rows = rows_;
-  for (const auto& row : other.rows_) {
-    auto found = std::lower_bound(rows_.begin(), rows_.end(), row.output,
-                                  [](const auto& entry, const auto& output) {
-                                    return entry.output < output;
-                                  });
-    if (found != rows_.end() && found->output == row.output) {
-      if (!same_row(*found, row))
+  auto count = coverage.value().element_count();
+  if (!count.ok())
+    return Result<DependencyCertificate>(count.status());
+  auto status = bounded(count.value(), limits);
+  if (!status.ok())
+    return Result<DependencyCertificate>(status);
+  // Both row lists are canonical. Check every selected row before copying its
+  // nested supports; matching overlap never requires a second owned row.
+  std::vector<AtomCertificate> rows;
+  std::size_t left = 0, right = 0;
+  std::uint64_t entries = 0, work = limits.maximum_work;
+  while (left < rows_.size() || right < other.rows_.size()) {
+    const AtomCertificate* row;
+    const AtomCertificate* overlap = nullptr;
+    if (right == other.rows_.size() ||
+        (left < rows_.size() &&
+         rows_[left].output < other.rows_[right].output)) {
+      row = &rows_[left++];
+    } else if (left == rows_.size() ||
+               other.rows_[right].output < rows_[left].output) {
+      row = &other.rows_[right++];
+    } else {
+      row = &rows_[left++];
+      overlap = &other.rows_[right++];
+    }
+    auto weight = row_weight(*row, limits);
+    if (!weight.ok())
+      return Result<DependencyCertificate>(weight.status());
+    if (entries > limits.maximum_boxes - weight.value())
+      return Result<DependencyCertificate>(
+          Status{ErrorCode::ResourceExhausted, {}});
+    status = consume_work(weight.value(), &work, limits);
+    if (!status.ok())
+      return Result<DependencyCertificate>(status);
+    if (overlap) {
+      auto overlap_weight = row_weight(*overlap, limits);
+      if (!overlap_weight.ok())
+        return Result<DependencyCertificate>(overlap_weight.status());
+      status = consume_work(overlap_weight.value(), &work, limits);
+      if (!status.ok())
+        return Result<DependencyCertificate>(status);
+      if (!same_row(*row, *overlap))
         return Result<DependencyCertificate>(
             invalid("inconsistent overlapping certificate rows"));
-    } else {
-      rows.push_back(row);
     }
+    entries += weight.value();
+    rows.push_back(*row);
   }
   return create(identity_, coverage.take_value(), input_shapes_,
                 std::move(rows), limits);

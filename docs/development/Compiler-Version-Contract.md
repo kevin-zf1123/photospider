@@ -135,6 +135,10 @@ the applicable identities. Optimizer-v5-canonical-noop, result digest v2, disk
 framing v2, image facet v2, schema 2 and provider ABI 1 retain their meanings.
 Version 7 DSOs are rejected before reading get_api_v8. No old aliases or image-v1
 reader are provided. C++ consumers rebuild against 0.8. The prior foundations
-paragraphs above describe their historical implementation boundary. C++ staged
-protocol and CPU Run integration are implemented; the C staged table and
-structural shared-result integration remain work in this G4 delivery.
+paragraphs above describe their historical implementation boundary. C++ and C
+staged programs execute through the existing Run and allocator, including exact
+fragments, immutable dependency records, isolated shared observations and
+content-result reuse. Native fragment atlases, bounded GPU discovery and CPU
+fallback use the same protocol. See [Dependency data and execution](../kernel-architecture/Dependency-Data.md)
+and the [G4 workflows](../../examples/g4_workflow/README.md) for implemented
+contracts and executable acceptance cases.

@@ -38,9 +38,9 @@ extern "C" {
 /** @brief All input descriptors match and output preserves them. */
 #define PS_OPERATION_SHAPE_MATCH_INPUTS_V8 3U
 /**
- * @brief Output uses an explicit descriptor-owned fixed dense shape.
- * @note ABI v8 carries no output strides, so the host rejects fixed shapes
- * whose contiguous strides or byte count are not representable.
+ * @brief Output uses an explicit descriptor-owned fixed logical shape.
+ * @note Synchronous callbacks require representable dense output strides and
+ * byte count. Staged programs validate each requested fragment instead.
  */
 #define PS_OPERATION_SHAPE_FIXED_V8 4U
 /** @brief Ceil-divided spatial first input. */
@@ -428,7 +428,7 @@ typedef struct ps_operation_semantic_constraint_v8 {
   uint32_t element_type_mask;
 } ps_operation_semantic_constraint_v8;
 
-/** @brief Typed semantic port, conservatively Whole in ABI 8. */
+/** @brief Typed semantic port, using Whole or an exact dependency program. */
 #define PS_OPERATION_PORT_TYPED_V8 5U
 /** @brief Independent statically resolved output axes. */
 #define PS_OPERATION_SHAPE_AXES_V8 6U
@@ -486,8 +486,8 @@ typedef struct ps_operation_extent_v8 {
  * Dtype/semantic parameters are required String schema entries, except
  * extract's required Int64 index. Swizzle and INDEX_LIST_COUNT use canonical
  * comma-separated decimal indices (1..64 entries, each 0..63, no spaces/leading
- * zeroes). Alpha/color transforms have no semantic parameter. New transforms
- * are Whole; their metadata checks and output facets are shared with C++
+ * zeroes). Alpha/color transforms have no semantic parameter. Transforms use
+ * Whole or a dependency program; metadata checks and facets are shared with C++
  * inference. axes has 1..8 records only for AXES. A repeated group follows
  * input_count fixed inputs; input_schema then has prefix+one template and
  * actual inputs are <=1024. All members of a homogeneous group must share dtype
@@ -553,8 +553,8 @@ typedef struct ps_operation_descriptor_v8 {
   uint32_t flags;
   /**
    * @brief Estimated peak invocation bytes for local resource admission.
-   * @note This modeled estimate does not replace fixed dense representability
-   * validation at DSO load.
+   * @note This estimate does not replace synchronous fixed dense validation at
+   * DSO load or staged fragment/state/workspace admission.
    */
   uint64_t estimated_bytes;
   /** @brief Scalar element type used by static output inference. */
@@ -562,11 +562,12 @@ typedef struct ps_operation_descriptor_v8 {
   /** @brief Rank in 1..8 for FIXED and zero for every other shape rule. */
   uint32_t output_rank;
   /**
-   * @brief Rank-sized dense fixed shape, null when output_rank is zero.
-   * @note Since ABI v8 carries no strides, the loader derives a contiguous
-   * stride chain with checked uint64 products. Every stored stride must fit
-   * int64, and complete byte count B must satisfy `B > 0`,
-   * `B - 1 <= INT64_MAX`, and `B <= SIZE_MAX` before publication.
+   * @brief Rank-sized fixed logical shape, null when output_rank is zero.
+   * @note For synchronous callbacks, the loader derives contiguous strides
+   * with checked uint64 products. Each stride must fit int64, and complete
+   * byte count B must satisfy `B > 0`, `B - 1 <= INT64_MAX`, `B <= SIZE_MAX`.
+   * Staged programs may use larger logical domains; each materialized
+   * fragment must independently satisfy the checked storage contract.
    */
   const uint64_t* output_shape;
   /** @brief One `PS_OPERATION_SHAPE_*_V8` inference rule. */
@@ -591,7 +592,8 @@ typedef struct ps_operation_descriptor_v8 {
   const ps_operation_port_constraint_v8* input_schema;
   /** @brief Exact-sized Value or image output constraint; scalar forbidden. */
   ps_operation_port_constraint_v8 output_schema;
-  /** @brief Required synchronous callback. */
+  /** @brief Synchronous callback; null exactly when dependency_program is set.
+   */
   ps_operation_execute_v8 execute;
   /** @brief Descriptor-owned opaque callback state, possibly null. */
   void* user_data;

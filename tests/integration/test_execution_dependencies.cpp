@@ -260,6 +260,37 @@ int whole_record() {
   tiny.maximum_boxes = 16;
   PS_CHECK(evidence.restrict({{"y", point(0)}}, tiny).status().code ==
            ErrorCode::ResourceExhausted);
+  // Restrict an observed Whole root to Empty, and compare with an independent
+  // Empty execution. Neither query has a global payload observation.
+  document.outputs = {{"global", 1, "value"}};
+  GraphContext global_graph(document);
+  const auto global_plan =
+      Compiler(registry).compile(global_graph).take_value().plan;
+  auto demand =
+      context
+          .open_demand(global_plan,
+                       {{{"x", values<double>(ElementType::Float64, {3, 5})}}})
+          .take_value();
+  const DemandQuery empty_query{{"global", Footprint::none({2}).take_value()}};
+  auto complete =
+      demand.request({{"global", Footprint::all({2}).take_value()}});
+  PS_CHECK(complete.ok());
+  auto empty = complete.value().dependencies.restrict(empty_query);
+  PS_CHECK(empty.ok() && empty.value().coverage() == empty_query);
+  auto independent = demand.request(empty_query);
+  PS_CHECK(independent.ok());
+  auto support = empty.value().source_support();
+  auto expected_support = independent.value().dependencies.source_support();
+  PS_CHECK(support.ok() && expected_support.ok());
+  PS_CHECK(expected_support.value().empty());
+  PS_CHECK(support.value() == expected_support.value());
+  PS_CHECK(empty.value()
+               .restrict(empty_query)
+               .value()
+               .source_support()
+               .value()
+               .empty());
+  PS_CHECK(!empty.value().restrict({{"global", point(0)}}).ok());
   return 0;
 }
 int metadata_bounds() {

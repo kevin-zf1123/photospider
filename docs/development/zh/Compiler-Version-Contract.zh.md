@@ -112,5 +112,8 @@ semantic-graph-ir-v8、physical-plan-v8、plan-cache-key-v8 和 result-region-ke
 result digest v2、disk framing v2、image facet v2、schema 2 与 provider ABI 1
 保持原语义。Host 在读取 get_api_v8 前拒绝 version 7 DSO，不提供旧别名或 image-v1
 reader。C++ consumer 需要以 0.8 重编。上面的 foundations 段落描述其历史实现边界。
-C++ 分阶段协议及 CPU Run 集成已实现；C 分阶段表与共享结构结果集成仍属于本轮
-G4 的进行中工作。
+C++ 与 C 分阶段程序通过既有 Run 和 allocator 执行，支持精确 fragments、不可变
+依赖记录、独立共享观察和内容结果复用。原生 fragment atlas、有界 GPU discovery
+及 CPU fallback 使用同一协议。已实现契约和可执行验收案例见
+[依赖数据与执行](../../kernel-architecture/zh/Dependency-Data.zh.md)及
+[G4 workflows](../../../examples/g4_workflow/README.zh.md)。

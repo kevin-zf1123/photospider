@@ -53,6 +53,8 @@ struct AtomCertificate final {
  * Const access is concurrent-safe. Allocating methods may throw bad_alloc.
  * Limits reject with ResourceExhausted, cancellation with Cancelled; invalid
  * domains, rows or incompatible identities reject with InvalidArgument.
+ * Row/edge copies and transpose output growth are bounded before allocation;
+ * traversal work includes rows with no matching dirty role.
  */
 class PHOTOSPIDER_API DependencyCertificate final {
  public:
