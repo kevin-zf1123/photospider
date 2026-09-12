@@ -30,7 +30,8 @@ UInt8 HW mask，任意非零字节都是前景。命名基底 `components_min_pi
 `maximum_count` 仅限制最终 K。K=0、maximum_count=0、N>0 合法：labels 有
 N 个零，Components 与 area 表均零行，filter 产生 N 个零。该上限不能替代
 固定 N 个 labels 或私有 N 个 union 记录的容量准入。组件数超限在发布前返回
-ResourceExhausted/CapacityLimit。
+OperationFailed/InvalidDomain，origin 为 Domain，scope 为 Group。页、磁盘和
+工作预算耗尽仍报告 ResourceExhausted。
 
 ## Rank-union recipe 与基底证明
 

@@ -603,6 +603,15 @@ class Pages {
     if (ok())
       status_ = invalid(detail);
   }
+  void reject_domain(const char* detail) {
+    if (ok()) {
+      status_ = {ErrorCode::OperationFailed,
+                 detail,
+                 FailureReason::InvalidDomain,
+                 {FailureOrigin::Domain, FailureScope::Association}};
+      status_.detail.association = result_.object_id();
+    }
+  }
   bool charge(std::uint64_t count = 1) {
     if (!ok())
       return false;
@@ -816,7 +825,11 @@ void spectrum_values(const Parsed& p, Pages* pages) {
 }
 void point_values(const Parsed& p, Pages* pages) {
   const auto count = pages->rows(0);
-  if (count > p.u[4] || pages->rows(1) != count || pages->rows(2) != count ||
+  if (count > p.u[4]) {
+    pages->reject_domain("point semantic count limit");
+    return;
+  }
+  if (pages->rows(1) != count || pages->rows(2) != count ||
       pages->rows(3) != count) {
     pages->reject("point count or association mismatch");
     return;
@@ -836,7 +849,7 @@ void point_values(const Parsed& p, Pages* pages) {
 void component_values(const Parsed& p, Pages* pages) {
   const auto count = pages->rows(1);
   if (count > p.u[0]) {
-    pages->reject("component semantic count limit");
+    pages->reject_domain("component semantic count limit");
     return;
   }
   std::int64_t previous_id = 0, previous_minimum = -1;

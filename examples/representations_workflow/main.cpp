@@ -364,7 +364,8 @@ OperationTraits staged(std::uint64_t bytes) {
   return t;
 }
 void run(const Fixture& fixture, bool expected = true,
-         std::uint64_t window = 256, bool refine = false) {
+         std::uint64_t window = 256, bool refine = false,
+         bool domain_limit = false) {
   if (selected_fixture && selected_fixture != fixture.name)
     return;
   auto registry = std::make_shared<OperationRegistry>();
@@ -474,6 +475,13 @@ void run(const Fixture& fixture, bool expected = true,
                               : ": rejected: " + result.status().message));
     check(observed == expected, "validation must precede observation");
     if (!expected) {
+      if (domain_limit)
+        check(result.status().code == ErrorCode::OperationFailed &&
+                  result.status().reason == FailureReason::InvalidDomain &&
+                  result.status().detail.origin == FailureOrigin::Domain &&
+                  result.status().detail.scope == FailureScope::Association &&
+                  result.status().detail.association != 0,
+              "semantic count failure must preserve Domain association");
       std::cout << fixture.name << " rejected before publication\n";
       return;
     }
@@ -699,6 +707,12 @@ void fixtures() {
     points.set(3, mapping);
     run(points, true, 128);
     if (count) {
+      auto limited = points;
+      auto limited_spec = point_spec;
+      limited_spec.maximum_count = count - 1;
+      limited.schema = take(point_set_schema(limited_spec));
+      limited.name = "points-semantic-limit";
+      run(limited, false, 128, false, true);
       mapping[1] = 0;
       points.set(3, mapping);
       run(points, false);
@@ -710,6 +724,10 @@ void fixtures() {
   components.set<std::int64_t>(0, {1, 1, 0, 4, 0, 0, 1, 0, 4, 4});
   components.set<std::int64_t>(1, {1, 3, 0, 4, 3, 3});
   run(components);
+  auto limited_components = components;
+  limited_components.schema = take(components_schema({2, 5, 1}));
+  limited_components.name = "components-semantic-limit";
+  run(limited_components, false, 256, false, true);
   components.set<std::int64_t>(1, {1, 3, 0, 4, 2, 3});
   run(components, false);
   Fixture empty_components{"components-empty",

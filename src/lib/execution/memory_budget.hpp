@@ -134,6 +134,9 @@ class MemoryReservation final
     return peak_;
   }
   std::uint64_t planned() const noexcept { return planned_; }
+  const std::shared_ptr<ResourceBudget>& resources() const noexcept {
+    return budget_->resources();
+  }
 
  private:
   friend class MemoryBudget;

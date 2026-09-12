@@ -989,7 +989,8 @@ class StructuredExecution final {
             validated.code != ErrorCode::ResourceExhausted &&
             validated.code != ErrorCode::Cancelled &&
             validated.code != ErrorCode::Stale) {
-          validated.detail.origin = FailureOrigin::Schema;
+          if (validated.detail.origin == FailureOrigin::Unspecified)
+            validated.detail.origin = FailureOrigin::Schema;
           validated.detail.scope = FailureScope::Association;
           validated.detail.association = published->result.object_id();
         }
@@ -1058,24 +1059,38 @@ class StructuredExecution final {
       return Answer(protocol("invalid source index"));
     const auto& declaration = plan_.input_declarations()[index];
     const auto& binding = bindings_[index];
+    const auto failed = [&](Status status) {
+      if (!status.detail.input_id && !status.detail.node_id)
+        status.detail.input_id = declaration.id;
+      if (status.detail.origin == FailureOrigin::Unspecified)
+        status.detail.origin = status.code == ErrorCode::ResourceExhausted
+                                   ? FailureOrigin::Resource
+                               : (status.code == ErrorCode::Cancelled ||
+                                  status.code == ErrorCode::Stale)
+                                   ? FailureOrigin::Cancellation
+                                   : FailureOrigin::Io;
+      if (status.detail.scope == FailureScope::Unspecified)
+        status.detail.scope = FailureScope::Group;
+      return Answer(std::move(status));
+    };
     if (!requested.valid() || requested.shape() != declaration.descriptor.shape)
       return Answer(protocol("source domain mismatch"));
     ResourceVector<Value> parts{ResourceAllocator<Value>(resources_)};
     for (const auto& region : requested.boxes()) {
       auto charged = consume(1);
       if (!charged.ok())
-        return Answer(charged);
+        return failed(charged);
       if (binding.value.valid()) {
         auto part = binding.value.view(region);
         if (!part.ok())
-          return Answer(part.status());
+          return failed(part.status());
         parts.push_back(part.take_value());
         continue;
       }
       auto made = MutableValue::allocate(declaration.descriptor, region,
                                          resources_.allocator());
       if (!made.ok())
-        return Answer(made.status());
+        return failed(made.status());
       auto writer = made.take_value();
       auto status = dispatch([&] {
         if (binding.source) {
@@ -1099,12 +1114,12 @@ class StructuredExecution final {
         return protocol("source binding is absent");
       });
       if (!status.ok())
-        return Answer(status);
+        return failed(status);
       ++diagnostics_.source_read_count;
       diagnostics_.source_read_bytes += writer.size();
       auto published = std::move(writer).publish(declaration.facets);
       if (!published.ok())
-        return Answer(published.status());
+        return failed(published.status());
       parts.push_back(published.take_value());
     }
     return ValueFragments::create_view(

@@ -1,6 +1,7 @@
 #include "photospider/execution/resources.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -71,6 +72,8 @@ struct ResourceBudget::Impl {
   }
   struct Reference;
   Reference* references = nullptr;
+  std::mutex reference_admission;
+  std::condition_variable reference_changed;
   std::mutex mutex;
   ResourceLimits limits;
   ResourceStatistics stats;
@@ -114,12 +117,19 @@ struct ResourceBudget::Impl::Reference {
   ~Reference() {
     if (!linked)
       return;
-    std::lock_guard<std::mutex> lock(root->mutex);
-    auto** cursor = &root->references;
-    while (*cursor && *cursor != this)
-      cursor = &(*cursor)->next;
-    if (*cursor)
-      *cursor = next;
+    std::lock_guard<std::mutex> admission(root->reference_admission);
+    {
+      std::lock_guard<std::mutex> lock(root->mutex);
+      auto** cursor = &root->references;
+      while (*cursor && *cursor != this)
+        cursor = &(*cursor)->next;
+      if (*cursor)
+        *cursor = next;
+    }
+    // A replacement registration must see both removal and returned capacity.
+    // Release external storage after this lock, including cross-root aliases.
+    lease = {};
+    root->reference_changed.notify_all();
   }
 };
 ResourceBudget::ResourceBudget(ResourceLimits limits) {
@@ -261,6 +271,10 @@ Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
         Status{ErrorCode::InvalidArgument, "missing referenced storage"});
   if (allocator().owns(*storage))
     return Answer(std::move(storage));
+  // Lookup and first admission are one transaction. Reserving speculatively
+  // can reject another reference to an already admitted full-capacity owner.
+  std::unique_lock<std::mutex> admission(impl_->reference_admission);
+  bool retiring = false;
   auto find = [&]() -> std::shared_ptr<const CpuStorage> {
     for (auto* node = impl_->references; node; node = node->next)
       if (node->storage.get() == storage.get()) {
@@ -268,14 +282,22 @@ Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
         if (owner)
           return std::shared_ptr<const CpuStorage>(std::move(owner),
                                                    storage.get());
+        retiring = true;
       }
     return {};
   };
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    auto existing = find();
-    if (existing)
-      return Answer(std::move(existing));
+  for (;;) {
+    retiring = false;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      auto existing = find();
+      if (existing)
+        return Answer(std::move(existing));
+    }
+    if (!retiring)
+      break;
+    // The last alias has begun destruction but has not returned its lease.
+    impl_->reference_changed.wait(admission);
   }
   auto capacity =
       ResourceCapacity::host(sizeof(Impl::Reference), sizeof(Impl::Reference));
@@ -291,9 +313,6 @@ Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
     owner->storage = storage;
     owner->self = owner;
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    auto existing = find();
-    if (existing)
-      return Answer(std::move(existing));
     owner->next = impl_->references;
     impl_->references = owner.get();
     owner->linked = true;

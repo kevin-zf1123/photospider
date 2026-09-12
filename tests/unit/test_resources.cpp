@@ -263,6 +263,48 @@ int concurrent() {
   PS_CHECK(root.statistics().peak[ResourceKind::Host] <= 1000);
   return 0;
 }
+int concurrent_references() {
+  auto l = limits(16384);
+  l.capacity[ResourceKind::Referenced] = 8;
+  auto value = Value::from_float64(7);
+  ResourceBudget root(l);
+  for (unsigned round = 0; round < 64; ++round) {
+    std::array<std::shared_ptr<const CpuStorage>, 16> aliases;
+    std::array<std::thread, 16> threads;
+    std::atomic<unsigned> ready{0};
+    for (unsigned i = 0; i < threads.size(); ++i)
+      threads[i] = std::thread([&, i] {
+        ready.fetch_add(1);
+        while (ready.load() != threads.size())
+          std::this_thread::yield();
+        auto referenced = root.reference(value.storage());
+        if (referenced.ok())
+          aliases[i] = referenced.take_value();
+      });
+    for (auto& thread : threads)
+      thread.join();
+    for (const auto& alias : aliases)
+      PS_CHECK(alias && alias.get() == value.storage().get());
+    PS_CHECK(root.statistics().live[ResourceKind::Referenced] == 8);
+    aliases = {};
+    PS_CHECK(root.statistics().live[ResourceKind::Referenced] == 0);
+  }
+  // Exercise a new first reference racing the retirement of the last alias.
+  std::array<std::thread, 8> threads;
+  std::atomic<unsigned> failures{0};
+  for (auto& thread : threads)
+    thread = std::thread([&] {
+      for (unsigned i = 0; i < 1000; ++i)
+        if (!root.reference(value.storage()).ok())
+          failures.fetch_add(1);
+    });
+  for (auto& thread : threads)
+    thread.join();
+  PS_CHECK(failures == 0);
+  for (auto live : root.statistics().live.values)
+    PS_CHECK(live == 0);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(ledger() == 0);
@@ -272,6 +314,9 @@ int main() {
   PS_CHECK(paging() == 0);
   PS_CHECK(failures() == 0);
   PS_CHECK(concurrent() == 0);
+  PS_CHECK(concurrent_references() == 0);
   PS_CHECK(allocator_ownership() == 0);
   return 0;
 }
+#include <array>
+#include <atomic>

@@ -244,7 +244,10 @@ struct State {
     ++label_fill;
     if (label && found_record[2] == static_cast<std::int64_t>(position)) {
       if (count == spec.maximum_count)
-        return Poll(capacity("component count limit"));
+        return Poll(Status{ErrorCode::OperationFailed,
+                           "component count limit",
+                           FailureReason::InvalidDomain,
+                           {FailureOrigin::Domain, FailureScope::Group}});
       if (!table.size()) {
         table_rows = std::min(spec.maximum_count - count, window(p) / 24);
         auto memory = p.allocator.allocate(table_rows * 24);

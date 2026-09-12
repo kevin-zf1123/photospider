@@ -218,6 +218,8 @@ struct QueuedCallback final {
   /** @brief Optional completion notification after the callback body retires.
    */
   std::function<void()> retired = {};
+  /** @brief Shared envelope lease; only its waiting slot retires at entry. */
+  ResourceLease managed_queue;
 };
 
 /**
@@ -337,6 +339,11 @@ class ThreadPool final {
         callbacks_.pop_front();
       }
       callback.admission.release();
+      if (callback.managed_queue.valid()) {
+        ResourceCapacity waiting;
+        waiting[ResourceKind::Queue] = 1;
+        (void)callback.managed_queue.shrink(waiting);
+      }
       try {
         callback.callback();
       } catch (...) {
@@ -1513,7 +1520,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return execution_internal::dependency_content_identity(
                       bindings, proof.support, &cache_work, active_token());
                 },
-                pump);
+                pump, budget->resources().get());
             if (!digest.ok())
               return;
             auto manifest =
@@ -2071,7 +2078,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                           binding.source->workspace_bytes),
                       active_token());
                 },
-                pump);
+                pump, budget->resources().get());
             if (!read.ok())
               return fail(read.status());
             if (!same_region(read.value(), box))
@@ -2352,7 +2359,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                           bindings, candidate->support, &cache_work,
                           active_token());
                     },
-                    pump);
+                    pump, budget->resources().get());
                 if (!digest.ok()) {
                   if (digest.status().code == ErrorCode::Cancelled)
                     return fail(digest.status());
@@ -2445,7 +2452,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       step.operation, std::move(request),
                       seal.reservation->allocator(), consume);
                 },
-                pump);
+                pump, budget->resources().get());
             if (!session.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, 0,
@@ -2793,7 +2800,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   callback_us = duration_us(callback_started);
                   return result;
                 },
-                pump);
+                pump, budget->resources().get());
             if (!progress.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, callback_us,
@@ -2934,7 +2941,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                           true);
                   return computed;
                 },
-                pump);
+                pump, budget->resources().get());
             if (!value.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, callback_us,
@@ -3115,7 +3122,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return execution_internal::dependency_content_identity(
                       bindings, candidate->support, &cache_work, parent_token);
                 },
-                pump);
+                pump, budget->resources().get());
             if (!digest.ok() || digest.value() != candidate->content_identity)
               continue;
             auto pixels = dependency_cache->dependency_values(*candidate);
@@ -3296,7 +3303,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       selected_step.operation, std::move(requests),
                       seal.reservation->allocator(), consume);
                 },
-                pump);
+                pump, budget->resources().get());
         if (!started.ok()) {
           // Release joint reservation before any singleton admission.
           seal.reservation->seal();
@@ -3385,7 +3392,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               [&] {
                 return session->poll(seal.reservation->allocator(), work);
               },
-              pump);
+              pump, budget->resources().get());
           ++diagnostics.joint_polls;
           if (!polled.ok()) {
             auto status = polled.status();
@@ -3851,7 +3858,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::move(*slot),
         [completion] {
           completion->promise.set_value(std::move(completion->result));
-        }};
+        },
+        completion->lease};
     if (!pool->submit(std::move(callback)))
       return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
                                        "dependency callback queue stopped"));
@@ -4217,8 +4225,24 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           owner->state_changed_.notify_all();
         }
         std::shared_ptr<ExecutionRun> owner;
+        ResourceLease lease;
       };
+      ResourceLease lease;
+      const auto& resources = reservation_->resources();
+      if (resources) {
+        auto capacity = ResourceCapacity::host(sizeof(CallbackLifetime),
+                                               sizeof(CallbackLifetime));
+        capacity[ResourceKind::Queue] = 1;
+        capacity[ResourceKind::Entries] = 1;
+        auto admitted = resources->reserve(capacity);
+        if (!admitted.ok()) {
+          finish_failure(admitted.status());
+          return;
+        }
+        lease = admitted.take_value();
+      }
       auto lifetime = std::make_shared<CallbackLifetime>(self);
+      lifetime->lease = std::move(lease);
       std::function<void()> callback = [lifetime, step_index, backend] {
         lifetime->owner->execute_attempt(step_index, backend);
       };
@@ -4233,7 +4257,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             "ExecutionContext waiting callback limit is exhausted"));
         return;
       }
-      QueuedCallback queued{std::move(callback), std::move(admission.value())};
+      if (resources) {
+        auto issued = resources->consume({0, 0, 0, 1});
+        if (!issued.ok()) {
+          finish_failure(issued);
+          return;
+        }
+      }
+      QueuedCallback queued{std::move(callback),
+                            std::move(admission.value()),
+                            {},
+                            lifetime->lease};
       bool accepted = false;
       if (backend == Backend::Gpu) {
         accepted = gpu_pool_ && gpu_pool_->submit(std::move(queued));
@@ -6006,15 +6040,34 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return Result<ExecutionResult>(made.status());
         auto writer = made.take_value();
         struct ReadCompletion {
+          ResourceLease lease;
           std::promise<Result<Region>> promise;
           Result<Region> result{Status{ErrorCode::Internal, {}}};
         };
+        ResourceLease lease;
+        const auto& resources = impl_->budget->resources();
+        if (resources) {
+          auto capacity = ResourceCapacity::host(sizeof(ReadCompletion),
+                                                 sizeof(ReadCompletion));
+          capacity[ResourceKind::Queue] = 1;
+          capacity[ResourceKind::Entries] = 1;
+          auto admitted = resources->reserve(capacity);
+          if (!admitted.ok())
+            return Result<ExecutionResult>(admitted.status());
+          lease = admitted.take_value();
+        }
         auto completion = std::make_shared<ReadCompletion>();
+        completion->lease = std::move(lease);
         auto future = completion->promise.get_future();
         auto admission = impl_->waiting_admission.try_acquire();
         if (!admission)
           return Result<ExecutionResult>(Status::failure(
               ErrorCode::ResourceExhausted, "source waiting queue is full"));
+        if (resources) {
+          auto issued = resources->consume({0, 0, 0, 1});
+          if (!issued.ok())
+            return Result<ExecutionResult>(issued);
+        }
         auto scratch =
             seal.reservation->allocator(binding.source->workspace_bytes);
         QueuedCallback callback{
@@ -6053,7 +6106,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             std::move(*admission),
             [completion] {
               completion->promise.set_value(std::move(completion->result));
-            }};
+            },
+            completion->lease};
         if (!impl_->cpu_pool.submit(std::move(callback)))
           return Result<ExecutionResult>(Status::failure(
               ErrorCode::ResourceExhausted, "source queue stopped"));

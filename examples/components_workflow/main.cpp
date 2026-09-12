@@ -292,6 +292,12 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
     else if (failure == 4)
       check(result.status().code == ErrorCode::Stale && reads == 0,
             "stale before source reads");
+    else if (reference.rows.size() > maximum)
+      check(result.status().code == ErrorCode::OperationFailed &&
+                result.status().reason == FailureReason::InvalidDomain &&
+                result.status().detail.origin == FailureOrigin::Domain &&
+                result.status().detail.scope == FailureScope::Group,
+            "component semantic count limit");
     else
       check(result.status().code == ErrorCode::ResourceExhausted,
             "component bounded failure category");

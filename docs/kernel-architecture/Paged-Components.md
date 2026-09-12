@@ -32,7 +32,8 @@ conversion of the threshold. Output is exactly
 labels contains N zeros, Components and area tables have zero rows, and filter
 produces N zeros. The limit cannot substitute for capacity admission of the N
 fixed labels or N private union records. Exceeding the count limit is an
-explicit ResourceExhausted/CapacityLimit failure before publication.
+explicit OperationFailed/InvalidDomain failure with Domain/Group scope before
+publication. Page, disk and work exhaustion remain ResourceExhausted failures.
 
 ## Rank-union recipe and basis proof
 

@@ -126,6 +126,14 @@ int main() {
            .ok());
   const ComponentsSpec spec{1, 5, 2};
   ResourceBudget root;
+  auto over_count =
+      fixture(root, take(components_schema({1, 1, 0})), {{1}, {1, 1, 0}});
+  auto semantic_limit = validate_representation(over_count, root, 24);
+  PS_CHECK(semantic_limit.code == ErrorCode::OperationFailed &&
+           semantic_limit.reason == FailureReason::InvalidDomain &&
+           semantic_limit.detail.origin == FailureOrigin::Domain &&
+           semantic_limit.detail.scope == FailureScope::Association &&
+           semantic_limit.detail.association == over_count.object_id());
   const auto label_schema = take(components_schema(spec)),
              index_schema = take(component_area_schema(spec));
   auto labels =

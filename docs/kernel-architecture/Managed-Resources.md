@@ -41,6 +41,8 @@ Referenced sublimit, deduplicated by actual storage owner within one root.
 The returned alias preserves the `CpuStorage` address and retains the reference
 lease through downstream views. Execute bindings use this admission when the
 managed root is enabled. Source-private state is not inferred from callbacks.
+Concurrent first references and last-reference retirement are serialized so
+the same live owner never needs a second capacity reservation.
 
 `consume(ResourceWork)` precharges work, bytes, requests and stages atomically.
 Issued work is never refunded after failure, fallback or cancellation. Singleton
@@ -48,6 +50,11 @@ and joint dependency sessions charge their current Run root before issuing work,
 including start failures and GPU discovery normalization. `FootprintLimits` can
 carry a borrowed host work callback for precharged set construction; this callback
 is not stored in an immutable Footprint or any semantic identity.
+Every queued source, Whole/backend attempt, singleton/joint dependency callback
+and structured callback also precharges one root stage before submission. The
+root stage count is cumulative across Runs. Queue counts callbacks waiting for
+a worker and is released before callback entry; envelope metadata remains
+charged through callback retirement. These limits apply with the cache disabled.
 
 ## Temporary backing
 
@@ -80,6 +87,9 @@ concurrent admission, referenced-owner deduplication, cancellation and bounded
 failure. `test_dependency_program` reproduces the parent Need/upstream/resume
 fuel sequence: root 10000 admits only the upstream's 6000 algorithm units; root
 30000 admits both 6000-unit phases. Host protocol work consumes additional units.
+`test_managed_dispatch` checks zero/cumulative root stages, zero/one Queue slots
+across Whole, source, dependency and atom execution, and structured source error
+provenance through returned failures and exceptions.
 
 The installed target `photospider_resource_consumer` compiles the same public
 API behavior checks through `find_package(Photospider 0.10 CONFIG REQUIRED)`.
