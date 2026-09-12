@@ -157,6 +157,7 @@ set(
   src/lib/data/quality.cpp
   src/lib/data/statistics.cpp
   src/lib/plugin/statistics_operation.cpp
+  src/lib/plugin/fft_operation.cpp
   src/lib/plugin/layer_operation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_relation.cpp
@@ -199,6 +200,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     src/lib/data/quality.cpp
     src/lib/data/statistics.cpp
     src/lib/plugin/statistics_operation.cpp
+    src/lib/plugin/fft_operation.cpp
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
@@ -211,6 +213,7 @@ elseif(MSVC)
     src/lib/data/quality.cpp
     src/lib/data/statistics.cpp
     src/lib/plugin/statistics_operation.cpp
+    src/lib/plugin/fft_operation.cpp
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -713,6 +716,9 @@ if(BUILD_TESTING)
   photospider_add_test(test_statistics_callback Photospider::kernel tests/unit/test_statistics_callback.cpp)
   photospider_add_test(test_statistics Photospider::kernel tests/unit/test_statistics.cpp)
   photospider_add_test(test_quality Photospider::kernel tests/unit/test_quality.cpp)
+  photospider_add_test(test_fft_contract Photospider::kernel tests/unit/test_fft_contract.cpp)
+  add_subdirectory(examples/fft_workflow)
+  add_test(NAME example_fft_workflow COMMAND photospider_fft_workflow)
   add_subdirectory(examples/statistics_workflow)
   add_test(NAME example_statistics_workflow COMMAND photospider_statistics_workflow)
   photospider_add_test(photospider_layer_workflow Photospider::kernel examples/layer_workflow/main.cpp)

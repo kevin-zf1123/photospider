@@ -35,3 +35,4 @@ through Git history and `pre-breaking-scope-reset-2026-09-01`.
 - [Composable foundations workflow](Foundations-Workflow.md): standalone installed public API scenarios and reusable operations.
 
 - [Integer statistics workflow](Integer-Statistics.md): paged histogram, global parameters and streaming grade.
+- [External-axis FFT](External-FFT.md): bounded generations, full/half identities and independent DFT references.
