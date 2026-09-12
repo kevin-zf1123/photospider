@@ -1715,7 +1715,8 @@ Status OperationRegistry::validate_dependency_metadata(
 }
 Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
     const std::string& key, DependencyRequest request,
-    const BufferAllocator& allocator) const {
+    const BufferAllocator& allocator,
+    std::function<Status(std::uint64_t)> consume_root_work) const {
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -1729,12 +1730,13 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
       "registry-" + std::to_string(impl_->identity) + ":" + key,
       definition->traits, definition->start_dependency,
       definition->validate_dependency, std::move(request), allocator,
-      definition);
+      definition, 0, std::move(consume_root_work));
 }
 
 Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
     const std::string& key, std::vector<DependencyRequest> requests,
-    const BufferAllocator& allocator) const {
+    const BufferAllocator& allocator,
+    std::function<Status(std::uint64_t)> consume_root_work) const {
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -1748,7 +1750,7 @@ Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
       "registry-" + std::to_string(impl_->identity) + ":" + key,
       definition->traits, definition->start_joint,
       definition->validate_dependency, std::move(requests), allocator,
-      definition);
+      definition, std::move(consume_root_work));
 }
 
 /**

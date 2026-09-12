@@ -2,6 +2,7 @@
 #include <cstring>
 #include <functional>
 #include <future>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -1011,6 +1012,76 @@ int flight_lifetime() {
   PS_CHECK(leaf.expired());
   return 0;
 }
+int root_work_resume() {
+  for (const std::uint64_t limit : {10000U, 30000U}) {
+    auto counts = std::make_shared<Counts>();
+    std::uint64_t issued = 0;
+    auto registry = std::make_shared<OperationRegistry>();
+    auto upstream = probe_definition(counts, [&](const DependencyPhase& phase) {
+      auto status = phase.consume_work(6000);
+      if (!status.ok())
+        return Result<DependencyPoll>(status);
+      issued += 6000;
+      return constant_result(phase);
+    });
+    upstream.key = "fuel_upstream";
+    PS_CHECK(registry->register_operation(upstream).ok());
+    auto parent = probe_definition(counts);
+    parent.key = "fuel_parent";
+    parent.start_dependency = [counts, &issued](
+                                  const DependencyQuery&,
+                                  const BufferAllocator& allocator) {
+      auto callback = [&issued,
+                       supplied = false](const DependencyPhase& phase) mutable {
+        if (!supplied) {
+          supplied = true;
+          return Result<DependencyPoll>(
+              DependencyNeedBatch{{{{0}, {{0, 1, point(0, 1), {}}}}}, {}});
+        }
+        auto status = phase.consume_work(6000);
+        if (!status.ok())
+          return Result<DependencyPoll>(status);
+        issued += 6000;
+        return constant_result(phase);
+      };
+      return DependencyContinuation::make<ProbeState>(allocator, callback,
+                                                      counts);
+    };
+    PS_CHECK(registry->register_operation(parent).ok());
+    PS_CHECK(registry->freeze().ok());
+    WorkflowDocument document;
+    document.inputs = {{1,
+                        "x",
+                        {ElementType::Float64, {1}},
+                        Region::whole({1}),
+                        {0, {8}},
+                        {}}};
+    document.nodes = {{1, "fuel_upstream", {WorkflowInputReference{1}}, {}},
+                      {2, "fuel_parent", {WorkflowNodeOutput{1, "value"}}, {}}};
+    document.outputs = {{"result", 2, "value"}};
+    GraphContext graph(document);
+    Compiler compiler(registry);
+    auto compiled = compiler.compile(graph);
+    PS_CHECK(compiled.ok());
+    ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    ExecutionContext context(registry, config);
+    ExecutionOptions options;
+    options.enable_joint = false;
+    options.maximum_dependency_work = limit;
+    auto result = context.execute(
+        compiled.value().plan, {{{"x", Value::from_float64(1)}}}, {}, options);
+    // Work is admitted against the current root before entering each phase.
+    std::cout << "root-work limit=" << limit << " issued=" << issued
+              << " status=" << static_cast<int>(result.status().code) << '\n';
+    PS_CHECK(issued == (limit == 10000 ? 6000 : 12000));
+    PS_CHECK(limit == 10000
+                 ? result.status().code == ErrorCode::ResourceExhausted
+                 : result.ok());
+    PS_CHECK(counts->starts == counts->destroyed);
+  }
+  return 0;
+}
 int execution_network() {
   auto registry = std::make_shared<OperationRegistry>();
   auto counts = std::make_shared<Counts>();
@@ -1319,6 +1390,7 @@ int dependency_record_rollback() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(root_work_resume() == 0);
   PS_CHECK(dependency_record_rollback() == 0);
   PS_CHECK(flight_lifetime() == 0);
   PS_CHECK(sibling_admission() == 0);

@@ -128,3 +128,10 @@ result-region key 为 v5；完整输出声明、输入投影和检查过的 exte
 schema 2、provider ABI 1、C++17、image v2、保守 optimizer v5、result digest v2 保持。
 C++ 消费者须重编译，0.8 包消费者被拒绝。多输出规划、执行身份及 Atomic 联合执行
 由后续独立叶项验收，M1 不宣称这些运行时条件已完成。
+
+## 阶段 A 受控资源基础
+
+package 0.10.0 改变 C++ execution config 与 host work service 签名。C++ 消费者需
+重新构建，0.9 包请求被拒绝。本资源基础保留 operation ABI/traits 9、document schema 2
+及既有 compiler identity domain；资源限额不进入语义身份。Result/schema ABI 变更由
+阶段 A #316 单独跟踪。见[受控资源](../../kernel-architecture/zh/Managed-Resources.zh.md)。

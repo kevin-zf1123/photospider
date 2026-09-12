@@ -14,6 +14,7 @@
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/dependencies.hpp"
+#include "photospider/execution/resources.hpp"
 
 namespace ps {
 namespace execution_internal {
@@ -72,6 +73,12 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
    * exhaustion skips retention. Independent from the pixel allocation limit.
    */
   std::uint64_t maximum_dependency_cache_metadata = 65536;
+  /** @brief Optional root managed-capacity model, shared by buffers and paging.
+   * Existing maximum_live_bytes remains a payload sublimit. Limits apply only
+   * to instrumented resources; uninstrumented legacy metadata and external
+   * allocator/OS overhead are explicitly outside this model, never RSS bounds.
+   */
+  std::optional<ResourceLimits> managed_resources = {};
 };
 
 /**
@@ -599,6 +606,11 @@ class PHOTOSPIDER_API ExecutionContext final {
    * @note Availability does not imply every operation supports GPU.
    */
   [[nodiscard]] bool gpu_enabled() const noexcept;
+  /** @brief Shares the configured root with explicit temporary-storage clients.
+   * @return The root, or NotFound if managed_resources was not configured.
+   * Its leases can outlive this context. Does not start or retain computation.
+   */
+  Result<ResourceBudget> resource_budget() const;
 
  private:
   Result<ExecutionResult> execute_regions(

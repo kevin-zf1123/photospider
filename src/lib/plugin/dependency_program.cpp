@@ -216,9 +216,15 @@ struct DependencySession::Impl {
       return record_failure(Status::failure(
           ErrorCode::ResourceExhausted, "dependency discovery fuel exhausted"));
     if (shared_work) {
-      auto shared = shared_work(count);
-      if (!shared.ok())
-        return record_failure(shared);
+      try {
+        auto shared = shared_work(count);
+        if (!shared.ok())
+          return record_failure(shared);
+      } catch (const std::bad_alloc&) {
+        return record_failure(Status{ErrorCode::ResourceExhausted, {}});
+      } catch (...) {
+        return record_failure(Status{ErrorCode::OperationFailed, {}});
+      }
     }
     remaining_work -= count;
     return Status::success();
@@ -913,7 +919,8 @@ Result<DependencyProgress> DependencySession::poll(
               std::min(limits.maximum_work, impl_->remaining_work);
           auto decoded = plugin_internal::decode_discovery(
               *frozen, capacity, candidates, impl_->query, limits,
-              &impl_->remaining_work, &discovery_metadata);
+              &impl_->remaining_work, &discovery_metadata,
+              [&](std::uint64_t count) { return impl_->consume(count); });
           if (!decoded.ok())
             return impl_->record_failure(decoded.status());
           if (decoded.value().size() > limits.maximum_boxes ||

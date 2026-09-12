@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.9.0
+  VERSION 0.10.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -151,6 +151,8 @@ set(
   src/lib/data/fragment_atlas.cpp
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
+  src/lib/data/temporary_storage.cpp
+  src/lib/execution/resources.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
@@ -682,6 +684,7 @@ if(BUILD_TESTING)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
+  photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
   photospider_add_test(

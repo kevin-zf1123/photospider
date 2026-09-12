@@ -90,6 +90,25 @@ struct DependencyJointSession::Impl {
       std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
   std::uint64_t proxy_entries = 0;
   DependencyJointContinuation state;
+  std::function<Status(std::uint64_t)> root_work;
+  Status consume(std::uint64_t amount) {
+    if (amount > maximum_work - work)
+      return Status{ErrorCode::ResourceExhausted,
+                    "joint work budget exhausted"};
+    if (root_work) {
+      try {
+        auto charged = root_work(amount);
+        if (!charged.ok())
+          return charged;
+      } catch (const std::bad_alloc&) {
+        return Status{ErrorCode::ResourceExhausted, {}};
+      } catch (...) {
+        return Status{ErrorCode::OperationFailed, {}};
+      }
+    }
+    work += amount;
+    return Status::success();
+  }
 };
 DependencyJointSession::DependencyJointSession(std::shared_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
@@ -101,7 +120,8 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
     const std::string& operation, const OperationTraits& traits,
     const DependencyJointStart& start, const DependencyValidator& validate,
     std::vector<DependencyRequest> requests, const BufferAllocator& allocator,
-    std::shared_ptr<const void> definition) {
+    std::shared_ptr<const void> definition,
+    std::function<Status(std::uint64_t)> consume_root_work) {
   using Answer = Result<std::shared_ptr<DependencyJointSession>>;
   if (!start || traits.joint_contract != 1)
     return Answer(Status{ErrorCode::BackendUnavailable,
@@ -110,6 +130,7 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
     return Answer(invalid("joint group requires 2..64 members"));
   auto impl = std::make_shared<Impl>();
   impl->definition = std::move(definition);
+  impl->root_work = std::move(consume_root_work);
   impl->maximum_work = requests[0].limits.maximum_work;
   impl->workspace = traits.joint_workspace_bytes;
   const auto& first = requests[0];
@@ -158,11 +179,7 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
             auto owner = weak.lock();
             if (!owner)
               return invalid("expired joint work budget");
-            if (amount > owner->maximum_work - owner->work)
-              return Status{ErrorCode::ResourceExhausted,
-                            "joint work budget exhausted"};
-            owner->work += amount;
-            return Status::success();
+            return owner->consume(amount);
           },
           true);
       if (!member.ok()) {
@@ -254,11 +271,8 @@ Result<std::vector<DependencyAtomProgress>> DependencyJointSession::poll(
                     !member.second.session->query().cancellation.cancelled();
         if (!active)
           impl->failure = Status{ErrorCode::Cancelled, {}};
-        else if (amount > impl->maximum_work - impl->work)
-          impl->failure = Status{ErrorCode::ResourceExhausted,
-                                 "joint work budget exhausted"};
         else
-          impl->work += amount;
+          impl->failure = impl->consume(amount);
         return impl->failure;
       };
       auto results = impl_->state.poll_(

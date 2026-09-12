@@ -55,13 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.8 CONFIG QUIET COMPONENTS kernel)
+find_package(Photospider 0.9 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.9 must reject a 0.8 consumer")
+  message(FATAL_ERROR "Photospider 0.10 must reject a 0.9 consumer")
 endif()
 
 find_package(
-  Photospider 0.9 CONFIG REQUIRED
+  Photospider 0.10 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -341,3 +341,10 @@ add_custom_target(
   DEPENDS photospider_multi_output_workflow photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)
+
+# Focused installed managed-resource consumer; only installed kernel headers.
+add_executable(photospider_resource_consumer ../unit/test_resources.cpp)
+target_include_directories(photospider_resource_consumer PRIVATE ..)
+target_link_libraries(photospider_resource_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_resource_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_resource_consumer PRIVATE ${_photospider_consumer_link_options})

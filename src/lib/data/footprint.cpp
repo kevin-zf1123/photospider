@@ -49,6 +49,11 @@ struct Work final {
     if (!remaining)
       throw Stop{Status::failure(ErrorCode::ResourceExhausted,
                                  "footprint work limit")};
+    if (limits.consume_work) {
+      auto charged = limits.consume_work(1);
+      if (!charged.ok())
+        throw Stop{std::move(charged)};
+    }
     --remaining;
   }
   void capacity(std::size_t count) const {

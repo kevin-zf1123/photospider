@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "photospider/data/storage.hpp"
+#include "photospider/execution/resources.hpp"
 
 namespace ps::execution_internal {
 class MemoryReservation;
@@ -24,7 +25,9 @@ struct MemoryObservation final {
 /** @brief Shared payload budget; retained results may outlive the context. */
 class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
  public:
-  explicit MemoryBudget(std::uint64_t maximum) : maximum_(maximum) {
+  explicit MemoryBudget(std::uint64_t maximum,
+                        std::shared_ptr<ResourceBudget> resources = {})
+      : maximum_(maximum), resources_(std::move(resources)) {
     if (maximum == 0)
       throw std::invalid_argument("memory budget must be positive");
   }
@@ -41,6 +44,9 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
     std::lock_guard<std::mutex> lock(mutex_);
     return maximum_ - reserved_;
   }
+  const std::shared_ptr<ResourceBudget>& resources() const noexcept {
+    return resources_;
+  }
   std::uint64_t live() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return live_;
@@ -50,6 +56,7 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
   friend class MemoryReservation;
   mutable std::mutex mutex_;
   const std::uint64_t maximum_;
+  std::shared_ptr<ResourceBudget> resources_;
   std::uint64_t reserved_ = 0;
   std::uint64_t live_ = 0;
   std::size_t active_ = 0;
@@ -108,6 +115,8 @@ class MemoryReservation final
   void seal() {
     std::lock_guard<std::mutex> lock(budget_->mutex_);
     if (!sealed_ && admitted_) {
+      if (resource_lease_.valid())
+        (void)resource_lease_.shrink(ResourceCapacity::host(capacity_ - used_));
       budget_->reserved_ -= capacity_ - used_;
       observation_->reserved -= capacity_ - used_;
       capacity_ = used_;
@@ -127,6 +136,7 @@ class MemoryReservation final
   friend class MemoryBudget;
   struct Allocation final {
     std::shared_ptr<MemoryReservation> owner;
+    ResourceLease metadata_lease;
     std::uint64_t bytes = 0;
     ~Allocation() {
       if (!owner || bytes == 0)
@@ -136,6 +146,8 @@ class MemoryReservation final
       owner->budget_->live_ -= bytes;
       owner->observation_->live -= bytes;
       if (owner->sealed_) {
+        if (owner->resource_lease_.valid())
+          (void)owner->resource_lease_.shrink(ResourceCapacity::host(bytes));
         owner->capacity_ -= bytes;
         owner->budget_->reserved_ -= bytes;
         owner->observation_->reserved -= bytes;
@@ -147,7 +159,17 @@ class MemoryReservation final
       : budget_(std::move(budget)), capacity_(bytes), planned_(bytes) {}
   Result<std::shared_ptr<void>> allocate(std::uint64_t bytes) {
     // Allocate lease metadata before locking; failure cannot leak accounting.
+    ResourceLease metadata;
+    if (budget_->resources_) {
+      constexpr auto bytes = sizeof(Allocation) + sizeof(CpuStorage);
+      auto admitted =
+          budget_->resources_->reserve(ResourceCapacity::host(bytes, bytes));
+      if (!admitted.ok())
+        return Result<std::shared_ptr<void>>(admitted.status());
+      metadata = admitted.take_value();
+    }
     auto lease = std::make_shared<Allocation>();
+    lease->metadata_lease = std::move(metadata);
     lease->owner = shared_from_this();
     std::lock_guard<std::mutex> lock(budget_->mutex_);
     if (sealed_ || bytes > capacity_ - used_)
@@ -163,6 +185,7 @@ class MemoryReservation final
     return Result<std::shared_ptr<void>>(std::move(lease));
   }
   std::shared_ptr<MemoryBudget> budget_;
+  ResourceLease resource_lease_;
   std::shared_ptr<MemoryObservation> observation_;
   std::uint64_t capacity_;
   std::uint64_t planned_;
@@ -212,6 +235,18 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
           Status::failure(ErrorCode::ResourceExhausted,
                           "retained results exhaust available budget"));
     changed_.wait_for(lock, std::chrono::milliseconds(2));
+  }
+  if (resources_) {
+    constexpr auto metadata =
+        sizeof(MemoryReservation) + sizeof(MemoryObservation);
+    if (bytes > UINT64_MAX - metadata)
+      return Result<std::shared_ptr<MemoryReservation>>(
+          Status{ErrorCode::ResourceExhausted, {}});
+    auto admitted =
+        resources_->reserve(ResourceCapacity::host(bytes + metadata, metadata));
+    if (!admitted.ok())
+      return Result<std::shared_ptr<MemoryReservation>>(admitted.status());
+    reservation->resource_lease_ = admitted.take_value();
   }
   reservation->capacity_ = bytes;
   reservation->planned_ = bytes;

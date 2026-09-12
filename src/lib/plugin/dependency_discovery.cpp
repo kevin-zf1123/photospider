@@ -23,7 +23,8 @@ std::uint64_t word(const std::uint8_t* bytes, unsigned width) {
 Result<std::vector<DependencyNeed>> decode_discovery(
     const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,
     const DependencyQuery& query, const FootprintLimits& limits,
-    std::uint64_t* normalization_work, std::uint64_t* metadata_entries) {
+    std::uint64_t* normalization_work, std::uint64_t* metadata_entries,
+    const std::function<Status(std::uint64_t)>& consume_work) {
   using Answer = Result<std::vector<DependencyNeed>>;
   if (limits.cancellation.cancelled())
     return Answer(Status{ErrorCode::Cancelled, {}});
@@ -83,12 +84,16 @@ Result<std::vector<DependencyNeed>> decode_discovery(
     grant.maximum_boxes =
         (limits.maximum_boxes - *metadata_entries) / roles - 1;
     grant.maximum_work = std::min(grant.maximum_work, *normalization_work);
+    grant.consume_work = consume_work;
     std::uint64_t used = 0;
     struct Charge {
       std::uint64_t* remaining;
       const std::uint64_t& used;
-      ~Charge() { *remaining -= used; }
-    } charge{normalization_work, used};
+      ~Charge() {
+        if (remaining)
+          *remaining -= used;
+      }
+    } charge{consume_work ? nullptr : normalization_work, used};
     auto set = Footprint::from_regions(
         query.inputs[group.first.first].descriptor.shape, group.second, grant,
         &used);

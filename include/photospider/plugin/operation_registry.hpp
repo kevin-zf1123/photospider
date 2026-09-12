@@ -603,7 +603,8 @@ class PHOTOSPIDER_API OperationRegistry final {
    */
   Result<std::shared_ptr<DependencyJointSession>> start_joint(
       const std::string& key, std::vector<DependencyRequest> requests,
-      const BufferAllocator& allocator = BufferAllocator{}) const;
+      const BufferAllocator& allocator = BufferAllocator{},
+      std::function<Status(std::uint64_t)> consume_root_work = {}) const;
 
   [[nodiscard]] Result<OperationTraits> find_traits(
       const std::string& key) const;
@@ -646,10 +647,14 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @note Uses the frozen definition and host allocator. Default request-only
    * failure delivery rejects multi-observation atomic starts before callbacks.
    * The returned handle owns state/definition; it has no upstream scheduler.
+   * consume_root_work, when supplied by a host, precharges every issued work
+   * unit against the current root before the operation runs. It must remain
+   * valid through session retirement; failures are sticky and never refunded.
    */
   Result<std::shared_ptr<DependencySession>> start_dependency(
       const std::string& key, DependencyRequest request,
-      const BufferAllocator& allocator = BufferAllocator{}) const;
+      const BufferAllocator& allocator = BufferAllocator{},
+      std::function<Status(std::uint64_t)> consume_root_work = {}) const;
 
   /**
    * @brief Returns the sorted immutable operation-key inventory.

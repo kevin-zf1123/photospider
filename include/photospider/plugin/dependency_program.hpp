@@ -559,7 +559,8 @@ class PHOTOSPIDER_API DependencyJointSession final {
       const std::string& operation, const OperationTraits& traits,
       const DependencyJointStart& start, const DependencyValidator& validate,
       std::vector<DependencyRequest> requests, const BufferAllocator& allocator,
-      std::shared_ptr<const void> definition);
+      std::shared_ptr<const void> definition,
+      std::function<Status(std::uint64_t)> consume_root_work);
   std::shared_ptr<Impl> impl_;
 };
 /** @brief Resolves observation coordinates and complete-pixel closure metadata.

@@ -866,7 +866,11 @@ struct ExecutionContext::Impl final {
 #endif
         maximum_waiting_callbacks(requested.maximum_queued_tasks),
         operation_registry(std::move(operations)),
-        budget(std::make_shared<MemoryBudget>(requested.maximum_live_bytes)),
+        budget(std::make_shared<MemoryBudget>(
+            requested.maximum_live_bytes,
+            requested.managed_resources
+                ? std::make_shared<ResourceBudget>(*requested.managed_resources)
+                : nullptr)),
         waiting_admission(maximum_waiting_callbacks),
         cpu_pool(cpu_worker_count, Backend::Cpu) {
     if (!operation_registry || !operation_registry->frozen()) {
@@ -940,6 +944,27 @@ struct ExecutionContext::Impl final {
 };
 
 namespace {
+
+Status retain_managed_inputs(std::vector<ExecutionBinding>* bindings,
+                             const std::shared_ptr<MemoryBudget>& budget) {
+  if (!budget->resources())
+    return Status::success();
+  for (auto& binding : *bindings) {
+    if (!binding.value.valid())
+      continue;
+    const auto& value = binding.value;
+    auto owner = budget->resources()->reference(value.storage());
+    if (!owner.ok())
+      return owner.status();
+    auto retained =
+        Value::from_storage(value.descriptor(), value.region(), value.layout(),
+                            owner.take_value(), value.facets());
+    if (!retained.ok())
+      return retained.status();
+    binding.value = retained.take_value();
+  }
+  return Status::success();
+}
 
 /** @brief Allocation-free stop selection after a successful plan entry check.
  */
@@ -1191,6 +1216,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         abort_flights(status);
       return Result<ExecutionResult>(std::move(status));
     };
+    auto retained_inputs = retain_managed_inputs(&bindings, budget);
+    if (!retained_inputs.ok())
+      return fail(retained_inputs);
     auto limits = options.dependencies.sets;
     limits.cancellation = flights ? CancellationToken{} : cancellation;
     auto observation =
@@ -1237,6 +1265,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (count > work)
         return Status::failure(ErrorCode::ResourceExhausted,
                                "dependency Run work limit");
+      if (budget->resources()) {
+        auto status = budget->resources()->consume({count, 0, 0, 0});
+        if (!status.ok())
+          return status;
+      }
       work -= count;
       return Status::success();
     };
@@ -2257,7 +2290,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         Status{stop(), {}});
                   return operations->start_dependency(
                       step.operation, std::move(request),
-                      seal.reservation->allocator());
+                      seal.reservation->allocator(), consume);
                 },
                 pump);
             if (!session.ok()) {
@@ -2273,9 +2306,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(session.status());
             }
             frame.session = session.take_value();
-            status = consume(frame.session->consumed_work());
-            if (!status.ok())
-              return fail(status);
             frame.state = Frame::State::Poll;
           } else {
             if (frame.outputs.boxes().size() != 1)
@@ -2408,7 +2438,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           std::uint64_t callback_us = 0;
           gpu_internal::Statistics native_stats;
           if (frame.session) {
-            const auto charged_before = frame.session->consumed_work();
             auto progress = dependency_stage<DependencyProgress>(
                 frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&] {
@@ -2612,9 +2641,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return result;
                 },
                 pump);
-            status = consume(frame.session->consumed_work() - charged_before);
-            if (!status.ok())
-              return fail(status);
             if (!progress.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, callback_us,
@@ -3045,9 +3071,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             dependency_stage<std::shared_ptr<DependencyJointSession>>(
                 pool, admission,
                 [&] {
-                  return operations->start_joint(selected_step.operation,
-                                                 std::move(requests),
-                                                 seal.reservation->allocator());
+                  return operations->start_joint(
+                      selected_step.operation, std::move(requests),
+                      seal.reservation->allocator(), consume);
                 },
                 pump);
         if (!started.ok()) {
@@ -3068,13 +3094,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       ++diagnostics.joint_groups;
       diagnostics.peak_active_tasks =
           std::max(diagnostics.peak_active_tasks, std::uint32_t{1});
-      auto charged = consume(session->consumed_work());
-      if (!charged.ok()) {
-        session.reset();
-        for (auto& member : members)
-          publish_failure(member, charged);
-        return Status::success();
-      }
       while (std::any_of(members.begin(), members.end(),
                          [](const auto& member) { return !member.done; })) {
         pump();
@@ -3124,7 +3143,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::vector<DependencyAtomProgress> events;
         {
           Seal seal{admitted.take_value()};
-          const auto before = session->consumed_work();
           auto polled = dependency_stage<std::vector<DependencyAtomProgress>>(
               pool, admission,
               [&] {
@@ -3132,9 +3150,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               },
               pump);
           ++diagnostics.joint_polls;
-          charged = consume(session->consumed_work() - before);
-          if (!polled.ok() || !charged.ok()) {
-            auto status = polled.ok() ? charged : polled.status();
+          if (!polled.ok()) {
+            auto status = polled.status();
             session.reset();
             seal.reservation->seal();
             seal.reservation.reset();
@@ -5305,6 +5322,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     if (!validated.ok())
       return failure(validated.status());
     auto snapshot = validated.take_value();
+    auto retained_inputs = retain_managed_inputs(&snapshot, impl_->budget);
+    if (!retained_inputs.ok())
+      return failure(retained_inputs);
     if (plan.dependency_network())
       return ExecutionRun::run_dependencies(
           &impl_->cpu_pool, impl_->gpu_pool.get(), impl_->native_device,
@@ -6015,6 +6035,12 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
  * @brief Implements resolved CPU-worker count observation.
  * @copydetails ExecutionContext::cpu_workers
  */
+Result<ResourceBudget> ExecutionContext::resource_budget() const {
+  if (!impl_->budget->resources())
+    return Result<ResourceBudget>(Status::failure(
+        ErrorCode::NotFound, "managed resource root is not configured"));
+  return Result<ResourceBudget>(*impl_->budget->resources());
+}
 std::uint32_t ExecutionContext::cpu_workers() const noexcept {
   return impl_ ? impl_->cpu_worker_count : 0U;
 }

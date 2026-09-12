@@ -156,3 +156,12 @@ enter identities. Schema 2, provider ABI 1, C++17, image v2, conservative optimi
 v5 and result digest v2 remain. C++ consumers rebuild; 0.8 package consumers reject.
 Multi-output planning, execution identities and Atomic joint execution have their
 own later acceptance leaves; M1 does not claim those runtime gates complete.
+
+## Phase A managed-resource foundation
+
+Package 0.10.0 changes C++ execution configuration and host work-service
+signatures. C++ consumers rebuild and package 0.9 consumers are rejected. The
+resource foundation retains operation ABI/traits 9, document schema 2 and the
+existing compiler identity domains; resource limits do not become semantic
+inputs. Result/schema ABI changes are tracked separately in Phase A #316.
+See [Managed resources](../kernel-architecture/Managed-Resources.md).
