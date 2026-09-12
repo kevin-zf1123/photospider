@@ -29,6 +29,18 @@ enum class ErrorCode {
   Internal,
 };
 
+/** @brief Stable numerical detail, independent of human diagnostics.
+ * None means the category alone describes the failure. These reasons do not
+ * change the C operation ABI's existing error-code projection.
+ */
+enum class FailureReason {
+  None = 0,
+  InvalidAssociation,
+  AssociationUnderflow,
+  ArithmeticOverflow,
+  EmptyWeightedResult
+};
+
 /**
  * @brief One success or recoverable failure status.
  *
@@ -39,6 +51,8 @@ struct PHOTOSPIDER_API Status final {
   ErrorCode code = ErrorCode::Ok;
   /** @brief Human-readable bounded diagnostic. */
   std::string message;
+  /** @brief Optional machine-readable detail; copied with the status. */
+  FailureReason reason = FailureReason::None;
 
   /**
    * @brief Reports whether this status is canonical success.

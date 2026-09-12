@@ -181,3 +181,10 @@ callbacks are currently registered through the installed C++ API; there is no
 structured C descriptor table or compatibility shim. These version axes are
 independent: C++ consumers must rebuild for 0.10, while unchanged ABI 9 C DSOs
 remain loadable. See [Global results](../kernel-architecture/Global-Results.md).
+
+#318 adds closed Layer schema version 1, the registered CPU Layer operation
+factory, strict per-primitive arithmetic and `Status.reason` to the same 0.10
+C++ package. The Status layout change requires C++ consumers to rebuild; C ABI 9
+continues to project its existing error code and does not gain a C++ Status
+field. Named working-space and arithmetic definitions are fixed by the schema
+version and operation identity. See [Layer runtime](../kernel-architecture/Layer-Runtime.md).

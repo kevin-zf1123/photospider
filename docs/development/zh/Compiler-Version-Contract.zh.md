@@ -149,3 +149,9 @@ C operation DSO 布局和 v9 入口不变。加载 ABI 9 Value/dependency plugin
 注册，没有 structured C descriptor 表或兼容 shim。各版本轴独立：C++ consumer
 必须为 0.10 重编译，布局不变的 ABI 9 C DSO 仍可加载。参见
 [全局结果](../../kernel-architecture/Global-Results.md)。
+
+#318 在同一 0.10 C++ package 增加闭集 Layer schema version 1、可注册的 CPU Layer
+operation factory、逐原语严格舍入与 `Status.reason`。Status 布局改变，C++ consumer
+须重新构建；C ABI 9 仍投影既有 error code，不增加 C++ Status 字段。具名 working-space
+和算术定义由 schema version 与 operation identity 固定。参见
+[Layer 运行时](../../kernel-architecture/zh/Layer-Runtime.zh.md)。

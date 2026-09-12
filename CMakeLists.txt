@@ -153,6 +153,8 @@ set(
   src/lib/data/storage.cpp
   src/lib/data/temporary_storage.cpp
   src/lib/data/representation.cpp
+  src/lib/data/layer.cpp
+  src/lib/plugin/layer_operation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_relation.cpp
   src/lib/execution/resources.cpp
@@ -190,6 +192,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+    src/lib/data/layer.cpp src/lib/data/representation.cpp
+    src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 elseif(MSVC)
@@ -197,6 +201,8 @@ elseif(MSVC)
 
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+    src/lib/data/layer.cpp src/lib/data/representation.cpp
+    src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
 # Disposable disk entries are compatible only with this maintained implementation.
@@ -691,6 +697,8 @@ if(BUILD_TESTING)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
   photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
+  photospider_add_test(test_layer Photospider::kernel tests/unit/test_layer.cpp)
+  photospider_add_test(photospider_layer_workflow Photospider::kernel examples/layer_workflow/main.cpp)
   photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
   photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
   photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)

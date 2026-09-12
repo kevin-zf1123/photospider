@@ -18,6 +18,12 @@ enum class DependencyGuarantee : std::uint32_t {
 /** @brief Input support in flattened logical sample coordinates.
  * Roles are a nonempty mask: Data=1, Control=2, Validation=4, Descriptor=8.
  * The input index names the producing operation's immutable input bundle.
+ * For a Result input, Descriptor role 8 has one reserved metadata observation
+ * at [0,1), independent of data row count. A descriptor-only span does not
+ * authorize a sample read or manufacture a row for an empty collection.
+ * Query edits with the Descriptor role when count/basis/descriptor facts
+ * change; ordinary data/control/validation spans use flattened field sample
+ * positions.
  */
 struct ResultSupport final {
   std::uint32_t input = 0, roles = 1;

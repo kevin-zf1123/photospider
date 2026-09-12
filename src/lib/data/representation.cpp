@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "data/input_validation.hpp"
+#include "photospider/data/layer.hpp"
 
 namespace ps {
 namespace {
@@ -398,12 +399,16 @@ Writer begin(unsigned kind) {
 }
 }  // namespace
 bool has_representation_schema(std::string_view id) noexcept {
+  if (has_layer_schema(id))
+    return true;
   for (unsigned i = 1; i <= 8; ++i)
     if (id == kIds[i])
       return true;
   return false;
 }
 Status validate_representation_schema(const SchemaTemplate& schema) {
+  if (has_layer_schema(schema.id))
+    return validate_layer_schema(schema);
   Parsed p;
   auto checked = parse(schema, &p);
   if (!checked.ok() || !p.kind)
@@ -1205,6 +1210,9 @@ Status validate_representation(
     const std::function<Status(std::uint64_t)>& consume_work) {
   if (!result.valid() || !result.owned_by(resources))
     return invalid("foreign representation owner");
+  if (has_layer_schema(result.schema().id))
+    return validate_layer_result(result, resources, maximum_window,
+                                 cancellation, consume_work);
   if (!has_representation_schema(result.schema().id))
     return Status::success();
   input_internal::Float32Environment environment;

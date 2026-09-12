@@ -66,6 +66,10 @@
 !examples/foundations_workflow/*.md
 !examples/foundations_workflow/CMakeLists.txt
 !examples/
+!examples/layer_workflow/
+!examples/layer_workflow/*.cpp
+!examples/layer_workflow/*.md
+!examples/layer_workflow/CMakeLists.txt
 !examples/representations_workflow/
 !examples/representations_workflow/*.cpp
 !examples/representations_workflow/*.md
