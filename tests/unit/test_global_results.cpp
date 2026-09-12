@@ -187,6 +187,23 @@ int paging() {
 }
 int relations() {
   auto root = budget();
+  auto empty_rows =
+      ResultRelation::rows(root, 1, 1, [](auto) {
+        return Result<ResultRelationRow>(ResultRelationRow{0, {0, 1, 5, 0}});
+      }).take_value();
+  unsigned visits = 0;
+  PS_CHECK(empty_rows
+               .visit(0, 100,
+                      [&](ResultSupport) {
+                        ++visits;
+                        return Status::success();
+                      })
+               .ok());
+  PS_CHECK(visits == 0);
+  PS_CHECK(!empty_rows.intersects(0, {{0, 1, 4, 2}}, 100).value().value());
+  auto span = ResultRelation::cartesian(root, 1, {0, 1, 4, 2}).take_value();
+  PS_CHECK(!span.intersects(0, {{0, 1, 5, 0}}, 100).value().value());
+  PS_CHECK(span.intersects(0, {{0, 1, 5, 1}}, 100).value().value());
   const std::vector<ResultRelationRow> rows{{0, {0, 1, 0, 1}},
                                             {1, {0, 1, 2, 1}},
                                             {3, {0, 1, 0, 1}},

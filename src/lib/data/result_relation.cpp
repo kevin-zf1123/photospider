@@ -91,7 +91,7 @@ struct ResultRelation::Impl {
             return page.status();
           ResultRelationRow row;
           std::memcpy(&row, page.value()->bytes().data(), sizeof(row));
-          if (row.output == output) {
+          if (row.output == output && row.support.count) {
             status = visitor(row.support);
             if (!status.ok())
               return status;
@@ -297,7 +297,8 @@ Result<std::optional<bool>> ResultRelation::intersects(
       if (!charged.ok())
         return charged;
       --maximum_work;
-      dirty |= support.input == edit.input && (support.roles & edit.roles) &&
+      dirty |= edit.count && support.input == edit.input &&
+               (support.roles & edit.roles) &&
                support.first < edit.first + edit.count &&
                edit.first < support.first + support.count;
     }
