@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/representation.hpp"
+
 namespace ps {
 namespace {
 Status invalid_schema() {
@@ -90,7 +92,7 @@ Status SchemaTemplate::validate(bool resolved) const {
       return invalid_schema();
     payload += facet.payload.size();
   }
-  return Status::success();
+  return validate_representation_schema(*this);
 }
 Result<std::uint64_t> SchemaTemplate::row_bytes(std::uint32_t field) const {
   if (field >= fields.size())

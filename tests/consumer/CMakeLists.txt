@@ -355,3 +355,5 @@ target_include_directories(photospider_result_consumer PRIVATE ..)
 target_link_libraries(photospider_result_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_result_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_result_consumer PRIVATE ${_photospider_consumer_link_options})
+
+add_subdirectory(../../examples/representations_workflow representations_workflow)

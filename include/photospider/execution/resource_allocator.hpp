@@ -37,12 +37,16 @@ class PHOTOSPIDER_API ResourceAllocationScope final {
   const ResourceBudget* previous_ = nullptr;
   ErrorCode* previous_failure_ = nullptr;
 };
-/** @brief STL metadata allocator with admission before physical allocation.
+/** @brief Ledger role of the requested STL element block. */
+enum class ResourceAllocationKind : std::uint32_t { Metadata = 0, Payload = 1 };
+/** @brief STL allocator with admission before physical allocation.
  * Each allocated block owns its lease through deallocation. Copying a
  * container propagates the root and separately admits its real new capacity;
  * moving an allocator-aware container transfers that ownership. A default
  * allocator is ordinary caller-owned storage outside a managed root. The
- * allocator's block header is included; implementation-private heap/control
+ * Payload mode also charges the Payload sublimit and preserves that role on
+ * copy/rebind; Metadata remains the default. The allocator's block header is
+ * included in Metadata; implementation-private heap/control
  * blocks remain outside the managed-capacity model. Exhaustion throws
  * std::bad_alloc, including checked size overflow. No RSS guarantee is made.
  */
@@ -60,23 +64,29 @@ class ResourceAllocator {
   ResourceAllocator(const ResourceAllocator&) noexcept = default;
   ResourceAllocator& operator=(const ResourceAllocator&) noexcept = default;
   ResourceAllocator(ResourceAllocator&& other) noexcept
-      : budget_(other.budget_) {}
+      : budget_(other.budget_), kind_(other.kind_) {}
   ResourceAllocator& operator=(ResourceAllocator&& other) noexcept {
     budget_ = other.budget_;
+    kind_ = other.kind_;
     return *this;
   }
-  explicit ResourceAllocator(ResourceBudget budget) noexcept
-      : budget_(std::move(budget)) {}
+  explicit ResourceAllocator(
+      ResourceBudget budget,
+      ResourceAllocationKind kind = ResourceAllocationKind::Metadata) noexcept
+      : budget_(std::move(budget)), kind_(kind) {}
   template <class U>
   ResourceAllocator(const ResourceAllocator<U>& other) noexcept
-      : budget_(other.budget_) {}
+      : budget_(other.budget_), kind_(other.kind_) {}
   T* allocate(std::size_t count) {
     if (!budget_)
       return std::allocator<T>{}.allocate(count);
     if (count > (std::numeric_limits<std::size_t>::max() - offset) / sizeof(T))
       fail();
     const auto bytes = offset + count * sizeof(T);
-    auto capacity = ResourceCapacity::host(bytes, bytes);
+    auto capacity = ResourceCapacity::host(
+        bytes, kind_ == ResourceAllocationKind::Payload ? offset : bytes);
+    if (kind_ == ResourceAllocationKind::Payload)
+      capacity[ResourceKind::Payload] = count * sizeof(T);
     capacity[ResourceKind::Entries] = 1;
     auto admitted = budget_->reserve(capacity);
     if (!admitted.ok())
@@ -105,7 +115,7 @@ class ResourceAllocator {
   }
   ResourceAllocator select_on_container_copy_construction() const noexcept {
     if (auto* budget = resource_internal::metadata_budget())
-      return ResourceAllocator(*budget);
+      return ResourceAllocator(*budget, kind_);
     return *this;
   }
   bool owned_by(const ResourceBudget& budget) const noexcept {
@@ -113,8 +123,9 @@ class ResourceAllocator {
   }
   template <class U>
   bool operator==(const ResourceAllocator<U>& other) const noexcept {
-    return (!budget_ && !other.budget_) ||
-           (budget_ && other.budget_ && budget_->same_owner(*other.budget_));
+    return kind_ == other.kind_ &&
+           ((!budget_ && !other.budget_) ||
+            (budget_ && other.budget_ && budget_->same_owner(*other.budget_)));
   }
   template <class U>
   bool operator!=(const ResourceAllocator<U>& other) const noexcept {
@@ -137,6 +148,7 @@ class ResourceAllocator {
   static constexpr std::size_t offset =
       (sizeof(Header) + alignment - 1) / alignment * alignment;
   std::optional<ResourceBudget> budget_;
+  ResourceAllocationKind kind_ = ResourceAllocationKind::Metadata;
 };
 /** @brief Allocator-aware owned metadata strings and sequences. */
 // NOLINTBEGIN(whitespace/indent_namespace)

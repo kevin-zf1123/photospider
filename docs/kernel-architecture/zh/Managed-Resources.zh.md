@@ -20,7 +20,9 @@ lease 对象容量自动计费，buffer、file 和 window owner 申报其 C++ �
 根启动、未管理的 allocator control block/header、标准库私有分配、线程栈、驱动、OS page cache
 及未接入 lease 的既有执行 metadata 均在此模型之外。ResourceAllocator 在分配前
 准入申请块和显式对齐 header；取消 state/control storage 及展平 source 列表使用该
-allocator。返回的 allocator-aware diagnostics 独立于 payload 持有容量。不能据此认证进程 RSS 或原生
+allocator。返回的 allocator-aware diagnostics 独立于 payload 持有容量。
+ResourceAllocationKind::Payload 将STL计算数据元素同时计入Payload，显式header仍为
+Metadata；复制、rebind、active-scope复制均保留该角色。不能据此认证进程 RSS 或原生
 设备分配器开销。live 表示仍持有的已批准容量，含未使用 reservation；peak 是该
 计数的实测峰值，不是完整输入类别的证明上界。保证限定为此模型的 WithinBudgetOrFail。
 

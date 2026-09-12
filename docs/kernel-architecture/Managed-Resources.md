@@ -28,7 +28,10 @@ model. Legacy execution metadata without a resource lease remains outside the
 model. `ResourceAllocator` admits its requested block and explicit alignment
 header before allocating; cancellation state/control storage and its flattened
 source list use that allocator. Retained allocator-aware diagnostics own their
-capacity independently of result payloads. This API does not certify process RSS or native-device allocator overhead.
+capacity independently of result payloads. `ResourceAllocationKind::Payload`
+marks STL computation data: its element block also counts toward Payload, while
+the explicit header remains Metadata. Copy, rebind and active-scope copying
+preserve that role. This API does not certify process RSS or native-device allocator overhead.
 The counter `live` means live admitted capacity, including unused reservations;
 `peak` is an observed peak of that counter, not a proved input-class bound.
 The guarantee is `WithinBudgetOrFail` for the declared capacity model.

@@ -20,6 +20,7 @@
 #include "data/input_validation.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "execution/shared_results.hpp"
+#include "photospider/data/representation.hpp"
 #include "plugin/dependency_identity.hpp"
 
 namespace ps::execution_internal {
@@ -915,6 +916,20 @@ class StructuredExecution final {
       auto retained = published->result.retain_association(input_owners);
       if (!retained.ok())
         return retire(actor, retained);
+      auto validated = validate_representation(
+          published->result, resources_, options_.maximum_result_window_bytes,
+          active_token(), [&](std::uint64_t count) {
+            const auto stopped = active_stop();
+            if (stopped != ErrorCode::Ok)
+              return Status{stopped, {}};
+            if (count > remaining_)
+              return Status{ErrorCode::ResourceExhausted,
+                            "structured validation work exhausted"};
+            remaining_ -= count;
+            return Status::success();
+          });
+      if (!validated.ok())
+        return retire(actor, validated);
       actor.published = published->result;
       actor.published_revision = descriptor.value().revision();
       actor.complete = published->complete;

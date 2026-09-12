@@ -152,6 +152,7 @@ set(
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/temporary_storage.cpp
+  src/lib/data/representation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_relation.cpp
   src/lib/execution/resources.cpp
@@ -689,6 +690,8 @@ if(BUILD_TESTING)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
+  photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
+  photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
   photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
   photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
   photospider_add_test(test_shared_results photospider_test_kernel tests/unit/test_shared_results.cpp)
