@@ -80,7 +80,8 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ByteReader reader(data, size);
   auto operations = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits traits;
-  traits.version = reader.next() % (PS_OPERATION_ABI_VERSION_9 + 1U);
+  // The C++ trait schema and the C plugin table have independent versions.
+  traits.version = reader.next();
   traits.outputs[0].output_element_type = static_cast<ps::ElementType>(
       (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V9);
   traits.outputs[0].shape_rule =
@@ -143,7 +144,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
 }  // namespace ps::fuzz_testing
 
 /**
- * @brief Fuzzes operation ABI 9 vocabulary, parameter schema, and typed IR
+ * @brief Fuzzes C++ traits, C ABI 9 element vocabulary and typed IR
  * gates.
  * @param data Arbitrary libFuzzer bytes.
  * @param size Exact byte count.

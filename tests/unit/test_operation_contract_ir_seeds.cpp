@@ -55,13 +55,15 @@ int main() {
   PS_CHECK(exercise_operation_contract_ir_input(valid.data(), valid.size()) ==
            OperationContractIrStage::CompilerAccepted);
 
-  // ABI 9 keeps no traits-v8 adapter, including in the byte-driven harness.
-  auto old_version = valid;
-  PS_CHECK(!old_version.empty());
-  old_version[0] = 8;
-  PS_CHECK(exercise_operation_contract_ir_input(old_version.data(),
-                                                old_version.size()) ==
-           OperationContractIrStage::RegistrationRejected);
+  // Current C++ traits reject old schemas independently of C plugin ABI 9.
+  for (const auto version : {8, 9}) {
+    auto old_version = valid;
+    PS_CHECK(!old_version.empty());
+    old_version[0] = version;
+    PS_CHECK(exercise_operation_contract_ir_input(old_version.data(),
+                                                  old_version.size()) ==
+             OperationContractIrStage::RegistrationRejected);
+  }
 
   const std::vector<std::uint8_t> duplicate =
       read_seed(PS_OPERATION_DUPLICATE_SEED_PATH);
