@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -194,6 +195,55 @@ int normalized_work() {
   PS_CHECK(root.statistics().issued.work == 3);
   return 0;
 }
+int allocator_ownership() {
+  ResourceBudget root(limits(4096));
+  {
+    ResourceVector<std::uint64_t> first{ResourceAllocator<std::uint64_t>(root)};
+    first.assign(16, 7);
+    const auto original = root.statistics().live[ResourceKind::Host];
+    auto copy = first;
+    PS_CHECK(copy == first &&
+             root.statistics().live[ResourceKind::Host] > original);
+    auto moved = std::move(first);
+    PS_CHECK(moved.size() == 16 && first.empty());
+    first.push_back(9);  // A moved-from allocator remains usable.
+    auto before = root.statistics().live[ResourceKind::Host];
+    bool refused = false;
+    try {
+      copy.reserve(4096);
+    } catch (const std::bad_alloc&) {
+      refused = true;
+    }
+    PS_CHECK(refused && copy.size() == 16 &&
+             root.statistics().live[ResourceKind::Host] == before);
+    ErrorCode failure = ErrorCode::Ok;
+    {
+      ResourceAllocationScope scope(root, &failure);
+      ResourceVector<std::uint8_t> scoped;
+      PS_CHECK(scoped.get_allocator().owned_by(root));
+      try {
+        scoped.resize(10000);
+      } catch (const std::bad_alloc&) {
+      }
+      PS_CHECK(failure == ErrorCode::ResourceExhausted);
+    }
+  }
+  for (auto live : root.statistics().live.values)
+    PS_CHECK(live == 0);
+  CancellationToken retained;
+  {
+    CancellationSource a(root), b(root);
+    retained =
+        CancellationToken::combine({a.token(), b.token()}, root).take_value();
+    a.cancel();
+  }
+  PS_CHECK(retained.cancelled() &&
+           root.statistics().live[ResourceKind::Host] > 0);
+  retained = {};
+  for (auto live : root.statistics().live.values)
+    PS_CHECK(live == 0);
+  return 0;
+}
 int concurrent() {
   ResourceBudget root(limits(1000));
   std::vector<std::thread> threads;
@@ -222,5 +272,6 @@ int main() {
   PS_CHECK(paging() == 0);
   PS_CHECK(failures() == 0);
   PS_CHECK(concurrent() == 0);
+  PS_CHECK(allocator_ownership() == 0);
   return 0;
 }

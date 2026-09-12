@@ -433,7 +433,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 9U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 10U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
@@ -982,13 +982,16 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   if (!traits_status.ok())
     return traits_status;
   const bool staged = definition.traits.outputs[0].dependency_version == 1;
+  const bool structured = definition.traits.outputs[0].dependency_version == 2;
   if (!valid_key(definition.key) || !traits_status.ok() ||
-      (staged ? (!definition.start_dependency || definition.callback)
-              : (!definition.callback || definition.start_dependency ||
-                 definition.validate_dependency))) {
+      (structured ? (!definition.start_result || definition.start_dependency ||
+                     definition.callback)
+       : staged   ? (!definition.start_dependency || definition.callback ||
+                   definition.start_result)
+                  : (!definition.callback || definition.start_dependency ||
+                   definition.start_result || definition.validate_dependency)))
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
-  }
   if (static_cast<bool>(definition.start_joint) !=
           (definition.traits.joint_contract == 1) ||
       definition.traits.joint_contract > 1 ||
@@ -1731,6 +1734,130 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
       definition->traits, definition->start_dependency,
       definition->validate_dependency, std::move(request), allocator,
       definition, 0, std::move(consume_root_work));
+}
+
+Result<ResultContinuation> OperationRegistry::start_result(
+    const std::string& key, const ResultProgramQuery& query,
+    const BufferAllocator& allocator) const {
+  using Answer = Result<ResultContinuation>;
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Answer(Status{ErrorCode::NotFound, {}});
+    definition = found->second;
+  }
+  try {
+    if (!definition->start_result ||
+        query.output_index >= definition->traits.outputs.size() ||
+        definition->traits.outputs[query.output_index].dependency_version !=
+            2 ||
+        query.semantic_key.empty() || query.semantic_key.size() > 4096 ||
+        !query.page_bytes)
+      return Answer(
+          Status{ErrorCode::InvalidArgument, "invalid structured start"});
+    auto resolved = resolve_operation_traits(
+        definition->traits, query.inputs.size(), query.parameters);
+    if (!resolved.ok())
+      return Answer(resolved.status());
+    auto selected =
+        select_operation_output(resolved.value(), query.output_index)
+            .take_value();
+    auto expected =
+        infer_operation_output(selected, query.inputs, query.parameters);
+    if (!expected.ok())
+      return Answer(expected.status());
+    const auto& metadata = expected.value();
+    if (static_cast<bool>(metadata.result_schema) !=
+            static_cast<bool>(query.output.result_schema) ||
+        metadata.descriptor.shape != query.output.descriptor.shape ||
+        metadata.descriptor.element_type !=
+            query.output.descriptor.element_type ||
+        !input_internal::same_facets(metadata.facets, query.output.facets) ||
+        (metadata.result_schema &&
+         !metadata.result_schema->same_schema(*query.output.result_schema)) ||
+        (metadata.result_schema
+             ? query.value_outputs.has_value()
+             : !query.value_outputs || !query.value_outputs->valid() ||
+                   query.value_outputs->shape() != metadata.descriptor.shape))
+      return Answer(Status{ErrorCode::TypeMismatch,
+                           "structured start metadata mismatch"});
+    auto checked = DependencySession::validate_static(
+        definition->validate_dependency, query.inputs, query.parameters,
+        query.cancellation);
+    if (!checked.ok())
+      return Answer(checked);
+    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+    auto scoped = allocator.limited(
+        selected.outputs[0].continuation_bytes, [failure](ErrorCode code) {
+          auto expected = ErrorCode::Ok;
+          failure->compare_exchange_strong(expected, code);
+        });
+    auto started = definition->start_result(query, scoped);
+    if (failure->load() != ErrorCode::Ok)
+      return Answer(Status{failure->load(), {}});
+    if (!started.ok())
+      return started;
+    auto state = started.take_value();
+    if (!state.valid() || !scoped.owns_allocation(state.storage_))
+      return Answer(Status{ErrorCode::InvalidArgument,
+                           "structured state must use host allocation"});
+    state.definition_ = definition;
+    return Answer(std::move(state));
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted, {}});
+  } catch (...) {
+    return Answer(Status{ErrorCode::OperationFailed, {}});
+  }
+}
+
+Result<ResultContinuation> OperationRegistry::start_result_compiled(
+    const std::string& key, const ResultProgramQuery& query,
+    const BufferAllocator& allocator,
+    std::shared_ptr<std::atomic<ErrorCode>> failure) const {
+  using Answer = Result<ResultContinuation>;
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Answer(Status{ErrorCode::NotFound, {}});
+    definition = found->second;
+  }
+  try {
+    if (!definition->start_result ||
+        query.output_index >= definition->traits.outputs.size() ||
+        definition->traits.outputs[query.output_index].dependency_version !=
+            2 ||
+        !failure || query.semantic_key.empty() ||
+        query.semantic_key.size() > 4096 || !query.page_bytes)
+      return Answer(
+          Status{ErrorCode::InvalidArgument, "invalid compiled result start"});
+    // Metadata and static validation were checked by Compiler. The context
+    // verifies the plan belongs to this frozen registry before entering here.
+    auto scoped = allocator.limited(
+        definition->traits.outputs[query.output_index].continuation_bytes,
+        [failure](ErrorCode code) {
+          auto expected = ErrorCode::Ok;
+          failure->compare_exchange_strong(expected, code);
+        });
+    auto started = definition->start_result(query, scoped);
+    if (failure->load() != ErrorCode::Ok)
+      return Answer(Status{failure->load(), {}});
+    if (!started.ok())
+      return started;
+    auto state = started.take_value();
+    if (!state.valid() || !scoped.owns_allocation(state.storage_))
+      return Answer(Status{ErrorCode::InvalidArgument,
+                           "structured state must use host allocation"});
+    state.definition_ = definition;
+    return Answer(std::move(state));
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted, {}});
+  } catch (...) {
+    return Answer(Status{ErrorCode::OperationFailed, {}});
+  }
 }
 
 Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(

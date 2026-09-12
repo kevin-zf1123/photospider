@@ -115,8 +115,11 @@ class MemoryReservation final
   void seal() {
     std::lock_guard<std::mutex> lock(budget_->mutex_);
     if (!sealed_ && admitted_) {
-      if (resource_lease_.valid())
-        (void)resource_lease_.shrink(ResourceCapacity::host(capacity_ - used_));
+      if (resource_lease_.valid()) {
+        auto release = ResourceCapacity::host(capacity_ - used_);
+        release[ResourceKind::Payload] = capacity_ - used_;
+        (void)resource_lease_.shrink(release);
+      }
       budget_->reserved_ -= capacity_ - used_;
       observation_->reserved -= capacity_ - used_;
       capacity_ = used_;
@@ -146,8 +149,11 @@ class MemoryReservation final
       owner->budget_->live_ -= bytes;
       owner->observation_->live -= bytes;
       if (owner->sealed_) {
-        if (owner->resource_lease_.valid())
-          (void)owner->resource_lease_.shrink(ResourceCapacity::host(bytes));
+        if (owner->resource_lease_.valid()) {
+          auto release = ResourceCapacity::host(bytes);
+          release[ResourceKind::Payload] = bytes;
+          (void)owner->resource_lease_.shrink(release);
+        }
         owner->capacity_ -= bytes;
         owner->budget_->reserved_ -= bytes;
         owner->observation_->reserved -= bytes;
@@ -242,8 +248,9 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
     if (bytes > UINT64_MAX - metadata)
       return Result<std::shared_ptr<MemoryReservation>>(
           Status{ErrorCode::ResourceExhausted, {}});
-    auto admitted =
-        resources_->reserve(ResourceCapacity::host(bytes + metadata, metadata));
+    auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
+    capacity[ResourceKind::Payload] = bytes;
+    auto admitted = resources_->reserve(capacity);
     if (!admitted.ok())
       return Result<std::shared_ptr<MemoryReservation>>(admitted.status());
     reservation->resource_lease_ = admitted.take_value();

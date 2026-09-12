@@ -135,3 +135,17 @@ package 0.10.0 改变 C++ execution config 与 host work service 签名。C++ �
 重新构建，0.9 包请求被拒绝。本资源基础保留 operation ABI/traits 9、document schema 2
 及既有 compiler identity domain；资源限额不进入语义身份。Result/schema ABI 变更由
 阶段 A #316 单独跟踪。见[受控资源](../../kernel-architecture/zh/Managed-Resources.zh.md)。
+
+## Phase A 结构化 C++ 契约
+
+#316 在 package 0.10.0 中加入 OperationTraits 10、dependency protocol 2、编译器
+可见的 result schema 和 owning paged ResultRef。semantic/physical-plan/plan-cache
+域升级为 v10，result-region identity 升级为 v6；规范 schema 和 Result port
+约束进入这些身份。资源限额和页大小仍是物理/准入选择。optimizer v5、
+WorkflowDocument schema 2、provider ABI 1、result digest v2 保持不变。
+
+C operation DSO 布局和 v9 入口不变。加载 ABI 9 Value/dependency plugin 时，
+宿主在内部构造当前 C++ traits。structured callback 当前通过安装的 C++ API
+注册，没有 structured C descriptor 表或兼容 shim。各版本轴独立：C++ consumer
+必须为 0.10 重编译，布局不变的 ABI 9 C DSO 仍可加载。参见
+[全局结果](../../kernel-architecture/Global-Results.md)。

@@ -165,3 +165,19 @@ resource foundation retains operation ABI/traits 9, document schema 2 and the
 existing compiler identity domains; resource limits do not become semantic
 inputs. Result/schema ABI changes are tracked separately in Phase A #316.
 See [Managed resources](../kernel-architecture/Managed-Resources.md).
+
+## Phase A structured C++ contracts
+
+#316 adds OperationTraits 10, dependency protocol 2, compiler-visible result
+schemas and owning paged ResultRefs in package 0.10.0. Semantic/physical-plan/
+plan-cache domains advance to v10; result-region identity advances to v6.
+Canonical schemas and Result port constraints enter those identities. Resource
+limits and page sizes remain physical/admission choices. The unchanged optimizer
+v5, WorkflowDocument schema 2, provider ABI 1 and result digest v2 remain.
+
+The C operation DSO layout and v9 entrypoints are unchanged. Loading an ABI 9
+Value/dependency plugin constructs current C++ traits internally. Structured
+callbacks are currently registered through the installed C++ API; there is no
+structured C descriptor table or compatibility shim. These version axes are
+independent: C++ consumers must rebuild for 0.10, while unchanged ABI 9 C DSOs
+remain loadable. See [Global results](../kernel-architecture/Global-Results.md).

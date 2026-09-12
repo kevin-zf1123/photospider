@@ -7,7 +7,34 @@
 #include <stdexcept>
 #include <utility>
 
+#include "photospider/execution/resource_allocator.hpp"
+
 namespace ps {
+namespace {
+thread_local const ResourceBudget* metadata_root = nullptr;
+thread_local ErrorCode* metadata_error = nullptr;
+}  // namespace
+namespace resource_internal {
+const ResourceBudget* metadata_budget() noexcept {
+  return metadata_root;
+}
+void metadata_failure(const ResourceBudget& budget, ErrorCode code) noexcept {
+  if (metadata_root && metadata_error && budget.same_owner(*metadata_root) &&
+      *metadata_error == ErrorCode::Ok)
+    *metadata_error = code;
+}
+}  // namespace resource_internal
+ResourceAllocationScope::ResourceAllocationScope(const ResourceBudget& budget,
+                                                 ErrorCode* failure) noexcept
+    : previous_(metadata_root), previous_failure_(metadata_error) {
+  metadata_root = &budget;
+  metadata_error = failure;
+}
+ResourceAllocationScope::~ResourceAllocationScope() noexcept {
+  metadata_root = previous_;
+  metadata_error = previous_failure_;
+}
+
 namespace {
 bool coherent(const ResourceCapacity& c) {
   return c[ResourceKind::Metadata] <= c[ResourceKind::Host] &&
@@ -96,7 +123,7 @@ struct ResourceBudget::Impl::Reference {
   }
 };
 ResourceBudget::ResourceBudget(ResourceLimits limits) {
-  if (!coherent(limits.capacity) || !coherent(limits.cleanup))
+  if (!coherent(limits.cleanup))
     throw std::invalid_argument("inconsistent managed capacity dimensions");
   for (std::size_t i = 0; i < limits.capacity.values.size(); ++i)
     if (limits.cleanup.values[i] > limits.capacity.values[i])
@@ -107,18 +134,24 @@ std::uint64_t ResourceBudget::lease_metadata_bytes() noexcept {
   return sizeof(ResourceLease::Impl);
 }
 Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
-  if (!coherent(capacity))
+  if (!coherent(capacity)) {
+    resource_internal::metadata_failure(*this, ErrorCode::InvalidArgument);
     return Result<ResourceLease>(Status::failure(
         ErrorCode::InvalidArgument, "inconsistent resource reservation"));
+  }
+  const auto failure = [&] {
+    resource_internal::metadata_failure(*this, ErrorCode::ResourceExhausted);
+    return Result<ResourceLease>(exhausted());
+  };
   const auto overhead = lease_metadata_bytes();
   if (capacity[ResourceKind::Host] > UINT64_MAX - overhead ||
       capacity[ResourceKind::Metadata] > UINT64_MAX - overhead)
-    return Result<ResourceLease>(exhausted());
+    return failure();
   capacity[ResourceKind::Host] += overhead;
   capacity[ResourceKind::Metadata] += overhead;
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (!impl_->fits(capacity))
-    return Result<ResourceLease>(exhausted());
+    return failure();
   // Admission and fallible owner construction are one serialized transaction.
   // No resource can be published until construction succeeds.
   try {
@@ -130,7 +163,7 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
     lease.impl_ = std::move(owner);
     return Result<ResourceLease>(std::move(lease));
   } catch (const std::bad_alloc&) {
-    return Result<ResourceLease>(exhausted());
+    return failure();
   }
 }
 ResourceCapacity ResourceLease::capacity() const {
@@ -206,8 +239,10 @@ Status ResourceBudget::consume(ResourceWork work) const {
   if (work.work > limit.maximum_work - issued.work ||
       work.io_bytes > limit.maximum_io_bytes - issued.io_bytes ||
       work.io_requests > limit.maximum_io_requests - issued.io_requests ||
-      work.stages > limit.maximum_stages - issued.stages)
+      work.stages > limit.maximum_stages - issued.stages) {
+    resource_internal::metadata_failure(*this, ErrorCode::ResourceExhausted);
     return exhausted();
+  }
   issued.work += work.work;
   issued.io_bytes += work.io_bytes;
   issued.io_requests += work.io_requests;
@@ -250,7 +285,7 @@ Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
   if (!admitted.ok())
     return Answer(admitted.status());
   try {
-    auto owner = std::make_shared<Impl::Reference>();
+    auto owner = std::shared_ptr<Impl::Reference>(new Impl::Reference());
     owner->lease = admitted.take_value();
     owner->root = impl_;
     owner->storage = storage;
@@ -274,8 +309,9 @@ BufferAllocator ResourceBudget::allocator() const {
         constexpr auto metadata = sizeof(CpuStorage);
         if (bytes > UINT64_MAX - metadata)
           return Result<std::shared_ptr<void>>(exhausted());
-        auto admitted =
-            root.reserve(ResourceCapacity::host(bytes + metadata, metadata));
+        auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
+        capacity[ResourceKind::Payload] = bytes;
+        auto admitted = root.reserve(capacity);
         if (!admitted.ok())
           return Result<std::shared_ptr<void>>(admitted.status());
         return Result<std::shared_ptr<void>>(admitted.value().impl_);

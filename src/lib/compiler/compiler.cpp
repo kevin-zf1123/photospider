@@ -7,18 +7,21 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "data/input_validation.hpp"
 #include "execution/native_gpu.hpp"
+#include "plugin/dependency_identity.hpp"
 #include "plugin/operation_identity.hpp"
 
 namespace ps {
@@ -71,7 +74,7 @@ class DigestBuilder final {
    * @throws Nothing.
    * @note UTF-8 validation belongs to the stage validator.
    */
-  void text(const std::string& value) noexcept {
+  void text(std::string_view value) noexcept {
     integer(value.size());
     bytes(value.data(), value.size());
   }
@@ -203,7 +206,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v9");
+  digest.text("semantic-graph-ir-v10");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -232,6 +235,9 @@ std::string semantic_digest(
       digest.integer(output.effective_atomic);
       append_descriptor(&digest, output.descriptor);
       contract_internal::append_facets(&digest, output.facets);
+      digest.integer(static_cast<bool>(output.result_schema));
+      if (output.result_schema)
+        digest.text(output.result_schema->canonical());
     }
   }
   digest.integer(outputs.size());
@@ -280,7 +286,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v9");
+  digest.text("physical-plan-v10");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -331,6 +337,9 @@ std::string physical_digest(
     digest.integer(step.effective_atomic);
     append_descriptor(&digest, step.output_descriptor);
     contract_internal::append_facets(&digest, step.output_facets);
+    digest.integer(static_cast<bool>(step.output_result_schema));
+    if (step.output_result_schema)
+      digest.text(step.output_result_schema->canonical());
     append_region(&digest, step.output_demand);
     digest.integer(step.input_demands.size());
     for (const Region& demand : step.input_demands) {
@@ -461,7 +470,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v9");
+  digest.text("plan-cache-key-v10");
   digest.text(plan);
   return digest.finish();
 }
@@ -517,6 +526,13 @@ std::uint64_t microseconds(
 }
 
 }  // namespace
+
+bool ExecutionPlan::structured_network() const noexcept {
+  for (const auto& step : steps_)
+    if (step.traits.outputs[0].dependency_version == 2)
+      return true;
+  return false;
+}
 
 bool ExecutionPlan::dependency_network() const noexcept {
   if (dependency_protocol_)
@@ -829,6 +845,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::map<ValueRef, ValueDescriptor> output_by_value;
+  std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
   while (!ready.empty()) {
     const std::uint64_t id = ready.top();
     ready.pop();
@@ -857,12 +874,14 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       node.inputs.push_back(input);
       ValueDescriptor descriptor;
       std::vector<ValueFacet> facets;
+      std::shared_ptr<const SchemaTemplate> result_schema;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
         const auto ref =
             result_ports.at({producer->source_node, producer->source_port});
         input_atomic[position] = effective_atomic.at(ref);
         descriptor = output_by_value.at(ref);
         facets = output_facets.at(ref);
+        result_schema = result_schemas.at(ref);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
@@ -881,11 +900,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
           }
         }
       }
-      const auto status =
-          input_internal::validate_port_metadata(port, descriptor, facets);
+      const auto status = input_internal::validate_port_metadata(
+          port, OperationMetadata{descriptor, facets, result_schema});
       if (!status.ok())
         return Result<SemanticGraphIR>(status);
-      input_descriptors.push_back({std::move(descriptor), std::move(facets)});
+      input_descriptors.push_back(
+          {std::move(descriptor), std::move(facets), std::move(result_schema)});
     }
     auto output = infer_operation_outputs(node.traits, input_descriptors,
                                           node.parameters);
@@ -930,8 +950,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       effective_atomic.emplace(ref, atomic);
       output_facets.emplace(ref, metadata.facets);
       output_by_value.emplace(ref, metadata.descriptor);
-      node.outputs.push_back(
-          {contract.key, metadata.descriptor, metadata.facets, atomic});
+      result_schemas.emplace(ref, metadata.result_schema);
+      node.outputs.push_back({contract.key, metadata.descriptor,
+                              metadata.facets, atomic, metadata.result_schema});
     }
     semantic.nodes_.push_back(std::move(node));
     for (std::uint64_t dependent : dependents[id]) {
@@ -1110,6 +1131,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
           step.traits.outputs[0].region_rule == OperationRegionRule::Whole ||
           !node.traits.deterministic || !node.traits.side_effect_free;
       step.output_descriptor = output.descriptor;
+      step.output_result_schema = output.result_schema;
       step.output_facets = output.facets;
       step.backend = options.execution_mode == ExecutionMode::MetalFp32 &&
                              node.traits.supports_gpu
@@ -1130,6 +1152,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
           dense_output.ok() ? dense_output.value().bytes
                             : static_cast<std::uint64_t>(Value::element_size(
                                   step.output_descriptor.element_type)));
+      if (step.output_result_schema)
+        step.planned_bytes = 0;
       step.inputs.reserve(node.inputs.size());
       for (const WorkflowInput& input : node.inputs) {
         if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
@@ -1182,7 +1206,9 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         return Result<ExecutionPlan>(Status::failure(
             ErrorCode::InvalidArgument, "unknown dependency output"));
     for (auto& step : plan.steps_) {
-      step.output_demand = Region::whole(step.output_descriptor.shape);
+      step.output_demand = step.output_result_schema
+                               ? Region{}
+                               : Region::whole(step.output_descriptor.shape);
       step.input_demands.clear();
       step.planned_bytes =
           0;  // A template has no resolved live-set reservation.
@@ -1190,6 +1216,14 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     for (const auto& output : plan.outputs_) {
       auto& step = plan.steps_[output.second];
       const auto requested = options.output_regions.find(output.first);
+      if (step.output_result_schema) {
+        if (requested != options.output_regions.end())
+          return Result<ExecutionPlan>(Status{
+              ErrorCode::InvalidArgument,
+              "ResultRef outputs use descriptor ranges, not Value Regions"});
+        plan.output_regions_.emplace(output.first, Region{});
+        continue;
+      }
       const auto region = requested == options.output_regions.end()
                               ? Region::whole(step.output_descriptor.shape)
                               : requested->second;
@@ -1210,6 +1244,30 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     plan.cache_key_.value = plan_cache_key(plan.digest_.value);
     plan.current_check_ = optimized.current_check_;
     plan.operation_registry_ = operations_;
+    if (plan.structured_network()) {
+      for (auto& step : plan.steps_) {
+        auto metadata = std::make_shared<ResultProgramMetadata>();
+        metadata->output = {step.output_descriptor, step.output_facets,
+                            step.output_result_schema};
+        for (const auto& input : step.inputs) {
+          if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+            const auto& source = plan.steps_[producer->step_index];
+            metadata->inputs.push_back({source.output_descriptor,
+                                        source.output_facets,
+                                        source.output_result_schema});
+          } else {
+            const auto& source =
+                plan.input_declarations_[std::get<PlanWorkflowInput>(input)
+                                             .declaration_index];
+            metadata->inputs.push_back({source.descriptor, source.facets});
+          }
+        }
+        step.structured_metadata = std::move(metadata);
+      }
+      auto work = UINT64_MAX;
+      plan.structured_templates_ =
+          contract_internal::dependency_cache_templates(plan, {}, &work, {});
+    }
     if (!plan.current())
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::Stale, "dependency template changed"));

@@ -152,11 +152,15 @@ set(
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
   src/lib/data/temporary_storage.cpp
+  src/lib/data/result.cpp
+  src/lib/data/result_relation.cpp
   src/lib/execution/resources.cpp
+  src/lib/execution/cancellation.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/result_program.cpp
   src/lib/plugin/dependency_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/dependency_block.cpp
@@ -167,6 +171,7 @@ set(
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
+  src/lib/execution/structured_execution.cpp
   src/lib/execution/dependency_records.cpp
   src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
@@ -684,6 +689,11 @@ if(BUILD_TESTING)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
+  photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
+  photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
+  photospider_add_test(test_shared_results photospider_test_kernel tests/unit/test_shared_results.cpp)
+  photospider_add_test(test_result_metadata_budget photospider_test_kernel tests/unit/test_result_metadata_budget.cpp)
+  target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)

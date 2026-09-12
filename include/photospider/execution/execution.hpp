@@ -14,6 +14,7 @@
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/dependencies.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/execution/resources.hpp"
 
 namespace ps {
@@ -161,6 +162,14 @@ struct PHOTOSPIDER_API ExecutionOptions final {
   std::uint64_t maximum_dependency_cache_work = 1048576;
   /** @brief Group already-ready Atomic outputs with optional CPU joint code. */
   bool enable_joint = true;
+  /** @brief Maximum explicit read window for structured stages, positive. */
+  std::uint64_t maximum_result_window_bytes = 4096;
+  /** @brief Coordinator notification after a structured range is certified.
+   * The owning reference can be retained and read explicitly after callback or
+   * context retirement. A prefix is not complete execution success. Exceptions
+   * and a failed sink stop this Run; prior certified ranges remain valid.
+   */
+  std::function<Status(ValueRef, const ResultRef&)> result_publication = {};
 };
 
 /**
@@ -207,6 +216,8 @@ struct ResultCacheStatistics final {
 struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Actual shared starts, polls and singleton group fallbacks. */
   std::uint64_t joint_groups = 0, joint_polls = 0, joint_fallbacks = 0;
+  /** @brief Context-root model snapshot for structured execution; not RSS. */
+  std::optional<ResourceStatistics> managed_resources = {};
   /** @brief Total execute call duration in microseconds. */
   std::uint64_t execute_us = 0;
   /** @brief Selected successful implementation backend per source result.
@@ -270,11 +281,12 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Human-readable CPU fallback reasons in occurrence order. */
   std::vector<std::string> fallback_reasons;
   /** @brief Raw physical callback attempts. */
-  std::vector<OperationTiming> operation_timings;
+  std::vector<OperationTiming, ResourceAllocator<OperationTiming>>
+      operation_timings;
   /** @brief Non-security digest of the executed physical plan. */
-  std::string plan_digest;
+  ResourceString plan_digest;
   /** @brief Non-security digest of named result bytes. */
-  std::string result_digest;
+  ResourceString result_digest;
 };
 
 /**
@@ -292,6 +304,12 @@ struct PHOTOSPIDER_API ExecutionResult final {
    * @note Empty for the legacy execution path. Owns no result pixel storage.
    */
   ExecutionDependencies dependencies;
+  /** @brief Paged named results; each retains descriptor, witness and backing.
+   */
+  ResourceMap<ResultRef> results = {};
+  /** @brief Structured-protocol Value witnesses with explicit guarantee tags.
+   */
+  ResourceMap<ResultRelation> result_relations = {};
 };
 
 /**
@@ -617,7 +635,8 @@ class PHOTOSPIDER_API ExecutionContext final {
       const ExecutionPlan& plan, ExecutionBindings bindings,
       const ExecutionSink* sink, const CancellationToken& cancellation,
       const ExecutionOptions& options, bool shared_producer = false,
-      std::uint64_t producer_epoch = UINT64_MAX);
+      std::uint64_t producer_epoch = UINT64_MAX,
+      const std::string& snapshot_identity = {});
   /** @brief Opaque pools, shared waiting admission, and resource ledger. */
   struct Impl;
   /** @brief Unique local execution ownership. */

@@ -27,6 +27,9 @@ enum class ResourceKind : std::uint32_t {
   Files,
   IoSlots,
   Queue,
+  /** @brief Computation-buffer bytes; preserves maximum_live_bytes as a
+     sublimit. */
+  Payload,
   Count
 };
 
@@ -124,6 +127,10 @@ class PHOTOSPIDER_API ResourceBudget final {
   Result<ResourceLease> reserve(ResourceCapacity capacity) const;
   Status consume(ResourceWork work) const;
   ResourceStatistics statistics() const;
+  /** @brief Compares capacity ownership only; never a semantic result key. */
+  bool same_owner(const ResourceBudget& other) const noexcept {
+    return impl_ == other.impl_;
+  }
   /** @brief Allocator charging payload plus actual CpuStorage object capacity.
    * Owner/control-block allocator overhead is explicitly outside this model.
    * Returned buffers retain this root and their charges until the last owner.

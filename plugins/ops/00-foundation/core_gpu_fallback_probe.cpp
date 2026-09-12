@@ -19,7 +19,7 @@ Status register_core_gpu_fallback_probe(OperationRegistry* registry) {
         t.supports_gpu = true;
         t.allows_cpu_fallback = true;
         t.estimated_bytes = 0U;
-        t.version = 9U;
+        t.version = 10U;
         t.cacheable = true;
         t.outputs[0].output_element_type = ElementType::Float64;
         t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;

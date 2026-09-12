@@ -16,6 +16,8 @@
 #include "photospider/data/fragment_atlas.hpp"
 #include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/region.hpp"
+#include "photospider/data/result.hpp"
+#include "photospider/data/result_relation.hpp"
 #include "photospider/data/storage.hpp"
 #include "photospider/data/temporary_storage.hpp"
 #include "photospider/data/value.hpp"

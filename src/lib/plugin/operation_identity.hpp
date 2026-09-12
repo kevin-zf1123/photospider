@@ -33,6 +33,8 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
   digest->integer(port.rank);
   digest->integer(port.element_type_mask);
   append_facets(digest, port.facets);
+  digest->text(port.result_schema_id);
+  digest->integer(port.result_schema_version);
 }
 
 /**
@@ -59,6 +61,9 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
     return;
   }
   const auto& output = traits.outputs[0];
+  digest->integer(output.result_schema.has_value());
+  if (output.result_schema)
+    digest->text(output.result_schema->canonical());
   digest->text(output.key);
   digest->integer(output.input_indices.has_value());
   if (output.input_indices) {

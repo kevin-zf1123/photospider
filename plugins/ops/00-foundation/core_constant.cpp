@@ -20,7 +20,7 @@ Status register_core_constant(OperationRegistry* registry) {
         t.supports_gpu = simulated_gpu;
         t.allows_cpu_fallback = simulated_gpu;
         t.estimated_bytes = sizeof(double);
-        t.version = 9U;
+        t.version = 10U;
         t.cacheable = true;
         t.outputs[0].output_element_type = ElementType::Float64;
         t.outputs[0].shape_rule = OperationShapeRule::Scalar;

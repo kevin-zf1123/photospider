@@ -10,14 +10,17 @@
 ## 容量与工作
 
 容量向量分别限制 host、device、shared、metadata、referenced input、临时 disk、
-entries、files、I/O slots 和 queue。host 包含 metadata/shared，device 包含 shared；
+entries、files、I/O slots、queue 和 Payload。Payload 统计受控 buffer 字节，
+在 execution context 中受 maximum_live_bytes 限制，含 structured callback。host 包含 metadata/shared，device 包含 shared；
 不能把重叠维度相加作为物理内存。整向量在 admission 前检查。lease 副本共享一个
 owner；增长必须计算旧新容量共存，只有存储释放或尚未提交的预留取消后才能缩减。
 cleanup 保护额度不能用于普通阶段。admission 不等待其他持有者，容量不足有限失败。
 
 lease 对象容量自动计费，buffer、file 和 window owner 申报其 C++ 对象容量。
-根启动、allocator control block/header、标准库私有分配、线程栈、驱动、OS page cache
-及未接入 lease 的既有执行 metadata 均在此模型之外。不能据此认证进程 RSS 或原生
+根启动、未管理的 allocator control block/header、标准库私有分配、线程栈、驱动、OS page cache
+及未接入 lease 的既有执行 metadata 均在此模型之外。ResourceAllocator 在分配前
+准入申请块和显式对齐 header；取消 state/control storage 及展平 source 列表使用该
+allocator。返回的 allocator-aware diagnostics 独立于 payload 持有容量。不能据此认证进程 RSS 或原生
 设备分配器开销。live 表示仍持有的已批准容量，含未使用 reservation；peak 是该
 计数的实测峰值，不是完整输入类别的证明上界。保证限定为此模型的 WithinBudgetOrFail。
 

@@ -250,6 +250,11 @@ class PHOTOSPIDER_API ValueView final {
   const StridedLayout& layout() const { return value_->layout(); }
   const std::vector<ValueFacet>& facets() const { return value_->facets(); }
   ByteView bytes() const { return value_->bytes(); }
+  /** @brief Explicitly retains an owning immutable Value during this callback.
+   * The shared payload stays charged until the last copy retires. Keeping many
+   * outputs can exhaust the execution budget; subsequent admission then fails.
+   */
+  Value retain() const { return *value_; }
   Result<std::size_t> byte_address(
       const std::vector<std::uint64_t>& coordinate) const {
     return value_->byte_address(coordinate);

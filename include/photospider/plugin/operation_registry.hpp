@@ -16,6 +16,7 @@
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/plugin/dependency_program.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/result_program.hpp"
 
 namespace ps {
 
@@ -105,6 +106,8 @@ enum class OperationPortKind : std::uint32_t {
   /** @brief Generic typed semantic constraint; Whole or staged dependency
      demand. */
   Typed = 5,
+  /** @brief A paged associated result, with fixed schema and runtime counts. */
+  Result = 6,
 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
@@ -141,6 +144,10 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
    * exclusive.
    */
   std::uint32_t element_type_mask = 0;
+  /** @brief Required fixed schema identity for Result ports; empty otherwise.
+   */
+  std::string result_schema_id = {};
+  std::uint32_t result_schema_version = 0;
 };
 
 /** @brief Output dtype selection, independent of output shape. */
@@ -280,6 +287,11 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    */
   std::uint64_t continuation_bytes = 0;
   std::uint32_t maximum_dependency_stages = 0;
+  /** @brief Alternative structured output template, resolved by the compiler.
+   * Result ports use this schema; scalar dtype/shape fields remain defaults and
+   * do not describe a placeholder Value. Requires structured protocol 2.
+   */
+  std::optional<SchemaTemplate> result_schema = {};
 };
 
 /**
@@ -318,7 +330,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 9U;
+  std::uint32_t version = 10U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Sorted closed parameter vocabulary for semantic validation. */
@@ -494,6 +506,9 @@ struct PHOTOSPIDER_API OperationDefinition final {
   /** @brief Optional Atomic joint implementation; singleton start remains
    * required. */
   DependencyJointStart start_joint = {};
+  /** @brief Alternative structured stage protocol 2; exclusive with callbacks.
+   */
+  ResultProgramStart start_result = {};
 };
 
 /**
@@ -656,6 +671,14 @@ class PHOTOSPIDER_API OperationRegistry final {
       const BufferAllocator& allocator = BufferAllocator{},
       std::function<Status(std::uint64_t)> consume_root_work = {}) const;
 
+  /** @brief Starts a validated structured continuation in host-owned state.
+   * Query metadata must match full compiler inference. Allocation and callback
+   * exceptions are fenced, and a definition lease survives through retirement.
+   */
+  Result<ResultContinuation> start_result(
+      const std::string& key, const ResultProgramQuery& query,
+      const BufferAllocator& allocator) const;
+
   /**
    * @brief Returns the sorted immutable operation-key inventory.
    * @return Exact key list.
@@ -671,6 +694,11 @@ class PHOTOSPIDER_API OperationRegistry final {
   std::string persistent_cache_identity() const;
 
  private:
+  friend class execution_internal::StructuredExecution;
+  Result<ResultContinuation> start_result_compiled(
+      const std::string& key, const ResultProgramQuery& query,
+      const BufferAllocator& allocator,
+      std::shared_ptr<std::atomic<ErrorCode>> failure) const;
   friend class ExecutionContext;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry();

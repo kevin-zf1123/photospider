@@ -9,7 +9,9 @@ cache configuration and retained leases can outlive the context.
 ## Capacity and work
 
 `ResourceCapacity` separates host, device, shared, metadata, referenced input,
-temporary disk, entries, files, I/O slots and queue constraints. Host includes
+temporary disk, entries, files, I/O slots, queue and Payload constraints.
+Payload counts managed buffer bytes and is capped by `maximum_live_bytes` in
+an execution context, including structured callbacks. Host includes
 metadata and shared bytes; device includes shared bytes. Overlapping dimensions
 must not be added to report physical memory. Whole vectors are checked before
 admission. `ResourceLease` copies share one owner. Growth includes simultaneous
@@ -20,10 +22,13 @@ capacity returns `ResourceExhausted`.
 
 Lease object capacity is charged automatically, while managed buffer and
 file/window owners charge their declared C++ object capacity. Root bootstrap,
-allocator control blocks/headers, standard-library private allocations,
+unmanaged allocator control blocks/headers, standard-library private allocations,
 thread stacks, driver state and OS page cache are outside this accounting
 model. Legacy execution metadata without a resource lease remains outside the
-model. This API does not certify process RSS or native-device allocator overhead.
+model. `ResourceAllocator` admits its requested block and explicit alignment
+header before allocating; cancellation state/control storage and its flattened
+source list use that allocator. Retained allocator-aware diagnostics own their
+capacity independently of result payloads. This API does not certify process RSS or native-device allocator overhead.
 The counter `live` means live admitted capacity, including unused reservations;
 `peak` is an observed peak of that counter, not a proved input-class bound.
 The guarantee is `WithinBudgetOrFail` for the declared capacity model.

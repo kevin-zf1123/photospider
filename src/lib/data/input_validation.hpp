@@ -59,6 +59,8 @@ Status validate_port_schema(const OperationTraits& traits);
 Status validate_operation_contract(const OperationTraits& traits);
 /** @brief Checks scalar/image descriptors and exact profile facet metadata. */
 Status validate_port_metadata(const OperationPortConstraint& port,
+                              const OperationMetadata& metadata);
+Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
                               const std::vector<ValueFacet>& facets);
 /** @brief Shared checked Whole/elementwise/halo demand rule for planning and

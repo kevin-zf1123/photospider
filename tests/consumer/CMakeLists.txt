@@ -348,3 +348,10 @@ target_include_directories(photospider_resource_consumer PRIVATE ..)
 target_link_libraries(photospider_resource_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_resource_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_resource_consumer PRIVATE ${_photospider_consumer_link_options})
+
+# Public staged ResultRef DAG against the installed package only.
+add_executable(photospider_result_consumer ../integration/test_result_execution.cpp)
+target_include_directories(photospider_result_consumer PRIVATE ..)
+target_link_libraries(photospider_result_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_result_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_result_consumer PRIVATE ${_photospider_consumer_link_options})

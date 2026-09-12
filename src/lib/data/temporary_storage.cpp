@@ -8,6 +8,8 @@
 #include <new>
 #include <utility>
 
+#include "execution/result_callback_scope.hpp"
+
 #if defined(_WIN32)
 #include <io.h>
 #else
@@ -78,6 +80,9 @@ struct TemporaryStorage::Impl {
   }
 };
 Result<TemporaryStorage> TemporaryStorage::create(ResourceBudget budget) {
+  auto allowed = execution_internal::result_io_allowed();
+  if (!allowed.ok())
+    return Result<TemporaryStorage>(allowed);
   try {
     auto capacity = ResourceCapacity::host(sizeof(Impl), sizeof(Impl));
     capacity[ResourceKind::Files] = 1;
@@ -87,6 +92,9 @@ Result<TemporaryStorage> TemporaryStorage::create(ResourceBudget budget) {
       return Result<TemporaryStorage>(lease.status());
     auto impl = std::make_shared<Impl>(std::move(budget));
     impl->lease = lease.take_value();
+    auto submitted = impl->budget.consume({1, 0, 1, 0});
+    if (!submitted.ok())
+      return Result<TemporaryStorage>(submitted);
     impl->file = std::tmpfile();
     if (!impl->file || std::setvbuf(impl->file, nullptr, _IONBF, 0) != 0)
       return Result<TemporaryStorage>(io_failure());
@@ -98,6 +106,9 @@ Result<TemporaryStorage> TemporaryStorage::create(ResourceBudget budget) {
         ErrorCode::ResourceExhausted, "temporary metadata allocation failed"));
   }
 }
+bool TemporaryStorage::owned_by(const ResourceBudget& budget) const noexcept {
+  return impl_ && impl_->budget.same_owner(budget);
+}
 std::uint64_t TemporaryStorage::size() const {
   if (!impl_)
     return 0;
@@ -106,6 +117,9 @@ std::uint64_t TemporaryStorage::size() const {
 }
 Result<std::uint64_t> TemporaryStorage::append_zeroed(
     std::uint64_t bytes, const CancellationToken& cancel) {
+  auto allowed = execution_internal::result_io_allowed();
+  if (!allowed.ok())
+    return Result<std::uint64_t>(allowed);
   if (!impl_)
     return Result<std::uint64_t>(stale());
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -160,6 +174,9 @@ Result<std::uint64_t> TemporaryStorage::append_zeroed(
 }
 Status TemporaryStorage::write(std::uint64_t offset, ByteView bytes,
                                const CancellationToken& cancel) {
+  auto allowed = execution_internal::result_io_allowed();
+  if (!allowed.ok())
+    return allowed;
   if (!impl_)
     return stale();
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -189,6 +206,9 @@ Result<std::shared_ptr<const CpuStorage>> TemporaryStorage::read(
     std::uint64_t offset, std::uint64_t bytes, std::uint64_t maximum_window,
     const CancellationToken& cancel) const {
   using ReadResult = Result<std::shared_ptr<const CpuStorage>>;
+  auto allowed = execution_internal::result_io_allowed();
+  if (!allowed.ok())
+    return ReadResult(allowed);
   if (!impl_)
     return ReadResult(stale());
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -222,8 +242,8 @@ Result<std::shared_ptr<const CpuStorage>> TemporaryStorage::read(
   if (!metadata.ok())
     return ReadResult(metadata.status());
   try {
-    auto owner = std::make_shared<WindowOwner>(
-        WindowOwner{metadata.take_value(), impl_, storage});
+    auto owner = std::shared_ptr<WindowOwner>(
+        new WindowOwner{metadata.take_value(), impl_, storage});
     return ReadResult(
         std::shared_ptr<const CpuStorage>(std::move(owner), storage.get()));
   } catch (const std::bad_alloc&) {

@@ -24,6 +24,8 @@ class PHOTOSPIDER_API TemporaryStorage final {
    */
   static Result<TemporaryStorage> create(ResourceBudget budget);
   bool valid() const noexcept { return impl_ != nullptr; }
+  /** @brief Capacity provenance, independent of semantic identity. */
+  bool owned_by(const ResourceBudget& budget) const noexcept;
   std::uint64_t size() const;
   /** @brief Appends zero bytes with a bounded 4096-byte staging window.
    * @return Previous logical end. Failure restores the old end or quarantines

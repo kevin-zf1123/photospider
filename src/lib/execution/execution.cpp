@@ -27,7 +27,6 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
-#include "execution/dependency_cache_identity.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -37,6 +36,9 @@
 #include "execution/native_gpu.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/result_identity.hpp"
+#include "execution/shared_results.hpp"
+#include "execution/structured_execution.hpp"
+#include "plugin/dependency_identity.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -869,7 +871,13 @@ struct ExecutionContext::Impl final {
         budget(std::make_shared<MemoryBudget>(
             requested.maximum_live_bytes,
             requested.managed_resources
-                ? std::make_shared<ResourceBudget>(*requested.managed_resources)
+                ? [&] {
+                    auto limits = *requested.managed_resources;
+                    const auto payload_limit = limits.capacity[ResourceKind::Payload];
+                    limits.capacity[ResourceKind::Payload] =
+                        std::min(payload_limit, requested.maximum_live_bytes);
+                    return std::make_shared<ResourceBudget>(std::move(limits));
+                  }()
                 : nullptr)),
         waiting_admission(maximum_waiting_callbacks),
         cpu_pool(cpu_worker_count, Backend::Cpu) {
@@ -938,6 +946,7 @@ struct ExecutionContext::Impl final {
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
   std::shared_ptr<execution_internal::DemandCoordinator> demands;
+  execution_internal::SharedResults shared_results;
   std::unique_ptr<execution_internal::DependencyFlights> dependency_flights;
   std::unique_ptr<execution_internal::DependencyCheckpoints>
       dependency_checkpoints;
@@ -1194,10 +1203,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const std::string& snapshot_identity = {},
       execution_internal::DependencyFlights* flights = nullptr,
       execution_internal::ResultCache* dependency_cache = nullptr,
-      execution_internal::DependencyCheckpoints* checkpoints = nullptr) {
+      execution_internal::DependencyCheckpoints* checkpoints = nullptr,
+      execution_internal::SharedResults* shared_results = nullptr) {
     const auto started = std::chrono::steady_clock::now();
-    auto combined_cancellation = CancellationToken::combine(
-        {caller_cancellation, options.dependencies.sets.cancellation});
+    auto combined_cancellation =
+        budget->resources()
+            ? CancellationToken::combine(
+                  {caller_cancellation, options.dependencies.sets.cancellation},
+                  *budget->resources())
+            : CancellationToken::combine(
+                  {caller_cancellation,
+                   options.dependencies.sets.cancellation});
     if (!combined_cancellation.ok())
       return Result<ExecutionResult>(combined_cancellation.status());
     const auto cancellation = combined_cancellation.take_value();
@@ -1219,6 +1235,27 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     auto retained_inputs = retain_managed_inputs(&bindings, budget);
     if (!retained_inputs.ok())
       return fail(retained_inputs);
+    if (plan.structured_network()) {
+      if (!budget->resources())
+        return fail(Status{ErrorCode::InvalidArgument,
+                           "structured execution requires managed_resources"});
+      auto result = execution_internal::execute_structured(
+          plan, std::move(bindings), operations, *budget->resources(), options,
+          sink, cancellation, stop,
+          [&](const std::function<Status()>& task,
+              const std::function<void()>& pump) {
+            auto completed = dependency_stage<int>(
+                pool, admission,
+                [&] {
+                  auto status = task();
+                  return status.ok() ? Result<int>(1) : Result<int>(status);
+                },
+                pump, budget->resources().get());
+            return completed.status();
+          },
+          requested, fragment_outputs, snapshot_identity, shared_results);
+      return result.ok() ? std::move(result) : fail(result.status());
+    }
     auto limits = options.dependencies.sets;
     limits.cancellation = flights ? CancellationToken{} : cancellation;
     auto observation =
@@ -1385,7 +1422,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     }
     const auto cache_templates =
         dependency_cache
-            ? execution_internal::dependency_cache_templates(
+            ? contract_internal::dependency_cache_templates(
                   plan,
                   native_device ? native_device->identity() : std::string{},
                   &cache_work, cancellation)
@@ -3459,19 +3496,38 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   static Result<T> dependency_stage(ThreadPool* pool,
                                     WaitingAdmission* admission,
                                     std::function<Result<T>()> work,
-                                    const std::function<void()>& pump = {}) {
+                                    const std::function<void()>& pump = {},
+                                    const ResourceBudget* resources = nullptr) {
     struct Completion {
+      ResourceLease lease;
       std::promise<Result<T>> promise;
       Result<T> result{Status{ErrorCode::Internal, {}}};
       std::function<Result<T>()> work;
     };
+    ResourceLease lease;
+    if (resources) {
+      auto capacity =
+          ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
+      capacity[ResourceKind::Queue] = 1;
+      capacity[ResourceKind::Entries] = 1;
+      auto admitted = resources->reserve(capacity);
+      if (!admitted.ok())
+        return Result<T>(admitted.status());
+      lease = admitted.take_value();
+    }
     auto completion = std::make_shared<Completion>();
+    completion->lease = std::move(lease);
     completion->work = std::move(work);
     auto future = completion->promise.get_future();
     auto slot = admission->try_acquire();
     if (!slot)
       return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
                                        "dependency waiting queue exhausted"));
+    if (resources) {
+      auto issued = resources->consume({0, 0, 0, 1});
+      if (!issued.ok())
+        return Result<T>(issued);
+    }
     QueuedCallback callback{
         [completion] {
           // The callable's owners retire before the completion notification.
@@ -4518,6 +4574,8 @@ ExecutionContext::ExecutionContext(
  * @copydetails ExecutionContext::~ExecutionContext
  */
 ExecutionContext::~ExecutionContext() noexcept {
+  if (impl_)
+    impl_->shared_results.shutdown();
   if (impl_ && impl_->dependency_flights)
     impl_->dependency_flights->close();
   if (impl_ && impl_->demands)
@@ -4828,7 +4886,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
       },
       &query, &result.values, frozen.execution_identity_,
       impl_->dependency_flights.get(), impl_->cache.get(),
-      impl_->dependency_checkpoints.get());
+      impl_->dependency_checkpoints.get(), &impl_->shared_results);
   if (!run.ok())
     return failure(run.status());
   auto completed = run.take_value();
@@ -5138,11 +5196,24 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
 Result<ExecutionResult> ExecutionContext::execute(
     const FrozenExecution& frozen, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
+  if (frozen.plan_.structured_network())
+    return execute_regions(frozen.plan_, frozen.bindings_, nullptr,
+                           cancellation, options, false, UINT64_MAX,
+                           frozen.execution_identity_);
   return execute(frozen.plan_, frozen.bindings_, cancellation, options);
 }
 Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
     const FrozenExecution& frozen, const ExecutionSink& sink,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (frozen.plan_.structured_network()) {
+    auto result =
+        execute_regions(frozen.plan_, frozen.bindings_, &sink, cancellation,
+                        options, false, UINT64_MAX, frozen.execution_identity_);
+    if (!result.ok())
+      return Result<ExecutionDiagnostics>(result.status());
+    return Result<ExecutionDiagnostics>(
+        std::move(result.take_value().diagnostics));
+  }
   return execute_stream(frozen.plan_, frozen.bindings_, sink, cancellation,
                         options);
 }
@@ -5294,7 +5365,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const ExecutionSink* sink, const CancellationToken& cancellation,
     const ExecutionOptions& options, bool shared_producer,
-    std::uint64_t producer_epoch) {
+    std::uint64_t producer_epoch, const std::string& snapshot_identity) {
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<ExecutionResult>(Status::failure(
@@ -5340,7 +5411,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               impl_->disk->drop_pending();
             if (impl_->cache)
               impl_->cache->reclaim_for(bytes);
-          });
+          },
+          nullptr, nullptr, snapshot_identity, nullptr, nullptr, nullptr,
+          &impl_->shared_results);
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
     std::map<ValueRef, Value> cached;
