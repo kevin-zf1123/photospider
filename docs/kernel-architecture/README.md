@@ -33,3 +33,5 @@ through Git history and `pre-breaking-scope-reset-2026-09-01`.
 
 - [S4 native Metal workflow](S4-Workflow.md): installed examples, numeric modes, residency and validation.
 - [Composable foundations workflow](Foundations-Workflow.md): standalone installed public API scenarios and reusable operations.
+
+- [Integer statistics workflow](Integer-Statistics.md): paged histogram, global parameters and streaming grade.

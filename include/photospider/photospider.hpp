@@ -21,6 +21,7 @@
 #include "photospider/data/representation.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/result_relation.hpp"
+#include "photospider/data/statistics.hpp"
 #include "photospider/data/storage.hpp"
 #include "photospider/data/temporary_storage.hpp"
 #include "photospider/data/value.hpp"
@@ -32,3 +33,4 @@
 #include "photospider/plugin/layer_operation.hpp"
 #include "photospider/plugin/operation_plugin.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "photospider/plugin/statistics_operation.hpp"

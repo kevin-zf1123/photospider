@@ -155,6 +155,8 @@ set(
   src/lib/data/representation.cpp
   src/lib/data/layer.cpp
   src/lib/data/quality.cpp
+  src/lib/data/statistics.cpp
+  src/lib/plugin/statistics_operation.cpp
   src/lib/plugin/layer_operation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_relation.cpp
@@ -195,6 +197,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/data/layer.cpp src/lib/data/representation.cpp
     src/lib/data/quality.cpp
+    src/lib/data/statistics.cpp
+    src/lib/plugin/statistics_operation.cpp
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
@@ -205,6 +209,8 @@ elseif(MSVC)
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/data/layer.cpp src/lib/data/representation.cpp
     src/lib/data/quality.cpp
+    src/lib/data/statistics.cpp
+    src/lib/plugin/statistics_operation.cpp
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -704,7 +710,11 @@ if(BUILD_TESTING)
   add_subdirectory(examples/atom_outcomes_workflow)
   add_test(NAME example_atom_outcomes_workflow COMMAND photospider_atom_outcomes_workflow)
   photospider_add_test(test_atom_outcomes Photospider::kernel tests/integration/test_atom_outcomes.cpp)
+  photospider_add_test(test_statistics_callback Photospider::kernel tests/unit/test_statistics_callback.cpp)
+  photospider_add_test(test_statistics Photospider::kernel tests/unit/test_statistics.cpp)
   photospider_add_test(test_quality Photospider::kernel tests/unit/test_quality.cpp)
+  add_subdirectory(examples/statistics_workflow)
+  add_test(NAME example_statistics_workflow COMMAND photospider_statistics_workflow)
   photospider_add_test(photospider_layer_workflow Photospider::kernel examples/layer_workflow/main.cpp)
   photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
   photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)

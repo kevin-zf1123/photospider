@@ -66,6 +66,10 @@
 !examples/foundations_workflow/*.md
 !examples/foundations_workflow/CMakeLists.txt
 !examples/
+!examples/statistics_workflow/
+!examples/statistics_workflow/*.cpp
+!examples/statistics_workflow/*.md
+!examples/statistics_workflow/CMakeLists.txt
 !examples/layer_workflow/
 !examples/layer_workflow/*.cpp
 !examples/layer_workflow/*.md
