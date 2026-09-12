@@ -36,3 +36,4 @@ through Git history and `pre-breaking-scope-reset-2026-09-01`.
 
 - [Integer statistics workflow](Integer-Statistics.md): paged histogram, global parameters and streaming grade.
 - [External-axis FFT](External-FFT.md): bounded generations, full/half identities and independent DFT references.
+- [Paged four-connected components](Paged-Components.md): dynamic min-pixel labels, associated area index and bounded filtering.

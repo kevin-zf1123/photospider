@@ -158,6 +158,7 @@ set(
   src/lib/data/statistics.cpp
   src/lib/plugin/statistics_operation.cpp
   src/lib/plugin/fft_operation.cpp
+  src/lib/plugin/component_operation.cpp
   src/lib/plugin/layer_operation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_relation.cpp
@@ -717,6 +718,9 @@ if(BUILD_TESTING)
   photospider_add_test(test_statistics Photospider::kernel tests/unit/test_statistics.cpp)
   photospider_add_test(test_quality Photospider::kernel tests/unit/test_quality.cpp)
   photospider_add_test(test_fft_contract Photospider::kernel tests/unit/test_fft_contract.cpp)
+  photospider_add_test(test_component_contract Photospider::kernel tests/unit/test_component_contract.cpp)
+  add_subdirectory(examples/components_workflow)
+  add_test(NAME example_components_workflow COMMAND photospider_components_workflow)
   add_subdirectory(examples/fft_workflow)
   add_test(NAME example_fft_workflow COMMAND photospider_fft_workflow)
   add_subdirectory(examples/statistics_workflow)

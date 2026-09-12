@@ -66,6 +66,10 @@
 !examples/foundations_workflow/*.md
 !examples/foundations_workflow/CMakeLists.txt
 !examples/
+!examples/components_workflow/
+!examples/components_workflow/*.cpp
+!examples/components_workflow/*.md
+!examples/components_workflow/CMakeLists.txt
 !examples/fft_workflow/
 !examples/fft_workflow/*.cpp
 !examples/fft_workflow/*.md

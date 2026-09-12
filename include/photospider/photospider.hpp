@@ -29,6 +29,7 @@
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/execution.hpp"
 #include "photospider/execution/resources.hpp"
+#include "photospider/plugin/component_operation.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/fft_operation.hpp"
 #include "photospider/plugin/layer_operation.hpp"
