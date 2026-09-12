@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -827,7 +828,9 @@ int workflow() {
       options.maximum_result_window_bytes = page_bytes;
       options.dependencies.maximum_stages = 100000;
       std::uint64_t last_count = 0;
+      std::set<std::uint64_t> notified_nodes;
       options.result_publication = [&](ValueRef ref, const ResultRef& result) {
+        notified_nodes.insert(ref.node_id);
         if (ref.node_id == 1) {
           auto facts = result.descriptor(false);
           if (!facts.ok() || facts.value().rows(0) < last_count)
@@ -843,6 +846,7 @@ int workflow() {
                   << static_cast<int>(executed.status().code) << ' '
                   << executed.status().message << '\n';
       PS_CHECK(executed.ok());
+      PS_CHECK(notified_nodes == std::set<std::uint64_t>({1, 2, 3}));
       PS_CHECK(builds == 1 && (count != 0 || reads == 0));
       auto result = executed.take_value();
       PS_CHECK(result.results.at("a").object_id() ==
@@ -877,6 +881,44 @@ int workflow() {
       retained_diagnostics = {};
       copied_diagnostics = {};
       if (count == 37 && page_bytes == 64) {
+        auto subscriptions = document;
+        subscriptions.nodes.push_back(
+            {4,
+             "select_ids",
+             {WorkflowInputReference{1}},
+             {{"count", static_cast<std::int64_t>(count)}}});
+        subscriptions.nodes.push_back(
+            {5, "first_id", {WorkflowNodeOutput{1, "value"}}, {}});
+        subscriptions.nodes.push_back(
+            {6, "first_id", {WorkflowNodeOutput{4, "value"}}, {}});
+        subscriptions.outputs = {{"a_first", 5, "value"},
+                                 {"b_first", 6, "value"},
+                                 {"c_all", 2, "value"}};
+        GraphContext subscribed_graph(subscriptions);
+        auto subscribed = Compiler(registry).compile(subscribed_graph);
+        PS_CHECK(subscribed.ok());
+        bool alias_prefix = false, alias_complete = false;
+        std::uint64_t alias_revision = 0;
+        auto subscribed_options = options;
+        subscribed_options.result_publication = [&](ValueRef ref,
+                                                    const ResultRef& object) {
+          if (ref.node_id == 4) {
+            const auto descriptor = object.descriptor(false).value();
+            if (descriptor.revision() <= alias_revision)
+              return Status{ErrorCode::Internal, "duplicate alias notice"};
+            alias_revision = descriptor.revision();
+            alias_prefix |= !descriptor.sealed();
+            alias_complete |= descriptor.sealed();
+          }
+          return Status::success();
+        };
+        const auto subscribed_builds = builds.load();
+        auto subscribed_result = context->execute_stream(
+            subscribed.value().plan, {{{"source", {}, source}}},
+            [](const std::string&, ValueView) { return Status::success(); }, {},
+            subscribed_options);
+        PS_CHECK(subscribed_result.ok() && alias_prefix && alias_complete &&
+                 builds == subscribed_builds + 1);
         std::vector<std::uint8_t> data(source_count);
         for (std::uint64_t i = 0; i < source_count; ++i)
           data[i] = i % 3;
@@ -898,9 +940,11 @@ int workflow() {
         PS_CHECK(first.value().results.at("ids").object_id() ==
                  second.value().results.at("ids").object_id());
         unsigned delivered = 0;
+        notified_nodes.clear();
         auto stream_options = options;
-        stream_options.result_publication = [&](ValueRef,
+        stream_options.result_publication = [&](ValueRef ref,
                                                 const ResultRef& object) {
+          notified_nodes.insert(ref.node_id);
           if (!object.descriptor().ok())
             return Status{ErrorCode::Internal, {}};
           ++delivered;
@@ -911,6 +955,7 @@ int workflow() {
             [](const std::string&, ValueView) { return Status::success(); }, {},
             stream_options);
         PS_CHECK(streamed.ok() && delivered >= 2 && builds == before + 1);
+        PS_CHECK(notified_nodes == std::set<std::uint64_t>({1, 2, 3}));
         first = Result<ExecutionResult>(ExecutionResult{});
         second = Result<ExecutionResult>(ExecutionResult{});
         // No optional cache owns completed data; expiry permits a new object.

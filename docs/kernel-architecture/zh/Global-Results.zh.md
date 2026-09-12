@@ -45,6 +45,9 @@ source I/O 契约。
 不拆为 Atomic。Result 输出从 ExecutionResult::results 取得，也可用
 result_publication 观察。execute_stream 包含具名 Result 输出时要求该 observer，
 普通 Value 输出仍使用原 sink。返回的读取窗口持有其授权和字节。
+通知按逻辑 ValueRef 去重，等价 step 共享 producer 时仍分别通知。晚加入的 alias
+收到当前 descriptor；已观察的 alias 继续收到后续 prefix 和完成通知。首次 observer
+失败会停止该 Run 的后续通知。
 
 ## 所有权、共享和取消
 

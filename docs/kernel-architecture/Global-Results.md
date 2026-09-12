@@ -57,6 +57,10 @@ Result outputs are retrieved from `ExecutionResult::results` or observed with
 `ExecutionOptions::result_publication`. `execute_stream` requires that observer
 when named outputs include ResultRefs; ordinary Value outputs use its normal
 sink. Returned read windows own their authorization and bytes.
+Notifications are deduplicated per logical ValueRef, even when equivalent steps
+share one producer. A late alias receives the current descriptor; already
+observed aliases receive subsequent prefixes and completion. The first observer
+failure stops further notifications for that Run.
 
 ## Ownership, sharing and cancellation
 

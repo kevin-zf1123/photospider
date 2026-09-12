@@ -124,6 +124,7 @@ class StructuredExecution final {
         snapshot_input_(snapshot),
         remaining_(options.maximum_dependency_work),
         actors_(ResourceAllocator<std::shared_ptr<Actor>>(resources_)),
+        notified_revisions_(ResourceAllocator<std::uint64_t>(resources_)),
         whole_(std::less<std::size_t>{},
                ResourceAllocator<std::pair<const std::size_t, ValueFragments>>(
                    resources_)) {}
@@ -206,6 +207,7 @@ class StructuredExecution final {
       return Answer(admitted.status());
     lease_ = admitted.take_value();
     actors_.resize(plan_.steps().size());
+    notified_revisions_.resize(plan_.steps().size());
     diagnostics_.operation_timings = decltype(diagnostics_.operation_timings)(
         ResourceAllocator<OperationTiming>(resources_));
     diagnostics_.operation_timings.reserve(plan_.steps().size());
@@ -409,7 +411,7 @@ class StructuredExecution final {
     ErrorCode terminal = ErrorCode::Ok;
     std::uint64_t node_id = 0;
     std::uint32_t polls = 0;
-    std::uint64_t published_revision = 0, notified_revision = 0;
+    std::uint64_t published_revision = 0;
     bool complete = false, busy = false;
   };
   void refresh_shared() const {
@@ -608,7 +610,7 @@ class StructuredExecution final {
         return ready;
       current->published = ready.value();
       current->complete = current->published.production_status().ok();
-      auto notified = notify(index, *current);
+      auto notified = notify(*current);
       return notified.ok() ? ready : Result<ResultRef>(notified);
     }
     if (current->busy)
@@ -622,7 +624,9 @@ class StructuredExecution final {
       if (!status.ok())
         return Result<ResultRef>(status);
     }
-    return Result<ResultRef>(current->published);
+    auto notified = notify(*current);
+    return notified.ok() ? Result<ResultRef>(current->published)
+                         : Result<ResultRef>(notified);
   }
   Status service_peers() {
     if (service_depth_ >= 64)
@@ -725,22 +729,32 @@ class StructuredExecution final {
     return applied.ok() ? Answer(ResultIoReply{applied.value()})
                         : Answer(applied.status());
   }
-  Status notify(std::size_t index, Actor& actor) {
+  Status notify(Actor& actor) {
     if (!options_.result_publication || !sink_failure_.ok())
       return Status::success();
     auto descriptor = actor.published.descriptor(false);
     if (!descriptor.ok())
       return descriptor.status();
-    if (descriptor.value().revision() <= actor.notified_revision)
-      return Status::success();
-    actor.notified_revision = descriptor.value().revision();
-    try {
-      sink_failure_ = options_.result_publication(
-          plan_.steps()[index].result_ref(), actor.published);
-    } catch (const std::bad_alloc&) {
-      sink_failure_ = Status{ErrorCode::ResourceExhausted, {}};
-    } catch (...) {
-      sink_failure_ = Status{ErrorCode::OperationFailed, {}};
+    auto charged = consume(actors_.size());
+    if (!charged.ok())
+      return charged;
+    // Computation ownership is shared, but each logical step has its own
+    // observer subscription. Late aliases receive the current snapshot.
+    for (std::size_t index = 0; index < actors_.size(); ++index) {
+      if (actors_[index].get() != &actor ||
+          descriptor.value().revision() <= notified_revisions_[index])
+        continue;
+      notified_revisions_[index] = descriptor.value().revision();
+      try {
+        sink_failure_ = options_.result_publication(
+            plan_.steps()[index].result_ref(), actor.published);
+      } catch (const std::bad_alloc&) {
+        sink_failure_ = Status{ErrorCode::ResourceExhausted, {}};
+      } catch (...) {
+        sink_failure_ = Status{ErrorCode::OperationFailed, {}};
+      }
+      if (!sink_failure_.ok())
+        break;
     }
     if (!sink_failure_.ok())
       call_.retire_user();
@@ -1000,7 +1014,7 @@ class StructuredExecution final {
       actor.published_revision = descriptor.value().revision();
       actor.complete = published->complete;
       actor.shared.publish(actor.published, actor.complete);
-      status = notify(index, actor);
+      status = notify(actor);
       if (!status.ok())
         return status;
       if (actor.complete) {
@@ -1382,6 +1396,7 @@ class StructuredExecution final {
   std::uint64_t remaining_;
   ResourceLease lease_;
   ResourceVector<std::shared_ptr<Actor>> actors_;
+  ResourceVector<std::uint64_t> notified_revisions_;
   std::map<std::size_t, ValueFragments, std::less<std::size_t>,
            ResourceAllocator<std::pair<const std::size_t, ValueFragments>>>
       whole_;
