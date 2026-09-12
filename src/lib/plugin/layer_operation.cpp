@@ -67,6 +67,33 @@ LayerRepresentation output_kind(Op op) {
     return LayerRepresentation::OptionalLayer;
   return LayerRepresentation::Layer;
 }
+Result<ResultGrowthLimits> growth_limits(Op op, const LayerSpec& spec) {
+  std::uint64_t bytes_per_row = 28, rows = 1;
+  switch (output_kind(op)) {
+    case LayerRepresentation::Response:
+    case LayerRepresentation::RawSum:
+      bytes_per_row = 16;
+      break;
+    case LayerRepresentation::Contributions:
+    case LayerRepresentation::WeightedSum:
+      bytes_per_row = 64;
+      break;
+    case LayerRepresentation::OptionalLayer:
+      bytes_per_row = 29;
+      break;
+    case LayerRepresentation::Layer:
+      break;
+  }
+  if (op != Op::Reduce && op != Op::Finalize) {
+    if (!spec.width || spec.height > UINT64_MAX / spec.width)
+      return Result<ResultGrowthLimits>(invalid("layer row count overflow"));
+    rows = spec.height * spec.width;
+  }
+  if (rows > UINT64_MAX / bytes_per_row)
+    return Result<ResultGrowthLimits>(invalid("layer result byte overflow"));
+  return Result<ResultGrowthLimits>(
+      ResultGrowthLimits{rows, rows * bytes_per_row});
+}
 struct State {
   Op op;
   LayerSpec spec;
@@ -272,9 +299,13 @@ struct State {
         for (const auto& input : inputs)
           if (input.valid())
             association.push_back(input.object_id());
+        auto limits = growth_limits(op, spec);
+        if (!limits.ok())
+          return Poll(limits.status());
         auto made = ResultBuilder::start(
             phase.resources, *phase.query.output.result_schema,
-            phase.query.semantic_key, {}, std::move(association));
+            phase.query.semantic_key, limits.take_value(),
+            std::move(association));
         if (!made.ok())
           return Poll(made.status());
         builder = made.take_value();

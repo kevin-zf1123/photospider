@@ -89,7 +89,13 @@ collapse overflows. These examples prohibit an implicit algebraic replacement.
 `OperationRegistry::register_operation`. The fixed raster/space is frozen in the
 registered output schema; the caller may choose another operation key when
 registering multiple fixed raster variants. Input dimensions and space are
-checked before input I/O. The canonical keys are:
+checked before input I/O. Builder growth bounds use the actual output extent:
+N rows and 28N bytes for Layer, 16N for Response/RawSum and 64N for raster
+contributions; reduction uses one 64-byte row and finalization at most 29 bytes.
+They do not inherit the general builder's one-million-row default. Mandatory
+disk, Host, work and stage budgets still apply. `test_layer` separately checks
+large-raster admission without claiming complete large-raster execution.
+The canonical keys are:
 
 | Keys | Input / parameter / output |
 | --- | --- |

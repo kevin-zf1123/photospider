@@ -73,6 +73,10 @@ Layer，但 collapse 会溢出。这些反例禁止未经证明的隐式代数�
 `make_layer_operation(LayerOperation, LayerSpec)` 返回带有实际 CPU staged callback
 的 `OperationDefinition`，可直接注册。固定 raster/space 写入输出 schema；同一 registry
 注册不同尺寸变体时可选择不同 key。输入尺寸和空间在输入 I/O 前检查。
+Builder 增长界来自实际输出：Layer 为 N 行、28N 字节，Response/RawSum 为
+16N 字节，raster contributions 为 64N 字节；reduce 为单行 64 字节，finalize
+最多 29 字节。它们不继承通用 builder 的百万行默认值。必需 disk、Host、work
+和 stage 预算仍然生效。test_layer 单独验证大 raster 准入，不将其视为完整执行证明。
 
 | key | 输入、参数、输出 |
 | --- | --- |

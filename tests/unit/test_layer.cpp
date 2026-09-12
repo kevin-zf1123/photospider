@@ -2,12 +2,72 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <memory>
+#include <string>
 
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
+namespace {
+int raster_admission(std::uint64_t height, std::uint64_t width) {
+  using namespace ps;  // NOLINT(build/namespaces)
+  const LayerSpec spec{height, width};
+  auto definition = make_layer_operation(LayerOperation::Assemble, spec);
+  PS_CHECK(definition.ok());
+  ResultProgramMetadata metadata;
+  metadata.output.result_schema = std::make_shared<const SchemaTemplate>(
+      *definition.value().traits.outputs[0].result_schema);
+  metadata.inputs.resize(2);
+  metadata.inputs[0].descriptor = {ElementType::Float32, {height, width, 4}};
+  metadata.inputs[0].facets = {encode_semantic(rgba_semantics()).take_value()};
+  metadata.inputs[1].descriptor = {ElementType::Float32, {height, width, 3}};
+  OperationRegistry registry;
+  PS_CHECK(registry.register_operation(definition.take_value()).ok());
+  PS_CHECK(registry.freeze().ok());
+  std::map<std::string, ParameterValue> parameters;
+  ResultProgramQuery query(metadata, parameters);
+  query.semantic_key = "large-layer-admission";
+  query.page_bytes = 64;
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Host] = 65536;
+  limits.capacity[ResourceKind::Metadata] = 65536;
+  ResourceBudget root(limits);
+  auto allocator = root.allocator();
+  auto started = registry.start_result("layer.assemble", query, allocator);
+  PS_CHECK(started.ok());
+  auto continuation = started.take_value();
+  ResultValueInputs values;
+  ResultObjectInputs objects;
+  ResourceVector<ResultIoReply> io;
+  auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+  ResultProgramPhase phase{
+      query,
+      values,
+      objects,
+      io,
+      allocator,
+      root,
+      [&](std::uint64_t work) { return root.consume({work}); },
+      failure};
+  auto polled = continuation.poll(phase);
+  PS_CHECK(polled.ok());
+  auto* need = std::get_if<ResultProgramNeed>(&polled.value());
+  PS_CHECK(need && need->values.size() == 2 && need->io.empty());
+  // Admission only: no pixel callback/I/O has run. Full execution remains
+  // subject to explicitly configured stage, work, disk and capacity budgets.
+  PS_CHECK(root.statistics().live[ResourceKind::Disk] == 0 &&
+           root.statistics().peak[ResourceKind::Host] <= 65536);
+  return 0;
+}
+}  // namespace
+
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
+  PS_CHECK(raster_admission(1, 1048576) == 0);
+  PS_CHECK(raster_admission(1, 1048577) == 0);
+  PS_CHECK(raster_admission(1080, 1920) == 0);
+  PS_CHECK(raster_admission(1, 67108864) == 0);
   const float maximum = std::numeric_limits<float>::max();
   const float tiny = std::numeric_limits<float>::denorm_min();
   LayerPixel underflow{{{1, 0, 0}, tiny}, {3, -4, 5}};
