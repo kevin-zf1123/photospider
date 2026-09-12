@@ -130,14 +130,20 @@ class PHOTOSPIDER_API BufferAllocator final {
   /** @brief Reports whether storage belongs to this allocator's accounting
    * domain. */
   bool owns(const CpuStorage& storage) const noexcept;
-  /** @brief Allocates exactly size zero-initialized bytes after reservation. */
+  /** @brief Allocates exactly size zero-initialized bytes after reservation.
+   * Host allocation exceptions become ResourceExhausted; other host exceptions
+   * become OperationFailed. Both notify all scoped failure observers before
+   * returning, so a callback cannot catch an exception and recover publication.
+   */
   Result<MutableBuffer> allocate(std::uint64_t size) const;
   /** @brief Allocation-failure notification; observer exceptions are fenced. */
   using FailureObserver = std::function<void(ErrorCode)>;
   /** @brief Creates an aggregate live-capacity sublimit retaining this domain.
    * @note Copies of the returned allocator share its quota. Parent reservation
    * and native allocation policies remain active; last-owner release returns
-   * capacity. Zero rejects every positive allocation. May throw bad_alloc.
+   * capacity. Zero rejects every positive allocation. Metadata exceptions
+   * notify parent/child failure observers before propagating (including
+   * bad_alloc).
    * @param maximum_bytes Maximum aggregate live capacity under this scope.
    * @param failure Optional failure observer; all parent/child observers run
    * independently even if another observer throws.

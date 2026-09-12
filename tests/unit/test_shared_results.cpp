@@ -87,7 +87,7 @@ int retirement_epochs() {
     auto replacement = table.acquire("r", budget, {}, b).take_value();
     PS_CHECK(replacement.producer());
     // Completion of the retired epoch cannot modify the new table entry.
-    old.fail(ErrorCode::Cancelled);
+    old.fail(Status{ErrorCode::Cancelled, {}});
     replacement.refresh();
     PS_CHECK(!replacement.token().cancelled());
     auto c = table.join_call("snapshot", budget, {}, {"r"}).take_value();
@@ -95,9 +95,20 @@ int retirement_epochs() {
     PS_CHECK(!peer.producer());
     b.retire_user();
     PS_CHECK(replacement.continue_for_peers());
-    replacement.fail(ErrorCode::OperationFailed);
-    PS_CHECK(peer.wait(true, 0, 0, {}).status().code ==
-             ErrorCode::OperationFailed);
+    Status failure{ErrorCode::OperationFailed,
+                   "associated publication failed",
+                   FailureReason::InvalidAssociation,
+                   {FailureOrigin::Schema, FailureScope::Association}};
+    failure.detail.association = 876;
+    failure.detail.node_id = 91;
+    replacement.fail(failure);
+    const auto observed = peer.wait(true, 0, 0, {}).status();
+    PS_CHECK(
+        observed.code == failure.code && observed.reason == failure.reason &&
+        observed.message == failure.message &&
+        observed.detail.origin == failure.detail.origin &&
+        observed.detail.scope == failure.detail.scope &&
+        observed.detail.association == 876 && observed.detail.node_id == 91);
     auto next = table.acquire("r", budget, {}, c).take_value();
     PS_CHECK(next.producer());
     peer = {};
@@ -112,10 +123,31 @@ int retirement_epochs() {
     PS_CHECK(live == 0);
   return 0;
 }
+int protocol_before_cancel() {
+  ResourceBudget budget;
+  SharedResults table;
+  CancellationSource cancellation;
+  auto a = table.join_call("snapshot", budget, {}, {"r"}).take_value();
+  auto producer = table.acquire("r", budget, {}, a).take_value();
+  auto b = table.join_call("snapshot", budget, cancellation.token(), {"r"})
+               .take_value();
+  auto peer = table.acquire("r", budget, cancellation.token(), b).take_value();
+  producer.fail(Status{ErrorCode::InvalidArgument,
+                       "bad envelope",
+                       FailureReason::MalformedEnvelope,
+                       {FailureOrigin::Protocol, FailureScope::Group}});
+  cancellation.cancel();
+  auto result = peer.wait(true, 0, 0, cancellation.token());
+  PS_CHECK(!result.ok() &&
+           result.status().reason == FailureReason::MalformedEnvelope &&
+           result.status().detail.origin == FailureOrigin::Protocol);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(cancellation_domains() == 0);
   PS_CHECK(retirement_epochs() == 0);
   PS_CHECK(escaped_token() == 0);
+  PS_CHECK(protocol_before_cancel() == 0);
   return 0;
 }

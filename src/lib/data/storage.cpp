@@ -8,6 +8,17 @@
 #include <utility>
 
 namespace ps {
+namespace {
+void notify_failure(const BufferAllocator::FailureObserver& observer,
+                    ErrorCode code) noexcept {
+  if (observer) {
+    try {
+      observer(code);
+    } catch (...) {
+    }
+  }
+}
+}  // namespace
 ByteView CpuStorage::bytes() const noexcept {
   if (native_owner_)
     return ByteView(native_bytes_, static_cast<std::size_t>(byte_size_));
@@ -40,64 +51,74 @@ bool BufferAllocator::owns(const CpuStorage& storage) const noexcept {
 }
 BufferAllocator BufferAllocator::limited(std::uint64_t maximum_bytes,
                                          FailureObserver failure) const {
-  struct State {
-    std::mutex mutex;
-    std::uint64_t live = 0;
-  };
-  struct Lease {
-    std::shared_ptr<State> state;
-    std::uint64_t bytes = 0;
-    std::shared_ptr<void> parent;
-    ~Lease() {
-      if (bytes) {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->live -= bytes;
-      }
-    }
-  };
-  auto state = std::make_shared<State>();
-  BufferAllocator result(
-      [parent = reserve_, state, maximum_bytes](std::uint64_t bytes) {
-        auto lease = std::make_shared<Lease>();
-        lease->state = state;
-        {
+  try {
+    struct State {
+      std::mutex mutex;
+      std::uint64_t live = 0;
+    };
+    struct Lease {
+      std::shared_ptr<State> state;
+      std::uint64_t bytes = 0;
+      std::shared_ptr<void> parent;
+      ~Lease() {
+        if (bytes) {
           std::lock_guard<std::mutex> lock(state->mutex);
-          if (bytes > maximum_bytes - state->live)
-            return Result<std::shared_ptr<void>>(
-                Status::failure(ErrorCode::ResourceExhausted,
-                                "allocator live sublimit exceeded"));
-          state->live += bytes;
-          lease->bytes = bytes;
+          state->live -= bytes;
         }
-        if (parent) {
-          auto reserved = parent(bytes);
-          if (!reserved.ok())
-            return Result<std::shared_ptr<void>>(reserved.status());
-          lease->parent = reserved.take_value();
+      }
+    };
+    auto state = std::make_shared<State>();
+    BufferAllocator result(
+        [parent = reserve_, state, maximum_bytes](std::uint64_t bytes) {
+          auto lease = std::make_shared<Lease>();
+          lease->state = state;
+          {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (bytes > maximum_bytes - state->live)
+              return Result<std::shared_ptr<void>>(
+                  Status::failure(ErrorCode::ResourceExhausted,
+                                  "allocator live sublimit exceeded"));
+            state->live += bytes;
+            lease->bytes = bytes;
+          }
+          if (parent) {
+            auto reserved = parent(bytes);
+            if (!reserved.ok())
+              return Result<std::shared_ptr<void>>(reserved.status());
+            lease->parent = reserved.take_value();
+          }
+          return Result<std::shared_ptr<void>>(std::move(lease));
+        },
+        domain_);
+    result.native_allocate_ = native_allocate_;
+    result.allocation_scopes_ = allocation_scopes_;
+    result.allocation_scopes_.push_back(state);
+    result.failure_ = [parent = failure_, observer = failure](ErrorCode code) {
+      if (parent) {
+        try {
+          parent(code);
+        } catch (...) {
         }
-        return Result<std::shared_ptr<void>>(std::move(lease));
-      },
-      domain_);
-  result.native_allocate_ = native_allocate_;
-  result.allocation_scopes_ = allocation_scopes_;
-  result.allocation_scopes_.push_back(state);
-  result.failure_ = [parent = failure_,
-                     observer = std::move(failure)](ErrorCode code) {
-    if (parent) {
-      try {
-        parent(code);
-      } catch (...) {
       }
-    }
-    if (observer) {
-      try {
-        observer(code);
-      } catch (...) {
+      if (observer) {
+        try {
+          observer(code);
+        } catch (...) {
+        }
       }
-    }
-  };
-  return result;
+    };
+    return result;
+  } catch (const std::bad_alloc&) {
+    notify_failure(failure_, ErrorCode::ResourceExhausted);
+    notify_failure(failure, ErrorCode::ResourceExhausted);
+    throw;
+  } catch (...) {
+    notify_failure(failure_, ErrorCode::OperationFailed);
+    notify_failure(failure, ErrorCode::OperationFailed);
+    throw;
+  }
 }
+
 bool BufferAllocator::owns_allocation(
     const MutableBuffer& buffer) const noexcept {
   return buffer.storage_ && owns_allocation(*buffer.storage_);
@@ -149,8 +170,10 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
     result.storage_->capacity_ = size;
     return Result<MutableBuffer>(std::move(result));
   } catch (const std::bad_alloc&) {
+    return reject(Status{ErrorCode::ResourceExhausted, {}});
+  } catch (...) {
     return reject(
-        Status::failure(ErrorCode::ResourceExhausted, "CPU allocation failed"));
+        Status{ErrorCode::OperationFailed, {}, FailureReason::HostException});
   }
 }
 }  // namespace ps

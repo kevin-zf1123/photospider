@@ -1198,7 +1198,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       groups[step.node_id].push_back(i);
   }
   for (auto& group : groups)
-    if (group.second.size() > 1)
+    if (group.second.size() > 1 ||
+        plan.steps_[group.second.front()].traits.joint_contract == 2)
       plan.execution_groups_.push_back({group.first, std::move(group.second)});
   if (plan.dependency_network()) {
     for (const auto& requested : options.output_regions)

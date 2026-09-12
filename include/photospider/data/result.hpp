@@ -176,7 +176,8 @@ class PHOTOSPIDER_API ResultRef final {
   friend class ResultWritePlan;
   friend class WeakResultRef;
   friend class execution_internal::StructuredExecution;
-  void retire_producer(ErrorCode failure) const noexcept;
+  void retire_producer(const Status& failure) const noexcept;
+  void bind_producer(std::uint64_t node) const noexcept;
   Status retain_association(const ResourceVector<ResultRef>& inputs) const;
   struct Impl;
   std::shared_ptr<Impl> impl_;

@@ -57,14 +57,18 @@ struct SelectState {
   unsigned stage = 0;
   ResultBuilder builder;
   ResultRelation relation;
-  bool illegal_io = false;
-  explicit SelectState(std::uint64_t n, bool forbidden = false)
+  unsigned illegal_io = 0;
+  explicit SelectState(std::uint64_t n, unsigned forbidden = 0)
       : count(n), illegal_io(forbidden) {}
   Poll poll(const ResultProgramPhase& phase) {
     if (stage == 0) {
-      if (illegal_io) {
+      if (illegal_io == 1 || illegal_io == 2 || illegal_io == 4) {
         auto ignored = TemporaryStorage::create(phase.resources);
         static_cast<void>(ignored);
+        if (illegal_io == 2)
+          throw std::runtime_error("throw after protocol violation");
+        if (illegal_io == 4)
+          static_cast<void>(phase.consume_work(UINT64_MAX));
       }
       auto made = ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
@@ -92,6 +96,13 @@ struct SelectState {
         return Poll(published);
       stage = 1;
       return Poll(ResultPublication{builder.reference(), false});
+    }
+    if (stage == 1 && illegal_io == 3) {
+      Status failure{ErrorCode::OperationFailed,
+                     "producer stopped after prefix",
+                     FailureReason::NotConverged};
+      builder.fail(failure);
+      return Poll(failure);
     }
     if (stage == 3) {
       auto status =
@@ -415,6 +426,22 @@ int prefix_retirement(const std::shared_ptr<OperationRegistry>& registry,
     auto b = std::async(std::launch::async, [&] {
       return execution.execute(frozen, peer_cancel.token(), options);
     });
+    struct ReleaseOnExit {
+      std::mutex& mutex;
+      std::condition_variable& changed;
+      bool& release;
+      CancellationSource& producer;
+      CancellationSource& peer;
+      ~ReleaseOnExit() {
+        producer.cancel();
+        peer.cancel();
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          release = true;
+        }
+        changed.notify_all();
+      }
+    } release_on_exit{mutex, changed, release, cancelled, peer_cancel};
     const auto limit =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (root.statistics().live[ResourceKind::Entries] <= entries &&
@@ -693,7 +720,7 @@ int workflow() {
       std::atomic<unsigned> builds{0}, reads{0}, forward_starts{0};
       std::function<Status(const ResultProgramQuery&)> start_control,
           select_control;
-      bool illegal_io = false;
+      unsigned illegal_io = 0;
       OperationDefinition select;
       select.key = "select_ids";
       select.traits = traits(ids_schema(), 1, sizeof(SelectState));
@@ -1052,14 +1079,41 @@ int workflow() {
           for (auto live : ledger.statistics().live.values)
             PS_CHECK(live == 0);
         }
-        illegal_io = true;
-        ExecutionContext checked(registry, config);
-        const auto before_reads = reads.load();
-        auto ignored = checked.execute(compiled.value().plan,
-                                       {{{"source", {}, source}}}, {}, options);
-        PS_CHECK(ignored.status().code == ErrorCode::InvalidArgument &&
-                 reads == before_reads);
-        illegal_io = false;
+        for (unsigned violation : {1u, 2u, 4u}) {
+          illegal_io = violation;
+          ExecutionContext checked(registry, config);
+          const auto before_reads = reads.load();
+          auto ignored = checked.execute(
+              compiled.value().plan, {{{"source", {}, source}}}, {}, options);
+          PS_CHECK(ignored.status().code == ErrorCode::InvalidArgument &&
+                   ignored.status().reason == FailureReason::UnauthorizedRead &&
+                   ignored.status().detail.origin == FailureOrigin::Protocol &&
+                   ignored.status().detail.scope == FailureScope::Group &&
+                   reads == before_reads);
+        }
+        illegal_io = 3;
+        {
+          ExecutionContext checked(registry, config);
+          ResultRef prefix;
+          options.result_publication = [&](ValueRef ref,
+                                           const ResultRef& result) {
+            if (ref.node_id == 1)
+              prefix = result;
+            return Status::success();
+          };
+          auto failed = checked.execute(
+              compiled.value().plan, {{{"source", {}, source}}}, {}, options);
+          PS_CHECK(prefix.valid() &&
+                   failed.status().reason == FailureReason::NotConverged);
+          const auto retained = prefix.production_status();
+          PS_CHECK(retained.reason == failed.status().reason &&
+                   retained.detail.node_id == failed.status().detail.node_id &&
+                   retained.detail.scope == failed.status().detail.scope &&
+                   retained.detail.node_id == 1 &&
+                   retained.detail.scope == FailureScope::Group);
+        }
+        options.result_publication = {};
+        illegal_io = 0;
       }
       for (auto live : root.statistics().live.values)
         PS_CHECK(live == 0);

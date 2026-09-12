@@ -121,6 +121,27 @@ int empty_and_failure() {
   auto bad_schema = points();
   bad_schema.fields[0].record_shape = {0};
   PS_CHECK(!ResultBuilder::start(root, bad_schema, "bad").ok());
+  {
+    auto builder =
+        ResultBuilder::start(root, points(), "failed-status").take_value();
+    auto reference = builder.reference();
+    Status failure{ErrorCode::OperationFailed,
+                   "domain prerequisite failed",
+                   FailureReason::InvalidDomain,
+                   {FailureOrigin::Schema, FailureScope::Association}};
+    failure.detail.association = reference.object_id();
+    failure.detail.node_id = 77;
+    builder.fail(failure);
+    builder.fail(Status{ErrorCode::Cancelled, {}});
+    for (const auto& observed :
+         {reference.production_status(), reference.descriptor().status(),
+          builder.seal().status()}) {
+      PS_CHECK(observed.reason == failure.reason &&
+               observed.message == failure.message &&
+               observed.detail.association == failure.detail.association &&
+               observed.detail.node_id == 77);
+    }
+  }
   return 0;
 }
 int paging() {

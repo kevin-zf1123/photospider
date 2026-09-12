@@ -22,11 +22,15 @@
 #include "execution/shared_results.hpp"
 #include "photospider/data/representation.hpp"
 #include "plugin/dependency_identity.hpp"
+#include "plugin/failure_latch.hpp"
 
 namespace ps::execution_internal {
 namespace {
 Status protocol(const char* message) {
-  return Status{ErrorCode::InvalidArgument, message};
+  return Status{ErrorCode::InvalidArgument,
+                message,
+                FailureReason::MalformedEnvelope,
+                {FailureOrigin::Protocol, FailureScope::Group}};
 }
 bool same_region(const Region& a, const Region& b) {
   if (a.rank() != b.rank())
@@ -385,7 +389,10 @@ class StructuredExecution final {
           io(ResourceAllocator<ResultIoReply>(budget)),
           failure(std::allocate_shared<std::atomic<ErrorCode>>(
               ResourceAllocator<std::atomic<ErrorCode>>(budget),
-              ErrorCode::Ok)) {}
+              ErrorCode::Ok)),
+          service_failure(std::allocate_shared<plugin_internal::FailureLatch>(
+              ResourceAllocator<plugin_internal::FailureLatch>(budget))),
+          node_id(step.node_id) {}
     ResourceLease lease;
     ResultProgramQuery query;
     ResourceString key;
@@ -398,7 +405,9 @@ class StructuredExecution final {
     std::optional<ValueFragments> value;
     ResultRelation value_relation;
     std::shared_ptr<std::atomic<ErrorCode>> failure;
+    std::shared_ptr<plugin_internal::FailureLatch> service_failure;
     ErrorCode terminal = ErrorCode::Ok;
+    std::uint64_t node_id = 0;
     std::uint32_t polls = 0;
     std::uint64_t published_revision = 0, notified_revision = 0;
     bool complete = false, busy = false;
@@ -441,7 +450,9 @@ class StructuredExecution final {
       return Status{stopped, {}};
     if (count > remaining_)
       return Status{ErrorCode::ResourceExhausted,
-                    "structured Run work exhausted"};
+                    "structured Run work exhausted",
+                    FailureReason::WorkLimit,
+                    {FailureOrigin::Resource, FailureScope::Run}};
     auto status = resources_.consume({count});
     if (status.ok())
       remaining_ -= count;
@@ -456,12 +467,18 @@ class StructuredExecution final {
     limits.consume_work = [&](std::uint64_t count) { return consume(count); };
     return limits;
   }
-  Status retire(Actor& actor, Status failure) {
+  Status retire(Actor& actor, const Status& incoming) {
+    auto failure = actor.service_failure->record(incoming);
+    if (!failure.detail.node_id && !failure.detail.input_id)
+      failure.detail.node_id = actor.node_id;
+    if (failure.detail.scope == FailureScope::Unspecified)
+      failure.detail.scope = FailureScope::Group;
+    actor.service_failure->enrich(failure);
     actor.terminal = failure.code;
-    actor.shared.fail(failure.code);
+    actor.shared.fail(failure);
     if (actor.published.valid() &&
         (!actor.shared.valid() || actor.shared.producer()))
-      actor.published.retire_producer(failure.code);
+      actor.published.retire_producer(failure);
     actor.continuation = {};
     actor.values.clear();
     actor.results.clear();
@@ -540,17 +557,25 @@ class StructuredExecution final {
     if (!charged.ok())
       return Answer(retire(*created, charged));
     Result<ResultContinuation> started(Status{ErrorCode::Internal, {}});
+    ErrorCode sticky = ErrorCode::Ok;
     auto dispatched = dispatch([&] {
-      ErrorCode sticky = ErrorCode::Ok;
-      ResultCallbackScope scope(&sticky);
+      ResultCallbackScope scope(&sticky, created->service_failure.get());
       ResourceAllocationScope metadata_scope(resources_, &sticky);
       auto allocator = resources_.allocator().limited(
           std::min(step.traits.outputs[0].continuation_bytes,
-                   options_.dependencies.maximum_state_bytes));
+                   options_.dependencies.maximum_state_bytes),
+          [full = created->service_failure](ErrorCode code) {
+            full->record(Status{code, {}});
+          });
       started = operations_->start_result_compiled(
           step.operation, created->query, allocator, created->failure);
       return sticky == ErrorCode::Ok ? Status::success() : Status{sticky, {}};
     });
+    if (sticky == ErrorCode::InvalidArgument)
+      dispatched = Status{sticky,
+                          {},
+                          FailureReason::UnauthorizedRead,
+                          {FailureOrigin::Protocol, FailureScope::Group}};
     if (!dispatched.ok())
       return Answer(retire(*created, dispatched));
     if (!started.ok())
@@ -590,7 +615,7 @@ class StructuredExecution final {
       return Result<ResultRef>(Status{ErrorCode::Cycle, {}});
     while (!satisfied(*current, request)) {
       if (current->terminal != ErrorCode::Ok)
-        return Result<ResultRef>(Status{current->terminal, {}});
+        return Result<ResultRef>(current->service_failure->snapshot());
       if (current->complete)
         return Result<ResultRef>(protocol("requested result field is absent"));
       auto status = advance(index, *current);
@@ -751,9 +776,9 @@ class StructuredExecution final {
     } idle{actor.busy};
     const auto started = std::chrono::steady_clock::now();
     Result<ResultProgramPoll> polled(Status{ErrorCode::Internal, {}});
+    ErrorCode sticky = actor.failure->load();
     auto status = dispatch([&] {
-      ErrorCode sticky = actor.failure->load();
-      ResultCallbackScope scope(&sticky);
+      ResultCallbackScope scope(&sticky, actor.service_failure.get());
       ResourceAllocationScope metadata_scope(resources_, &sticky);
       auto limit = step.traits.workspace_bytes;
       if (actor.query.value_outputs) {
@@ -765,30 +790,62 @@ class StructuredExecution final {
         limit += count.value() * width;
       }
       auto allocator = resources_.allocator().limited(
-          limit, [failure = actor.failure](ErrorCode code) {
-            auto expected = ErrorCode::Ok;
-            failure->compare_exchange_strong(expected, code);
+          limit, [full = actor.service_failure](ErrorCode code) {
+            full->record(Status{code, {}});
           });
+      auto observe_failure = [&actor, &sticky](const Status& failed) {
+        if (sticky != ErrorCode::Ok)
+          actor.service_failure->record(
+              sticky == ErrorCode::InvalidArgument
+                  ? Status{sticky,
+                           {},
+                           FailureReason::UnauthorizedRead,
+                           {FailureOrigin::Protocol, FailureScope::Group}}
+                  : Status{sticky, {}});
+        auto first = actor.service_failure->record(failed);
+        auto expected = ErrorCode::Ok;
+        actor.failure->compare_exchange_strong(expected, first.code);
+      };
       auto work = [&](std::uint64_t count) {
         auto result = consume(count);
         if (!result.ok()) {
-          auto expected = ErrorCode::Ok;
-          actor.failure->compare_exchange_strong(expected, result.code);
+          observe_failure(result);
         }
         return result;
       };
-      ResultProgramPhase phase{actor.query, actor.values, actor.results,
-                               actor.io,    allocator,    resources_,
-                               work,        actor.failure};
+      ResultProgramPhase phase{actor.query, actor.values,  actor.results,
+                               actor.io,    allocator,     resources_,
+                               work,        actor.failure, observe_failure};
       polled = actor.continuation.poll(phase);
       if (sticky != ErrorCode::Ok) {
         auto expected = ErrorCode::Ok;
         actor.failure->compare_exchange_strong(expected, sticky);
       }
-      return actor.failure->load() == ErrorCode::Ok
-                 ? Status::success()
-                 : Status{actor.failure->load(), {}};
+      auto failure = actor.service_failure->snapshot();
+      if (!failure.ok())
+        return failure;
+      const auto code = actor.failure->load();
+      if (code == ErrorCode::InvalidArgument)
+        return Status{code,
+                      {},
+                      FailureReason::UnauthorizedRead,
+                      {FailureOrigin::Protocol, FailureScope::Group}};
+      return Status{code, {}};
     });
+    const auto host_failure = actor.service_failure->snapshot();
+    if (host_failure.detail.origin == FailureOrigin::Protocol)
+      status = host_failure;
+    else if (sticky == ErrorCode::InvalidArgument ||
+             actor.failure->load() == ErrorCode::InvalidArgument)
+      status = Status{ErrorCode::InvalidArgument,
+                      {},
+                      FailureReason::UnauthorizedRead,
+                      {FailureOrigin::Protocol, FailureScope::Group}};
+    // Record a returned failure before optional diagnostic growth can fail.
+    if (!status.ok())
+      return retire(actor, status);
+    if (!polled.ok())
+      return retire(actor, polled.status());
     actor.values.clear();
     actor.io.clear();
     const auto elapsed = static_cast<std::uint64_t>(
@@ -809,10 +866,6 @@ class StructuredExecution final {
       timing->outcome = status.ok() ? polled.status().code : status.code;
     }
     diagnostics_.peak_active_tasks = 1;
-    if (!status.ok())
-      return retire(actor, status);
-    if (!polled.ok())
-      return retire(actor, polled.status());
     auto event = polled.take_value();
     if (const auto* need = std::get_if<ResultProgramNeed>(&event)) {
       const auto count =
@@ -888,6 +941,7 @@ class StructuredExecution final {
            actor.published.object_id() != published->result.object_id()))
         return retire(actor,
                       protocol("structured publication identity mismatch"));
+      published->result.bind_producer(actor.node_id);
       auto descriptor = published->result.descriptor(published->complete);
       if (!descriptor.ok() ||
           descriptor.value().revision() <= actor.published_revision ||
@@ -928,8 +982,19 @@ class StructuredExecution final {
             remaining_ -= count;
             return Status::success();
           });
-      if (!validated.ok())
+      if (!validated.ok()) {
+        if ((validated.detail.origin == FailureOrigin::Unspecified ||
+             validated.detail.origin == FailureOrigin::Domain ||
+             validated.detail.origin == FailureOrigin::Schema) &&
+            validated.code != ErrorCode::ResourceExhausted &&
+            validated.code != ErrorCode::Cancelled &&
+            validated.code != ErrorCode::Stale) {
+          validated.detail.origin = FailureOrigin::Schema;
+          validated.detail.scope = FailureScope::Association;
+          validated.detail.association = published->result.object_id();
+        }
         return retire(actor, validated);
+      }
       actor.published = published->result;
       actor.published_revision = descriptor.value().revision();
       actor.complete = published->complete;
@@ -1071,7 +1136,7 @@ class StructuredExecution final {
         if (current->busy)
           return Answer(Status{ErrorCode::Cycle, {}});
         if (current->terminal != ErrorCode::Ok)
-          return Answer(Status{current->terminal, {}});
+          return Answer(current->service_failure->snapshot());
         auto status = advance(index, *current);
         if (!status.ok())
           return Answer(status);

@@ -11,11 +11,13 @@
 #include <malloc.h>
 #endif
 
+#include "execution/shared_results.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 std::atomic<bool> inspect_allocations{false};
+std::atomic<bool> fail_next_allocation{false};
 std::atomic<unsigned> large_allocations{0};
 struct Allocation {
   void* pointer = nullptr;
@@ -56,6 +58,8 @@ void record(std::size_t size) {
 // The target statically links the kernel, so this observes its actual C++
 // allocation calls, including any accidental ordinary STL metadata copy.
 void* operator new(std::size_t size) {
+  if (fail_next_allocation.exchange(false))
+    throw std::bad_alloc();
   record(size);
   if (void* p = std::malloc(size ? size : 1)) {
     track_allocation(p, size);
@@ -170,9 +174,95 @@ int weak_windows() {
   PS_CHECK(retained_allocations() == 0);
   return 0;
 }
+int failure_copy_exhaustion() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  ResourceBudget root;
+  SchemaTemplate schema;
+  schema.id = "test.failure";
+  schema.fields = {
+      {"rows", ElementType::Int64, {ResultExtentKind::RuntimeCount}, {}}};
+  auto builder =
+      ResultBuilder::start(root, schema, "copy-failure").take_value();
+  auto reference = builder.reference();
+  Status failure{ErrorCode::InvalidArgument,
+                 std::string(128, 'x'),
+                 FailureReason::MalformedEnvelope,
+                 {FailureOrigin::Protocol, FailureScope::Group}};
+  failure.detail.node_id = 19;
+  builder.fail(failure);
+  fail_next_allocation = true;
+  auto observed = reference.production_status();
+  PS_CHECK(!fail_next_allocation && observed.message.empty() &&
+           observed.reason == failure.reason && observed.detail.node_id == 19);
+  execution_internal::SharedResults table;
+  auto a = table.join_call("snapshot", root, {}, {"r"}).take_value();
+  auto producer = table.acquire("r", root, {}, a).take_value();
+  auto b = table.join_call("snapshot", root, {}, {"r"}).take_value();
+  auto peer = table.acquire("r", root, {}, b).take_value();
+  producer.fail(failure);
+  fail_next_allocation = true;
+  auto waiting = peer.wait(true, 0, 0, {});
+  PS_CHECK(!fail_next_allocation && !waiting.ok() &&
+           waiting.status().message.empty() &&
+           waiting.status().reason == failure.reason &&
+           waiting.status().detail.node_id == 19);
+  return 0;
+}
+int callback_failure_copy_exhaustion() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  struct State {
+    Result<ResultProgramPoll> poll(const ResultProgramPhase&) {
+      Result<ResultProgramPoll> failed(
+          Status{ErrorCode::InvalidArgument,
+                 std::string(128, 'x'),
+                 FailureReason::MalformedEnvelope,
+                 {FailureOrigin::Protocol, FailureScope::Group}});
+      fail_next_allocation = true;
+      return failed;
+    }
+  };
+  SchemaTemplate schema;
+  schema.id = "test.callback_failure";
+  schema.fields = {
+      {"rows", ElementType::Int64, {ResultExtentKind::RuntimeCount}, {}}};
+  OperationDefinition op;
+  op.key = "test.callback_failure";
+  auto& output = op.traits.outputs[0];
+  output.dependency_version = 2;
+  output.region_rule = OperationRegionRule::Dependency;
+  output.continuation_bytes = sizeof(State);
+  output.maximum_dependency_stages = 1;
+  output.output_schema.kind = OperationPortKind::Result;
+  output.output_schema.result_schema_id = schema.id;
+  output.output_schema.result_schema_version = schema.version;
+  output.result_schema = schema;
+  op.start_result = [](const ResultProgramQuery&, const BufferAllocator& host) {
+    return ResultContinuation::make<State>(host);
+  };
+  auto registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(registry->register_operation(std::move(op)).ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument doc;
+  doc.nodes = {{41, "test.callback_failure", {}, {}}};
+  doc.outputs = {{"sink", 41, "value"}};
+  GraphContext graph(doc);
+  auto compiled = Compiler(registry).compile(graph).take_value();
+  ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.managed_resources = ResourceLimits{};
+  ExecutionContext context(registry, config);
+  auto result = context.execute(compiled.plan);
+  PS_CHECK(!fail_next_allocation && !result.ok() &&
+           result.status().reason == FailureReason::MalformedEnvelope &&
+           result.status().detail.origin == FailureOrigin::Protocol &&
+           result.status().detail.node_id == 41);
+  return 0;
+}
 }  // namespace
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
+  PS_CHECK(failure_copy_exhaustion() == 0);
+  PS_CHECK(callback_failure_copy_exhaustion() == 0);
   inspect_allocations = true;
   void* control = ::operator new(32768);
   inspect_allocations = false;

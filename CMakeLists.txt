@@ -154,6 +154,7 @@ set(
   src/lib/data/temporary_storage.cpp
   src/lib/data/representation.cpp
   src/lib/data/layer.cpp
+  src/lib/data/quality.cpp
   src/lib/plugin/layer_operation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_relation.cpp
@@ -193,6 +194,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/data/layer.cpp src/lib/data/representation.cpp
+    src/lib/data/quality.cpp
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
@@ -202,6 +204,7 @@ elseif(MSVC)
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
     src/lib/data/layer.cpp src/lib/data/representation.cpp
+    src/lib/data/quality.cpp
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
@@ -698,12 +701,17 @@ if(BUILD_TESTING)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
   photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
   photospider_add_test(test_layer Photospider::kernel tests/unit/test_layer.cpp)
+  add_subdirectory(examples/atom_outcomes_workflow)
+  add_test(NAME example_atom_outcomes_workflow COMMAND photospider_atom_outcomes_workflow)
+  photospider_add_test(test_atom_outcomes Photospider::kernel tests/integration/test_atom_outcomes.cpp)
+  photospider_add_test(test_quality Photospider::kernel tests/unit/test_quality.cpp)
   photospider_add_test(photospider_layer_workflow Photospider::kernel examples/layer_workflow/main.cpp)
   photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
   photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
   photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
   photospider_add_test(test_shared_results photospider_test_kernel tests/unit/test_shared_results.cpp)
   photospider_add_test(test_result_metadata_budget photospider_test_kernel tests/unit/test_result_metadata_budget.cpp)
+  target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)

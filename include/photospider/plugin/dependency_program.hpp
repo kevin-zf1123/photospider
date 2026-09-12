@@ -16,11 +16,15 @@
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/data/dependency.hpp"
 #include "photospider/data/fragment_atlas.hpp"
+#include "photospider/data/quality.hpp"
 #include "photospider/data/value_fragments.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 #include "photospider/plugin/operation_types.hpp"
 
 namespace ps {
+namespace plugin_internal {
+struct JointMemberPhase;
+}
 struct OperationTraits;
 class OperationRegistry;
 /** @brief Execution-scoped bounds, separate from compile-time phase limits. */
@@ -73,6 +77,11 @@ struct DependencyQuery final {
   /** @brief Declaration-order selected result. */
   std::uint32_t output_index = 0;
 };
+/** @brief Extracts one canonical output/coordinate key from an Atomic query.
+ * Empty or multi-observation queries fail without sample reads or allocation.
+ */
+PHOTOSPIDER_API Result<AtomKey> dependency_atom_key(
+    const DependencyQuery& query);
 /** @brief Declared next reads plus their output associations.
  * @note Atomic programs emit associations; terminal RequestRecord programs emit
  * request_needs. The host preserves rows separately from their transport union.
@@ -335,11 +344,13 @@ class PHOTOSPIDER_API DependencyContinuation final {
 };
 /** @brief One named member's next reads, completion or local error. */
 struct DependencyAtomOutcome final {
-  std::uint32_t output_index;
+  AtomKey key;
   Result<DependencyPoll> outcome;
+  std::optional<QualityReport> quality = {};
 };
 /** @brief Borrowed ready Atomic members of one finite CPU joint poll.
- * @note Each output occurs once. Member phases and their services expire at
+ * @note Each AtomKey occurs once. Contract 1 also requires distinct outputs;
+ * contract 2 allows coordinates of the same output. Member services expire at
  * return. Declare each member's own associations even when sharing computation.
  * allocator owns shared scratch; never use one member's services for another.
  */
@@ -393,6 +404,7 @@ class PHOTOSPIDER_API DependencyJointContinuation final {
 
  private:
   friend class DependencyJointSession;
+
   void reset() noexcept;
   MutableBuffer storage_;
   using Destroy = void (*)(void*) noexcept;  // NOLINT(readability/casting)
@@ -438,9 +450,9 @@ using DependencyProgress = std::variant<DependencyNeedBatch, DependencyResult>;
  * @note Calls must not race destruction. Concurrent/reentrant poll or supply is
  * rejected, never serialized behind an active callback. Borrowed phase objects
  * expire on return; the owning registry/DSO definition survives state
- * destruction. Accepted-call failures retire state with cancellation priority.
- * A rejected concurrent/reentrant call leaves the active call and its state
- * undisturbed.
+ * destruction. Accepted-call failures retire state; a detected protocol
+ * violation survives later cancellation. A rejected concurrent/reentrant call
+ * leaves the active call and its state undisturbed.
  */
 class PHOTOSPIDER_API DependencySession final {
  public:
@@ -488,6 +500,17 @@ class PHOTOSPIDER_API DependencySession final {
  private:
   friend class OperationRegistry;
   friend class DependencyJointSession;
+  /** @brief Joint envelope preflight with no state transition or publication.
+   * Failure of the outer Result denotes malformed protocol. A contained status
+   * is a valid member-local failure discovered by host services/validation.
+   */
+  Result<std::optional<Status>> preflight_joint_reply(
+      const Result<DependencyPoll>& reply);
+  Status retire_joint_member(Status failure);
+  Status joint_service_failure() const;
+  Status begin_joint_phase(plugin_internal::JointMemberPhase* phase,
+                           const BufferAllocator& allocator);
+  void end_joint_phase() noexcept;
   struct Impl;
   explicit DependencySession(std::unique_ptr<Impl> impl);
   static Result<std::shared_ptr<DependencySession>> create(
@@ -507,19 +530,25 @@ class PHOTOSPIDER_API DependencySession final {
 };
 /** @brief Validated member event; each terminal member is delivered once. */
 struct DependencyAtomProgress final {
-  std::uint32_t output_index;
+  AtomKey key;
   Result<DependencyProgress> outcome;
+  std::optional<QualityReport> quality = {};
 };
 /** @brief Direct joint start/poll/supply driver, with independent member
  * validation.
- * @note Supports 2..64 distinct Atomic outputs, one observation each, sharing
- * operation, static inputs/parameters, snapshot and CPU backend. Concurrent or
- * recursive calls are rejected without disturbing the active call. Supply only
- * a waiting member's exact transport union. Poll advances all ready members;
- * waiting and terminal members are omitted. Per-member failures do not retire
- * siblings. An enclosing failure retires the group; InvalidArgument denotes a
- * protocol error and must never trigger singleton retry. Destruction must not
- * race calls. DSO ownership survives state destruction.
+ * @note Contract 1 supports 2..64 distinct Atomic outputs. Contract 2 supports
+ * 1..64 distinct AtomKeys, including multiple coordinates of the same output.
+ * All members share operation, static inputs/parameters, snapshot and CPU
+ * backend. Concurrent or recursive calls are rejected without disturbing the
+ * active call. Supply only a waiting member's exact transport union. Poll
+ * advances all ready members; waiting and terminal members are omitted.
+ * Per-member failures do not retire siblings. Contract 2 validates the complete
+ * membership, payload and failure scope before any member reply leaves the
+ * round. Its fixed ValidationDomain covers the immutable full output shape and
+ * must precede covered terminal semantics. An enclosing failure retires the
+ * group and never triggers a singleton retry in contract 2. Protocol failure
+ * survives later cancellation. Destruction must not race calls. DSO ownership
+ * survives state destruction.
  */
 class PHOTOSPIDER_API DependencyJointSession final {
  public:
@@ -527,6 +556,8 @@ class PHOTOSPIDER_API DependencyJointSession final {
   /** @brief Accounted host adapter bytes per member, additional to shared
    * state. */
   static std::uint64_t member_state_bytes() noexcept;
+  /** @brief Additional per-ready-member adapter capacity for joint polls. */
+  static std::uint64_t member_phase_bytes() noexcept;
   DependencyJointSession(const DependencyJointSession&) = delete;
   DependencyJointSession& operator=(const DependencyJointSession&) = delete;
   /** @brief Advances the currently ready members using borrowed stage
@@ -538,7 +569,7 @@ class PHOTOSPIDER_API DependencyJointSession final {
   Result<std::vector<DependencyAtomProgress>> poll(
       const BufferAllocator& allocator = BufferAllocator{},
       std::uint64_t maximum_additional_work = UINT64_MAX);
-  Status supply(std::uint32_t output_index, std::vector<ValueFragments> inputs,
+  Status supply(const AtomKey& key, std::vector<ValueFragments> inputs,
                 const std::string& snapshot_identity);
   /** @brief Reports a host upstream failure for one waiting member.
    * @note The host already owns the member's terminal error; no additional poll
@@ -546,9 +577,8 @@ class PHOTOSPIDER_API DependencyJointSession final {
    * the member immediately and shared state when no members remain. Uses the
    * same concurrent/reentrant rejection rule as supply.
    */
-  Status fail_input(std::uint32_t output_index, Status failure);
-  Result<std::vector<DependencyNeed>> pending_reads(
-      std::uint32_t output_index) const;
+  Status fail_input(const AtomKey& key, Status failure);
+  Result<std::vector<DependencyNeed>> pending_reads(const AtomKey& key) const;
   std::uint64_t consumed_work() const;
 
  private:

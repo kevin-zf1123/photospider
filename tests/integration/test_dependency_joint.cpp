@@ -61,14 +61,15 @@ struct Joint {
     std::vector<DependencyAtomOutcome> outcomes;
     for (const auto* phase : joint.members) {
       const auto id = phase->query.output_index;
+      const auto key = dependency_atom_key(phase->query).value();
       if (mode == 5 && id == 0) {
         outcomes.push_back(
-            {id, Result<DependencyPoll>(
-                     Status{ErrorCode::OperationFailed, "member failure"})});
+            {key, Result<DependencyPoll>(
+                      Status{ErrorCode::OperationFailed, "member failure"})});
       } else if (mode == 6 && id == 0) {
         double ignored;
         static_cast<void>(phase->read(0, {0}, &ignored, sizeof(ignored)));
-        outcomes.push_back({id, publish(*phase, 9)});
+        outcomes.push_back({key, publish(*phase, 9)});
       } else if (mode == 7 && !requested[id]) {
         requested[id] = true;
         std::vector<std::uint64_t> atom;
@@ -76,24 +77,24 @@ struct Joint {
              phase->query.observations.boxes()[0].dimensions())
           atom.push_back(dim.offset);
         outcomes.push_back(
-            {id, Result<DependencyPoll>(DependencyNeedBatch{
-                     {{atom, {{0, 1, Footprint::all({1}).take_value(), {}}}}},
-                     {}})});
+            {key, Result<DependencyPoll>(DependencyNeedBatch{
+                      {{atom, {{0, 1, Footprint::all({1}).take_value(), {}}}}},
+                      {}})});
       } else if (mode == 7) {
         double value = 0;
         auto status = phase->read(0, {0}, &value, sizeof(value));
-        outcomes.push_back({id, status.ok() ? publish(*phase, value + id)
-                                            : Result<DependencyPoll>(status)});
+        outcomes.push_back({key, status.ok() ? publish(*phase, value + id)
+                                             : Result<DependencyPoll>(status)});
       } else {
-        outcomes.push_back({id, publish(*phase, 10 + id)});
+        outcomes.push_back({key, publish(*phase, 10 + id)});
       }
     }
     if (mode == 1)
       outcomes.pop_back();
     if (mode == 2)
-      outcomes.back().output_index = outcomes.front().output_index;
+      outcomes.back().key = outcomes.front().key;
     if (mode == 3)
-      outcomes.back().output_index = 64;
+      outcomes.back().key.output_index = 64;
     return Answer(std::move(outcomes));
   }
 };
@@ -161,16 +162,17 @@ int outcomes() {
     } else {
       PS_CHECK(polled.ok() && polled.value().size() == 2);
       for (const auto& event : polled.value()) {
-        if (mode >= 5 && event.output_index == 0) {
+        if (mode >= 5 && event.key.output_index == 0) {
           PS_CHECK(!event.outcome.ok());
           continue;
         }
         PS_CHECK(event.outcome.ok());
         const auto& result = std::get<DependencyResult>(event.outcome.value());
         double value = 0;
-        PS_CHECK(result.value.read({event.output_index}, &value, sizeof(value))
-                     .ok());
-        PS_CHECK(value == 10 + event.output_index);
+        PS_CHECK(
+            result.value.read({event.key.output_index}, &value, sizeof(value))
+                .ok());
+        PS_CHECK(value == 10 + event.key.output_index);
         PS_CHECK(result.certificate.has_value());
       }
     }
@@ -189,23 +191,26 @@ int reads_and_lifecycle() {
   auto needs = session->poll();
   PS_CHECK(needs.ok() && needs.value().size() == 2);
   for (unsigned id = 0; id < 2; ++id) {
-    PS_CHECK(session->pending_reads(id).value().size() >= 1);
+    PS_CHECK(session->pending_reads(AtomKey{id, 1, {id}}).value().size() >= 1);
     auto input = Value::from_float64(20);
     auto fragments = ValueFragments::create(
         input.descriptor(), {}, Footprint::all({1}).take_value(), {input});
     PS_CHECK(fragments.ok());
-    PS_CHECK(session->supply(id, {fragments.take_value()}, "snapshot").ok());
+    PS_CHECK(
+        session
+            ->supply(AtomKey{id, 1, {id}}, {fragments.take_value()}, "snapshot")
+            .ok());
     auto result = session->poll();
     PS_CHECK(result.ok() && result.value().size() == 1);
-    PS_CHECK(result.value()[0].output_index == id &&
+    PS_CHECK(result.value()[0].key.output_index == id &&
              result.value()[0].outcome.ok());
   }
   PS_CHECK(counts->polls == 3 && counts->destroys == 1);
   auto failed =
       registry.start_joint("test.joint", requests(2, true)).take_value();
   PS_CHECK(failed->poll().ok());
-  PS_CHECK(!failed->supply(0, {}, "wrong").ok());
-  PS_CHECK(!failed->supply(1, {}, "wrong").ok());
+  PS_CHECK(!failed->supply(AtomKey{0, 1, {0}}, {}, "wrong").ok());
+  PS_CHECK(!failed->supply(AtomKey{1, 1, {1}}, {}, "wrong").ok());
   PS_CHECK(counts->destroys == 2);
   return 0;
 }
@@ -231,7 +236,7 @@ int cancellation_and_limits() {
     auto result = session->poll();
     PS_CHECK(result.ok() && result.value().size() == 64);
     for (const auto& event : result.value())
-      PS_CHECK(event.outcome.ok() == (event.output_index != cancelled));
+      PS_CHECK(event.outcome.ok() == (event.key.output_index != cancelled));
   }
   for (unsigned cancelled : {0U, 31U, 63U}) {
     auto query = requests(64);
@@ -243,7 +248,7 @@ int cancellation_and_limits() {
     auto result = started.value()->poll();
     PS_CHECK(result.ok() && result.value().size() == 64);
     for (const auto& event : result.value())
-      PS_CHECK(event.outcome.ok() == (event.output_index != cancelled));
+      PS_CHECK(event.outcome.ok() == (event.key.output_index != cancelled));
   }
   auto small = requests();
   for (auto& member : small)
@@ -277,7 +282,7 @@ int reentrant_calls() {
   bool poll_rejected = false, supply_rejected = false;
   counts->hook = [&] {
     poll_rejected = !session->poll().ok();
-    supply_rejected = !session->supply(0, {}, "snapshot").ok();
+    supply_rejected = !session->supply(AtomKey{0, 1, {0}}, {}, "snapshot").ok();
   };
   auto result = session->poll();
   counts->hook = {};
@@ -293,19 +298,20 @@ int host_input_failure() {
   auto session =
       registry.start_joint("test.joint", requests(2, true)).take_value();
   PS_CHECK(session->poll().ok());
-  PS_CHECK(
-      session->fail_input(0, Status{ErrorCode::OperationFailed, "upstream"})
-          .ok());
-  PS_CHECK(!session->pending_reads(0).ok());
+  PS_CHECK(session
+               ->fail_input(AtomKey{0, 1, {0}},
+                            Status{ErrorCode::OperationFailed, "upstream"})
+               .ok());
+  PS_CHECK(!session->pending_reads(AtomKey{0, 1, {0}}).ok());
   auto input = Value::from_float64(20);
   auto fragments =
       ValueFragments::create(input.descriptor(), {},
                              Footprint::all({1}).take_value(), {input})
           .take_value();
-  PS_CHECK(session->supply(1, {fragments}, "snapshot").ok());
+  PS_CHECK(session->supply(AtomKey{1, 1, {1}}, {fragments}, "snapshot").ok());
   auto result = session->poll();
   PS_CHECK(result.ok() && result.value().size() == 1 &&
-           result.value()[0].output_index == 1 &&
+           result.value()[0].key.output_index == 1 &&
            result.value()[0].outcome.ok());
   PS_CHECK(counts->destroys == 1);
   return 0;
@@ -346,7 +352,8 @@ int c_protocol() {
     } else {
       PS_CHECK(result.ok() && result.value().size() == 2);
       for (const auto& event : result.value())
-        PS_CHECK(event.outcome.ok() == !(mode >= 5 && event.output_index == 0));
+        PS_CHECK(event.outcome.ok() ==
+                 !(mode >= 5 && event.key.output_index == 0));
     }
   }
   return 0;

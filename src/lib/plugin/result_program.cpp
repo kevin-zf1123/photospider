@@ -19,6 +19,12 @@ Status ResultProgramPhase::read(std::uint32_t input,
   } catch (...) {
     status = Status{ErrorCode::OperationFailed, {}};
   }
+  if (!status.ok() && status.code == ErrorCode::InvalidArgument) {
+    status.reason = FailureReason::UnauthorizedRead;
+    status.detail = {FailureOrigin::Protocol, FailureScope::Group};
+  }
+  if (!status.ok() && failure_observer)
+    failure_observer(status);
   if (!status.ok() && failure) {
     auto expected = ErrorCode::Ok;
     failure->compare_exchange_strong(expected, status.code);

@@ -993,10 +993,12 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
   if (static_cast<bool>(definition.start_joint) !=
-          (definition.traits.joint_contract == 1) ||
-      definition.traits.joint_contract > 1 ||
+          (definition.traits.joint_contract != 0) ||
+      definition.traits.joint_contract > 2 ||
       (definition.start_joint &&
-       (!staged || definition.traits.outputs.size() < 2 ||
+       (!staged ||
+        (definition.traits.joint_contract == 1 &&
+         definition.traits.outputs.size() < 2) ||
         !definition.traits.joint_continuation_bytes)) ||
       (!definition.start_joint && (definition.traits.joint_continuation_bytes ||
                                    definition.traits.joint_workspace_bytes)))

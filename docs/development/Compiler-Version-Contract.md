@@ -188,3 +188,11 @@ C++ package. The Status layout change requires C++ consumers to rebuild; C ABI 9
 continues to project its existing error code and does not gain a C++ Status
 field. Named working-space and arithmetic definitions are fixed by the schema
 version and operation identity. See [Layer runtime](../kernel-architecture/Layer-Runtime.md).
+
+#319 extends the same pending 0.10 C++ package with full `Status.detail`,
+coordinate `AtomKey` joint contract 2, `execute_atoms` and opaque numerical
+`QualityReport`. C ABI 9 keeps unique-output joint contract 1 and its unchanged
+error-code projection. C++ callback outcome/supply signatures now use AtomKey;
+consumers rebuild without an output-index shim. Joint contract 2 is a new
+trait value in existing v10 canonical framing; contract 1 semantics and C
+layouts remain. See [Atom errors and quality](../kernel-architecture/Atom-Errors-and-Quality.md).

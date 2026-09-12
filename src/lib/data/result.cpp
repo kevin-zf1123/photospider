@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/stored_failure.hpp"
 #include "photospider/data/representation.hpp"
 
 namespace ps {
@@ -346,7 +347,7 @@ struct ResultRef::Impl {
   ResultRelation descriptor_relation;
   ResultGrowthLimits limits;
   std::uint64_t object = 0, revision = 1, bytes = 0;
-  ErrorCode failure = ErrorCode::Ok;
+  core_internal::StoredFailure failure;
   bool complete = false, owners_bound = false;
 };
 struct ResultReadPlan::Impl {
@@ -469,12 +470,23 @@ const ResourceVector<std::uint64_t>& ResultRef::association() const {
     throw std::logic_error("invalid ResultRef");
   return impl_->association;
 }
-void ResultRef::retire_producer(ErrorCode failure) const noexcept {
+void ResultRef::bind_producer(std::uint64_t node) const noexcept {
   if (!impl_)
     return;
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (!impl_->complete && impl_->failure == ErrorCode::Ok)
-    impl_->failure = failure == ErrorCode::Ok ? ErrorCode::Internal : failure;
+  impl_->failure.bind_producer(node);
+}
+void ResultRef::retire_producer(const Status& failure) const noexcept {
+  if (!impl_)
+    return;
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->failure.bind_producer(failure.detail.node_id);
+  if (!impl_->complete) {
+    if (impl_->failure.ok())
+      impl_->failure.record(failure);
+    else
+      impl_->failure.enrich(failure);
+  }
 }
 Status ResultRef::production_status() const {
   if (!impl_)
@@ -482,8 +494,7 @@ Status ResultRef::production_status() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (impl_->complete)
     return Status::success();
-  return impl_->failure == ErrorCode::Ok ? unavailable()
-                                         : Status{impl_->failure, {}};
+  return impl_->failure.ok() ? unavailable() : impl_->failure.status();
 }
 Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
   if (!impl_)
@@ -492,9 +503,8 @@ Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
   if (!impl_->complete &&
       (require_complete ||
        impl_->schema.publication == PublishPolicy::CompleteBundle))
-    return Result<ResultDescriptor>(impl_->failure == ErrorCode::Ok
-                                        ? unavailable()
-                                        : Status{impl_->failure, {}});
+    return Result<ResultDescriptor>(
+        impl_->failure.ok() ? unavailable() : impl_->failure.status());
   ResultDescriptor facts;
   facts.object_ = impl_->object;
   facts.revision_ = impl_->revision;
@@ -692,8 +702,8 @@ void ResultBuilder::fail(Status status) noexcept {
   if (!impl_)
     return;
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (!impl_->complete && impl_->failure == ErrorCode::Ok)
-    impl_->failure = status.ok() ? ErrorCode::Internal : status.code;
+  if (!impl_->complete && impl_->failure.ok())
+    impl_->failure.record(status);
 }
 Status ResultBuilder::append(std::uint32_t field, std::uint64_t rows,
                              ByteView bytes,
@@ -707,12 +717,11 @@ Status ResultBuilder::append_to(const std::shared_ptr<ResultRef::Impl>& impl,
   if (!impl)
     return Status{ErrorCode::Stale, {}};
   std::lock_guard<std::mutex> lock(impl->mutex);
-  if (impl->complete || impl->failure != ErrorCode::Ok)
-    return Status{
-        impl->failure == ErrorCode::Ok ? ErrorCode::Stale : impl->failure,
-        {}};
+  if (impl->complete || !impl->failure.ok())
+    return impl->failure.ok() ? Status{ErrorCode::Stale, {}}
+                              : impl->failure.status();
   auto reject = [&](Status status) {
-    impl->failure = status.code;
+    impl->failure.record(status);
     return status;
   };
   if (cancellation.cancelled())
@@ -750,12 +759,11 @@ Status ResultBuilder::publish(std::uint32_t field, std::uint64_t end,
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->complete || impl_->failure != ErrorCode::Ok)
-    return Status{
-        impl_->failure == ErrorCode::Ok ? ErrorCode::Stale : impl_->failure,
-        {}};
+  if (impl_->complete || !impl_->failure.ok())
+    return impl_->failure.ok() ? Status{ErrorCode::Stale, {}}
+                               : impl_->failure.status();
   auto reject = [&](Status status) {
-    impl_->failure = status.code;
+    impl_->failure.record(status);
     return status;
   };
   if (field >= impl_->schema.fields.size() || !finality.satisfied() ||
@@ -781,12 +789,11 @@ Result<ResultRef> ResultBuilder::seal() {
   if (!impl_)
     return Result<ResultRef>(Status{ErrorCode::Stale, {}});
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->complete || impl_->failure != ErrorCode::Ok)
-    return Result<ResultRef>(Status{
-        impl_->failure == ErrorCode::Ok ? ErrorCode::Stale : impl_->failure,
-        {}});
+  if (impl_->complete || !impl_->failure.ok())
+    return Result<ResultRef>(impl_->failure.ok() ? Status{ErrorCode::Stale, {}}
+                                                 : impl_->failure.status());
   auto reject = [&](Status status) {
-    impl_->failure = status.code;
+    impl_->failure.record(status);
     return Result<ResultRef>(status);
   };
   for (std::uint32_t i = 0; i < impl_->schema.fields.size(); ++i) {

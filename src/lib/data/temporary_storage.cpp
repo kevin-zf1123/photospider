@@ -20,8 +20,10 @@ namespace ps {
 namespace {
 constexpr std::uint64_t kBlock = 4096;
 Status io_failure() {
-  return Status::failure(ErrorCode::OperationFailed,
-                         "mandatory temporary storage I/O failed");
+  return Status{ErrorCode::OperationFailed,
+                "mandatory temporary storage I/O failed",
+                FailureReason::ShortIo,
+                {FailureOrigin::Io, FailureScope::Group}};
 }
 Status stopped() {
   return Status::failure(ErrorCode::Cancelled, "temporary I/O cancelled");

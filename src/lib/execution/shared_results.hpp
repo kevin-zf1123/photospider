@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/stored_failure.hpp"
 #include "photospider/data/result.hpp"
 
 namespace ps::execution_internal {
@@ -154,7 +155,7 @@ class SharedResults final {
     ResourceString key;
     ResultRef published;
     WeakResultRef completed;
-    ErrorCode failure = ErrorCode::Ok;
+    core_internal::StoredFailure failure;
     bool finished = false;
     void refresh_locked();
   };
@@ -220,14 +221,14 @@ class SharedResults final {
       }
       entry.changed.notify_all();
     }
-    void fail(ErrorCode code) const {
+    void fail(const Status& status) const {
       if (!waiter_ || !producer_)
         return;
       auto& entry = *waiter_->entry;
       std::lock_guard<std::recursive_mutex> lock(entry.mutex);
       if (!entry.finished) {
         entry.finished = true;
-        entry.failure = code == ErrorCode::Ok ? ErrorCode::Internal : code;
+        entry.failure.record(status);
         entry.changed.notify_all();
       }
     }
@@ -241,8 +242,15 @@ class SharedResults final {
       std::unique_lock<std::recursive_mutex> lock(entry.mutex);
       for (;;) {
         entry.refresh_locked();
+        if (entry.finished && !entry.failure.ok() &&
+            entry.failure.origin() == FailureOrigin::Protocol)
+          return Result<ResultRef>(entry.failure.status());
         if (cancellation.cancelled())
-          return Result<ResultRef>(Status{ErrorCode::Cancelled, {}});
+          return Result<ResultRef>(
+              Status{ErrorCode::Cancelled,
+                     {},
+                     FailureReason::Cancelled,
+                     {FailureOrigin::Cancellation, FailureScope::Waiter}});
         auto result =
             entry.published.valid() ? entry.published : entry.completed.lock();
         if (result.valid()) {
@@ -254,10 +262,9 @@ class SharedResults final {
             return Result<ResultRef>(std::move(result));
         }
         if (entry.finished)
-          return Result<ResultRef>(Status{entry.failure == ErrorCode::Ok
-                                              ? ErrorCode::NotFound
-                                              : entry.failure,
-                                          {}});
+          return Result<ResultRef>(entry.failure.ok()
+                                       ? Status{ErrorCode::NotFound, {}}
+                                       : entry.failure.status());
         if (token_.cancelled())
           return Result<ResultRef>(Status{ErrorCode::Cancelled, {}});
         if (pump) {
@@ -306,7 +313,7 @@ class SharedResults final {
     std::unique_lock<std::recursive_mutex> admission_lock;
     if (entry) {
       admission_lock = std::unique_lock<std::recursive_mutex>(entry->mutex);
-      producer = entry->failure != ErrorCode::Ok ||
+      producer = !entry->failure.ok() ||
                  (!entry->finished && entry->producer_stop.token().cancelled());
     }
     if (producer) {

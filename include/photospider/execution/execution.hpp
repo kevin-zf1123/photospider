@@ -164,6 +164,10 @@ struct PHOTOSPIDER_API ExecutionOptions final {
   bool enable_joint = true;
   /** @brief Maximum explicit read window for structured stages, positive. */
   std::uint64_t maximum_result_window_bytes = 4096;
+  /** @brief Collected atom observations for execute_atoms, at most 65536.
+   * Zero permits only an empty query. This bound is not semantic identity.
+   */
+  std::uint64_t maximum_atom_observations = 65536;
   /** @brief Coordinator notification after a structured range is certified.
    * The owning reference can be retained and read explicitly after callback or
    * context retirement. A prefix is not complete execution success. Exceptions
@@ -295,6 +299,19 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
  * @note Results have no durable identity, retention, receipt, or recovery
  * semantics.
  */
+/** @brief Outcome of one requested output observation. output/key identify the
+ * consumer request; a failure's detail preserves its actual upstream origin.
+ * Operational Group/Run/Waiter causes remain scoped causes, not invented
+ * SemanticFailure values for the requested coordinate. Success owns only its
+ * authorized fragments; failure has no Value or success certificate.
+ */
+struct AtomObservation final {
+  ResourceString name;
+  ValueRef output;
+  AtomKey key;
+  Result<ValueFragments> outcome;
+  std::optional<QualityReport> quality = {};
+};
 struct PHOTOSPIDER_API ExecutionResult final {
   /** @brief Sorted caller-requested named Values. */
   std::map<std::string, Value> values;
@@ -310,6 +327,8 @@ struct PHOTOSPIDER_API ExecutionResult final {
   /** @brief Structured-protocol Value witnesses with explicit guarantee tags.
    */
   ResourceMap<ResultRelation> result_relations = {};
+  /** @brief Populated by execute_atoms; empty for ordinary execute calls. */
+  ResourceVector<AtomObservation> atoms = {};
 };
 
 /**
@@ -629,6 +648,23 @@ class PHOTOSPIDER_API ExecutionContext final {
    * Its leases can outlive this context. Does not start or retain computation.
    */
   Result<ResourceBudget> resource_budget() const;
+  /** @brief Executes exact requested CPU Atomic Value observations separately.
+   * Requires managed_resources, a dependency-network plan and at most the
+   * configured number of observations. Empty queries allocate no pixel Value.
+   * C++ joint contract 2 may batch coordinates of the same output; contract 1
+   * retains its distinct-output restriction. Each completed semantic failure
+   * is retained alongside unrelated successful observations. Admission, bad
+   * protocol, cancellation and other enclosing failures may end the call.
+   * Structured Result outputs use their own publication/failure contracts and
+   * are not accepted by this Value-observation entry point. Result leases and
+   * quality reports can outlive this context. No singleton retry washes away a
+   * failed contract-2 group. Ordinary execute retains its existing fail-fast
+   * API.
+   */
+  Result<ExecutionResult> execute_atoms(
+      const ExecutionPlan& plan, ExecutionBindings bindings,
+      const DemandQuery& requested, const CancellationToken& cancellation = {},
+      const ExecutionOptions& options = {});
 
  private:
   Result<ExecutionResult> execute_regions(
@@ -636,7 +672,8 @@ class PHOTOSPIDER_API ExecutionContext final {
       const ExecutionSink* sink, const CancellationToken& cancellation,
       const ExecutionOptions& options, bool shared_producer = false,
       std::uint64_t producer_epoch = UINT64_MAX,
-      const std::string& snapshot_identity = {});
+      const std::string& snapshot_identity = {}, bool atom_outcomes = false,
+      const DemandQuery* requested = nullptr);
   /** @brief Opaque pools, shared waiting admission, and resource ledger. */
   struct Impl;
   /** @brief Unique local execution ownership. */

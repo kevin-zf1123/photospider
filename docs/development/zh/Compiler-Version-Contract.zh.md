@@ -155,3 +155,10 @@ operation factory、逐原语严格舍入与 `Status.reason`。Status 布局改�
 须重新构建；C ABI 9 仍投影既有 error code，不增加 C++ Status 字段。具名 working-space
 和算术定义由 schema version 与 operation identity 固定。参见
 [Layer 运行时](../../kernel-architecture/zh/Layer-Runtime.zh.md)。
+
+#319 在本轮 0.10 C++ 包中增加完整 `Status.detail`、基于坐标 `AtomKey`
+的 joint contract 2、`execute_atoms` 和不可伪造枚举的 `QualityReport`。
+C ABI 9 保留按不同输出分组的 joint contract 1 和原错误码投影。C++ 回调结果与
+supply 签名使用 AtomKey，消费方重新构建，不提供 output-index shim。
+joint contract 2 使用既有 v10 canonical framing 中的新 trait 值；contract 1
+语义和 C 布局保持原样。见[原子错误与质量](../../kernel-architecture/zh/Atom-Errors-and-Quality.zh.md)。

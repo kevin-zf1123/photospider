@@ -145,3 +145,8 @@ tests/results/
 *.dll
 *.pyc
 __pycache__/
+
+!/examples/atom_outcomes_workflow/
+!/examples/atom_outcomes_workflow/CMakeLists.txt
+!/examples/atom_outcomes_workflow/main.cpp
+!/examples/atom_outcomes_workflow/README.md

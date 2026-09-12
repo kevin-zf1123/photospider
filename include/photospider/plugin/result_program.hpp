@@ -129,6 +129,9 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
   const ResourceBudget& resources;
   std::function<Status(std::uint64_t)> consume_work;
   std::shared_ptr<std::atomic<ErrorCode>> failure;
+  /** @brief Host-provided first-failure observer; callbacks must not retain it.
+   */
+  std::function<void(const Status&)> failure_observer = {};
   Status read(std::uint32_t input, const std::vector<std::uint64_t>& coordinate,
               void* destination, std::size_t bytes) const;
 };
