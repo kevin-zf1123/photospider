@@ -16,6 +16,11 @@
 #include "support/test_support.hpp"
 
 namespace {
+#if defined(PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
+constexpr bool interpose_allocations = false;
+#else
+constexpr bool interpose_allocations = true;
+#endif
 std::atomic<bool> inspect_allocations{false};
 std::atomic<bool> fail_next_allocation{false};
 std::atomic<unsigned> large_allocations{0};
@@ -25,6 +30,7 @@ struct Allocation {
 };
 std::array<Allocation, 256> allocations;
 bool track_owners = false;
+#if !defined(PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
 void track_allocation(void* pointer, std::size_t bytes) {
   if (!track_owners)
     return;
@@ -44,19 +50,25 @@ void track_free(void* pointer) {
       return;
     }
 }
+#endif
 std::size_t retained_allocations() {
   std::size_t bytes = 0;
   for (const auto& record : allocations)
     bytes += record.bytes;
   return bytes;
 }
+#if !defined(PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
 void record(std::size_t size) {
   if (inspect_allocations.load() && size > 16384)
     ++large_allocations;
 }
+#endif
 }  // namespace
 // The target statically links the kernel, so this observes its actual C++
 // allocation calls, including any accidental ordinary STL metadata copy.
+// TSAN owns these symbols; that build retains budget and lifetime assertions
+// but leaves allocator interception and fault injection to ordinary builds.
+#if !defined(PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
 void* operator new(std::size_t size) {
   if (fail_next_allocation.exchange(false))
     throw std::bad_alloc();
@@ -120,6 +132,7 @@ void operator delete[](void* p, std::size_t,
                        std::align_val_t alignment) noexcept {
   ::operator delete(p, alignment);
 }
+#endif
 
 namespace {
 int weak_windows() {
@@ -136,7 +149,9 @@ int weak_windows() {
   }
   track_owners = false;
   const auto control_bytes = retained_allocations();
-  PS_CHECK(control.expired() && control_bytes > 0);
+  PS_CHECK(control.expired());
+  if constexpr (interpose_allocations)
+    PS_CHECK(control_bytes > 0);
   control.reset();
   PS_CHECK(retained_allocations() == 0);
   ResourceBudget budget;
@@ -167,7 +182,8 @@ int weak_windows() {
     PS_CHECK(budget.statistics().live[ResourceKind::Host] == baseline);
     // Only the measured ordinary weak control block remains. Coallocating a
     // WindowOwner into it would retain additional uncharged object bytes.
-    PS_CHECK(retained_allocations() == control_bytes * (i + 1));
+    if constexpr (interpose_allocations)
+      PS_CHECK(retained_allocations() == control_bytes * (i + 1));
   }
   for (auto& item : weak)
     item.reset();
@@ -190,22 +206,25 @@ int failure_copy_exhaustion() {
                  {FailureOrigin::Protocol, FailureScope::Group}};
   failure.detail.node_id = 19;
   builder.fail(failure);
-  fail_next_allocation = true;
+  fail_next_allocation = interpose_allocations;
   auto observed = reference.production_status();
-  PS_CHECK(!fail_next_allocation && observed.message.empty() &&
-           observed.reason == failure.reason && observed.detail.node_id == 19);
+  PS_CHECK(!fail_next_allocation && observed.reason == failure.reason &&
+           observed.detail.node_id == 19);
+  PS_CHECK(interpose_allocations ? observed.message.empty()
+                                 : observed.message == failure.message);
   execution_internal::SharedResults table;
   auto a = table.join_call("snapshot", root, {}, {"r"}).take_value();
   auto producer = table.acquire("r", root, {}, a).take_value();
   auto b = table.join_call("snapshot", root, {}, {"r"}).take_value();
   auto peer = table.acquire("r", root, {}, b).take_value();
   producer.fail(failure);
-  fail_next_allocation = true;
+  fail_next_allocation = interpose_allocations;
   auto waiting = peer.wait(true, 0, 0, {});
   PS_CHECK(!fail_next_allocation && !waiting.ok() &&
-           waiting.status().message.empty() &&
            waiting.status().reason == failure.reason &&
            waiting.status().detail.node_id == 19);
+  PS_CHECK(interpose_allocations ? waiting.status().message.empty()
+                                 : waiting.status().message == failure.message);
   return 0;
 }
 int callback_failure_copy_exhaustion() {
@@ -217,7 +236,7 @@ int callback_failure_copy_exhaustion() {
                  std::string(128, 'x'),
                  FailureReason::MalformedEnvelope,
                  {FailureOrigin::Protocol, FailureScope::Group}});
-      fail_next_allocation = true;
+      fail_next_allocation = interpose_allocations;
       return failed;
     }
   };
@@ -267,7 +286,8 @@ int main() {
   void* control = ::operator new(32768);
   inspect_allocations = false;
   ::operator delete(control);
-  PS_CHECK(large_allocations == 1);
+  if constexpr (interpose_allocations)
+    PS_CHECK(large_allocations == 1);
   SchemaTemplate schema;
   schema.id = "test.large_metadata";
   schema.fields = {
@@ -289,7 +309,8 @@ int main() {
   auto result = ResultBuilder::start(budget, std::move(schema), "scope");
   inspect_allocations = false;
   PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(large_allocations == 0);
+  if constexpr (interpose_allocations)
+    PS_CHECK(large_allocations == 0);
   PS_CHECK(budget.statistics().peak[ResourceKind::Host] <= 16384);
   for (auto live : budget.statistics().live.values)
     PS_CHECK(live == 0);

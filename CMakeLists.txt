@@ -731,6 +731,12 @@ if(BUILD_TESTING)
   photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
   photospider_add_test(test_shared_results photospider_test_kernel tests/unit/test_shared_results.cpp)
   photospider_add_test(test_result_metadata_budget photospider_test_kernel tests/unit/test_result_metadata_budget.cpp)
+  if(PHOTOSPIDER_ENABLE_TSAN)
+    # TSAN defines strong global new/delete interceptors. Keep the ordinary
+    # budget/lifetime checks, while native builds retain allocator injection.
+    target_compile_definitions(test_result_metadata_budget PRIVATE
+      PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
+  endif()
   target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
