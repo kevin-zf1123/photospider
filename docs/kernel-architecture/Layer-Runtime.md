@@ -94,7 +94,13 @@ N rows and 28N bytes for Layer, 16N for Response/RawSum and 64N for raster
 contributions; reduction uses one 64-byte row and finalization at most 29 bytes.
 They do not inherit the general builder's one-million-row default. Mandatory
 disk, Host, work and stage budgets still apply. `test_layer` separately checks
-large-raster admission without claiming complete large-raster execution.
+large-raster admission. The separate `photospider_layer_raster_workflow --large`
+completes 1920×1080 assemble → over → weight and checks every output field.
+Raster stages process batches bounded by the remaining HW row, per-field I/O
+window and 4096-byte output slab working set. Arithmetic stays in row-major
+order; only transfer/append grouping changes. All pixels in a batch must succeed
+before its field write plans are returned. The canonical reduction tree and
+Whole flatten output allocation retain their existing rules.
 The canonical keys are:
 
 | Keys | Input / parameter / output |

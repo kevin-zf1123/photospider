@@ -76,7 +76,12 @@ Layer，但 collapse 会溢出。这些反例禁止未经证明的隐式代数�
 Builder 增长界来自实际输出：Layer 为 N 行、28N 字节，Response/RawSum 为
 16N 字节，raster contributions 为 64N 字节；reduce 为单行 64 字节，finalize
 最多 29 字节。它们不继承通用 builder 的百万行默认值。必需 disk、Host、work
-和 stage 预算仍然生效。test_layer 单独验证大 raster 准入，不将其视为完整执行证明。
+和 stage 预算仍然生效。test_layer 单独验证大 raster 准入；另一个公开示例
+photospider_layer_raster_workflow --large 完整执行 1920×1080 的 assemble → over →
+weight，并检查全部字段。每批受 HW 当前行余量、单字段 I/O 窗口及 4096 字节输出
+slab 工作集共同限制。算术仍按 row-major 顺序，仅合并传输和 append；整批像素
+全部成功后才返回字段写入计划。canonical reduction tree 与 Whole flatten 输出分配
+规则保持不变。
 
 | key | 输入、参数、输出 |
 | --- | --- |

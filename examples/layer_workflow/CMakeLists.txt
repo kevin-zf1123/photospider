@@ -5,3 +5,6 @@ if(NOT TARGET Photospider::kernel)
 endif()
 add_executable(photospider_layer_workflow main.cpp)
 target_link_libraries(photospider_layer_workflow PRIVATE Photospider::kernel)
+
+add_executable(photospider_layer_raster_workflow raster.cpp)
+target_link_libraries(photospider_layer_raster_workflow PRIVATE Photospider::kernel)
