@@ -68,6 +68,10 @@ if(PHOTOSPIDER_ENABLE_ASAN OR PHOTOSPIDER_ENABLE_TSAN)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(OPENCV412 QUIET opencv4)
+endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_constant.cpp
@@ -131,6 +135,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/08-transform/mask_downsample_box.cpp
   plugins/ops/09-composite/image_brush_circle.cpp
   plugins/ops/09-composite/image_mask.cpp
+  plugins/ops/09-composite/image_local_inpaint_navier_stokes.cpp
   plugins/ops/09-composite/image_mix.cpp
   plugins/ops/09-composite/image_opacity.cpp
   plugins/ops/09-composite/image_source_over.cpp
@@ -246,6 +251,13 @@ else()
   configure_file(cmake/cache_build_identity.hpp.in "generated/${CMAKE_BUILD_TYPE}/cache_build_identity.hpp" @ONLY)
 endif()
 add_library(photospider ${PHOTOSPIDER_KERNEL_SOURCES})
+if(OPENCV412_FOUND)
+  target_compile_definitions(photospider PRIVATE PHOTOSPIDER_INPAINT_OPENCV)
+  set_source_files_properties(plugins/ops/09-composite/image_local_inpaint_navier_stokes.cpp PROPERTIES COMPILE_OPTIONS "-Wno-c11-extensions")
+  target_include_directories(photospider PRIVATE ${OPENCV412_INCLUDE_DIRS})
+  target_link_directories(photospider PRIVATE ${OPENCV412_LIBRARY_DIRS})
+  target_link_libraries(photospider PRIVATE ${OPENCV412_LIBRARIES})
+endif()
 add_library(Photospider::kernel ALIAS photospider)
 
 add_library(photospider_operation_sdk INTERFACE)
