@@ -160,7 +160,8 @@ struct Sink {
 };
 void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
          std::uint64_t window, unsigned variant = 0,
-         std::uint64_t work = 10000000, std::uint64_t disk = UINT64_MAX) {
+         std::uint64_t work = 10000000, std::uint64_t disk = UINT64_MAX,
+         std::uint32_t stages = 200000) {
   auto spec = take(fft_spectrum_spec(h, w, packing));
   const auto k = packing == SpectrumPacking::Full ? w : w / 2 + 1, n = h * w;
   auto registry = std::make_shared<OperationRegistry>();
@@ -245,7 +246,7 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
     ExecutionOptions options;
     options.maximum_result_window_bytes = window;
     options.maximum_dependency_work = work;
-    options.dependencies.maximum_stages = 200000;
+    options.dependencies.maximum_stages = stages;
     CancellationSource cancellation;
     ExecutionResult prior;
     if (variant == 5) {
@@ -325,7 +326,30 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
   check(descriptor.rows(0) == h * k, "packed row count and original shape");
   const long double tau = 2 * std::acos(-1.0L);
   double maximum = 0;
-  for (std::uint64_t q = 0; q < h * k; ++q) {
+  if (variant == 1) {
+    for (std::uint64_t row = 0; row < h * k;) {
+      const auto batch = std::min(h * k - row, window / 16);
+      auto page =
+          take(take(fft.prepare_read(descriptor, 0, row, batch)).load(window));
+      for (std::uint64_t i = 0; i < batch; ++i) {
+        const auto angle = -tau * static_cast<long double>((row + i) / k) / h;
+        const std::complex<long double> reference =
+            h > 1 ? std::complex<long double>(std::cos(angle), std::sin(angle))
+                  : std::complex<long double>{};
+        std::array<double, 2> actual;
+        std::memcpy(actual.data(), page->bytes().data() + i * 16, 16);
+        const auto error = static_cast<double>(std::abs(
+            std::complex<long double>(actual[0], actual[1]) - reference));
+        maximum = std::max(maximum, error);
+        check(error < 1e-8, "independent analytic impulse spectrum oracle");
+        if (h == 3 && w == 4 && (row + i) / k == 1 && (row + i) % k == 2)
+          check(actual[1] < -.8,
+                "Nyquist column must retain nonreal conjugate values");
+      }
+      row += batch;
+    }
+  }
+  for (std::uint64_t q = 0; variant != 1 && q < h * k; ++q) {
     if (n > 1024 && q != 0 && q != 1 && q != k - 1)
       continue;
     const auto u = q / k, v = q % k;
@@ -345,9 +369,6 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
         std::abs(std::complex<long double>(actual[0], actual[1]) - reference));
     maximum = std::max(maximum, error);
     check(error < 1e-8, "independent direct DFT spectrum oracle");
-    if (variant == 1 && h == 3 && w == 4 && u == 1 && v == 2)
-      check(actual[1] < -.8,
-            "Nyquist column must retain nonreal conjugate values");
   }
   auto image_facts = take(image.descriptor());
   auto residue =
@@ -372,11 +393,24 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
             << " window=" << window << " measured_dft_error=" << maximum
             << " measured_imaginary=" << imaginary
             << " host_peak=" << root.statistics().peak[ResourceKind::Host]
+            << " issued_stages=" << root.statistics().issued.stages
             << " source_reads=" << reads << '\n';
 }
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--large") {
+      for (auto packing : {SpectrumPacking::Full, SpectrumPacking::R2CHalf})
+        run(1024, 1024, packing, 1024, 1, 5000000000ULL, 1ULL << 30, 1000000);
+      return 0;
+    }
+    for (auto packing : {SpectrumPacking::Full, SpectrumPacking::R2CHalf})
+      run(32, 32, packing, 1024, 1, 100000000, 1ULL << 30, 1100);
+    run(1024, 1, SpectrumPacking::Full, 1024, 1, 100000000, 1ULL << 30, 5000);
+    if (argc == 2 && std::string(argv[1]) == "--stage-regression")
+      return 0;
+    check(argc == 1,
+          "usage: photospider_fft_workflow [--large|--stage-regression]");
     for (auto shape : {std::pair<std::uint64_t, std::uint64_t>{1, 1},
                        {1, 5},
                        {1, 6},

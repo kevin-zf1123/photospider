@@ -19,6 +19,7 @@ cmake -S examples/fft_workflow -B out/phase-a-delivery/fft-consumer \
   -DCMAKE_PREFIX_PATH="$PWD/out/phase-a-delivery/install"
 cmake --build out/phase-a-delivery/fft-consumer -j 8
 out/phase-a-delivery/fft-consumer/photospider_fft_workflow
+out/phase-a-delivery/fft-consumer/photospider_fft_workflow --large
 ```
 
 ## Independent reference
@@ -35,6 +36,18 @@ or bit reversal. It checks every stored frequency for images of at most 1024
 samples. For the 8192-sample external-axis fixture, it checks DC, frequency 1,
 and the final stored frequency, plus **all** shifted output pixels. Printed DFT
 differences and inverse imaginary residuals are Measured, not CertifiedBound.
+
+`--large` runs both Full and R2CHalf at 1024x1024, with a 1024-byte page,
+65536-byte managed Host limit, 1 GiB disk capacity, finite five-billion-work
+budget and one-million-stage limit per producer. The source is a unit impulse
+at (1,0). Every stored frequency is checked against the independent closed form
+`exp(-2*pi*i*u/H)` in bounded reads, and the sink checks every shifted pixel:
+only (2,1) is one. This also checks cache-off sharing and final owner release.
+The default run includes 32x32 Full/Half with a 1100-stage limit; the old
+one-frequency-per-poll implementation exhausts that limit. Run just these
+regressions and a cross-axis-row singleton case with `--stage-regression`.
+Printed `issued_stages` totals coordinator actions across the whole DAG,
+not the poll count of any single producer.
 
 An independent Python standard-library oracle for a 3×4 case:
 

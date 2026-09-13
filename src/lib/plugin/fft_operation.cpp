@@ -142,7 +142,7 @@ struct State {
                 term = 0;
   std::uint64_t fill = 0, slab_rows = 0;
   unsigned axis = 0, bits = 0;
-  bool small = false, conjugate = false;
+  bool small = false, conjugate = false, batched_leaf = false;
   Complex sum{};
   double residual = 0;
   TemporaryStorage a, b;
@@ -518,6 +518,19 @@ struct State {
               return Poll(status);
           }
           const auto frequency = position % length;
+          batched_leaf = odd <= window(p);
+          if (batched_leaf) {
+            batch = std::min({slab_rows - fill, UINT64_C(16), window(p) / odd});
+            ResultProgramNeed need;
+            for (std::uint64_t i = 0; i < batch; ++i) {
+              const auto q = position + i;
+              const auto leaf = reverse_bits((q % length) % power, bits);
+              const auto offset = (q / length) * length + leaf * odd;
+              need.io.push_back(ResultReadTemporary{a, offset * 16, odd * 16});
+            }
+            stage = LeafReady;
+            return Poll(std::move(need));
+          }
           const auto leaf = reverse_bits(frequency % power, bits);
           const auto offset = (position / length) * length + leaf * odd + term;
           batch = std::min(odd - term, window(p));
@@ -528,34 +541,63 @@ struct State {
               {ResultReadTemporary{a, offset * 16, batch * 16}}});
         }
         case LeafReady: {
-          auto fuel = p.consume_work(batch * 80);
-          if (!fuel.ok())
-            return Poll(fuel);
-          const auto frequency = (position % length) / power;
-          for (std::uint64_t t = 0; t < batch; ++t) {
-            auto value = read_pair(p, 0, t);
-            if (odd != 1) {
-              auto product = multiply(
-                  value, twiddle(modular_product(frequency, term + t, odd), odd,
-                                 inverse()));
-              if (!product.ok())
-                return Poll(product.status());
-              value = product.take_value();
+          if (batched_leaf) {
+            auto fuel = p.consume_work(batch * odd * 80);
+            if (!fuel.ok())
+              return Poll(fuel);
+            for (std::uint64_t i = 0; i < batch; ++i) {
+              const auto frequency = ((position + i) % length) / power;
+              Complex accumulated{};
+              for (std::uint64_t t = 0; t < odd; ++t) {
+                auto value = read_pair(p, static_cast<unsigned>(i), t);
+                if (odd != 1) {
+                  auto product = multiply(
+                      value, twiddle(modular_product(frequency, t, odd), odd,
+                                     inverse()));
+                  if (!product.ok())
+                    return Poll(product.status());
+                  value = product.take_value();
+                }
+                accumulated = {accumulated[0] + value[0],
+                               accumulated[1] + value[1]};
+                if (!finite(accumulated))
+                  return Poll(overflow());
+              }
+              std::memcpy(slab.data() + (fill + i) * 16, accumulated.data(),
+                          16);
             }
-            sum = {sum[0] + value[0], sum[1] + value[1]};
-            if (!finite(sum))
-              return Poll(overflow());
+            fill += batch;
+            position += batch;
+          } else {
+            auto fuel = p.consume_work(batch * 80);
+            if (!fuel.ok())
+              return Poll(fuel);
+            const auto frequency = (position % length) / power;
+            for (std::uint64_t t = 0; t < batch; ++t) {
+              auto value = read_pair(p, 0, t);
+              if (odd != 1) {
+                auto product = multiply(
+                    value, twiddle(modular_product(frequency, term + t, odd),
+                                   odd, inverse()));
+                if (!product.ok())
+                  return Poll(product.status());
+                value = product.take_value();
+              }
+              sum = {sum[0] + value[0], sum[1] + value[1]};
+              if (!finite(sum))
+                return Poll(overflow());
+            }
+            term += batch;
+            if (term < odd) {
+              stage = Leaf;
+              break;
+            }
+            std::memcpy(slab.data() + fill * 16, sum.data(), 16);
+            ++fill;
+            ++position;
+            term = 0;
+            sum = {};
           }
-          term += batch;
-          if (term < odd) {
-            stage = Leaf;
-            break;
-          }
-          std::memcpy(slab.data() + fill * 16, sum.data(), 16);
-          ++fill;
-          ++position;
-          term = 0;
-          sum = {};
           if (fill < slab_rows) {
             stage = Leaf;
             break;
@@ -577,7 +619,7 @@ struct State {
             begin_axis();
             break;
           }
-          batch = std::min({n - position, window(p), std::uint64_t{8}});
+          batch = std::min({n - position, window(p), std::uint64_t{16}});
           ResultProgramNeed need;
           for (std::uint64_t i = 0; i < batch; ++i) {
             const auto q = position + i;
@@ -624,7 +666,7 @@ struct State {
             if (!status.ok())
               return Poll(status);
           }
-          batch = std::min({slab_rows - fill, std::uint64_t{8}, window(p)});
+          batch = std::min({slab_rows - fill, std::uint64_t{16}, window(p)});
           ResultProgramNeed need;
           const auto columns = inverse() ? w : k;
           for (std::uint64_t i = 0; i < batch; ++i) {

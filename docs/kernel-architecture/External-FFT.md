@@ -76,14 +76,23 @@ all writes before role changes. Each data window is at most
 The declared callback workspace is 4096 bytes, with temporary read replies,
 owning window metadata and retained buffers additionally charged to the root.
 Odd-leaf output buffers and gather batches are explicitly owned and bounded.
+When a complete odd leaf fits the window, one stage requests up to 16 natural
+output frequencies, limited so all leaf replies together fit that window.
+Each frequency retains its original summation order, including positive-zero
+initialization. Batches may cross logical axis rows; each request recomputes
+its row base. Larger odd leaves keep streaming their terms. Transpose and
+output gathers also process up to 16 records per stage.
 
 Arithmetic work is O(HW*(log2(W/mw)+mw+log2(H/mh)+mh)); odd-leaf direct summation
 may dominate. Every pass, butterfly, accumulation, initialization and I/O is
 charged. Mandatory scratch occupies two separately admitted full generations,
 plus any final Result and live predecessor owners. Stage, work, I/O or capacity
 exhaustion fails without a complete result; already submitted work is not
-refunded. The example selects a finite 200000-stage envelope; the general
-default 4096-stage setting does not promise all large transforms will fit.
+refunded. The default example selects a finite 200000-stage envelope; its dedicated
+1024x1024 Full/Half run uses 1000000 stages per producer and finite work/I/O
+limits. The general default 4096-stage setting does not promise all large
+transforms will fit. Printed root `issued_stages` sums coordinator actions
+across producers; it is distinct from each producer's poll limit.
 
 ## Real policy and publication
 
