@@ -300,6 +300,59 @@ target_compile_options(photospider_ordered_reduction_consumer PRIVATE ${_photosp
 target_link_options(photospider_ordered_reduction_consumer PRIVATE ${_photospider_consumer_link_options})
 
 add_subdirectory(../../examples/multi_output_workflow multi-output)
+
+# Installed consumer of the PNT-05A navier_stokes profile. The adapter key is
+# asserted only when the producing build published it; the independent pinned
+# oracle is linked when this consumer finds the same OpenCV 4.12.0 build.
+set(PHOTOSPIDER_CONSUMER_INPAINT_ADAPTER OFF CACHE BOOL
+    "Producer published image.local_inpaint_navier_stokes_openCV")
+set(PHOTOSPIDER_CONSUMER_INPAINT_ORACLE ${PHOTOSPIDER_CONSUMER_INPAINT_ADAPTER}
+    CACHE BOOL
+    "Link the pinned OpenCV oracle into the consumer inpaint test; a native-only consumer must stay OpenCV-free")
+set(_photospider_inpaint_oracle OFF)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(PS_CONSUMER_OPENCV_INPAINT QUIET opencv4)
+endif()
+if(PHOTOSPIDER_CONSUMER_INPAINT_ORACLE AND
+   PS_CONSUMER_OPENCV_INPAINT_FOUND AND
+   PS_CONSUMER_OPENCV_INPAINT_VERSION VERSION_EQUAL "4.12.0")
+  set(_photospider_inpaint_oracle ON)
+  message(STATUS
+    "PNT-05A consumer oracle: ${PS_CONSUMER_OPENCV_INPAINT_VERSION} at "
+    "${PS_CONSUMER_OPENCV_INPAINT_LIBRARY_DIRS}")
+elseif(PHOTOSPIDER_CONSUMER_INPAINT_ORACLE)
+  message(WARNING
+    "PNT-05A consumer oracle requested but pkg-config opencv4 4.12.0 is absent; "
+    "the consumer runs analytic checks only.")
+endif()
+add_executable(photospider_inpaint_ns_consumer
+  ../integration/test_local_inpaint_navier_stokes.cpp)
+target_include_directories(photospider_inpaint_ns_consumer PRIVATE ..)
+target_link_libraries(photospider_inpaint_ns_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_inpaint_ns_consumer
+  PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_inpaint_ns_consumer
+  PRIVATE ${_photospider_consumer_link_options})
+set_target_properties(photospider_inpaint_ns_consumer
+  PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+if(PHOTOSPIDER_CONSUMER_INPAINT_ADAPTER)
+  target_compile_definitions(photospider_inpaint_ns_consumer
+    PRIVATE PS_INPAINT_NAVIER_STOKES_ADAPTER)
+endif()
+if(_photospider_inpaint_oracle)
+  target_compile_definitions(photospider_inpaint_ns_consumer
+    PRIVATE PS_INPAINT_NAVIER_STOKES_ORACLE)
+  target_include_directories(photospider_inpaint_ns_consumer
+    SYSTEM PRIVATE ${PS_CONSUMER_OPENCV_INPAINT_INCLUDE_DIRS})
+  target_link_libraries(photospider_inpaint_ns_consumer
+    PRIVATE ${PS_CONSUMER_OPENCV_INPAINT_LINK_LIBRARIES})
+endif()
+add_subdirectory(../../examples/inpaint_ns_workflow inpaint_ns_workflow)
+target_compile_options(photospider_inpaint_ns_workflow
+  PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_inpaint_ns_workflow
+  PRIVATE ${_photospider_consumer_link_options})
 target_compile_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_link_options})
 
@@ -307,6 +360,8 @@ add_custom_target(
   run_photospider_consumer
   COMMAND "$<TARGET_FILE:photospider_multi_output_workflow>" --scenario all
   COMMAND "$<TARGET_FILE:photospider_multi_output_workflow>" --scenario all --joint off
+  COMMAND "$<TARGET_FILE:photospider_inpaint_ns_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_inpaint_ns_workflow>"
   COMMAND "$<TARGET_FILE:photospider_consumer>"
   COMMAND "$<TARGET_FILE:photospider_dependency_consumer>"
   COMMAND "$<TARGET_FILE:photospider_execution_dependencies_consumer>"
@@ -338,7 +393,8 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
   COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_multi_output_workflow photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  DEPENDS photospider_inpaint_ns_consumer photospider_inpaint_ns_workflow
+          photospider_multi_output_workflow photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
   USES_TERMINAL
   VERBATIM)
 

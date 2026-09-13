@@ -302,3 +302,162 @@ Both C++ and C consumer runs report `layouts=5 semantic_kinds=3` and
 native hardware the same test verifies CPU/fallback behavior and reports zero
 native dispatches. Change the fixture's coefficient binding or the pure producer
 callback to continue composing; expression parsing is a later operation slice.
+
+## Local Navier-Stokes inpaint (PNT-05A)
+
+[`PNT-05A_local_inpaint_navier_stokes.md`](../built-in_ops/09-composite/op_specs/PNT-05A_local_inpaint_navier_stokes.md)
+revision 0.3.0 freezes the profile `opencv_4_12_ns_f32_planar_v1`: OpenCV 4.12.0
+`INPAINT_NS` applied to three single-channel Float32 planes in R, G, B order.
+Two explicit keys are required. The unsuffixed
+`image.local_inpaint_navier_stokes` is the semantic family name, not a third
+registration or alias.
+
+| Operation | Input 0 | Input 1 | Parameters | Named output |
+| --- | --- | --- | --- | --- |
+| `image.local_inpaint_navier_stokes_openCV` | Image | Float32 `{H,W}` canonical coverage | required Int64 `radius`, inclusive `[1,32]` | `image`, Float32 `{H,W,4}` |
+| `image.local_inpaint_navier_stokes_native_apple_silicon` | Image | same | same | same |
+
+The image port is a typed `SemanticKind::Image` Float32 rank-three constraint,
+because a fixed `RgbaFloat32` port cannot express the profile's legal scene or
+display reference. The callback validates the exact remaining interpretation:
+canonical linear sRGB D65, coverage-premultiplied association, four channels with
+their canonical roles, exactly one facet, and a `scene` or `display` reference.
+Every other association, primaries, white, transfer, model, channel set or extra
+facet fails with `TypeMismatch`, and the published result preserves the input
+facet byte-for-byte.
+
+Hole coverage stays the exact canonical `Float32Mask` port. Both inputs must be
+finite, alpha must be exactly one and mask samples must be exactly `0` or `1`;
+both signed zeros are known samples, and `0.5` coverage is invalid for this
+profile even though it is valid coverage. The complete logical domain of both
+inputs is validated before the all-zero identity shortcut and before algorithm
+entry, so nonfinite RGB placeholders inside holes, nonopaque alpha and nonbinary
+coverage fail even for a noop mask. `K=0` returns the unedited input bits,
+`K=H*W` fails with `OperationFailed`, a spatial extent below three fails with
+`TypeMismatch`, an extent above 32768 on either axis fails with
+`ResourceExhausted`, and a mask on a different logical grid is rejected. Only
+hole RGB samples are written; unmasked samples and every alpha sample stay
+bit-identical, and hole results are never clamped to `[0,1]`.
+
+The Region rule is Whole: `need_image=All([H,W,4])` and
+`need_hole_mask=All([H,W])` for every legal nonempty query, a nonzero output
+Region is a crop of the same complete computation, and any input edit dirties
+the whole output. Radius is not a transitive halo. Both operations are CPU only
+with no implicit GPU fallback. The two variants share validation, hole zeroing,
+0/255 mask materialization, plane packing, write-back, publication and the
+arithmetic-exception contract below.
+
+### Arithmetic-exception contract
+
+A finite published hole sample can hide a nonfinite intermediate, for example an
+overflowing `VectorLength(gradI)` on alternating signed `1e30` neighbors. Both
+variants clear `FE_INVALID | FE_OVERFLOW | FE_DIVBYZERO` before each channel
+solve and test them after it, so such a channel fails with `OperationFailed`
+instead of publishing a finite-looking value. The surrounding image scope
+restores the caller's complete floating-point environment, so the caller's own
+rounding mode and sticky exception flags are unchanged, and a clean invocation
+leaves no flag behind. The same contract is what makes the identity and
+facet-preservation clauses testable: `floating-state` and the exception-flag
+cases are part of the in-tree acceptance test.
+
+### Cancellation cadence
+
+Cancellation is observed at most every 4096 logical samples, counting every RGBA
+and mask read, across validation, output copying, mask materialization, plane
+packing, hole checking and native guard-grid initialization. Each sample-counted
+helper observes cancellation as it starts, the output allocation is observed on
+both sides, and a cancelled channel reports `Cancelled` before any dirty
+arithmetic state is reported, so helper boundaries and stage transitions are
+observation points and no uncounted tail bridges two phases. A direct registry
+invocation returns this callback status unchanged, which is why the callback
+order matters. Native
+initialization counts each guard-grid access of the cross-dilated band
+construction and resets the per-channel flag grid in the same checked loop
+rather than an unchecked bulk store. The ported frontier observes cancellation
+at most every 64 pops or 4096 candidate-loop visits, whichever comes first, plus
+around every large allocation, channel transition and publication. A row-modulo
+check does not satisfy this bound and is not used. The OpenCV adapter cannot
+interrupt the pinned library call; it observes cancellation before packing,
+after the last packing chunk and after each channel call, and declares that
+limitation instead of claiming the frontier cadence.
+
+### Variant boundaries
+
+The OpenCV adapter packs one Float32 plane per channel, zeroes hole samples and
+calls the pinned library once per channel. The library's own guard-grid and
+heap-vector allocations are outside the invocation allocator; they are reported
+by `estimated_external_bytes` (7 bytes per padded sample for `f`, `band`, `mask`
+and `t`, plus up to 32 bytes per padded sample for the inserting-order heap
+vector at two-times geometric growth capacity) and are never charged to the host
+execution budget. A refused pinned allocation (`cv::Error::StsNoMem`, host
+`std::bad_alloc`) maps to `ResourceExhausted`; every other pinned failure maps to
+`OperationFailed`.
+
+The native Apple Silicon variant is a licensed standalone port of the pinned
+single-channel `icvNSInpaintFMM<float>` frontier, `FastMarching_solve` and
+narrow-band construction, with the retained Intel License Agreement notice. It
+includes no OpenCV header, symbol or linkage; a native-only build is produced
+with `-DPHOTOSPIDER_ENABLE_OPENCV_INPAINT=OFF`. All of its scratch comes from
+the invocation allocator: one packed work plane (4N), the internal UInt8 mask
+(N), the padded state/band/flags triple (3P), padded arrival times (4P) and a
+bounded heap of 16-byte `{float T, int32 y, int32 x, int32 order}` entries
+(16P), so `5N+23P` bytes are host-accounted and released on every failure path.
+
+The pinned index branches, guard grid, `1.0e6f` initialization and insertion
+order are preserved. `FastMarching_solve` keeps the pinned `double a11, a22,
+m12` locals and its binary64 comparisons, mixed term and `1+m12` sums; only the
+returned value narrows to Float32. The frontier keeps the pinned binary32
+`dst`, gradient, magnitude and `(double)Ia/s` expressions with
+round-to-nearest and gradual underflow.
+
+Spec revision 0.3.1 binds one common arm64 OpenCV 4.12.0 reference built with
+`-fno-fast-math -frounding-math -ffp-contract=off`, and both variants are
+bit-exact to it: zero differing samples over the 5100 compared hole samples of
+the acceptance set, and 64/64 on the independent common harness for each
+variant, including its `large-frontier` 512x512 random-hole case. Port fidelity
+was confirmed directly by compiling the pinned `inpaint.cpp` verbatim into one
+diagnostic translation unit with the kernel's flags: over that fixture (65262
+hole samples per channel) the verbatim source and the registered native
+operation differ in zero samples on all three channels. Each variant also
+repeats bitwise for identical invocations.
+
+Historical note: the package-manager `libopencv_photo` distribution is built
+with FMA contraction (48 `fmadd` and 18 `fmsub` inside `icvInpaint`). The same
+verbatim source compiled with `-ffp-contract=fast` reproduces that distribution
+bit-for-bit, while a non-contracted build differs from it by up to 15 times the
+frozen tolerance on the 512x512 fixture, because sequential hole dependencies
+amplify last-place differences. That measurement is why the profile, the adapter
+linkage and the native port all bind the same non-contracted reference instead
+of the distribution build; the native translation unit shares the shared
+operation flags with no per-file override.
+
+### Evidence
+
+[`test_local_inpaint_navier_stokes.cpp`](../../tests/integration/test_local_inpaint_navier_stokes.cpp)
+covers the frozen acceptance matrix, reproduces the coordinator harness fixtures
+(block holes at radius 1/3/8/32, extents above the bound, display reference,
+nonfinite intermediates, exception-flag restoration) and is rebuilt unchanged as
+an installed consumer. The mapping, commands, evidence and current gaps are
+recorded in
+[`examples/inpaint_ns_workflow/README.md`](../../examples/inpaint_ns_workflow/README.md).
+The independent oracle is the pinned library called directly on Float32 planes
+with zeroed hole samples and restored unmasked samples; it never calls a
+production helper, and it is linked only when `pkg-config opencv4` reports
+4.12.0.
+
+```sh
+cmake -S . -B build/inpaint-ns -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=ON -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build build/inpaint-ns --target test_local_inpaint_navier_stokes \
+  photospider_inpaint_ns_workflow -j 3
+ctest --test-dir build/inpaint-ns \
+  -R '^(test_local_inpaint_navier_stokes|example_inpaint_ns_workflow)$' \
+  --output-on-failure
+```
+
+`-DCMAKE_OSX_ARCHITECTURES=arm64` is required for the pinned profile: the
+provisioned OpenCV 4.12.0 build is arm64-only, and a translated x86_64
+configure cannot link it. The adapter is disabled with a warning when
+`pkg-config opencv4` is missing or reports another version; the native variant
+is never affected.

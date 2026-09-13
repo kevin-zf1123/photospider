@@ -69,6 +69,44 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# Optional pinned OpenCV adapter of the PNT-05A navier_stokes profile. The
+# adapter requires the locally provisioned OpenCV 4.12.0 discovered through
+# `pkg-config opencv4`; disabling this option produces a native-only build with
+# no OpenCV header, symbol or linkage anywhere in the kernel.
+option(PHOTOSPIDER_ENABLE_OPENCV_INPAINT
+  "Build the image.local_inpaint_navier_stokes_openCV adapter from pkg-config opencv4"
+  ON)
+set(PHOTOSPIDER_OPENCV_INPAINT_ENABLED OFF)
+if(PHOTOSPIDER_ENABLE_OPENCV_INPAINT)
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(PS_OPENCV_INPAINT QUIET opencv4)
+  endif()
+  if(PS_OPENCV_INPAINT_FOUND AND PS_OPENCV_INPAINT_VERSION VERSION_EQUAL "4.12.0")
+    set(PHOTOSPIDER_OPENCV_INPAINT_ENABLED ON)
+    message(STATUS
+      "PNT-05A OpenCV adapter: ${PS_OPENCV_INPAINT_VERSION} at "
+      "${PS_OPENCV_INPAINT_LIBRARY_DIRS}")
+    if(APPLE AND NOT "${CMAKE_OSX_ARCHITECTURES}" MATCHES "arm64")
+      message(WARNING
+        "PNT-05A OpenCV adapter: the pinned provisioning is arm64-only, but "
+        "CMAKE_OSX_ARCHITECTURES is '${CMAKE_OSX_ARCHITECTURES}'. Configure "
+        "with -DCMAKE_OSX_ARCHITECTURES=arm64 for the native Apple Silicon "
+        "profile.")
+    endif()
+  elseif(PS_OPENCV_INPAINT_FOUND)
+    message(WARNING
+      "PNT-05A OpenCV adapter disabled: pkg-config opencv4 reports "
+      "${PS_OPENCV_INPAINT_VERSION}, but the pinned numeric profile requires "
+      "4.12.0. Pass -DPHOTOSPIDER_ENABLE_OPENCV_INPAINT=OFF to silence this.")
+  else()
+    message(WARNING
+      "PNT-05A OpenCV adapter disabled: pkg-config could not find opencv4. The "
+      "native_apple_silicon variant is unaffected. Pass "
+      "-DPHOTOSPIDER_ENABLE_OPENCV_INPAINT=OFF to silence this.")
+  endif()
+endif()
+
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_constant.cpp
   plugins/ops/00-foundation/core_delay.cpp
@@ -134,9 +172,14 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/09-composite/image_mix.cpp
   plugins/ops/09-composite/image_opacity.cpp
   plugins/ops/09-composite/image_source_over.cpp
+  plugins/ops/09-composite/local_inpaint_navier_stokes_native.cpp
   plugins/ops/10-analysis/analysis_histogram.cpp
   plugins/ops/10-analysis/analysis_histogram_out_of_range.cpp
 )
+if(PHOTOSPIDER_OPENCV_INPAINT_ENABLED)
+  list(APPEND PHOTOSPIDER_OPERATION_SOURCES
+    plugins/ops/09-composite/local_inpaint_navier_stokes_opencv.cpp)
+endif()
 
 set(
   PHOTOSPIDER_KERNEL_SOURCES
@@ -205,6 +248,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
+  # PNT-05A spec 0.3.1 binds the common arm64 OpenCV 4.12.0 reference to this
+  # same non-contracted profile, so the native port shares the profile's flags
+  # and reproduces that reference instead of the FMA-contracted distribution
+  # build shipped by the package manager.
 elseif(MSVC)
   set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
 
@@ -307,6 +354,18 @@ function(photospider_configure_kernel_target target)
 endfunction()
 
 photospider_configure_kernel_target(photospider)
+# Pinned OpenCV symbols stay private to this target's build; the adapter
+# translation unit is the only OpenCV consumer inside the kernel library.
+function(photospider_configure_opencv_inpaint target)
+  if(NOT PHOTOSPIDER_OPENCV_INPAINT_ENABLED)
+    return()
+  endif()
+  target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_OPENCV_INPAINT)
+  target_include_directories(${target} SYSTEM PRIVATE
+    ${PS_OPENCV_INPAINT_INCLUDE_DIRS})
+  target_link_libraries(${target} PRIVATE ${PS_OPENCV_INPAINT_LINK_LIBRARIES})
+endfunction()
+photospider_configure_opencv_inpaint(photospider)
 set_target_properties(photospider PROPERTIES EXPORT_NAME kernel)
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
@@ -376,6 +435,7 @@ add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/inpaint_ns_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
   foreach(_joint on off)
@@ -398,6 +458,8 @@ if(BUILD_TESTING)
   add_test(NAME test_image_vertical COMMAND photospider_image_vertical)
   add_test(NAME test_image_vertical_plugin COMMAND photospider_image_vertical
     "$<TARGET_FILE:photospider_rgba32f_ops>")
+  add_test(NAME example_inpaint_ns_workflow
+    COMMAND photospider_inpaint_ns_workflow)
   add_library(
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
     ${PHOTOSPIDER_KERNEL_SOURCES}
@@ -405,6 +467,7 @@ if(BUILD_TESTING)
     src/lib/execution/execution_test_hooks.cpp
     src/lib/plugin/library_test_hooks.cpp)
   photospider_configure_kernel_target(photospider_test_kernel)
+  photospider_configure_opencv_inpaint(photospider_test_kernel)
   target_compile_definitions(
     photospider_test_kernel
     PUBLIC PHOTOSPIDER_STATIC
@@ -742,6 +805,23 @@ if(BUILD_TESTING)
   target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
   photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
+  # PNT-05A acceptance for both required navier_stokes variants. The installed
+  # pinned OpenCV 4.12.0 build is linked here only as the independent oracle.
+  photospider_add_test(
+    test_local_inpaint_navier_stokes Photospider::kernel
+    tests/integration/test_local_inpaint_navier_stokes.cpp)
+  if(PHOTOSPIDER_OPENCV_INPAINT_ENABLED)
+    target_compile_definitions(
+      test_local_inpaint_navier_stokes
+      PRIVATE PS_INPAINT_NAVIER_STOKES_ADAPTER
+              PS_INPAINT_NAVIER_STOKES_ORACLE)
+    target_include_directories(
+      test_local_inpaint_navier_stokes
+      SYSTEM PRIVATE ${PS_OPENCV_INPAINT_INCLUDE_DIRS})
+    target_link_libraries(
+      test_local_inpaint_navier_stokes
+      PRIVATE ${PS_OPENCV_INPAINT_LINK_LIBRARIES})
+  endif()
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
   photospider_add_test(
@@ -831,5 +911,6 @@ if(BUILD_TESTING)
       "-DPHOTOSPIDER_GENERATOR_PLATFORM:STRING=${CMAKE_GENERATOR_PLATFORM}"
       "-DPHOTOSPIDER_GENERATOR_TOOLSET:STRING=${CMAKE_GENERATOR_TOOLSET}"
       "-DPHOTOSPIDER_CONSUMER_SANITIZER:STRING=${PHOTOSPIDER_SANITIZER_MODE}"
+      "-DPHOTOSPIDER_OPENCV_INPAINT_ENABLED:BOOL=${PHOTOSPIDER_OPENCV_INPAINT_ENABLED}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunInstalledConsumer.cmake")
 endif()

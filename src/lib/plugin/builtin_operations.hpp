@@ -44,6 +44,12 @@ Status register_image_split_horizontal(OperationRegistry* registry);
 Status register_image_downsample_box(OperationRegistry* registry);
 Status register_mask_downsample_box(OperationRegistry* registry);
 Status register_image_brush_circle(OperationRegistry* registry);
+Status register_image_local_inpaint_navier_stokes_native(
+    OperationRegistry* registry);
+#ifdef PHOTOSPIDER_HAS_OPENCV_INPAINT
+Status register_image_local_inpaint_navier_stokes_opencv(
+    OperationRegistry* registry);
+#endif
 Status register_curve_sample_linear(OperationRegistry* registry);
 Status register_curve_sample_monotone(OperationRegistry* registry);
 Status register_field_apply_lut_1d(OperationRegistry* registry);

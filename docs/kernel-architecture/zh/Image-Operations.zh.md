@@ -224,3 +224,114 @@ C++ 与 C consumer 均报告 layouts=5 semantic_kinds=3、oracle=passed；原生
 必须执行 45 次 dispatch。无硬件时验证 CPU/fallback 并报告零 native dispatch。修改
 fixture 的 coefficient binding 或纯 producer callback 可继续组合，expression 解析由后续
 算子切片完成。
+
+## 局部 Navier-Stokes 修补（PNT-05A）
+
+[`PNT-05A_local_inpaint_navier_stokes.md`](../../built-in_ops/09-composite/op_specs/PNT-05A_local_inpaint_navier_stokes.md)
+修订 0.3.0 冻结了 profile `opencv_4_12_ns_f32_planar_v1`：OpenCV 4.12.0
+`INPAINT_NS` 按 R、G、B 顺序作用于三个单通道 Float32 平面。必须提供两个显式 key，
+不带后缀的 `image.local_inpaint_navier_stokes` 只是语义族名称，不是第三个注册或别名。
+
+| 算子 | 输入 0 | 输入 1 | 参数 | 具名输出 |
+| --- | --- | --- | --- | --- |
+| `image.local_inpaint_navier_stokes_openCV` | Image | Float32 `{H,W}` 规范 coverage | 必填 Int64 `radius`，闭区间 `[1,32]` | `image`，Float32 `{H,W,4}` |
+| `image.local_inpaint_navier_stokes_native_apple_silicon` | Image | 同上 | 同上 | 同上 |
+
+图像端口是类型化 `SemanticKind::Image` 的 Float32 三阶约束：固定 `RgbaFloat32`
+端口无法表达 profile 允许的 scene 或 display reference。callback 校验其余精确语义：
+规范线性 sRGB D65、coverage 预乘 association、四通道及其规范角色、恰好一个 facet，
+reference 为 `scene` 或 `display`。其他 association、primaries、白点、transfer、
+model、通道集合或多余 facet 均以 `TypeMismatch` 失败；发布结果逐字节保留输入 facet。
+
+洞 mask 保持精确的规范 `Float32Mask` 端口。两个输入都必须有限，alpha 必须恰为 1，
+mask 采样必须恰为 `0` 或 `1`；两种符号零都是已知采样，`0.5` coverage 虽然合法但不是
+本 profile 的合法输入。全零 mask 的 identity 与算法进入之前都会校验完整逻辑域，因此
+洞内非有限 RGB 占位、非不透明 alpha 与非二值 coverage 在 noop mask 下同样失败。
+`K=0` 返回未改动输入位，`K=H*W` 以 `OperationFailed` 失败，空间尺寸小于 3 以
+`TypeMismatch` 失败，任一轴超过 32768 以 `ResourceExhausted` 失败，逻辑网格不一致的
+mask 被拒绝。只写入洞内 RGB 采样；未遮蔽采样与全部 alpha 采样保持位相同，洞内结果
+不做 `[0,1]` 截断。
+
+Region 规则为 Whole：任意合法非空查询都有 `need_image=All([H,W,4])` 与
+`need_hole_mask=All([H,W])`，非零输出 Region 是同一完整计算的裁剪，任何输入改动都会
+使整个输出失效。radius 不是传递 halo。两个算子都只支持 CPU，不做隐式 GPU 回退。
+两个变体共享校验、洞置零、0/255 mask 生成、平面打包、写回、发布以及下文的算术异常契约。
+
+### 算术异常契约
+
+有限的洞内结果可能掩盖非有限中间量，例如相邻 ±1e30 使 `VectorLength(gradI)` 溢出。
+两个变体在每个通道求解前清除 `FE_INVALID | FE_OVERFLOW | FE_DIVBYZERO`，求解后检查，
+使该通道以 `OperationFailed` 失败而不是发布看似有限的值。外层 image scope 恢复调用者
+完整浮点环境，因此调用者的舍入模式与粘滞异常标志保持不变，干净调用不留下任何标志。
+
+### 取消观测频率
+
+校验、输出拷贝、mask 生成、平面打包、洞检查与原生 guard 网格初始化都按逻辑采样计数，
+每 4096 个采样（含全部 RGBA 与 mask 读取）至多观测一次取消。每个按采样计数的 helper 在
+进入时观测一次取消，输出分配前后各观测一次，被取消的通道先报告 `Cancelled` 再报告脏算术
+状态，因此 helper 边界与阶段切换都是观测点，不存在跨越两个阶段的未计数尾部。直接
+registry 调用会原样返回该 callback 状态，因此 callback 内的顺序是必要的。原生初始化对十字膨胀窄带
+构造的每次 guard 网格访问计数，并在同一受检循环中重置每通道标志网格，而不是整块存储。
+移植的前沿每 64 次 pop 或 4096 次候选循环访问（取先到者）观测一次，并在每次大分配、
+通道切换与发布前后观测。按行取模不满足该界限，未被使用。OpenCV adapter 无法中断库
+调用，在打包前、最后一个打包分块之后以及每个通道调用之后观测，并声明该限制而不声称
+达到前沿观测频率。
+
+### 变体边界
+
+OpenCV adapter 每通道打包一个 Float32 平面、将洞采样置零、每通道调用一次库。库自身的
+guard 网格与堆向量分配不计入 invocation allocator；`estimated_external_bytes` 报告该
+估算（`f`/`band`/`mask`/`t` 每 padded 采样 7 字节，插入序堆向量按 2 倍几何增长容量每
+padded 采样最多 32 字节），并且从不算作宿主执行预算。库拒绝分配（`cv::Error::StsNoMem`、
+宿主 `std::bad_alloc`）映射为 `ResourceExhausted`，其他库失败映射为 `OperationFailed`。
+
+原生 Apple Silicon 变体是固定单通道 `icvNSInpaintFMM<float>` 前沿、`FastMarching_solve`
+与窄带构造的授权独立移植，保留 Intel License Agreement 声明，且不含任何 OpenCV 头、
+符号或链接；使用 `-DPHOTOSPIDER_ENABLE_OPENCV_INPAINT=OFF` 得到 native-only 构建。
+其全部 scratch 来自 invocation allocator：打包工作平面（4N）、内部 UInt8 mask（N）、
+padded state/band/flags 三元组（3P）、padded 到达时间（4P）以及 16 字节条目
+`{float T, int32 y, int32 x, int32 order}` 的有界堆（16P），即 `5N+23P` 字节全部计入
+宿主，并在任何失败路径释放。
+
+固定的索引分支、guard 网格、`1.0e6f` 初始化与插入顺序都保留。`FastMarching_solve`
+保留原 `double a11, a22, m12` 局部变量及其 binary64 比较、混合项与 `1+m12` 求和，只有
+返回值收窄为 Float32。前沿保留原 binary32 的 `dst`、梯度、模长与 `(double)Ia/s`
+表达式，使用 round-to-nearest 与渐进下溢。
+
+规范 0.3.1 绑定唯一的 arm64 OpenCV 4.12.0 参考构建，使用 `-fno-fast-math
+-frounding-math -ffp-contract=off`；两个变体都与该参考逐位一致：验收集合的 5100 个
+洞内采样差异为 0，独立公共 harness 对每个变体均为 64/64，包括其 `large-frontier`
+512x512 随机洞用例。移植保真度另有直接证据：把原 `inpaint.cpp` 原样编入一个诊断翻译
+单元并使用本内核浮点标志，在该 fixture（每通道 65262 个洞内采样）上与已注册原生算子
+比较，三个通道的差异采样数均为 0。两个变体对相同调用也逐位可重复。
+
+历史记录：包管理器分发的 `libopencv_photo` 启用了 FMA 收缩（`icvInpaint` 内 48 条
+`fmadd`、18 条 `fmsub`）。同一源码以 `-ffp-contract=fast` 编译可逐位复现该分发版本，
+而不收缩版本在同一 512x512 fixture 上与其偏差可达冻结容差的 15 倍，因为顺序洞依赖会
+放大末位差异。该测量正是 profile、adapter 链接与原生移植统一绑定同一非收缩参考、而不
+使用分发版本的原因；原生翻译单元使用共享算子标志，没有单独覆盖。
+
+### 证据
+
+[`test_local_inpaint_navier_stokes.cpp`](../../../tests/integration/test_local_inpaint_navier_stokes.cpp)
+覆盖冻结验收矩阵，复现协调方 harness 的 fixture（radius 1/3/8/32 的块状洞、超出上界的
+尺寸、display reference、非有限中间量、异常标志恢复），并以同一源码重建为已安装
+consumer。映射、命令、证据与当前缺口记录在
+[`examples/inpaint_ns_workflow/README.md`](../../../examples/inpaint_ns_workflow/README.md)。
+独立 oracle 直接调用固定库处理 Float32 平面，洞采样置零并还原未遮蔽采样，绝不调用生产
+helper，且仅在 `pkg-config opencv4` 报告 4.12.0 时链接。
+
+```sh
+cmake -S . -B build/inpaint-ns -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_TESTING=ON -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build build/inpaint-ns --target test_local_inpaint_navier_stokes \
+  photospider_inpaint_ns_workflow -j 3
+ctest --test-dir build/inpaint-ns \
+  -R '^(test_local_inpaint_navier_stokes|example_inpaint_ns_workflow)$' \
+  --output-on-failure
+```
+
+`-DCMAKE_OSX_ARCHITECTURES=arm64` 是本 profile 的必要条件：已提供的 OpenCV 4.12.0
+构建仅含 arm64，翻译运行的 x86_64 配置无法链接。`pkg-config opencv4` 缺失或版本不符时
+adapter 以警告禁用，原生变体不受影响。

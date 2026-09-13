@@ -39,6 +39,7 @@ execute_process(
           "-DCMAKE_PREFIX_PATH:PATH=${_install_prefix}"
           "-DCMAKE_BUILD_TYPE:STRING=${PHOTOSPIDER_BUILD_CONFIG}"
           "-DPHOTOSPIDER_CONSUMER_SANITIZER:STRING=${PHOTOSPIDER_CONSUMER_SANITIZER}"
+          "-DPHOTOSPIDER_CONSUMER_INPAINT_ADAPTER:BOOL=${PHOTOSPIDER_OPENCV_INPAINT_ENABLED}"
   RESULT_VARIABLE _configure_result)
 if(NOT _configure_result EQUAL 0)
   message(FATAL_ERROR "Photospider consumer configure failed")

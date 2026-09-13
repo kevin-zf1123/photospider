@@ -42,6 +42,10 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_image_downsample_box,
                               register_mask_downsample_box,
                               register_image_brush_circle,
+                              register_image_local_inpaint_navier_stokes_native,
+#ifdef PHOTOSPIDER_HAS_OPENCV_INPAINT
+                              register_image_local_inpaint_navier_stokes_opencv,
+#endif
                               register_curve_sample_linear,
                               register_curve_sample_monotone,
                               register_field_apply_lut_1d,
