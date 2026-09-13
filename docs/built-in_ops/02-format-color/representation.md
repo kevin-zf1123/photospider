@@ -10,6 +10,10 @@
 
 ## 算子目录
 
+CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contract.md)的配套澄清：
+支持 Float32/Float64、rank 2～8、最后一轴为颜色通道，携带模型及适用的色域、白点、reference 和 transfer。
+该扩展保持 Proposed，不改变当前 typed Image/Layer 的实现契约。
+
 | ID / 提议操作 | 输入 → 输出 | 关键参数和建议默认 | 实现/支持与验收 |
 | --- | --- | --- | --- |
 | FMT-01 `channel.extract` | `[H,W,C]`→`[H,W]` | `channel` 必填，0-based或精确通道名；拒绝重复歧义 | copy/view；提取alpha保留coverage角色，提取L*保留其单位；RGB不变相转灰 |
@@ -52,9 +56,9 @@ OpenImageIO官方提供通道重排、premult/unpremult、色彩变换等独立�
 
 ## 数学核心
 
-`a≤0.04045` 时sRGB解码为 `a/12.92`，其他非负值为 `((a+0.055)/1.055)^2.4`。负值扩展另设策略。RGB原色转换使用线性值，经XYZ及所选白点适应，再到目标线性RGB。对编码RGB直接乘原色矩阵会得到不同结果。
+`a≤0.04045` 时sRGB解码为 `a/12.92`，其他非负值为 `((a+0.055)/1.055)^2.4`。新增 ColorArray 的 RGB ramp 采用对绝对值运算后恢复符号的扩展，见其具体规格；现有 typed 算子仍按已实现契约。RGB原色转换使用线性值，经XYZ及所选白点适应，再到目标线性RGB。对编码RGB直接乘原色矩阵会得到不同结果。
 
-Lab转换中 `f(t)=cbrt(t)` 当 `t>(6/29)^3`，否则 `t/(3(6/29)^2)+4/29`；`L*=116f(Y/Yn)-16`、`a*=500(f(X/Xn)-f(Y/Yn))`、`b*=200(f(Y/Yn)-f(Z/Zn))`。LCh为 `C=hypot(a,b)`、`h=wrap360(atan2(b,a)*180/pi)`，无彩时按显式策略。采样、白点与超范围策略影响结果，不能仅测试常见RGB颜色块。
+Lab转换中 `f(t)=cbrt(t)` 当 `t>(6/29)^3`，否则 `t/(3(6/29)^2)+4/29`；`L*=116f(Y/Yn)-16`、`a*=500(f(X/Xn)-f(Y/Yn))`、`b*=200(f(Y/Yn)-f(Z/Zn))`。LCh 的坐标转换使用 `C=hypot(a,b)`、弧度 `h=atan2(b,a)`，或显式输出 `atan2(b,a)/pi` 的 π 倍数；原点策略由对应转换规格定义。已有 LCh/HSL 输入的 hue 在 ramp/LUT 中保留原值与圈数，不做归一化或角度制转换。采样、白点与超范围策略影响结果，不能仅测试常见RGB颜色块。
 
 ## alpha 与 VFX 数据的边界
 

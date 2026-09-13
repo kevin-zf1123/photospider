@@ -2,7 +2,7 @@
 
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
-状态Proposed。标量插值/查表为D1，通用Path与LUT烘焙/求逆为D2。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；当前曲线与 field LUT 的 Whole 实现边界以链接契约为准。
+状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；范围外的通用 Path、3D 数值求逆等继续为后续设计。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；当前曲线与 field LUT 的 Whole 实现边界以链接契约为准。
 
 本轮控制点 generator 选择二次/三次 Bézier 锚点与相对控制柄，见
 [CRV-02 具体规格](op_specs/CRV-02_sample_bezier_function.md)。每个节点静态选择 degree，
@@ -15,17 +15,17 @@ strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其�
 
 | ID / 提议操作 | 输入 → 输出 | 参数与方法 | 验收 |
 | --- | --- | --- | --- |
-| CRV-01 interpolate | x[K],y[K,C],query[N]→[N,C] | x严格递增；默认linear，tone profile可选PCHIP；domain外默认error，可选clamp/linear extension | 控制点命中、重复x报错、端点与外推 |
+| CRV-01 interpolate family | 单函数 x[K],y[K],query[N]→[N]；多函数 x[K],y[K,C],query[N]→[N,C] | 单／多函数与 linear/PCHIP 共四个独立算子；动态 query、全局 x 校验、按请求 y；linear 三版本位一致，PCHIP 加速最终 4 ULP 并保持形状 | [具体规格](op_specs/CRV-01_interpolate.md)，Proposed；旧 sample_linear/monotone 接口单独记录 |
 | CRV-02 bezier_function | anchors/handle offsets+start/end/count → `values[N]`,`axis[3]` | 二次或三次；全局验证 x 单调，按命中段读取 y；先解 Bx(t)=x，再取 By(t)；允许尖角和 y 过冲 | [完整草稿](op_specs/CRV-02_sample_bezier_function.md)，Proposed；新接口尚未实现 |
-| CRV-03 parametric evaluate | curve+参数t→[N,D] | quadratic/cubic Bézier、Hermite/B-spline；允许x回转 | 端点、切线、退化段；路径语义另见paths |
-| CRV-04 bake_lut1d | expression/curve+domain→[N,C] | N=256建议、包含端点；输出不默认clip | 与连续函数的误差和顶点一致分别测 |
-| CRV-05 apply_lut1d | scalar/RGB+表→结果 | linear默认；domain/对应通道/越界必填 | RGB独立应用、灰阶和alpha策略 |
-| CRV-06 apply_color_ramp | scalar t+表→RGB/RGBA | 同一t取全部列；颜色插值空间与alpha规则 | 与三条独立LUT同shape不同输出 |
-| CRV-07 apply_lut3d | RGB+cube→RGB | tetrahedral建议，trilinear可选，axis order显式 | identity cube、网格顶点、六面、非可分离映射 |
-| CRV-08 shaper | HDR值→LUT坐标 | log/分段具名，domain、负值策略；不是tone map | HDR上界、暗部精度与inverse（若有） |
-| CRV-09 compose/bake | 纯颜色变换链→表/链 | domain、网格分辨率、误差预算必填 | 采样外独立测试；空间滤镜不可烘成固定颜色LUT |
-| CRV-10 invert | 单调曲线/可逆映射→逆或failure | 单调1D二分；3D数值逆为D2，多解/clip拒绝 | 双向误差、plateau与不可逆区明确 |
-| CRV-11 resample signal | positions/values→新positions/values | 插值与缩采样低通分开；Fourier仅显式periodic | 正弦混叠与非周期端点 |
+| CRV-03 evaluate_bezier | anchors/handles+segment_indices[N]+t[N]→[N,D] | 同阶二次／三次参数 Bézier；控制点 RN64 重建，strict 整式正确舍入、加速最终 4 ULP；按段／分量读取 | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed；端点只读锚点、允许回折与退化 |
+| CRV-04 bake_lut1d templates | 六种函数来源+start/end/count→values/axis | 六个独立命名组合模板；作者侧 profile 默认 strict；插值查询固定 Float64；输出按需请求 | [具体规格](op_specs/CRV-04_bake_lut1d.md)，Proposed；不自动保存或冻结，离散误差单独验收 |
+| CRV-05 apply_lut1d family | input+table[L] 或 table[L,C]+axis[3]→同形结果 | 单表与逐通道多表独立；共享动态轴、固定线性插值；三版本位一致；按请求表项／通道读取 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；单点表、反向轴和三种域外策略 |
+| CRV-06 color_ramp family | input+stops+颜色表（有理色相拆分整数分子/分母）→input.shape+[C] | RGB、CMYK、XYZ、CIELAB、CIELCh(ab)、OKLab、OKLCh、HSL、YCbCr 独立实现；携带通用颜色数组描述 | [具体规格](op_specs/CRV-06_color_ramp.md)，Proposed；九种模型已澄清，LCh/HSL 各三入口，原始 hue 保留圈数 |
+| CRV-07 apply_lut3d | 三分量颜色+table[N0,N1,N2,3]+axis[3,3]→同形颜色 | trilinear/tetrahedral 独立；八种模型，同模型内可改变描述；三版本整式正确舍入 | [具体规格](op_specs/CRV-07_apply_lut3d.md)，Proposed；全局轴校验、非零权重顶点按需、整颜色观察 |
+| CRV-08 shaper | 数值+共享 lower/upper→同形数值 | linear 正反为 remap 模板，log2 正反为 primitive；IEEE 值、无夹紧；log 加速 4 ULP 且单调 | [具体规格](op_specs/CRV-08_shaper.md)，Proposed；完整公式、端点精确、动态边界校验 |
+| CRV-09 bake_lut3d | 逐颜色 workflow+axis→table/axis/report | 同模型 3D 组合模板；固定网格、全单元中心＋额外点 Measured 验收；报告独立，表通过后发布 | [具体规格](op_specs/CRV-09_bake_lut3d.md)，Proposed；调用者声明逐颜色独立性，非全域误差证明 |
+| CRV-10 invert | x/y/query→反查 x | linear/PCHIP 独立；严格单调 y 升降序、reject/clamp；反解数学曲线，PCHIP 加速按 x 的 4 ULP 验收 | [具体规格](op_specs/CRV-10_invert.md)，Proposed；全局 x/y 校验，3D 逆暂不纳入 |
+| CRV-11 resample signal | positions/values→samples/positions；独立低通保持采样轴 | 四个插值模板；等/不等间距各五种低通核，后者连续折线卷积 | [具体规格](op_specs/CRV-11_resample_signal.md)，Proposed；明确核/边界/精度，低通不保证零混叠 |
 
 ## 插值选择
 
@@ -49,7 +49,7 @@ count=1 只在 start 求值且不读取 end。返回的 axis 保留起点、终�
 
 顺序query可线性扫描区间，预处理O(K)，求值O(K+N)；无序query可二分O(NlogK)。GPU可并行query，但完整表及shape需求要明确。动态表值变化应纳入绑定快照和缓存依赖，不隐式从可变文件读取。
 
-默认不将曲线输出clip到[0,1]。对width要求非负时在该语义层校验或显式clip；对颜色HDR允许超1，对hue用周期角度。LUT inverse不能通过倒置数组次序实现一般反函数。
+默认不将曲线输出clip到[0,1]。对width要求非负时在该语义层校验或显式clip；对颜色 HDR 的范围按模型规定；LCh/HSL 保留原始 hue 与圈数，直接插值，不归一化。LUT inverse不能通过倒置数组次序实现一般反函数。
 
 验收：x²在0,.5,1得0,.25,1；烘焙这三个点后线性查表.25得.125，准确表达离散表近似。控制点小扰动、PCHIP单调性、同shape不同arity、hue接缝与非单调inverse均需覆盖。概念链路为`expression/control points→curve→bake→apply→scope`。
 
