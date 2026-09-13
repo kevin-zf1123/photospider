@@ -20,6 +20,7 @@ cmake -S examples/statistics_workflow -B out/phase-a-delivery/statistics-consume
 cmake --build out/phase-a-delivery/statistics-consumer -j 8
 out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow
 out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow --large
+out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow --stage-admission
 ```
 
 ## Contract and independent reference
@@ -87,3 +88,17 @@ asserted by every source callback. They are independent of Result I/O paging;
 histogram fields, parameter reads and grade outputs continue to obey the
 24-byte selected window. Printed root `issued_stages` sums coordinator actions
 across all producers, and differs from each producer's poll limit.
+
+`--stage-admission` checks that the Histogram factory rejects
+`StatisticsSpec{2048,2048,65536}` with ResourceExhausted before source binding.
+The independent necessary count is `2048*ceil(2048/512)*ceil(65536/512) =
+1048576` source-request polls, exceeding the fixed 1000000-stage cap before
+output work. The factory rejects any profile whose required source polls leave
+no final consumption/publication poll. This lower bound does not guarantee
+that all accepted profiles fit their additional output/work/I/O budgets.
+Generic schemas and Parameters/Grade retain their existing size domain.
+
+The same command executes an empty 2x513 input with 513 bins. Two source strips
+per row and two counter passes require eight source polls plus one final poll:
+cap 9 succeeds with empty histogram and `[count,total,valid]=[0,0,0]`; cap 8
+fails and releases partial storage. These checks also run in the default suite.
