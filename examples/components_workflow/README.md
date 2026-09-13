@@ -20,6 +20,7 @@ cmake -S examples/components_workflow -B out/phase-a-delivery/components-consume
   -DCMAKE_PREFIX_PATH="$PWD/out/phase-a-delivery/install"
 cmake --build out/phase-a-delivery/components-consumer -j 8
 out/phase-a-delivery/components-consumer/photospider_components_workflow
+out/phase-a-delivery/components-consumer/photospider_components_workflow --large
 ```
 
 ## Independent expected results
@@ -81,7 +82,18 @@ Provisional storage is not inferred from the final one-row component table.
 The executable covers 32/64/256-byte windows, 528 isolated components with a
 paged binary-search area index, and a 100×100 connected input. Its 80,000-byte
 labels and 320,000-byte private UF exceed the **65,536-byte managed Host limit**.
-The last case measured a 38,273-byte Host peak in local validation. Actual page
+The default run also checks a 100x100 connected fixture at a 20000-stage
+producer limit; `--stage-regression` runs it alone. The earlier per-record
+poll implementation exhausts that limit.
+
+`--large` runs a 1000x1000 all-background image (K=0, maximum_count=0) and an
+all-foreground image (K=1, maximum_count=1). The latter has the sole component
+row `[1,1000000,0]`; threshold 1000000 preserves every pixel. Both run with
+1024-byte windows, the same 65536-byte managed Host limit, finite 200-million
+work budget and one-million-stage producer limit. All labels, area rows and
+filtered bytes are checked against independent BFS. Their local managed Host
+peaks were 38393 and 39209 bytes. Printed `issued_stages` counts coordinator
+actions across the DAG, not any individual producer's polls. Actual page
 padding writes and the complete association validator consume additional I/O
 and work, beyond logical field sizes.
 

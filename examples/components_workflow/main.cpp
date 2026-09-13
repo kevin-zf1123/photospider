@@ -175,7 +175,8 @@ struct Sink {
 void run(const char* name, std::uint64_t h, std::uint64_t w,
          std::vector<std::uint8_t> mask, std::int64_t threshold = 2,
          std::uint64_t window = 64, std::uint64_t maximum = 1048576,
-         unsigned failure = 0, std::uint64_t work = 10000000) {
+         unsigned failure = 0, std::uint64_t work = 10000000,
+         std::uint32_t stages = 1000000) {
   check(mask.size() == h * w, "fixture dimensions");
   const auto reference = bfs(mask, w, threshold);
   ComponentsSpec spec{h, w, maximum, ComponentIdScheme::MinPixel};
@@ -274,7 +275,7 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
     ExecutionOptions options;
     options.maximum_result_window_bytes = window;
     options.maximum_dependency_work = work;
-    options.dependencies.maximum_stages = 1000000;
+    options.dependencies.maximum_stages = stages;
     if (failure == 4)
       graph.replace(doc);
     result =
@@ -370,11 +371,27 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
   std::cout << name << " passed HW=" << h << 'x' << w
             << " K=" << reference.rows.size() << " window=" << window
             << " host_peak=" << root.statistics().peak[ResourceKind::Host]
+            << " issued_stages=" << root.statistics().issued.stages
             << " source_reads=" << reads << '\n';
 }
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--large") {
+      run("million-empty", 1000, 1000, std::vector<std::uint8_t>(1000000, 0), 1,
+          1024, 0, 0, 200000000);
+      run("million-connected", 1000, 1000,
+          std::vector<std::uint8_t>(1000000, 1), 1000000, 1024, 1, 0,
+          200000000);
+      return 0;
+    }
+    run("stage-regression", 100, 100, std::vector<std::uint8_t>(10000, 1),
+        10000, 1024, 1, 0, 10000000, 20000);
+    if (argc == 2 && std::string(argv[1]) == "--stage-regression")
+      return 0;
+    check(
+        argc == 1,
+        "usage: photospider_components_workflow [--large|--stage-regression]");
     for (auto window : {32U, 64U, 256U}) {
       run("empty", 2, 3, {0, 0, 0, 0, 0, 0}, 2, window, 0);
       run("same-root", 2, 2, {1, 1, 1, 1}, 4, window, 1);

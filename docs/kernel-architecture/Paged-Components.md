@@ -48,7 +48,7 @@ publication. Page, disk and work exhaustion remain ResourceExhausted failures.
    unions, updating both address and record when another root wins.
 3. Find neighbour roots by bounded paged parent reads. Same-root union is a
    no-op. Otherwise link by rank, sum disjoint areas and take the minimum
-   position. Finish both writes before evaluating the next neighbour. Non-root
+   position. Apply both cached record updates before the next neighbour. Non-root
    area/minimum fields may be stale and are never used as root facts.
 4. Once every edge is processed, scan pixels again and find roots. Emit
    `minimum+1` as the label. Append `[id,area,minimum]` only when the scanned
@@ -95,9 +95,18 @@ Create, Extend and dependent writes are separate coordinator stages. Source,
 union and output windows are at most min(user page,1024) bytes. Labels requires
 at least a 32-byte window; area/filter require at least 24 bytes. Two output
 slabs and a possible smaller final table copy have bounded overlapping
-capacity. The declared callback workspace is 4096 bytes; all read-window owners,
-metadata and persistent fields remain separately charged to the root. UF is
-released after the final append applies, before association validation.
+capacity. Labels retains four mutable LRU pages across edge processing, parent
+finds, both union updates and final emission. A dirty victim is written before
+its replacement is read; cache hits continue within the current poll. Both
+union records are resident before either cached update is applied. Emission
+uses the same cache, so it sees the latest root facts. After the final append,
+remaining private dirty pages can be discarded with UF: no later stage reads
+that private tree. Association validation consumes only the published fields.
+
+Labels declares 8192 bytes of callback workspace, including at most 4096 bytes
+of cached tree payload and the bounded output slabs/tail copy. Area and filter
+retain their 4096-byte workspace. All read-window owners, metadata and
+persistent fields remain separately charged to the root.
 
 Union and final root discovery cost O(N log N), index copying/verification O(K),
 and filtering O(N log K). The existing Components validator additionally costs

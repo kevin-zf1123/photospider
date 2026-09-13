@@ -105,6 +105,9 @@ struct State {
     Find,
     Found,
     UnionWritten,
+    CacheEvict,
+    CacheRead,
+    CacheReady,
     Emit,
     EmitReady,
     EmitWritten,
@@ -133,6 +136,15 @@ struct State {
   Record root_record{}, found_record{};
   TemporaryStorage tree;
   MutableBuffer labels, table;
+  struct TreePage {
+    MutableBuffer bytes;
+    std::uint64_t first = 0, rows = 0, stamp = 0;
+    bool dirty = false;
+  };
+  std::array<TreePage, 4> tree_pages;
+  std::uint64_t cache_clock = 0, cache_first = 0, cache_rows = 0;
+  unsigned cache_slot = 0;
+  Stage cache_resume = Edges;
   std::array<ResultRef, 2> input;
   std::array<ResultDescriptor, 2> descriptors;
   std::shared_ptr<const CpuStorage> label_page, index_page;
@@ -212,23 +224,47 @@ struct State {
     return result.ok() ? Poll(ResultPublication{result.take_value(), true})
                        : Poll(result.status());
   }
-  Result<ResultWriteTemporary> write_record(const ResultProgramPhase& p,
-                                            std::uint64_t id, Record record) {
-    auto memory = p.allocator.allocate(32);
-    if (!memory.ok())
-      return Result<ResultWriteTemporary>(memory.status());
-    auto buffer = memory.take_value();
-    std::memcpy(buffer.data(), record.data(), 32);
-    return Result<ResultWriteTemporary>(
-        ResultWriteTemporary{tree, (id - 1) * 32, std::move(buffer).freeze()});
+  int cached(std::uint64_t id) {
+    const auto row = id - 1;
+    for (unsigned i = 0; i < tree_pages.size(); ++i) {
+      auto& page = tree_pages[i];
+      if (page.rows && row >= page.first && row - page.first < page.rows) {
+        page.stamp = ++cache_clock;
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
   }
-  Record record(const ResultProgramPhase& p) {
-    Record value;
-    std::memcpy(
-        value.data(),
-        std::get<std::shared_ptr<const CpuStorage>>(p.io.at(0))->bytes().data(),
-        32);
-    return value;
+  void request_page(const ResultProgramPhase& p, std::uint64_t id,
+                    Stage resume) {
+    const auto rows = window(p) / 32;
+    cache_first = ((id - 1) / rows) * rows;
+    cache_rows = std::min(n - cache_first, rows);
+    cache_slot = 0;
+    for (unsigned i = 0; i < tree_pages.size(); ++i) {
+      if (!tree_pages[i].rows) {
+        cache_slot = i;
+        break;
+      }
+      if (tree_pages[i].stamp < tree_pages[cache_slot].stamp)
+        cache_slot = i;
+    }
+    cache_resume = resume;
+    stage = CacheEvict;
+  }
+  Record cached_record(unsigned slot, std::uint64_t id) {
+    Record result;
+    auto& page = tree_pages[slot];
+    std::memcpy(result.data(), page.bytes.data() + (id - 1 - page.first) * 32,
+                32);
+    return result;
+  }
+  void store_record(unsigned slot, std::uint64_t id, const Record& value) {
+    auto& page = tree_pages[slot];
+    std::memcpy(page.bytes.data() + (id - 1 - page.first) * 32, value.data(),
+                32);
+    page.dirty = true;
+    page.stamp = ++cache_clock;
   }
   Poll emit(const ResultProgramPhase& p) {
     if (!labels.size()) {
@@ -291,9 +327,9 @@ struct State {
     stage = EmitWritten;
     if (!need.io.empty())
       return Poll(std::move(need));
-    // No publication or I/O is required for a partly filled output page.
+    // Continue in the outer state loop instead of recursing on cache hits.
     stage = Emit;
-    return poll(p);
+    return Poll(std::move(need));
   }
   Poll poll(const ResultProgramPhase& p) {
     if (window(p) < (op == Op::Labels ? 32U : 24U))
@@ -396,19 +432,66 @@ struct State {
               {ResultWriteTemporary{tree, offset,
                                     std::move(buffer).freeze()}}});
         }
-        case Edges:
+        case CacheEvict: {
+          auto& page = tree_pages[cache_slot];
+          stage = CacheRead;
+          if (page.dirty) {
+            page.dirty = false;
+            page.rows = 0;
+            return Poll(ResultProgramNeed{
+                {},
+                {},
+                {ResultWriteTemporary{tree, page.first * 32,
+                                      std::move(page.bytes).freeze()}}});
+          }
+          page.bytes = {};
+          page.rows = 0;
+          break;
+        }
+        case CacheRead:
+          stage = CacheReady;
+          return Poll(ResultProgramNeed{
+              {},
+              {},
+              {ResultReadTemporary{tree, cache_first * 32, cache_rows * 32}}});
+        case CacheReady: {
+          auto fuel = p.consume_work(cache_rows * 4);
+          if (!fuel.ok())
+            return Poll(fuel);
+          auto memory = p.allocator.allocate(cache_rows * 32);
+          if (!memory.ok())
+            return Poll(memory.status());
+          auto& page = tree_pages[cache_slot];
+          page.bytes = memory.take_value();
+          std::memcpy(page.bytes.data(),
+                      std::get<std::shared_ptr<const CpuStorage>>(p.io.at(0))
+                          ->bytes()
+                          .data(),
+                      cache_rows * 32);
+          page.first = cache_first;
+          page.rows = cache_rows;
+          page.stamp = ++cache_clock;
+          page.dirty = false;
+          stage = cache_resume;
+          break;
+        }
+        case Edges: {
           if (position == n) {
             position = 0;
             stage = Emit;
             break;
           }
+          const auto slot = cached(position + 1);
+          if (slot < 0) {
+            request_page(p, position + 1, Edges);
+            break;
+          }
+          root_record =
+              cached_record(static_cast<unsigned>(slot), position + 1);
           stage = EdgeReady;
-          return Poll(ResultProgramNeed{
-              {},
-              {},
-              {ResultReadTemporary{tree, position * 32, 32}}});
+          break;
+        }
         case EdgeReady: {
-          root_record = record(p);
           auto fuel = p.consume_work(1);
           if (!fuel.ok())
             return Poll(fuel);
@@ -441,16 +524,21 @@ struct State {
           stage = Find;
           break;
         }
-        case Find:
-          if (!find_id || find_id > n || ++hops > 64)
+        case Find: {
+          if (!find_id || find_id > n)
             return Poll(invalid("invalid bounded union parent path"));
+          const auto slot = cached(find_id);
+          if (slot < 0) {
+            request_page(p, find_id, Find);
+            break;
+          }
+          if (++hops > 64)
+            return Poll(invalid("invalid bounded union parent path"));
+          found_record = cached_record(static_cast<unsigned>(slot), find_id);
           stage = Found;
-          return Poll(ResultProgramNeed{
-              {},
-              {},
-              {ResultReadTemporary{tree, (find_id - 1) * 32, 32}}});
+          break;
+        }
         case Found: {
-          found_record = record(p);
           auto fuel = p.consume_work(1);
           if (!fuel.ok())
             return Poll(fuel);
@@ -493,23 +581,32 @@ struct State {
           root_record[2] = std::min(root_record[2], found_record[2]);
           root_record[3] += found_record[3];
           found_record[0] = static_cast<std::int64_t>(root_id);
-          {
-            auto winner = write_record(p, root_id, root_record),
-                 loser = write_record(p, find_id, found_record);
-            if (!winner.ok() || !loser.ok())
-              return Poll(!winner.ok() ? winner.status() : loser.status());
-            stage = UnionWritten;
-            return Poll(
-                ResultProgramNeed{{},
-                                  {},
-                                  {winner.take_value(), loser.take_value()}});
-          }
+          stage = UnionWritten;
+          break;
         }
-        case UnionWritten:
+        case UnionWritten: {
+          // Arithmetic above runs once. Page misses resume this commit, not
+          // Found, and cannot add rank/area or advance a neighbour twice.
+          const auto winner = cached(root_id);
+          if (winner < 0) {
+            request_page(p, root_id, UnionWritten);
+            break;
+          }
+          const auto loser = cached(find_id);
+          if (loser < 0) {
+            request_page(p, find_id, UnionWritten);
+            break;
+          }
+          store_record(static_cast<unsigned>(winner), root_id, root_record);
+          store_record(static_cast<unsigned>(loser), find_id, found_record);
           stage = Neighbour;
           break;
+        }
         case Emit:
           if (position == n) {
+            // No later reader observes private union pages; discard dirty
+            // cache only after every output append has completed.
+            tree_pages = {};
             tree = {};
             stage = Finish;
             break;
@@ -519,8 +616,13 @@ struct State {
           emit_find = true;
           stage = Find;
           break;
-        case EmitReady:
-          return emit(p);
+        case EmitReady: {
+          auto emitted = emit(p);
+          if (!emitted.ok() ||
+              !std::get<ResultProgramNeed>(emitted.value()).io.empty())
+            return emitted;
+          break;
+        }
         case EmitWritten:
           stage = Emit;
           break;
@@ -725,7 +827,7 @@ Result<OperationDefinition> make_component_operation(
   auto& traits = definition.traits;
   traits.input_count = operation == Op::Filter ? 2 : 1;
   traits.input_schema.resize(traits.input_count);
-  traits.workspace_bytes = 4096;
+  traits.workspace_bytes = operation == Op::Labels ? 8192 : 4096;
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
   out.dependency_version = 2;

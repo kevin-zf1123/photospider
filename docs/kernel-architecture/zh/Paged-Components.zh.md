@@ -43,7 +43,7 @@ OperationFailed/InvalidDomain，origin 为 Domain，scope 为 Group。页、磁�
    当前像素首次处理边之前仍是自身根，因为先前像素只访问更小索引。在两次
    合并之间保留当前组件根；其他根获胜时同时更新地址和完整 record。
 3. 通过有界分页 parent 读取查找邻根。同根不重复合并；不同根按 rank 连接，
-   对不交集合面积求和、对位置取最小值。两次写入完成后才处理下一个邻居。
+   对不交集合面积求和、对位置取最小值。两个缓存记录都更新后才处理下一个邻居。
    非根 area/minimum 可以过时，不能作为根事实使用。
 4. 全部边完成后重新扫描像素并查根，输出 label=`minimum+1`；仅在扫描像素
    等于 minimum 时追加 `[id,area,minimum]`，自然形成唯一有序表，无需驻留
@@ -78,8 +78,15 @@ UF 占 32*N 逻辑磁盘字节，按 4096 字节编码 extent 准入。Create、
 依赖写入是不同 coordinator 阶段。source、union、输出窗口最多为
 min(user page,1024) 字节。Labels 至少需要 32 字节窗口，area/filter 至少
 需要 24 字节。两个输出 slab 和可能更小的最后表复制具有有限重叠容量。
-声明的 callback workspace 为 4096 字节，读取窗口 owner、metadata 及跨
-阶段字段另按实际所有权计入根预算。最后 append 完成后释放 UF，再验证关联。
+Labels 在 edge、parent find、两条 union 更新和最终 emit 之间保留四个可写
+LRU 页。替换脏页时先写出再读取新页；命中缓存时在当前 poll 内继续。两个
+union 记录都驻留后才应用缓存更新。emit 使用同一缓存，能读取最新根事实。
+最后 append 完成后可将剩余私有脏页和 UF 一起丢弃，因为后续不再读取私有树；
+关联验证只消费发布字段。
+
+Labels 声明 8192 字节 callback workspace，包含最多 4096 字节缓存树 payload
+以及有界输出 slab/尾页复制。area/filter 仍声明 4096 字节。读取窗口 owner、
+metadata 及跨阶段字段另按实际所有权计入根预算。
 
 Union 和最终查根为 O(N log N)，索引复制/比较 O(K)，过滤 O(N log K)。现有
 Components validator 另需 O(NK+N log K) 工作，在 labels/table 间切换时
