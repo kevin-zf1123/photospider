@@ -14,6 +14,17 @@ Int64 HW and UInt8 HW; mask values other than zero select samples. Selected
 integers must be in `[0,bins)`. There is no implicit color, luminance or transfer
 conversion. Masked-out samples may lie outside the bin domain.
 
+The Histogram factory also checks a necessary stage lower bound before source
+binding or execution: `S=H*ceil(W/512)*ceil(bins/512)` source-request polls,
+followed by at least one poll to consume the last reply and finish. It returns
+ResourceExhausted when `S>=1000000`, the recipe's fixed producer cap. The
+comparison uses division, so extreme valid dimensions cannot overflow the
+admission calculation. For example, 2048x2048 with 65536 bins is rejected since
+S=1048576. This is a recipe admission restriction; the generic schema,
+Parameters and Grade factories retain their existing size domain. Passing this
+lower-bound check does not reserve output stages or guarantee completion:
+populated rows, selected I/O windows and Run budgets can still exhaust limits.
+
 Version-one schemas have a canonical `integer_statistics_v1` metadata facet
 containing profile 1, H, W and bins as four little-endian UInt64 words.
 
@@ -108,3 +119,8 @@ not certified bounds. The `--large` workflow checks 200x200 samples, 65536 bins
 and a 24-byte Result window at the existing one-million-stage producer cap;
 a smaller regression fixes the producer envelope at 5000 stages. All source
 callbacks assert the independent 4096-byte strip cap.
+
+The `--stage-admission` example checks the rejected 2048x2048 profile without
+source binding. It also executes an empty 2x513/B513 histogram through real
+callbacks: eight source-request polls plus one final poll succeed at cap 9;
+cap 8 fails with `structured stage limit` and releases partial resources.

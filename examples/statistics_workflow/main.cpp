@@ -155,7 +155,8 @@ struct Sink {
 void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
          bool grade = true, std::uint64_t work = 10000000,
          std::uint64_t host = 65536, std::uint64_t height = 1,
-         std::uint64_t disk = UINT64_MAX, std::uint32_t stages = 100000) {
+         std::uint64_t disk = UINT64_MAX, std::uint32_t stages = 100000,
+         bool stage_exhausted = false) {
   const StatisticsSpec spec{height, n / height,
                             variant == 10 || variant == 11 ? 513U
                             : variant == 8                 ? 65536U
@@ -298,12 +299,17 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
             "retained old snapshot and new snapshot totals");
     }
   }
-  const bool expected_failure =
-      variant == 4 || (grade && (variant == 2 || variant == 3)) ||
-      window < 24 || work < 1000 || host < 65536 || disk < 8192 || variant == 9;
+  const bool expected_failure = variant == 4 ||
+                                (grade && (variant == 2 || variant == 3)) ||
+                                window < 24 || work < 1000 || host < 65536 ||
+                                disk < 8192 || variant == 9 || stage_exhausted;
   if (expected_failure) {
     check(!result.ok(), "expected domain/resource failure");
-    if (variant == 9)
+    if (stage_exhausted)
+      check(result.status().code == ErrorCode::ResourceExhausted &&
+                result.status().message == "structured stage limit",
+            "source polls still need a final consumption/publication poll");
+    else if (variant == 9)
       check(result.status().code == ErrorCode::Cancelled,
             "cancel after histogram publication");
     else if (window < 24 || work < 1000 || host < 65536 || disk < 8192)
@@ -388,6 +394,21 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
 }  // namespace
 int main(int argc, char** argv) {
   try {
+    const auto rejected = make_statistics_operation(
+        StatisticsOperation::Histogram, {2048, 2048, 65536});
+    check(
+        !rejected.ok() &&
+            rejected.status().code == ErrorCode::ResourceExhausted &&
+            rejected.status().message ==
+                "histogram required source stages exceed operation stage limit",
+        "reject impossible source-stage profile before source binding");
+    std::cout << "rejected 2048x2048 bins=65536 before source binding: "
+              << rejected.status().message << '\n';
+    // Empty 2x513/B513: two strips per row, two passes, then one final poll.
+    run(1026, 24, 11, false, 10000000, 65536, 2, UINT64_MAX, 9);
+    run(1026, 24, 11, false, 10000000, 65536, 2, UINT64_MAX, 8, true);
+    if (argc == 2 && std::string(argv[1]) == "--stage-admission")
+      return 0;
     if (argc == 2 && std::string(argv[1]) == "--large") {
       run(40000, 24, 8, true, 100000000, 65536, 200, 1ULL << 30, 1000000);
       return 0;
@@ -395,9 +416,9 @@ int main(int argc, char** argv) {
     run(1000, 24, 8, true, 10000000, 65536, 25, 1ULL << 30, 5000);
     if (argc == 2 && std::string(argv[1]) == "--stage-regression")
       return 0;
-    check(
-        argc == 1,
-        "usage: photospider_statistics_workflow [--large|--stage-regression]");
+    check(argc == 1,
+          "usage: photospider_statistics_workflow "
+          "[--large|--stage-regression|--stage-admission]");
     for (auto n : {1U, 17U, 1003U})
       for (auto window : {64U, 256U, 4096U})
         run(n, window);

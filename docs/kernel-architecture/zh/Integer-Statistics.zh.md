@@ -13,6 +13,14 @@ protocol 2、根预算准入、强制临时存储和既有共享 Result 生命�
 facet 的 Int64 HW 数值和 UInt8 HW mask，非零 mask 选择样本。被选择的整数
 必须位于 `[0,bins)`；未选择值可以超出范围。不隐含颜色、亮度或传递函数转换。
 
+Histogram 工厂还在源绑定和执行前检查必需阶段下界：
+`S=H*ceil(W/512)*ceil(bins/512)` 次源请求 poll，随后至少再用一次 poll 消费
+最后回复并结束。若 `S>=1000000`，则超过该 recipe 的固定生产者上限，返回
+ResourceExhausted。比较使用除法，极大的合法尺寸不会造成准入计算溢出。
+例如 2048×2048、65536 bins 的 S=1048576，会被提前拒绝。此限制仅属于该
+recipe；通用 schema、Parameters 和 Grade 工厂保持既有尺寸域。通过下界检查
+不代表预留了输出阶段或保证完成：非空行、所选 I/O 窗口和 Run 预算仍可导致超限。
+
 版本 1 的 `integer_statistics_v1` metadata facet 按四个 little-endian UInt64
 保存 profile 1、H、W 和 bins。
 
@@ -84,3 +92,7 @@ histogram、跨行 HW、小窗口和预算、cache-off 别名、不同 Run 快�
 `--large` workflow 在既有一百万生产者阶段上限内检查 200×200 样本、65536 bins
 和 24 字节 Result 窗口；较小回归把生产者上限固定为 5000。所有源 callback
 都断言独立的 4096 字节 strip 上限。
+
+`--stage-admission` 示例在源绑定前检查 2048×2048 配置被拒绝；另通过真实
+callback 执行空的 2×513/B513 histogram：八次源请求 poll 加一次结束 poll，
+上限 9 时成功，上限 8 时返回 `structured stage limit` 并释放部分资源。

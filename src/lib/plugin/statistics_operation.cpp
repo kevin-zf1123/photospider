@@ -16,6 +16,9 @@ namespace {
 using Op = StatisticsOperation;
 using Rep = StatisticsRepresentation;
 using Poll = Result<ResultProgramPoll>;
+constexpr std::uint32_t kStatisticsMaximumStages = 1000000;
+constexpr std::uint32_t kHistogramBlockBins = 512;
+constexpr std::uint64_t kHistogramSourceBytes = 4096;
 Status domain(const char* message) {
   return {ErrorCode::OperationFailed,
           message,
@@ -133,7 +136,7 @@ struct State {
     // A small Result I/O window must not multiply all source scan stages.
     const auto source_bytes =
         op == Op::Histogram
-            ? UINT64_C(4096)
+            ? kHistogramSourceBytes
             : std::min<std::uint64_t>(4096, phase.query.page_bytes);
     batch = std::min(
         {size() - row, spec.width - row % spec.width, source_bytes / 8});
@@ -194,7 +197,7 @@ struct State {
         if (!fuel.ok())
           return Poll(fuel);
         counters = ResourceVector<std::int64_t>(
-            std::min<std::uint32_t>(spec.bins, 512), 0,
+            std::min<std::uint32_t>(spec.bins, kHistogramBlockBins), 0,
             ResourceAllocator<std::int64_t>(phase.resources,
                                             ResourceAllocationKind::Payload));
       }
@@ -454,6 +457,17 @@ Result<OperationDefinition> make_statistics_operation(
   auto schema = statistics_schema(static_cast<Rep>(index), spec);
   if (!schema.ok())
     return Result<OperationDefinition>(schema.status());
+  if (op == Op::Histogram) {
+    const auto strips =
+        1 + (spec.width - 1) / (kHistogramSourceBytes / sizeof(std::int64_t));
+    const auto passes = 1 + (spec.bins - 1) / kHistogramBlockBins;
+    // Every strip needs a poll in every pass, plus at least one final poll.
+    // Divide the available stage count instead of multiplying dimensions.
+    if (spec.height > (kStatisticsMaximumStages - 1) / strips / passes)
+      return Result<OperationDefinition>(Status{
+          ErrorCode::ResourceExhausted,
+          "histogram required source stages exceed operation stage limit"});
+  }
   OperationDefinition definition;
   definition.key = op == Op::Histogram    ? "statistics.histogram"
                    : op == Op::Parameters ? "statistics.parameters"
@@ -466,7 +480,7 @@ Result<OperationDefinition> make_statistics_operation(
   out.region_rule = OperationRegionRule::Dependency;
   out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
-  out.maximum_dependency_stages = 1000000;
+  out.maximum_dependency_stages = kStatisticsMaximumStages;
   out.result_schema = schema.take_value();
   out.output_schema.kind = OperationPortKind::Result;
   out.output_schema.result_schema_id = std::string(out.result_schema->id);

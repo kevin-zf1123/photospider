@@ -23,6 +23,12 @@ enum class StatisticsOperation : std::uint32_t {
  * never hidden as an empty graded image. Every Result association is sealed;
  * dependency support is Conservative, with shared global support plus a compact
  * identity relation for each grade sample. Physical windows do not change keys.
+ * @return A definition, or the schema validation error. Histogram additionally
+ * returns ResourceExhausted before source binding when
+ * H*ceil(W/512)*ceil(bins/512) >= 1000000: required source polls alone leave no
+ * final poll within this recipe's fixed stage cap. This lower-bound check does
+ * not admit output I/O or guarantee completion under the Run's resource limits.
+ * Parameters, Grade and statistics_schema do not impose this scan restriction.
  */
 PHOTOSPIDER_API Result<OperationDefinition> make_statistics_operation(
     StatisticsOperation operation, const StatisticsSpec& spec);
