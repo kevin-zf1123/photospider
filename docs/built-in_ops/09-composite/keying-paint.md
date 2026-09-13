@@ -1,6 +1,14 @@
 # 抠像、绘制与修补
 
-状态Proposed。阈值key、clone与简单despill为D1；matting、heal、patch搜索为D2；生成式处理见模型规划。输入图像、hole/edit mask、允许采样区域、参考层和原始快照分别提供。默认Float32、线性或算法声明的颜色域；alpha/coverage/confidence/labels不可混用。
+除下述已实现条目外，状态为 Proposed。阈值key、clone与简单despill为D1；matting、heal、patch搜索为D2；生成式处理见模型规划。输入图像、hole/edit mask、允许采样区域、参考层和原始快照分别提供。默认Float32、线性或算法声明的颜色域；alpha/coverage/confidence/labels不可混用。
+
+## 已实现条目
+
+PNT-05A `local_inpaint_navier_stokes` 已提供 native Apple Silicon 与可选 OpenCV
+两个算子。输入为不透明线性 RGBA 与二值 hole mask，必填 Int64 `radius` 为
+1..32，使用 Whole 依赖。详见[规格书](op_specs/PNT-05A_local_inpaint_navier_stokes.md)
+及[实现、公开 workflow 与验收说明](inpaint-ns-implementation.md)。验收说明保留了
+推断阶段检查和部分取消、缓存测试的覆盖边界。
 
 ## 算子目录
 

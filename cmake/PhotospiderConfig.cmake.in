@@ -2,6 +2,9 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+if(@PHOTOSPIDER_ENABLE_INPAINT_OPENCV@)
+  find_dependency(OpenCV 4.12.0 EXACT COMPONENTS core photo)
+endif()
 
 set(Photospider_kernel_FOUND TRUE)
 set(Photospider_operation_sdk_FOUND TRUE)

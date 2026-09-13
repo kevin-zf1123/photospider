@@ -68,6 +68,10 @@ if(PHOTOSPIDER_ENABLE_ASAN OR PHOTOSPIDER_ENABLE_TSAN)
 endif()
 
 find_package(Threads REQUIRED)
+option(PHOTOSPIDER_ENABLE_INPAINT_OPENCV "Build pinned OpenCV 4.12.0 inpaint adapter" OFF)
+if(PHOTOSPIDER_ENABLE_INPAINT_OPENCV)
+  find_package(OpenCV 4.12.0 EXACT REQUIRED COMPONENTS core photo)
+endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_constant.cpp
@@ -130,6 +134,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/08-transform/image_split_horizontal.cpp
   plugins/ops/08-transform/mask_downsample_box.cpp
   plugins/ops/09-composite/image_brush_circle.cpp
+  plugins/ops/09-composite/image_local_inpaint_navier_stokes.cpp
+  plugins/ops/09-composite/inpaint_ns_native.cpp
   plugins/ops/09-composite/image_mask.cpp
   plugins/ops/09-composite/image_mix.cpp
   plugins/ops/09-composite/image_opacity.cpp
@@ -137,6 +143,10 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/10-analysis/analysis_histogram.cpp
   plugins/ops/10-analysis/analysis_histogram_out_of_range.cpp
 )
+
+if(PHOTOSPIDER_ENABLE_INPAINT_OPENCV)
+  list(APPEND PHOTOSPIDER_OPERATION_SOURCES plugins/ops/09-composite/inpaint_ns_opencv.cpp)
+endif()
 
 set(
   PHOTOSPIDER_KERNEL_SOURCES
@@ -283,6 +293,11 @@ function(photospider_configure_kernel_target target)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
   target_compile_definitions(${target} PRIVATE PHOTOSPIDER_BUILD)
+  if(PHOTOSPIDER_ENABLE_INPAINT_OPENCV)
+    target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_INPAINT_OPENCV)
+    target_include_directories(${target} SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE opencv_core opencv_photo)
+  endif()
   if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
     target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_METAL)
     target_link_libraries(${target} PRIVATE "-framework Metal" "-framework Foundation")
@@ -369,6 +384,7 @@ install(
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Photospider)
 
 add_subdirectory(plugins/ops/rgba32f EXCLUDE_FROM_ALL)
+add_subdirectory(examples/inpaint_ns_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
@@ -832,4 +848,16 @@ if(BUILD_TESTING)
       "-DPHOTOSPIDER_GENERATOR_TOOLSET:STRING=${CMAKE_GENERATOR_TOOLSET}"
       "-DPHOTOSPIDER_CONSUMER_SANITIZER:STRING=${PHOTOSPIDER_SANITIZER_MODE}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunInstalledConsumer.cmake")
+endif()
+
+install(FILES plugins/ops/09-composite/inpaint_ns_license.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
+
+if(BUILD_TESTING)
+  photospider_add_test(test_inpaint_ns Photospider::kernel tests/integration/test_inpaint_ns.cpp)
+  target_include_directories(test_inpaint_ns PRIVATE examples)
+  if(PHOTOSPIDER_ENABLE_INPAINT_OPENCV)
+    target_include_directories(test_inpaint_ns SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_compile_definitions(test_inpaint_ns PRIVATE PHOTOSPIDER_TEST_INPAINT_OPENCV)
+    target_link_libraries(test_inpaint_ns PRIVATE opencv_core opencv_photo)
+  endif()
 endif()
