@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "image_fixture.hpp"  // NOLINT(build/include_subdir)
@@ -42,7 +43,8 @@ void print_value(const std::string& label, const ps::Value& value) {
 
 bool diagnostics_match(const ps::ExecutionDiagnostics& diagnostics,
                        const std::string& plan) {
-  if (diagnostics.plan_digest != plan || diagnostics.result_digest.empty() ||
+  if (std::string_view(diagnostics.plan_digest) != plan ||
+      diagnostics.result_digest.empty() ||
       diagnostics.operation_timings.size() != 2 ||
       diagnostics.selected_backends.size() != 2 ||
       diagnostics.transfer_count != 0 || diagnostics.transfer_bytes != 0 ||
@@ -117,7 +119,7 @@ void run(const std::shared_ptr<ps::OperationRegistry>& operations) {
             << "raw analyze_us=" << workflow.diagnostics.analyze_us
             << " optimize_us=" << workflow.diagnostics.optimize_us
             << " plan_us=" << workflow.diagnostics.plan_us << '\n';
-  std::vector<std::string> result_digests;
+  std::vector<ps::ResourceString> result_digests;
   for (bool second : {false, true}) {
     const auto bindings = s1_fixture::bindings(second);
     const auto result = execution.execute(workflow.plan, bindings);

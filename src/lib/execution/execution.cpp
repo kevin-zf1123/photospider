@@ -25,9 +25,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/stored_failure.hpp"
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
-#include "execution/dependency_cache_identity.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -37,6 +37,9 @@
 #include "execution/native_gpu.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/result_identity.hpp"
+#include "execution/shared_results.hpp"
+#include "execution/structured_execution.hpp"
+#include "plugin/dependency_identity.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -215,6 +218,8 @@ struct QueuedCallback final {
   /** @brief Optional completion notification after the callback body retires.
    */
   std::function<void()> retired = {};
+  /** @brief Shared envelope lease; only its waiting slot retires at entry. */
+  ResourceLease managed_queue;
 };
 
 /**
@@ -334,6 +339,11 @@ class ThreadPool final {
         callbacks_.pop_front();
       }
       callback.admission.release();
+      if (callback.managed_queue.valid()) {
+        ResourceCapacity waiting;
+        waiting[ResourceKind::Queue] = 1;
+        (void)callback.managed_queue.shrink(waiting);
+      }
       try {
         callback.callback();
       } catch (...) {
@@ -866,7 +876,17 @@ struct ExecutionContext::Impl final {
 #endif
         maximum_waiting_callbacks(requested.maximum_queued_tasks),
         operation_registry(std::move(operations)),
-        budget(std::make_shared<MemoryBudget>(requested.maximum_live_bytes)),
+        budget(std::make_shared<MemoryBudget>(
+            requested.maximum_live_bytes,
+            requested.managed_resources
+                ? [&] {
+                    auto limits = *requested.managed_resources;
+                    const auto payload_limit = limits.capacity[ResourceKind::Payload];
+                    limits.capacity[ResourceKind::Payload] =
+                        std::min(payload_limit, requested.maximum_live_bytes);
+                    return std::make_shared<ResourceBudget>(std::move(limits));
+                  }()
+                : nullptr)),
         waiting_admission(maximum_waiting_callbacks),
         cpu_pool(cpu_worker_count, Backend::Cpu) {
     if (!operation_registry || !operation_registry->frozen()) {
@@ -934,12 +954,34 @@ struct ExecutionContext::Impl final {
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
   std::shared_ptr<execution_internal::DemandCoordinator> demands;
+  execution_internal::SharedResults shared_results;
   std::unique_ptr<execution_internal::DependencyFlights> dependency_flights;
   std::unique_ptr<execution_internal::DependencyCheckpoints>
       dependency_checkpoints;
 };
 
 namespace {
+
+Status retain_managed_inputs(std::vector<ExecutionBinding>* bindings,
+                             const std::shared_ptr<MemoryBudget>& budget) {
+  if (!budget->resources())
+    return Status::success();
+  for (auto& binding : *bindings) {
+    if (!binding.value.valid())
+      continue;
+    const auto& value = binding.value;
+    auto owner = budget->resources()->reference(value.storage());
+    if (!owner.ok())
+      return owner.status();
+    auto retained =
+        Value::from_storage(value.descriptor(), value.region(), value.layout(),
+                            owner.take_value(), value.facets());
+    if (!retained.ok())
+      return retained.status();
+    binding.value = retained.take_value();
+  }
+  return Status::success();
+}
 
 /** @brief Allocation-free stop selection after a successful plan entry check.
  */
@@ -1169,10 +1211,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const std::string& snapshot_identity = {},
       execution_internal::DependencyFlights* flights = nullptr,
       execution_internal::ResultCache* dependency_cache = nullptr,
-      execution_internal::DependencyCheckpoints* checkpoints = nullptr) {
+      execution_internal::DependencyCheckpoints* checkpoints = nullptr,
+      execution_internal::SharedResults* shared_results = nullptr,
+      bool atom_outcomes = false) {
     const auto started = std::chrono::steady_clock::now();
-    auto combined_cancellation = CancellationToken::combine(
-        {caller_cancellation, options.dependencies.sets.cancellation});
+    auto combined_cancellation =
+        budget->resources()
+            ? CancellationToken::combine(
+                  {caller_cancellation, options.dependencies.sets.cancellation},
+                  *budget->resources())
+            : CancellationToken::combine(
+                  {caller_cancellation,
+                   options.dependencies.sets.cancellation});
     if (!combined_cancellation.ok())
       return Result<ExecutionResult>(combined_cancellation.status());
     const auto cancellation = combined_cancellation.take_value();
@@ -1183,14 +1233,47 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     };
     const auto fail = [&](Status status) {
       const auto code = stop();
-      if (code != ErrorCode::Ok) {
-        status.code = code;
-        status.message.clear();
+      if (code != ErrorCode::Ok &&
+          status.detail.origin != FailureOrigin::Protocol) {
+        status =
+            Status{code,
+                   {},
+                   code == ErrorCode::Cancelled ? FailureReason::Cancelled
+                                                : FailureReason::StaleVersion,
+                   {FailureOrigin::Cancellation, FailureScope::Run}};
       }
       if (abort_flights)
         abort_flights(status);
       return Result<ExecutionResult>(std::move(status));
     };
+    auto retained_inputs = retain_managed_inputs(&bindings, budget);
+    if (!retained_inputs.ok())
+      return fail(retained_inputs);
+    if (atom_outcomes && (plan.structured_network() || !budget->resources()))
+      return fail(Status{
+          ErrorCode::InvalidArgument,
+          "atom execution requires a managed CPU Value dependency plan"});
+    if (plan.structured_network()) {
+      if (!budget->resources())
+        return fail(Status{ErrorCode::InvalidArgument,
+                           "structured execution requires managed_resources"});
+      auto result = execution_internal::execute_structured(
+          plan, std::move(bindings), operations, *budget->resources(), options,
+          sink, cancellation, stop,
+          [&](const std::function<Status()>& task,
+              const std::function<void()>& pump) {
+            auto completed = dependency_stage<int>(
+                pool, admission,
+                [&] {
+                  auto status = task();
+                  return status.ok() ? Result<int>(1) : Result<int>(status);
+                },
+                pump, budget->resources().get());
+            return completed.status();
+          },
+          requested, fragment_outputs, snapshot_identity, shared_results);
+      return result.ok() ? std::move(result) : fail(result.status());
+    }
     auto limits = options.dependencies.sets;
     limits.cancellation = flights ? CancellationToken{} : cancellation;
     auto observation =
@@ -1237,6 +1320,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (count > work)
         return Status::failure(ErrorCode::ResourceExhausted,
                                "dependency Run work limit");
+      if (budget->resources()) {
+        auto status = budget->resources()->consume({count, 0, 0, 0});
+        if (!status.ok())
+          return status;
+      }
       work -= count;
       return Status::success();
     };
@@ -1290,6 +1378,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::optional<execution_internal::DependencyRecords::Checkpoint>
           attempt_records;
       std::optional<ValueFragments> complete;
+      std::optional<QualityReport> quality;
       std::shared_ptr<execution_internal::DependencyFlights::Lease> flight;
       std::string record_identity;
       bool cache_hit = false;
@@ -1352,7 +1441,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     }
     const auto cache_templates =
         dependency_cache
-            ? execution_internal::dependency_cache_templates(
+            ? contract_internal::dependency_cache_templates(
                   plan,
                   native_device ? native_device->identity() : std::string{},
                   &cache_work, cancellation)
@@ -1431,7 +1520,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return execution_internal::dependency_content_identity(
                       bindings, proof.support, &cache_work, active_token());
                 },
-                pump);
+                pump, budget->resources().get());
             if (!digest.ok())
               return;
             auto manifest =
@@ -1577,9 +1666,56 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
     }
+    std::uint64_t atom_count = 0;
     for (const auto& named : wanted) {
       const auto step_index = plan.outputs().at(named.first);
       const auto& step = plan.steps()[step_index];
+      if (atom_outcomes) {
+        if (step.backend != Backend::Cpu ||
+            step.traits.outputs[0].observation_kind !=
+                ObservationKind::Atomic ||
+            step.traits.outputs[0].failure_delivery !=
+                FailureDelivery::PerAtomOutcome)
+          return fail(Status{
+              ErrorCode::InvalidArgument,
+              "requested output does not declare CPU per-atom outcomes"});
+        auto observations = operation_observations(
+            {step.output_descriptor, step.output_facets}, named.second, limits);
+        if (!observations.ok())
+          return fail(observations.status());
+        auto count = observations.value().element_count();
+        const auto maximum =
+            std::min<std::uint64_t>(65536, options.maximum_atom_observations);
+        if (!count.ok() || count.value() > maximum - atom_count)
+          return fail(Status{ErrorCode::ResourceExhausted,
+                             "atom observation count limit"});
+        atom_count += count.value();
+        auto visited = observations.value().visit(
+            [&](const auto& coordinate) {
+              auto charged = consume();
+              if (!charged.ok())
+                return charged;
+              std::vector<RegionDimension> dimensions;
+              for (auto n : coordinate)
+                dimensions.push_back({n, 1});
+              auto atom = Footprint::from_regions(observations.value().shape(),
+                                                  {Region(dimensions)}, limits);
+              if (!atom.ok())
+                return atom.status();
+              auto samples = observation_samples(
+                  {step.output_descriptor, step.output_facets}, atom.value(),
+                  limits);
+              if (!samples.ok())
+                return samples.status();
+              queries.push_back(
+                  {step_index, named.first, samples.take_value(), false});
+              return Status::success();
+            },
+            maximum, cancellation);
+        if (!visited.ok())
+          return fail(visited);
+        continue;
+      }
       if (!sink || step.traits.outputs[0].observation_kind ==
                        ObservationKind::RequestRecord) {
         queries.push_back({step_index, named.first, named.second, false});
@@ -1640,12 +1776,28 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       Backend backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
           records;
+      std::optional<QualityReport> quality = {};
     };
     std::function<Result<Evaluation>(PlanInput, const Footprint&, bool, bool,
                                      bool)>
         evaluate;
     std::map<std::size_t, Footprint> known_demands;
     std::map<std::string, Result<Evaluation>> joint_completed;
+    struct FailureQuality {
+      std::uint64_t node;
+      std::optional<AtomKey> atom;
+      std::optional<AtomDomain> domain;
+      QualityReport report;
+    };
+    ResourceVector<FailureQuality> failure_quality;
+    struct ValidationDomainRecord {
+      core_internal::StoredFailure failure;
+      bool semantic_terminal = false;
+    };
+    using DomainEntry = std::pair<const ValueRef, ValidationDomainRecord>;
+    std::map<ValueRef, ValidationDomainRecord, std::less<ValueRef>,
+             ResourceAllocator<DomainEntry>>
+        validation_domains;
     std::map<std::string,
              std::shared_ptr<execution_internal::DependencyFlights::Lease>>
         prepared_flights;
@@ -1718,14 +1870,41 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       evaluation_shared = inherited_shared;
       const auto fail = [&](Status status) -> Result<Evaluation> {
         const auto code = stop();
-        if (code != ErrorCode::Ok)
-          status = Status{code, {}};
+        if (code != ErrorCode::Ok &&
+            status.detail.origin != FailureOrigin::Protocol)
+          status =
+              Status{code,
+                     {},
+                     code == ErrorCode::Cancelled ? FailureReason::Cancelled
+                                                  : FailureReason::StaleVersion,
+                     {FailureOrigin::Cancellation, FailureScope::Run}};
+        if (!status.detail.node_id && !status.detail.input_id &&
+            !frames.empty()) {
+          if (const auto* producer =
+                  std::get_if<PlanStepInput>(&frames.back().target))
+            status.detail.node_id = plan.steps()[producer->step_index].node_id;
+          else
+            status.detail.input_id =
+                plan.input_declarations()[std::get<PlanWorkflowInput>(
+                                              frames.back().target)
+                                              .declaration_index]
+                    .id;
+        }
+        if (status.detail.origin == FailureOrigin::Unspecified)
+          status.detail.origin =
+              status.code == ErrorCode::ResourceExhausted
+                  ? FailureOrigin::Resource
+                  : (status.detail.input_id ? FailureOrigin::Io
+                                            : FailureOrigin::Backend);
+        if (status.detail.scope == FailureScope::Unspecified)
+          status.detail.scope = FailureScope::Group;
         if (abort_flights)
           abort_flights(status);
         return Result<Evaluation>(std::move(status));
       };
       frames.emplace_back(target, samples, unit, terminal_allowed);
       std::optional<ValueFragments> returned;
+      std::optional<QualityReport> returned_quality;
       bool returned_taint = false;
       Backend returned_backend = Backend::Cpu;
       std::vector<std::shared_ptr<const execution_internal::DependencyRecord>>
@@ -1752,6 +1931,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           returned_records.clear();
           if (frame.state == Frame::State::Expand) {
+            if (frame.outputs == returned->coverage())
+              frame.quality = returned_quality;
             frame.values.insert(frame.values.end(),
                                 returned->fragments().begin(),
                                 returned->fragments().end());
@@ -1768,6 +1949,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (const auto* producer =
                   std::get_if<PlanStepInput>(&frame.target)) {
             const auto& step = plan.steps()[producer->step_index];
+            if (step.traits.joint_contract == 2 && !frame.outputs.empty())
+              validation_domains[step.result_ref()].semantic_terminal = true;
             if (frame.unit) {
               status = retire_demand(producer->step_index, frame.outputs);
               if (!status.ok())
@@ -1785,12 +1968,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
             if (frame.flight && frame.flight->producer()) {
               if (dependency_cache && cacheable[producer->step_index] &&
-                  !frame.cache_hit && !frame.fallback_taint && cache_work)
+                  !frame.cache_hit && !frame.fallback_taint && !frame.quality &&
+                  cache_work)
                 retain_cache(producer->step_index, frame.record,
                              *frame.complete);
               auto value =
                   std::make_shared<execution_internal::DependencyFlightValue>();
               value->value = *frame.complete;
+              value->quality = frame.quality;
               value->record = frame.record;
               value->backend = frame.backend;
               value->fallback_taint = frame.fallback_taint;
@@ -1819,6 +2004,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             }
           }
           returned = std::move(frame.complete);
+          returned_quality = std::move(frame.quality);
           returned_taint = frame.fallback_taint;
           returned_backend = frame.backend;
           if (frame.record)
@@ -1892,7 +2078,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                           binding.source->workspace_bytes),
                       active_token());
                 },
-                pump);
+                pump, budget->resources().get());
             if (!read.ok())
               return fail(read.status());
             if (!same_region(read.value(), box))
@@ -2067,6 +2253,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
         }
         if (frame.state == Frame::State::Initial) {
+          auto domain = validation_domains.find(step.result_ref());
+          if (domain != validation_domains.end() &&
+              !domain->second.failure.ok())
+            return fail(domain->second.failure.status());
           const auto observation = observation_key(step_index, frame.outputs);
           auto completed = joint_completed.find(observation);
           if (completed != joint_completed.end()) {
@@ -2081,6 +2271,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 return fail(status);
             }
             frame.complete = std::move(result.value);
+            frame.quality = std::move(result.quality);
             frame.fallback_taint = result.taint;
             frame.backend = result.backend;
             if (result.records.size() == 1)
@@ -2103,6 +2294,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (!status.ok())
                 return fail(status);
               frame.complete = shared.value()->value;
+              frame.quality = shared.value()->quality;
               frame.record = shared.value()->record;
               frame.backend = shared.value()->backend;
               frame.fallback_taint = shared.value()->fallback_taint;
@@ -2135,6 +2327,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (!status.ok())
                 return fail(status);
               frame.complete = shared.value()->value;
+              frame.quality = shared.value()->quality;
               frame.record = shared.value()->record;
               frame.backend = shared.value()->backend;
               frame.fallback_taint |= shared.value()->fallback_taint;
@@ -2166,7 +2359,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                           bindings, candidate->support, &cache_work,
                           active_token());
                     },
-                    pump);
+                    pump, budget->resources().get());
                 if (!digest.ok()) {
                   if (digest.status().code == ErrorCode::Cancelled)
                     return fail(digest.status());
@@ -2257,9 +2450,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         Status{stop(), {}});
                   return operations->start_dependency(
                       step.operation, std::move(request),
-                      seal.reservation->allocator());
+                      seal.reservation->allocator(), consume);
                 },
-                pump);
+                pump, budget->resources().get());
             if (!session.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, 0,
@@ -2273,9 +2466,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(session.status());
             }
             frame.session = session.take_value();
-            status = consume(frame.session->consumed_work());
-            if (!status.ok())
-              return fail(status);
             frame.state = Frame::State::Poll;
           } else {
             if (frame.outputs.boxes().size() != 1)
@@ -2408,7 +2598,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           std::uint64_t callback_us = 0;
           gpu_internal::Statistics native_stats;
           if (frame.session) {
-            const auto charged_before = frame.session->consumed_work();
             auto progress = dependency_stage<DependencyProgress>(
                 frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&] {
@@ -2611,10 +2800,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   callback_us = duration_us(callback_started);
                   return result;
                 },
-                pump);
-            status = consume(frame.session->consumed_work() - charged_before);
-            if (!status.ok())
-              return fail(status);
+                pump, budget->resources().get());
             if (!progress.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, callback_us,
@@ -2755,7 +2941,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                           true);
                   return computed;
                 },
-                pump);
+                pump, budget->resources().get());
             if (!value.ok()) {
               diagnostics.operation_timings.push_back(
                   OperationTiming{step.result_ref(), frame.backend, callback_us,
@@ -2795,9 +2981,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       if (!returned)
         return fail(Status::failure(ErrorCode::Internal,
                                     "dependency output record missing"));
-      return Result<Evaluation>(Evaluation{std::move(*returned), returned_taint,
-                                           returned_backend,
-                                           std::move(returned_records)});
+      return Result<Evaluation>(
+          Evaluation{std::move(*returned), returned_taint, returned_backend,
+                     std::move(returned_records), std::move(returned_quality)});
     };
     try_joint = [&](std::size_t selected, const Footprint& selected_samples,
                     Frame& selected_frame) -> Status {
@@ -2809,6 +2995,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                        });
       if (group == plan.execution_groups().end())
         return Status::success();
+      const bool coordinate_batch = selected_step.traits.joint_contract == 2;
       struct Member {
         std::size_t step;
         Footprint samples;
@@ -2825,14 +3012,27 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               samples(std::move(samples)),
               flight(std::move(flight)) {}
       };
+      const auto member_key = [&](const Member& member) {
+        const auto& step = plan.steps()[member.step];
+        auto observations =
+            operation_observations({step.output_descriptor, step.output_facets},
+                                   member.samples, limits);
+        if (!observations.ok())
+          throw std::logic_error("invalid joint member observation");
+        DependencyQuery query;
+        query.output_index = step.output_index;
+        query.observations = observations.take_value();
+        return dependency_atom_key(query).take_value();
+      };
       std::vector<Member> members;
       members.emplace_back(selected, selected_samples, selected_frame.flight);
       const auto parent_token = active_token();
       bool parent_shared = evaluation_shared;
       for (const auto& frame : frames)
         parent_shared |= frame.flight && frame.flight->producer();
+      std::vector<std::pair<std::size_t, Footprint>> candidates;
       for (const auto index : group->members) {
-        if (index == selected)
+        if (!coordinate_batch && index == selected)
           continue;
         auto known = known_demands.find(index);
         if (known == known_demands.end() || known->second.empty())
@@ -2843,17 +3043,47 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                    known->second, limits);
         if (!observations.ok())
           return observations.status();
-        std::vector<RegionDimension> dimensions;
-        for (const auto& dim : observations.value().boxes()[0].dimensions())
-          dimensions.push_back({dim.offset, 1});
-        auto atom = Footprint::from_regions(observations.value().shape(),
-                                            {Region(dimensions)}, limits);
-        if (!atom.ok())
-          return atom.status();
-        auto samples = observation_samples(
-            {step.output_descriptor, step.output_facets}, atom.value(), limits);
-        if (!samples.ok())
-          return samples.status();
+        for (const auto& box : observations.value().boxes()) {
+          auto dimensions = box.dimensions();
+          for (auto& dim : dimensions)
+            dim.extent = 1;
+          bool exhausted = false;
+          while (!exhausted && candidates.size() < 63) {
+            auto charged = consume();
+            if (!charged.ok())
+              return charged;
+            auto atom = Footprint::from_regions(observations.value().shape(),
+                                                {Region(dimensions)}, limits);
+            if (!atom.ok())
+              return atom.status();
+            auto samples = observation_samples(
+                {step.output_descriptor, step.output_facets}, atom.value(),
+                limits);
+            if (!samples.ok())
+              return samples.status();
+            if (index != selected || samples.value() != selected_samples)
+              candidates.emplace_back(index, samples.take_value());
+            if (!coordinate_batch)
+              break;
+            for (std::size_t axis = dimensions.size(); axis > 0;) {
+              --axis;
+              if (++dimensions[axis].offset <
+                  box.dimensions()[axis].offset + box.dimensions()[axis].extent)
+                break;
+              dimensions[axis].offset = box.dimensions()[axis].offset;
+              if (axis == 0)
+                exhausted = true;
+            }
+          }
+          if (!coordinate_batch || candidates.size() == 63)
+            break;
+        }
+        if (candidates.size() == 63)
+          break;
+      }
+      for (auto& candidate : candidates) {
+        const auto index = candidate.first;
+        Result<Footprint> samples(std::move(candidate.second));
         auto key = observation_key(index, samples.value());
         if (joint_completed.count(key) || prepared_flights.count(key))
           continue;
@@ -2892,7 +3122,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return execution_internal::dependency_content_identity(
                       bindings, candidate->support, &cache_work, parent_token);
                 },
-                pump);
+                pump, budget->resources().get());
             if (!digest.ok() || digest.value() != candidate->content_identity)
               continue;
             auto pixels = dependency_cache->dependency_values(*candidate);
@@ -2925,6 +3155,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       const execution_internal::DependencyFlightValue>>(
                       published));
             }
+            if (coordinate_batch)
+              validation_domains[plan.steps()[index].result_ref()]
+                  .semantic_terminal = true;
             joint_completed.emplace(key, Result<Evaluation>(std::move(value)));
             status = retire_demand(index, samples.value());
             if (!status.ok())
@@ -2937,7 +3170,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (!hit)
           members.emplace_back(index, samples.take_value(), std::move(flight));
       }
-      if (members.size() < 2)
+      if (members.size() < 2 && !coordinate_batch)
         return Status::success();
       // Isolate member work from the initiating output's cancellation. Refresh
       // all leases; only the absence of every active member cancels shared
@@ -2986,19 +3219,40 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       });
       restore.pump_registered = true;
       std::shared_ptr<DependencyJointSession> session;
-      const auto publish_failure = [&](Member& member, Status status) {
+      const auto publish_failure = [&](Member& member, Status status,
+                                       std::optional<QualityReport> quality =
+                                           {}) {
+        if (!status.detail.node_id && !status.detail.input_id)
+          status.detail.node_id = plan.steps()[member.step].node_id;
         if (session && member.waiting)
-          static_cast<void>(session->fail_input(
-              plan.steps()[member.step].output_index, status));
+          static_cast<void>(session->fail_input(member_key(member), status));
         auto key = observation_key(member.step, member.samples);
         if (member.flight)
           member.flight->complete(
               Result<std::shared_ptr<
                   const execution_internal::DependencyFlightValue>>(status));
         joint_completed.insert_or_assign(key, Result<Evaluation>(status));
+        if (quality && (status.detail.atom || status.detail.domain))
+          failure_quality.push_back({status.detail.node_id, status.detail.atom,
+                                     status.detail.domain, *quality});
         member.done = true;
       };
-      const auto fallback = [&]() -> Status {
+      const auto fallback = [&](Status cause) -> Status {
+        if (coordinate_batch ||
+            cause.detail.origin == FailureOrigin::Protocol ||
+            cause.detail.scope == FailureScope::Group ||
+            cause.detail.scope == FailureScope::Run) {
+          if (cause.detail.scope == FailureScope::Unspecified)
+            cause.detail.scope = FailureScope::Group;
+          if (cause.detail.origin == FailureOrigin::Unspecified)
+            cause.detail.origin = cause.code == ErrorCode::ResourceExhausted
+                                      ? FailureOrigin::Resource
+                                      : FailureOrigin::Backend;
+          for (auto& member : members)
+            if (!member.done)
+              publish_failure(member, cause);
+          return Status::success();
+        }
         ++diagnostics.joint_fallbacks;
         for (auto& member : members) {
           if (member.done)
@@ -3017,10 +3271,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           selected_step.traits.joint_continuation_bytes,
           members.size() * DependencyJointSession::member_state_bytes());
       if (!state_capacity.ok())
-        return fallback();
+        return fallback(state_capacity.status());
       auto reserved = reserve(state_capacity.value());
       if (!reserved.ok())
-        return fallback();
+        return fallback(reserved.status());
       {
         Seal seal{reserved.take_value()};
         std::vector<DependencyRequest> requests;
@@ -3045,11 +3299,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             dependency_stage<std::shared_ptr<DependencyJointSession>>(
                 pool, admission,
                 [&] {
-                  return operations->start_joint(selected_step.operation,
-                                                 std::move(requests),
-                                                 seal.reservation->allocator());
+                  return operations->start_joint(
+                      selected_step.operation, std::move(requests),
+                      seal.reservation->allocator(), consume);
                 },
-                pump);
+                pump, budget->resources().get());
         if (!started.ok()) {
           // Release joint reservation before any singleton admission.
           seal.reservation->seal();
@@ -3061,24 +3315,25 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               publish_failure(member, started.status());
             return Status::success();
           }
-          return fallback();
+          return fallback(started.status());
         }
         session = started.take_value();
       }
       ++diagnostics.joint_groups;
       diagnostics.peak_active_tasks =
           std::max(diagnostics.peak_active_tasks, std::uint32_t{1});
-      auto charged = consume(session->consumed_work());
-      if (!charged.ok()) {
-        session.reset();
-        for (auto& member : members)
-          publish_failure(member, charged);
-        return Status::success();
-      }
       while (std::any_of(members.begin(), members.end(),
                          [](const auto& member) { return !member.done; })) {
         pump();
         std::uint64_t capacity = selected_step.traits.joint_workspace_bytes;
+        {
+          auto phases = checked_add(
+              capacity,
+              members.size() * DependencyJointSession::member_phase_bytes());
+          if (!phases.ok())
+            return fallback(phases.status());
+          capacity = phases.value();
+        }
         for (const auto& member : members) {
           if (member.done || member.waiting)
             continue;
@@ -3088,7 +3343,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Value::element_size(step.output_descriptor.element_type);
           if (!count.ok() || count.value() > UINT64_MAX / width) {
             session.reset();
-            return fallback();
+            return fallback(Status{ErrorCode::ResourceExhausted,
+                                   {},
+                                   FailureReason::CapacityLimit});
           }
           auto bytes = checked_add(
               capacity,
@@ -3097,7 +3354,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             bytes = checked_add(bytes.value(), step.traits.workspace_bytes);
           if (!bytes.ok()) {
             session.reset();
-            return fallback();
+            return fallback(Status{ErrorCode::ResourceExhausted,
+                                   {},
+                                   FailureReason::CapacityLimit});
           }
           capacity = bytes.value();
           if (step.traits.workspace_input_multiplier) {
@@ -3110,7 +3369,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (!elements.ok() ||
                   elements.value() > (UINT64_MAX - capacity) / scale) {
                 session.reset();
-                return fallback();
+                return fallback(Status{ErrorCode::ResourceExhausted,
+                                       {},
+                                       FailureReason::CapacityLimit});
               }
               capacity += elements.value() * scale;
             }
@@ -3119,22 +3380,22 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         auto admitted = reserve(capacity);
         if (!admitted.ok()) {
           session.reset();
-          return fallback();
+          return fallback(Status{ErrorCode::ResourceExhausted,
+                                 {},
+                                 FailureReason::CapacityLimit});
         }
         std::vector<DependencyAtomProgress> events;
         {
           Seal seal{admitted.take_value()};
-          const auto before = session->consumed_work();
           auto polled = dependency_stage<std::vector<DependencyAtomProgress>>(
               pool, admission,
               [&] {
                 return session->poll(seal.reservation->allocator(), work);
               },
-              pump);
+              pump, budget->resources().get());
           ++diagnostics.joint_polls;
-          charged = consume(session->consumed_work() - before);
-          if (!polled.ok() || !charged.ok()) {
-            auto status = polled.ok() ? charged : polled.status();
+          if (!polled.ok()) {
+            auto status = polled.status();
             session.reset();
             seal.reservation->seal();
             seal.reservation.reset();
@@ -3146,19 +3407,70 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   publish_failure(member, status);
               break;
             }
-            return fallback();
+            return fallback(status);
           }
           events = polled.take_value();
+          // Domain finality spans every physical session in this Run. Validate
+          // the entire new envelope before admitting any of its successes.
+          if (coordinate_batch) {
+            for (const auto& event : events) {
+              if (event.outcome.ok() || event.outcome.status().detail.scope !=
+                                            FailureScope::ValidationDomain)
+                continue;
+              auto found = std::find_if(
+                  members.begin(), members.end(), [&](const auto& member) {
+                    return member_key(member) == event.key;
+                  });
+              auto& domain =
+                  validation_domains[plan.steps()[found->step].result_ref()];
+              if (domain.semantic_terminal) {
+                Status invalid_domain{
+                    ErrorCode::InvalidArgument,
+                    "validation domain declared after a prior batch terminal",
+                    FailureReason::MalformedEnvelope,
+                    {FailureOrigin::Protocol, FailureScope::Group}};
+                invalid_domain.detail.node_id = selected_step.node_id;
+                session.reset();
+                for (auto& member : members)
+                  if (!member.done)
+                    publish_failure(member, invalid_domain);
+                return Status::success();
+              }
+            }
+            for (const auto& event : events) {
+              auto found = std::find_if(
+                  members.begin(), members.end(), [&](const auto& member) {
+                    return member_key(member) == event.key;
+                  });
+              auto& domain =
+                  validation_domains[plan.steps()[found->step].result_ref()];
+              if (!event.outcome.ok() && event.outcome.status().detail.scope ==
+                                             FailureScope::ValidationDomain) {
+                auto failure = event.outcome.status();
+                failure.detail.node_id = selected_step.node_id;
+                domain.failure.record(failure);
+              } else if ((event.outcome.ok() &&
+                          std::holds_alternative<DependencyResult>(
+                              event.outcome.value())) ||
+                         (!event.outcome.ok() &&
+                          (event.outcome.status().detail.origin ==
+                               FailureOrigin::Domain ||
+                           event.outcome.status().detail.origin ==
+                               FailureOrigin::Schema))) {
+                domain.semantic_terminal = true;
+              }
+            }
+          }
           for (auto& event : events) {
-            auto found = std::find_if(
-                members.begin(), members.end(), [&](const auto& member) {
-                  return plan.steps()[member.step].output_index ==
-                         event.output_index;
-                });
+            auto found = std::find_if(members.begin(), members.end(),
+                                      [&](const auto& member) {
+                                        return member_key(member) == event.key;
+                                      });
             auto& member = *found;
             const auto& step = plan.steps()[member.step];
             if (!event.outcome.ok()) {
-              publish_failure(member, event.outcome.status());
+              publish_failure(member, event.outcome.status(),
+                              std::move(event.quality));
               continue;
             }
             auto progress = event.outcome.take_value();
@@ -3204,14 +3516,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Evaluation published{value.take_value(),
                                    member.taint,
                                    Backend::Cpu,
-                                   {record}};
-              if (dependency_cache && cacheable[member.step] && !member.taint &&
-                  cache_work)
+                                   {record},
+                                   event.quality};
+              if (dependency_cache && cacheable[member.step] &&
+                  !published.quality && !member.taint && cache_work)
                 retain_cache(member.step, record, published.value);
               if (member.flight) {
                 auto flight_value = std::make_shared<
                     execution_internal::DependencyFlightValue>();
                 flight_value->value = published.value;
+                flight_value->quality = published.quality;
                 flight_value->fallback_taint = member.taint;
                 flight_value->record = record;
                 flight_value->producer_peak = budget->peaks(observation).first;
@@ -3247,7 +3561,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           if (member.done || !member.waiting)
             continue;
           const auto& step = plan.steps()[member.step];
-          auto pending = session->pending_reads(step.output_index);
+          auto pending = session->pending_reads(member_key(member));
           if (!pending.ok()) {
             publish_failure(member, pending.status());
             continue;
@@ -3340,8 +3654,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           if (member.done)
             continue;
-          auto status = session->supply(plan.steps()[member.step].output_index,
-                                        std::move(supplied), identity);
+          auto status = session->supply(member_key(member), std::move(supplied),
+                                        identity);
           if (!status.ok())
             publish_failure(member, status);
           member.waiting = false;
@@ -3358,6 +3672,57 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     for (const auto& named : queries) {
       auto evaluated = evaluate(PlanStepInput{named.step}, named.samples, false,
                                 !named.boundary, true);
+      if (atom_outcomes && !named.boundary) {
+        const auto& step = plan.steps()[named.step];
+        DependencyQuery query;
+        query.output_index = step.output_index;
+        auto observations =
+            operation_observations({step.output_descriptor, step.output_facets},
+                                   named.samples, limits);
+        if (!observations.ok())
+          return fail(observations.status());
+        query.observations = observations.take_value();
+        auto key = dependency_atom_key(query);
+        if (!key.ok())
+          return fail(key.status());
+        Result<ValueFragments> outcome(Status{ErrorCode::Internal, {}});
+        std::optional<QualityReport> quality;
+        if (evaluated.ok()) {
+          auto value = evaluated.take_value();
+          outcome = Result<ValueFragments>(std::move(value.value));
+          quality = std::move(value.quality);
+          auto recorded = records.output(named.name, named.step, named.samples);
+          if (!recorded.ok())
+            return fail(recorded);
+        } else {
+          const auto& failure = evaluated.status();
+          if (failure.detail.origin == FailureOrigin::Protocol ||
+              failure.detail.scope == FailureScope::Run ||
+              failure.detail.scope == FailureScope::Waiter ||
+              stop() != ErrorCode::Ok)
+            return fail(failure);
+          outcome = Result<ValueFragments>(failure);
+          for (const auto& report : failure_quality) {
+            const bool same_atom = report.atom && failure.detail.atom &&
+                                   *report.atom == *failure.detail.atom;
+            const bool same_domain =
+                report.domain && failure.detail.domain &&
+                report.domain->first == failure.detail.domain->first &&
+                report.domain->extent == failure.detail.domain->extent;
+            if (report.node == failure.detail.node_id &&
+                (same_atom || same_domain)) {
+              quality = report.report;
+              break;
+            }
+          }
+        }
+        result.atoms.push_back(
+            {ResourceString(named.name.begin(), named.name.end()),
+             step.result_ref(), key.take_value(), std::move(outcome),
+             std::move(quality)});
+        ++diagnostics.tile_count;
+        continue;
+      }
       if (!evaluated.ok())
         return fail(evaluated.status());
       auto returned =
@@ -3429,8 +3794,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     diagnostics.dependency_cache_work =
         options.maximum_dependency_cache_work - cache_work;
     result.dependencies = std::move(records).finish();
-    if (!sink && !fragment_outputs)
+    if (!sink && !fragment_outputs && !atom_outcomes)
       diagnostics.result_digest = result_digest(result.values);
+    if (atom_outcomes && budget->resources())
+      diagnostics.managed_resources = budget->resources()->statistics();
     if (stop() != ErrorCode::Ok)
       return fail(Status{stop(), {}});
     return Result<ExecutionResult>(std::move(result));
@@ -3442,19 +3809,38 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   static Result<T> dependency_stage(ThreadPool* pool,
                                     WaitingAdmission* admission,
                                     std::function<Result<T>()> work,
-                                    const std::function<void()>& pump = {}) {
+                                    const std::function<void()>& pump = {},
+                                    const ResourceBudget* resources = nullptr) {
     struct Completion {
+      ResourceLease lease;
       std::promise<Result<T>> promise;
       Result<T> result{Status{ErrorCode::Internal, {}}};
       std::function<Result<T>()> work;
     };
+    ResourceLease lease;
+    if (resources) {
+      auto capacity =
+          ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
+      capacity[ResourceKind::Queue] = 1;
+      capacity[ResourceKind::Entries] = 1;
+      auto admitted = resources->reserve(capacity);
+      if (!admitted.ok())
+        return Result<T>(admitted.status());
+      lease = admitted.take_value();
+    }
     auto completion = std::make_shared<Completion>();
+    completion->lease = std::move(lease);
     completion->work = std::move(work);
     auto future = completion->promise.get_future();
     auto slot = admission->try_acquire();
     if (!slot)
       return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
                                        "dependency waiting queue exhausted"));
+    if (resources) {
+      auto issued = resources->consume({0, 0, 0, 1});
+      if (!issued.ok())
+        return Result<T>(issued);
+    }
     QueuedCallback callback{
         [completion] {
           // The callable's owners retire before the completion notification.
@@ -3472,7 +3858,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         std::move(*slot),
         [completion] {
           completion->promise.set_value(std::move(completion->result));
-        }};
+        },
+        completion->lease};
     if (!pool->submit(std::move(callback)))
       return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
                                        "dependency callback queue stopped"));
@@ -3838,8 +4225,24 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           owner->state_changed_.notify_all();
         }
         std::shared_ptr<ExecutionRun> owner;
+        ResourceLease lease;
       };
+      ResourceLease lease;
+      const auto& resources = reservation_->resources();
+      if (resources) {
+        auto capacity = ResourceCapacity::host(sizeof(CallbackLifetime),
+                                               sizeof(CallbackLifetime));
+        capacity[ResourceKind::Queue] = 1;
+        capacity[ResourceKind::Entries] = 1;
+        auto admitted = resources->reserve(capacity);
+        if (!admitted.ok()) {
+          finish_failure(admitted.status());
+          return;
+        }
+        lease = admitted.take_value();
+      }
       auto lifetime = std::make_shared<CallbackLifetime>(self);
+      lifetime->lease = std::move(lease);
       std::function<void()> callback = [lifetime, step_index, backend] {
         lifetime->owner->execute_attempt(step_index, backend);
       };
@@ -3854,7 +4257,17 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             "ExecutionContext waiting callback limit is exhausted"));
         return;
       }
-      QueuedCallback queued{std::move(callback), std::move(admission.value())};
+      if (resources) {
+        auto issued = resources->consume({0, 0, 0, 1});
+        if (!issued.ok()) {
+          finish_failure(issued);
+          return;
+        }
+      }
+      QueuedCallback queued{std::move(callback),
+                            std::move(admission.value()),
+                            {},
+                            lifetime->lease};
       bool accepted = false;
       if (backend == Backend::Gpu) {
         accepted = gpu_pool_ && gpu_pool_->submit(std::move(queued));
@@ -4501,6 +4914,8 @@ ExecutionContext::ExecutionContext(
  * @copydetails ExecutionContext::~ExecutionContext
  */
 ExecutionContext::~ExecutionContext() noexcept {
+  if (impl_)
+    impl_->shared_results.shutdown();
   if (impl_ && impl_->dependency_flights)
     impl_->dependency_flights->close();
   if (impl_ && impl_->demands)
@@ -4811,7 +5226,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
       },
       &query, &result.values, frozen.execution_identity_,
       impl_->dependency_flights.get(), impl_->cache.get(),
-      impl_->dependency_checkpoints.get());
+      impl_->dependency_checkpoints.get(), &impl_->shared_results);
   if (!run.ok())
     return failure(run.status());
   auto completed = run.take_value();
@@ -5121,11 +5536,24 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
 Result<ExecutionResult> ExecutionContext::execute(
     const FrozenExecution& frozen, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
+  if (frozen.plan_.structured_network())
+    return execute_regions(frozen.plan_, frozen.bindings_, nullptr,
+                           cancellation, options, false, UINT64_MAX,
+                           frozen.execution_identity_);
   return execute(frozen.plan_, frozen.bindings_, cancellation, options);
 }
 Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
     const FrozenExecution& frozen, const ExecutionSink& sink,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (frozen.plan_.structured_network()) {
+    auto result =
+        execute_regions(frozen.plan_, frozen.bindings_, &sink, cancellation,
+                        options, false, UINT64_MAX, frozen.execution_identity_);
+    if (!result.ok())
+      return Result<ExecutionDiagnostics>(result.status());
+    return Result<ExecutionDiagnostics>(
+        std::move(result.take_value().diagnostics));
+  }
   return execute_stream(frozen.plan_, frozen.bindings_, sink, cancellation,
                         options);
 }
@@ -5273,11 +5701,27 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
   return Result<ExecutionDiagnostics>(result.take_value().diagnostics);
 }
 
+Result<ExecutionResult> ExecutionContext::execute_atoms(
+    const ExecutionPlan& plan, ExecutionBindings bindings,
+    const DemandQuery& requested, const CancellationToken& cancellation,
+    const ExecutionOptions& options) {
+  auto root = resource_budget();
+  if (!root.ok())
+    return Result<ExecutionResult>(root.status());
+  if (!plan.dependency_network() || plan.structured_network())
+    return Result<ExecutionResult>(
+        Status{ErrorCode::InvalidArgument,
+               "atom execution requires a Value dependency network"});
+  ResourceAllocationScope scope(root.value());
+  return execute_regions(plan, std::move(bindings), nullptr, cancellation,
+                         options, false, UINT64_MAX, {}, true, &requested);
+}
 Result<ExecutionResult> ExecutionContext::execute_regions(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const ExecutionSink* sink, const CancellationToken& cancellation,
     const ExecutionOptions& options, bool shared_producer,
-    std::uint64_t producer_epoch) {
+    std::uint64_t producer_epoch, const std::string& snapshot_identity,
+    bool atom_outcomes, const DemandQuery* requested) {
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<ExecutionResult>(Status::failure(
@@ -5285,9 +5729,14 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
   const auto stop = [&] { return binding_stop(plan, cancellation); };
   const auto failure = [&](Status status) {
     const auto code = stop();
-    if (code != ErrorCode::Ok) {
-      status.code = code;
-      status.message.clear();
+    if (code != ErrorCode::Ok &&
+        status.detail.origin != FailureOrigin::Protocol) {
+      status =
+          Status{code,
+                 {},
+                 code == ErrorCode::Cancelled ? FailureReason::Cancelled
+                                              : FailureReason::StaleVersion,
+                 {FailureOrigin::Cancellation, FailureScope::Run}};
     }
     return Result<ExecutionResult>(std::move(status));
   };
@@ -5305,6 +5754,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     if (!validated.ok())
       return failure(validated.status());
     auto snapshot = validated.take_value();
+    auto retained_inputs = retain_managed_inputs(&snapshot, impl_->budget);
+    if (!retained_inputs.ok())
+      return failure(retained_inputs);
     if (plan.dependency_network())
       return ExecutionRun::run_dependencies(
           &impl_->cpu_pool, impl_->gpu_pool.get(), impl_->native_device,
@@ -5320,7 +5772,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               impl_->disk->drop_pending();
             if (impl_->cache)
               impl_->cache->reclaim_for(bytes);
-          });
+          },
+          requested, nullptr, snapshot_identity, nullptr, nullptr, nullptr,
+          &impl_->shared_results, atom_outcomes);
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
     std::map<ValueRef, Value> cached;
@@ -5586,15 +6040,34 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return Result<ExecutionResult>(made.status());
         auto writer = made.take_value();
         struct ReadCompletion {
+          ResourceLease lease;
           std::promise<Result<Region>> promise;
           Result<Region> result{Status{ErrorCode::Internal, {}}};
         };
+        ResourceLease lease;
+        const auto& resources = impl_->budget->resources();
+        if (resources) {
+          auto capacity = ResourceCapacity::host(sizeof(ReadCompletion),
+                                                 sizeof(ReadCompletion));
+          capacity[ResourceKind::Queue] = 1;
+          capacity[ResourceKind::Entries] = 1;
+          auto admitted = resources->reserve(capacity);
+          if (!admitted.ok())
+            return Result<ExecutionResult>(admitted.status());
+          lease = admitted.take_value();
+        }
         auto completion = std::make_shared<ReadCompletion>();
+        completion->lease = std::move(lease);
         auto future = completion->promise.get_future();
         auto admission = impl_->waiting_admission.try_acquire();
         if (!admission)
           return Result<ExecutionResult>(Status::failure(
               ErrorCode::ResourceExhausted, "source waiting queue is full"));
+        if (resources) {
+          auto issued = resources->consume({0, 0, 0, 1});
+          if (!issued.ok())
+            return Result<ExecutionResult>(issued);
+        }
         auto scratch =
             seal.reservation->allocator(binding.source->workspace_bytes);
         QueuedCallback callback{
@@ -5633,7 +6106,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             std::move(*admission),
             [completion] {
               completion->promise.set_value(std::move(completion->result));
-            }};
+            },
+            completion->lease};
         if (!impl_->cpu_pool.submit(std::move(callback)))
           return Result<ExecutionResult>(Status::failure(
               ErrorCode::ResourceExhausted, "source queue stopped"));
@@ -6015,6 +6489,12 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
  * @brief Implements resolved CPU-worker count observation.
  * @copydetails ExecutionContext::cpu_workers
  */
+Result<ResourceBudget> ExecutionContext::resource_budget() const {
+  if (!impl_->budget->resources())
+    return Result<ResourceBudget>(Status::failure(
+        ErrorCode::NotFound, "managed resource root is not configured"));
+  return Result<ResourceBudget>(*impl_->budget->resources());
+}
 std::uint32_t ExecutionContext::cpu_workers() const noexcept {
   return impl_ ? impl_->cpu_worker_count : 0U;
 }

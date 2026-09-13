@@ -12,10 +12,12 @@
 #include <utility>
 
 #include "execution/dependency_records.hpp"
+#include "photospider/data/quality.hpp"
 
 namespace ps::execution_internal {
 struct DependencyFlightValue final {
   ValueFragments value;
+  std::optional<QualityReport> quality;
   std::shared_ptr<const DependencyRecord> record;
   std::uint64_t producer_peak = 0;
   Backend backend = Backend::Cpu;

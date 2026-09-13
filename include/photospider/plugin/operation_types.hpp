@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
+#include "photospider/data/result.hpp"
 #include "photospider/data/value.hpp"
 
 namespace ps {
@@ -27,5 +29,8 @@ enum class FailureDelivery : std::uint32_t {
 struct PHOTOSPIDER_API OperationMetadata final {
   ValueDescriptor descriptor;
   std::vector<ValueFacet> facets;
+  /** @brief Alternative paged edge type; descriptor/facets are empty when set.
+   */
+  std::shared_ptr<const SchemaTemplate> result_schema = {};
 };
 }  // namespace ps

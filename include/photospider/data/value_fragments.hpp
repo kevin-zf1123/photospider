@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -35,6 +36,16 @@ class PHOTOSPIDER_API ValueFragments final {
                                        Footprint authorized,
                                        const std::vector<Value>& fragments,
                                        const FootprintLimits& limits = {});
+  /** @brief Same validation from a borrowed contiguous array, without a
+   * temporary std::vector. A null pointer is valid only for count zero.
+   * The array is borrowed for this call; returned fragments retain owners.
+   */
+  static Result<ValueFragments> create_view(ValueDescriptor descriptor,
+                                            std::vector<ValueFacet> facets,
+                                            Footprint authorized,
+                                            const Value* fragments,
+                                            std::size_t count,
+                                            const FootprintLimits& limits = {});
   bool valid() const noexcept { return authorized_.valid(); }
   const ValueDescriptor& descriptor() const noexcept { return descriptor_; }
   const std::vector<ValueFacet>& facets() const noexcept { return facets_; }

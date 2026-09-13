@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -1386,7 +1387,7 @@ int main() {
   auto result = execution.execute(workflow.plan);
   PS_CHECK(result.ok());
   PS_CHECK(ps::test::named_scalar(result.value(), "sum") == 6.5);
-  PS_CHECK(result.value().diagnostics.plan_digest ==
+  PS_CHECK(std::string_view(result.value().diagnostics.plan_digest) ==
            workflow.plan.digest().value);
   PS_CHECK(!result.value().diagnostics.result_digest.empty());
   PS_CHECK(result.value().diagnostics.selected_backends.size() == 3U);
@@ -1531,10 +1532,12 @@ int main() {
            2U);
   PS_CHECK(second_effect_result.value().diagnostics.operation_timings.size() ==
            2U);
-  PS_CHECK(first_effect_result.value().diagnostics.plan_digest ==
-           effect_workflow.plan.digest().value);
-  PS_CHECK(second_effect_result.value().diagnostics.plan_digest ==
-           effect_workflow.plan.digest().value);
+  PS_CHECK(
+      std::string_view(first_effect_result.value().diagnostics.plan_digest) ==
+      effect_workflow.plan.digest().value);
+  PS_CHECK(
+      std::string_view(second_effect_result.value().diagnostics.plan_digest) ==
+      effect_workflow.plan.digest().value);
   {
     std::lock_guard<std::mutex> lock(effect_mutex);
     PS_CHECK(source_calls == 2U);

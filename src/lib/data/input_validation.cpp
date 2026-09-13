@@ -7,6 +7,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,15 @@ std::uint32_t float_bits(float value) noexcept {
   return bits;
 }
 bool valid_constraint(const OperationPortConstraint& port) {
+  if (port.kind == OperationPortKind::Result) {
+    return valid_input_name(port.result_schema_id) &&
+           port.result_schema_version && !port.rank && !port.element_type &&
+           !port.element_type_mask && !port.semantic_kind &&
+           port.facets.empty() && float_bits(port.minimum) == 0 &&
+           float_bits(port.maximum) == 0;
+  }
+  if (!port.result_schema_id.empty() || port.result_schema_version)
+    return false;
   if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 10 ||
       (port.element_type_mask & ~UINT32_C(15)) ||
       (port.element_type && port.element_type_mask))
@@ -36,6 +46,8 @@ bool valid_constraint(const OperationPortConstraint& port) {
   if (!canonicalize_facets(&facets).ok() || !same_facets(facets, port.facets))
     return false;
   switch (port.kind) {
+    case OperationPortKind::Result:
+      return false;
     case OperationPortKind::Value:
     case OperationPortKind::Typed:
     case OperationPortKind::Float32Mask:
@@ -230,7 +242,7 @@ Status validate_port_schema(const OperationTraits& traits) {
             OperationShapeRule::PreserveFirstInput &&
         traits.outputs[0].shape_rule != OperationShapeRule::MatchAllInputs &&
         traits.outputs[0].shape_rule != OperationShapeRule::Shrink &&
-        !(traits.outputs[0].dependency_version == 1 &&
+        !(traits.outputs[0].dependency_version != 0 &&
           traits.outputs[0].shape_rule == OperationShapeRule::Axes)) ||
        traits.input_schema.empty() ||
        traits.input_schema.front().kind !=
@@ -367,6 +379,23 @@ Result<Region> derive_input_demand(
 
 ValueFacet image_facet() {
   return encode_semantic(rgba_semantics()).take_value();
+}
+
+Status validate_port_metadata(const OperationPortConstraint& port,
+                              const OperationMetadata& metadata) {
+  if (metadata.result_schema) {
+    if (port.kind != OperationPortKind::Result ||
+        std::string_view(metadata.result_schema->id) !=
+            std::string_view(port.result_schema_id) ||
+        metadata.result_schema->version != port.result_schema_version ||
+        !metadata.descriptor.shape.empty() || !metadata.facets.empty())
+      return failure(ErrorCode::TypeMismatch,
+                     "structured input schema mismatch");
+    return metadata.result_schema->validate(true);
+  }
+  if (port.kind == OperationPortKind::Result)
+    return failure(ErrorCode::TypeMismatch, "paged ResultRef input required");
+  return validate_port_metadata(port, metadata.descriptor, metadata.facets);
 }
 
 Status validate_port_metadata(const OperationPortConstraint& port,

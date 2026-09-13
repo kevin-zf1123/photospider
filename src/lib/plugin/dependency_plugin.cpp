@@ -999,7 +999,8 @@ struct CJointState {
       if (found == bundles.end() || !seen.insert(result.output_index).second)
         return Answer(invalid("C joint duplicate or unknown output"));
       results.push_back(
-          {result.output_index, finish_poll((*found)->phase, result.result)});
+          {dependency_atom_key((*found)->phase.phase.query).value(),
+           finish_poll((*found)->phase, result.result)});
     }
     return Answer(std::move(results));
   }

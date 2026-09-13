@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include "photospider/core/atom_key.hpp"
 #include "photospider/core/export.hpp"
 
 namespace ps {
@@ -29,6 +30,76 @@ enum class ErrorCode {
   Internal,
 };
 
+/** @brief Stable numerical detail, independent of human diagnostics.
+ * None means the category alone describes the failure. These reasons do not
+ * change the C operation ABI's existing error-code projection.
+ */
+enum class FailureReason {
+  None = 0,
+  InvalidAssociation,
+  AssociationUnderflow,
+  ArithmeticOverflow,
+  EmptyWeightedResult,
+  DivideByZero,
+  InvalidDomain,
+  NotConverged,
+  NoSolution,
+  MultipleSolutions,
+  IllConditioned,
+  MalformedEnvelope,
+  UnauthorizedRead,
+  StaleHandle,
+  HostException,
+  ShortIo,
+  WorkLimit,
+  CapacityLimit,
+  StageLimit,
+  Cancelled,
+  StaleVersion,
+  InvalidQuality
+};
+
+enum class FailureOrigin {
+  Unspecified = 0,
+  Schema,
+  Domain,
+  Resource,
+  Io,
+  Backend,
+  Cancellation,
+  Protocol
+};
+enum class FailureScope {
+  Unspecified = 0,
+  Atom,
+  ValidationDomain,
+  Association,
+  Group,
+  Run,
+  Waiter
+};
+/** @brief Structured context paired with Status::code/reason. Unspecified is
+ * the legacy category-only projection, not a claim of per-atom semantics.
+ * Atom failures name exactly one key. Group/Run/Waiter failures have no atom.
+ * ValidationDomain names a fixed logical domain; Association names an immutable
+ * Result ObjectId. A coordinate batch validates these fields before commit.
+ */
+struct FailureDetail final {
+  FailureOrigin origin = FailureOrigin::Unspecified;
+  FailureScope scope = FailureScope::Unspecified;
+  std::optional<AtomKey> atom = {};
+  std::optional<AtomDomain> domain = {};
+  std::uint64_t association = 0;
+  /** @brief Host-bound producing Workflow node; zero for a direct session or
+   * Run/waiter failure outside a node. Propagation preserves this origin.
+   */
+  std::uint64_t node_id = 0;
+  /** @brief Host-bound Workflow input declaration for source failures; mutually
+   * exclusive with node_id. Zero leaves the direct-session source unnamed.
+   */
+  std::uint64_t input_id = 0;
+};
+
 /**
  * @brief One success or recoverable failure status.
  *
@@ -39,6 +110,10 @@ struct PHOTOSPIDER_API Status final {
   ErrorCode code = ErrorCode::Ok;
   /** @brief Human-readable bounded diagnostic. */
   std::string message;
+  /** @brief Optional machine-readable detail; copied with the status. */
+  FailureReason reason = FailureReason::None;
+  /** @brief Failure origin and semantic/operational scope, when supplied. */
+  FailureDetail detail = {};
 
   /**
    * @brief Reports whether this status is canonical success.

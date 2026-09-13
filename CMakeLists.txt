@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.9.0
+  VERSION 0.10.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -151,10 +151,24 @@ set(
   src/lib/data/fragment_atlas.cpp
   src/lib/data/region.cpp
   src/lib/data/storage.cpp
+  src/lib/data/temporary_storage.cpp
+  src/lib/data/representation.cpp
+  src/lib/data/layer.cpp
+  src/lib/data/quality.cpp
+  src/lib/data/statistics.cpp
+  src/lib/plugin/statistics_operation.cpp
+  src/lib/plugin/fft_operation.cpp
+  src/lib/plugin/component_operation.cpp
+  src/lib/plugin/layer_operation.cpp
+  src/lib/data/result.cpp
+  src/lib/data/result_relation.cpp
+  src/lib/execution/resources.cpp
+  src/lib/execution/cancellation.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/result_program.cpp
   src/lib/plugin/dependency_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/dependency_block.cpp
@@ -165,6 +179,7 @@ set(
   src/lib/data/input_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
+  src/lib/execution/structured_execution.cpp
   src/lib/execution/dependency_records.cpp
   src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
@@ -182,6 +197,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+    src/lib/data/layer.cpp src/lib/data/representation.cpp
+    src/lib/data/quality.cpp
+    src/lib/data/statistics.cpp
+    src/lib/plugin/statistics_operation.cpp
+    src/lib/plugin/fft_operation.cpp
+    src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 elseif(MSVC)
@@ -189,6 +210,12 @@ elseif(MSVC)
 
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
     src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+    src/lib/data/layer.cpp src/lib/data/representation.cpp
+    src/lib/data/quality.cpp
+    src/lib/data/statistics.cpp
+    src/lib/plugin/statistics_operation.cpp
+    src/lib/plugin/fft_operation.cpp
+    src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
 # Disposable disk entries are compatible only with this maintained implementation.
@@ -682,6 +709,39 @@ if(BUILD_TESTING)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
+  photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
+  photospider_add_test(test_layer Photospider::kernel tests/unit/test_layer.cpp)
+  add_subdirectory(examples/atom_outcomes_workflow)
+  add_test(NAME example_atom_outcomes_workflow COMMAND photospider_atom_outcomes_workflow)
+  photospider_add_test(test_atom_outcomes Photospider::kernel tests/integration/test_atom_outcomes.cpp)
+  photospider_add_test(test_statistics_callback Photospider::kernel tests/unit/test_statistics_callback.cpp)
+  photospider_add_test(test_statistics Photospider::kernel tests/unit/test_statistics.cpp)
+  photospider_add_test(test_quality Photospider::kernel tests/unit/test_quality.cpp)
+  photospider_add_test(test_fft_contract Photospider::kernel tests/unit/test_fft_contract.cpp)
+  photospider_add_test(test_component_contract Photospider::kernel tests/unit/test_component_contract.cpp)
+  add_subdirectory(examples/components_workflow)
+  add_test(NAME example_components_workflow COMMAND photospider_components_workflow)
+  add_subdirectory(examples/fft_workflow)
+  add_test(NAME example_fft_workflow COMMAND photospider_fft_workflow)
+  add_subdirectory(examples/statistics_workflow)
+  add_test(NAME example_statistics_workflow COMMAND photospider_statistics_workflow)
+  photospider_add_test(photospider_layer_workflow Photospider::kernel examples/layer_workflow/main.cpp)
+  photospider_add_test(photospider_layer_raster_workflow Photospider::kernel examples/layer_workflow/raster.cpp)
+  photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
+  photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
+  photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
+  photospider_add_test(test_shared_results photospider_test_kernel tests/unit/test_shared_results.cpp)
+  photospider_add_test(test_result_metadata_budget photospider_test_kernel tests/unit/test_result_metadata_budget.cpp)
+  if(PHOTOSPIDER_ENABLE_TSAN)
+    # TSAN defines strong global new/delete interceptors. Keep the ordinary
+    # budget/lifetime checks, while native builds retain allocator injection.
+    target_compile_definitions(test_result_metadata_budget PRIVATE
+      PHOTOSPIDER_TEST_NO_GLOBAL_ALLOCATOR_INTERPOSITION)
+  endif()
+  target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
+  target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
+  photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
+  photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
   photospider_add_test(

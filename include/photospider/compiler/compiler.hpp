@@ -60,6 +60,9 @@ struct PHOTOSPIDER_API SemanticOutput final {
   ValueDescriptor descriptor;
   std::vector<ValueFacet> facets;
   bool effective_atomic = true;
+  /** @brief Alternative fixed structured edge schema; Value metadata is empty.
+   */
+  std::shared_ptr<const SchemaTemplate> result_schema = {};
 };
 
 /**
@@ -391,6 +394,12 @@ struct PHOTOSPIDER_API PlanStep final {
   bool whole_boundary = false;
   /** @brief Compiler-proven observation kind over all input edges. */
   bool effective_atomic = true;
+  /** @brief Resolved fixed schema for a paged output; no Value shape is
+   * invented. */
+  std::shared_ptr<const SchemaTemplate> output_result_schema = {};
+  /** @brief Immutable staged metadata owned by compilation, borrowed by Runs.
+   */
+  std::shared_ptr<const ResultProgramMetadata> structured_metadata = {};
 };
 
 /**
@@ -430,6 +439,10 @@ class PHOTOSPIDER_API ExecutionPlan final {
    */
   [[nodiscard]] const std::vector<PlanStep>& steps() const noexcept {
     return steps_;
+  }
+  /** @brief Compiler-owned static result identities; no Run-time rehashing. */
+  const std::vector<std::string>& structured_templates() const noexcept {
+    return structured_templates_;
   }
   /** @brief Optional execution groups; no group changes singleton semantics. */
   const std::vector<PlanExecutionGroup>& execution_groups() const noexcept {
@@ -527,6 +540,8 @@ class PHOTOSPIDER_API ExecutionPlan final {
    * Empty evidence. Runtime certificates carry the actual exact dependencies.
    */
   bool dependency_network() const noexcept;
+  /** @brief Contains the structured result stage protocol. */
+  bool structured_network() const noexcept;
 
  private:
   friend class Compiler;
@@ -548,6 +563,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
   std::uint64_t revision_ = 0;
   /** @brief Validated dependency-ordered plan steps. */
   std::vector<PlanStep> steps_;
+  std::vector<std::string> structured_templates_;
   /** @brief Sorted named output mapping. */
   std::map<std::string, std::size_t> outputs_;
   /** @brief Parent optimized stage digest. */

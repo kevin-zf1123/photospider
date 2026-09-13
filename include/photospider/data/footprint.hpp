@@ -17,6 +17,12 @@ struct FootprintLimits final {
   std::uint64_t maximum_boxes = 65536;
   std::uint64_t maximum_work = 1048576;
   CancellationToken cancellation;
+  /** @brief Optional host precharge for each normalization work unit.
+   * Borrowed during construction, never stored in a Footprint. Failure stops
+   * before the unit executes; issued work is not refunded. Exceptions
+   * propagate.
+   */
+  std::function<Status(std::uint64_t)> consume_work = {};
 };
 
 /** @brief Immutable exact logical set in a nonzero rank-1..8 domain.

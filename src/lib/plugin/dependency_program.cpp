@@ -17,6 +17,8 @@
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/dependency_block.hpp"
 #include "plugin/dependency_discovery.hpp"
+#include "plugin/failure_latch.hpp"
+#include "plugin/joint_member_phase.hpp"
 #include "plugin/operation_identity.hpp"
 
 namespace ps {
@@ -55,6 +57,24 @@ Status validate_metadata(OperationMetadata* metadata) {
   return Status::success();
 }
 }  // namespace
+Result<AtomKey> dependency_atom_key(const DependencyQuery& query) {
+  if (query.kind != ObservationKind::Atomic || !query.observations.valid() ||
+      query.observations.boxes().size() != 1)
+    return Result<AtomKey>(invalid("one atomic observation required"));
+  AtomKey key;
+  key.output_index = query.output_index;
+  const auto& dimensions = query.observations.boxes()[0].dimensions();
+  if (dimensions.empty() || dimensions.size() > 8)
+    return Result<AtomKey>(invalid("invalid observation rank"));
+  key.rank = static_cast<std::uint32_t>(dimensions.size());
+  for (std::uint32_t i = 0; i < key.rank; ++i) {
+    if (dimensions[i].extent != 1)
+      return Result<AtomKey>(invalid("batch member has multiple observations"));
+    key.coordinate[i] = dimensions[i].offset;
+  }
+  return key.canonical() ? Result<AtomKey>(key)
+                         : Result<AtomKey>(invalid("invalid atom key"));
+}
 Result<Footprint> operation_observations(const OperationMetadata& output,
                                          const Footprint& samples,
                                          const FootprintLimits& limits) {
@@ -105,14 +125,31 @@ Result<Footprint> observation_samples(const OperationMetadata& output,
 Status DependencyPhase::read(std::uint32_t port,
                              const std::vector<std::uint64_t>& coordinate,
                              void* destination, std::size_t size) const {
-  auto status = consume_work(1);
-  if (!status.ok())
-    return status;
-  if (port >= inputs.size())
-    return report_failure(invalid("dependency read port out of bounds"));
-  status = inputs[port].read(coordinate, destination, size);
-  return status.ok() ? status : report_failure(status);
+  try {
+    auto status = consume_work(1);
+    if (!status.ok())
+      return status;
+    if (port >= inputs.size())
+      return report_failure(
+          Status{ErrorCode::InvalidArgument,
+                 {},
+                 FailureReason::UnauthorizedRead,
+                 {FailureOrigin::Protocol, FailureScope::Atom}});
+    status = inputs[port].read(coordinate, destination, size);
+    if (!status.ok() && status.code == ErrorCode::InvalidArgument) {
+      status.reason = FailureReason::UnauthorizedRead;
+      status.detail.origin = FailureOrigin::Protocol;
+      status.detail.scope = FailureScope::Atom;
+    }
+    return status.ok() ? status : report_failure(std::move(status));
+  } catch (const std::bad_alloc&) {
+    return report_failure(Status{ErrorCode::ResourceExhausted, {}});
+  } catch (...) {
+    return report_failure(
+        Status{ErrorCode::OperationFailed, {}, FailureReason::HostException});
+  }
 }
+
 void DependencyContinuation::reset() noexcept {
   if (destroy_)
     destroy_(storage_.data());
@@ -178,13 +215,13 @@ struct DependencySession::Impl {
   bool active_call = false;
   // Only private joint-owned proxies opt in. They never escape the group,
   // whose mutex/active guard serializes every call throughout nested polls.
-  bool joint_serialized = false;
+  bool joint_serialized = false, joint_prepared = false;
   std::uint64_t remaining_work = 0;
   std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
   std::string certificate_identity, block_identity;
-  std::shared_ptr<std::atomic<ErrorCode>> service_failure =
-      std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+  std::shared_ptr<plugin_internal::FailureLatch> service_failure =
+      std::make_shared<plugin_internal::FailureLatch>();
   bool waiting = false, terminal = false;
   std::vector<ValueFragments> ready;
   std::vector<DependencyNeed> pending;
@@ -198,12 +235,55 @@ struct DependencySession::Impl {
     return Status::success();
   }
   Status record_failure(Status status) {
-    auto expected = ErrorCode::Ok;
-    const auto code = status.ok() ? ErrorCode::Internal : status.code;
-    service_failure->compare_exchange_strong(expected, code);
-    if (expected != ErrorCode::Ok)
-      return Status{expected, {}};
-    return status.ok() ? Status{ErrorCode::Internal, {}} : status;
+    if (status.detail.scope == FailureScope::Atom && !status.detail.atom) {
+      if (query.kind == ObservationKind::Atomic) {
+        auto key = dependency_atom_key(query);
+        if (key.ok())
+          status.detail.atom = key.take_value();
+      } else {
+        status.detail.scope = FailureScope::Group;
+      }
+    }
+    return service_failure->record(std::move(status));
+  }
+
+  Status service_status() const {
+    auto status = service_failure->snapshot();
+    if (status.ok())
+      return status;
+    if (status.detail.origin == FailureOrigin::Unspecified) {
+      if (status.code == ErrorCode::InvalidArgument ||
+          status.code == ErrorCode::TypeMismatch) {
+        status.detail.origin = FailureOrigin::Protocol;
+        if (status.reason == FailureReason::None)
+          status.reason = FailureReason::UnauthorizedRead;
+      } else if (status.code == ErrorCode::ResourceExhausted) {
+        status.detail.origin = FailureOrigin::Resource;
+        if (status.reason == FailureReason::None)
+          status.reason = FailureReason::CapacityLimit;
+      } else if (status.code == ErrorCode::Cancelled ||
+                 status.code == ErrorCode::Stale) {
+        status.detail.origin = FailureOrigin::Cancellation;
+        if (status.reason == FailureReason::None)
+          status.reason = status.code == ErrorCode::Cancelled
+                              ? FailureReason::Cancelled
+                              : FailureReason::StaleVersion;
+      } else {
+        status.detail.origin = FailureOrigin::Backend;
+        if (status.reason == FailureReason::None)
+          status.reason = FailureReason::HostException;
+      }
+    }
+    if (status.detail.scope == FailureScope::Unspecified)
+      status.detail.scope = query.kind == ObservationKind::Atomic
+                                ? FailureScope::Atom
+                                : FailureScope::Group;
+    if (status.detail.scope == FailureScope::Atom && !status.detail.atom) {
+      auto key = dependency_atom_key(query);
+      if (key.ok())
+        status.detail.atom = key.take_value();
+    }
+    return status;
   }
   Status consume(std::uint64_t count) {
     auto status = stop();
@@ -211,14 +291,23 @@ struct DependencySession::Impl {
       return record_failure(status);
     const auto code = service_failure->load();
     if (code != ErrorCode::Ok)
-      return Status{code, {}};
+      return service_status();
     if (count > remaining_work)
-      return record_failure(Status::failure(
-          ErrorCode::ResourceExhausted, "dependency discovery fuel exhausted"));
+      return record_failure(
+          Status{ErrorCode::ResourceExhausted,
+                 "dependency discovery fuel exhausted",
+                 FailureReason::WorkLimit,
+                 {FailureOrigin::Resource, FailureScope::Atom}});
     if (shared_work) {
-      auto shared = shared_work(count);
-      if (!shared.ok())
-        return record_failure(shared);
+      try {
+        auto shared = shared_work(count);
+        if (!shared.ok())
+          return record_failure(shared);
+      } catch (const std::bad_alloc&) {
+        return record_failure(Status{ErrorCode::ResourceExhausted, {}});
+      } catch (...) {
+        return record_failure(Status{ErrorCode::OperationFailed, {}});
+      }
     }
     remaining_work -= count;
     return Status::success();
@@ -230,7 +319,9 @@ struct DependencySession::Impl {
     pending.clear();
     state = DependencyContinuation{};
     const auto stopped = stop();
-    return stopped.ok() ? status : stopped;
+    return stopped.ok() || status.detail.origin == FailureOrigin::Protocol
+               ? status
+               : stopped;
   }
   std::vector<std::vector<std::uint64_t>> input_shapes() const {
     std::vector<std::vector<std::uint64_t>> result;
@@ -479,6 +570,226 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
       std::shared_ptr<DependencySession>(
           new DependencySession(std::move(impl))));
 }
+Status DependencySession::begin_joint_phase(
+    plugin_internal::JointMemberPhase* slot, const BufferAllocator& host) {
+  if (!slot || !impl_->joint_serialized || impl_->active_call ||
+      impl_->terminal || impl_->waiting || impl_->query.backend != Backend::Cpu)
+    return invalid("invalid prepared joint member phase");
+  auto stopped = impl_->stop();
+  if (!stopped.ok())
+    return impl_->retire(stopped);
+  auto charged = impl_->consume(1);
+  if (!charged.ok())
+    return impl_->retire(charged);
+  if (impl_->polls >=
+      std::min(impl_->traits.outputs[0].maximum_dependency_stages,
+               impl_->limits.maximum_stages))
+    return impl_->retire(
+        Status{ErrorCode::ResourceExhausted, {}, FailureReason::StageLimit});
+  auto elements = impl_->query.outputs.element_count();
+  const auto width =
+      Value::element_size(impl_->query.output.descriptor.element_type);
+  if (!elements.ok() || elements.value() > UINT64_MAX / width)
+    return impl_->retire(Status{ErrorCode::ResourceExhausted, {}});
+  auto capacity =
+      std::max(impl_->traits.estimated_bytes, elements.value() * width);
+  if (impl_->traits.workspace_bytes > UINT64_MAX - capacity)
+    return impl_->retire(Status{ErrorCode::ResourceExhausted, {}});
+  capacity += impl_->traits.workspace_bytes;
+  for (const auto& input : impl_->ready) {
+    auto count = input.coverage().element_count();
+    const auto factor = Value::element_size(input.descriptor().element_type) *
+                        impl_->traits.workspace_input_multiplier;
+    if (factor &&
+        (!count.ok() || count.value() > (UINT64_MAX - capacity) / factor))
+      return impl_->retire(Status{ErrorCode::ResourceExhausted, {}});
+    if (factor)
+      capacity += count.value() * factor;
+  }
+  slot->allocator = host.limited(
+      capacity, [failure = impl_->service_failure](ErrorCode code) {
+        auto expected = ErrorCode::Ok;
+        failure->compare_exchange_strong(expected, code);
+      });
+  slot->consume = [this](std::uint64_t count) { return impl_->consume(count); };
+  slot->report = [this](Status failure) {
+    return impl_->record_failure(std::move(failure));
+  };
+  slot->phase.emplace(DependencyPhase{impl_->query,
+                                      impl_->ready,
+                                      slot->allocator,
+                                      slot->consume,
+                                      slot->report,
+                                      impl_->limits.sets,
+                                      {},
+                                      {},
+                                      {},
+                                      {},
+                                      {},
+                                      {},
+                                      {}});
+  auto& phase = *slot->phase;
+  const auto checkpoint_allowed = [this]() {
+    auto status = impl_->consume(1);
+    if (!status.ok())
+      return status;
+    if (!impl_->traits.deterministic || !impl_->traits.side_effect_free)
+      return impl_->record_failure(
+          invalid("checkpoint requires pure atomic program"));
+    return Status::success();
+  };
+  phase.checkpoint_before = [checkpoint_allowed](std::uint32_t, std::uint64_t) {
+    auto status = checkpoint_allowed();
+    return status.ok() ? Result<std::optional<DependencyCheckpoint>>(
+                             std::optional<DependencyCheckpoint>{})
+                       : Result<std::optional<DependencyCheckpoint>>(status);
+  };
+  phase.checkpoint_publish = [this, slot, checkpoint_allowed](
+                                 std::uint32_t, std::uint64_t,
+                                 const Value& state) {
+    auto status = checkpoint_allowed();
+    if (!status.ok())
+      return status;
+    if (!state.valid() || !slot->allocator.owns_allocation(*state.storage()))
+      return impl_->record_failure(
+          invalid("checkpoint state must use host allocator"));
+    return Status::success();
+  };
+  phase.block = [this, slot](std::uint32_t kind, std::uint64_t begin,
+                             std::uint64_t end, std::uint64_t mode,
+                             const Value& incoming,
+                             const std::function<Result<Value>()>& compute) {
+    try {
+      return plugin_internal::evaluate_dependency_block(
+          impl_->block_identity, *slot->phase, {}, kind, begin, end, mode,
+          incoming, compute);
+    } catch (const std::bad_alloc&) {
+      return Result<Value>(
+          impl_->record_failure(Status{ErrorCode::ResourceExhausted, {}}));
+    } catch (...) {
+      return Result<Value>(
+          impl_->record_failure(Status{ErrorCode::OperationFailed,
+                                       {},
+                                       FailureReason::HostException}));
+    }
+  };
+  const auto no_gpu = [this]() {
+    return impl_->record_failure(
+        Status{ErrorCode::InvalidArgument,
+               "native service on CPU dependency",
+               FailureReason::UnauthorizedRead,
+               {FailureOrigin::Protocol, FailureScope::Atom}});
+  };
+  phase.atlas = [no_gpu](std::uint32_t) {
+    return Result<FragmentAtlas>(no_gpu());
+  };
+  phase.gpu_buffer = [no_gpu](const std::uint8_t*, std::uint64_t, bool) {
+    return Result<std::uint64_t>(no_gpu());
+  };
+  phase.gpu_execute = [no_gpu](const ps_gpu_dispatch_v9*, std::uint32_t) {
+    return no_gpu();
+  };
+  phase.discover =
+      [no_gpu](std::uint32_t, std::uint32_t,
+               const std::function<Status(const DependencyGpuRequestTable&)>&) {
+        return no_gpu();
+      };
+  ++impl_->polls;
+  impl_->joint_prepared = true;
+  impl_->active_call = true;
+  return Status::success();
+}
+void DependencySession::end_joint_phase() noexcept {
+  impl_->active_call = false;
+}
+Status DependencySession::joint_service_failure() const {
+  return impl_->service_status();
+}
+Status DependencySession::retire_joint_member(Status failure) {
+  if (!impl_->joint_serialized || impl_->active_call || !impl_->waiting ||
+      failure.ok())
+    return invalid("joint scope retirement requires a waiting member");
+  return impl_->retire(std::move(failure));
+}
+Result<std::optional<Status>> DependencySession::preflight_joint_reply(
+    const Result<DependencyPoll>& reply) {
+  using Answer = Result<std::optional<Status>>;
+  const auto protocol = [](const char* message) {
+    return Answer(Status{ErrorCode::InvalidArgument,
+                         message,
+                         FailureReason::MalformedEnvelope,
+                         {FailureOrigin::Protocol, FailureScope::Group}});
+  };
+  const auto local = [&](Status status, FailureOrigin origin) {
+    status.detail.origin = origin;
+    status.detail.scope = FailureScope::Atom;
+    status.detail.atom = dependency_atom_key(impl_->query).value();
+    return Answer(std::optional<Status>(std::move(status)));
+  };
+  if (!impl_->joint_serialized || !impl_->active_call || impl_->terminal ||
+      impl_->waiting)
+    return protocol("member is not a currently ready joint phase");
+  if (!reply.ok()) {
+    auto sticky = impl_->service_status();
+    return Answer(sticky.ok() ? std::optional<Status>{}
+                              : std::optional<Status>(sticky));
+  }
+  const auto& event = reply.value();
+  if (const auto* need = std::get_if<DependencyNeedBatch>(&event)) {
+    if (!need->request_needs.empty())
+      return protocol("atomic batch contains RequestRecord needs");
+    auto projected = impl_->projection(*need);
+    if (!projected.ok()) {
+      if (projected.status().code == ErrorCode::ResourceExhausted)
+        return local(projected.status(), FailureOrigin::Resource);
+      if (projected.status().code == ErrorCode::Cancelled) {
+        auto sticky = impl_->service_status();
+        return sticky.detail.origin == FailureOrigin::Protocol
+                   ? Answer(std::optional<Status>(sticky))
+                   : local(projected.status(), FailureOrigin::Cancellation);
+      }
+      return protocol("invalid batch member Need payload");
+    }
+    if (projected.value().empty())
+      return protocol("empty batch member Need");
+    for (const auto& fetch : projected.value()) {
+      const auto& allowed = impl_->traits.outputs[0].input_indices;
+      if (allowed && std::find(allowed->begin(), allowed->end(), fetch.port) ==
+                         allowed->end())
+        return protocol("batch member reads excluded input");
+      auto charged =
+          impl_->consume(fetch.tags.size() + fetch.samples.boxes().size() + 1);
+      if (!charged.ok())
+        return Answer(std::optional<Status>(impl_->service_status()));
+      for (const auto& box : fetch.samples.boxes())
+        if (!input_internal::complete_image_channels(
+                impl_->query.inputs[fetch.port].descriptor,
+                impl_->query.inputs[fetch.port].facets, box))
+          return protocol("batch member omits complete input observation");
+    }
+  } else {
+    const auto& result = std::get<ValueFragments>(event);
+    if (!result.valid() || result.coverage() != impl_->query.outputs ||
+        result.descriptor().element_type !=
+            impl_->query.output.descriptor.element_type ||
+        result.descriptor().shape != impl_->query.output.descriptor.shape ||
+        !input_internal::same_facets(result.facets(),
+                                     impl_->query.output.facets))
+      return protocol("batch Success payload differs from its atom contract");
+    for (const auto& fragment : result.fragments()) {
+      auto checked = input_internal::validate_port_value(
+          impl_->traits.outputs[0].output_schema, fragment,
+          ErrorCode::OperationFailed, [&] { return impl_->stop().code; });
+      if (!checked.ok())
+        return local(checked, checked.code == ErrorCode::Cancelled
+                                  ? FailureOrigin::Cancellation
+                                  : FailureOrigin::Domain);
+    }
+  }
+  auto sticky = impl_->service_status();
+  return Answer(sticky.ok() ? std::optional<Status>{}
+                            : std::optional<Status>(sticky));
+}
 Result<DependencyProgress> DependencySession::poll(
     const BufferAllocator& allocator,
     const DependencyCheckpointServices& checkpoints,
@@ -493,23 +804,29 @@ Result<DependencyProgress> DependencySession::poll(
     explicit Active(bool& v) : value(v) { value = true; }
     ~Active() { value = false; }
   } active(impl_->active_call);
+  const bool prepared = std::exchange(impl_->joint_prepared, false);
   if (impl_->terminal)
     return Result<DependencyProgress>(
         invalid("dependency session is terminal"));
+  const auto prepared_failure = impl_->service_status();
+  if (prepared_failure.detail.origin == FailureOrigin::Protocol)
+    return Result<DependencyProgress>(impl_->retire(prepared_failure));
   auto status = impl_->stop();
   if (!status.ok())
     return Result<DependencyProgress>(impl_->retire(status));
   if (impl_->waiting)
     return Result<DependencyProgress>(
         impl_->retire(invalid("dependency poll is awaiting supply")));
-  status = impl_->consume(1);
-  if (!status.ok())
-    return Result<DependencyProgress>(impl_->retire(status));
-  if (impl_->polls >=
-      std::min(impl_->traits.outputs[0].maximum_dependency_stages,
-               impl_->limits.maximum_stages))
-    return Result<DependencyProgress>(impl_->retire(Status::failure(
-        ErrorCode::ResourceExhausted, "dependency phase limit")));
+  if (!prepared) {
+    status = impl_->consume(1);
+    if (!status.ok())
+      return Result<DependencyProgress>(impl_->retire(status));
+    if (impl_->polls >=
+        std::min(impl_->traits.outputs[0].maximum_dependency_stages,
+                 impl_->limits.maximum_stages))
+      return Result<DependencyProgress>(impl_->retire(Status::failure(
+          ErrorCode::ResourceExhausted, "dependency phase limit")));
+  }
   try {
     Result<DependencyPoll> polled(invalid("uninitialized poll"));
     std::vector<DependencyNeed> discovered;
@@ -913,7 +1230,8 @@ Result<DependencyProgress> DependencySession::poll(
               std::min(limits.maximum_work, impl_->remaining_work);
           auto decoded = plugin_internal::decode_discovery(
               *frozen, capacity, candidates, impl_->query, limits,
-              &impl_->remaining_work, &discovery_metadata);
+              &impl_->remaining_work, &discovery_metadata,
+              [&](std::uint64_t count) { return impl_->consume(count); });
           if (!decoded.ok())
             return impl_->record_failure(decoded.status());
           if (decoded.value().size() > limits.maximum_boxes ||
@@ -930,7 +1248,8 @@ Result<DependencyProgress> DependencySession::poll(
           return impl_->record_failure(Status{ErrorCode::OperationFailed, {}});
         }
       };
-      ++impl_->polls;
+      if (!prepared)
+        ++impl_->polls;
       std::optional<input_internal::Float32Environment> environment;
       if (!impl_->query.output.facets.empty() ||
           impl_->traits.outputs[0].output_schema.kind !=
@@ -945,16 +1264,16 @@ Result<DependencyProgress> DependencySession::poll(
     // Returning Need relinquishes stage input leases; state-retained owners
     // remain explicit real allocations, not merely a sealed reservation.
     impl_->ready.clear();
+    const auto host_failure = impl_->service_status();
+    if (host_failure.detail.origin == FailureOrigin::Protocol)
+      return Result<DependencyProgress>(impl_->retire(host_failure));
     status = impl_->stop();
     if (!status.ok())
       return Result<DependencyProgress>(impl_->retire(status));
     if (impl_->service_failure->load() != ErrorCode::Ok) {
-      const auto code = impl_->service_failure->load();
-      // Preserve a propagated service diagnostic (including the numeric sample
-      // index), while an ignored failure still overrides callback success.
-      return Result<DependencyProgress>(impl_->retire(
-          !polled.ok() && polled.status().code == code ? polled.status()
-                                                       : Status{code, {}}));
+      // A callback cannot replace a prior Protocol reason/scope by returning
+      // a different failure with the same coarse ErrorCode.
+      return Result<DependencyProgress>(impl_->retire(impl_->service_status()));
     }
     if (!polled.ok())
       return Result<DependencyProgress>(impl_->retire(polled.status()));

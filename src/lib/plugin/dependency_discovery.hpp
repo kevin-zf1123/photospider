@@ -10,5 +10,6 @@ namespace ps::plugin_internal {
 Result<std::vector<DependencyNeed>> decode_discovery(
     const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,
     const DependencyQuery& query, const FootprintLimits& limits,
-    std::uint64_t* normalization_work, std::uint64_t* metadata_entries);
+    std::uint64_t* normalization_work, std::uint64_t* metadata_entries,
+    const std::function<Status(std::uint64_t)>& consume_work);
 }  // namespace ps::plugin_internal

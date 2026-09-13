@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 namespace ps::content_internal {
 /** @brief Streaming SHA-256 for disposable content identities, not signatures.
@@ -33,7 +34,7 @@ class Sha256 final {
       data[i] = static_cast<std::uint8_t>(value >> (8 * i));
     bytes(data, 8);
   }
-  void text(const std::string& value) noexcept {
+  void text(std::string_view value) noexcept {
     integer(value.size());
     bytes(value.data(), value.size());
   }

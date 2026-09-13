@@ -69,6 +69,16 @@ Result<ValueFragments> ValueFragments::create(
     ValueDescriptor descriptor, std::vector<ValueFacet> facets,
     Footprint authorized, const std::vector<Value>& fragments,
     const FootprintLimits& limits) {
+  return create_view(std::move(descriptor), std::move(facets),
+                     std::move(authorized), fragments.data(), fragments.size(),
+                     limits);
+}
+Result<ValueFragments> ValueFragments::create_view(
+    ValueDescriptor descriptor, std::vector<ValueFacet> facets,
+    Footprint authorized, const Value* fragments, std::size_t count,
+    const FootprintLimits& limits) {
+  if (count && !fragments)
+    return Result<ValueFragments>(invalid("null fragment array"));
   if (!authorized.valid() || authorized.shape() != descriptor.shape)
     return Result<ValueFragments>(invalid("fragment domain mismatch"));
   try {
@@ -99,7 +109,8 @@ Result<ValueFragments> ValueFragments::create(
   auto available = empty.take_value();
   ValueFragments result;
   std::uint64_t work = limits.maximum_work;
-  for (const auto& value : fragments) {
+  for (std::size_t index = 0; index < count; ++index) {
+    const auto& value = fragments[index];
     if (limits.cancellation.cancelled())
       return Result<ValueFragments>(
           Status::failure(ErrorCode::Cancelled, "fragment creation cancelled"));

@@ -17,7 +17,7 @@ struct Joint {
       const DependencyJointPhase& phase) {
     std::vector<DependencyAtomOutcome> results;
     for (const auto* member : phase.members)
-      results.push_back({member->query.output_index,
+      results.push_back({dependency_atom_key(member->query).value(),
                          states[member->query.output_index].poll(*member)});
     return Result<std::vector<DependencyAtomOutcome>>(std::move(results));
   }

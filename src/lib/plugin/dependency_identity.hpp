@@ -2,13 +2,14 @@
 
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "data/content_digest.hpp"
 #include "photospider/compiler/compiler.hpp"
 #include "plugin/operation_identity.hpp"
 
-namespace ps::execution_internal {
+namespace ps::contract_internal {
 // Optional cache identity work is charged before hashing arbitrary metadata.
 class DependencyTemplateDigest final {
  public:
@@ -17,7 +18,7 @@ class DependencyTemplateDigest final {
     if (charge(1))
       hash_.integer(value);
   }
-  void text(const std::string& value) {
+  void text(std::string_view value) {
     if (charge(value.size()) && charge(1))
       hash_.text(value);
   }
@@ -113,4 +114,4 @@ inline std::vector<std::string> dependency_cache_templates(
   }
   return keys;
 }
-}  // namespace ps::execution_internal
+}  // namespace ps::contract_internal

@@ -115,7 +115,8 @@ struct Joint {
     std::vector<DependencyAtomOutcome> result;
     for (const auto* member : phase.members) {
       const auto id = member->query.output_index;
-      result.push_back({id, states[id].poll(*member, &shared)});
+      result.push_back({dependency_atom_key(member->query).value(),
+                        states[id].poll(*member, &shared)});
     }
     return Result<std::vector<DependencyAtomOutcome>>(std::move(result));
   }

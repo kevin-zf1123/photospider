@@ -128,3 +128,37 @@ result-region key 为 v5；完整输出声明、输入投影和检查过的 exte
 schema 2、provider ABI 1、C++17、image v2、保守 optimizer v5、result digest v2 保持。
 C++ 消费者须重编译，0.8 包消费者被拒绝。多输出规划、执行身份及 Atomic 联合执行
 由后续独立叶项验收，M1 不宣称这些运行时条件已完成。
+
+## 阶段 A 受控资源基础
+
+package 0.10.0 改变 C++ execution config 与 host work service 签名。C++ 消费者需
+重新构建，0.9 包请求被拒绝。本资源基础保留 operation ABI/traits 9、document schema 2
+及既有 compiler identity domain；资源限额不进入语义身份。Result/schema ABI 变更由
+阶段 A #316 单独跟踪。见[受控资源](../../kernel-architecture/zh/Managed-Resources.zh.md)。
+
+## Phase A 结构化 C++ 契约
+
+#316 在 package 0.10.0 中加入 OperationTraits 10、dependency protocol 2、编译器
+可见的 result schema 和 owning paged ResultRef。semantic/physical-plan/plan-cache
+域升级为 v10，result-region identity 升级为 v6；规范 schema 和 Result port
+约束进入这些身份。资源限额和页大小仍是物理/准入选择。optimizer v5、
+WorkflowDocument schema 2、provider ABI 1、result digest v2 保持不变。
+
+C operation DSO 布局和 v9 入口不变。加载 ABI 9 Value/dependency plugin 时，
+宿主在内部构造当前 C++ traits。structured callback 当前通过安装的 C++ API
+注册，没有 structured C descriptor 表或兼容 shim。各版本轴独立：C++ consumer
+必须为 0.10 重编译，布局不变的 ABI 9 C DSO 仍可加载。参见
+[全局结果](../../kernel-architecture/Global-Results.md)。
+
+#318 在同一 0.10 C++ package 增加闭集 Layer schema version 1、可注册的 CPU Layer
+operation factory、逐原语严格舍入与 `Status.reason`。Status 布局改变，C++ consumer
+须重新构建；C ABI 9 仍投影既有 error code，不增加 C++ Status 字段。具名 working-space
+和算术定义由 schema version 与 operation identity 固定。参见
+[Layer 运行时](../../kernel-architecture/zh/Layer-Runtime.zh.md)。
+
+#319 在本轮 0.10 C++ 包中增加完整 `Status.detail`、基于坐标 `AtomKey`
+的 joint contract 2、`execute_atoms` 和不可伪造枚举的 `QualityReport`。
+C ABI 9 保留按不同输出分组的 joint contract 1 和原错误码投影。C++ 回调结果与
+supply 签名使用 AtomKey，消费方重新构建，不提供 output-index shim。
+joint contract 2 使用既有 v10 canonical framing 中的新 trait 值；contract 1
+语义和 C 布局保持原样。见[原子错误与质量](../../kernel-architecture/zh/Atom-Errors-and-Quality.zh.md)。

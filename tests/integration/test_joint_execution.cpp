@@ -105,7 +105,8 @@ struct Joint {
                                    member->query.outputs, {view.take_value()});
         if (!fragments.ok())
           return Result<std::vector<DependencyAtomOutcome>>(fragments.status());
-        results.push_back({id, Result<DependencyPoll>(fragments.take_value())});
+        results.push_back({dependency_atom_key(member->query).value(),
+                           Result<DependencyPoll>(fragments.take_value())});
       }
       return Result<std::vector<DependencyAtomOutcome>>(std::move(results));
     }
@@ -119,10 +120,12 @@ struct Joint {
       const auto id = member->query.output_index;
       if (failure == 3 && id == 0)
         result.push_back(
-            {id, Result<DependencyPoll>(Status{ErrorCode::OperationFailed,
-                                               "local numerical error"})});
+            {dependency_atom_key(member->query).value(),
+             Result<DependencyPoll>(
+                 Status{ErrorCode::OperationFailed, "local numerical error"})});
       else
-        result.push_back({id, states[id].poll(*member)});
+        result.push_back({dependency_atom_key(member->query).value(),
+                          states[id].poll(*member)});
     }
     return Result<std::vector<DependencyAtomOutcome>>(std::move(result));
   }

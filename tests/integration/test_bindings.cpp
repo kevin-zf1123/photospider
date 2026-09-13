@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -76,7 +77,7 @@ int dynamic_bindings() {
     PS_CHECK(result.value().diagnostics.operation_timings.size() == 2);
     PS_CHECK(result.value().diagnostics.transfer_count == 0);
     PS_CHECK(result.value().diagnostics.peak_live_bytes == 48);
-    PS_CHECK(result.value().diagnostics.plan_digest ==
+    PS_CHECK(std::string_view(result.value().diagnostics.plan_digest) ==
              workflow.plan.digest().value);
   }
   for (const auto& step : workflow.plan.steps()) {

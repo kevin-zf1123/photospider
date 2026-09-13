@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -40,7 +42,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 9)
+  if (count > 1024 || traits.version != 10)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -89,8 +91,8 @@ Result<OperationMetadata> infer_operation_output(
   if (inputs.size() != t.input_count || inputs.size() != t.input_schema.size())
     return mismatch("inference input count mismatch");
   for (std::size_t i = 0; i < inputs.size(); ++i) {
-    auto status = input_internal::validate_port_metadata(
-        t.input_schema[i], inputs[i].descriptor, inputs[i].facets);
+    auto status =
+        input_internal::validate_port_metadata(t.input_schema[i], inputs[i]);
     if (!status.ok())
       return Result<OperationMetadata>(status);
   }
@@ -103,6 +105,35 @@ Result<OperationMetadata> infer_operation_output(
           inputs[i].descriptor.element_type !=
               inputs[first].descriptor.element_type)
         return mismatch("homogeneous repeated input descriptors differ");
+  }
+  std::vector<std::vector<std::uint64_t>> domains;
+  for (const auto& input : inputs) {
+    if (!input.result_schema) {
+      domains.push_back(input.descriptor.shape);
+      continue;
+    }
+    std::vector<std::uint64_t> domain;
+    for (const auto& extent : input.result_schema->domain) {
+      if (extent.kind != ResultExtentKind::Fixed) {
+        domain.clear();
+        break;
+      }
+      const auto n =
+          extent.value / extent.divisor + (extent.value % extent.divisor != 0);
+      if (n > UINT64_MAX - extent.offset)
+        return mismatch("result domain overflows");
+      domain.push_back(n + extent.offset);
+    }
+    domains.push_back(std::move(domain));
+  }
+  if (t.outputs[0].result_schema) {
+    auto schema = t.outputs[0].result_schema->resolve(domains);
+    if (!schema.ok())
+      return Result<OperationMetadata>(schema.status());
+    OperationMetadata metadata;
+    metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(schema.take_value());
+    return Result<OperationMetadata>(std::move(metadata));
   }
   OperationMetadata result;
   result.descriptor.element_type = t.outputs[0].output_element_type;
@@ -167,9 +198,9 @@ Result<OperationMetadata> infer_operation_output(
             break;
           case OperationExtentSource::InputAxis:
             if (axis.input >= inputs.size() ||
-                axis.axis >= inputs[axis.input].descriptor.shape.size())
+                axis.axis >= domains[axis.input].size())
               return mismatch("output axis references absent input axis");
-            n = inputs[axis.input].descriptor.shape[axis.axis];
+            n = domains[axis.input][axis.axis];
             break;
           case OperationExtentSource::IndexListCount: {
             const auto* value =
@@ -336,17 +367,37 @@ Status validate_operation_contract(const OperationTraits& t) {
       (t.outputs[0].failure_delivery == FailureDelivery::PerAtomOutcome &&
        (t.outputs[0].observation_kind != ObservationKind::Atomic ||
         !t.outputs[0].dependency_version)) ||
-      t.outputs[0].dependency_version > 1 ||
-      ((t.outputs[0].dependency_version == 1) !=
+      t.outputs[0].dependency_version > 2 ||
+      ((t.outputs[0].dependency_version != 0) !=
        (t.outputs[0].region_rule == OperationRegionRule::Dependency)) ||
       (t.outputs[0].dependency_version == 0 &&
        (t.outputs[0].continuation_bytes ||
         t.outputs[0].maximum_dependency_stages)) ||
-      (t.outputs[0].dependency_version == 1 &&
+      (t.outputs[0].dependency_version != 0 &&
        (!t.outputs[0].continuation_bytes ||
         !t.outputs[0].maximum_dependency_stages ||
         t.outputs[0].maximum_dependency_stages > 1048576)))
     return invalid("invalid dependency observation/phase contract");
+  const auto& output = t.outputs[0];
+  if (output.result_schema.has_value() !=
+      (output.output_schema.kind == OperationPortKind::Result))
+    return invalid("structured output requires a complete schema template");
+  if (output.result_schema &&
+      (output.dependency_version != 2 ||
+       !output.result_schema->validate().ok() ||
+       std::string_view(output.result_schema->id) !=
+           std::string_view(output.output_schema.result_schema_id) ||
+       output.result_schema->version !=
+           output.output_schema.result_schema_version ||
+       output.shape_rule != OperationShapeRule::Scalar ||
+       output.output_dtype_rule != OperationDtypeRule::Declared ||
+       output.output_semantic_rule != OperationSemanticRule::Drop ||
+       !output.output_facets.empty()))
+    return invalid("invalid structured output template");
+  for (const auto& port : t.input_schema)
+    if (port.kind == OperationPortKind::Result &&
+        output.dependency_version != 2)
+      return invalid("Result inputs require structured stage protocol");
   const auto spec = [&](const std::string& name, OperationParameterType type) {
     return std::any_of(t.parameter_schema.begin(), t.parameter_schema.end(),
                        [&](const auto& p) {

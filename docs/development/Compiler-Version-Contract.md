@@ -156,3 +156,43 @@ enter identities. Schema 2, provider ABI 1, C++17, image v2, conservative optimi
 v5 and result digest v2 remain. C++ consumers rebuild; 0.8 package consumers reject.
 Multi-output planning, execution identities and Atomic joint execution have their
 own later acceptance leaves; M1 does not claim those runtime gates complete.
+
+## Phase A managed-resource foundation
+
+Package 0.10.0 changes C++ execution configuration and host work-service
+signatures. C++ consumers rebuild and package 0.9 consumers are rejected. The
+resource foundation retains operation ABI/traits 9, document schema 2 and the
+existing compiler identity domains; resource limits do not become semantic
+inputs. Result/schema ABI changes are tracked separately in Phase A #316.
+See [Managed resources](../kernel-architecture/Managed-Resources.md).
+
+## Phase A structured C++ contracts
+
+#316 adds OperationTraits 10, dependency protocol 2, compiler-visible result
+schemas and owning paged ResultRefs in package 0.10.0. Semantic/physical-plan/
+plan-cache domains advance to v10; result-region identity advances to v6.
+Canonical schemas and Result port constraints enter those identities. Resource
+limits and page sizes remain physical/admission choices. The unchanged optimizer
+v5, WorkflowDocument schema 2, provider ABI 1 and result digest v2 remain.
+
+The C operation DSO layout and v9 entrypoints are unchanged. Loading an ABI 9
+Value/dependency plugin constructs current C++ traits internally. Structured
+callbacks are currently registered through the installed C++ API; there is no
+structured C descriptor table or compatibility shim. These version axes are
+independent: C++ consumers must rebuild for 0.10, while unchanged ABI 9 C DSOs
+remain loadable. See [Global results](../kernel-architecture/Global-Results.md).
+
+#318 adds closed Layer schema version 1, the registered CPU Layer operation
+factory, strict per-primitive arithmetic and `Status.reason` to the same 0.10
+C++ package. The Status layout change requires C++ consumers to rebuild; C ABI 9
+continues to project its existing error code and does not gain a C++ Status
+field. Named working-space and arithmetic definitions are fixed by the schema
+version and operation identity. See [Layer runtime](../kernel-architecture/Layer-Runtime.md).
+
+#319 extends the same pending 0.10 C++ package with full `Status.detail`,
+coordinate `AtomKey` joint contract 2, `execute_atoms` and opaque numerical
+`QualityReport`. C ABI 9 keeps unique-output joint contract 1 and its unchanged
+error-code projection. C++ callback outcome/supply signatures now use AtomKey;
+consumers rebuild without an output-index shim. Joint contract 2 is a new
+trait value in existing v10 canonical framing; contract 1 semantics and C
+layouts remain. See [Atom errors and quality](../kernel-architecture/Atom-Errors-and-Quality.md).
