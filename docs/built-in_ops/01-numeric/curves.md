@@ -4,6 +4,11 @@
 
 状态Proposed。标量插值/查表为D1，通用Path与LUT烘焙/求逆为D2。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；当前曲线与 field LUT 的 Whole 实现边界以链接契约为准。
 
+本轮控制点 generator 选择二次/三次 Bézier 锚点与相对控制柄，见
+[CRV-02 具体规格](op_specs/CRV-02_sample_bezier_function.md)。每个节点静态选择 degree，
+anchors/handles/start/end 动态输入，输出 `values` 与 `axis`；输出默认 Float64。
+strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其他族的建议不覆盖该具体规格。
+
 ## 表示与目录
 
 `[N,3]`可表示RGB三条独立函数，也可表示一个标量t到RGB的color ramp。相同shape不足以决定语义，必须写input arity、轴domain和输出通道角色。真正RGB三维LUT是`[Nr,Ng,Nb,3]`，三个颜色分量共同索引；CLF分别定义1D、3×1D与3D LUT，scalar→RGB color ramp是本规格另外定义的映射语义。[^clf]
@@ -11,7 +16,7 @@
 | ID / 提议操作 | 输入 → 输出 | 参数与方法 | 验收 |
 | --- | --- | --- | --- |
 | CRV-01 interpolate | x[K],y[K,C],query[N]→[N,C] | x严格递增；默认linear，tone profile可选PCHIP；domain外默认error，可选clamp/linear extension | 控制点命中、重复x报错、端点与外推 |
-| CRV-02 bezier_function | 二维控制点+query x→y | 必须验证x(t)单调；先求Bx(t)=x，再取By(t) | 参数t不等于横轴x；多值曲线拒绝作为函数 |
+| CRV-02 bezier_function | anchors/handle offsets+start/end/count → `values[N]`,`axis[3]` | 二次或三次；全局验证 x 单调，按命中段读取 y；先解 Bx(t)=x，再取 By(t)；允许尖角和 y 过冲 | [完整草稿](op_specs/CRV-02_sample_bezier_function.md)，Proposed；新接口尚未实现 |
 | CRV-03 parametric evaluate | curve+参数t→[N,D] | quadratic/cubic Bézier、Hermite/B-spline；允许x回转 | 端点、切线、退化段；路径语义另见paths |
 | CRV-04 bake_lut1d | expression/curve+domain→[N,C] | N=256建议、包含端点；输出不默认clip | 与连续函数的误差和顶点一致分别测 |
 | CRV-05 apply_lut1d | scalar/RGB+表→结果 | linear默认；domain/对应通道/越界必填 | RGB独立应用、灰阶和alpha策略 |
@@ -37,7 +42,10 @@ PCHIP与B-spline性质可对照SciPy官方实现定义；Fourier resample的周�
 
 ## 采样和执行
 
-规范形式建议`x0,step,count`，见NUM-01。另提供UI半开区间step模式，例如[0,1)、step=.3得到0,.3,.6,.9；由整数索引计算，不能靠反复浮点加法决定长度。采样数上界、N*C溢出、端点不足和重复节点必须在分配前验证。
+NUM-01 与 CRV-02 的目标采样形式为 `start,end,count`，含端点并支持反向；
+count=1 只在 start 求值且不读取 end。返回的 axis 保留起点、终点和推导步长，
+具体坐标舍入及相邻坐标重复检查见单算子规格。其他采样族的区间模式须另行澄清；
+现有代码调用继续遵循已实现参数，不以目标规格伪装成当前 registry 行为。
 
 顺序query可线性扫描区间，预处理O(K)，求值O(K+N)；无序query可二分O(NlogK)。GPU可并行query，但完整表及shape需求要明确。动态表值变化应纳入绑定快照和缓存依赖，不隐式从可变文件读取。
 
