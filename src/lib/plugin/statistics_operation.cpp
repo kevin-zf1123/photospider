@@ -129,9 +129,14 @@ struct State {
                        : Poll(sealed.status());
   }
   Poll source(const ResultProgramPhase& phase) {
-    batch =
-        std::min({size() - row, spec.width - row % spec.width,
-                  std::min<std::uint64_t>(4096, phase.query.page_bytes) / 8});
+    // Histogram Value requests have their own fixed, admitted strip bound.
+    // A small Result I/O window must not multiply all source scan stages.
+    const auto source_bytes =
+        op == Op::Histogram
+            ? UINT64_C(4096)
+            : std::min<std::uint64_t>(4096, phase.query.page_bytes);
+    batch = std::min(
+        {size() - row, spec.width - row % spec.width, source_bytes / 8});
     if (!batch)
       return Poll(Status{ErrorCode::ResourceExhausted,
                          "statistics scalar exceeds page window"});

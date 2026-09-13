@@ -19,6 +19,7 @@ cmake -S examples/statistics_workflow -B out/phase-a-delivery/statistics-consume
   -DCMAKE_PREFIX_PATH="$PWD/out/phase-a-delivery/install"
 cmake --build out/phase-a-delivery/statistics-consumer -j 8
 out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow
+out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow --large
 ```
 
 ## Contract and independent reference
@@ -72,3 +73,17 @@ bytes and rereads the immutable source once per 512-bin range. Large bin domains
 therefore have a concrete bounded-memory path; extra passes may exhaust work. Source and output fields use windows no larger
 than 4096 bytes, and mandatory result backing is paged. Dependency relations
 remain Conservative and retain descriptor observations for empty collections.
+
+`--large` executes 200x200 samples with 65536 bins, a 24-byte Result I/O window,
+65536-byte managed Host budget, finite 100-million work and one-million-stage
+producer limits. Here `x[i]=(509*i)%65536`; the map reference checks all 40000
+nonzero histogram rows, count 40000 and total 1309905504, then the sink checks
+every grade pixel. Cache-off sharing and final-window cleanup are included.
+The measured Host peak was 40160 bytes. `--stage-regression` runs a 25x40 version
+at a 5000-stage producer cap; the old implementation exhausts that cap.
+
+Histogram Value input strips have their own root-admitted 4096-byte field cap,
+asserted by every source callback. They are independent of Result I/O paging;
+histogram fields, parameter reads and grade outputs continue to obey the
+24-byte selected window. Printed root `issued_stages` sums coordinator actions
+across all producers, and differs from each producer's poll limit.

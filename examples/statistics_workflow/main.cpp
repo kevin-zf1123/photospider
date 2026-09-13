@@ -54,6 +54,9 @@ std::shared_ptr<RegionalSource> source(StatisticsSpec spec, bool mask,
                      const Region& region, std::uint8_t* output,
                      std::uint64_t bytes, const BufferAllocator&,
                      const CancellationToken&) -> Result<Region> {
+    if (bytes > 4096)
+      return Result<Region>(Status{ErrorCode::OperationFailed,
+                                   "source strip exceeds 4096 bytes"});
     const auto& r = region.dimensions();
     std::uint64_t offset = 0;
     for (auto y = r[0].offset; y < r[0].offset + r[0].extent; ++y)
@@ -152,7 +155,7 @@ struct Sink {
 void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
          bool grade = true, std::uint64_t work = 10000000,
          std::uint64_t host = 65536, std::uint64_t height = 1,
-         std::uint64_t disk = UINT64_MAX) {
+         std::uint64_t disk = UINT64_MAX, std::uint32_t stages = 100000) {
   const StatisticsSpec spec{height, n / height,
                             variant == 10 || variant == 11 ? 513U
                             : variant == 8                 ? 65536U
@@ -259,7 +262,7 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
     ExecutionOptions options;
     options.maximum_result_window_bytes = window;
     options.maximum_dependency_work = work;
-    options.dependencies.maximum_stages = 100000;
+    options.dependencies.maximum_stages = stages;
     CancellationSource cancellation;
     if (variant == 9) {
       options.result_publication = [&](ValueRef, const ResultRef&) {
@@ -380,11 +383,21 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
             << " window=" << window << " bins=" << reference.size()
             << " count=" << count << " total=" << total
             << " host_peak=" << root.statistics().peak[ResourceKind::Host]
-            << '\n';
+            << " issued_stages=" << root.statistics().issued.stages << '\n';
 }
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--large") {
+      run(40000, 24, 8, true, 100000000, 65536, 200, 1ULL << 30, 1000000);
+      return 0;
+    }
+    run(1000, 24, 8, true, 10000000, 65536, 25, 1ULL << 30, 5000);
+    if (argc == 2 && std::string(argv[1]) == "--stage-regression")
+      return 0;
+    check(
+        argc == 1,
+        "usage: photospider_statistics_workflow [--large|--stage-regression]");
     for (auto n : {1U, 17U, 1003U})
       for (auto window : {64U, 256U, 4096U})
         run(n, window);

@@ -162,7 +162,10 @@ struct PHOTOSPIDER_API ExecutionOptions final {
   std::uint64_t maximum_dependency_cache_work = 1048576;
   /** @brief Group already-ready Atomic outputs with optional CPU joint code. */
   bool enable_joint = true;
-  /** @brief Maximum explicit read window for structured stages, positive. */
+  /** @brief Maximum explicit Result/temporary read or write payload, positive.
+   * Value Need source windows are operation-defined and admitted against root
+   * capacity; this bound does not split or reject those Value requests.
+   */
   std::uint64_t maximum_result_window_bytes = 4096;
   /** @brief Collected atom observations for execute_atoms, at most 65536.
    * Zero permits only an empty query. This bound is not semantic identity.

@@ -74,8 +74,12 @@ after every range. This is the Design's bin-range multipass fallback, with work
 O(N*ceil(B/512)+B) and at most 4096 resident counter bytes. Initialization,
 reset/scanning and every pass consume root work. Extra passes may exhaust the
 work budget; no full B-counter allocation or unaccounted input spool is needed.
-Source strips stop at HW row boundaries and use at most 4096 bytes per field.
-Histogram output and parameter input pages obey the same cap. The 24-byte
+Histogram source strips stop at HW row boundaries and use at most 4096 bytes
+per field, independently of the selected Result I/O window. Value requests are
+admitted by the root capacity budget; a 24-byte Result window does not force
+three source samples per poll on every bin-range pass. Histogram output,
+parameter input and grade output pages use min(user Result window,4096).
+The 24-byte
 parameter record is indivisible and fails when the selected window is smaller.
 Grade writes bounded Float64 windows to mandatory backing and yields stable
 prefixes to active downstream consumers. Stage/work/capacity exhaustion remains
@@ -100,4 +104,7 @@ post-context ownership. `test_statistics` verifies exact binary64 rounding and
 schema rejection; `test_statistics_callback` drives the public parameter
 callback with malformed external sparse records, integer overflow and a large
 integer rational golden case. Fixture pixel tolerances are measured agreement,
-not certified bounds.
+not certified bounds. The `--large` workflow checks 200x200 samples, 65536 bins
+and a 24-byte Result window at the existing one-million-stage producer cap;
+a smaller regression fixes the producer envelope at 5000 stages. All source
+callbacks assert the independent 4096-byte strip cap.

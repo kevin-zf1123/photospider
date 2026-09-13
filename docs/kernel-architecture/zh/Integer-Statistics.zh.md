@@ -58,8 +58,10 @@ Grade 在首次前缀前验证完整参数。关系由每个源像素的紧凑 i
 完成后才 seal。这实现 Design 的按 bin 范围多遍扫描路径，工作量为
 O(N*ceil(B/512)+B)，驻留计数器最多 4096 字节。初始化、清零、扫描及每一遍
 样本处理都消耗根 work；额外遍数可导致工作预算耗尽，不申请完整 B 计数器或
-未计账的输入 spool。源 strip 在 HW 行边界停止，每字段
-不超过 4096 字节；histogram 输出和参数输入遵守相同页上限。24 字节参数
+未计账的输入 spool。Histogram 源 strip 在 HW 行边界停止，每字段最多
+4096 字节，与所选 Result I/O 窗口独立。Value 请求由根容量预算准入；24 字节
+Result 窗口不要求每遍 bin 范围扫描都以每 poll 三个源样本推进。Histogram
+输出、参数输入和 grade 输出使用 min(用户 Result 窗口,4096)。24 字节参数
 记录不可拆分，窗口过小明确失败。Grade 向强制存储写入有限窗口并向活动下游
 发布稳定前缀。stage/work/capacity 耗尽保持独立资源失败。页几何不进入语义
 schema 或共享结果 key。
@@ -78,3 +80,7 @@ histogram、跨行 HW、小窗口和预算、cache-off 别名、不同 Run 快�
 销毁后的所有权。`test_statistics` 验证 binary64 舍入和 schema 错误；
 `test_statistics_callback` 通过公开 callback 检查外部畸形稀疏数据、整数溢出
 和大整数有理数参考。像素容差只是 fixture 实测符合，不是认证上界。
+
+`--large` workflow 在既有一百万生产者阶段上限内检查 200×200 样本、65536 bins
+和 24 字节 Result 窗口；较小回归把生产者上限固定为 5000。所有源 callback
+都断言独立的 4096 字节 strip 上限。
