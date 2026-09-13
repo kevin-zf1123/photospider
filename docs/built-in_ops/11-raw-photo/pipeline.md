@@ -27,7 +27,7 @@ DNG1.7.1.0的参考归一化分母使用WhiteLevel减去sample plane的maximum c
 
 ## 多图摄影
 
-输入为显式图像列表、各图时间/曝光/有效mask、可选校准与变换。多图不同data window要先对齐到共同坐标。输出confidence、source map、focus index是数值诊断，当前单Value输出需G3。
+输入为显式图像列表、各图时间/曝光/有效mask、可选校准与变换。多图不同data window要先对齐到共同坐标。输出confidence、source map、focus index是数值诊断，可使用已实现静态命名多输出或带动态 count 的 Result；专用诊断语义和关联仍须定义。
 
 | ID / 功能 | 输入 → 输出 | 实现路线/参数 | 验收与边界 |
 | --- | --- | --- | --- |
@@ -46,9 +46,9 @@ HDR、全景和景深合成在产品中分别包含对齐、去鬼影、投影�
 
 ## CPU/GPU、Region与资源
 
-sensor局部校正可H/E，demosaic按算法支持半径，色彩校准E。配准、HDR响应估计、全景优化和无界图像列表暂W；全尺寸多图直接堆入内存不一定可行，必须给源分块、pyramid与临时磁盘的宿主策略。当前内核没有由本规格自动增加多图/时间执行能力。
+sensor局部校正可H/E，demosaic按算法支持半径，色彩校准E。配准、HDR响应估计、全景优化和无界图像列表暂W；全尺寸多图直接堆入内存不一定可行，可复用内核 managed resources 与 mandatory backing，但须给源分块、pyramid、临时磁盘和校验的实际预算。当前内核没有由本规格自动增加多图/时间执行能力。
 
-Float32/64是中间数据建议，UInt16等原始容器支持需G1；原始负值与色变换negative需G2。参考CPU实现不允许缺省自动tone curve改变输入物理意义。GPU demosaic/warp/fusion需对应oracle，不能只验证文件能打开。
+Float32/64是中间数据建议，UInt16等原始容器支持需G1；signed field/image v2 已支持负值，仍须符合各端口的颜色/alpha 子集。参考CPU实现不允许缺省自动tone curve改变输入物理意义。GPU demosaic/warp/fusion需对应oracle，不能只验证文件能打开。
 
 W11提供最小RAW/HDR链路。额外采用synthetic CFA常量和高对比斜边、不同曝光的同一线性场、明确mask的坏点和暗场作为可复现测试；真实相机样本另记录许可与metadata。
 

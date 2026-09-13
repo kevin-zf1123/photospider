@@ -1,12 +1,14 @@
 # 空间滤波、边缘与细节
 
-2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+2026-09-13：`field.convolve` 已有 staged regional 实现；`image.convolve_channels` 输出 `r/g/b`，`image.gaussian_blur_with_kernel` 输出 `image/kernel`，按输出独立声明邻域与整核需求。见[多输出契约](../../kernel-architecture/Multi-Output-Operations.md)。其他新增滤镜需求和建议参数不覆盖既有节点契约。
+
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
 状态Proposed。确定核/局部统计/导数为D1，复杂保边、多尺度和后处理AA为D2。通用核输入为signed real `[H,W,C]`和kernel `[Kh,Kw]`；颜色wrapper另负责alpha/transfer。CPU参考Float64累加，输出Float32/64；GPU支持须逐算法验证。
 
 ## 共同参数
 
-kernel anchor、convolution/correlation方向、normalization(none/sum/l1)、bias、same/full/valid与输出原点均显式。奇数核可默认中心，偶数核要求anchor。零和导数核不得sum归一化。边界模式要定义短数组延拓，不能只写reflect。
+kernel anchor、convolution/correlation方向、normalization(none/sum/l1)、bias、same/full/valid与输出原点均显式。既有 `field.convolve/correlate` 与 `image.convolve_channels` 均要求显式 anchor，包括奇数核。新 UI 可按所选规则填中心值。零和导数核不得sum归一化。边界模式要定义短数组延拓，不能只写reflect。
 
 非负归一模糊同时处理linear premul RGB和alpha；一般signed卷积、导数、高通不自动卷积alpha并反预乘。mask有两个不同用途：`mix(I,filter(I),M)`限制应用结果；对非负可归一权重核，`sum(KMI)/sum(KM)`限制参与样本并需要零权重策略。signed核的缺失样本处理另定，不能套此分母；导数零和不表示没有样本。
 

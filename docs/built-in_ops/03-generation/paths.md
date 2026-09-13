@@ -1,10 +1,12 @@
 # 路径、变化线宽与光栅化
 
-状态Proposed。固定Bézier数学为D1；复合PathSet、通用stroke/fill/boolean为D2。当前Value只有一个数组输出，变长路径及关联属性需要G3；不能把“能保存rank4数组”当成已有矢量数据模型。
+2026-09-13：PathSet 的 CoreVerbs、primitive authority、关联字段、空集合和属性验证已实现，见[Structured representations](../../kernel-architecture/Structured-Representations.md)。通用路径构造、弧长采样、stroke/fill/boolean registry 节点仍待实现；下表记录算法需求。
+
+状态Proposed。固定Bézier数学为D1；复合PathSet、通用stroke/fill/boolean为D2。命名多输出和动态 Result rows 已交付；路径应使用已定义 PathSet schema，并为每个消费节点定义 geometry authority、输出和关联。
 
 ## 表示
 
-固定次数首版：quadratic controls `[S,3,2]`，cubic controls `[S,4,2]`，每段固定样本 `[S,N,2]`。复合路径建议controls/verbs/control_offsets/path_offsets/closed分别保存；move/line/quadratic/cubic/close为首批，arc、布尔和字体轮廓后续。公共端点是否重复、闭合是否隐含末段、每段属性归属必须固定。SVG2提供路径与子路径的公开语义词汇。[^svg]
+固定次数首版：quadratic controls `[S,3,2]`，cubic controls `[S,4,2]`，每段固定样本 `[S,N,2]`。现有 CoreVerbs 保存 verbs/control_offsets/controls/subpath_offsets/closed，支持 M/L/Q/C/Z；primitive authority 已表示 Bézier、ArcSweep/FullTurn、Hermite 和非周期 B-spline，并验证连接/属性。布尔和字体轮廓节点仍待实现。公共端点是否重复、闭合是否隐含末段、每段属性归属必须固定。SVG2提供路径与子路径的公开语义词汇。[^svg]
 
 坐标采用[公共约定](../00-foundation/contracts.md)，width单位px，明确表示直径。全op共享一个width profile符合首期需求，但profile自变量必须选择整条路径归一弧长、每段t或实际弧长，建议整路径弧长`s/L`。
 
@@ -27,7 +29,7 @@
 
 Bézier二次 `B=(1-t)²P0+2(1-t)tP1+t²P2`；三次用对应Bernstein权重。弧长 `s(t)=∫₀ᵗ|B′(u)|du`，建议建立单调(t,s)表后二分/保护迭代反求t。均匀t通常不是均匀几何距离；Fourier只适合显式周期profile，普通线宽优先linear/PCHIP避免振铃负值。
 
-整路径L=0时不计算s/L：参考mode令profile坐标为0，arc resample返回显式有效单点或按输出数量重复该点，零长stroke的cap政策单独规定（round可定义圆点，butt为空）。当前空shape限制仍按G3处理。后期B-spline需degree/knots及归一t到有效knot区间的映射，不能仅复用Bézier控制点数组。
+整路径L=0时不计算s/L：参考mode令profile坐标为0，arc resample返回显式有效单点或按输出数量重复该点，零长stroke的cap政策单独规定（round可定义圆点，butt为空）。空 PathSet 使用零字段 rows 与 offsets=[0]；普通 Value 轴仍须非零。现有 B-spline 表示含 degree/knots，求值节点仍须定义归一 t 到有效 knot 区间的映射，不能仅复用Bézier控制点数组。
 
 ## 光栅化方案
 
@@ -39,7 +41,7 @@ coverage与SDF独立：前者为像素面积比例[0,1]，后者为px距离。�
 
 ## Region、使用和验收
 
-输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。当前没有这种PathSet专用demand，首版可读完整控制点表，输出策略仍需G3/G4。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
+输出tile需读取所有可能覆盖其footprint的段，stroke扩张包含半宽、join/miter与AA。PathSet schema 不提供 stroke 专用空间索引；节点可用现有 ResultRelation 表达 Conservative 全路径支持，或提供经过证明的精确段映射，并声明 descriptor/拓扑依赖。路径中一次编辑的dirty不能只用控制点bbox，要覆盖曲线与描边的真实/保守范围。
 
 概念流程：`controls→arc-length→width curve→stroke coverage→color ramp/constant→over`；另可`path→SDF→mask offset→feather`。解析验收包括100px直线、圆/矩形面积、孔洞、自交、闭合接缝、宽度0/.25/1/10px、非均匀变换和不同tile一致。边界与迭代使用Float64参考，GPU coverage采用明确误差而非未经证明的bit identity。
 

@@ -1,5 +1,7 @@
 # 几何变换、重采样与液化
 
+2026-09-13 已实现：`image.stmap` 接受 canonical Float32 RGBA 与 generic Float64 HW2 像素坐标 map，提供 bilinear、五种显式边界和精确 data/control 读取；`image.split_horizontal` 提供命名多输出及偏移 Region。见[采样契约](../../kernel-architecture/Dependency-Sampling.md)、[多输出](../../kernel-architecture/Multi-Output-Operations.md)。下面 validity、其他核、map 生成/合成及液化仍为扩展需求。
+
 状态Proposed。基础inverse sampler、affine与map合成为D1；非线性网格、逆解与高质量footprint为D2。向量场为Float32/64 `[Hout,Wout,2]`，不是颜色图像。默认像素边界坐标，中心 `(x+.5,y+.5)`；向量分量x,y，数组y,x,c。
 
 核心为`Iout(p)=sample(Iin,M(p))`，M从输出坐标映到输入。OpenCV公开几何变换也以反向取样区分插值与域外扩展；接入其整数像素中心坐标需要±.5适配。[^opencv]
@@ -24,7 +26,7 @@
 | GEO-14 reproject/panorama | source/target projection→map | orientation、FOV、chart、pixel aspect | seam/cubemap面边界、未知视角无数据 |
 | GEO-15 mip pyramid/sample footprint | image+map/Jacobian→sampled | reconstruction、max anisotropy、lod规则 | minification与各向异性，质量档误差 |
 
-首版默认图像sampler可采用bilinear+域外transparent，resize缩小时必须明确低通；标签/ID采用nearest，normal插值后按语义归一化，flow按数据向量处理。当前profile已支持有限非负HDR；signed RGB、其他颜色语义与可能产生负值的负瓣核输出需要G2，不能隐式clip掉负值后声称滤波正确。
+首版默认图像sampler可采用bilinear+域外transparent，resize缩小时必须明确低通；标签/ID采用nearest，normal插值后按语义归一化，flow按数据向量处理。image v2 已支持 finite signed/HDR；具体端口输入子集仍须核验，负瓣核还需明确 alpha 越界和 association 失败规则，不隐式 clip。
 
 ## 重采样方法
 
@@ -53,7 +55,7 @@ Nuke官方STMap以归一化U/V表示绝对源位置，左下(0,0)、右上(1,1)�
 
 ## Region、资源与验收
 
-affine可映射矩形顶点后扩大filter footprint；homography须排除分母零点；任意非线性映射有内部极值、缝和跨面采样，只看四角不保证输入bbox保守。某tile指向全源图时真实需求可以很大。当前只有Shrink专用映射，其他先满足shape/port后使用Whole或提议新的G4规则，不存在自动warp Region能力。
+affine可映射矩形顶点后扩大filter footprint；homography须排除分母零点；任意非线性映射有内部极值、缝和跨面采样，只看四角不保证输入bbox保守。某tile指向全源图时真实需求可以很大。G4 已实现 STMap 按 map 值发现精确源 tap 的读取与 dirty 关系；更一般的 warp 仍须实现各自支持和校验逻辑。精确映射不保证读取区域小，也不自动生成其他 warp 算法。
 
 验收包括整数排列bit保持、identity map、已知点、map合成反例、bilinear解析2×2、常量保持、zero/negative scale、极点、odd尺寸、alpha边缘与zone plate缩小频谱。Whole/ROI/tile一致与前向dirty传播分别检查；局部编辑map不总意味着只读局部源。
 

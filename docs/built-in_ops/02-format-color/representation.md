@@ -1,5 +1,7 @@
 # 通道、数值格式与颜色管理
 
+2026-09-13：除下述颜色节点外，Spectrum、PlanarYCbCr 等[结构化表示](../../kernel-architecture/Structured-Representations.md)与独立 coverage/emission 的 [Layer](../../kernel-architecture/Layer-Runtime.md)已交付。当前是 package 0.10.0 / C ABI 9，通用 ICC/OCIO 等扩展保持 Proposed。
+
 已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：typed image v2 完整替换 v1，通道 extract/merge/swizzle、alpha associate/unassociate、显式 assign、同白点 linear-sRGB D65↔XYZ↔Lab。允许 signed/HDR；零 alpha 和极小 alpha 规则显式，无隐式白点适应/gamut clamp。ICC/OCIO、其他颜色模型与完整 transfer 目录继续 Proposed。
 
 当前通道、alpha、assign 和 RGB/XYZ/Lab 实现及可运行公开示例见[通道与颜色算子](../../kernel-architecture/zh/Channel-and-Color-Operations.zh.md)。下表扩展目录继续 Proposed，参数以实现文档为准。
@@ -56,7 +58,7 @@ Lab转换中 `f(t)=cbrt(t)` 当 `t>(6/29)^3`，否则 `t/(3(6/29)^2)+4/29`；`L*
 
 ## alpha 与 VFX 数据的边界
 
-现有profile要求alpha=0时RGB=0。OpenEXR明确允许alpha=0而颜色非零的发光像素，普通VFX premultiplied输入因此不一定可直接绑定到现有端口。新设计应区分 coverage premul、可保留隐含颜色的straight、独立emission 或适合VFX的扩展语义。把这类样本清零会丢失信息，不能标成无损导入。[^exr]
+CoverageRGBA 要求 A=0 时 P=0。已实现 Layer 分开保存 coverage P/A 与 emission E，允许 A=0、E≠0，且已有显式 emit/over/flatten 操作。OpenEXR 零 alpha 非零颜色的导入需要宿主明确解释和转换，不能直接绑定到 coverage 端口，也不能靠清零保留信息。[^exr]
 
 颜色转换需要处理非线性与alpha交互：通常 unassociate→color transform→associate；极小alpha会放大误差，需设完整的数值策略。若包含独立emission，不可沿用简单除alpha公式。空间重采样、颜色变换和发光合成的wrapper分别建立。
 

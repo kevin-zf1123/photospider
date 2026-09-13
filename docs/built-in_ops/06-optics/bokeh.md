@@ -4,7 +4,7 @@
 
 ## 相邻项目的实际基础
 
-本地 `../phisical_bokeh` 当前代码采用每图层单距离、圆/多边形固定核；规格将非均匀depth和像差列为后续。以下为代码阅读事实，本次未重跑其测试或测量性能。
+2026-09-09 阅读的本地 `../phisical_bokeh` 快照采用每图层单距离、圆/多边形固定核；规格将非均匀depth和像差列为后续。以下为代码阅读事实，本次未重跑其测试或测量性能。
 
 | 观察 | 本地证据 | 接入影响 |
 | --- | --- | --- |
@@ -33,7 +33,7 @@
 | OPT-10 wave PSF | pupil amplitude+OPD+lambda→PSF | wavelength/长度单位、Fraunhofer/Fresnel、采样间距 | 非负、energy、OPD=0、lambda尺度；D3 |
 | OPT-11 spectral apply | spectrum image或明确RGB代理→image | wavelengths、weights、sensor/CMFs、重建假设 | 色度积分与采样收敛；RGB代理不能标真光谱 |
 
-固定层的PSF可首期直接复用非负RGBA流程；depth、vector、PSFBank、spectral与多输出需要G2/G3/G4。Foundry ZDefocus公开区分depth math、blur map、disc/bladed/image kernel和分层，支持以上接口拆分。[^nuke]
+2026-09-13：可复用基础已有 named outputs、signed fields、Spectrum FFT、Layer/RawSum/WeightedSum 和 G4 radius gather/scatter。这里的 1D radius sum 不等于 2D 可变 PSF；PSFBank、CoC、visibility、波动光学和专用 scatter 节点仍需定义与实现。Layer 的 mass/weight/emission 规则见[实现契约](../../kernel-architecture/Layer-Runtime.md)。Foundry ZDefocus公开区分depth math、blur map、disc/bladed/image kernel和分层，支持以上接口拆分。[^nuke]
 
 ## 薄透镜与像素单位
 

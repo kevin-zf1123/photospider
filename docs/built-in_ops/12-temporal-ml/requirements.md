@@ -1,6 +1,6 @@
 # 时域、机器学习与特殊图像数据
 
-状态Proposed，D3覆盖与依赖规划。本篇不阻挡首期静态确定性算子，不声称现有内核已经具有序列/Deep/模型运行时。逐族落地前须升级为D1/D2专用规格。
+状态Proposed，D3覆盖与依赖规划。本篇不阻挡首期静态确定性算子，不声称现有内核已经具有序列/Deep/模型运行时。2026-09-13 已有 DynamicPoints、PathSet、BrushState、IterativeState 等结构化表示和 managed Result 基础，见[表示契约](../../kernel-architecture/Structured-Representations.md)。这些子集可供复用；逐族落地前仍须补 D1/D2 专用规格和节点。
 
 ## 时间数据
 
@@ -34,7 +34,7 @@ CPU/GPU先按每个算法的数值与内存协议实现；窗口长度、状态�
 | AUX-01 AOV select/transform | named depth/normal/position/motion/ID/coverage→AOV | data角色，不做颜色transfer；normal变换/normalize，整数ID保持 |
 | AUX-02 Cryptomatte extract | ID/coverage channels+manifest+selection→mask | hash编码、重叠、AA、名称查找与缺manifest；不能用RGB色键替代 |
 | AUX-03 deep select/sort | offsets+samples→deep | front/back depth、surface/volume、排序tie、最大sample数 |
-| AUX-04 deep merge/holdout | deep inputs→deep | 交错深度、重叠体积、opacity区间规则；空像素表示G3 |
+| AUX-04 deep merge/holdout | deep inputs→deep | 交错深度、重叠体积、opacity区间规则；可用 Result 零 rows；Deep sample/schema 与算法仍待定义 |
 | AUX-05 deep flatten | deep→flat color/alpha/depth | 给定view/样本解释与积分；透明层与终止条件 |
 | AUX-06 geometric attributes | depth/normal/position+camera→derived data | reconstruct position、normal、depth compare、relight输入；无数据不猜单位 |
 

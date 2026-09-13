@@ -1,6 +1,8 @@
 # 蒙版、选区与形态学
 
-2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+2026-09-13：另已交付 `make_component_operation` 的 `components4.labels/area/filter` 分页链：UInt8 HW 非零前景、四连通 MinPixel IDs、动态/空属性表和精确 ObjectId 关联，见[Paged components](../../kernel-architecture/Paged-Components.md)。它与原 `mask.components` 的 Float32/compact labels 契约分开；EDT、flood、通用 hole fill 等仍 Proposed。
+
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
 状态Proposed。基本mask代数/有限footprint/离散EDT为D1，连续轮廓offset与复杂区域重建为D2。mask为Float32 `[H,W]`，finite[0,1]；SDF为signed距离场，label为Int64且0表示背景。默认画布外0，扩大画布须显式pad。
 

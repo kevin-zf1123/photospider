@@ -1,8 +1,10 @@
 # 数值与数组基础
 
-2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+2026-09-13：G4 已有 `numeric.radius_gather/radius_scatter` 与 ordered scan；Phase A 提供 `statistics.histogram/parameters/grade` 的受预算分页全局流程。见[采样](../../kernel-architecture/Dependency-Sampling.md)、[Region](../../kernel-architecture/Region-Semantics.md)、[整数统计](../../kernel-architecture/Integer-Statistics.md)。分页统计为显式注册 factory，不能替代任意 numeric reduction。
 
-已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：四 dtype cast/range 分离，Float32/64 同 shape 基础算术和显式 clamp，全数组 Float64 mean/variance，有界单通道 expression（静态 start/step/count、动态 Float64 coefficients）及 linear 1D LUT。默认由 workflow 显式提交，全部新增算子首版 Whole；其他 unary/broadcast/scan/数组操作继续 Proposed。
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
+
+已接受首版见 [ADR 0020](../../adr/0020-composable-operation-foundations.md)：四 dtype cast/range 分离，Float32/64 同 shape 基础算术和显式 clamp，全数组 Float64 mean/variance，有界单通道 expression（静态 start/step/count、动态 Float64 coefficients）及 linear 1D LUT。必填参数由 workflow 显式提交；首版 Whole 是历史范围，当前 Region 以各实现文档为准。min/max/abs、smoothstep 和 `numeric.ordered_scan` 已交付，其他 unary/broadcast/通用 scan 与数组扩展继续 Proposed。
 
 当前已实现的 cast/encode_range、四种二元算术、clamp、mean/variance 及公开运行示例见[数值算子实现](../../kernel-architecture/zh/Numeric-Operations.zh.md)。Expression/LUT 的首版实现与公开 workflow 见[实现文档](../../kernel-architecture/zh/Expression-and-LUT-Operations.zh.md)；下表扩展目录仍为 Proposed。
 
