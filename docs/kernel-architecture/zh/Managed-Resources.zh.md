@@ -14,7 +14,7 @@ entries、files、I/O slots、queue 和 Payload。Payload 统计受控 buffer �
 在 execution context 中受 maximum_live_bytes 限制，含 structured callback。host 包含 metadata/shared，device 包含 shared；
 不能把重叠维度相加作为物理内存。整向量在 admission 前检查。lease 副本共享一个
 owner；增长必须计算旧新容量共存，只有存储释放或尚未提交的预留取消后才能缩减。
-cleanup 保护额度不能用于普通阶段。admission 不等待其他持有者，容量不足有限失败。
+cleanup 保护额度不能用于普通阶段。admission 不等待其他持有者，容量不足返回 ResourceExhausted / CapacityLimit。
 
 lease 对象容量自动计费，buffer、file 和 window owner 申报其 C++ 对象容量。
 根启动、未管理的 allocator control block/header、标准库私有分配、线程栈、驱动、OS page cache
@@ -31,7 +31,9 @@ Metadata；复制、rebind、active-scope复制均保留该角色。不能据此
 lease。启用根预算的 execute bindings 使用此机制；不推测 source callback 私有状态。
 并发首次引用与最后引用释放采用串行事务，同一活跃 owner 不重复申请容量。
 
-`consume(ResourceWork)` 原子预扣 work、bytes、requests 和 stages。已提交的工作
+`consume(ResourceWork)` 原子预扣 work、bytes、requests 和 stages。工作或 I/O
+超限返回 WorkLimit；仅 stages 超限返回 StageLimit；两者错误码均为
+ResourceExhausted，失败不改变 issued 计数。已提交的工作
 不因失败、fallback 或取消退款。singleton/joint dependency session 在执行前向当前
 Run 根收费，包括 start 失败和 GPU discovery normalization。FootprintLimits 可携带
 借用的根收费 callback，它不保存到不可变 Footprint 或语义身份。
@@ -58,6 +60,6 @@ I/O，已提交同步 I/O 返回后才释放 owner；cleanup 不需要新窗口�
 限额处理 65536 字节临时 payload，检查独立计数、alias 寿命、并发 admission、输入
 owner 去重、取消和有界失败。test_dependency_program 的 Need/上游/恢复例中，根
 10000 只允许上游 6000 算法单位，根 30000 允许两个各 6000 的阶段；协议另计工作。
-安装 consumer 目标 photospider_resource_consumer 仅通过已安装的 0.10 公共包运行。
+安装 consumer 目标 photospider_resource_consumer 仅通过已安装的 0.11 公共包运行。
 test_managed_dispatch 检查 Whole、source、dependency 与 atom 执行的零/累计 stage、
 零/单 Queue 槽，以及 structured source 返回错误或抛异常时的实际输入归属。

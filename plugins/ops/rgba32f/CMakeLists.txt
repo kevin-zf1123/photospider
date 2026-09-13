@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(PhotospiderRgba32fOperations VERSION 1.0.0 LANGUAGES C)
 
 if(NOT TARGET Photospider::operation_sdk)
-  find_package(Photospider 0.10 CONFIG REQUIRED COMPONENTS operation_sdk)
+  find_package(Photospider 0.11 CONFIG REQUIRED COMPONENTS operation_sdk)
 endif()
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/image.metal")
@@ -19,7 +19,7 @@ target_include_directories(photospider_rgba32f_ops PRIVATE ${CMAKE_CURRENT_BINAR
 target_compile_definitions(photospider_rgba32f_ops PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
 set_target_properties(photospider_rgba32f_ops PROPERTIES
   C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
   target_compile_options(photospider_rgba32f_ops PRIVATE
     -Wall -Wextra -Wpedantic -Werror -fno-fast-math -frounding-math -ffp-contract=off)
 elseif(MSVC)

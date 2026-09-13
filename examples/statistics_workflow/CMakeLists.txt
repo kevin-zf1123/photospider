@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderStatisticsWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.10 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.11 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_statistics_workflow main.cpp)
 target_link_libraries(photospider_statistics_workflow PRIVATE Photospider::kernel)

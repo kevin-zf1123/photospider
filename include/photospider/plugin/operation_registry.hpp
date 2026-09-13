@@ -154,7 +154,11 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
 enum class OperationDtypeRule : std::uint32_t {
   Declared = 0,
   Input = 1,
-  Parameter = 2
+  Parameter = 2,
+  /** @brief Int64 for an Int64 source, otherwise Float64 for a floating source.
+   * Uses output_dtype_input; UInt8 is rejected. C++ metadata inference only.
+   */
+  WidenNumericInput = 3
 };
 /** @brief Statically available axis-length sources. */
 enum class OperationExtentSource : std::uint32_t {
@@ -281,6 +285,13 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
   ObservationKind observation_kind = ObservationKind::Atomic;
   /** @brief All relevant stages must implement the declared error delivery. */
   FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
+  /** @brief Number of complete trailing axes in each generic Atomic tuple.
+   * Zero retains ordinary generic-sample/image-pixel observations. Nonzero
+   * requires CPU staged Atomic execution and no recognized image facet.
+   * A partial request expands to its complete tuples; all axes grouped uses
+   * the singleton observation domain {1}. Included in contract identities.
+   */
+  std::uint32_t atomic_trailing_axes = 0;
   /** @brief Zero for synchronous callback, one for the staged read protocol. */
   std::uint32_t dependency_version = 0;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
@@ -330,7 +341,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 10U;
+  std::uint32_t version = 11U;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Sorted closed parameter vocabulary for semantic validation. */

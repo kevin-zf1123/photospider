@@ -2,9 +2,14 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.10.0
+  VERSION 0.11.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
+
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR
+   NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  message(FATAL_ERROR "Photospider requires Clang for C and C++ builds")
+endif()
 
 include(CMakePackageConfigHelpers)
 include(CTest)
@@ -29,8 +34,8 @@ endif()
 set(PHOTOSPIDER_SANITIZER_MODE none)
 set(PHOTOSPIDER_SANITIZER_FLAG "")
 if(PHOTOSPIDER_ENABLE_ASAN OR PHOTOSPIDER_ENABLE_TSAN)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    message(FATAL_ERROR "Photospider sanitizers require Clang or GNU C++")
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Photospider sanitizers require Clang C++")
   endif()
   include(CheckCXXCompilerFlag)
   include(CheckLinkerFlag)
@@ -96,6 +101,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_minimum.cpp
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
+  plugins/ops/01-numeric/numeric_sequences.cpp
+  plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
   plugins/ops/02-format-color/alpha_associate.cpp
@@ -202,7 +209,7 @@ if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
     COMPILE_OPTIONS "-fobjc-arc")
 endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
 
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
@@ -304,7 +311,7 @@ function(photospider_configure_kernel_target target)
     set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED ON)
   endif()
 
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
     if(NOT PHOTOSPIDER_SANITIZER_MODE STREQUAL "none")
       target_compile_options(
@@ -390,6 +397,7 @@ add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
@@ -433,7 +441,7 @@ if(BUILD_TESTING)
     target_link_libraries(${target} PRIVATE ${kernel_target})
     target_include_directories(${target} PRIVATE tests)
     target_compile_features(${target} PRIVATE cxx_std_17)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME ${target} COMMAND ${target})

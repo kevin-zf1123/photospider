@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/numeric_diagnostics.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/plugin/dependency_program.hpp"
 #include "photospider/plugin/operation_registry.hpp"
@@ -168,6 +169,7 @@ struct DependencyJointSession::Impl {
     bool waiting = false, terminal = false;
     std::optional<Status> start_failure;
     bool semantic_terminal = false;
+    NumericDiagnostics reported_numeric = {};
   };
   struct Proxy {
     std::weak_ptr<Impl> owner;
@@ -273,6 +275,8 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
               first.inputs[i].descriptor.element_type ||
           request.inputs[i].descriptor.shape !=
               first.inputs[i].descriptor.shape ||
+          request.inputs[i].atomic_trailing_axes !=
+              first.inputs[i].atomic_trailing_axes ||
           !input_internal::same_facets(request.inputs[i].facets,
                                        first.inputs[i].facets))
         return Answer(invalid("joint input metadata mismatch"));
@@ -681,6 +685,10 @@ Result<std::vector<DependencyAtomProgress>> DependencyJointSession::poll(
     events.push_back(std::move(event));
   for (auto& event : events) {
     auto& outcome = event.outcome;
+    auto& member = impl_->members.at(event.key);
+    if (member.session)
+      event.numeric = numeric_internal::delta(
+          member.session->numeric_diagnostics(), &member.reported_numeric);
     if (!outcome.ok() && impl_->coordinate_batch &&
         outcome.status().detail.scope == FailureScope::Unspecified) {
       auto failure = group_failure(outcome.status());

@@ -140,6 +140,7 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
       static_cast<std::uint32_t>(traits.outputs[0].observation_kind));
   digest->integer(
       static_cast<std::uint32_t>(traits.outputs[0].failure_delivery));
+  digest->integer(traits.outputs[0].atomic_trailing_axes);
   digest->integer(traits.outputs[0].dependency_version);
   digest->integer(traits.outputs[0].continuation_bytes);
   digest->integer(traits.outputs[0].maximum_dependency_stages);

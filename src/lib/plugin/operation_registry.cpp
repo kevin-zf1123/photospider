@@ -433,7 +433,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 10U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 11U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
@@ -861,11 +861,17 @@ int plugin_cancelled(void* context) noexcept {
 Status validate_operation_parameters(
     const OperationTraits& traits,
     const std::map<std::string, ParameterValue>& parameters) {
+  const auto schema_error = [](ErrorCode code, std::string message) {
+    return Status{code,
+                  std::move(message),
+                  FailureReason::InvalidDomain,
+                  {FailureOrigin::Schema, FailureScope::Unspecified}};
+  };
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
   if (!schema_status.ok() ||
       parameters.size() > traits.parameter_schema.size()) {
-    return Status::failure(
+    return schema_error(
         ErrorCode::InvalidArgument,
         "operation parameters exceed or contradict the published schema");
   }
@@ -873,20 +879,20 @@ Status validate_operation_parameters(
     const auto parameter = parameters.find(declaration.key);
     if (parameter == parameters.end()) {
       if (declaration.required) {
-        return Status::failure(
+        return schema_error(
             ErrorCode::InvalidArgument,
             "required operation parameter is missing: " + declaration.key);
       }
       continue;
     }
     if (!parameter_type_matches(parameter->second, declaration.type)) {
-      return Status::failure(
+      return schema_error(
           ErrorCode::InvalidArgument,
           "operation parameter has the wrong type: " + declaration.key);
     }
     if (declaration.type == OperationParameterType::String &&
         std::get<std::string>(parameter->second).size() > 8192U) {
-      return Status::failure(
+      return schema_error(
           ErrorCode::InvalidArgument,
           "operation string parameter exceeds bounds: " + declaration.key);
     }
@@ -906,8 +912,8 @@ Status validate_operation_parameters(
               value <= spec.maximum;
     }
     if (!valid)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "parameter outside finite interval: " + spec.key);
+      return schema_error(ErrorCode::InvalidArgument,
+                          "parameter outside finite interval: " + spec.key);
   }
   for (const auto& parameter : parameters) {
     const auto declaration = std::lower_bound(
@@ -918,7 +924,7 @@ Status validate_operation_parameters(
         });
     if (declaration == traits.parameter_schema.end() ||
         declaration->key != parameter.first) {
-      return Status::failure(
+      return schema_error(
           ErrorCode::InvalidArgument,
           "operation parameter key is unknown: " + parameter.first);
     }
@@ -1054,6 +1060,7 @@ bool copy_contract(const ps_operation_contract_v9* c, OperationTraits* t) {
     return true;
   if (reinterpret_cast<std::uintptr_t>(c) % alignof(ps_operation_contract_v9) ||
       c->struct_size != sizeof(*c) || c->repeated_match > 1 ||
+      c->dtype_rule > PS_OPERATION_DTYPE_PARAMETER_V9 ||
       !records(c->axes, c->axis_count, 8) ||
       !copy_text(c->dtype_parameter, c->dtype_parameter_size,
                  &t->outputs[0].output_dtype_parameter) ||

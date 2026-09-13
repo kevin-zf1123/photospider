@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/numeric_diagnostics.hpp"
 #include "core/stored_failure.hpp"
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
@@ -1352,7 +1353,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     const auto metadata = [&](const PlanInput& input) -> OperationMetadata {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& step = plan.steps().at(producer->step_index);
-        return {step.output_descriptor, step.output_facets};
+        return {step.output_descriptor,
+                step.output_facets,
+                {},
+                step.traits.outputs[0].atomic_trailing_axes};
       }
       const auto& declaration = plan.input_declarations().at(
           std::get<PlanWorkflowInput>(input).declaration_index);
@@ -1680,7 +1684,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               ErrorCode::InvalidArgument,
               "requested output does not declare CPU per-atom outcomes"});
         auto observations = operation_observations(
-            {step.output_descriptor, step.output_facets}, named.second, limits);
+            {step.output_descriptor,
+             step.output_facets,
+             {},
+             step.traits.outputs[0].atomic_trailing_axes},
+            named.second, limits);
         if (!observations.ok())
           return fail(observations.status());
         auto count = observations.value().element_count();
@@ -1703,8 +1711,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (!atom.ok())
                 return atom.status();
               auto samples = observation_samples(
-                  {step.output_descriptor, step.output_facets}, atom.value(),
-                  limits);
+                  {step.output_descriptor,
+                   step.output_facets,
+                   {},
+                   step.traits.outputs[0].atomic_trailing_axes},
+                  atom.value(), limits);
               if (!samples.ok())
                 return samples.status();
               queries.push_back(
@@ -2597,7 +2608,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           Seal seal{reserved.take_value()};
           std::uint64_t callback_us = 0;
           gpu_internal::Statistics native_stats;
+          const bool dependency_attempt = static_cast<bool>(frame.session);
           if (frame.session) {
+            auto reported_numeric = frame.session->numeric_diagnostics();
             auto progress = dependency_stage<DependencyProgress>(
                 frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&] {
@@ -2801,14 +2814,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   return result;
                 },
                 pump, budget->resources().get());
+            diagnostics.operation_timings.push_back(OperationTiming{
+                step.result_ref(), frame.backend, callback_us,
+                progress.status().code, 1,
+                progress.ok() && std::holds_alternative<DependencyResult>(
+                                     progress.value())
+                    ? elements.value()
+                    : 0});
+            diagnostics.operation_timings.back().native_dispatch_count =
+                native_stats.dispatches;
+            diagnostics.operation_timings.back().native_compute_us =
+                native_stats.device_us;
+            diagnostics.operation_timings.back().numeric =
+                numeric_internal::delta(frame.session->numeric_diagnostics(),
+                                        &reported_numeric);
             if (!progress.ok()) {
-              diagnostics.operation_timings.push_back(
-                  OperationTiming{step.result_ref(), frame.backend, callback_us,
-                                  progress.status().code, 1, 0});
-              diagnostics.operation_timings.back().native_dispatch_count =
-                  native_stats.dispatches;
-              diagnostics.operation_timings.back().native_compute_us =
-                  native_stats.device_us;
               if (fallback(progress.status())) {
                 status = restart_cpu();
                 if (!status.ok())
@@ -2969,13 +2989,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           diagnostics.peak_active_tasks = 1;
           diagnostics.selected_backends[step.result_ref()] = frame.backend;
-          diagnostics.operation_timings.push_back(OperationTiming{
-              step.result_ref(), frame.backend, callback_us, ErrorCode::Ok, 1,
-              frame.state == Frame::State::Complete ? elements.value() : 0});
-          diagnostics.operation_timings.back().native_dispatch_count =
-              native_stats.dispatches;
-          diagnostics.operation_timings.back().native_compute_us =
-              native_stats.device_us;
+          if (!dependency_attempt) {
+            diagnostics.operation_timings.push_back(OperationTiming{
+                step.result_ref(), frame.backend, callback_us, ErrorCode::Ok, 1,
+                frame.state == Frame::State::Complete ? elements.value() : 0});
+            diagnostics.operation_timings.back().native_dispatch_count =
+                native_stats.dispatches;
+            diagnostics.operation_timings.back().native_compute_us =
+                native_stats.device_us;
+          }
         }
       }
       if (!returned)
@@ -3014,9 +3036,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       };
       const auto member_key = [&](const Member& member) {
         const auto& step = plan.steps()[member.step];
-        auto observations =
-            operation_observations({step.output_descriptor, step.output_facets},
-                                   member.samples, limits);
+        auto observations = operation_observations(
+            {step.output_descriptor,
+             step.output_facets,
+             {},
+             step.traits.outputs[0].atomic_trailing_axes},
+            member.samples, limits);
         if (!observations.ok())
           throw std::logic_error("invalid joint member observation");
         DependencyQuery query;
@@ -3038,9 +3063,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (known == known_demands.end() || known->second.empty())
           continue;
         const auto& step = plan.steps()[index];
-        auto observations =
-            operation_observations({step.output_descriptor, step.output_facets},
-                                   known->second, limits);
+        auto observations = operation_observations(
+            {step.output_descriptor,
+             step.output_facets,
+             {},
+             step.traits.outputs[0].atomic_trailing_axes},
+            known->second, limits);
         if (!observations.ok())
           return observations.status();
         for (const auto& box : observations.value().boxes()) {
@@ -3057,8 +3085,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             if (!atom.ok())
               return atom.status();
             auto samples = observation_samples(
-                {step.output_descriptor, step.output_facets}, atom.value(),
-                limits);
+                {step.output_descriptor,
+                 step.output_facets,
+                 {},
+                 step.traits.outputs[0].atomic_trailing_axes},
+                atom.value(), limits);
             if (!samples.ok())
               return samples.status();
             if (index != selected || samples.value() != selected_samples)
@@ -3468,6 +3499,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                       });
             auto& member = *found;
             const auto& step = plan.steps()[member.step];
+            diagnostics.operation_timings.push_back(
+                {step.result_ref(), Backend::Cpu, 0,
+                 event.outcome.status().code, 1,
+                 event.outcome.ok() && std::holds_alternative<DependencyResult>(
+                                           event.outcome.value())
+                     ? member.samples.element_count().value()
+                     : 0});
+            diagnostics.operation_timings.back().numeric = event.numeric;
             if (!event.outcome.ok()) {
               publish_failure(member, event.outcome.status(),
                               std::move(event.quality));
@@ -3542,9 +3581,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             } else {
               member.waiting = true;
             }
-            diagnostics.operation_timings.push_back(OperationTiming{
-                step.result_ref(), Backend::Cpu, 0, ErrorCode::Ok, 1,
-                member.done ? member.samples.element_count().value() : 0});
           }
         }
         // Register every new input demand before evaluating the first producer.
@@ -3676,9 +3712,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         const auto& step = plan.steps()[named.step];
         DependencyQuery query;
         query.output_index = step.output_index;
-        auto observations =
-            operation_observations({step.output_descriptor, step.output_facets},
-                                   named.samples, limits);
+        auto observations = operation_observations(
+            {step.output_descriptor,
+             step.output_facets,
+             {},
+             step.traits.outputs[0].atomic_trailing_axes},
+            named.samples, limits);
         if (!observations.ok())
           return fail(observations.status());
         query.observations = observations.take_value();
@@ -5196,7 +5235,10 @@ Result<DemandResult> ExecutionContext::execute_fragments(
         for (const auto& input : step.inputs) {
           if (const auto* source = std::get_if<PlanStepInput>(&input)) {
             const auto& p = frozen.plan_.steps().at(source->step_index);
-            inputs.push_back({p.output_descriptor, p.output_facets});
+            inputs.push_back({p.output_descriptor,
+                              p.output_facets,
+                              {},
+                              p.traits.outputs[0].atomic_trailing_axes});
           } else {
             const auto& p = frozen.plan_.input_declarations().at(
                 std::get<PlanWorkflowInput>(input).declaration_index);
@@ -5858,6 +5900,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               return status;
           }
           found->outcome = timing.outcome;
+          status = merge_numeric_diagnostics(&found->numeric, timing.numeric);
+          if (!status.ok())
+            return status;
         }
       }
       for (const auto& reason : part.fallback_reasons)

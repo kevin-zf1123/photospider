@@ -18,7 +18,7 @@ admission. `ResourceLease` copies share one owner. Growth includes simultaneous
 old/new capacity; shrinking is allowed only after storage retirement or an
 unissued reservation is abandoned. Protected cleanup capacity cannot be spent
 by ordinary stages. Admission never waits on retained owners: insufficient
-capacity returns `ResourceExhausted`.
+capacity returns `ResourceExhausted` with `CapacityLimit`.
 
 Lease object capacity is charged automatically, while managed buffer and
 file/window owners charge their declared C++ object capacity. Root bootstrap,
@@ -45,6 +45,8 @@ Concurrent first references and last-reference retirement are serialized so
 the same live owner never needs a second capacity reservation.
 
 `consume(ResourceWork)` precharges work, bytes, requests and stages atomically.
+Exceeding work or I/O limits returns `WorkLimit`; exceeding only stages returns
+`StageLimit`. Both use `ResourceExhausted` and leave issued counters unchanged.
 Issued work is never refunded after failure, fallback or cancellation. Singleton
 and joint dependency sessions charge their current Run root before issuing work,
 including start failures and GPU discovery normalization. `FootprintLimits` can
@@ -92,5 +94,5 @@ across Whole, source, dependency and atom execution, and structured source error
 provenance through returned failures and exceptions.
 
 The installed target `photospider_resource_consumer` compiles the same public
-API behavior checks through `find_package(Photospider 0.10 CONFIG REQUIRED)`.
+API behavior checks through `find_package(Photospider 0.11 CONFIG REQUIRED)`.
 It does not include private kernel headers or link a source-tree kernel target.

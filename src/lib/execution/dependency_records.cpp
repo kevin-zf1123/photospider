@@ -39,7 +39,10 @@ Target target(const ExecutionPlan& plan, const PlanInput& input) {
 OperationMetadata metadata(const ExecutionPlan& plan, const PlanInput& input) {
   if (const auto* step = std::get_if<PlanStepInput>(&input)) {
     const auto& p = plan.steps().at(step->step_index);
-    return {p.output_descriptor, p.output_facets};
+    return {p.output_descriptor,
+            p.output_facets,
+            {},
+            p.traits.outputs[0].atomic_trailing_axes};
   }
   const auto& p = plan.input_declarations().at(
       std::get<PlanWorkflowInput>(input).declaration_index);
@@ -536,7 +539,10 @@ Status DependencyRecords::append_record(
       step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord;
   ExecutionDependencies::Impl::Record candidate{
       step.result_ref(),
-      {step.output_descriptor, step.output_facets},
+      {step.output_descriptor,
+       step.output_facets,
+       {},
+       step.traits.outputs[0].atomic_trailing_axes},
       std::move(outputs),
       {},
       std::move(certificate),
@@ -631,8 +637,12 @@ Status DependencyRecords::append_legacy(std::size_t index,
   if (step.whole_boundary ||
       step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord)
     return append_record(index, outputs, {}, std::move(needs));
-  auto observations = operation_observations(
-      {step.output_descriptor, step.output_facets}, outputs, limits_);
+  auto observations =
+      operation_observations({step.output_descriptor,
+                              step.output_facets,
+                              {},
+                              step.traits.outputs[0].atomic_trailing_axes},
+                             outputs, limits_);
   if (!observations.ok())
     return observations.status();
   std::vector<AtomCertificate> rows;
@@ -665,8 +675,12 @@ Status DependencyRecords::append_empty(std::size_t index,
     std::vector<std::vector<std::uint64_t>> inputs;
     for (const auto& input : step.inputs)
       inputs.push_back(metadata(*plan_, input).descriptor.shape);
-    auto observations = operation_observations(
-        {step.output_descriptor, step.output_facets}, outputs, limits_);
+    auto observations =
+        operation_observations({step.output_descriptor,
+                                step.output_facets,
+                                {},
+                                step.traits.outputs[0].atomic_trailing_axes},
+                               outputs, limits_);
     if (!observations.ok())
       return observations.status();
     auto empty = DependencyCertificate::create(

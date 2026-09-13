@@ -16,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/numeric_diagnostics.hpp"
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "execution/result_callback_scope.hpp"
@@ -1282,8 +1283,12 @@ class StructuredExecution final {
     if (!bridge.ok())
       return Answer(bridge.status());
     const std::string legacy_snapshot(snapshot_.data(), snapshot_.size());
-    auto observations = operation_observations(
-        {step.output_descriptor, step.output_facets}, requested, set_limits());
+    auto observations =
+        operation_observations({step.output_descriptor,
+                                step.output_facets,
+                                {},
+                                step.traits.outputs[0].atomic_trailing_axes},
+                               requested, set_limits());
     if (!observations.ok())
       return Answer(observations.status());
     ResourceVector<Value> parts{ResourceAllocator<Value>(resources_)};
@@ -1306,12 +1311,51 @@ class StructuredExecution final {
       if (!started.ok())
         return started.status();
       auto session = started.take_value();
+      NumericDiagnostics reported_numeric;
       for (;;) {
+        std::uint64_t numeric_callback_us = 0;
         Result<DependencyProgress> progress(Status{ErrorCode::Internal, {}});
         status = dispatch([&] {
+          const auto tick = std::chrono::steady_clock::now();
           progress = session->poll(resources_.allocator());
+          numeric_callback_us += static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - tick)
+                  .count());
           return Status::success();
         });
+        const auto numeric = numeric_internal::delta(
+            session->numeric_diagnostics(), &reported_numeric);
+        const auto code = status.ok() ? progress.status().code : status.code;
+        const auto elements =
+            status.ok() && progress.ok() &&
+                    std::holds_alternative<DependencyResult>(progress.value())
+                ? samples.element_count().value()
+                : 0;
+        auto timing = std::find_if(
+            diagnostics_.operation_timings.begin(),
+            diagnostics_.operation_timings.end(),
+            [&](const auto& item) { return item.output == step.result_ref(); });
+        if (timing == diagnostics_.operation_timings.end()) {
+          diagnostics_.operation_timings.push_back(
+              {step.result_ref(), Backend::Cpu, numeric_callback_us, code, 1,
+               elements});
+          diagnostics_.operation_timings.back().numeric = numeric;
+        } else {
+          auto merged = merge_numeric_diagnostics(&timing->numeric, numeric);
+          if (!merged.ok())
+            return merged;
+          if (timing->invocation_count == UINT64_MAX ||
+              elements > UINT64_MAX - timing->computed_elements ||
+              numeric_callback_us > UINT64_MAX - timing->duration_us)
+            return Status{ErrorCode::ResourceExhausted,
+                          {},
+                          FailureReason::CapacityLimit};
+          ++timing->invocation_count;
+          timing->computed_elements += elements;
+          timing->duration_us += numeric_callback_us;
+          timing->outcome = code;
+        }
         if (!status.ok())
           return status;
         if (!progress.ok())
@@ -1365,7 +1409,10 @@ class StructuredExecution final {
             if (!observation.ok())
               return observation.status();
             auto samples = observation_samples(
-                {step.output_descriptor, step.output_facets},
+                {step.output_descriptor,
+                 step.output_facets,
+                 {},
+                 step.traits.outputs[0].atomic_trailing_axes},
                 observation.value(), set_limits());
             return samples.ok() ? drive(samples.value()) : samples.status();
           },

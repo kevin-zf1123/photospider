@@ -14,7 +14,10 @@
 namespace ps {
 namespace {
 Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
+  return Status{ErrorCode::InvalidArgument,
+                message,
+                FailureReason::InvalidDomain,
+                {FailureOrigin::Schema, FailureScope::Unspecified}};
 }
 template <class T>
 const T* parameter(const std::map<std::string, ParameterValue>& values,
@@ -42,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 10)
+  if (count > 1024 || traits.version != 11)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -86,15 +89,34 @@ Result<OperationMetadata> infer_operation_output(
         invalid("select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
     return Result<OperationMetadata>(
-        Status::failure(ErrorCode::TypeMismatch, message));
+        Status{ErrorCode::TypeMismatch,
+               message,
+               FailureReason::None,
+               {FailureOrigin::Schema, FailureScope::Unspecified}});
   };
   if (inputs.size() != t.input_count || inputs.size() != t.input_schema.size())
     return mismatch("inference input count mismatch");
   for (std::size_t i = 0; i < inputs.size(); ++i) {
+    if (inputs[i].atomic_trailing_axes > inputs[i].descriptor.shape.size() ||
+        (inputs[i].atomic_trailing_axes &&
+         std::any_of(inputs[i].facets.begin(), inputs[i].facets.end(),
+                     [](const auto& facet) {
+                       return facet.key == "photospider.image";
+                     })))
+      return mismatch("invalid input tuple observation metadata");
     auto status =
         input_internal::validate_port_metadata(t.input_schema[i], inputs[i]);
-    if (!status.ok())
+    if (!status.ok()) {
+      if (status.detail.origin == FailureOrigin::Unspecified &&
+          (status.code == ErrorCode::TypeMismatch ||
+           status.code == ErrorCode::InvalidArgument)) {
+        status.detail.origin = FailureOrigin::Schema;
+        if (status.code == ErrorCode::InvalidArgument &&
+            status.reason == FailureReason::None)
+          status.reason = FailureReason::InvalidDomain;
+      }
       return Result<OperationMetadata>(status);
+    }
   }
   if (t.repeated_resolved && t.repeated_match) {
     if (t.repeated_resolved > inputs.size())
@@ -136,12 +158,21 @@ Result<OperationMetadata> infer_operation_output(
     return Result<OperationMetadata>(std::move(metadata));
   }
   OperationMetadata result;
+  result.atomic_trailing_axes = t.outputs[0].atomic_trailing_axes;
   result.descriptor.element_type = t.outputs[0].output_element_type;
-  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input) {
+  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input ||
+      t.outputs[0].output_dtype_rule == OperationDtypeRule::WidenNumericInput) {
     if (t.outputs[0].output_dtype_input >= inputs.size())
       return mismatch("output dtype input is absent");
     result.descriptor.element_type =
         inputs[t.outputs[0].output_dtype_input].descriptor.element_type;
+    if (t.outputs[0].output_dtype_rule ==
+        OperationDtypeRule::WidenNumericInput) {
+      if (result.descriptor.element_type == ElementType::UInt8)
+        return mismatch("numeric widening requires integer or floating input");
+      if (result.descriptor.element_type != ElementType::Int64)
+        result.descriptor.element_type = ElementType::Float64;
+    }
   } else if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Parameter) {
     const auto* value =
         parameter<std::string>(parameters, t.outputs[0].output_dtype_parameter);
@@ -264,6 +295,8 @@ Result<OperationMetadata> infer_operation_output(
   if (shape.empty() || shape.size() > 8 ||
       std::any_of(shape.begin(), shape.end(), [](auto n) { return n == 0; }))
     return mismatch("output requires nonzero rank-1..8 shape");
+  if (result.atomic_trailing_axes > shape.size())
+    return mismatch("tuple grouping exceeds output rank");
   if (t.outputs[0].shape_rule == OperationShapeRule::Axes ||
       (t.outputs[0].requires_dense_output &&
        (t.outputs[0].shape_rule == OperationShapeRule::Fixed ||
@@ -334,6 +367,12 @@ Result<OperationMetadata> infer_operation_output(
       if (!status.ok())
         return Result<OperationMetadata>(status);
     }
+  if (result.atomic_trailing_axes &&
+      std::any_of(
+          result.facets.begin(), result.facets.end(),
+          [](const auto& facet) { return facet.key == "photospider.image"; }))
+    return mismatch(
+        "explicit tuple grouping cannot override image observations");
   return Result<OperationMetadata>(std::move(result));
 }
 Result<std::vector<OperationMetadata>> infer_operation_outputs(
@@ -379,6 +418,10 @@ Status validate_operation_contract(const OperationTraits& t) {
         t.outputs[0].maximum_dependency_stages > 1048576)))
     return invalid("invalid dependency observation/phase contract");
   const auto& output = t.outputs[0];
+  if (output.atomic_trailing_axes &&
+      (output.atomic_trailing_axes > 8 || output.dependency_version != 1 ||
+       output.observation_kind != ObservationKind::Atomic || t.supports_gpu))
+    return invalid("tuple grouping requires CPU staged Atomic output");
   if (output.result_schema.has_value() !=
       (output.output_schema.kind == OperationPortKind::Result))
     return invalid("structured output requires a complete schema template");
@@ -411,7 +454,8 @@ Status validate_operation_contract(const OperationTraits& t) {
       (!t.repeated_maximum && t.repeated_minimum))
     return invalid("invalid repeated input template");
   const auto maximum = t.input_count + t.repeated_maximum;
-  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input) {
+  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input ||
+      t.outputs[0].output_dtype_rule == OperationDtypeRule::WidenNumericInput) {
     if (t.outputs[0].output_dtype_input >= maximum ||
         !t.outputs[0].output_dtype_parameter.empty())
       return invalid("invalid output dtype input");

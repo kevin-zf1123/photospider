@@ -229,7 +229,10 @@ Result<Value> OperationRegistry::invoke_dependency_current(
           auto result = run(requested.value());
           if (!result.ok())
             return result.status();
-          return requested.value().visit(
+          auto visible = requested.value().intersect(samples.value());
+          if (!visible.ok())
+            return visible.status();
+          return visible.value().visit(
               [&](const auto& sample) {
                 std::uint64_t offset = 0;
                 for (std::size_t axis = 0; axis < sample.size(); ++axis)

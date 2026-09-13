@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
+#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/dependency.hpp"
 #include "photospider/data/fragment_atlas.hpp"
 #include "photospider/data/quality.hpp"
@@ -292,6 +293,11 @@ struct PHOTOSPIDER_API DependencyPhase final {
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,
               void* destination, std::size_t size) const;
+  /** @brief Host-owned cumulative numeric report for this observation.
+   * Borrowed for one poll; malformed reports and service failures are sticky.
+   * Report only arithmetic actually performed, including strict fallbacks.
+   */
+  std::function<Status(const NumericDiagnostics&)> report_numeric = {};
 };
 /** @brief Address-stable, move-only state allocated through the host allocator.
  * @note Destruction runs exactly once before its storage lease retires. A state
@@ -442,6 +448,7 @@ struct DependencyResult final {
   ObservationKind kind = ObservationKind::Atomic;
   std::optional<DependencyCertificate> certificate;
   std::vector<DependencyNeed> request_dependencies;
+  NumericDiagnostics numeric = {};
 };
 /** @brief Poll result delivered by the validated direct protocol driver. */
 using DependencyProgress = std::variant<DependencyNeedBatch, DependencyResult>;
@@ -496,6 +503,11 @@ class PHOTOSPIDER_API DependencySession final {
   /** @brief Total charged work and number of actual program polls. */
   std::uint64_t consumed_work() const;
   std::uint32_t poll_count() const;
+  /** @brief Actual cumulative numeric work, retained after success or failure.
+   * The returned inline record owns its text; concurrent calls are serialized
+   * with poll/supply. Querying statistics never retries computation.
+   */
+  NumericDiagnostics numeric_diagnostics() const;
 
  private:
   friend class OperationRegistry;
@@ -533,6 +545,10 @@ struct DependencyAtomProgress final {
   AtomKey key;
   Result<DependencyProgress> outcome;
   std::optional<QualityReport> quality = {};
+  /** @brief Incremental actual work since the previous event, including Need.
+   * Terminal work is included exactly once, also on arithmetic failure.
+   */
+  NumericDiagnostics numeric = {};
 };
 /** @brief Direct joint start/poll/supply driver, with independent member
  * validation.

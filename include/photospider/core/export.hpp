@@ -5,7 +5,7 @@
  * @brief Defines public shared/static library visibility for the C++ API.
  *
  * @note Windows producers and consumers use explicit export/import markers;
- * static consumers define `PHOTOSPIDER_STATIC`. GCC- and Clang-compatible
+ * static consumers define `PHOTOSPIDER_STATIC`. Clang
  * shared builds publish annotated API symbols despite the target's hidden
  * default visibility.
  */
@@ -18,7 +18,7 @@
 #else
 #define PHOTOSPIDER_API __declspec(dllimport)
 #endif
-#elif defined(__GNUC__) || defined(__clang__)
+#elif defined(__clang__)
 #define PHOTOSPIDER_API __attribute__((visibility("default")))
 #else
 #define PHOTOSPIDER_API

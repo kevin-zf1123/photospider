@@ -13,8 +13,8 @@ kind: primitive
 status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
+implementation_status: implemented
+repository_branch: ops-impl
 repository_commit: 30478d33
 ---
 
@@ -195,17 +195,25 @@ Compile once, rerun with changed inputs, then request early and overflowing
 indices independently. Inspect exact Int64 bytes and output read witnesses.
 Use exact integer/dyadic reference values, never a floating oracle for Int64.
 Implementation delivery supplies actual target/build/run commands and observed
-outputs; these proposed operation keys are not currently executable.
+outputs.
 
-During clarification, independent Python integer checks verified A04 and A05.
-No product tests or platform benchmarks have run for this target. Registration,
-conditional axis dtype inference, staged exact support and correctly rounded
-CPU implementations remain work for a separately authorized implementation task.
+## Implementation and references
 
-## Existing state and references
+All three arange profiles are registered in `numeric_sequences.cpp`, with
+bounded exact integer/dyadic formulas and scalar, NEON or AVX2 limb arithmetic.
+C++ metadata inference preserves Int64 axis for integer inputs and Float64 axis
+for floating inputs. Values are per-index observations; axis is one tuple.
+The public `numeric/sequences.hpp` helpers supply the documented authoring defaults.
 
-No independent `numeric.arange` registration was found in the inspected current
-code at `30478d33`.
+The manual [numeric workflow](../../../../examples/numeric_workflow/README.md)
+contains the actual commands and independent expected values. Local Clang
+strict/NEON and Ubuntu WSL Clang strict/AVX2 passed the public workflow and
+960-case Fraction/IEEE oracle per profile on 2026-09-14. The executable also
+checks exact Int64 cancellation above 2^53, requested overflow, tuple behavior,
+resources, cache, cancellation, strided inputs and owner lifetime. Installed
+public-consumer execution passed locally. These correctness checks add no
+integration-test registration or performance claim. Specification acceptance
+remains separate from this implementation record.
 
 - [NUM-02 category](../core.md).
 - [NUM-02A linspace](NUM-02A_linspace.md).

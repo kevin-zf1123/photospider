@@ -70,6 +70,12 @@
 !examples/foundations_workflow/*.hpp
 !examples/foundations_workflow/*.md
 !examples/foundations_workflow/CMakeLists.txt
+!examples/numeric_workflow/
+!examples/numeric_workflow/*.cpp
+!examples/numeric_workflow/*.hpp
+!examples/numeric_workflow/*.md
+!examples/numeric_workflow/*.py
+!examples/numeric_workflow/CMakeLists.txt
 !examples/
 !examples/components_workflow/
 !examples/components_workflow/*.cpp

@@ -115,17 +115,17 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical v10 vectors include Result schema presence and traits 10.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "e6ed5e44c9f529c9");
+  // Canonical v11 vectors include explicit tuple grouping and traits 11.
+  PS_CHECK(positive_zero.value().semantic.digest().value == "be964e8f16aefcef");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "85b905783760e4f5");
-  PS_CHECK(positive_zero.value().plan.digest().value == "30d346aa98de3a11");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "578e618519da5dd1");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "7fdf744733a10e49");
+           "be9112bbde110445");
+  PS_CHECK(positive_zero.value().plan.digest().value == "7906d3d2645b4bbf");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "cb1fc028b1ac1586");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "8f33be51b964716f");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "4ffa0c2b617081f1");
-  PS_CHECK(negative_zero.value().plan.digest().value == "9b67c3266a4693c1");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "d7a540bfb7c52d52");
+           "e7124e05093fcf5d");
+  PS_CHECK(negative_zero.value().plan.digest().value == "26950fbee29c5fec");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "8dbda563d37dadcd");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=

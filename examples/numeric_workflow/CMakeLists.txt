@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.21)
+project(PhotospiderNumericWorkflow LANGUAGES CXX)
+if(NOT TARGET Photospider::kernel)
+  find_package(Photospider 0.11 CONFIG REQUIRED COMPONENTS kernel)
+endif()
+add_executable(photospider_numeric_sequences sequences.cpp)
+target_link_libraries(photospider_numeric_sequences PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_sequences PRIVATE cxx_std_17)
+add_executable(photospider_numeric_facilities facilities.cpp)
+target_link_libraries(photospider_numeric_facilities PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_facilities PRIVATE cxx_std_17)
+# Manual acceptance executables deliberately have no add_test registration.

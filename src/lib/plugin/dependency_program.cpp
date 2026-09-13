@@ -32,6 +32,9 @@ bool image_metadata(const OperationMetadata& metadata) {
       [](const auto& facet) { return facet.key == "photospider.image"; });
 }
 Status validate_metadata(OperationMetadata* metadata) {
+  if (metadata->atomic_trailing_axes > metadata->descriptor.shape.size() ||
+      (metadata->atomic_trailing_axes && image_metadata(*metadata)))
+    return invalid("invalid input tuple observation metadata");
   auto shape = Footprint::none(metadata->descriptor.shape);
   if (!shape.ok())
     return shape.status();
@@ -84,20 +87,28 @@ Result<Footprint> operation_observations(const OperationMetadata& output,
     return Result<Footprint>(status);
   if (!samples.valid() || samples.shape() != output.descriptor.shape)
     return Result<Footprint>(invalid("output footprint domain mismatch"));
-  if (!image_metadata(output))
+  const auto grouped = output.atomic_trailing_axes;
+  if (grouped > output.descriptor.shape.size() ||
+      (grouped && image_metadata(output)))
+    return Result<Footprint>(invalid("invalid tuple observation metadata"));
+  if (!image_metadata(output) && !grouped)
     return Result<Footprint>(samples);
   std::vector<Region> rectangles;
   for (const auto& box : samples.boxes()) {
-    if (!input_internal::complete_image_channels(output.descriptor,
-                                                 output.facets, box))
+    if (!grouped && !input_internal::complete_image_channels(
+                        output.descriptor, output.facets, box))
       return Result<Footprint>(
           invalid("an image observation requires complete channels"));
     auto dimensions = box.dimensions();
-    dimensions.pop_back();
+    dimensions.resize(dimensions.size() - (grouped ? grouped : 1));
+    if (dimensions.empty())
+      dimensions.push_back({0, 1});
     rectangles.emplace_back(std::move(dimensions));
   }
   auto shape = output.descriptor.shape;
-  shape.pop_back();
+  shape.resize(shape.size() - (grouped ? grouped : 1));
+  if (shape.empty())
+    shape.push_back(1);
   return Footprint::from_regions(std::move(shape), rectangles, limits);
 }
 Result<Footprint> observation_samples(const OperationMetadata& output,
@@ -108,16 +119,25 @@ Result<Footprint> observation_samples(const OperationMetadata& output,
   if (!status.ok())
     return Result<Footprint>(status);
   auto shape = output.descriptor.shape;
-  if (image_metadata(output))
-    shape.pop_back();
+  const auto grouped = output.atomic_trailing_axes;
+  if (grouped > shape.size() || (grouped && image_metadata(output)))
+    return Result<Footprint>(invalid("invalid tuple observation metadata"));
+  const auto trailing = grouped ? grouped : (image_metadata(output) ? 1U : 0U);
+  shape.resize(shape.size() - trailing);
+  if (shape.empty())
+    shape.push_back(1);
   if (!observations.valid() || observations.shape() != shape)
     return Result<Footprint>(invalid("observation domain mismatch"));
-  if (!image_metadata(output))
+  if (!trailing)
     return Result<Footprint>(observations);
   std::vector<Region> rectangles;
   for (const auto& box : observations.boxes()) {
     auto dimensions = box.dimensions();
-    dimensions.push_back({0, output.descriptor.shape.back()});
+    if (trailing == output.descriptor.shape.size())
+      dimensions.clear();
+    for (auto axis = output.descriptor.shape.size() - trailing;
+         axis < output.descriptor.shape.size(); ++axis)
+      dimensions.push_back({0, output.descriptor.shape[axis]});
     rectangles.emplace_back(std::move(dimensions));
   }
   return Footprint::from_regions(output.descriptor.shape, rectangles, limits);
@@ -219,6 +239,7 @@ struct DependencySession::Impl {
   std::uint64_t remaining_work = 0;
   std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
+  NumericDiagnostics numeric;
   std::string certificate_identity, block_identity;
   std::shared_ptr<plugin_internal::FailureLatch> service_failure =
       std::make_shared<plugin_internal::FailureLatch>();
@@ -228,6 +249,22 @@ struct DependencySession::Impl {
   std::vector<AtomCertificate> rows;
   std::vector<DependencyNeed> terminal_needs;
   DependencyContinuation state;
+  Status report_numeric(const NumericDiagnostics& report) {
+    try {
+      auto status = consume(1);
+      if (!status.ok())
+        return status;
+      status = merge_numeric_diagnostics(&numeric, report);
+      return status.ok() ? status : record_failure(std::move(status));
+    } catch (const std::bad_alloc&) {
+      return record_failure(Status{ErrorCode::ResourceExhausted,
+                                   {},
+                                   FailureReason::CapacityLimit});
+    } catch (...) {
+      return record_failure(
+          Status{ErrorCode::OperationFailed, {}, FailureReason::HostException});
+    }
+  }
   Status stop() const {
     if (query.cancellation.cancelled() || auxiliary_cancellation.cancelled())
       return Status::failure(ErrorCode::Cancelled,
@@ -424,6 +461,13 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                                              request.limits.sets);
   if (!observations.ok())
     return Result<std::shared_ptr<DependencySession>>(observations.status());
+  if (output.value().atomic_trailing_axes) {
+    auto closure = observation_samples(output.value(), observations.value(),
+                                       request.limits.sets);
+    if (!closure.ok())
+      return Result<std::shared_ptr<DependencySession>>(closure.status());
+    request.outputs = closure.take_value();
+  }
   if (traits.outputs[0].observation_kind == ObservationKind::Atomic) {
     auto count = observations.value().element_count();
     if (!count.ok())
@@ -488,6 +532,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     for (auto n : metadata.descriptor.shape)
       identity.integer(n);
     contract_internal::append_facets(&identity, metadata.facets);
+    identity.integer(metadata.atomic_trailing_axes);
   };
   metadata_identity(impl->query.output);
   for (const auto& input : impl->query.inputs)
@@ -629,6 +674,9 @@ Status DependencySession::begin_joint_phase(
                                       {},
                                       {}});
   auto& phase = *slot->phase;
+  phase.report_numeric = [this](const auto& report) {
+    return impl_->report_numeric(report);
+  };
   const auto checkpoint_allowed = [this]() {
     auto status = impl_->consume(1);
     if (!status.ok())
@@ -1066,6 +1114,9 @@ Result<DependencyProgress> DependencySession::poll(
                             {},
                             {},
                             {}};
+      phase.report_numeric = [this](const auto& report) {
+        return impl_->report_numeric(report);
+      };
       phase.block = [&](std::uint32_t kind, std::uint64_t begin,
                         std::uint64_t end, std::uint64_t mode,
                         const Value& incoming,
@@ -1409,6 +1460,7 @@ Result<DependencyProgress> DependencySession::poll(
                               impl_->query.kind,
                               {},
                               {}};
+    complete.numeric = impl_->numeric;
     if (impl_->query.kind == ObservationKind::Atomic) {
       auto certificate = impl_->certificate();
       if (!certificate.ok())
@@ -1518,5 +1570,9 @@ std::uint64_t DependencySession::consumed_work() const {
 std::uint32_t DependencySession::poll_count() const {
   std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
   return impl_->polls;
+}
+NumericDiagnostics DependencySession::numeric_diagnostics() const {
+  std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+  return impl_->numeric;
 }
 }  // namespace ps

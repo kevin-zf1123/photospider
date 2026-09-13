@@ -84,3 +84,24 @@ the prior result. `test_dependency_sampling` additionally checks literal finite
 radius relations, changed edges with equal output bytes, control transpose,
 negative coordinates/endpoints/N=1, zero-weight tap validation, Empty static
 errors and rounding-mode/cross-chunk numerical invariance.
+
+## Generic tuple observations and numeric diagnostics
+
+C++ `OperationOutputTraits::atomic_trailing_axes` groups complete trailing axes
+into one atomic observation for CPU staged Atomic outputs. Zero keeps scalar
+observations. For generic shape `{N,C}`, value 1 gives observation shape `{N}`;
+for an axis tuple `{3}`, value 1 gives one observation with shape `{1}`. The
+host closes a partial sample request over its complete tuple for computation,
+validation and certificates, then returns the requested sample intersection.
+Image-v2 retains its existing complete-pixel rules. Grouping is preserved in
+compiler edge metadata, structured bridges and joint compatibility checks, and
+is included in operation identity. C ABI 9 does not expose this C++ trait.
+
+`DependencyPhase::report_numeric` accepts checked incremental `NumericDiagnostics`
+records, owned inline by the host. Reports identify the actual CPU profile and
+implementation, evaluated values, strict fallbacks and bounded fallback reasons.
+Arithmetic reported before a later failure remains visible on terminal atom
+progress and `OperationTiming::numeric`. Structured consumers accumulate every
+upstream observation. Cache hits and unrequested observations add no arithmetic
+counts. These physical diagnostics do not change semantic identity or establish
+an accuracy bound. See the manual [numeric workflow](../../examples/numeric_workflow/README.md).

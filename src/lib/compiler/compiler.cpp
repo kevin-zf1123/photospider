@@ -206,7 +206,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v10");
+  digest.text("semantic-graph-ir-v11");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -286,7 +286,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v10");
+  digest.text("physical-plan-v11");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -470,7 +470,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v10");
+  digest.text("plan-cache-key-v11");
   digest.text(plan);
   return digest.finish();
 }
@@ -846,6 +846,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   semantic.nodes_.reserve(document.nodes.size());
   std::map<ValueRef, ValueDescriptor> output_by_value;
   std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
+  std::map<ValueRef, std::uint32_t> tuple_axes;
   while (!ready.empty()) {
     const std::uint64_t id = ready.top();
     ready.pop();
@@ -875,6 +876,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       ValueDescriptor descriptor;
       std::vector<ValueFacet> facets;
       std::shared_ptr<const SchemaTemplate> result_schema;
+      std::uint32_t atomic_trailing_axes = 0;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
         const auto ref =
             result_ports.at({producer->source_node, producer->source_port});
@@ -882,6 +884,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
         descriptor = output_by_value.at(ref);
         facets = output_facets.at(ref);
         result_schema = result_schemas.at(ref);
+        atomic_trailing_axes = tuple_axes.at(ref);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
@@ -900,12 +903,23 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
           }
         }
       }
-      const auto status = input_internal::validate_port_metadata(
-          port, OperationMetadata{descriptor, facets, result_schema});
-      if (!status.ok())
+      auto status = input_internal::validate_port_metadata(
+          port, OperationMetadata{descriptor, facets, result_schema,
+                                  atomic_trailing_axes});
+      if (!status.ok()) {
+        if (status.detail.origin == FailureOrigin::Unspecified &&
+            (status.code == ErrorCode::TypeMismatch ||
+             status.code == ErrorCode::InvalidArgument)) {
+          status.detail.origin = FailureOrigin::Schema;
+          if (status.code == ErrorCode::InvalidArgument &&
+              status.reason == FailureReason::None)
+            status.reason = FailureReason::InvalidDomain;
+        }
         return Result<SemanticGraphIR>(status);
-      input_descriptors.push_back(
-          {std::move(descriptor), std::move(facets), std::move(result_schema)});
+      }
+      input_descriptors.push_back({std::move(descriptor), std::move(facets),
+                                   std::move(result_schema),
+                                   atomic_trailing_axes});
     }
     auto output = infer_operation_outputs(node.traits, input_descriptors,
                                           node.parameters);
@@ -951,6 +965,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       output_facets.emplace(ref, metadata.facets);
       output_by_value.emplace(ref, metadata.descriptor);
       result_schemas.emplace(ref, metadata.result_schema);
+      tuple_axes.emplace(ref, metadata.atomic_trailing_axes);
       node.outputs.push_back({contract.key, metadata.descriptor,
                               metadata.facets, atomic, metadata.result_schema});
     }
@@ -1249,13 +1264,15 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       for (auto& step : plan.steps_) {
         auto metadata = std::make_shared<ResultProgramMetadata>();
         metadata->output = {step.output_descriptor, step.output_facets,
-                            step.output_result_schema};
+                            step.output_result_schema,
+                            step.traits.outputs[0].atomic_trailing_axes};
         for (const auto& input : step.inputs) {
           if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
             const auto& source = plan.steps_[producer->step_index];
-            metadata->inputs.push_back({source.output_descriptor,
-                                        source.output_facets,
-                                        source.output_result_schema});
+            metadata->inputs.push_back(
+                {source.output_descriptor, source.output_facets,
+                 source.output_result_schema,
+                 source.traits.outputs[0].atomic_trailing_axes});
           } else {
             const auto& source =
                 plan.input_declarations_[std::get<PlanWorkflowInput>(input)

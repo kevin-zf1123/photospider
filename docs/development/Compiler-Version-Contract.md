@@ -196,3 +196,18 @@ error-code projection. C++ callback outcome/supply signatures now use AtomKey;
 consumers rebuild without an output-index shim. Joint contract 2 is a new
 trait value in existing v10 canonical framing; contract 1 semantics and C
 layouts remain. See [Atom errors and quality](../kernel-architecture/Atom-Errors-and-Quality.md).
+
+## Numeric tuple and diagnostics contracts
+
+Package 0.11.0 adds C++ OperationTraits 11, generic trailing-axis observation
+grouping, numeric axis dtype inference and host-owned CPU numeric diagnostics.
+Semantic, physical-plan and plan-cache domains advance to v11 because output
+grouping enters operation identity. Dependency protocol 2, joint contract 2,
+result-region v6, WorkflowDocument schema 2 and the C operation ABI 9 remain.
+C++ consumers rebuild against 0.11; requests for the 0.10 package are rejected.
+The C ABI loader rejects dtype rules outside its existing v9 enum. Its layout
+does not expose the new C++ grouping, dtype rule or diagnostics callbacks.
+
+Kernel C/C++ builds require Clang, including Apple Clang. Correctness runs on
+Ubuntu WSL use Clang too. The manual [numeric workflows](../../examples/numeric_workflow/README.md)
+exercise the installed public API without adding integration-test registrations.

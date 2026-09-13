@@ -23,6 +23,7 @@ int ledger() {
   auto l = limits(overhead + 20);
   l.maximum_work = 10;
   l.maximum_io_bytes = 20;
+  l.maximum_stages = 1;
   l.cleanup = ResourceCapacity::host(2);
   ResourceBudget root(l);
   {
@@ -38,13 +39,15 @@ int ledger() {
     PS_CHECK(alias.capacity()[ResourceKind::Host] == 16);
     PS_CHECK(!alias.grow(ResourceCapacity::host(3)).ok());
     PS_CHECK(root.consume({7, 11}).ok());
-    PS_CHECK(!root.consume({4, 1}).ok());
+    PS_CHECK(root.consume({4, 1}).reason == FailureReason::WorkLimit);
     PS_CHECK(root.statistics().issued.io_bytes == 11);
     first = {};
     PS_CHECK(root.statistics().live[ResourceKind::Host] == 16 + overhead);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Host] == 0);
   PS_CHECK(root.statistics().issued.work == 7);
+  PS_CHECK(root.consume({0, 0, 0, 1}).ok());
+  PS_CHECK(root.consume({0, 0, 0, 1}).reason == FailureReason::StageLimit);
   PS_CHECK(root.statistics().protected_cleanup[ResourceKind::Host] == 2);
   auto shared = ResourceCapacity::host(10);
   shared[ResourceKind::Shared] = 10;

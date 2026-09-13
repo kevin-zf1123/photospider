@@ -162,3 +162,16 @@ C ABI 9 保留按不同输出分组的 joint contract 1 和原错误码投影。
 supply 签名使用 AtomKey，消费方重新构建，不提供 output-index shim。
 joint contract 2 使用既有 v10 canonical framing 中的新 trait 值；contract 1
 语义和 C 布局保持原样。见[原子错误与质量](../../kernel-architecture/zh/Atom-Errors-and-Quality.zh.md)。
+
+## 数值元组与诊断契约
+
+Package 0.11.0 增加 C++ OperationTraits 11、通用尾轴观察分组、数值 axis dtype
+推导和宿主持有的 CPU 数值诊断。输出分组进入 operation identity，因此 semantic、
+physical-plan、plan-cache 域升级为 v11。Dependency protocol 2、joint contract 2、
+result-region v6、WorkflowDocument schema 2 和 C operation ABI 9 保持不变。
+C++ 消费方须针对 0.11 重编译；0.10 package 请求被拒绝。C ABI loader 拒绝既有
+v9 枚举之外的 dtype rule；其布局不增加 C++ 分组、新 dtype rule 或诊断回调。
+
+内核 C/C++ 构建要求 Clang，包含 Apple Clang；Ubuntu WSL 正确性验证也使用
+Clang。[数值 workflow](../../../examples/numeric_workflow/README.md) 通过安装后的
+公开 API 手动运行，不新增集成测试注册。
