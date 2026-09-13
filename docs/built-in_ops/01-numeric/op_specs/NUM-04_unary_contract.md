@@ -151,6 +151,15 @@ No new keys in this family are currently claimed as implemented or runnable.
 Implementation delivery supplies actual executable targets and run commands;
 specification-only mathematical/bit-pattern experiments are not product acceptance.
 
+## Exact rational pi input counterparts
+
+[NUM-04S..V](NUM-04_rational_pi_contract.md) add independently named
+sinpi_rational, cospi_rational, tanpi_rational and sincpi_rational. Their exact
+p/q inputs use two Int64 ports and a separate interface/execution contract;
+they do not inherit this file's one-floating-input shape/dtype rule. Existing
+floating pi-multiple functions remain separate. Reduced common-angle denominator
+1/2/3/4/6 paths are exact for the three new trigonometric functions in all profiles.
+
 - [NUM category](../core.md).
 - [Operator template](../../00-foundation/spec-template.md).
 - [Current abs implementation](../../../../plugins/ops/01-numeric/numeric_abs.cpp).
