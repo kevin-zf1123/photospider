@@ -1,5 +1,12 @@
 # Basic operation research and implementation contract
 
+Status update, 2026-09-13: the twelve families below were implemented by
+`ops@00864936`. This page retains the original 2026-09-11 research contract.
+Current package 0.10.0 / C ABI 9 behavior is documented in
+[Basic operations](../../kernel-architecture/Basic-Operations.md);
+`field.convolve` now has staged regional execution, while `field.correlate` remains Whole.
+The historical delivery steps below do not authorize a new implementation or PR cycle.
+
 Approved scope: twelve basic operation families, CPU, existing ABI/Traits 7.
 Research baseline: `ops@2495393c`, 2026-09-11. Foundations PR #298 is merged.
 This research commit does not claim implementation or executed product tests.

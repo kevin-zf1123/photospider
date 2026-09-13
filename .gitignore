@@ -42,6 +42,7 @@
 !plugins/ops/**/*.cpp
 !plugins/ops/**/*.hpp
 !plugins/ops/README.md
+!plugins/ops/09-composite/inpaint_ns_license.txt
 !plugins/ops/rgba32f/
 !plugins/ops/rgba32f/*.c
 !plugins/ops/rgba32f/*.h
@@ -50,6 +51,10 @@
 !plugins/ops/rgba32f/CMakeLists.txt
 
 # Maintained public-API image example and shared acceptance fixture.
+!examples/inpaint_ns_workflow/
+!examples/inpaint_ns_workflow/*.cpp
+!examples/inpaint_ns_workflow/*.hpp
+!examples/inpaint_ns_workflow/CMakeLists.txt
 !examples/g4_gpu_workflow/
 !examples/g4_gpu_workflow/*.cpp
 !examples/g4_gpu_workflow/*.c

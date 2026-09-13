@@ -1,8 +1,10 @@
 # 调色与局部色调
 
-2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+2026-09-13：`statistics.histogram→statistics.parameters→statistics.grade` 已提供可组合的全局参数链，见[Integer statistics](../../kernel-architecture/Integer-Statistics.md)。该 factory 处理 Int64 标量与 UInt8 selection、输出 Float64 pixels，未实现 GRD-24 的通用 RGB/percentile 自动曝光；下表仍保留该扩展需求。
 
-状态 Proposed；逐像素明确公式为D1，局部tone mapping、复杂色域压缩和商业控制匹配为D2。输入为描述明确的RGB/Lab等图像，可选mask；默认保留alpha。参考使用Float32颜色、Float64系数与统计，GPU FP32须单独验证。E/H/W为数学依赖；辅助LUT/统计表的完整输入需求仍需G4。
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
+
+状态 Proposed；逐像素明确公式为D1，局部tone mapping、复杂色域压缩和商业控制匹配为D2。输入为描述明确的RGB/Lab等图像，可选mask；默认保留alpha。参考使用Float32颜色、Float64系数与统计，GPU FP32须单独验证。E/H/W为数学依赖；G4 已能按端口表达完整辅助表需求；既有 Whole LUT 节点不自动获得 regional 实现。
 
 ## 调色目录
 
@@ -41,7 +43,7 @@
 
 ## 关键数学与默认选择
 
-Levels规范候选：`u=(x-black)/(white-black)`；bounded模式先clip到[0,1]，`y=out0+(out1-out0)*u^(1/gamma)`，gamma>0。若提供signed/HDR扩展，另命名、另定义幂函数；当前8项没有该操作。输入曲线控制点x必须严格递增，禁止重复x含糊处理。
+Levels规范候选：`u=(x-black)/(white-black)`；bounded模式先clip到[0,1]，`y=out0+(out1-out0)*u^(1/gamma)`，gamma>0。若提供signed/HDR扩展，另命名、另定义幂函数；已实现 `grade.levels` 的参数名为 `out_min/out_max`，具体稳定算术与失败规则见基础算子契约。输入曲线控制点x必须严格递增，禁止重复x含糊处理。
 
 Monochrome是本清单易混淆的一项。线性RGB的Y来自当前原色矩阵；Lab L*是对Y/Yn的感知编码，提取后若要显示中性灰，应先按Lab逆变换或明确的L*→Y映射重建。可调channel mixer属于艺术黑白，不保证物理luminance。统一使用“黑白”名称却让下游猜输出尺度会影响阈值和示波器。
 
@@ -51,7 +53,7 @@ HDR高光暗部需区分global zone和local operator。全局只依赖每像素f
 
 ## 支持和实施
 
-第一步支持线性Float32 RGB/RGBA与独立mask，渐次开放signed wide-gamut；Lab/OKLab操作必须等G2。调色默认对unassociated颜色操作，alpha原样；纯linear gain可优化为premul直接乘RGB。mask效果的混合空间明确，不能在Lab/encodedRGB/linearRGB之间静默切换。
+已有 typed signed/HDR、RGB/XYZ/Lab 和独立 mask。OKLab、更多 wide-gamut 变换及专用调色节点仍须实现。调色默认对unassociated颜色操作，alpha原样；纯linear gain可优化为premul直接乘RGB。mask效果的混合空间明确，不能在Lab/encodedRGB/linearRGB之间静默切换。
 
 master curve、RGB per-channel curves、luma curve、L* curve应在workflow中可见。LUT资源通过显式输入绑定，N或profile改变影响shape/契约时按静态路径处理；只改表值应以已允许的动态binding为目标，不假定当前端口都支持。
 

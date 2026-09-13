@@ -1,13 +1,15 @@
 # 频域、去噪与恢复
 
-状态Proposed。DFT/固定卷积/具名基础恢复为D1数学核心，复杂统计和迭代质量选择为D2。signed real与complex语义依赖G1/G2，FFT和全局求解优先Whole，不能把任意频率滤镜误标有限Halo。
+2026-09-13 已实现：`make_fft_operation` 提供 `fft.forward_real/import_response/multiply/inverse_real`，通过显式注册和 managed resources 执行 Float64 HW 的 Full/R2CHalf 分页流程。FRQ-01/02/06 的这个子集见[External FFT](../../kernel-architecture/External-FFT.md)与[公开 workflow](../../../examples/fft_workflow/README.md)。Bands 的 duplicate-last Haar schema/校验和重建 fixture 见[结构化表示](../../kernel-architecture/Structured-Representations.md)；通用 wavelet、window/PSD、反卷积仍是下面的扩展需求。
+
+状态Proposed。DFT/固定卷积/具名基础恢复为D1数学核心，复杂统计和迭代质量选择为D2。signed real 和 Spectrum 已有承载。现有 FFT 使用两代完整临时 complex backing 与有界窗口，奇数叶采用直接 DFT，不能统一标 O(N log N)；全局 solver 需另定算法和发布条件，不能标有限 Halo。
 
 ## 频域基础
 
 | ID / 功能 | 输入 → 输出 | 建议参数与数学 | 支持与验收 |
 | --- | --- | --- | --- |
 | FRQ-01 fft2/ifft2 | real/complex→complex | axes=y,x；forward负号不缩放，inverse除HW；ortho另mode | O(PC logP)，W；round-trip/Parseval/impulse |
-| FRQ-02 rfft2/irfft2 | real↔half complex | `[H,floor(W/2)+1,C,2]`实虚表示建议，保存原W | 奇偶宽、Hermitian、DC/Nyquist |
+| FRQ-02 rfft2/irfft2 | real↔half complex | 现有单通道 Spectrum 保存 Float64 pairs 和原 HW；多通道扩展另定 | 奇偶宽、Hermitian、DC/Nyquist |
 | FRQ-03 fftshift/ifftshift | frequency array→重排 | 仅移频率索引，不改变谱值 | 奇数长度shift与inverse不混用 |
 | FRQ-04 window | field+shape→windowed field/window | Hann/Tukey等具名、periodic/symmetric、axes | 窗能量、coherent gain；谱分析另行归一 |
 | FRQ-05 frequency response | shape+sampling→complex/real Hf | Gaussian/Butterworth/ideal low/high/band/notch；截止cycles/unit | DC、截止、Hermitian；硬截止产生长响应/ringing |

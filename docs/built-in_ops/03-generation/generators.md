@@ -1,8 +1,8 @@
 # 图形、坐标、渐变与噪声生成
 
-2026-09-11：本轮基础子集的接口、Region 与可运行示例见[基础算子实现](../../kernel-architecture/zh/Basic-Operations.zh.md)。其他目录项继续保持原研究状态。
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
-状态Proposed，基础为D1；mesh gradient、动态点集合与物理噪声为D2。生成器必须显式给输出shape/坐标描述；数学逐像素可计算不等于当前registry具有按参数推导尺寸的契约。默认像素中心 `(x+.5,y+.5)`，图像左上为(0,0)，数组y,x,c。
+状态Proposed，基础为D1；mesh gradient、动态点集合与物理噪声为D2。生成器必须显式给输出shape/坐标描述；已有 `field.coordinate/constant` 按静态 height/width 推断 shape；其他生成器须声明自己的输出推断。DynamicPoints schema 已支持零/变长 count 和显式 ID 映射，随机/分布生成节点仍待实现。默认像素中心 `(x+.5,y+.5)`，图像左上为(0,0)，数组y,x,c。
 
 ## 图形与坐标
 
@@ -40,7 +40,7 @@ Gaussian表示分布，white/blue表示频谱，Perlin/Voronoi表示构造。将
 
 Perlin2002的固定gradient/permutation与五次fade为明确可实现的版本，换hash或seed展开就改变图样，应纳入算法身份。[^perlin] Random123的counter-based方法适合按全局坐标取样；整数序列和正态浮点变换的跨后端一致性分别定义。[^random] 时空blue noise具有独立时间频谱设计，不能以每帧新2D蓝噪声替代。[^blue]
 
-默认随机key由seed、stream、绝对坐标、channel及可选frame构成，不依赖tile顺序或局部ROI原点。cache依赖seed和全部生成参数。Gaussian与其他signed输出不能使用当前非负RGBA facet。
+默认随机key由seed、stream、绝对坐标、channel及可选frame构成，不依赖tile顺序或局部ROI原点。cache依赖seed和全部生成参数。signed 噪声可按 field 语义输出；不得只因通道数为四就声明 CoverageRGBA，image v2 的 signed/HDR 支持仍有 alpha association 约束。
 
 ## 使用与验收
 
