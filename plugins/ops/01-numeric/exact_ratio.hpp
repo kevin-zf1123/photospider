@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -9,16 +10,19 @@
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-// Caller-owned, fixed-capacity exact rational scratch. The numerator is in
-// units 2^-2148, denominator in units 2^-1074; result therefore has scale
-// 2^-1074. Four raw finite binary64 products require at most 4198 bits.
-struct RatioWorkspace final {
-  PredicateInteger numerator, denominator, term, shifted, candidate;
+// Caller-owned, fixed-capacity exact rational scratch. round() computes
+// RN((numerator / denominator) * 2^scale). The default scale -1074
+// matches products in units 2^-2148 divided by a width in units 2^-1074.
+// Callers prove capacity for their formula and all shifted division operands.
+template <std::size_t Words>
+struct ExactRatioWorkspace final {
+  using Integer = FixedInteger<Words>;
+  Integer numerator, denominator, term, shifted, candidate;
   std::array<std::int64_t, 4> greater{}, less{};
   bool negative = false;
   SequenceProfile profile;
-  explicit RatioWorkspace(SequenceProfile selected) : profile(selected) {}
-  int compare(const PredicateInteger& a, const PredicateInteger& b) {
+  explicit ExactRatioWorkspace(SequenceProfile selected) : profile(selected) {}
+  int compare(const Integer& a, const Integer& b) {
     for (std::size_t end = a.words.size(); end; end -= 4) {
       compare_keys(a.words.data() + end - 4, b.words.data() + end - 4,
                    greater.data(), less.data(), profile);
@@ -31,7 +35,7 @@ struct RatioWorkspace final {
     }
     return 0;
   }
-  static int top(const PredicateInteger& value) {
+  static int top(const Integer& value) {
     for (std::size_t i = value.words.size(); i; --i)
       if (value.words[i - 1])
         return static_cast<int>((i - 1) * 64 + 63 -
@@ -39,8 +43,7 @@ struct RatioWorkspace final {
     return -1;
   }
   // Distinct input/output. Reject a nonzero bit shifted beyond capacity.
-  static bool shift(const PredicateInteger& source, unsigned bits,
-                    PredicateInteger* output) {
+  static bool shift(const Integer& source, unsigned bits, Integer* output) {
     output->words.fill(0);
     const auto whole = bits / 64, tail = bits % 64;
     for (std::size_t i = 0; i < source.words.size(); ++i) {
@@ -80,7 +83,8 @@ struct RatioWorkspace final {
     add_term((a.negative != b.negative) != subtract);
   }
   Result<std::uint64_t> round(
-      bool narrow, const std::function<Status(std::uint64_t)>& consume) {
+      bool narrow, const std::function<Status(std::uint64_t)>& consume,
+      int scale = -1074) {
     using Answer = Result<std::uint64_t>;
     const auto capacity = [] {
       return Answer(Status{ErrorCode::ResourceExhausted,
@@ -96,19 +100,32 @@ struct RatioWorkspace final {
           Status{ErrorCode::InvalidArgument, "zero exact denominator"});
     if (n_top < 0)
       return Answer(UINT64_C(0));
-    const unsigned fraction = narrow ? 23 : 52, minimum = narrow ? 925 : 0;
+    const unsigned fraction = narrow ? 23 : 52;
+    const int minimum = narrow ? -149 : -1074;
     int ratio_top = n_top - d_top;
     if (ratio_top >= 0) {
       if (!shift(denominator, static_cast<unsigned>(ratio_top), &candidate))
         return capacity();
       if (compare(numerator, candidate) < 0)
         --ratio_top;
+    } else {
+      if (!shift(numerator, static_cast<unsigned>(-ratio_top), &candidate))
+        return capacity();
+      if (compare(candidate, denominator) < 0)
+        --ratio_top;
     }
-    unsigned quantum = minimum;
-    if (ratio_top > static_cast<int>(minimum + fraction))
-      quantum = static_cast<unsigned>(ratio_top) - fraction;
-    if (!shift(denominator, quantum, &shifted))
-      return capacity();
+    int quantum =
+        std::max(minimum, ratio_top + scale - static_cast<int>(fraction));
+    const auto alignment = quantum - scale;
+    if (alignment >= 0) {
+      if (!shift(denominator, static_cast<unsigned>(alignment), &shifted))
+        return capacity();
+    } else {
+      if (!shift(numerator, static_cast<unsigned>(-alignment), &candidate))
+        return capacity();
+      numerator = candidate;
+      shifted = denominator;
+    }
     std::uint64_t significand = 0;
     for (unsigned i = fraction + 1; i; --i) {
       work = consume(256);
@@ -145,4 +162,5 @@ struct RatioWorkspace final {
                   (exponent << fraction) | significand);
   }
 };
+using RatioWorkspace = ExactRatioWorkspace<68>;
 }  // namespace ps::plugin_internal::numeric_ops

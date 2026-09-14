@@ -37,11 +37,14 @@ struct BinaryParts final {
                     : magnitude | (UINT64_C(1) << 63);
   }
 };
-// Nonnegative values in units of 2^-2148. Two finite binary64 significands
-// multiply into at most 106 bits; their product plus an absolute tolerance
-// fits below bit 4197. The 4352-bit storage and every loop are fixed/bounded.
-struct PredicateInteger final {
-  std::array<std::uint64_t, 68> words{};
+// Fixed-capacity nonnegative integers. set_product uses units of 2^-2148;
+// two finite binary64 significands multiply into at most 106 bits, and their
+// product plus an absolute tolerance fits below bit 4197. PredicateInteger
+// therefore uses 4352 bits; exact cubic callers select a larger fixed capacity.
+template <std::size_t Words>
+struct FixedInteger final {
+  static_assert(Words >= 68 && Words % 4 == 0);
+  std::array<std::uint64_t, Words> words{};
   void set_product(const BinaryParts& a, const BinaryParts& b) {
     words.fill(0);
     const auto product =
@@ -62,7 +65,7 @@ struct PredicateInteger final {
       if ((value.significand >> bit) & 1)
         words[(shift + bit) / 64] |= UINT64_C(1) << ((shift + bit) % 64);
   }
-  void add(const PredicateInteger& other) {
+  void add(const FixedInteger& other) {
     std::uint64_t carry = 0;
     for (std::size_t i = 0; i < words.size(); ++i) {
       const auto sum =
@@ -72,7 +75,7 @@ struct PredicateInteger final {
     }
   }
   // Requires this >= other, guaranteed by magnitude selection for |a-b|.
-  void subtract(const PredicateInteger& other) {
+  void subtract(const FixedInteger& other) {
     std::uint64_t borrow = 0;
     for (std::size_t i = 0; i < words.size(); ++i) {
       const auto sub = static_cast<unsigned __int128>(other.words[i]) + borrow;
@@ -83,4 +86,5 @@ struct PredicateInteger final {
     }
   }
 };
+using PredicateInteger = FixedInteger<68>;
 }  // namespace ps::plugin_internal::numeric_ops

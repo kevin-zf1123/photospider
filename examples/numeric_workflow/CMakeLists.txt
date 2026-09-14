@@ -22,3 +22,7 @@ target_compile_features(photospider_numeric_comparisons PRIVATE cxx_std_17)
 add_executable(photospider_numeric_ranges ranges.cpp)
 target_link_libraries(photospider_numeric_ranges PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_ranges PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_interpolation EXCLUDE_FROM_ALL interpolation.cpp)
+target_link_libraries(photospider_numeric_interpolation PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_interpolation PRIVATE cxx_std_17)

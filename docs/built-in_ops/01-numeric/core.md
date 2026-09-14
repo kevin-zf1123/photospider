@@ -1,7 +1,7 @@
 # 数值与数组基础
 
 2026-09-14：`ops-impl` 正在实现本目录完整契约，按功能簇记录于
-[实现进度](implementation.md)。NUM-02、NUM-03、NUM-06 与 NUM-07 已完成实现，
+[实现进度](implementation.md)。NUM-02、NUM-03、NUM-06、NUM-07 与 NUM-08 已完成实现，
 公开手动 workflow、独立数值 oracle、本机与 WSL Clang 检查、安装 consumer 和
 对应独立审查均已通过。其余功能簇继续按依赖实现。
 下述 Proposed 规格状态保持独立。

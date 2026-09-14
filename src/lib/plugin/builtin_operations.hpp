@@ -5,6 +5,7 @@
 namespace ps::plugin_internal {
 /** @brief Registers the source-tree operations grouped by docs/built-in_ops. */
 Status register_builtin_operations(OperationRegistry* registry);
+Status register_numeric_interpolation(OperationRegistry* registry);
 Status register_numeric_ranges(OperationRegistry* registry);
 Status register_numeric_comparisons(OperationRegistry* registry);
 Status register_numeric_arrays(OperationRegistry* registry);

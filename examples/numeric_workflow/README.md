@@ -160,6 +160,38 @@ negative/zero/unaligned strides and packed global ROI origins.
 These are manual targets without CTest or
 integration-test registration, and no performance result is claimed.
 
+## Interpolation: NUM-08
+
+`photospider_numeric_interpolation` exercises the six versioned keys
+`numeric.mix_*` and `numeric.smoothstep_*` through the public
+`WorkflowDocument`, `Compiler`, `ExecutionContext` and explicit
+`broadcast_node` path. Build and run with Clang:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_interpolation -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
+python3 examples/numeric_workflow/interpolation_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
+```
+
+Use `_accelerated_apple_silicon` on Apple Silicon or `_accelerated_x86_64` on
+x86-64. The workflow expects
+`smoothstep=[0,0,.15625,.5,.84375,1,1]` and
+`mix=[10,10,11.5625,15,18.4375,20,20]`, and checks staged factor control,
+selected branch Data and typed-validation closure. It also checks exact sparse
+support, factor-cache branch replacement, invalid-factor/edge atom isolation,
+layout and ROI behavior, empty demand, sNaN caller fenv preservation, WorkLimit
+and cancellation cleanup. `interpolation_oracle.py` uses raw IEEE decoding,
+`Fraction` and direct destination rounding.
+
+Local strict and Apple profile runs passed 5242 oracle cases per profile and
+the complete manual workflow. Ubuntu WSL Clang strict/x86 passed the same
+5242 cases per profile and manual checks; the installed consumer passed locally. The smoothstep implementation uses a bounded 104-limb
+(6656-bit) exact cubic workspace with scalar `u128` multiplication and
+NEON/AVX2 comparison helpers. Diagnostics describe the selected profile and
+implementation; no performance result is claimed. This executable is a manual
+target without CTest or integration-test registration.
+
 ## Exact comparisons and select: NUM-07
 
 `photospider_numeric_comparisons` exercises the public `WorkflowDocument`,
