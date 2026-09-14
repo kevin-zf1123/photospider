@@ -365,7 +365,8 @@ class StructuredExecution final {
               protocol("dense structured output requires one rectangle"));
         const auto& parts = computed.value().fragments();
         const bool view =
-            step.traits.outputs[0].maximum_output_payload_bytes.has_value();
+            step.traits.outputs[0].maximum_output_payload_bytes.has_value() ||
+            step.traits.outputs[0].preserve_output_views;
         if (view && parts.size() != 1)
           return Answer(Status{
               ErrorCode::TypeMismatch,
@@ -1404,7 +1405,8 @@ class StructuredExecution final {
     Status visited;
     if (step.traits.outputs[0].observation_kind ==
             ObservationKind::RequestRecord ||
-        step.traits.outputs[0].static_dependency_maps) {
+        step.traits.outputs[0].static_dependency_maps ||
+        step.traits.outputs[0].regional_atomic) {
       visited = drive(requested);
     } else {
       visited = observations.value().visit(

@@ -10,6 +10,8 @@ inline NumericDiagnostics delta(const NumericDiagnostics& current,
   auto result = current;
   result.evaluated_values -= previous->evaluated_values;
   result.strict_fallbacks -= previous->strict_fallbacks;
+  result.view_elements -= previous->view_elements;
+  result.copied_elements -= previous->copied_elements;
   for (unsigned i = 0; i < result.fallback_reasons.size(); ++i)
     result.fallback_reasons[i] -= previous->fallback_reasons[i];
   *previous = current;

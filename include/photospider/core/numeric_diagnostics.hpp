@@ -34,6 +34,13 @@ struct NumericDiagnostics final {
   std::array<char, 256> implementation{};
   std::uint64_t evaluated_values = 0;
   std::uint64_t strict_fallbacks = 0;
+  /** @brief Actual logical elements formed for publication as views or packed
+   * copies. Unused for arithmetic-only operations; excludes collection outside
+   * the operator and cache hits. Counts survive a later attempt failure. A view
+   * count does not imply allocated payload.
+   */
+  std::uint64_t view_elements = 0;
+  std::uint64_t copied_elements = 0;
   std::array<std::uint64_t, 4> fallback_reasons{};
 };
 /** @brief Checks and accumulates a physical attempt in fixed inline storage.
@@ -49,6 +56,7 @@ inline Status merge_numeric_diagnostics(NumericDiagnostics* target,
   if (report.profile == CpuNumericProfile::Unspecified) {
     if (report.implementation != std::array<char, 256>{} ||
         report.evaluated_values || report.strict_fallbacks ||
+        report.view_elements || report.copied_elements ||
         report.fallback_reasons != std::array<std::uint64_t, 4>{})
       return Status{ErrorCode::InvalidArgument,
                     "noncanonical empty numeric diagnostics"};
@@ -77,12 +85,16 @@ inline Status merge_numeric_diagnostics(NumericDiagnostics* target,
       return Status{ErrorCode::InvalidArgument,
                     "numeric implementation changed within attempt"};
     if (report.evaluated_values > UINT64_MAX - merged.evaluated_values ||
-        report.strict_fallbacks > UINT64_MAX - merged.strict_fallbacks)
+        report.strict_fallbacks > UINT64_MAX - merged.strict_fallbacks ||
+        report.view_elements > UINT64_MAX - merged.view_elements ||
+        report.copied_elements > UINT64_MAX - merged.copied_elements)
       return Status{ErrorCode::ResourceExhausted,
                     "numeric diagnostic counter overflow",
                     FailureReason::CapacityLimit};
     merged.evaluated_values += report.evaluated_values;
     merged.strict_fallbacks += report.strict_fallbacks;
+    merged.view_elements += report.view_elements;
+    merged.copied_elements += report.copied_elements;
     for (unsigned i = 0; i < merged.fallback_reasons.size(); ++i)
       merged.fallback_reasons[i] += report.fallback_reasons[i];
   }

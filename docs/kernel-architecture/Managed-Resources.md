@@ -94,5 +94,42 @@ across Whole, source, dependency and atom execution, and structured source error
 provenance through returned failures and exceptions.
 
 The installed target `photospider_resource_consumer` compiles the same public
-API behavior checks through `find_package(Photospider 0.11 CONFIG REQUIRED)`.
+API behavior checks through `find_package(Photospider 0.12 CONFIG REQUIRED)`.
 It does not include private kernel headers or link a source-tree kernel target.
+
+## Current staged metadata and view boundaries
+
+Staged dependency certificates and `NeedBatch` metadata are admitted and copied
+at their public boundaries. A copy admits fresh metadata capacity and owns a
+new metadata owner; it does not copy the source owner. The host invokes private
+`reseal_metadata()` before accepting finalized mutable batch vectors.
+Dependency sessions and callbacks use the active TLS resource root when one is
+present; otherwise they restore the root saved at session start, including when
+work crosses a scope boundary.
+
+For regional layout operations, `regional_atomic` passes the original query and
+normalized requested rectangle set to the callback. Each logical sample remains
+an Atomic observation; the rectangle set is not one Atomic observation. When
+`preserve_output_views` publishes an
+affine view, payload admission uses the existing nonblocking reserve and
+cache-reclaim path for the actual newly allocated bytes; the retained source
+owner is accounted separately. `ValueFragments` can carry a
+publication lifetime token for owned metadata, while each published `Value`
+retains its immutable storage alias until the last owner is released. The
+layout operations are `cacheable=false` because content cache entries do not
+encode physical owner/stride partitions; pure and active-Run sharing have
+separate lifetimes.
+
+The accounting boundary remains explicit: caller code that extracts a raw
+`Value` or returns a raw vector and copies it is outside the publication token's
+accounting. Empty containers and geometry work internal to the current
+implementation are not comprehensively charged. The declared budget therefore
+provides `WithinBudgetOrFail` only for the accounted capacity model and does not
+certify total process RSS.
+
+This exclusion also covers host container reconstruction in
+`ExecutionRun` and structured execution: those paths extract published Values
+and create new `ValueFragments` containers without transferring the original
+container token. Each Value still retains its source and publication owner;
+the reconstructed outer vector/coverage/descriptor storage is legacy container
+metadata and can retire after its last Value releases that owner.

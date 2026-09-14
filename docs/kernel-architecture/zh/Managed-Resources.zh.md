@@ -60,6 +60,32 @@ I/O，已提交同步 I/O 返回后才释放 owner；cleanup 不需要新窗口�
 限额处理 65536 字节临时 payload，检查独立计数、alias 寿命、并发 admission、输入
 owner 去重、取消和有界失败。test_dependency_program 的 Need/上游/恢复例中，根
 10000 只允许上游 6000 算法单位，根 30000 允许两个各 6000 的阶段；协议另计工作。
-安装 consumer 目标 photospider_resource_consumer 仅通过已安装的 0.11 公共包运行。
+安装 consumer 目标 photospider_resource_consumer 仅通过已安装的 0.12 公共包运行。
 test_managed_dispatch 检查 Whole、source、dependency 与 atom 执行的零/累计 stage、
 零/单 Queue 槽，以及 structured source 返回错误或抛异常时的实际输入归属。
+
+## 当前 staged metadata 与 view 边界
+
+分阶段 dependency certificate 和 `NeedBatch` metadata 在各自公开边界准入并复制。copy 会
+重新准入 metadata 容量并拥有新的 metadata owner，不复制源 owner。宿主在接受最终的可变
+batch vectors 前调用 private `reseal_metadata()` 重新封存。Dependency session 及 callback
+优先使用当前 TLS resource root；没有 active TLS 时恢复 session start 保存的 root，包括
+跨 scope 的 work。
+
+区域布局算子中，`regional_atomic` 将原始 query 及 normalized 请求矩形集合传给 callback。
+每个逻辑样本仍是 Atomic observation；矩形集合不是一个 Atomic observation。设置
+`preserve_output_views` 时，合法 affine view 的 payload admission 通过现有 nonblocking
+reserve 和 cache-reclaim 路径按实际新分配字节计算，保留的 source owner 另行计费。
+`ValueFragments` 可携带已拥有 metadata 的 publication
+lifetime token；每个已发布 `Value` 保留 immutable storage alias，直到最后 owner 释放。
+布局算子设置 `cacheable=false`，因为 content cache entry 不编码物理 owner/stride 分区；
+pure 与 active-Run sharing 使用独立 lifetime。
+
+计费边界保持明确：调用方取出裸 `Value` 或返回 raw vector 后自行复制时，不计入 publication
+token。Empty 容器和当前实现内部 geometry 工作尚未全面计费。因此 `WithinBudgetOrFail`
+只适用于已声明的 capacity model，不证明整个进程 RSS 都受到控制。
+
+此边界也包括 `ExecutionRun` 和 structured execution 的宿主容器重建：这些路径
+提取已发布 Value，再创建 `ValueFragments`，未转移原容器 token。每个 Value
+仍保留 source 与 publication owner；重建的外层 vector、coverage、descriptor
+存储属于既有容器 metadata，可能在最后一个 Value 释放 owner 后才退役。

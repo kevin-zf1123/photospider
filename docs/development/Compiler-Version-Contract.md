@@ -199,15 +199,30 @@ layouts remain. See [Atom errors and quality](../kernel-architecture/Atom-Errors
 
 ## Numeric tuple and diagnostics contracts
 
-Package 0.11.0 adds C++ OperationTraits 11, generic trailing-axis observation
+Package 0.12.0 uses C++ OperationTraits 12, generic trailing-axis observation
 grouping, numeric axis dtype inference and host-owned CPU numeric diagnostics.
-Semantic, physical-plan and plan-cache domains advance to v11 because output
-grouping enters operation identity. Dependency protocol 2, joint contract 2,
+Semantic, physical-plan and plan-cache domains use v12 because output
+grouping, regional execution and view traits enter operation identity. Dependency protocol 2, joint contract 2,
 result-region v6, WorkflowDocument schema 2 and the C operation ABI 9 remain.
-C++ consumers rebuild against 0.11; requests for the 0.10 package are rejected.
+C++ consumers rebuild against 0.12; requests for older minor packages are rejected.
 The C ABI loader rejects dtype rules outside its existing v9 enum. Its layout
 does not expose the new C++ grouping, dtype rule or diagnostics callbacks.
 
 Kernel C/C++ builds require Clang, including Apple Clang. Correctness runs on
 Ubuntu WSL use Clang too. The manual [numeric workflows](../../examples/numeric_workflow/README.md)
 exercise the installed public API without adding integration-test registrations.
+
+## NUM-09 layout implementation
+
+Package version is 0.12.0 with C++ `OperationTraits` version 12.
+The operation plugin ABI remains C ABI 9; its descriptor and entrypoint layout
+are unchanged. The nine `array.reshape`, `array.transpose` and `array.slice`
+keys use the existing C++ traits and dependency protocol and do not add a C ABI
+field or compatibility alias. C++ installed consumers must rebuild for the
+0.12 package.
+
+Layout traits carry per-node shape/permutation/count metadata, regional atomic
+execution where applicable, and `preserve_output_views`. These fields affect
+the C++ operation identity. The layout operations set `cacheable=false`, since
+the current content cache does not witness physical owner/stride partitions;
+pure and active-Run sharing remain separate.

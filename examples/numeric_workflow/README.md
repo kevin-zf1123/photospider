@@ -192,6 +192,47 @@ NEON/AVX2 comparison helpers. Diagnostics describe the selected profile and
 implementation; no performance result is claimed. This executable is a manual
 target without CTest or integration-test registration.
 
+## Layout transforms: NUM-09
+
+`photospider_numeric_layouts` exercises the nine `array.*` profile keys through
+the public `reshape_node`, `transpose_node` and `slice_node` helpers in
+`photospider/numeric/layouts.hpp`. The helpers default to
+`TransformLayout::Auto`; `View` and `Dense` can be selected explicitly. Build
+and run the manual target with Clang:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_layouts -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_layouts strict
+python3 examples/numeric_workflow/layout_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_layouts strict
+```
+
+The CLI profile arguments are `strict`, `apple` and `x86`; the executable
+translates them to the three operation keys, so they are not operation-key
+suffixes. On an unsupported host the selected accelerated profile returns
+`BackendUnavailable`. Expected output includes
+`reshape: [2,3]->[3,2] ... passed`,
+`transpose: permutation [2,0,1], values[k,i,j]=100*i+10*j+k passed`, and
+`slice: [4,2,0], exact support/dirty, full-domain validation and ignored
+singleton step passed`.
+
+The example demonstrates that direct bindings are whole dense values, while a
+public transpose node can create the physically strided intermediate used to
+test per-request view proof, `auto` fallback and explicit `ViewUnavailable`.
+Slice uses dynamic Int64[rank] `starts` and `steps`; a singleton `counts` axis
+does not read its step. `layout_oracle.py` checks integer flatten/unflatten and
+raw bit preservation across reshape, transpose and slice. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed 636 oracle cases per profile and the public examples. The
+installed consumer passed. Additional checks cover unaligned/negative/zero
+strides, shared and independent owners, typed Validation, schema/Empty,
+WorkLimit/cancellation, dense capacity admission and final publication-owner
+release. A constant view composed with transpose returns a 64x64 array of 7
+while retaining an 8-byte payload under a 4096-byte execution budget. The
+three layout operations are `cacheable=false` because the current content cache
+does not witness physical owner/stride partitions; pure and active-run sharing
+remain independent. These are manual targets without CTest or
+integration-test registration, and no performance result is claimed.
+
 ## Exact comparisons and select: NUM-07
 
 `photospider_numeric_comparisons` exercises the public `WorkflowDocument`,

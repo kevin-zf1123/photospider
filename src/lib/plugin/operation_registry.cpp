@@ -433,7 +433,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 11U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 12U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
@@ -1793,6 +1793,8 @@ Result<OperationTraits> OperationRegistry::resolve_traits(
       output.output_semantic_parameter.clear();
       output.output_facets = std::move(metadata.facets);
       output.atomic_trailing_axes = metadata.atomic_trailing_axes;
+      output.regional_atomic = specialization.regional_atomic;
+      output.preserve_output_views = specialization.preserve_output_views;
       output.maximum_output_payload_bytes =
           specialization.maximum_output_payload_bytes;
       output.static_dependency_maps =

@@ -94,6 +94,15 @@ class PHOTOSPIDER_API Value final {
    * @note Default Values are useful only as container placeholders.
    */
   Value() noexcept = default;
+  Value(const Value&) = default;
+  Value& operator=(const Value&) = default;
+  Value(Value&&) noexcept = default;
+  Value& operator=(Value&&) noexcept = default;
+  /** @brief Retires owned metadata before releasing its storage lifetime.
+   * Storage aliases may retain a host metadata-capacity owner in addition to
+   * payload ownership. Destruction performs no allocation.
+   */
+  ~Value() noexcept;
 
   /**
    * @brief Validates and publishes an immutable Value.

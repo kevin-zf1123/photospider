@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.11.0
+  VERSION 0.12.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -102,6 +102,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
   plugins/ops/01-numeric/numeric_interpolation.cpp
+  plugins/ops/01-numeric/numeric_layouts.cpp
   plugins/ops/01-numeric/numeric_ranges.cpp
   plugins/ops/01-numeric/numeric_comparisons.cpp
   plugins/ops/01-numeric/comparison_profiles.cpp
@@ -169,6 +170,7 @@ set(
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/dependency.cpp
+  src/lib/data/dependency_metadata.cpp
   src/lib/data/dependency_mapping.cpp
   src/lib/data/footprint.cpp
   src/lib/data/value_fragments.cpp
@@ -192,6 +194,7 @@ set(
   src/lib/data/semantic.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_metadata.cpp
   src/lib/plugin/result_program.cpp
   src/lib/plugin/dependency_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
@@ -772,6 +775,7 @@ if(BUILD_TESTING)
   target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
+  target_include_directories(test_resources PRIVATE src/lib)
   photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)

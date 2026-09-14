@@ -45,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 11)
+  if (count > 1024 || traits.version != 12)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -414,6 +414,14 @@ namespace input_internal {
 Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return invalid("select one output contract");
+  if ((t.outputs[0].regional_atomic || t.outputs[0].preserve_output_views) &&
+      (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
+       t.outputs[0].observation_kind != ObservationKind::Atomic ||
+       t.outputs[0].region_rule != OperationRegionRule::Dependency ||
+       t.outputs[0].dependency_version != 1 ||
+       t.outputs[0].requires_dense_output))
+    return invalid(
+        "regional/view output requires CPU non-joint staged Atomic execution");
   if (t.outputs[0].static_dependency_maps &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        t.outputs[0].observation_kind != ObservationKind::Atomic ||

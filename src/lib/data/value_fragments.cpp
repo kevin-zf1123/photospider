@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <set>
 #include <utility>
 #include <vector>
@@ -65,6 +66,28 @@ Status invalid(const char* message) {
   return Status::failure(ErrorCode::InvalidArgument, message);
 }
 }  // namespace
+void ValueFragments::swap(ValueFragments& other) noexcept {
+  using std::swap;
+  swap(metadata_lifetime_, other.metadata_lifetime_);
+  swap(descriptor_, other.descriptor_);
+  swap(facets_, other.facets_);
+  swap(authorized_, other.authorized_);
+  swap(fragments_, other.fragments_);
+}
+ValueFragments& ValueFragments::operator=(const ValueFragments& other) {
+  if (this != &other) {
+    ValueFragments replacement(other);
+    swap(replacement);
+  }
+  return *this;
+}
+ValueFragments& ValueFragments::operator=(ValueFragments&& other) noexcept {
+  if (this != &other) {
+    ValueFragments replacement(std::move(other));
+    swap(replacement);
+  }
+  return *this;
+}
 Result<ValueFragments> ValueFragments::create(
     ValueDescriptor descriptor, std::vector<ValueFacet> facets,
     Footprint authorized, const std::vector<Value>& fragments,
@@ -76,7 +99,8 @@ Result<ValueFragments> ValueFragments::create(
 Result<ValueFragments> ValueFragments::create_view(
     ValueDescriptor descriptor, std::vector<ValueFacet> facets,
     Footprint authorized, const Value* fragments, std::size_t count,
-    const FootprintLimits& limits) {
+    const FootprintLimits& limits,
+    std::shared_ptr<const void> metadata_lifetime) {
   if (count && !fragments)
     return Result<ValueFragments>(invalid("null fragment array"));
   if (!authorized.valid() || authorized.shape() != descriptor.shape)
@@ -108,6 +132,7 @@ Result<ValueFragments> ValueFragments::create_view(
     return Result<ValueFragments>(empty.status());
   auto available = empty.take_value();
   ValueFragments result;
+  result.metadata_lifetime_ = std::move(metadata_lifetime);
   std::uint64_t work = limits.maximum_work;
   for (std::size_t index = 0; index < count; ++index) {
     const auto& value = fragments[index];
@@ -200,7 +225,8 @@ Result<ValueFragments> ValueFragments::restrict(
   if (!outside.value().empty())
     return Result<ValueFragments>(
         invalid("fragment restriction exceeds coverage"));
-  return create(descriptor_, facets_, subset, fragments_, limits);
+  return create_view(descriptor_, facets_, subset, fragments_.data(),
+                     fragments_.size(), limits, metadata_lifetime_);
 }
 Result<Value> ValueFragments::collect(const Region& region,
                                       const BufferAllocator& allocator,

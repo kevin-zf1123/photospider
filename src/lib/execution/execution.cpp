@@ -1312,6 +1312,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       // remain charged; an impossible minimum stage fails finitely.
       return budget->reserve(bytes, {}, observation);
     };
+    execution_internal::ScopedMemoryAdmission on_demand_admission(reserve);
     std::uint64_t work = options.maximum_dependency_work;
     std::uint64_t cache_work = options.maximum_dependency_cache_work;
     const auto cache_epoch = dependency_cache ? dependency_cache->epoch() : 0;
@@ -2191,7 +2192,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
         if (frame.state == Frame::State::Initial && !frame.unit && !terminal &&
-            !step.traits.outputs[0].static_dependency_maps) {
+            !step.traits.outputs[0].static_dependency_maps &&
+            !step.traits.outputs[0].regional_atomic) {
           if (step.traits.outputs[0].dependency_version == 0 &&
               step.whole_boundary) {
             // The legacy Whole contract observes global validation for every
@@ -2606,10 +2608,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               capacity = Result<std::uint64_t>(capacity.value() +
                                                count.value() * scale);
           }
-          auto reserved = reserve(capacity.value());
-          if (!reserved.ok())
-            return fail(reserved.status());
-          Seal seal{reserved.take_value()};
+          const bool on_demand = step.traits.outputs[0].preserve_output_views;
+          std::shared_ptr<MemoryReservation> reservation;
+          if (!on_demand) {
+            auto reserved = reserve(capacity.value());
+            if (!reserved.ok())
+              return fail(reserved.status());
+            reservation = reserved.take_value();
+          }
+          Seal seal{std::move(reservation)};
+          const auto stage_allocator =
+              on_demand ? budget->on_demand_allocator(
+                              observation, on_demand_admission.callback())
+                        : seal.reservation->allocator();
           std::uint64_t callback_us = 0;
           gpu_internal::Statistics native_stats;
           const bool dependency_attempt = static_cast<bool>(frame.session);
@@ -2735,7 +2746,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       return Status::success();
                     };
                   }
-                  auto allocator = seal.reservation->allocator();
+                  auto allocator = stage_allocator;
                   DependencyGpuServices gpu;
                   std::optional<gpu_internal::Invocation> native;
                   if (frame.backend == Backend::Gpu) {
@@ -2849,7 +2860,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (!status.ok())
                 return fail(status);
               std::vector<Value> owned;
-              const auto allocator = seal.reservation->allocator();
+              const auto allocator = stage_allocator;
               for (const auto& fragment : complete->value.fragments()) {
                 if (allocator.owns(*fragment.storage()) ||
                     external.count(fragment.storage().get())) {
@@ -2898,7 +2909,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 [&]() -> Result<Value> {
                   if (stop() != ErrorCode::Ok)
                     return Result<Value>(Status{stop(), {}});
-                  auto allocator = seal.reservation->allocator();
+                  auto allocator = stage_allocator;
                   std::optional<gpu_internal::Invocation> native;
                   if (frame.backend == Backend::Gpu) {
                     allocator = native_device->allocator(allocator);
@@ -3812,7 +3823,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       const auto& region = named.samples.boxes()[0];
       if (plan.steps()[named.step]
               .traits.outputs[0]
-              .maximum_output_payload_bytes) {
+              .maximum_output_payload_bytes ||
+          plan.steps()[named.step].traits.outputs[0].preserve_output_views) {
         if (returned->fragments().size() != 1)
           return fail(Status{
               ErrorCode::TypeMismatch,

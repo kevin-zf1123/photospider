@@ -1,10 +1,12 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "execution/memory_budget.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
@@ -308,6 +310,259 @@ int concurrent_references() {
     PS_CHECK(live == 0);
   return 0;
 }
+int dependency_metadata_owners() {
+  ResourceBudget root(ResourceLimits{});
+  DependencyCertificate retained;
+  DependencyNeedBatch batch;
+  {
+    ResourceAllocationScope scope(root);
+    auto coverage = Footprint::all({2}).take_value();
+    const auto first =
+        Footprint::from_regions({2}, {Region({{0, 1}})}).take_value();
+    const auto second =
+        Footprint::from_regions({2}, {Region({{1, 1}})}).take_value();
+    retained = DependencyCertificate::create(
+                   "metadata-owner", coverage, {{2}},
+                   {{{0}, {{0, 1, first, {}}}}, {{1}, {{0, 1, second, {}}}}})
+                   .take_value();
+    batch = DependencyNeedBatch(retained.rows());
+  }
+  const auto baseline = root.statistics().live[ResourceKind::Metadata];
+  PS_CHECK(baseline > 0);
+  {
+    auto copy = retained;
+    PS_CHECK(root.statistics().live[ResourceKind::Metadata] > baseline);
+    auto subset = Footprint::from_regions({2}, {Region({{0, 1}})}).take_value();
+    auto restricted = retained.restrict(subset).take_value();
+    PS_CHECK(restricted.rows().size() == 1);
+    auto moved = std::move(copy);
+    copy = retained;
+    copy = std::move(moved);  // Retire nonempty old storage before its lease.
+    std::string identity;
+    identity.reserve(4096);
+    identity = "long-capacity";
+    const auto before = root.statistics().live[ResourceKind::Metadata];
+    auto renamed = retained.with_identity(std::move(identity)).take_value();
+    PS_CHECK(renamed.identity() == "long-capacity");
+    PS_CHECK(root.statistics().live[ResourceKind::Metadata] >= before + 4096);
+    auto batch_copy = batch;
+    PS_CHECK(batch_copy.associations.size() == 2);
+    auto low_limits = limits(1);
+    low_limits.capacity[ResourceKind::Metadata] = 1;
+    ResourceBudget low(low_limits);
+    ErrorCode failure = ErrorCode::Ok;
+    bool rejected = false;
+    {
+      ResourceAllocationScope scope(low, &failure);
+      try {
+        copy = retained;
+      } catch (const std::bad_alloc&) {
+        rejected = true;
+      }
+    }
+    PS_CHECK(rejected && failure == ErrorCode::ResourceExhausted);
+    PS_CHECK(copy.valid() && copy.identity() == retained.identity());
+  }
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] == baseline);
+  retained = {};
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
+  batch = {};
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] == 0);
+  return 0;
+}
+struct RegionalMetadataProbe {
+  bool requested = false;
+  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+    if (!requested) {
+      requested = true;
+      DependencyNeedBatch
+          batch;  // Deliberately use the public mutable builder.
+      auto status = phase.query.outputs.visit(
+          [&](const auto& coordinate) {
+            auto point =
+                Footprint::from_regions({2}, {Region({{coordinate[0], 1}})});
+            if (!point.ok())
+              return point.status();
+            batch.associations.push_back(
+                {coordinate, {{0, 1, point.take_value(), {}}}});
+            return Status::success();
+          },
+          2);
+      return status.ok() ? Result<DependencyPoll>(std::move(batch))
+                         : Result<DependencyPoll>(status);
+    }
+    return Result<DependencyPoll>(phase.inputs[0]);
+  }
+};
+int regional_scope_retention() {
+  auto registry = make_default_operation_registry(false);
+  OperationDefinition definition;
+  definition.key = "test.regional_metadata";
+  definition.traits.input_count = 1;
+  definition.traits.input_schema.resize(1);
+  auto& output = definition.traits.outputs[0];
+  output.shape_rule = OperationShapeRule::MatchAllInputs;
+  output.output_dtype_rule = OperationDtypeRule::Input;
+  output.region_rule = OperationRegionRule::Dependency;
+  output.dependency_version = 1;
+  output.regional_atomic = true;
+  output.preserve_output_views = true;
+  output.maximum_output_payload_bytes = 0;
+  output.continuation_bytes = sizeof(RegionalMetadataProbe);
+  output.maximum_dependency_stages = 2;
+  definition.start_dependency = [](const auto&, const auto& allocator) {
+    return DependencyContinuation::make<RegionalMetadataProbe>(allocator);
+  };
+  PS_CHECK(registry->register_operation(std::move(definition)).ok());
+  PS_CHECK(registry->freeze().ok());
+  ResourceBudget root(ResourceLimits{});
+  std::shared_ptr<DependencySession> session;
+  DependencyRequest request;
+  request.inputs = {{{ElementType::Int64, {2}}, {}}};
+  request.outputs = Footprint::all({2}).take_value();
+  request.snapshot_identity = "scope-retention";
+  {
+    ResourceAllocationScope scope(root);
+    session = registry
+                  ->start_dependency("test.regional_metadata", request,
+                                     root.allocator())
+                  .take_value();
+  }
+  // Poll outside the start scope, then retain its mutable-built event beyond
+  // the Session. The host must reseal it under the retained metadata root.
+  std::optional<DependencyProgress> pending(
+      session->poll(root.allocator()).take_value());
+  PS_CHECK(std::get<DependencyNeedBatch>(*pending).associations.size() == 2);
+  auto buffer = root.allocator().allocate(16).take_value();
+  auto input =
+      Value::from_storage({ElementType::Int64, {2}}, Region::whole({2}),
+                          {0, {8}}, std::move(buffer).freeze())
+          .take_value();
+  auto fragments =
+      ValueFragments::create(input.descriptor(), {}, request.outputs, {input})
+          .take_value();
+  PS_CHECK(session->supply({fragments}, request.snapshot_identity).ok());
+  auto done = session->poll(root.allocator()).take_value();
+  auto certificate = std::get<DependencyResult>(done).certificate;
+  done = DependencyNeedBatch{};
+  session.reset();
+  fragments = {};
+  input = {};
+  PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
+  pending.reset();
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
+  certificate = {};
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] == 0);
+  return 0;
+}
+int mixed_certificate_roots() {
+  ResourceBudget root(ResourceLimits{});
+  const auto left =
+      Footprint::from_regions({2}, {Region({{0, 1}})}).take_value();
+  const auto right =
+      Footprint::from_regions({2}, {Region({{1, 1}})}).take_value();
+  for (bool mapped : {false, true}) {
+    const auto make = [&](const Footprint& coverage) {
+      if (mapped)
+        return DependencyCertificate::create_mapped(
+                   "mixed", coverage, {{2}},
+                   {{coverage, {{0, 1, {{0, {}}}, {}}}}})
+            .take_value();
+      const auto coordinate = coverage.boxes()[0].dimensions()[0].offset;
+      return DependencyCertificate::create(
+                 "mixed", coverage, {{2}},
+                 {{{coordinate}, {{0, 1, coverage, {}}}}})
+          .take_value();
+    };
+    auto caller = make(left);
+    DependencyCertificate managed;
+    {
+      ResourceAllocationScope scope(root);
+      managed = make(right);
+    }
+    auto merged = caller.merge(managed).take_value();
+    managed = {};
+    PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
+    PS_CHECK(merged.coverage() == Footprint::all({2}).take_value());
+    merged = {};
+    PS_CHECK(root.statistics().live[ResourceKind::Metadata] == 0);
+  }
+  std::uint64_t baseline_delta = 0, baseline_capacity = 0;
+  for (unsigned length : {1U, 32U, 64U}) {
+    DependencyCertificate source;
+    {
+      ResourceAllocationScope scope(root);
+      source = DependencyCertificate::create(std::string(length, 'x'), left,
+                                             {{2}}, {{{0}, {{0, 1, left, {}}}}})
+                   .take_value();
+    }
+    const auto before = root.statistics().live[ResourceKind::Metadata];
+    auto copy = source;
+    const auto delta = root.statistics().live[ResourceKind::Metadata] - before;
+    if (length == 1) {
+      baseline_delta = delta;
+      baseline_capacity = copy.identity().capacity();
+    } else {
+      PS_CHECK(delta - baseline_delta >=
+               copy.identity().capacity() - baseline_capacity);
+    }
+  }
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] == 0);
+  return 0;
+}
+int on_demand_payload() {
+  auto root = std::make_shared<ResourceBudget>(ResourceLimits{});
+  auto budget = std::make_shared<execution_internal::MemoryBudget>(8192, root);
+  auto observation = std::make_shared<execution_internal::MemoryObservation>();
+  auto cached_reservation = budget->reserve(7000, {}, observation).take_value();
+  auto cached = cached_reservation->allocator().allocate(7000).take_value();
+  cached_reservation->seal();
+  auto state_reservation = budget->reserve(256, {}, observation).take_value();
+  auto state = state_reservation->allocator().allocate(256).take_value();
+  state_reservation->seal();
+  PS_CHECK(!budget->reserve(2000, {}, observation).ok());
+  unsigned reclaimed = 0;
+  BufferAllocator escaped;
+  MutableBuffer output;
+  {
+    execution_internal::ScopedMemoryAdmission admission(
+        [&](std::uint64_t bytes) {
+          ++reclaimed;
+          cached = {};
+          return budget->reserve(bytes, {}, observation);
+        });
+    escaped = budget->on_demand_allocator(observation, admission.callback());
+    const auto before = budget->live();
+    auto scoped = escaped.limited(2000);
+    PS_CHECK(budget->live() == before);  // A view allocates no output bytes.
+    auto allocated = scoped.allocate(2000);
+    PS_CHECK(allocated.ok());
+    output = allocated.take_value();
+    PS_CHECK(reclaimed == 1 && budget->live() == 2256);
+    PS_CHECK(escaped.owns(*std::move(output).freeze()));
+    PS_CHECK(budget->live() == 256);
+    PS_CHECK(scoped.allocate(2001).status().reason ==
+             FailureReason::CapacityLimit);
+  }
+  PS_CHECK(escaped.allocate(1).status().code == ErrorCode::OperationFailed);
+  PS_CHECK(reclaimed == 1);  // No callback may access retired driver state.
+  state = {};
+  PS_CHECK(budget->live() == 0 && budget->available() == 8192);
+  PS_CHECK(root->statistics().live[ResourceKind::Payload] == 0);
+  NumericDiagnostics report;
+  report.profile = CpuNumericProfile::Strict;
+  report.implementation[0] = 'x';
+  report.view_elements = UINT64_MAX;
+  NumericDiagnostics merged;
+  PS_CHECK(merge_numeric_diagnostics(&merged, report).ok());
+  report.view_elements = 1;
+  report.copied_elements = 1;
+  PS_CHECK(merge_numeric_diagnostics(&merged, report).reason ==
+           FailureReason::CapacityLimit);
+  PS_CHECK(merged.view_elements == UINT64_MAX && merged.copied_elements == 0);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(ledger() == 0);
@@ -319,6 +574,10 @@ int main() {
   PS_CHECK(concurrent() == 0);
   PS_CHECK(concurrent_references() == 0);
   PS_CHECK(allocator_ownership() == 0);
+  PS_CHECK(on_demand_payload() == 0);
+  PS_CHECK(dependency_metadata_owners() == 0);
+  PS_CHECK(regional_scope_retention() == 0);
+  PS_CHECK(mixed_certificate_roots() == 0);
   return 0;
 }
 #include <array>

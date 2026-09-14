@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <utility>
 #include <vector>
 
 #include "photospider/data/footprint.hpp"
@@ -19,6 +21,10 @@ namespace ps {
 class PHOTOSPIDER_API ValueFragments final {
  public:
   ValueFragments() = default;
+  ValueFragments(const ValueFragments&) = default;
+  ValueFragments(ValueFragments&&) noexcept = default;
+  ValueFragments& operator=(const ValueFragments&);
+  ValueFragments& operator=(ValueFragments&&) noexcept;
   /** @brief Clips supplied Values to authorization, checks exact completeness.
    * @param descriptor Full domain and dtype, independent of stored rectangles.
    * @param facets Canonical immutable metadata shared by every fragment.
@@ -39,13 +45,15 @@ class PHOTOSPIDER_API ValueFragments final {
   /** @brief Same validation from a borrowed contiguous array, without a
    * temporary std::vector. A null pointer is valid only for count zero.
    * The array is borrowed for this call; returned fragments retain owners.
+   * metadata_lifetime optionally retains a trusted host's publication capacity
+   * until owned metadata storage is destroyed. It must not own this result or
+   * its Values. This lifetime token does not account arbitrary caller copies.
    */
-  static Result<ValueFragments> create_view(ValueDescriptor descriptor,
-                                            std::vector<ValueFacet> facets,
-                                            Footprint authorized,
-                                            const Value* fragments,
-                                            std::size_t count,
-                                            const FootprintLimits& limits = {});
+  static Result<ValueFragments> create_view(
+      ValueDescriptor descriptor, std::vector<ValueFacet> facets,
+      Footprint authorized, const Value* fragments, std::size_t count,
+      const FootprintLimits& limits = {},
+      std::shared_ptr<const void> metadata_lifetime = {});
   bool valid() const noexcept { return authorized_.valid(); }
   const ValueDescriptor& descriptor() const noexcept { return descriptor_; }
   const std::vector<ValueFacet>& facets() const noexcept { return facets_; }
@@ -78,6 +86,8 @@ class PHOTOSPIDER_API ValueFragments final {
   Result<std::uint64_t> retained_bytes() const;
 
  private:
+  void swap(ValueFragments&) noexcept;
+  std::shared_ptr<const void> metadata_lifetime_;
   ValueDescriptor descriptor_;
   std::vector<ValueFacet> facets_;
   Footprint authorized_;

@@ -1,12 +1,17 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "photospider/data/footprint.hpp"
 
 namespace ps {
+namespace dependency_internal {
+struct MetadataOwner;
+}
 /** @brief Composable purposes of a declared input dependency. */
 enum class DependencyRole : std::uint32_t {
   Data = 1,
@@ -100,6 +105,15 @@ struct DependencyMapPiece final {
 class PHOTOSPIDER_API DependencyCertificate final {
  public:
   DependencyCertificate() = default;
+  /** @brief Deep copies owned metadata after admitting its new capacity.
+   * Uses the current managed metadata scope, otherwise inherits source root.
+   * Allocation failure throws bad_alloc; assignment leaves this unchanged.
+   * Moves transfer capacity ownership and invalidate the moved-from storage.
+   */
+  DependencyCertificate(const DependencyCertificate&);
+  DependencyCertificate& operator=(const DependencyCertificate&);
+  DependencyCertificate(DependencyCertificate&&) noexcept = default;
+  DependencyCertificate& operator=(DependencyCertificate&&) noexcept;
   /** @brief Validates complete coverage and copies canonical rows.
    * @param identity Contract/numeric/error/snapshot identity, 1..4096 bytes.
    * @param coverage Output observation domain and exact resolved observations.
@@ -171,6 +185,7 @@ class PHOTOSPIDER_API DependencyCertificate final {
                                       const FootprintLimits& limits = {}) const;
 
  private:
+  std::shared_ptr<const dependency_internal::MetadataOwner> metadata_owner_;
   std::string identity_;
   Footprint coverage_;
   std::vector<std::vector<std::uint64_t>> input_shapes_;
@@ -179,6 +194,18 @@ class PHOTOSPIDER_API DependencyCertificate final {
   std::vector<DependencyMapPiece> pieces_;
   std::uint64_t metadata_entries_ = 0;
   std::uint64_t storage_entries_ = 0;
+  void swap(DependencyCertificate&) noexcept;
+  DependencyCertificate(const DependencyCertificate&, std::string identity);
+  static Result<DependencyCertificate> create_owned(
+      std::string identity, Footprint coverage,
+      std::vector<std::vector<std::uint64_t>> shapes,
+      std::vector<AtomCertificate> rows, const FootprintLimits& limits,
+      const std::shared_ptr<const dependency_internal::MetadataOwner>& source);
+  static Result<DependencyCertificate> create_mapped_owned(
+      std::string identity, Footprint coverage,
+      std::vector<std::vector<std::uint64_t>> shapes,
+      std::vector<DependencyMapPiece> pieces, const FootprintLimits& limits,
+      const std::shared_ptr<const dependency_internal::MetadataOwner>& source);
   std::uint64_t measure_storage() const noexcept;
   Result<DependencyCertificate> restrict_mapped(const Footprint&,
                                                 const FootprintLimits&) const;

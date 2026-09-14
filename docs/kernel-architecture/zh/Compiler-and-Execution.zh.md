@@ -247,3 +247,26 @@ broadcast 无需预留逻辑 dense 字节。普通、直接和 structured 执行
 `make_default_operation_registry(false)` 允许在 built-ins 旁注册 embedding 算子。
 编译或执行前必须 freeze。成功自定义注册清除 built-in persistent-cache identity，
 失败注册保持不变。默认工厂调用仍返回 frozen registry。
+
+## 区域布局执行
+
+当前布局算子通过每节点 metadata specialization 在执行前解析 shape、permutation 或
+counts 与 layout。适用时，`regional_atomic` 将原始 query 及其 normalized 请求矩形集合
+传给 callback；每个逻辑样本仍是 Atomic observation，不把矩形集合转换成一个 Atomic
+observation。`preserve_output_views` 允许合法 affine view 保留 source owner；此时 output
+payload admission 通过现有 nonblocking reserve 和 cache-reclaim 路径按实际新分配容量
+计算，不按逻辑 dense 大小预留。由于这些算子设置
+`cacheable=false`，content cache 不复用同一物理 owner/stride 分区；pure 与 active-Run
+sharing 仍是独立路径。
+
+Dependency certificate 和 `NeedBatch` metadata 在各自公开边界复制并计费。
+`DependencyCertificate` 或 `DependencyNeedBatch` copy 会重新准入 metadata 容量并拥有
+新的 metadata owner，不复制源 owner。宿主在接受可变 batch 前调用 private
+`reseal_metadata()` 重新封存。`DependencySession` 及其 callback 优先使用当前 TLS
+resource root；没有 active TLS 时恢复 session start 保存的 root，包含跨 scope 的 work
+和 metadata。`ValueFragments` publication 通过 lifetime token 保留已发布 metadata；每个
+发布的 `Value` 保留 immutable storage alias，直到最后 owner 销毁。
+
+这些机制不改变 legacy 边界。调用方取出裸 `Value` 或返回 raw vector 后自行复制时，不在
+publication token 的计费范围内。Empty 容器和当前实现内部的 geometry 工作尚未全面计费；
+受控资源模型也不证明所有进程 RSS 都受到控制。

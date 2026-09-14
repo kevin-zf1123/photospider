@@ -88,7 +88,27 @@ PHOTOSPIDER_API Result<AtomKey> dependency_atom_key(
  * request_needs. The host preserves rows separately from their transport union.
  * A program may repeat/control reads, consuming execution fuel on every stage.
  */
-struct DependencyNeedBatch final {
+struct PHOTOSPIDER_API DependencyNeedBatch final {
+ private:
+  friend class DependencySession;
+  void reseal_metadata();
+  std::shared_ptr<const dependency_internal::MetadataOwner> metadata_owner_;
+  void swap(DependencyNeedBatch&) noexcept;
+
+ public:
+  DependencyNeedBatch() = default;
+  /** @brief Adopts caller-owned boundary vectors under the current metadata
+   * scope. Programs must admit temporary construction before building vectors.
+   * Copies separately admit their deep-copy capacity; moves transfer owners.
+   * Allocation failure throws bad_alloc and preserves assignment targets.
+   */
+  DependencyNeedBatch(std::vector<AtomCertificate> associations,
+                      std::vector<DependencyNeed> request_needs = {},
+                      bool static_mapping = false);
+  DependencyNeedBatch(const DependencyNeedBatch&);
+  DependencyNeedBatch& operator=(const DependencyNeedBatch&);
+  DependencyNeedBatch(DependencyNeedBatch&&) noexcept = default;
+  DependencyNeedBatch& operator=(DependencyNeedBatch&&) noexcept;
   std::vector<AtomCertificate> associations;
   std::vector<DependencyNeed> request_needs;
   /** @brief Requests the complete registered static mapping once. Both other

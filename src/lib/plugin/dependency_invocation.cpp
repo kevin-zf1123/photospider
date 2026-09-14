@@ -200,7 +200,8 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{stop(), {}});
       return result;
     }
-    if (resolved.value().outputs[0].maximum_output_payload_bytes) {
+    if (resolved.value().outputs[0].maximum_output_payload_bytes ||
+        resolved.value().outputs[0].preserve_output_views) {
       auto result = run(samples.value());
       if (!result.ok())
         return failure(result.status());
@@ -213,7 +214,8 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{stop(), {}});
       return fragments[0].view(region);
     }
-    if (resolved.value().outputs[0].static_dependency_maps) {
+    if (resolved.value().outputs[0].static_dependency_maps ||
+        resolved.value().outputs[0].regional_atomic) {
       auto result = run(samples.value());
       if (!result.ok())
         return failure(result.status());

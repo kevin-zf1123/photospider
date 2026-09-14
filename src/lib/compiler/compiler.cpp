@@ -206,7 +206,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v11");
+  digest.text("semantic-graph-ir-v12");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -286,7 +286,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v11");
+  digest.text("physical-plan-v12");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -470,7 +470,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v11");
+  digest.text("plan-cache-key-v12");
   digest.text(plan);
   return digest.finish();
 }
@@ -635,9 +635,10 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     step.planned_bytes = std::max(
         step.traits.estimated_bytes,
         step.traits.outputs[0].maximum_output_payload_bytes.value_or(
-            dense.ok() ? dense.value().bytes
-                       : static_cast<std::uint64_t>(
-                             Value::element_size(packed.element_type))));
+            step.traits.outputs[0].preserve_output_views ? 0
+            : dense.ok()                                 ? dense.value().bytes
+                         : static_cast<std::uint64_t>(
+                               Value::element_size(packed.element_type))));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t port = 0; port < step.inputs.size() &&
                                step.traits.workspace_input_multiplier != 0;
@@ -1171,7 +1172,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.planned_bytes =
           std::max(node.traits.estimated_bytes,
                    step.traits.outputs[0].maximum_output_payload_bytes.value_or(
-                       dense_output.ok()
+                       step.traits.outputs[0].preserve_output_views ? 0
+                       : dense_output.ok()
                            ? dense_output.value().bytes
                            : static_cast<std::uint64_t>(Value::element_size(
                                  step.output_descriptor.element_type))));
@@ -1396,9 +1398,10 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     step.planned_bytes = std::max(
         step.traits.estimated_bytes,
         step.traits.outputs[0].maximum_output_payload_bytes.value_or(
-            dense.ok() ? dense.value().bytes
-                       : static_cast<std::uint64_t>(
-                             Value::element_size(packed.element_type))));
+            step.traits.outputs[0].preserve_output_views ? 0
+            : dense.ok()                                 ? dense.value().bytes
+                         : static_cast<std::uint64_t>(
+                               Value::element_size(packed.element_type))));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t i = 0; i < step.inputs.size(); ++i) {
       if (step.traits.workspace_input_multiplier == 0)

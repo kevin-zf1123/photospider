@@ -305,6 +305,20 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * checkpoints, GPU and joint callbacks are excluded from this path.
    */
   std::optional<std::vector<DependencyMappedNeed>> static_dependency_maps = {};
+  /** @brief Runs one normalized regional Atomic request without splitting it
+   * into samples. Each dynamic Need stage supplies complete bounded atom rows.
+   * Observations remain individual samples; successful certificates retain
+   * exact associations. CPU staged, non-joint programs only; checkpoints and
+   * pure-block services are unavailable. Included in all contract identities.
+   */
+  bool regional_atomic = false;
+  /** @brief Preserves returned immutable views at ordinary/direct collectors.
+   * New payload is admitted on actual allocation, bounded by requested bytes
+   * unless maximum_output_payload_bytes replaces that bound. Borrowed owners
+   * remain charged independently. CPU staged non-joint execution only.
+   * This permits per-rectangle auto view/copy choices without dense precharge.
+   */
+  bool preserve_output_views = false;
   /** @brief Zero for synchronous callback, one for the staged read protocol. */
   std::uint32_t dependency_version = 0;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
@@ -354,7 +368,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 11U;
+  std::uint32_t version = 12U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -519,6 +533,8 @@ using OperationCallback = std::function<CallbackSignature>;
  */
 struct OperationOutputSpecialization final {
   OperationMetadata metadata;
+  bool regional_atomic = false;
+  bool preserve_output_views = false;
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
   std::optional<std::vector<DependencyMappedNeed>> static_dependency_maps = {};
 };

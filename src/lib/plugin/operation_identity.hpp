@@ -66,6 +66,8 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   if (output.result_schema)
     digest->text(output.result_schema->canonical());
   digest->text(output.key);
+  digest->integer(output.regional_atomic);
+  digest->integer(output.preserve_output_views);
   digest->integer(output.static_dependency_maps.has_value());
   if (output.static_dependency_maps) {
     digest->integer(output.static_dependency_maps->size());

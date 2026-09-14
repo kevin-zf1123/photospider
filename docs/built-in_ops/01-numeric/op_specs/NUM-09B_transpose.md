@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-09B: transpose
@@ -75,5 +75,23 @@ permutation [2,0,1] yields shape [4,2,3], with values[k,i,j]=100*i+10*j+k.
 Use an independent coordinate oracle and source-read logs. Cover identity and
 all rank-2/rank-3 permutations, reverse/zero input strides, fragmented owners,
 sNaN payloads, view/auto/dense choices, disjoint requests and inverse dirty sets.
-Apply inherited typed-validation, lifetime, capacity/work/cancellation and public
-WorkflowDocument tests when implemented. No versioned runtime or test is claimed.
+The current nine `array.*` keys include the three explicit transpose profiles.
+`transpose_node` in `photospider/numeric/layouts.hpp` emits the canonical
+permutation and `auto`/`view`/`dense` layout parameter. The implementation
+permutes affine source strides for a view, preserves global origins and packs
+only the requested rectangle when needed. It uses exact mapped dependencies and
+inverse dirty regions without enumerating unrelated output coordinates.
+
+On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the public manual examples and 636 independent integer/raw-bit
+oracle cases per profile. The installed public consumer passed. Coverage includes
+exact support/dirty mapping, whole versus regional layout policy, unaligned and
+negative/zero strides, shared versus independent owners, ignored singleton steps,
+full slice endpoint validation, typed Validation closures, schema/Empty behavior,
+work/cancellation/capacity failures, fenv and escaped Value lifetime. Focused
+compiler/dependency/fragments/resources units and independent scoped review passed.
+Layout operations are `cacheable=false` because the content cache does not witness
+physical owner/stride partitions. Managed metadata and its remaining host-container
+boundaries are documented in [Managed Resources](../../../kernel-architecture/Managed-Resources.md).
+The manual target is not registered in integration tests. Specification status
+remains Proposed; no performance claim follows from correctness checks.

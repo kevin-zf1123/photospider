@@ -328,3 +328,35 @@ multiple owners use `execute_fragments` or explicitly selected dense layout.
 built-ins. Freeze the registry before compilation or execution. Successful custom
 registration clears the built-in persistent-cache identity; failed registration
 leaves it unchanged. The default factory call remains frozen.
+
+## Regional layout execution
+
+The current layout operations use per-node metadata specialization to resolve
+shape, permutation or counts and layout before execution. `regional_atomic`
+passes the original query and its normalized requested rectangle set to the
+callback where required. Each logical sample remains an Atomic observation;
+the rectangle set is not converted into one Atomic observation.
+`preserve_output_views` lets a valid affine view retain its source owner;
+output payload admission uses the actual newly allocated capacity through the
+existing nonblocking reserve and cache-reclaim path, rather than a dense
+logical-size reservation. The same
+physical owner/stride partition is intentionally not reused by the content
+cache because these operations are `cacheable=false`; pure and active-Run
+sharing are independent paths.
+
+Dependency certificates and `NeedBatch` metadata are copied and accounted at
+their public boundaries. A `DependencyCertificate` or `DependencyNeedBatch`
+copy admits fresh metadata capacity and owns a new metadata owner; it does not
+copy the source owner. The host invokes private `reseal_metadata()` when a
+mutable batch is finalized before acceptance. A `DependencySession` and its
+callbacks use the active TLS resource root when present, and otherwise restore
+the root saved at session start, including cross-scope work and metadata.
+`ValueFragments` publication
+passes a lifetime token for owned publication metadata; each published `Value`
+retains its immutable storage alias until the final owner is destroyed.
+
+These mechanisms do not change legacy boundaries. A caller that extracts a raw
+`Value` or returns a raw vector and then copies it is outside the publication
+token's accounting. Empty containers and geometry work internal to the current
+implementation are not comprehensively charged, and the managed-resource
+model does not certify that all process RSS is controlled.

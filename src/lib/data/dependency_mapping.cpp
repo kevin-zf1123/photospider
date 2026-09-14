@@ -1,10 +1,12 @@
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "data/dependency_metadata.hpp"
 #include "photospider/data/dependency.hpp"
 
 namespace ps {
@@ -283,6 +285,15 @@ Result<DependencyCertificate> DependencyCertificate::create_mapped(
     std::string identity, Footprint coverage,
     std::vector<std::vector<std::uint64_t>> input_shapes,
     std::vector<DependencyMapPiece> pieces, const FootprintLimits& limits) {
+  return create_mapped_owned(std::move(identity), std::move(coverage),
+                             std::move(input_shapes), std::move(pieces), limits,
+                             {});
+}
+Result<DependencyCertificate> DependencyCertificate::create_mapped_owned(
+    std::string identity, Footprint coverage,
+    std::vector<std::vector<std::uint64_t>> input_shapes,
+    std::vector<DependencyMapPiece> pieces, const FootprintLimits& limits,
+    const std::shared_ptr<const dependency_internal::MetadataOwner>& source) {
   return guarded([&]() -> Result<DependencyCertificate> {
     MappingBudget budget(limits);
     budget.work();
@@ -313,6 +324,10 @@ Result<DependencyCertificate> DependencyCertificate::create_mapped(
       return Result<DependencyCertificate>(
           invalid("mapped certificate has unknown observations"));
     DependencyCertificate result;
+    result.metadata_owner_ = dependency_internal::metadata_owner(
+        dependency_internal::certificate_bytes(identity, coverage, input_shapes,
+                                               {}, normalized, false),
+        source);
     result.identity_ = std::move(identity);
     result.coverage_ = std::move(coverage);
     result.input_shapes_ = std::move(input_shapes);
@@ -331,8 +346,7 @@ Result<DependencyCertificate> DependencyCertificate::with_identity(
     if (!valid() || identity.empty() || identity.size() > 4096)
       return Result<DependencyCertificate>(
           invalid("invalid rebound certificate identity"));
-    auto result = *this;
-    result.identity_ = std::move(identity);
+    DependencyCertificate result(*this, std::move(identity));
     result.storage_entries_ = result.measure_storage();
     return Result<DependencyCertificate>(std::move(result));
   });
@@ -380,7 +394,34 @@ Result<DependencyCertificate> DependencyCertificate::restrict_mapped(
     if (!take(subset.subtract(coverage_, budget.geometry())).empty())
       return Result<DependencyCertificate>(
           invalid("unknown mapped observation"));
+    dependency_internal::MetadataBytes construction_bytes;
+    construction_bytes.add(dependency_internal::certificate_bytes(
+        identity_, subset, input_shapes_, {}, {}, true));
+    std::size_t selected_count = 0;
+    for (const auto& piece : pieces_) {
+      budget.work();
+      auto intersection =
+          take(piece.coverage.intersect(subset, budget.geometry()));
+      if (!intersection.empty()) {
+        ++selected_count;
+        construction_bytes.add(1, sizeof(DependencyMapPiece));
+        construction_bytes.footprint(intersection, false);
+        construction_bytes.block(piece.inputs, true);
+        for (const auto& need : piece.inputs) {
+          construction_bytes.block(need.axes, true);
+          construction_bytes.block(need.tags, true);
+        }
+      }
+    }
+    if (selected_count > limits.maximum_boxes)
+      return Result<DependencyCertificate>(
+          Status{ErrorCode::ResourceExhausted,
+                 {},
+                 FailureReason::CapacityLimit});
+    auto construction = dependency_internal::metadata_owner(
+        construction_bytes.bytes, metadata_owner_);
     std::vector<DependencyMapPiece> selected;
+    selected.reserve(selected_count);
     for (const auto& piece : pieces_) {
       budget.work();
       auto intersection =
@@ -392,8 +433,9 @@ Result<DependencyCertificate> DependencyCertificate::restrict_mapped(
         selected.push_back({std::move(intersection), piece.inputs});
       }
     }
-    return create_mapped(identity_, subset, input_shapes_, std::move(selected),
-                         budget.geometry());
+    return create_mapped_owned(identity_, subset, input_shapes_,
+                               std::move(selected), budget.geometry(),
+                               metadata_owner_);
   });
 }
 Result<std::vector<DependencyNeed>> DependencyCertificate::backward_mapped(
@@ -503,6 +545,22 @@ Result<DependencyCertificate> DependencyCertificate::merge_mapped(
     const DependencyCertificate& other, const FootprintLimits& limits) const {
   return guarded([&]() -> Result<DependencyCertificate> {
     MappingBudget budget(limits);
+    dependency_internal::MetadataBytes construction_bytes;
+    construction_bytes.add(dependency_internal::certificate_bytes(
+        identity_, coverage_, input_shapes_, rows_, pieces_, true));
+    construction_bytes.add(dependency_internal::certificate_bytes(
+        other.identity_, other.coverage_, other.input_shapes_, other.rows_,
+        other.pieces_, true));
+    // Fixed-axis conversion replaces 16-byte region dimensions with 24-byte
+    // axes; this bounded workspace also covers vector growth and both copies.
+    if (construction_bytes.bytes > UINT64_MAX / 4)
+      return Result<DependencyCertificate>(
+          Status{ErrorCode::ResourceExhausted,
+                 {},
+                 FailureReason::CapacityLimit});
+    auto construction = dependency_internal::metadata_owner(
+        construction_bytes.bytes * 4,
+        metadata_owner_ ? metadata_owner_ : other.metadata_owner_);
     auto pieces = as_pieces(*this, &budget);
     auto incoming = as_pieces(other, &budget);
     for (auto& next : incoming) {
@@ -545,8 +603,10 @@ Result<DependencyCertificate> DependencyCertificate::merge_mapped(
       }
     }
     auto coverage = take(coverage_.unite(other.coverage_, budget.geometry()));
-    return create_mapped(identity_, std::move(coverage), input_shapes_,
-                         std::move(pieces), budget.geometry());
+    return create_mapped_owned(
+        identity_, std::move(coverage), input_shapes_, std::move(pieces),
+        budget.geometry(),
+        metadata_owner_ ? metadata_owner_ : other.metadata_owner_);
   });
 }
 }  // namespace ps

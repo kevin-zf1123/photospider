@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "data/content_digest.hpp"
+#include "data/dependency_metadata.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/plugin/operation_registry.hpp"
@@ -231,6 +232,7 @@ struct DependencySession::Impl {
   // State is declared last so its plugin destructor runs before the definition.
   std::shared_ptr<const void> definition;
   OperationTraits traits;
+  std::optional<ResourceBudget> metadata_root;
   DependencyQuery query;
   DependencyLimits limits;
   CancellationToken auxiliary_cancellation;
@@ -255,6 +257,7 @@ struct DependencySession::Impl {
       std::make_shared<plugin_internal::FailureLatch>();
   bool waiting = false, terminal = false;
   std::vector<ValueFragments> ready;
+  std::shared_ptr<const dependency_internal::MetadataOwner> regional_metadata;
   std::vector<DependencyNeed> pending;
   std::vector<AtomCertificate> rows;
   std::vector<DependencyNeed> terminal_needs;
@@ -368,7 +371,9 @@ struct DependencySession::Impl {
     waiting = false;
     ready.clear();
     borrowed_output_owners.clear();
-    pending.clear();
+    std::vector<DependencyNeed>{}.swap(pending);
+    std::vector<AtomCertificate>{}.swap(rows);
+    regional_metadata.reset();
     state = DependencyContinuation{};
     const auto stopped = stop();
     return stopped.ok() || status.detail.origin == FailureOrigin::Protocol
@@ -382,6 +387,17 @@ struct DependencySession::Impl {
     return result;
   }
   Result<DependencyCertificate> certificate() const {
+    std::shared_ptr<const dependency_internal::MetadataOwner> copying;
+    if (traits.outputs[0].regional_atomic) {
+      dependency_internal::MetadataBytes capacity;
+      capacity.rows(rows, true);
+      if (capacity.bytes > UINT64_MAX / 4)
+        return Result<DependencyCertificate>(Status{
+            ErrorCode::ResourceExhausted, "regional certificate copy overflow",
+            FailureReason::CapacityLimit});
+      copying = dependency_internal::metadata_owner(capacity.bytes * 4,
+                                                    regional_metadata);
+    }
     if (traits.outputs[0].static_dependency_maps)
       return DependencyCertificate::create_mapped(
           certificate_identity, query.observations, input_shapes(),
@@ -507,7 +523,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     auto count = observations.value().element_count();
     if (!count.ok())
       return Result<std::shared_ptr<DependencySession>>(count.status());
-    if (count.value() > 1 && !traits.outputs[0].static_dependency_maps)
+    if (count.value() > 1 && !traits.outputs[0].static_dependency_maps &&
+        !traits.outputs[0].regional_atomic)
       return Result<std::shared_ptr<DependencySession>>(
           invalid("request-only atomic start requires one observation"));
   } else if (traits.outputs[0].observation_kind !=
@@ -520,6 +537,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     return Result<std::shared_ptr<DependencySession>>(Status::failure(
         ErrorCode::ResourceExhausted, "zero dependency execution limit"));
   auto impl = std::make_unique<Impl>();
+  if (const auto* root = resource_internal::metadata_budget())
+    impl->metadata_root = *root;
   impl->definition = std::move(definition);
   impl->shared_work = std::move(shared_work);
   impl->joint_serialized = joint_serialized;
@@ -584,14 +603,40 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     impl->mapped_inputs = *impl->traits.outputs[0].static_dependency_maps;
   if (impl->query.kind == ObservationKind::Atomic &&
       !impl->traits.outputs[0].static_dependency_maps) {
+    const auto row_count = impl->query.observations.element_count().value();
+    const auto levels = row_count ? 64U - __builtin_clzll(row_count) : 0U;
+    status = impl->consume(row_count * (1 + levels) *
+                           impl->query.observations.shape().size());
+    if (!status.ok())
+      return Result<std::shared_ptr<DependencySession>>(status);
+    if (impl->traits.outputs[0].regional_atomic) {
+      std::uint64_t per_row =
+          sizeof(AtomCertificate) +
+          impl->query.observations.shape().size() * sizeof(std::uint64_t) +
+          impl->query.inputs.size() * sizeof(DependencyNeed);
+      for (const auto& input : impl->query.inputs)
+        per_row += input.descriptor.shape.size() * sizeof(std::uint64_t) +
+                   sizeof(DependencyTag);
+      if (row_count > UINT64_MAX / per_row)
+        return Result<std::shared_ptr<DependencySession>>(Status{
+            ErrorCode::ResourceExhausted, "regional metadata capacity overflow",
+            FailureReason::CapacityLimit});
+      impl->regional_metadata =
+          dependency_internal::metadata_owner(row_count * per_row);
+      impl->rows.reserve(row_count);
+    }
     status = impl->query.observations.visit(
         [&](const auto& coordinate) {
           impl->rows.push_back({coordinate, {}});
+          if (impl->traits.outputs[0].regional_atomic)
+            impl->rows.back().inputs.reserve(impl->query.inputs.size());
           return Status::success();
         },
         impl->limits.sets.maximum_boxes, request.cancellation);
     if (!status.ok())
       return Result<std::shared_ptr<DependencySession>>(status);
+    std::sort(impl->rows.begin(), impl->rows.end(),
+              [](const auto& a, const auto& b) { return a.output < b.output; });
   }
   // Descriptor evidence is independent from pixel transport and is retained
   // even when a data-dependent map resolves to no source pixels.
@@ -894,6 +939,11 @@ Result<DependencyProgress> DependencySession::poll(
     explicit Active(bool& v) : value(v) { value = true; }
     ~Active() { value = false; }
   } active(impl_->active_call);
+  ErrorCode restored_metadata_failure = ErrorCode::Ok;
+  std::optional<ResourceAllocationScope> restored_metadata_scope;
+  if (!resource_internal::metadata_budget() && impl_->metadata_root)
+    restored_metadata_scope.emplace(*impl_->metadata_root,
+                                    &restored_metadata_failure);
   const bool prepared = std::exchange(impl_->joint_prepared, false);
   if (impl_->terminal)
     return Result<DependencyProgress>(
@@ -999,6 +1049,7 @@ Result<DependencyProgress> DependencySession::poll(
               invalid("invalid checkpoint host scope"));
         if (impl_->query.kind != ObservationKind::Atomic ||
             impl_->traits.outputs[0].static_dependency_maps ||
+            impl_->traits.outputs[0].regional_atomic ||
             !impl_->traits.deterministic || !impl_->traits.side_effect_free)
           return impl_->record_failure(
               invalid("checkpoint requires pure atomic program"));
@@ -1169,7 +1220,8 @@ Result<DependencyProgress> DependencySession::poll(
                         const std::function<Result<Value>()>& compute) {
         try {
           if (discovery_active ||
-              impl_->traits.outputs[0].static_dependency_maps)
+              impl_->traits.outputs[0].static_dependency_maps ||
+              impl_->traits.outputs[0].regional_atomic)
             return Result<Value>(impl_->record_failure(
                 invalid("pure block inside GPU discovery")));
           struct BlockScope {
@@ -1362,6 +1414,12 @@ Result<DependencyProgress> DependencySession::poll(
     // Returning Need relinquishes stage input leases; state-retained owners
     // remain explicit real allocations, not merely a sealed reservation.
     impl_->ready.clear();
+    if (restored_metadata_failure != ErrorCode::Ok)
+      impl_->record_failure(
+          Status{restored_metadata_failure,
+                 "dependency metadata allocation failed",
+                 FailureReason::CapacityLimit,
+                 {FailureOrigin::Resource, FailureScope::Unspecified}});
     const auto host_failure = impl_->service_status();
     if (host_failure.detail.origin == FailureOrigin::Protocol)
       return Result<DependencyProgress>(impl_->retire(host_failure));
@@ -1425,6 +1483,9 @@ Result<DependencyProgress> DependencySession::poll(
         return Result<DependencyProgress>(impl_->retire(status));
     }
     if (auto* need = std::get_if<DependencyNeedBatch>(&value)) {
+      // Public batches are mutable; seal the actual capacities before any
+      // host retention or escaped progress event, including default builders.
+      need->reseal_metadata();
       if ((impl_->query.kind == ObservationKind::Atomic &&
            !need->request_needs.empty()) ||
           (impl_->query.kind == ObservationKind::RequestRecord &&
@@ -1435,6 +1496,22 @@ Result<DependencyProgress> DependencySession::poll(
                               need->request_needs.size());
       if (!status.ok())
         return Result<DependencyProgress>(impl_->retire(status));
+      if (impl_->traits.outputs[0].regional_atomic) {
+        dependency_internal::MetadataBytes capacity;
+        capacity.rows(impl_->rows, false);
+        capacity.needs(impl_->pending, false);
+        capacity.rows(need->associations, true);
+        // Declared boundary workspace includes four role expansions and
+        // overlapping canonical-row/projection copies. Geometry internals
+        // retain the existing legacy metadata exclusion and exact set bounds.
+        if (capacity.bytes > UINT64_MAX / 8)
+          return Result<DependencyProgress>(
+              impl_->retire(Status{ErrorCode::ResourceExhausted,
+                                   "regional metadata workspace overflow",
+                                   FailureReason::CapacityLimit}));
+        impl_->regional_metadata = dependency_internal::metadata_owner(
+            capacity.bytes * 8, impl_->regional_metadata);
+      }
       auto projected = impl_->projection(*need);
       if (!projected.ok())
         return Result<DependencyProgress>(impl_->retire(projected.status()));
@@ -1474,10 +1551,19 @@ Result<DependencyProgress> DependencySession::poll(
         impl_->mapped_requested = true;
       } else if (impl_->query.kind == ObservationKind::Atomic) {
         for (const auto& row : need->associations) {
-          auto found = std::find_if(
-              impl_->rows.begin(), impl_->rows.end(),
-              [&](const auto& prior) { return prior.output == row.output; });
-          if (found == impl_->rows.end())
+          const auto levels = impl_->rows.empty()
+                                  ? 0U
+                                  : 64U - __builtin_clzll(impl_->rows.size());
+          status = impl_->consume((levels + 1) * row.output.size() +
+                                  row.inputs.size());
+          if (!status.ok())
+            return Result<DependencyProgress>(impl_->retire(status));
+          auto found = std::lower_bound(
+              impl_->rows.begin(), impl_->rows.end(), row.output,
+              [](const auto& prior, const auto& coordinate) {
+                return prior.output < coordinate;
+              });
+          if (found == impl_->rows.end() || found->output != row.output)
             return Result<DependencyProgress>(
                 impl_->retire(invalid("unknown dependency observation")));
           found->inputs.insert(found->inputs.end(), row.inputs.begin(),
@@ -1499,7 +1585,7 @@ Result<DependencyProgress> DependencySession::poll(
       }
       impl_->pending = projected.take_value();
       impl_->waiting = true;
-      return Result<DependencyProgress>(*need);
+      return Result<DependencyProgress>(std::move(*need));
     }
     if (impl_->traits.outputs[0].static_dependency_maps &&
         !impl_->query.outputs.empty() && !impl_->mapped_supplied)
@@ -1515,13 +1601,16 @@ Result<DependencyProgress> DependencySession::poll(
       return Result<DependencyProgress>(impl_->retire(
           Status::failure(ErrorCode::TypeMismatch,
                           "dependency result differs from inferred output")));
-    if (impl_->traits.outputs[0].maximum_output_payload_bytes) {
+    if (impl_->traits.outputs[0].maximum_output_payload_bytes ||
+        impl_->traits.outputs[0].preserve_output_views) {
       std::set<const CpuStorage*, std::less<const CpuStorage*>,
                ResourceAllocator<const CpuStorage*>>
           counted;
       std::uint64_t payload = 0;
       const auto maximum =
-          *impl_->traits.outputs[0].maximum_output_payload_bytes;
+          impl_->traits.outputs[0].maximum_output_payload_bytes.value_or(
+              impl_->query.outputs.element_count().value() *
+              Value::element_size(impl_->query.output.descriptor.element_type));
       for (const auto& fragment : result.fragments()) {
         status = impl_->consume(1);
         if (!status.ok())
@@ -1589,6 +1678,11 @@ Status DependencySession::supply(std::vector<ValueFragments> inputs,
     explicit Active(bool& v) : value(v) { value = true; }
     ~Active() { value = false; }
   } active(impl_->active_call);
+  ErrorCode restored_metadata_failure = ErrorCode::Ok;
+  std::optional<ResourceAllocationScope> restored_metadata_scope;
+  if (!resource_internal::metadata_budget() && impl_->metadata_root)
+    restored_metadata_scope.emplace(*impl_->metadata_root,
+                                    &restored_metadata_failure);
   if (impl_->terminal)
     return invalid("dependency session is terminal");
   if (!impl_->waiting)
@@ -1632,7 +1726,8 @@ Status DependencySession::supply(std::vector<ValueFragments> inputs,
           return impl_->retire(status);
       }
     }
-    if (impl_->traits.outputs[0].maximum_output_payload_bytes) {
+    if (impl_->traits.outputs[0].maximum_output_payload_bytes ||
+        impl_->traits.outputs[0].preserve_output_views) {
       for (const auto& input : inputs) {
         for (const auto& fragment : input.fragments()) {
           auto charged = impl_->consume(1);
@@ -1654,6 +1749,12 @@ Status DependencySession::supply(std::vector<ValueFragments> inputs,
         }
       }
     }
+    if (restored_metadata_failure != ErrorCode::Ok)
+      return impl_->retire(
+          Status{restored_metadata_failure,
+                 "dependency supply metadata allocation failed",
+                 FailureReason::CapacityLimit,
+                 {FailureOrigin::Resource, FailureScope::Unspecified}});
     impl_->ready = std::move(inputs);
     if (impl_->traits.outputs[0].static_dependency_maps)
       impl_->mapped_supplied = true;

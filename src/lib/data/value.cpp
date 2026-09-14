@@ -53,6 +53,13 @@ Result<std::size_t> address(const StridedLayout& layout,
 }
 }  // namespace
 
+Value::~Value() noexcept {
+  descriptor_ = ValueDescriptor{};
+  region_ = Region{};
+  layout_ = StridedLayout{};
+  facets_ = std::vector<ValueFacet>{};
+}
+
 Result<Value> Value::create(ValueDescriptor descriptor, Region region,
                             StridedLayout layout,
                             std::vector<std::uint8_t> bytes,

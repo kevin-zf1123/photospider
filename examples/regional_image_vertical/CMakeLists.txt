@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(PhotospiderRegionalImageVertical LANGUAGES CXX)
 
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.11 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.12 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 
 add_executable(photospider_regional_image_vertical main.cpp)
