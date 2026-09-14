@@ -46,6 +46,7 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
  */
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
+  digest->integer(traits.requires_metadata_specialization);
   digest->integer(traits.joint_contract);
   digest->integer(traits.joint_continuation_bytes);
   digest->integer(traits.joint_workspace_bytes);
@@ -65,6 +66,28 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   if (output.result_schema)
     digest->text(output.result_schema->canonical());
   digest->text(output.key);
+  digest->integer(output.static_dependency_maps.has_value());
+  if (output.static_dependency_maps) {
+    digest->integer(output.static_dependency_maps->size());
+    for (const auto& map : *output.static_dependency_maps) {
+      digest->integer(map.port);
+      digest->integer(map.roles);
+      digest->integer(map.axes.size());
+      for (const auto& axis : map.axes) {
+        digest->integer(static_cast<std::uint32_t>(axis.observation_axis));
+        digest->integer(axis.fixed.offset);
+        digest->integer(axis.fixed.extent);
+      }
+      digest->integer(map.tags.size());
+      for (const auto& tag : map.tags) {
+        digest->integer(tag.kind);
+        digest->integer(tag.id);
+      }
+    }
+  }
+  digest->integer(output.maximum_output_payload_bytes.has_value());
+  if (output.maximum_output_payload_bytes)
+    digest->integer(*output.maximum_output_payload_bytes);
   digest->integer(output.input_indices.has_value());
   if (output.input_indices) {
     digest->integer(output.input_indices->size());

@@ -43,20 +43,6 @@ Result<Value> OperationRegistry::invoke_dependency_current(
   try {
     if (stop() != ErrorCode::Ok)
       return failure(Status{stop(), {}});
-    auto found = find_traits(key);
-    if (!found.ok())
-      return failure(found.status());
-    auto selected =
-        select_operation_output(found.value(), invocation.output_index);
-    if (!selected.ok())
-      return failure(selected.status());
-    auto resolved = resolve_operation_traits(
-        selected.value(),
-        invocation.input_metadata.empty() ? invocation.inputs.size()
-                                          : invocation.input_metadata.size(),
-        invocation.parameters);
-    if (!resolved.ok())
-      return failure(resolved.status());
     if (invocation.input_demands.size() != invocation.inputs.size())
       return failure(
           Status::failure(ErrorCode::InvalidArgument,
@@ -93,6 +79,13 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{ErrorCode::TypeMismatch,
                               "projected input metadata mismatch"});
     }
+    auto specialized = resolve_traits(key, metadata, invocation.parameters);
+    if (!specialized.ok())
+      return failure(specialized.status());
+    auto resolved =
+        select_operation_output(specialized.value(), invocation.output_index);
+    if (!resolved.ok())
+      return failure(resolved.status());
     auto inferred = infer_operation_output(resolved.value(), metadata,
                                            invocation.parameters);
     if (!inferred.ok())
@@ -206,6 +199,33 @@ Result<Value> OperationRegistry::invoke_dependency_current(
       if (stop() != ErrorCode::Ok)
         return failure(Status{stop(), {}});
       return result;
+    }
+    if (resolved.value().outputs[0].maximum_output_payload_bytes) {
+      auto result = run(samples.value());
+      if (!result.ok())
+        return failure(result.status());
+      const auto& fragments = result.value().value.fragments();
+      if (fragments.size() != 1)
+        return failure(
+            Status{ErrorCode::TypeMismatch,
+                   "view requires execute_fragments or explicit dense layout"});
+      if (stop() != ErrorCode::Ok)
+        return failure(Status{stop(), {}});
+      return fragments[0].view(region);
+    }
+    if (resolved.value().outputs[0].static_dependency_maps) {
+      auto result = run(samples.value());
+      if (!result.ok())
+        return failure(result.status());
+      FootprintLimits limits;
+      limits.cancellation = invocation.cancellation;
+      auto collected =
+          result.value().value.collect(region, invocation.allocator, limits);
+      if (!collected.ok())
+        return failure(collected.status());
+      if (stop() != ErrorCode::Ok)
+        return failure(Status{stop(), {}});
+      return collected;
     }
     auto allocation = MutableValue::allocate(inferred.value().descriptor,
                                              region, invocation.allocator);

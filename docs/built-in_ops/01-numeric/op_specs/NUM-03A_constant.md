@@ -12,9 +12,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-03A: constant
@@ -142,22 +142,32 @@ byte strides and owned storage sizes. Repeat with dense and a nonzero region;
 do not test a view by assuming its raw bytes contain a dense repeated array.
 Implementation delivery provides real build/run commands and measured results.
 
-## Current implementation gaps
+## Current implementation status
 
-The existing Value representation and fixed-shape C++ embedding tests already
-support zero-stride arrays. However, current Fixed traits store shape in an
-operation definition; they do not by themselves parse a different static shape
-String at every node. The target needs compiler-visible per-node shape inference
-and layout-dependent Whole/view versus regional/dense planning. Resolve these
-through a reviewed implementation contract, without claiming a currently
-implemented generic shape parser or silently registering shape-specific aliases.
+The three keys are registered with per-node metadata specialization. The
+specializer parses and validates `shape` and `layout`, infers the input dtype
+and concrete output shape, and exposes the view payload bound to the planner.
+`constant_node` in `photospider/numeric/arrays.hpp` is the public authoring
+helper and emits the same explicit operation key and parameters.
 
-This session read the Value and registry tests; no product implementation,
-execution test or CPU benchmark was performed for these new keys.
+The strict implementation performs an exact byte copy of the scalar. The two
+accelerated keys use the same bit-copy semantics and report their selected
+profile; unsupported hosts return `BackendUnavailable`. Local Clang execution
+has checked an Int64 shape `[1048576,1048576]` backed by one 8-byte payload with
+zero strides, including result ownership after context destruction, and dense
+`[2,3]` execution.
 
-The current `core.constant` is a static Float64 scalar producer; `field.constant`
-is a static Float32/Float64 rank-2 field generator. Neither provides this general
-dynamic-scalar-to-array interface.
+Manual acceptance on 2026-09-14 passed local AppleClang 21 strict/Apple profiles
+and Ubuntu WSL Clang 18 strict/x86 profiles, plus an installed public consumer.
+Coverage includes all UInt8 values, integer extrema and IEEE bit patterns,
+view/dense output, shape errors, cancellation during collection, StageLimit,
+metadata/output capacity, semantic validation, oversized unaligned source release,
+NaN-payload cache updates and owner lifetime. Dense execution reads the scalar once
+per region session and fills admitted 32-byte blocks through memcpy, NEON or AVX2;
+short tails use exact bounded byte copies. The accompanying
+mapping checks use an independent finite-set oracle. No performance benchmark or
+new integration-test registration is included. This does not change the Proposed
+status of this specification.
 
 - [NUM-03 category](../core.md).
 - [Existing scalar producer](../../../../plugins/ops/00-foundation/core_constant.cpp).

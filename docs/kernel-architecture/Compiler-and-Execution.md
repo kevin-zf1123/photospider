@@ -303,3 +303,28 @@ input ports before publication; ambiguous topology is an optional cache miss.
 Flight identity remains plan/snapshot-specific. Template hashing and rebinding
 consume the optional cache-work budget. Node/declaration renumbering, sibling
 pruning and a multi-level cached producer DAG have direct regressions.
+
+## Metadata-specialized array views
+
+C++ definitions marked `requires_metadata_specialization` provide a pure
+`specialize_metadata` callback. The registry validates ordinary parameters and
+input contracts first, invokes the callback outside its mutex under the retained
+definition lease, and validates the fixed-count output metadata. Compiler and
+direct entry points use `resolve_traits`; unresolved templates cannot infer their
+placeholder descriptor. Shape, dtype, facets, tuple grouping, payload bounds and
+static dependency maps become immutable per-node traits and enter stage identity.
+No pixel access or query-dependent metadata is permitted.
+
+`maximum_output_payload_bytes` replaces the dense payload admission floor for a
+CPU staged output. Publication separately checks the actual capacities of newly
+owned output buffers; borrowed owners must have been supplied in that session.
+Source owners, metadata and workspace remain charged. This permits scalar-backed
+constant and source-backed broadcast views without reserving logical dense bytes.
+Ordinary/direct and structured execution preserve a single covering view;
+multiple owners use `execute_fragments` or explicitly selected dense layout.
+`ValueFragments::collect` is an explicit packed copy and observes cancellation.
+
+`make_default_operation_registry(false)` permits embedding registration alongside
+built-ins. Freeze the registry before compilation or execution. Successful custom
+registration clears the built-in persistent-cache identity; failed registration
+leaves it unchanged. The default factory call remains frozen.

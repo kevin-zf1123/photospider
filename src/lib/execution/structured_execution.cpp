@@ -363,8 +363,17 @@ class StructuredExecution final {
         if (wanted.value().boxes().size() != 1)
           return Answer(
               protocol("dense structured output requires one rectangle"));
-        auto collected = computed.value().collect(
-            wanted.value().boxes()[0], resources_.allocator(), set_limits());
+        const auto& parts = computed.value().fragments();
+        const bool view =
+            step.traits.outputs[0].maximum_output_payload_bytes.has_value();
+        if (view && parts.size() != 1)
+          return Answer(Status{
+              ErrorCode::TypeMismatch,
+              "view requires execute_fragments or explicit dense layout"});
+        auto collected = view ? parts[0].view(wanted.value().boxes()[0])
+                              : computed.value().collect(
+                                    wanted.value().boxes()[0],
+                                    resources_.allocator(), set_limits());
         if (!collected.ok())
           return Answer(collected.status());
         result.values.emplace(named.first, collected.take_value());
@@ -1394,7 +1403,8 @@ class StructuredExecution final {
     };
     Status visited;
     if (step.traits.outputs[0].observation_kind ==
-        ObservationKind::RequestRecord) {
+            ObservationKind::RequestRecord ||
+        step.traits.outputs[0].static_dependency_maps) {
       visited = drive(requested);
     } else {
       visited = observations.value().visit(

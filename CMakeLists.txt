@@ -101,6 +101,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_minimum.cpp
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
+  plugins/ops/01-numeric/numeric_arrays.cpp
+  plugins/ops/01-numeric/array_profiles.cpp
   plugins/ops/01-numeric/numeric_sequences.cpp
   plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
@@ -163,6 +165,7 @@ set(
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/dependency.cpp
+  src/lib/data/dependency_mapping.cpp
   src/lib/data/footprint.cpp
   src/lib/data/value_fragments.cpp
   src/lib/data/fragment_atlas.cpp

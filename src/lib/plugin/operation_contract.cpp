@@ -84,6 +84,9 @@ Result<OperationTraits> resolve_operation_traits(
 Result<OperationMetadata> infer_operation_output(
     const OperationTraits& t, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
+  if (t.requires_metadata_specialization)
+    return Result<OperationMetadata>(invalid(
+        "operation template requires registry metadata specialization"));
   if (t.outputs.size() != 1)
     return Result<OperationMetadata>(
         invalid("select one output for singleton inference"));
@@ -373,6 +376,22 @@ Result<OperationMetadata> infer_operation_output(
           [](const auto& facet) { return facet.key == "photospider.image"; }))
     return mismatch(
         "explicit tuple grouping cannot override image observations");
+  if (t.outputs[0].static_dependency_maps) {
+    auto all = Footprint::all(result.descriptor.shape);
+    if (!all.ok())
+      return Result<OperationMetadata>(all.status());
+    auto observations = operation_observations(result, all.value());
+    if (!observations.ok())
+      return Result<OperationMetadata>(observations.status());
+    std::vector<std::vector<std::uint64_t>> shapes;
+    for (const auto& input : inputs)
+      shapes.push_back(input.descriptor.shape);
+    auto certificate = DependencyCertificate::create_mapped(
+        "static-metadata", observations.value(), shapes,
+        {{observations.value(), *t.outputs[0].static_dependency_maps}});
+    if (!certificate.ok())
+      return Result<OperationMetadata>(certificate.status());
+  }
   return Result<OperationMetadata>(std::move(result));
 }
 Result<std::vector<OperationMetadata>> infer_operation_outputs(
@@ -395,6 +414,20 @@ namespace input_internal {
 Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return invalid("select one output contract");
+  if (t.outputs[0].static_dependency_maps &&
+      (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
+       t.outputs[0].observation_kind != ObservationKind::Atomic ||
+       t.outputs[0].region_rule != OperationRegionRule::Dependency ||
+       t.outputs[0].dependency_version != 1))
+    return invalid(
+        "static mapping requires CPU singleton/regional Atomic execution");
+  if (t.outputs[0].maximum_output_payload_bytes &&
+      (!t.supports_cpu || t.supports_gpu ||
+       t.outputs[0].region_rule != OperationRegionRule::Dependency ||
+       t.outputs[0].dependency_version != 1 ||
+       t.outputs[0].requires_dense_output))
+    return invalid("explicit output payload bound requires a CPU staged view");
+
   if (t.outputs[0].dependency_version &&
       (!t.deterministic || !t.side_effect_free))
     return invalid(

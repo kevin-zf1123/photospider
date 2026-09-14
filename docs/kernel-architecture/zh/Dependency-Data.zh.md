@@ -44,7 +44,7 @@ role/tag 隔离、迟到 dirty、dtype/stride/owner 上限和快照 COW。通用
 
 ## C++ 分阶段程序与当前 Run 集成
 
-OperationTraits 9 区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议
+C++ OperationTraits 11 区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议
 版本、continuation 字节上限与有限阶段数。注册时必须选择一个同步 callback 或一个
 分阶段 start。分阶段程序要求 deterministic、side-effect-free。协议版本 1 使用 RegionRule::Dependency，允许 Typed/Axes/重复输入
 静态推断，无需强制 Whole demand。编译器检查所请求结果与副作用根可达的执行边，
@@ -54,8 +54,8 @@ OperationTraits 9 区分本地 `Atomic`、终端 `RequestRecord`、请求级失�
 `start_dependency` 复制校验后的 metadata、参数、original Q 与不可变输入 bundle
 identity。Generic Atomic 每次最多一个 sample，image v2 每次最多一个完整像素。
 RequestRecord 保留完整 Q。ABI 9 的 `start_joint` 支持 PerAtomOutcome，逐成员验证
-outcome。Singleton start 仍然每次只接受一个 observation；修改失败标志不能使
-该 session 接受多个 observation。
+outcome。普通 singleton start 接受一个 observation，并应用已声明的 tuple 闭包；修改失败标志
+不能扩展该范围。下述显式 static mapping 路径可以接收区域 Atomic 查询。
 
 Continuation 在宿主分配中原位构造。`poll` 只消费已提供 fragment，返回逐输出关联的
 Need 或完整结果。`supply` 的每个端口必须精确匹配取数并集及 bundle identity。
@@ -392,3 +392,21 @@ C joint table 复用 singleton 的服务及完成验证器。共享单调句柄�
 外部 waiter 取消、输入比例 scratch、深依赖链及 GPU fallback ancestry。
 `joint_groups`、`joint_polls`、`joint_fallbacks` 报告实际物理路径。未请求的纯兄弟
 端口没有登记需求，因此不会执行。
+
+## 紧凑静态映射
+
+`DependencyCertificate::create_mapped` 保存不交覆盖片段及端口/role 轴映射。
+每个输入轴选择一个独立 observation 轴或固定区间，tags 单独保存。该闭合集合表示
+可精确计算 broadcast/permutation 的 backward demand 和 dirty transpose，无需枚举
+复制后的输出样本。Restriction 与相同 map 的 merge 使用集合几何；不同 map 的重叠
+可能需要有界逐行比较。`row` 解析一个观察，`materialize` 显式生成有界 rows，mapped
+证书调用 `rows()` 会抛异常。所有变换限制工作量和保留元数据，包括规范化增加的 boxes。
+`storage_entries()` 统计实际保留的坐标、支持集和 tags，供 cache admission 使用，
+独立于去重后的源支持投影。
+
+CPU staged Atomic 输出可声明 `static_dependency_maps`，也可由 metadata specialization
+生成。首次 `DependencyNeedBatch::static_mapping` 请求 Q 对应的完整注册映射；不允许
+动态 associations、重复请求、GPU、joint 或 checkpoint。成功 supply 后才能发布，宿主
+自动保留 descriptor tags。Data 与 Validation 可不同：图像 Data 可只选一个通道，
+Validation 闭包为全部通道；每端口取数并集仍须满足 image fragment 规则。普通与
+structured executor 均推进一个区域 session 并保留紧凑证书。C ABI 9 没有该字段。

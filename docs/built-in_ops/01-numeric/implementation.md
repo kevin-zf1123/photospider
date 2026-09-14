@@ -15,7 +15,7 @@ are complete; required fixes precede the branch push.
 | Shared numeric, metadata, observation, profile and resource facilities | In progress | Bounded exact sequence arithmetic, axis dtype inference, tuple observations and numeric diagnostics implemented; later-family shape/view and numerical facilities remain |
 | NUM-01 expression | Pending | Spec and shared numeric facilities |
 | NUM-02 linspace / arange | Complete (2026-09-14) | Clang strict/NEON locally and strict/AVX2 in Ubuntu WSL passed public workflows and 960 independent rational/IEEE cases per profile on 2026-09-14; installed consumer passed locally; independent scoped review fixes validated; test_compiler/test_resources and ClangFormat 21/cpplint passed |
-| NUM-03 constant / broadcast | Pending | |
+| NUM-03 constant / broadcast | Complete (2026-09-14) | Per-node metadata, bounded owned/borrowed views, exact compact mappings and explicit NEON/AVX2 dense copy paths; strict/Apple locally and strict/x86 in Clang WSL passed manual arrays/mappings, bit-pattern, cache, typed-validation, resource and ownership checks; installed consumer and focused compiler/resources/dependency/fragments units passed; independent scoped review required fixes closed |
 | NUM-04 unary / trigonometric / rational pi | Pending | |
 | NUM-05 binary | Pending | |
 | NUM-06 clamp / remap | Pending | |

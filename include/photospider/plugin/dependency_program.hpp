@@ -91,6 +91,10 @@ PHOTOSPIDER_API Result<AtomKey> dependency_atom_key(
 struct DependencyNeedBatch final {
   std::vector<AtomCertificate> associations;
   std::vector<DependencyNeed> request_needs;
+  /** @brief Requests the complete registered static mapping once. Both other
+   * lists must be empty. Only a CPU regional mapping program may use this.
+   */
+  bool static_mapping = false;
 };
 /** @brief A poll either suspends for declared inputs or completes its exact
  * set.

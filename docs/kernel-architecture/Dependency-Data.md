@@ -68,7 +68,7 @@ See [Cache Model](Cache-Model.md) for generic snapshot identity and ownership.
 
 ## Staged C++ programs and current Run integration
 
-OperationTraits 9 distinguishes local `Atomic` and terminal `RequestRecord`,
+C++ OperationTraits 11 distinguishes local `Atomic` and terminal `RequestRecord`,
 request-only failure delivery, dependency protocol version, continuation byte
 bound and finite stage bound. Exactly one synchronous callback or staged start
 function is registered. Staged programs require deterministic, side-effect-free
@@ -85,8 +85,9 @@ rectangular approximation.
 immutable input-bundle identity. Generic Atomic starts accept at most one sample;
 image-v2 starts accept at most one complete pixel. RequestRecord starts preserve
 the complete original query. ABI 9 adds the validated `start_joint` driver for
-PerAtomOutcome Atomic outputs. Singleton starts still accept only one observation;
-changing a failure flag does not authorize multiple observations in that session.
+PerAtomOutcome Atomic outputs. Ordinary singleton starts accept one observation (with tuple closure where declared);
+changing a failure flag does not authorize multiple observations. The explicit
+static-mapping path below accepts a regional Atomic query.
 
 A continuation is placement-constructed in its host allocation. `poll` consumes
 only supplied fragments and either returns exact associated Needs or a complete
@@ -540,3 +541,27 @@ cancellation, proportional scratch, deep dependency chains and GPU fallback
 ancestry. `joint_groups`, `joint_polls` and `joint_fallbacks` report the physical
 path actually taken. Unrequested pure siblings have no registered demand and do
 not run.
+
+## Compact static mappings
+
+`DependencyCertificate::create_mapped` retains disjoint coverage pieces and
+port/role axis maps. Each input axis selects a distinct observation axis or a
+fixed interval; tags remain explicit. This closed representation supports exact
+broadcast/permutation backward demand and dirty transpose without enumerating
+replicated output samples. Restriction and equal-map merge remain geometric;
+different maps on overlapping coverage may require bounded row comparison.
+`row` resolves one observation; `materialize` explicitly requests bounded rows.
+`rows()` throws for mapped certificates. All transformations charge work and
+retained metadata, including canonical box expansion. `storage_entries()`
+counts actual retained coordinates, supports and tags for cache admission,
+independently of a deduplicated source-support projection.
+
+A CPU staged Atomic output can declare `static_dependency_maps`, including
+metadata-specialized maps. Its first `DependencyNeedBatch::static_mapping`
+requests the complete registered map for Q; dynamic associations, repeated
+mapping requests, GPU, joint execution and checkpoints are excluded. Successful
+supply must precede publication. Descriptor tags are retained automatically.
+Data and Validation can differ: an image source's Data may select one channel
+while Validation closes over all channels; their per-port transport union must
+satisfy the image fragment rules. The ordinary and structured executors drive
+one regional session, preserving compact certificates. C ABI 9 has no such field.

@@ -78,3 +78,57 @@ Actual validation on 2026-09-14 used Apple Clang 21 locally and Clang 18.1.3 in
 Ubuntu WSL on x86-64. Strict/NEON locally and strict/AVX2 in WSL passed the public
 workflows and 960-case oracle. Local installed-consumer compilation and execution
 also passed. These are correctness checks; no performance result is claimed.
+
+## Array construction: NUM-03
+
+`photospider_numeric_arrays` exercises `numeric.constant` and
+`numeric.broadcast` with `Compiler`, `freeze`, `execute_fragments`, ordinary
+execution and a structured public consumer. The public
+`photospider/numeric/arrays.hpp` helpers are `constant_node` and
+`broadcast_node`; both accept an explicit shape, layout (`View` or `Dense`),
+and numeric profile. Build the explicit targets and run:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_arrays -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_arrays _strict
+cmake --build build/numeric --target photospider_numeric_mappings -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_mappings
+```
+
+The executable checks a `[1048576,1048576]` constant view backed by one 8-byte
+Int64 scalar, a `[3]` to `[2,3,4]` broadcast backed by three Int64 samples, a
+`[274877906944,3]` broadcast view with exact sparse support and dirty
+replication, dense packing, resource bounds, structured consumption and owner
+lifetime. Expected output includes `stored_bytes=8`, `last=7`, and
+`3 source samples, exact view/dirty/support passed`. The mappings executable
+compares compact mapped certificates to explicit rows and reports
+`64 Q subsets x 8 dirty subsets x 3 roles match explicit rows`.
+
+To compose a structured consumer, request a mutable built-in registry, register
+the consumer with `register_operation`, then call `freeze` before compiling:
+
+```cpp
+auto registry = ps::make_default_operation_registry(false);
+registry->register_operation(structured_last()); // Defined in arrays.cpp.
+registry->freeze();
+auto node = ps::numeric::broadcast_node(
+    2, ps::WorkflowInputReference{1}, {UINT64_C(274877906944), 3}, {1});
+// structured_views() below supplies document, bindings and ExecutionContext.
+```
+
+The `arrays.cpp` `structured_views()` function is the runnable example: it
+registers `manual.structured_last`, composes it after the giant broadcast, and
+checks the named result is an 8-byte view with `last=7`. These executables are
+manual targets only; they have no CTest or integration-test registration. WSL
+runs use Clang for numerical correctness only. On 2026-09-14, local AppleClang 21
+strict/Apple and Ubuntu WSL Clang 18 strict/x86 runs passed, as did the local
+installed consumer. Additional checked outputs cover all UInt8 values, IEEE bit
+patterns, negative unaligned permutation, typed validation, separate owners,
+Empty, cancellation, StageLimit and exact cache updates. No performance claim is
+inferred from these runs.
+
+Dense array implementations use 32-byte memcpy, NEON or AVX2 blocks and exact
+byte tails. Diagnostics identify `memcpy32`, `NEON-copy32` or `AVX2-copy32` plus
+build and host identity. View diagnostics identify scalar copy or owner retention.
+`array_owner_and_payload_cache()` checks oversized source release, changed NaN
+payloads in a warm constant cache and final release of borrowed broadcast storage.

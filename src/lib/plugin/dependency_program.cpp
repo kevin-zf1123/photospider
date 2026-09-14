@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -14,6 +16,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/dependency_block.hpp"
 #include "plugin/dependency_discovery.hpp"
@@ -240,6 +243,13 @@ struct DependencySession::Impl {
   std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
   NumericDiagnostics numeric;
+  std::vector<DependencyMappedNeed> mapped_inputs;
+  bool mapped_requested = false, mapped_supplied = false;
+  using BorrowedOwner =
+      std::pair<const CpuStorage* const, std::weak_ptr<const CpuStorage>>;
+  std::map<const CpuStorage*, std::weak_ptr<const CpuStorage>,
+           std::less<const CpuStorage*>, ResourceAllocator<BorrowedOwner>>
+      borrowed_output_owners;
   std::string certificate_identity, block_identity;
   std::shared_ptr<plugin_internal::FailureLatch> service_failure =
       std::make_shared<plugin_internal::FailureLatch>();
@@ -277,6 +287,8 @@ struct DependencySession::Impl {
         auto key = dependency_atom_key(query);
         if (key.ok())
           status.detail.atom = key.take_value();
+        else
+          status.detail.scope = FailureScope::Group;
       } else {
         status.detail.scope = FailureScope::Group;
       }
@@ -319,6 +331,8 @@ struct DependencySession::Impl {
       auto key = dependency_atom_key(query);
       if (key.ok())
         status.detail.atom = key.take_value();
+      else
+        status.detail.scope = FailureScope::Group;
     }
     return status;
   }
@@ -353,6 +367,7 @@ struct DependencySession::Impl {
     terminal = true;
     waiting = false;
     ready.clear();
+    borrowed_output_owners.clear();
     pending.clear();
     state = DependencyContinuation{};
     const auto stopped = stop();
@@ -367,12 +382,32 @@ struct DependencySession::Impl {
     return result;
   }
   Result<DependencyCertificate> certificate() const {
+    if (traits.outputs[0].static_dependency_maps)
+      return DependencyCertificate::create_mapped(
+          certificate_identity, query.observations, input_shapes(),
+          {{query.observations, mapped_inputs}}, limits.sets);
     return DependencyCertificate::create(certificate_identity,
                                          query.observations, input_shapes(),
                                          rows, limits.sets);
   }
   Result<std::vector<DependencyNeed>> projection(
       const DependencyNeedBatch& batch) const {
+    if (traits.outputs[0].static_dependency_maps) {
+      if (!batch.static_mapping || !batch.associations.empty() ||
+          !batch.request_needs.empty())
+        return Result<std::vector<DependencyNeed>>(
+            invalid("mapped program requires its complete static mapping"));
+      auto mapped = DependencyCertificate::create_mapped(
+          certificate_identity, query.observations, input_shapes(),
+          {{query.observations, *traits.outputs[0].static_dependency_maps}},
+          limits.sets);
+      if (!mapped.ok())
+        return Result<std::vector<DependencyNeed>>(mapped.status());
+      return mapped.value().backward(query.observations, limits.sets);
+    }
+    if (batch.static_mapping)
+      return Result<std::vector<DependencyNeed>>(
+          invalid("static mapping not declared by operation"));
     // A terminal record uses one non-spatial request observation only inside
     // this temporary fetch projection; it never publishes an atomic
     // certificate.
@@ -472,7 +507,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     auto count = observations.value().element_count();
     if (!count.ok())
       return Result<std::shared_ptr<DependencySession>>(count.status());
-    if (count.value() > 1)
+    if (count.value() > 1 && !traits.outputs[0].static_dependency_maps)
       return Result<std::shared_ptr<DependencySession>>(
           invalid("request-only atomic start requires one observation"));
   } else if (traits.outputs[0].observation_kind !=
@@ -545,7 +580,10 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   auto status = impl->stop();
   if (!status.ok())
     return Result<std::shared_ptr<DependencySession>>(status);
-  if (impl->query.kind == ObservationKind::Atomic) {
+  if (impl->traits.outputs[0].static_dependency_maps)
+    impl->mapped_inputs = *impl->traits.outputs[0].static_dependency_maps;
+  if (impl->query.kind == ObservationKind::Atomic &&
+      !impl->traits.outputs[0].static_dependency_maps) {
     status = impl->query.observations.visit(
         [&](const auto& coordinate) {
           impl->rows.push_back({coordinate, {}});
@@ -563,7 +601,9 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     if (!empty.ok())
       return Result<std::shared_ptr<DependencySession>>(empty.status());
     DependencyNeed descriptor{port, 8, empty.take_value(), {{1, 0}}};
-    if (impl->query.kind == ObservationKind::Atomic) {
+    if (impl->traits.outputs[0].static_dependency_maps) {
+      impl->mapped_inputs.push_back({port, 8, {}, {{1, 0}}});
+    } else if (impl->query.kind == ObservationKind::Atomic) {
       for (auto& row : impl->rows)
         row.inputs.push_back(descriptor);
     } else {
@@ -637,7 +677,9 @@ Status DependencySession::begin_joint_phase(
   if (!elements.ok() || elements.value() > UINT64_MAX / width)
     return impl_->retire(Status{ErrorCode::ResourceExhausted, {}});
   auto capacity =
-      std::max(impl_->traits.estimated_bytes, elements.value() * width);
+      std::max(impl_->traits.estimated_bytes,
+               impl_->traits.outputs[0].maximum_output_payload_bytes.value_or(
+                   elements.value() * width));
   if (impl_->traits.workspace_bytes > UINT64_MAX - capacity)
     return impl_->retire(Status{ErrorCode::ResourceExhausted, {}});
   capacity += impl_->traits.workspace_bytes;
@@ -872,8 +914,9 @@ Result<DependencyProgress> DependencySession::poll(
     if (impl_->polls >=
         std::min(impl_->traits.outputs[0].maximum_dependency_stages,
                  impl_->limits.maximum_stages))
-      return Result<DependencyProgress>(impl_->retire(Status::failure(
-          ErrorCode::ResourceExhausted, "dependency phase limit")));
+      return Result<DependencyProgress>(impl_->retire(
+          Status{ErrorCode::ResourceExhausted, "dependency phase limit",
+                 FailureReason::StageLimit}));
   }
   try {
     Result<DependencyPoll> polled(invalid("uninitialized poll"));
@@ -919,8 +962,10 @@ Result<DependencyProgress> DependencySession::poll(
           output_bytes += bytes;
         }
       }
-      std::uint64_t capacity =
-          std::max(impl_->traits.estimated_bytes, output_bytes);
+      std::uint64_t capacity = std::max(
+          impl_->traits.estimated_bytes,
+          impl_->traits.outputs[0].maximum_output_payload_bytes.value_or(
+              output_bytes));
       if (impl_->traits.workspace_bytes > UINT64_MAX - capacity)
         return Result<DependencyProgress>(impl_->retire(Status::failure(
             ErrorCode::ResourceExhausted, "dependency workspace overflow")));
@@ -953,6 +998,7 @@ Result<DependencyProgress> DependencySession::poll(
           return impl_->record_failure(
               invalid("invalid checkpoint host scope"));
         if (impl_->query.kind != ObservationKind::Atomic ||
+            impl_->traits.outputs[0].static_dependency_maps ||
             !impl_->traits.deterministic || !impl_->traits.side_effect_free)
           return impl_->record_failure(
               invalid("checkpoint requires pure atomic program"));
@@ -1122,7 +1168,8 @@ Result<DependencyProgress> DependencySession::poll(
                         const Value& incoming,
                         const std::function<Result<Value>()>& compute) {
         try {
-          if (discovery_active)
+          if (discovery_active ||
+              impl_->traits.outputs[0].static_dependency_maps)
             return Result<Value>(impl_->record_failure(
                 invalid("pure block inside GPU discovery")));
           struct BlockScope {
@@ -1391,6 +1438,7 @@ Result<DependencyProgress> DependencySession::poll(
       auto projected = impl_->projection(*need);
       if (!projected.ok())
         return Result<DependencyProgress>(impl_->retire(projected.status()));
+      std::map<std::uint32_t, Footprint> transport;
       for (const auto& fetch : projected.value()) {
         const auto& allowed = impl_->traits.outputs[0].input_indices;
         if (allowed && std::find(allowed->begin(), allowed->end(),
@@ -1402,14 +1450,29 @@ Result<DependencyProgress> DependencySession::poll(
                                 fetch.samples.boxes().size() + 1);
         if (!status.ok())
           return Result<DependencyProgress>(impl_->retire(status));
-        for (const auto& box : fetch.samples.boxes())
-          if (!input_internal::complete_image_channels(
-                  impl_->query.inputs[fetch.port].descriptor,
-                  impl_->query.inputs[fetch.port].facets, box))
-            return Result<DependencyProgress>(impl_->retire(
-                invalid("input image dependency omits channel closure")));
+        auto found = transport.find(fetch.port);
+        if (found == transport.end()) {
+          transport.emplace(fetch.port, fetch.samples);
+        } else {
+          auto joined = found->second.unite(fetch.samples, impl_->limits.sets);
+          if (!joined.ok())
+            return Result<DependencyProgress>(impl_->retire(joined.status()));
+          found->second = joined.take_value();
+        }
       }
-      if (impl_->query.kind == ObservationKind::Atomic) {
+      for (const auto& port : transport)
+        for (const auto& box : port.second.boxes())
+          if (!input_internal::complete_image_channels(
+                  impl_->query.inputs[port.first].descriptor,
+                  impl_->query.inputs[port.first].facets, box))
+            return Result<DependencyProgress>(impl_->retire(invalid(
+                "dependency transport requires complete image channels")));
+      if (impl_->traits.outputs[0].static_dependency_maps) {
+        if (impl_->mapped_requested)
+          return Result<DependencyProgress>(
+              impl_->retire(invalid("static mapping already requested")));
+        impl_->mapped_requested = true;
+      } else if (impl_->query.kind == ObservationKind::Atomic) {
         for (const auto& row : need->associations) {
           auto found = std::find_if(
               impl_->rows.begin(), impl_->rows.end(),
@@ -1438,6 +1501,10 @@ Result<DependencyProgress> DependencySession::poll(
       impl_->waiting = true;
       return Result<DependencyProgress>(*need);
     }
+    if (impl_->traits.outputs[0].static_dependency_maps &&
+        !impl_->query.outputs.empty() && !impl_->mapped_supplied)
+      return Result<DependencyProgress>(impl_->retire(
+          invalid("static mapping must be supplied before publication")));
     auto result = std::get<ValueFragments>(std::move(value));
     if (!result.valid() || result.coverage() != impl_->query.outputs ||
         result.descriptor().element_type !=
@@ -1448,6 +1515,33 @@ Result<DependencyProgress> DependencySession::poll(
       return Result<DependencyProgress>(impl_->retire(
           Status::failure(ErrorCode::TypeMismatch,
                           "dependency result differs from inferred output")));
+    if (impl_->traits.outputs[0].maximum_output_payload_bytes) {
+      std::set<const CpuStorage*, std::less<const CpuStorage*>,
+               ResourceAllocator<const CpuStorage*>>
+          counted;
+      std::uint64_t payload = 0;
+      const auto maximum =
+          *impl_->traits.outputs[0].maximum_output_payload_bytes;
+      for (const auto& fragment : result.fragments()) {
+        status = impl_->consume(1);
+        if (!status.ok())
+          return Result<DependencyProgress>(impl_->retire(status));
+        const auto* owner = fragment.storage().get();
+        const auto borrowed = impl_->borrowed_output_owners.find(owner);
+        if (borrowed != impl_->borrowed_output_owners.end() &&
+            !borrowed->second.expired())
+          continue;
+        if (!counted.insert(owner).second)
+          continue;
+        if (owner->capacity() > maximum - payload)
+          return Result<DependencyProgress>(impl_->retire(
+              Status{ErrorCode::ResourceExhausted,
+                     "new output backing exceeds its declared payload bound",
+                     FailureReason::CapacityLimit,
+                     {FailureOrigin::Resource, FailureScope::Unspecified}}));
+        payload += owner->capacity();
+      }
+    }
     for (const auto& fragment : result.fragments()) {
       status = input_internal::validate_port_value(
           impl_->traits.outputs[0].output_schema, fragment,
@@ -1455,6 +1549,7 @@ Result<DependencyProgress> DependencySession::poll(
       if (!status.ok())
         return Result<DependencyProgress>(impl_->retire(status));
     }
+    impl_->borrowed_output_owners.clear();
     DependencyResult complete{std::move(result),
                               impl_->query.outputs,
                               impl_->query.kind,
@@ -1537,7 +1632,31 @@ Status DependencySession::supply(std::vector<ValueFragments> inputs,
           return impl_->retire(status);
       }
     }
+    if (impl_->traits.outputs[0].maximum_output_payload_bytes) {
+      for (const auto& input : inputs) {
+        for (const auto& fragment : input.fragments()) {
+          auto charged = impl_->consume(1);
+          if (!charged.ok())
+            return impl_->retire(charged);
+          auto found =
+              impl_->borrowed_output_owners.find(fragment.storage().get());
+          if (found == impl_->borrowed_output_owners.end()) {
+            if (impl_->borrowed_output_owners.size() >=
+                impl_->limits.sets.maximum_boxes)
+              return impl_->retire(Status{ErrorCode::ResourceExhausted,
+                                          "view owner metadata limit",
+                                          FailureReason::CapacityLimit});
+            impl_->borrowed_output_owners.emplace(fragment.storage().get(),
+                                                  fragment.storage());
+          } else {
+            found->second = fragment.storage();
+          }
+        }
+      }
+    }
     impl_->ready = std::move(inputs);
+    if (impl_->traits.outputs[0].static_dependency_maps)
+      impl_->mapped_supplied = true;
     impl_->pending.clear();
     impl_->waiting = false;
     return Status::success();

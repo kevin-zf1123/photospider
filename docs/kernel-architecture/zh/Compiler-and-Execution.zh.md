@@ -227,3 +227,23 @@ Validation witness；公开 binding name 标识输入路由。跨 plan 命中时
 输入端口重绑定各 record 与 certificate，再发布；歧义拓扑只导致可选缓存未命中。
 Flight 身份仍限定 plan/snapshot。模板 hash 与重绑定计入 cache-work 预算。
 回归覆盖节点/输入声明重编号、兄弟裁剪和多层缓存生产者 DAG。
+
+## 按节点推导的数组视图
+
+标记 `requires_metadata_specialization` 的 C++ definition 提供纯
+`specialize_metadata` callback。Registry 先验证普通参数与输入契约，在 mutex 外通过
+保留的 definition lease 调用，再验证固定输出数量及 metadata。Compiler 与直接入口
+使用 `resolve_traits`；未解析模板不能推导占位 descriptor。Shape、dtype、facets、tuple
+分组、payload 上限和静态依赖映射成为不可变节点 traits 并进入阶段 identity。
+该过程不得读取像素或依赖查询改变 metadata。
+
+CPU staged 输出的 `maximum_output_payload_bytes` 替换 dense payload admission 下限。
+发布时另外核对新增输出 owner 的实际容量；借用 owner 必须已由该 session 接收。
+源 owner、metadata 和 workspace 仍计费。因此 scalar-backed constant 和 source-backed
+broadcast 无需预留逻辑 dense 字节。普通、直接和 structured 执行保留单一覆盖 view；
+多个 owner 使用 `execute_fragments` 或显式 dense layout。`ValueFragments::collect`
+显式生成 packed copy，并遵守取消。
+
+`make_default_operation_registry(false)` 允许在 built-ins 旁注册 embedding 算子。
+编译或执行前必须 freeze。成功自定义注册清除 built-in persistent-cache identity，
+失败注册保持不变。默认工厂调用仍返回 frozen registry。

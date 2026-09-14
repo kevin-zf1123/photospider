@@ -186,10 +186,14 @@ Result<DependencyCertificate> DependencyCertificate::create(
   result.coverage_ = std::move(coverage);
   result.input_shapes_ = std::move(input_shapes);
   result.rows_ = std::move(rows);
+  result.metadata_entries_ = published_entries;
+  result.storage_entries_ = result.measure_storage();
   return Result<DependencyCertificate>(std::move(result));
 }
 Result<DependencyCertificate> DependencyCertificate::restrict(
     const Footprint& subset, const FootprintLimits& limits) const {
+  if (mapped_)
+    return restrict_mapped(subset, limits);
   auto outside = subset.subtract(coverage_, limits);
   if (!outside.ok())
     return Result<DependencyCertificate>(outside.status());
@@ -233,6 +237,8 @@ Result<DependencyCertificate> DependencyCertificate::restrict(
 }
 Result<std::vector<DependencyNeed>> DependencyCertificate::backward(
     const Footprint& subset, const FootprintLimits& limits) const {
+  if (mapped_)
+    return backward_mapped(subset, limits);
   auto restricted = restrict(subset, limits);
   if (!restricted.ok())
     return Result<std::vector<DependencyNeed>>(restricted.status());
@@ -243,6 +249,8 @@ Result<std::vector<DependencyNeed>> DependencyCertificate::backward(
 }
 Result<Footprint> DependencyCertificate::transpose(
     const DependencyNeed& dirty, const FootprintLimits& limits) const {
+  if (mapped_)
+    return transpose_mapped(dirty, limits);
   auto status = stopped(limits);
   if (!status.ok())
     return Result<Footprint>(status);
@@ -290,6 +298,8 @@ Result<DependencyCertificate> DependencyCertificate::merge(
       input_shapes_ != other.input_shapes_)
     return Result<DependencyCertificate>(
         invalid("incompatible certificate identities"));
+  if (mapped_ || other.mapped_)
+    return merge_mapped(other, limits);
   auto coverage = coverage_.unite(other.coverage_, limits);
   if (!coverage.ok())
     return Result<DependencyCertificate>(coverage.status());

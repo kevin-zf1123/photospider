@@ -2190,7 +2190,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return fail(
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
-        if (frame.state == Frame::State::Initial && !frame.unit && !terminal) {
+        if (frame.state == Frame::State::Initial && !frame.unit && !terminal &&
+            !step.traits.outputs[0].static_dependency_maps) {
           if (step.traits.outputs[0].dependency_version == 0 &&
               step.whole_boundary) {
             // The legacy Whole contract observes global validation for every
@@ -2566,9 +2567,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               output_bytes += bytes;
             }
           }
-          auto capacity =
-              checked_add(std::max(step.traits.estimated_bytes, output_bytes),
-                          step.traits.workspace_bytes);
+          auto capacity = checked_add(
+              std::max(
+                  step.traits.estimated_bytes,
+                  step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+                      output_bytes)),
+              step.traits.workspace_bytes);
           if (!capacity.ok())
             return fail(capacity.status());
           // The pending input footprint remains available after supply moved
@@ -3380,7 +3384,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           }
           auto bytes = checked_add(
               capacity,
-              std::max(step.traits.estimated_bytes, count.value() * width));
+              std::max(
+                  step.traits.estimated_bytes,
+                  step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+                      count.value() * width)));
           if (bytes.ok())
             bytes = checked_add(bytes.value(), step.traits.workspace_bytes);
           if (!bytes.ok()) {
@@ -3803,6 +3810,28 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         return fail(Status{ErrorCode::InvalidArgument,
                            "dense output requires one nonempty rectangle"});
       const auto& region = named.samples.boxes()[0];
+      if (plan.steps()[named.step]
+              .traits.outputs[0]
+              .maximum_output_payload_bytes) {
+        if (returned->fragments().size() != 1)
+          return fail(Status{
+              ErrorCode::TypeMismatch,
+              "view requires execute_fragments or explicit dense layout"});
+        auto value = returned->fragments()[0].view(region);
+        if (!value.ok())
+          return fail(value.status());
+        if (stop() != ErrorCode::Ok)
+          return fail(Status{stop(), {}});
+        if (sink) {
+          const auto status = (*sink)(named.name, ValueView(value.value()));
+          if (!status.ok())
+            return fail(status);
+        } else {
+          result.values.emplace(named.name, value.take_value());
+        }
+        ++diagnostics.tile_count;
+        continue;
+      }
       auto bytes = region_bytes(returned->descriptor(), region);
       if (!bytes.ok())
         return fail(bytes.status());
@@ -3881,11 +3910,27 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         return Result<T>(issued);
     }
     QueuedCallback callback{
-        [completion] {
+        [completion, resources] {
           // The callable's owners retire before the completion notification.
           auto work = std::move(completion->work);
           try {
+            ErrorCode metadata_failure = ErrorCode::Ok;
+            std::optional<ResourceAllocationScope> scope;
+            if (resources)
+              scope.emplace(*resources, &metadata_failure);
             completion->result = work();
+            if (metadata_failure != ErrorCode::Ok &&
+                completion->result.status().detail.origin !=
+                    FailureOrigin::Protocol &&
+                completion->result.status().code !=
+                    ErrorCode::ResourceExhausted &&
+                completion->result.status().code != ErrorCode::Cancelled &&
+                completion->result.status().code != ErrorCode::Stale)
+              completion->result = Result<T>(
+                  Status{metadata_failure,
+                         "dependency stage metadata allocation failed",
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Unspecified}});
           } catch (const std::bad_alloc&) {
             completion->result =
                 Result<T>(Status{ErrorCode::ResourceExhausted, {}});

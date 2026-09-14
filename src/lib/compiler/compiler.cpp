@@ -632,11 +632,12 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
                            OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
-    step.planned_bytes =
-        std::max(step.traits.estimated_bytes,
-                 dense.ok() ? dense.value().bytes
-                            : static_cast<std::uint64_t>(
-                                  Value::element_size(packed.element_type)));
+    step.planned_bytes = std::max(
+        step.traits.estimated_bytes,
+        step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+            dense.ok() ? dense.value().bytes
+                       : static_cast<std::uint64_t>(
+                             Value::element_size(packed.element_type))));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t port = 0; port < step.inputs.size() &&
                                step.traits.workspace_input_multiplier != 0;
@@ -921,6 +922,11 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
                                    std::move(result_schema),
                                    atomic_trailing_axes});
     }
+    auto specialized = operations_->resolve_traits(
+        source.operation, input_descriptors, source.parameters);
+    if (!specialized.ok())
+      return Result<SemanticGraphIR>(specialized.status());
+    node.traits = specialized.take_value();
     auto output = infer_operation_outputs(node.traits, input_descriptors,
                                           node.parameters);
     if (!output.ok()) {
@@ -1162,11 +1168,13 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       if (!dense_output.ok() && step.traits.outputs[0].output_schema.kind ==
                                     OperationPortKind::RgbaFloat32)
         return Result<ExecutionPlan>(dense_output.status());
-      step.planned_bytes = std::max(
-          node.traits.estimated_bytes,
-          dense_output.ok() ? dense_output.value().bytes
-                            : static_cast<std::uint64_t>(Value::element_size(
-                                  step.output_descriptor.element_type)));
+      step.planned_bytes =
+          std::max(node.traits.estimated_bytes,
+                   step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+                       dense_output.ok()
+                           ? dense_output.value().bytes
+                           : static_cast<std::uint64_t>(Value::element_size(
+                                 step.output_descriptor.element_type))));
       if (step.output_result_schema)
         step.planned_bytes = 0;
       step.inputs.reserve(node.inputs.size());
@@ -1385,11 +1393,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
                            OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
-    step.planned_bytes =
-        std::max(step.traits.estimated_bytes,
-                 dense.ok() ? dense.value().bytes
-                            : static_cast<std::uint64_t>(
-                                  Value::element_size(packed.element_type)));
+    step.planned_bytes = std::max(
+        step.traits.estimated_bytes,
+        step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+            dense.ok() ? dense.value().bytes
+                       : static_cast<std::uint64_t>(
+                             Value::element_size(packed.element_type))));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t i = 0; i < step.inputs.size(); ++i) {
       if (step.traits.workspace_input_multiplier == 0)
