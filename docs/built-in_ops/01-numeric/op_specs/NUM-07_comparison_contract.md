@@ -6,9 +6,9 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-07: exact comparisons
@@ -64,4 +64,26 @@ strided/disjoint demands and shared resource/ownership checks.
 | [NUM-07E greater](NUM-07E_greater.md) | `a > b` |
 | [NUM-07F greater_equal](NUM-07F_greater_equal.md) | `a >= b` |
 
-No target runtime implementation or test is claimed.
+## Current implementation status
+
+The six predicates and `is_close` are registered under their three explicit
+profile keys. Per-node specialization validates matching dtype/shape, parses
+the `is_close` tolerances, and publishes compact static mappings for both input
+ports. The implementation uses raw IEEE classification and integer order keys;
+the exact `is_close` predicate uses bounded dyadic arithmetic and does not
+perform floating subtraction or tolerance rounding.
+
+`numeric.select` is also registered for the three profiles. It stages condition
+control reads before requesting only the selected branch Data and its required
+validation closure, and isolates invalid condition bytes to atom outcomes.
+Its diagnostics identify scalar condition, bit choice and an ISA scratch
+store. This describes implementation behavior, not a claim of four-sample
+SIMD or a performance improvement.
+
+The manual [numeric workflow](../../../../examples/numeric_workflow/README.md)
+and 3760-case independent Fraction oracle passed on 2026-09-14 with local
+AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86. The installed
+consumer passed. Source support, typed closure, sNaN environment preservation,
+condition/error isolation, cache changes and resource cleanup are separately
+checked. These manual executables have no integration-test registration and
+establish no performance claim. Specification status remains Proposed.

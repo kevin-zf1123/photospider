@@ -132,3 +132,37 @@ byte tails. Diagnostics identify `memcpy32`, `NEON-copy32` or `AVX2-copy32` plus
 build and host identity. View diagnostics identify scalar copy or owner retention.
 `array_owner_and_payload_cache()` checks oversized source release, changed NaN
 payloads in a warm constant cache and final release of borrowed broadcast storage.
+
+## Exact comparisons and select: NUM-07
+
+`photospider_numeric_comparisons` exercises the public `WorkflowDocument`,
+`Compiler`, `ExecutionContext` and `execute_fragments` path for the six
+predicates, `is_close` and `select`. Build and run a selected profile with
+Clang:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_comparisons -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
+python3 examples/numeric_workflow/comparison_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
+```
+
+Use `_accelerated_apple_silicon` on Apple Silicon or
+`_accelerated_x86_64` on x86-64. An unsupported host reports
+`BackendUnavailable`. The example expects
+`NUM-07: six predicates; select=[10,2,30] ... passed`, followed by selected
+branch support `{0,2}` and `{1}`, and confirms the `MAX/-MAX` `is_close` result
+is 0 without floating overflow. It separately checks that an invalid
+condition byte 2 fails only atom coordinate 1, while errors from unselected
+branches are not read.
+
+`comparison_oracle.py` decodes raw IEEE values and uses `Fraction` for the
+independent relation and tolerance oracle. The 3760-case set passed on 2026-09-14 under local AppleClang 21 strict/Apple
+and Ubuntu WSL Clang 18 strict/x86, and the installed public consumer passed.
+The composed `less -> select` workflow returns `[1,2,2]`; changing its condition
+and branch bindings updates the exact support and selected values. Other checks
+cover sNaN floating-environment preservation, typed validation, negative/zero
+strides, work/state limits and cancellation cleanup. Select diagnostics
+describe `scalar-condition`, `bit-choice` and an ISA `scratch-store`; they do
+not claim four independent samples per SIMD operation or a performance gain.
+These are manual targets with no CTest or integration-test registration.

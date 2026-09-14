@@ -2,7 +2,8 @@
 
 namespace ps::plugin_internal {
 Status register_builtin_operations(OperationRegistry* registry) {
-  for (const auto function : {register_numeric_arrays,
+  for (const auto function : {register_numeric_comparisons,
+                              register_numeric_arrays,
                               register_numeric_sequences,
                               register_image_gaussian_blur_with_kernel,
                               register_image_convolve_channels,

@@ -131,6 +131,8 @@ class PHOTOSPIDER_API BufferAllocator final {
    * domain. */
   bool owns(const CpuStorage& storage) const noexcept;
   /** @brief Allocates exactly size zero-initialized bytes after reservation.
+   * Local size, quota and allocation exhaustion use ResourceExhausted with
+   * CapacityLimit. External reservation/native failures preserve their Status.
    * Host allocation exceptions become ResourceExhausted; other host exceptions
    * become OperationFailed. Both notify all scoped failure observers before
    * returning, so a callback cannot catch an exception and recover publication.

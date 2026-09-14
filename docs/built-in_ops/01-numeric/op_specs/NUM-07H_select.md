@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-07H: select
@@ -101,6 +101,14 @@ all-false, alternating/disjoint conditions, invalid byte 2, all four branch
 dtypes, distinct sNaN payload bits, source strides, low metadata/output budgets,
 cancellation, cache-off and output lifetime after context destruction.
 
-Use independent bit selection plus source-read logs as the oracle. Deliver an
-actual public WorkflowDocument fixture and execution results when implemented;
-these Proposed versioned keys are not registered and no runtime test is claimed.
+The manual public workflow uses independent bit selection and instrumented
+source reads. On 2026-09-14, AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/x86 runs passed, as did the installed consumer. Checks include exact
+true/false support, unselected source-error isolation, invalid condition Atom
+attribution, four dtype bit patterns, selected typed-validation closure, changed
+condition/cache support, strides and composition after `numeric.less`.
+
+The diagnostic identity distinguishes scalar condition/bit choice and the target
+ISA scratch store for one observed sample. Fixed padded scratch is not a claim
+of four independently selected samples or a performance improvement. No numeric
+integration-test registration is included. The specification remains Proposed.

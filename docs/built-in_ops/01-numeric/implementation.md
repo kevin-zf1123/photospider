@@ -19,7 +19,7 @@ are complete; required fixes precede the branch push.
 | NUM-04 unary / trigonometric / rational pi | Pending | |
 | NUM-05 binary | Pending | |
 | NUM-06 clamp / remap | Pending | |
-| NUM-07 comparison / select | Pending | |
+| NUM-07 comparison / select | Complete (2026-09-14) | Eight operations / 24 keys; exact IEEE comparisons and dyadic is_close, staged select with precise Control/Data/Validation; strict/Apple and Clang WSL strict/x86 passed 3760 independent Fraction cases per profile and public composition, source/error isolation, bit-pattern, typed-validation, cache, fenv, resource and cleanup checks; installed consumer, test_resources, formatting/lint and independent scoped reviews passed |
 | NUM-08 mix / smoothstep | Pending | |
 | NUM-09 reshape / transpose / slice | Pending | |
 | NUM-10 concatenate / gather / scatter | Pending | |
