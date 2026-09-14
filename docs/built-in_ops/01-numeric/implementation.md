@@ -18,7 +18,7 @@ are complete; required fixes precede the branch push.
 | NUM-03 constant / broadcast | Complete (2026-09-14) | Per-node metadata, bounded owned/borrowed views, exact compact mappings and explicit NEON/AVX2 dense copy paths; strict/Apple locally and strict/x86 in Clang WSL passed manual arrays/mappings, bit-pattern, cache, typed-validation, resource and ownership checks; installed consumer and focused compiler/resources/dependency/fragments units passed; independent scoped review required fixes closed |
 | NUM-04 unary / trigonometric / rational pi | Pending | |
 | NUM-05 binary | Pending | |
-| NUM-06 clamp / remap | Pending | |
+| NUM-06 clamp / remap | Complete (2026-09-14) | Six keys; dynamic bounds, raw-bit clamp and whole-formula exact rational rounding; strict/Apple and Clang WSL strict/x86 passed 2826 Fraction cases per profile, explicit broadcast composition, all-port support, InvalidBounds isolation, upstream/typed errors, cache, fenv, layouts, work/cancel and owner cleanup; installed consumer, independent math/entry reviews and lint passed |
 | NUM-07 comparison / select | Complete (2026-09-14) | Eight operations / 24 keys; exact IEEE comparisons and dyadic is_close, staged select with precise Control/Data/Validation; strict/Apple and Clang WSL strict/x86 passed 3760 independent Fraction cases per profile and public composition, source/error isolation, bit-pattern, typed-validation, cache, fenv, resource and cleanup checks; installed consumer, test_resources, formatting/lint and independent scoped reviews passed |
 | NUM-08 mix / smoothstep | Pending | |
 | NUM-09 reshape / transpose / slice | Pending | |

@@ -133,6 +133,33 @@ build and host identity. View diagnostics identify scalar copy or owner retentio
 `array_owner_and_payload_cache()` checks oversized source release, changed NaN
 payloads in a warm constant cache and final release of borrowed broadcast storage.
 
+## Range operations: NUM-06
+
+`photospider_numeric_ranges` composes public `broadcast_node` helpers with the
+versioned `numeric.remap_range` and `numeric.clamp` keys through one
+`WorkflowDocument`. Build and run it with Clang:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_ranges -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_ranges _strict
+python3 examples/numeric_workflow/range_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_ranges _strict
+```
+
+Use `_accelerated_apple_silicon` on Apple Silicon or `_accelerated_x86_64` on
+x86-64. The composition expects
+`remap=[0,127.5,255,510]` followed by
+`clamp=[0,127.5,255,255]`. The workflow also checks per-atom `InvalidBounds`,
+exact sparse support and dirty mapping, required reads of all five remap
+operands, upstream endpoint failure, WorkLimit and mid-refinement cancellation
+cleanup. `range_oracle.py` uses raw IEEE decoding and exact rational arithmetic;
+local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86 each passed
+2826 cases on 2026-09-14. The installed consumer also passed. Other checks cover
+typed validation, dynamic-bound cache changes, caller floating flags,
+negative/zero/unaligned strides and packed global ROI origins.
+These are manual targets without CTest or
+integration-test registration, and no performance result is claimed.
+
 ## Exact comparisons and select: NUM-07
 
 `photospider_numeric_comparisons` exercises the public `WorkflowDocument`,

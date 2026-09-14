@@ -52,9 +52,12 @@ struct PredicateInteger final {
       if ((product >> bit) & 1)
         words[(shift + bit) / 64] |= UINT64_C(1) << ((shift + bit) % 64);
   }
-  void set(const BinaryParts& value) {
+  // Finite parts only; callers use fractional_bits 1074 or 2148, ensuring
+  // every decoded significand has a nonnegative in-capacity shift.
+  void set(const BinaryParts& value, unsigned fractional_bits = 2148) {
     words.fill(0);
-    const unsigned shift = static_cast<unsigned>(value.exponent + 2148);
+    const unsigned shift = static_cast<unsigned>(
+        value.exponent + static_cast<int>(fractional_bits));
     for (unsigned bit = 0; bit < 53; ++bit)
       if ((value.significand >> bit) & 1)
         words[(shift + bit) / 64] |= UINT64_C(1) << ((shift + bit) % 64);

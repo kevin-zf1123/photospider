@@ -15,6 +15,7 @@ void compare_keys(const std::uint64_t* a, const std::uint64_t* b,
 void select_words(std::uint64_t* result, std::uint64_t when_true,
                   std::uint64_t when_false, std::uint8_t condition,
                   SequenceProfile profile);
+const char* numeric_build_identity();
 const char* selection_implementation(SequenceProfile profile);
 const char* comparison_implementation(SequenceProfile profile);
 }  // namespace ps::plugin_internal::numeric_ops

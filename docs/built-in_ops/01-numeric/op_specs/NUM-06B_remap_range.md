@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-06B: remap_range
@@ -81,5 +81,16 @@ invalidation, owner/cache, budget/cancellation and public entry-point cases when
 implemented. Output storage covers requested coordinates only, with all actual
 source and result capacities accounted under the shared contract.
 
-This is distinct from the existing encode_range operation; no versioned
-remap_range runtime implementation or public test is claimed.
+This remains distinct from `encode_range`. The three versioned keys are
+registered with closed matching-shape/input-dtype inference, pure metadata
+validation and five explicit dynamic inputs.
+Exact rational evaluation, endpoint precedence, invalid-bound diagnostics and
+the public broadcast-to-remap-to-clamp workflow are implemented. Local strict
+and Apple runs passed the 2826-case independent Fraction oracle, endpoint and
+invalid-bound cases, sparse support, resource and cancellation cleanup.
+Ubuntu WSL Clang 18 strict/x86 passed the same 2826-case oracle and public
+workflows on 2026-09-14; the installed public consumer passed. Direct invocation
+also preserved caller floating flags while a negative nonzero exact result
+underflowed to negative zero. Independently reviewed adjacent-value rounding
+checks covered 4198-bit numerators and exact half-way boundaries. This does not
+change the Proposed status of this specification.

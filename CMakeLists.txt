@@ -101,6 +101,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_minimum.cpp
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
+  plugins/ops/01-numeric/numeric_ranges.cpp
   plugins/ops/01-numeric/numeric_comparisons.cpp
   plugins/ops/01-numeric/comparison_profiles.cpp
   plugins/ops/01-numeric/numeric_arrays.cpp

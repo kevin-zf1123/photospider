@@ -1,8 +1,10 @@
 # 数值与数组基础
 
 2026-09-14：`ops-impl` 正在实现本目录完整契约，按功能簇记录于
-[实现进度](implementation.md)。NUM-02 三种 CPU profile 与手动公开 workflow
-已运行，本簇独立审核及必要修复已完成；下述 Proposed 规格状态保持独立。
+[实现进度](implementation.md)。NUM-02、NUM-03、NUM-06 与 NUM-07 已完成实现，
+公开手动 workflow、独立数值 oracle、本机与 WSL Clang 检查、安装 consumer 和
+对应独立审查均已通过。其余功能簇继续按依赖实现。
+下述 Proposed 规格状态保持独立。
 
 2026-09-13：G4 已有 `numeric.radius_gather/radius_scatter` 与 ordered scan；Phase A 提供 `statistics.histogram/parameters/grade` 的受预算分页全局流程。见[采样](../../kernel-architecture/Dependency-Sampling.md)、[Region](../../kernel-architecture/Region-Semantics.md)、[整数统计](../../kernel-architecture/Integer-Statistics.md)。分页统计为显式注册 factory，不能替代任意 numeric reduction。
 

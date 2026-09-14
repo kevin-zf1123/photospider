@@ -95,6 +95,9 @@ void select_words(std::uint64_t* result, std::uint64_t when_true,
 #define PS_COMPARE_BUILD \
   PS_COMPARE_HOST        \
   ";no-fast-math;rounding-math;fp-contract=off;Clang/" __clang_version__
+const char* numeric_build_identity() {
+  return PS_COMPARE_BUILD;
+}
 const char* comparison_implementation(SequenceProfile profile) {
   static_assert(sizeof("photospider.comparison/"
                        "1;integer-keys;exact-dyadic-predicate;NEON-"
