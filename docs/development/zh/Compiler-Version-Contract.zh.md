@@ -165,11 +165,11 @@ joint contract 2 使用既有 v10 canonical framing 中的新 trait 值；contra
 
 ## 数值元组与诊断契约
 
-Package 0.12.0 使用 C++ OperationTraits 12、通用尾轴观察分组、数值 axis dtype
+Package 0.13.0 使用 C++ OperationTraits 13、通用尾轴观察分组、数值 axis dtype
 推导和宿主持有的 CPU 数值诊断。输出分组、regional execution 与 view traits 进入 operation identity，因此 semantic、
-physical-plan、plan-cache 域使用 v12。Dependency protocol 2、joint contract 2、
+physical-plan、plan-cache 域使用 v13。Dependency protocol 2、joint contract 2、
 result-region v6、WorkflowDocument schema 2 和 C operation ABI 9 保持不变。
-C++ 消费方须针对 0.12 重编译；旧 minor package 请求被拒绝。C ABI loader 拒绝既有
+C++ 消费方须针对 0.13 重编译；旧 minor package 请求被拒绝。C ABI loader 拒绝既有
 v9 枚举之外的 dtype rule；其布局不增加 C++ 分组、新 dtype rule 或诊断回调。
 
 内核 C/C++ 构建要求 Clang，包含 Apple Clang；Ubuntu WSL 正确性验证也使用
@@ -178,13 +178,20 @@ Clang。[数值 workflow](../../../examples/numeric_workflow/README.md) 通过�
 
 ## NUM-09 布局实现
 
-Package 版本为 0.12.0，C++ `OperationTraits` 版本为 12。operation
+Package 版本为 0.13.0，C++ `OperationTraits` 版本为 13。operation
 plugin ABI 保持 C ABI 9，descriptor 与 entrypoint 布局不变。九个
 `array.reshape`、`array.transpose` 和 `array.slice` key 使用现有 C++ traits 与
 dependency protocol，不增加 C ABI 字段、兼容别名或 shim。C++ installed consumer
-须针对 0.12 package 重新构建。
+须针对 0.13 package 重新构建。
 
 布局 traits 携带每节点 shape/permutation/count metadata，并在适用时携带
-regional atomic execution 和 `preserve_output_views`；这些字段进入 C++ operation
-identity。布局算子设置 `cacheable=false`，因为当前 content cache 不记录物理 owner/
+regional atomic execution 和 `preserve_output_views`。Static dependency pieces 替代
+之前的 static dependency maps；每个 piece 携带不相交的 observation coverage 与完整的
+各端口 dependency。这些字段进入 C++ operation identity。布局算子设置 `cacheable=false`，因为当前 content cache 不记录物理 owner/
 stride 分区；pure 与 active-Run sharing 仍独立。
+
+静态映射 identity 包含每个互不相交 piece 的完整 observation coverage 和每个
+`DependencyAxis::translation`。translation 是有符号 Int64；创建时使用加宽整数
+算术逐 piece 检查平移后的范围。C++ 字段为 `static_dependency_pieces`，不提供
+旧字段别名。repeated input template 只有在存在 metadata specializer、由其验证
+描述符关系时才能设置 `repeated_match=false`；concatenate 用它检查非拼接轴维度。

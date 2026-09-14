@@ -233,6 +233,43 @@ does not witness physical owner/stride partitions; pure and active-run sharing
 remain independent. These are manual targets without CTest or
 integration-test registration, and no performance result is claimed.
 
+## Indexing and scatter: NUM-10
+
+`photospider_numeric_indexing` exercises the eighteen `array.*` keys through
+the public helpers in `photospider/numeric/indexing.hpp`: `concatenate_node`,
+`gather_node`, `scatter_replace_node`, `scatter_sum_node`,
+`scatter_minimum_node` and `scatter_maximum_node`. Build and run with Clang:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_indexing -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+python3 examples/numeric_workflow/index_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+```
+
+The executable accepts `strict`, `apple` and `x86`; these select the profile
+and are not operation-key suffixes. The basic fixtures include concatenate
+`[[1,2],[3,4]] + [[5],[6]] -> [[1,2,5],[3,4,6]]`, gather
+`[[10,11,12],[20,21,22]]` with indices `[2,0,2]` ->
+`[[12,10,12],[22,20,22]]`, scatter replace `[10,3,4]`, scatter sum
+`[10,25,34]`, scatter minimum `[10,2,4]`, and scatter maximum
+`[10,23,34]` for the documented duplicate-target fixtures.
+
+The manual workflow also checks exact disjoint support, static dependency piece
+translation, duplicate contributor grouping, global index validation, raw and
+quiet NaN behavior, signed zeros, negative/zero/unaligned strides, changed
+index cache witnesses, typed validation, diagnostics, fenv, WorkLimit, state
+limits and cancellation cleanup. `index_oracle.py` independently checks
+integer coordinate mapping, contributor selection and Fraction aggregate
+results. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed all manual checks and 3858 oracle cases per profile. The
+installed public consumer and focused compiler/dependency/fragments/resources
+units passed. Diagnostics retain `evaluated=5, copied=4` after the fifth value
+fails; a copy-report WorkLimit stops before the next block is copied. The shared
+static-piece mapping and aggregate math received independent scoped reviews.
+These targets have no CTest or integration-test registration; no performance
+result is claimed.
+
 ## Exact comparisons and select: NUM-07
 
 `photospider_numeric_comparisons` exercises the public `WorkflowDocument`,

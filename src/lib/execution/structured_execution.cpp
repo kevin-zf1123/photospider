@@ -1405,7 +1405,7 @@ class StructuredExecution final {
     Status visited;
     if (step.traits.outputs[0].observation_kind ==
             ObservationKind::RequestRecord ||
-        step.traits.outputs[0].static_dependency_maps ||
+        step.traits.outputs[0].static_dependency_pieces ||
         step.traits.outputs[0].regional_atomic) {
       visited = drive(requested);
     } else {

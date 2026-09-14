@@ -234,8 +234,9 @@ Flight 身份仍限定 plan/snapshot。模板 hash 与重绑定计入 cache-work
 `specialize_metadata` callback。Registry 先验证普通参数与输入契约，在 mutex 外通过
 保留的 definition lease 调用，再验证固定输出数量及 metadata。Compiler 与直接入口
 使用 `resolve_traits`；未解析模板不能推导占位 descriptor。Shape、dtype、facets、tuple
-分组、payload 上限和静态依赖映射成为不可变节点 traits 并进入阶段 identity。
-该过程不得读取像素或依赖查询改变 metadata。
+分组、payload 上限和 static dependency pieces 成为不可变节点 traits 并进入阶段
+identity。该过程不得读取像素或依赖查询改变 metadata。每个 piece 保持不相交的
+observation coverage 与完整各端口 dependency，替代旧的 static dependency maps 表述。
 
 CPU staged 输出的 `maximum_output_payload_bytes` 替换 dense payload admission 下限。
 发布时另外核对新增输出 owner 的实际容量；借用 owner 必须已由该 session 接收。
@@ -270,3 +271,17 @@ resource root；没有 active TLS 时恢复 session start 保存的 root，包�
 这些机制不改变 legacy 边界。调用方取出裸 `Value` 或返回 raw vector 后自行复制时，不在
 publication token 的计费范围内。Empty 容器和当前实现内部的 geometry 工作尚未全面计费；
 受控资源模型也不证明所有进程 RSS 都受到控制。
+
+## 分段静态映射
+
+`static_dependency_pieces` 用互不相交的 coverage 集合划分完整的推导 observation
+域。每个 piece 记录逐端口 Data/Control/Validation 关系和可选 descriptor tags。
+选择的输入轴可以加有符号 translation；固定区间的 translation 必须为零。证书
+创建按对应 piece 坐标检查源域，backward 与 transpose 使用加宽算术和精确裁剪，
+因此可表达 concatenate 分段而不枚举其中的逻辑样本。
+
+Session 在回调前将每个声明 piece 与 Q 求交，分别保留 descriptor evidence。
+裁剪、axes/tags 复制和 descriptor 扩展计入 Session 及 shared work 限额；保留的
+geometry 容量包含 vector 扩容及构造重叠。资源不足不会扩大 Q 或请求未命中源端口。
+动态 regional 算子保留有界显式行：gather 记录观察到的索引位置，scatter 记录全局
+索引扫描和每个输出的实际贡献者。

@@ -283,7 +283,9 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
       maps.push_back(std::move(data));
       maps.push_back(std::move(validation));
     }
-    result.static_dependency_maps = std::move(maps);
+    result.static_dependency_pieces = std::vector<DependencyMapPiece>{
+        {Footprint::all(result.metadata.descriptor.shape).take_value(),
+         std::move(maps)}};
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };

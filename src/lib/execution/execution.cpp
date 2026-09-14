@@ -2192,7 +2192,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               Status::failure(ErrorCode::InvalidArgument,
                               "dependency producer has non-atomic ancestry"));
         if (frame.state == Frame::State::Initial && !frame.unit && !terminal &&
-            !step.traits.outputs[0].static_dependency_maps &&
+            !step.traits.outputs[0].static_dependency_pieces &&
             !step.traits.outputs[0].regional_atomic) {
           if (step.traits.outputs[0].dependency_version == 0 &&
               step.whole_boundary) {

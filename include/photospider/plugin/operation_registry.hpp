@@ -298,13 +298,14 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * The allocator still enforces this bound and failures remain sticky.
    */
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
-  /** @brief Closed CPU regional dependency mapping in observation coordinates.
-   * Present maps permit a multi-observation Atomic session without row
-   * enumeration. The program requests the complete static mapping once,
-   * then publishes its exact requested coverage. Dynamic requests,
-   * checkpoints, GPU and joint callbacks are excluded from this path.
+  /** @brief Disjoint complete CPU dependency pieces in observation coordinates.
+   * Coverage partitions the full inferred observation domain. Present pieces
+   * permit a multi-observation Atomic session without row enumeration. The
+   * program requests the complete static mapping once, then publishes its exact
+   * requested coverage. Dynamic requests, checkpoints, GPU and joint callbacks
+   * are excluded from this path.
    */
-  std::optional<std::vector<DependencyMappedNeed>> static_dependency_maps = {};
+  std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
   /** @brief Runs one normalized regional Atomic request without splitting it
    * into samples. Each dynamic Need stage supplies complete bounded atom rows.
    * Observations remain individual samples; successful certificates retain
@@ -368,7 +369,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 12U;
+  std::uint32_t version = 13U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -536,7 +537,7 @@ struct OperationOutputSpecialization final {
   bool regional_atomic = false;
   bool preserve_output_views = false;
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
-  std::optional<std::vector<DependencyMappedNeed>> static_dependency_maps = {};
+  std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
 };
 /** @brief Pure, deterministic metadata inference with no Value or I/O access.
  * Input descriptors and static parameters are validated first. Return one

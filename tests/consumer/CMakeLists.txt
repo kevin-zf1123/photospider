@@ -57,11 +57,11 @@ endif()
 
 find_package(Photospider 0.10 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.12 must reject a 0.10 consumer")
+  message(FATAL_ERROR "Photospider 0.13 must reject a 0.10 consumer")
 endif()
 
 find_package(
-  Photospider 0.12 CONFIG REQUIRED
+  Photospider 0.13 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(

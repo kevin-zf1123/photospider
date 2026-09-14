@@ -1402,7 +1402,7 @@ int main() {
     auto traits = registry.find_traits("fixture.double");
     PS_CHECK(traits.ok());
     PS_CHECK(traits.value().input_count == 1U);
-    PS_CHECK(traits.value().version == 12U);
+    PS_CHECK(traits.value().version == 13U);
     PS_CHECK(traits.value().parameter_schema.size() == 1U);
     PS_CHECK(traits.value().parameter_schema.front().key == "scale");
     PS_CHECK(traits.value().parameter_schema.front().type ==

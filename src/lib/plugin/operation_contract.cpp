@@ -45,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 12)
+  if (count > 1024 || traits.version != 13)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -376,7 +376,7 @@ Result<OperationMetadata> infer_operation_output(
           [](const auto& facet) { return facet.key == "photospider.image"; }))
     return mismatch(
         "explicit tuple grouping cannot override image observations");
-  if (t.outputs[0].static_dependency_maps) {
+  if (t.outputs[0].static_dependency_pieces) {
     auto all = Footprint::all(result.descriptor.shape);
     if (!all.ok())
       return Result<OperationMetadata>(all.status());
@@ -388,7 +388,7 @@ Result<OperationMetadata> infer_operation_output(
       shapes.push_back(input.descriptor.shape);
     auto certificate = DependencyCertificate::create_mapped(
         "static-metadata", observations.value(), shapes,
-        {{observations.value(), *t.outputs[0].static_dependency_maps}});
+        *t.outputs[0].static_dependency_pieces);
     if (!certificate.ok())
       return Result<OperationMetadata>(certificate.status());
   }
@@ -422,7 +422,7 @@ Status validate_operation_contract(const OperationTraits& t) {
        t.outputs[0].requires_dense_output))
     return invalid(
         "regional/view output requires CPU non-joint staged Atomic execution");
-  if (t.outputs[0].static_dependency_maps &&
+  if (t.outputs[0].static_dependency_pieces &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        t.outputs[0].observation_kind != ObservationKind::Atomic ||
        t.outputs[0].region_rule != OperationRegionRule::Dependency ||
@@ -490,8 +490,10 @@ Status validate_operation_contract(const OperationTraits& t) {
   };
   if (t.repeated_resolved || t.repeated_maximum > 1024 ||
       t.repeated_minimum > t.repeated_maximum ||
-      (t.repeated_maximum && (!t.repeated_minimum || !t.repeated_match ||
-                              t.input_count > 1024 - t.repeated_maximum)) ||
+      (t.repeated_maximum &&
+       (!t.repeated_minimum ||
+        (!t.repeated_match && !t.requires_metadata_specialization) ||
+        t.input_count > 1024 - t.repeated_maximum)) ||
       (!t.repeated_maximum && t.repeated_minimum))
     return invalid("invalid repeated input template");
   const auto maximum = t.input_count + t.repeated_maximum;

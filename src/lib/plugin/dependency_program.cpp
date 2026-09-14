@@ -245,7 +245,8 @@ struct DependencySession::Impl {
   std::function<Status(std::uint64_t)> shared_work;
   std::uint32_t polls = 0;
   NumericDiagnostics numeric;
-  std::vector<DependencyMappedNeed> mapped_inputs;
+  std::shared_ptr<const dependency_internal::MetadataOwner> mapped_metadata;
+  std::vector<DependencyMapPiece> mapped_pieces;
   bool mapped_requested = false, mapped_supplied = false;
   using BorrowedOwner =
       std::pair<const CpuStorage* const, std::weak_ptr<const CpuStorage>>;
@@ -374,6 +375,8 @@ struct DependencySession::Impl {
     std::vector<DependencyNeed>{}.swap(pending);
     std::vector<AtomCertificate>{}.swap(rows);
     regional_metadata.reset();
+    std::vector<DependencyMapPiece>{}.swap(mapped_pieces);
+    mapped_metadata.reset();
     state = DependencyContinuation{};
     const auto stopped = stop();
     return stopped.ok() || status.detail.origin == FailureOrigin::Protocol
@@ -398,25 +401,24 @@ struct DependencySession::Impl {
       copying = dependency_internal::metadata_owner(capacity.bytes * 4,
                                                     regional_metadata);
     }
-    if (traits.outputs[0].static_dependency_maps)
+    if (traits.outputs[0].static_dependency_pieces)
       return DependencyCertificate::create_mapped(
           certificate_identity, query.observations, input_shapes(),
-          {{query.observations, mapped_inputs}}, limits.sets);
+          mapped_pieces, limits.sets);
     return DependencyCertificate::create(certificate_identity,
                                          query.observations, input_shapes(),
                                          rows, limits.sets);
   }
   Result<std::vector<DependencyNeed>> projection(
       const DependencyNeedBatch& batch) const {
-    if (traits.outputs[0].static_dependency_maps) {
+    if (traits.outputs[0].static_dependency_pieces) {
       if (!batch.static_mapping || !batch.associations.empty() ||
           !batch.request_needs.empty())
         return Result<std::vector<DependencyNeed>>(
             invalid("mapped program requires its complete static mapping"));
       auto mapped = DependencyCertificate::create_mapped(
           certificate_identity, query.observations, input_shapes(),
-          {{query.observations, *traits.outputs[0].static_dependency_maps}},
-          limits.sets);
+          mapped_pieces, limits.sets);
       if (!mapped.ok())
         return Result<std::vector<DependencyNeed>>(mapped.status());
       return mapped.value().backward(query.observations, limits.sets);
@@ -523,7 +525,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     auto count = observations.value().element_count();
     if (!count.ok())
       return Result<std::shared_ptr<DependencySession>>(count.status());
-    if (count.value() > 1 && !traits.outputs[0].static_dependency_maps &&
+    if (count.value() > 1 && !traits.outputs[0].static_dependency_pieces &&
         !traits.outputs[0].regional_atomic)
       return Result<std::shared_ptr<DependencySession>>(
           invalid("request-only atomic start requires one observation"));
@@ -599,10 +601,70 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   auto status = impl->stop();
   if (!status.ok())
     return Result<std::shared_ptr<DependencySession>>(status);
-  if (impl->traits.outputs[0].static_dependency_maps)
-    impl->mapped_inputs = *impl->traits.outputs[0].static_dependency_maps;
+  if (impl->traits.outputs[0].static_dependency_pieces) {
+    const auto& pieces = *impl->traits.outputs[0].static_dependency_pieces;
+    if (pieces.size() > impl->limits.sets.maximum_boxes)
+      return Result<std::shared_ptr<DependencySession>>(
+          Status{ErrorCode::ResourceExhausted, "static piece capacity",
+                 FailureReason::CapacityLimit});
+    dependency_internal::MetadataBytes capacity;
+    for (const auto& piece : pieces) {
+      status = impl->consume(1 + piece.coverage.shape().size() +
+                             piece.coverage.boxes().size() *
+                                 piece.coverage.shape().size() +
+                             piece.inputs.size());
+      if (!status.ok())
+        return Result<std::shared_ptr<DependencySession>>(status);
+      for (const auto& map : piece.inputs) {
+        status = impl->consume(map.axes.size() + map.tags.size());
+        if (!status.ok())
+          return Result<std::shared_ptr<DependencySession>>(status);
+      }
+    }
+    capacity.pieces(pieces, true);
+    // Clipping may split each static box at each requested rectangle. Four
+    // times the Cartesian element bound covers geometric vector growth and
+    // retained/temporary overlap on the supported Clang standard libraries.
+    // Include descriptor evidence before retaining copies.
+    for (const auto& piece : pieces) {
+      capacity.add(2 * (piece.inputs.size() + impl->query.inputs.size()),
+                   sizeof(DependencyMappedNeed));
+      capacity.add(impl->query.inputs.size(), sizeof(DependencyTag));
+      for (const auto& box : piece.coverage.boxes()) {
+        static_cast<void>(box);
+        capacity.add(
+            impl->query.observations.boxes().size(),
+            4 * (sizeof(Region) + impl->query.observations.shape().size() *
+                                      sizeof(RegionDimension)));
+      }
+    }
+    impl->mapped_metadata = dependency_internal::metadata_owner(capacity.bytes);
+    impl->mapped_pieces.reserve(pieces.size());
+    auto clipping_limits = impl->limits.sets;
+    const auto prior_work = clipping_limits.consume_work;
+    clipping_limits.consume_work = [state = impl.get(),
+                                    prior_work](std::uint64_t amount) {
+      auto charged = state->consume(amount);
+      return charged.ok() && prior_work ? prior_work(amount) : charged;
+    };
+    for (const auto& piece : pieces) {
+      status = impl->consume(1 + piece.inputs.size() +
+                             piece.coverage.boxes().size());
+      if (!status.ok())
+        return Result<std::shared_ptr<DependencySession>>(status);
+      auto coverage =
+          piece.coverage.intersect(impl->query.observations, clipping_limits);
+      if (!coverage.ok())
+        return Result<std::shared_ptr<DependencySession>>(coverage.status());
+      if (!coverage.value().empty()) {
+        impl->mapped_pieces.push_back({coverage.take_value(), piece.inputs});
+        impl->mapped_pieces.back().inputs.reserve(piece.inputs.size() +
+                                                  impl->query.inputs.size());
+      }
+    }
+  }
   if (impl->query.kind == ObservationKind::Atomic &&
-      !impl->traits.outputs[0].static_dependency_maps) {
+      !impl->traits.outputs[0].static_dependency_pieces) {
     const auto row_count = impl->query.observations.element_count().value();
     const auto levels = row_count ? 64U - __builtin_clzll(row_count) : 0U;
     status = impl->consume(row_count * (1 + levels) *
@@ -646,8 +708,13 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     if (!empty.ok())
       return Result<std::shared_ptr<DependencySession>>(empty.status());
     DependencyNeed descriptor{port, 8, empty.take_value(), {{1, 0}}};
-    if (impl->traits.outputs[0].static_dependency_maps) {
-      impl->mapped_inputs.push_back({port, 8, {}, {{1, 0}}});
+    if (impl->traits.outputs[0].static_dependency_pieces) {
+      for (auto& piece : impl->mapped_pieces) {
+        status = impl->consume(1);
+        if (!status.ok())
+          return Result<std::shared_ptr<DependencySession>>(status);
+        piece.inputs.push_back({port, 8, {}, {{1, 0}}});
+      }
     } else if (impl->query.kind == ObservationKind::Atomic) {
       for (auto& row : impl->rows)
         row.inputs.push_back(descriptor);
@@ -1048,7 +1115,7 @@ Result<DependencyProgress> DependencySession::poll(
           return impl_->record_failure(
               invalid("invalid checkpoint host scope"));
         if (impl_->query.kind != ObservationKind::Atomic ||
-            impl_->traits.outputs[0].static_dependency_maps ||
+            impl_->traits.outputs[0].static_dependency_pieces ||
             impl_->traits.outputs[0].regional_atomic ||
             !impl_->traits.deterministic || !impl_->traits.side_effect_free)
           return impl_->record_failure(
@@ -1220,7 +1287,7 @@ Result<DependencyProgress> DependencySession::poll(
                         const std::function<Result<Value>()>& compute) {
         try {
           if (discovery_active ||
-              impl_->traits.outputs[0].static_dependency_maps ||
+              impl_->traits.outputs[0].static_dependency_pieces ||
               impl_->traits.outputs[0].regional_atomic)
             return Result<Value>(impl_->record_failure(
                 invalid("pure block inside GPU discovery")));
@@ -1544,7 +1611,7 @@ Result<DependencyProgress> DependencySession::poll(
                   impl_->query.inputs[port.first].facets, box))
             return Result<DependencyProgress>(impl_->retire(invalid(
                 "dependency transport requires complete image channels")));
-      if (impl_->traits.outputs[0].static_dependency_maps) {
+      if (impl_->traits.outputs[0].static_dependency_pieces) {
         if (impl_->mapped_requested)
           return Result<DependencyProgress>(
               impl_->retire(invalid("static mapping already requested")));
@@ -1587,7 +1654,7 @@ Result<DependencyProgress> DependencySession::poll(
       impl_->waiting = true;
       return Result<DependencyProgress>(std::move(*need));
     }
-    if (impl_->traits.outputs[0].static_dependency_maps &&
+    if (impl_->traits.outputs[0].static_dependency_pieces &&
         !impl_->query.outputs.empty() && !impl_->mapped_supplied)
       return Result<DependencyProgress>(impl_->retire(
           invalid("static mapping must be supplied before publication")));
@@ -1756,7 +1823,7 @@ Status DependencySession::supply(std::vector<ValueFragments> inputs,
                  FailureReason::CapacityLimit,
                  {FailureOrigin::Resource, FailureScope::Unspecified}});
     impl_->ready = std::move(inputs);
-    if (impl_->traits.outputs[0].static_dependency_maps)
+    if (impl_->traits.outputs[0].static_dependency_pieces)
       impl_->mapped_supplied = true;
     impl_->pending.clear();
     impl_->waiting = false;

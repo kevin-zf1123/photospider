@@ -164,8 +164,9 @@ OperationDefinition constant(const std::string& key, SequenceProfile profile) {
       result.maximum_output_payload_bytes =
           Value::element_size(inputs[0].descriptor.element_type);
     } else {
-      result.static_dependency_maps =
-          std::vector<DependencyMappedNeed>{{0, 5, {{-1, {0, 1}}}, {}}};
+      result.static_dependency_pieces = std::vector<DependencyMapPiece>{
+          {Footprint::all(result.metadata.descriptor.shape).take_value(),
+           {{0, 5, {{-1, {0, 1}}}, {}}}}};
     }
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
@@ -387,8 +388,9 @@ OperationDefinition broadcast(const std::string& key, SequenceProfile profile) {
       return Answer(available);
     OperationOutputSpecialization result;
     result.metadata.descriptor = {source.element_type, shape.take_value()};
-    result.static_dependency_maps = std::vector<DependencyMappedNeed>{
-        std::move(data), std::move(validation)};
+    result.static_dependency_pieces = std::vector<DependencyMapPiece>{
+        {Footprint::all(result.metadata.descriptor.shape).take_value(),
+         {std::move(data), std::move(validation)}}};
     if (layout == "view")
       result.maximum_output_payload_bytes = 0;
     return Answer(

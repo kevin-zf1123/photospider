@@ -394,6 +394,66 @@ struct RegionalMetadataProbe {
     return Result<DependencyPoll>(phase.inputs[0]);
   }
 };
+int static_piece_work() {
+  auto registry = make_default_operation_registry(false);
+  OperationDefinition definition;
+  definition.key = "test.static_piece_work";
+  definition.traits.input_count = 128;
+  definition.traits.input_schema.resize(128);
+  auto& output = definition.traits.outputs[0];
+  output.shape_rule = OperationShapeRule::Fixed;
+  output.fixed_output_shape = {64};
+  output.output_element_type = ElementType::Int64;
+  output.region_rule = OperationRegionRule::Dependency;
+  output.dependency_version = 1;
+  output.continuation_bytes = sizeof(RegionalMetadataProbe);
+  output.maximum_dependency_stages = 2;
+  output.static_dependency_pieces = std::vector<DependencyMapPiece>{
+      {Footprint::from_regions({64}, {Region({{0, 32}})}).take_value(),
+       {{0, 1, {{0, {}, 0}}, {}}}},
+      {Footprint::from_regions({64}, {Region({{32, 32}})}).take_value(),
+       {{1, 1, {{0, {}, -32}}, {}}}}};
+  unsigned starts = 0;
+  definition.start_dependency = [&](const auto&, const auto& allocator) {
+    ++starts;
+    return DependencyContinuation::make<RegionalMetadataProbe>(allocator);
+  };
+  PS_CHECK(registry->register_operation(std::move(definition)).ok());
+  PS_CHECK(registry->freeze().ok());
+  DependencyRequest request;
+  request.inputs.resize(128, {{ElementType::Int64, {32}}, {}});
+  request.snapshot_identity = "piece-work";
+  std::vector<Region> boxes;
+  for (std::uint64_t i = 0; i < 20; ++i)
+    boxes.emplace_back(std::vector<RegionDimension>{{3 * i, 1}});
+  request.outputs = Footprint::from_regions({64}, boxes).take_value();
+  request.limits.maximum_work = 50;
+  std::uint64_t prior_work = 0;
+  request.limits.sets.consume_work = [&](std::uint64_t amount) {
+    prior_work += amount;
+    return Status::success();
+  };
+  auto stopped = registry->start_dependency("test.static_piece_work", request);
+  PS_CHECK(stopped.status().reason == FailureReason::WorkLimit);
+  PS_CHECK(starts == 0);
+  PS_CHECK(prior_work > 0);
+  request.outputs = Footprint::all({64}).take_value();
+  request.limits.maximum_work = 10000;
+  std::uint64_t root_work = 0;
+  auto limited = registry->start_dependency(
+      "test.static_piece_work", request, BufferAllocator{},
+      [&](std::uint64_t amount) {
+        root_work += amount;
+        return root_work > 200 ? Status{ErrorCode::ResourceExhausted,
+                                        "root work", FailureReason::WorkLimit}
+                               : Status::success();
+      });
+  PS_CHECK(limited.status().reason == FailureReason::WorkLimit);
+  PS_CHECK(starts == 0);
+  auto accepted = registry->start_dependency("test.static_piece_work", request);
+  PS_CHECK(accepted.ok() && starts == 1);
+  return 0;
+}
 int regional_scope_retention() {
   auto registry = make_default_operation_registry(false);
   OperationDefinition definition;
@@ -577,6 +637,7 @@ int main() {
   PS_CHECK(on_demand_payload() == 0);
   PS_CHECK(dependency_metadata_owners() == 0);
   PS_CHECK(regional_scope_retention() == 0);
+  PS_CHECK(static_piece_work() == 0);
   PS_CHECK(mixed_certificate_roots() == 0);
   return 0;
 }

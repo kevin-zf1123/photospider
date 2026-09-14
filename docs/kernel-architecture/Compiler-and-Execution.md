@@ -312,7 +312,7 @@ input contracts first, invokes the callback outside its mutex under the retained
 definition lease, and validates the fixed-count output metadata. Compiler and
 direct entry points use `resolve_traits`; unresolved templates cannot infer their
 placeholder descriptor. Shape, dtype, facets, tuple grouping, payload bounds and
-static dependency maps become immutable per-node traits and enter stage identity.
+static dependency pieces become immutable per-node traits and enter stage identity.
 No pixel access or query-dependent metadata is permitted.
 
 `maximum_output_payload_bytes` replaces the dense payload admission floor for a
@@ -360,3 +360,21 @@ These mechanisms do not change legacy boundaries. A caller that extracts a raw
 token's accounting. Empty containers and geometry work internal to the current
 implementation are not comprehensively charged, and the managed-resource
 model does not certify that all process RSS is controlled.
+
+## Partitioned static mappings
+
+`static_dependency_pieces` partitions the complete inferred observation domain
+into disjoint coverage sets. Each piece records per-port Data/Control/Validation
+relations and optional descriptor tags. Selected input axes may add a signed
+translation; fixed intervals require zero translation. Certificate construction
+checks only the selected piece's coordinates against the source domain, while
+backward and transpose use widened arithmetic and exact clipping. This supports
+concatenation slabs without enumerating their logical samples.
+
+A Session intersects each declared piece with Q before callbacks and retains
+descriptor evidence separately. Clipping work, copied axes/tags and descriptor
+expansion charge Session and shared work limits. Its retained geometry ledger
+includes vector capacity growth and construction overlap; resource exhaustion
+never widens Q or requests an unhit source port. Generic dynamic regional
+operations retain bounded explicit rows: gather records observed index positions,
+and scatter records its global index scan plus each output's actual contributors.

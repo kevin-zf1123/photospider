@@ -68,25 +68,39 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->text(output.key);
   digest->integer(output.regional_atomic);
   digest->integer(output.preserve_output_views);
-  digest->integer(output.static_dependency_maps.has_value());
-  if (output.static_dependency_maps) {
-    digest->integer(output.static_dependency_maps->size());
-    for (const auto& map : *output.static_dependency_maps) {
-      digest->integer(map.port);
-      digest->integer(map.roles);
-      digest->integer(map.axes.size());
-      for (const auto& axis : map.axes) {
-        digest->integer(static_cast<std::uint32_t>(axis.observation_axis));
-        digest->integer(axis.fixed.offset);
-        digest->integer(axis.fixed.extent);
-      }
-      digest->integer(map.tags.size());
-      for (const auto& tag : map.tags) {
-        digest->integer(tag.kind);
-        digest->integer(tag.id);
+  digest->integer(output.static_dependency_pieces.has_value());
+  if (output.static_dependency_pieces) {
+    digest->integer(output.static_dependency_pieces->size());
+    for (const auto& piece : *output.static_dependency_pieces) {
+      digest->integer(piece.coverage.shape().size());
+      for (auto extent : piece.coverage.shape())
+        digest->integer(extent);
+      digest->integer(piece.coverage.boxes().size());
+      for (const auto& box : piece.coverage.boxes())
+        for (const auto& dimension : box.dimensions()) {
+          digest->integer(dimension.offset);
+          digest->integer(dimension.extent);
+        }
+      digest->integer(piece.inputs.size());
+      for (const auto& map : piece.inputs) {
+        digest->integer(map.port);
+        digest->integer(map.roles);
+        digest->integer(map.axes.size());
+        for (const auto& axis : map.axes) {
+          digest->integer(static_cast<std::uint32_t>(axis.observation_axis));
+          digest->integer(axis.fixed.offset);
+          digest->integer(axis.fixed.extent);
+          digest->integer(static_cast<std::uint64_t>(axis.translation));
+        }
+        digest->integer(map.tags.size());
+        for (const auto& tag : map.tags) {
+          digest->integer(tag.kind);
+          digest->integer(tag.id);
+        }
       }
     }
   }
+
   digest->integer(output.maximum_output_payload_bytes.has_value());
   if (output.maximum_output_payload_bytes)
     digest->integer(*output.maximum_output_payload_bytes);

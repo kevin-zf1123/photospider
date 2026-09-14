@@ -75,10 +75,10 @@ bool less_need(const DependencyMappedNeed& a, const DependencyMappedNeed& b) {
   return a.tags < b.tags;
 }
 std::vector<DependencyMappedNeed> canonical_maps(
-    const std::vector<DependencyMappedNeed>& inputs,
-    const std::vector<std::uint64_t>& output,
+    const std::vector<DependencyMappedNeed>& inputs, const Footprint& domain,
     const std::vector<std::vector<std::uint64_t>>& shapes,
     MappingBudget* budget) {
+  const auto& output = domain.shape();
   std::vector<DependencyMappedNeed> result;
   for (const auto& source : inputs) {
     budget->work();
@@ -98,13 +98,20 @@ std::vector<DependencyMappedNeed> canonical_maps(
         throw MappingStop{invalid("mapped observation axis outside rank")};
       if (axis.observation_axis >= 0) {
         const auto bit = 1U << axis.observation_axis;
-        if ((used & bit) ||
-            output[axis.observation_axis] > shapes[need.port][i])
-          throw MappingStop{
-              invalid("mapped axes must be injective and in bounds")};
+        if (used & bit)
+          throw MappingStop{invalid("mapped axes must be injective")};
+        for (const auto& box : domain.boxes()) {
+          budget->work();
+          const auto range = box.dimensions()[axis.observation_axis];
+          const auto begin =
+              static_cast<__int128>(range.offset) + axis.translation;
+          const auto end = begin + range.extent;
+          if (begin < 0 || end > shapes[need.port][i])
+            throw MappingStop{invalid("translated mapped axis outside input")};
+        }
         used |= bit;
         axis.fixed = {0, 0};
-      } else if (!axis.fixed.extent ||
+      } else if (axis.translation || !axis.fixed.extent ||
                  axis.fixed.offset > shapes[need.port][i] ||
                  axis.fixed.extent > shapes[need.port][i] - axis.fixed.offset) {
         throw MappingStop{invalid("mapped fixed interval outside input")};
@@ -148,10 +155,15 @@ std::vector<DependencyNeed> project(
         if (boxes.size() >= budget->limits.maximum_boxes)
           throw MappingStop{Status{ErrorCode::ResourceExhausted, {}}};
         std::vector<RegionDimension> dimensions;
-        for (const auto& axis : map.axes)
-          dimensions.push_back(axis.observation_axis < 0
-                                   ? axis.fixed
-                                   : box.dimensions()[axis.observation_axis]);
+        for (const auto& axis : map.axes) {
+          auto dimension = axis.observation_axis < 0
+                               ? axis.fixed
+                               : box.dimensions()[axis.observation_axis];
+          if (axis.observation_axis >= 0)
+            dimension.offset = static_cast<std::uint64_t>(
+                static_cast<__int128>(dimension.offset) + axis.translation);
+          dimensions.push_back(dimension);
+        }
         boxes.emplace_back(std::move(dimensions));
       }
     }
@@ -259,7 +271,7 @@ std::uint64_t DependencyCertificate::measure_storage() const noexcept {
       footprint(piece.coverage);
       add(piece.inputs.size());
       for (const auto& need : piece.inputs) {
-        add(need.axes.size(), 4);
+        add(need.axes.size(), 5);
         add(need.tags.size(), 3);
       }
     }
@@ -315,7 +327,7 @@ Result<DependencyCertificate> DependencyCertificate::create_mapped_owned(
         return Result<DependencyCertificate>(
             invalid("mapped pieces overlap or exceed coverage"));
       auto maps =
-          canonical_maps(piece.inputs, coverage.shape(), input_shapes, &budget);
+          canonical_maps(piece.inputs, piece.coverage, input_shapes, &budget);
       visited = take(visited.unite(piece.coverage, budget.geometry()));
       if (!piece.coverage.empty())
         normalized.push_back({std::move(piece.coverage), std::move(maps)});
@@ -517,12 +529,17 @@ Result<Footprint> DependencyCertificate::transpose_mapped(
                      change.offset < axis.fixed.offset + axis.fixed.extent;
             } else {
               const auto size = coverage_.shape()[axis.observation_axis];
-              if (change.offset >= size)
+              const auto begin =
+                  static_cast<__int128>(change.offset) - axis.translation;
+              const auto end = begin + change.extent;
+              const auto low = std::max<__int128>(0, begin);
+              const auto high = std::min<__int128>(size, end);
+              if (low >= high)
                 hit = false;
               else
                 dimensions[axis.observation_axis] = {
-                    change.offset,
-                    std::min(change.extent, size - change.offset)};
+                    static_cast<std::uint64_t>(low),
+                    static_cast<std::uint64_t>(high - low)};
             }
           }
           if (hit) {
@@ -551,7 +568,7 @@ Result<DependencyCertificate> DependencyCertificate::merge_mapped(
     construction_bytes.add(dependency_internal::certificate_bytes(
         other.identity_, other.coverage_, other.input_shapes_, other.rows_,
         other.pieces_, true));
-    // Fixed-axis conversion replaces 16-byte region dimensions with 24-byte
+    // Fixed-axis conversion replaces 16-byte region dimensions with 32-byte
     // axes; this bounded workspace also covers vector growth and both copies.
     if (construction_bytes.bytes > UINT64_MAX / 4)
       return Result<DependencyCertificate>(

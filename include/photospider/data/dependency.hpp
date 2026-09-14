@@ -51,23 +51,29 @@ struct AtomCertificate final {
   std::vector<DependencyNeed> inputs;
 };
 /** @brief One input axis copied from an observation axis or held in a fixed
- * half-open interval. A nonnegative observation_axis selects that axis;
- * -1 selects fixed. Repeated selected axes within one map are prohibited.
+ * half-open interval. A nonnegative observation_axis selects that axis plus
+ * signed translation; -1 selects fixed and requires translation zero. Mapping
+ * creation checks translated coordinates against each piece coverage. Repeated
+ * selected axes within one map are prohibited.
  */
 struct DependencyAxis final {
   std::int32_t observation_axis = -1;
   RegionDimension fixed{0, 1};
+  std::int64_t translation = 0;
   bool operator==(const DependencyAxis& other) const noexcept {
     return observation_axis == other.observation_axis &&
            fixed.offset == other.fixed.offset &&
-           fixed.extent == other.fixed.extent;
+           fixed.extent == other.fixed.extent &&
+           translation == other.translation;
   }
   bool operator<(const DependencyAxis& other) const noexcept {
     if (observation_axis != other.observation_axis)
       return observation_axis < other.observation_axis;
-    return fixed.offset != other.fixed.offset
-               ? fixed.offset < other.fixed.offset
-               : fixed.extent < other.fixed.extent;
+    if (fixed.offset != other.fixed.offset)
+      return fixed.offset < other.fixed.offset;
+    if (fixed.extent != other.fixed.extent)
+      return fixed.extent < other.fixed.extent;
+    return translation < other.translation;
   }
 };
 /** @brief Closed exact mapping to one port's samples and non-spatial tags.

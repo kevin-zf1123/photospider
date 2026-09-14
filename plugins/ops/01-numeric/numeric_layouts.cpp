@@ -11,6 +11,7 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
+#include "01-numeric/array_publication.hpp"
 #include "data/dependency_metadata.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
@@ -326,21 +327,6 @@ struct LayoutState final {
     diagnostics.copied_elements = view ? 0 : count;
     return phase.report_numeric(diagnostics);
   }
-  struct PublishedOwner {
-    std::shared_ptr<const dependency_internal::MetadataOwner> metadata;
-    std::shared_ptr<const CpuStorage> source;
-  };
-  Result<Value> retain_publication(
-      Value value,
-      const std::shared_ptr<const dependency_internal::MetadataOwner>&
-          publication) const {
-    auto owner = std::make_shared<PublishedOwner>(
-        PublishedOwner{publication, value.storage()});
-    auto alias = std::shared_ptr<const CpuStorage>(owner, owner->source.get());
-    return Value::from_storage(value.descriptor(), value.region(),
-                               value.layout(), std::move(alias),
-                               value.facets());
-  }
   Result<DependencyPoll> poll(const DependencyPhase& phase) {
     using Answer = Result<DependencyPoll>;
     if (!stage) {
@@ -362,18 +348,7 @@ struct LayoutState final {
     const auto& descriptor = phase.query.output.descriptor;
     const auto width = Value::element_size(descriptor.element_type);
     const auto boxes = phase.query.outputs.boxes().size();
-    const auto per_box =
-        4 * (sizeof(Value) + target_rank * 40 + sizeof(PublishedOwner)) +
-        sizeof(Region) + target_rank * sizeof(RegionDimension);
-    if (boxes > (UINT64_MAX - 4096) / per_box)
-      return Answer(Status{ErrorCode::ResourceExhausted,
-                           "layout publication metadata overflow",
-                           FailureReason::CapacityLimit});
-    // Bounded per-box metadata construction/copy workspace. One publication
-    // guard is shared by all storage aliases, so coalescing keeps its ledger.
-    // It owns no Values and cannot form a cycle with the returned fragments.
-    auto publication =
-        dependency_internal::metadata_owner(4096 + boxes * per_box);
+    numeric_ops::ArrayPublication publication(boxes, target_rank);
     ResourceVector<Value> fragments;
     for (const auto& box : phase.query.outputs.boxes()) {
       if (layout != "dense") {
@@ -384,8 +359,7 @@ struct LayoutState final {
           auto status = report(phase, box.element_count().value(), true);
           if (!status.ok())
             return Answer(status);
-          auto retained =
-              retain_publication(std::move(*candidate.value()), publication);
+          auto retained = publication.retain(std::move(*candidate.value()));
           if (!retained.ok())
             return Answer(retained.status());
           fragments.push_back(retained.take_value());
@@ -439,16 +413,16 @@ struct LayoutState final {
       auto published = std::move(output).publish();
       if (!published.ok())
         return Answer(published.status());
-      auto retained = retain_publication(published.take_value(), publication);
+      auto retained = publication.retain(published.take_value());
       if (!retained.ok())
         return Answer(retained.status());
       fragments.push_back(retained.take_value());
     }
     if (phase.query.cancellation.cancelled())
       return Answer(Status{ErrorCode::Cancelled, {}});
-    auto result = ValueFragments::create_view(
-        descriptor, {}, phase.query.outputs, fragments.data(), fragments.size(),
-        phase.sets, publication);
+    auto result =
+        publication.finish(descriptor, phase.query.outputs, fragments.data(),
+                           fragments.size(), phase.sets);
     return result.ok() ? Answer(result.take_value()) : Answer(result.status());
   }
 };
@@ -563,8 +537,9 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
           if (semantic.value().kind == SemanticKind::Image)
             validation.axes[2] = {-1, {0, input.shape[2]}};
         }
-      result.static_dependency_maps = std::vector<DependencyMappedNeed>{
-          std::move(data), std::move(validation)};
+      result.static_dependency_pieces = std::vector<DependencyMapPiece>{
+          {Footprint::all(result.metadata.descriptor.shape).take_value(),
+           {std::move(data), std::move(validation)}}};
     }
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});

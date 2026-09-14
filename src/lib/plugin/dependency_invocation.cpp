@@ -214,7 +214,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{stop(), {}});
       return fragments[0].view(region);
     }
-    if (resolved.value().outputs[0].static_dependency_maps ||
+    if (resolved.value().outputs[0].static_dependency_pieces ||
         resolved.value().outputs[0].regional_atomic) {
       auto result = run(samples.value());
       if (!result.ok())

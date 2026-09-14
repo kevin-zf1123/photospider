@@ -433,7 +433,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 12U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 13U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
@@ -1797,8 +1797,8 @@ Result<OperationTraits> OperationRegistry::resolve_traits(
       output.preserve_output_views = specialization.preserve_output_views;
       output.maximum_output_payload_bytes =
           specialization.maximum_output_payload_bytes;
-      output.static_dependency_maps =
-          std::move(specialization.static_dependency_maps);
+      output.static_dependency_pieces =
+          std::move(specialization.static_dependency_pieces);
     }
     traits.requires_metadata_specialization = false;
     auto expanded_validation = traits;
