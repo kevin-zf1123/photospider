@@ -15,6 +15,8 @@ Status register_log_shapers(OperationRegistry* registry);
 Status register_parametric_bezier(OperationRegistry* registry);
 Status register_bezier_function(OperationRegistry* registry);
 Status register_color_ramps(OperationRegistry* registry);
+Status register_nonuniform_lowpass(OperationRegistry* registry);
+Status register_uniform_lowpass(OperationRegistry* registry);
 Status register_curve_inverse(OperationRegistry* registry);
 Status register_curve_interpolation(OperationRegistry* registry);
 Status register_numeric_expression(OperationRegistry* registry);

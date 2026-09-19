@@ -617,16 +617,23 @@ void cache_composition_and_validation(ps::CpuNumericProfile profile) {
             "global y upstream failure precedes query rejection");
   }
   // Generic output does not discard the typed source's validation obligation.
-  auto facet = take(ps::encode_semantic(ps::coverage_semantics()));
+  ps::SemanticDescriptor signal;
+  signal.kind = ps::SemanticKind::SampledSignal;
+  signal.channels = {{"ordinate", "value", "dimensionless"}};
+  signal.sample_step = 1;
+  signal.sample_axis_unit = "sample";
+  auto facet = take(ps::encode_semantic(signal));
   auto typed =
-      array(ps::ElementType::Float32, {3}, {0, 0x3f800000, 0x40000000});
+      array(ps::ElementType::Float32, {3}, {0, 0x3f800000, 0x7fc00000});
   typed =
       take(ps::Value::from_storage(typed.descriptor(), typed.region(),
                                    typed.layout(), typed.storage(), {facet}));
   Fixture invalid(authored(true, profile),
                   {doubles({3}, {0, 1, 2}), typed, doubles({1}, {0})});
   auto failed = invalid.run({{"values", take(ps::Footprint::all({1}))}}, false);
-  require(!failed.ok(), "global typed invalid y rejects exact knot");
+  require(!failed.ok() && failed.status().message ==
+                              "sample violates typed semantic domain",
+          "global typed payload invalid y rejects exact knot");
   std::cout << "warm cache replacement, public forward/inverse composition, "
                "partitions, fallback and typed/upstream validation passed\n";
 }

@@ -935,3 +935,90 @@ all four groups on both native profiles. The shared
 forward interpolation and LUT1D regressions passed 2484 and 1416 cases respectively
 on both native profiles. The focused compiler unit passed. No integration test
 was registered or run for this feature.
+
+## CRV-11 resampling and certified lowpass
+
+The four resampling helpers append existing CRV-01 interpolation and independent
+`core.identity` nodes. Identity preserves new-position dtype, facets and raw
+special bits; only sample demand adds curve validation. Exports remain caller
+controlled and IDs reserve declared/referenced nodes. No new interpolation
+primitive, implicit filtering or sample-rate inference is introduced.
+
+Uniform tap support is exact before coefficient evaluation. A 128-bit product
+represents `2*cutoff*j` as a dyadic; integer phases are sinc zeros and the integer
+part determines its lobe sign. Hann/Blackman endpoints are exact zeros. Gaussian
+support is always positive. Mapped physical reads may merge, but logical offsets
+retain their order for NaN payload selection and signed infinity contributions.
+Finite pair sums are compared exactly in binary64 minimum-subnormal units;
+if every nonzero ±j pair equals twice the center, evenness proves the final
+center independently of coefficient approximation. Constant raw bits are checked
+first to preserve -0. Even these uniform shortcuts require a certified positive
+full discrete normalizer.
+
+`DirectedLowpassKernel` encloses complete mathematical coefficients. Rational-π
+arguments are reduced by an exact integer chosen from an interval endpoint;
+any chosen integer is valid if the remaining certified angle lies in [-2,2].
+Taylor sin/cos terms have decreasing alternating tails after the checked index.
+Tiny sinc arguments use their removable-singularity series. Decimal window
+coefficients are exact rationals. Kaiser uses the positive series
+`I0(beta*sqrt(1-u*u)) = sum (beta*beta*(1-u*u)/4)^n/(n!)^2`;
+no rounded sqrt is introduced. Once subsequent ratios are at most 1/2, twice
+the first omitted term bounds the tail. The common `1/I0(beta)` cancels from
+both the complete numerator and denominator. Gaussian divides binary significands
+before applying their exact exponent difference, avoiding a tiny denominator
+being rounded to zero. Its negative exponential returns a real positive-value
+enclosure even when only `[0,2^-precision]` is needed. Such a tap remains a
+source/IEEE dependency.
+
+Continuous geometry keeps coordinates as signed integers in `2^-1074` units.
+Floor quotient/remainder select exact periods; forward segments choose the right
+piece at knots and reflected backward segments choose the left. World coordinate
+copies are clipped to positive-length support, with no wrap seam bridge. Stored
+coordinate combinations fit below 2102 bits; the common 12288-bit records and
+ResourceVector maps are admitted under host capacity. Global positions and local
+value endpoints receive separate Control/Data and typed Validation certificates.
+Output publication metadata is admitted before constructing mutable fragments,
+including on failed/cancelled arithmetic paths.
+
+For continuous exact landmarks, merge the positive and negative partitions and
+compare `F(u)+F(-u)` by integer rational cross products. If every overlap has zero
+slope and the same exact constant C, return `RN(C/2)`. This proves interior affine,
+collinear insertion, odd cancellation, zero-boundary half-constant and subnormal
+midpoint cases without endless interval refinement. Numerator/slope integers need
+less than 4204 bits, paired numerator/denominator less than 6306/4204, and equality
+cross products less than 10510, within the 12288-bit arena. All source endpoints
+are read/validated before this shortcut. Full continuous normalization is strictly
+positive for every admitted tuple: Gaussian is positive; the four sinc windows
+are nonnegative and nonincreasing on [0,R], and integration by parts against the
+strictly positive sine-integral primitive proves positivity. Successive positive/
+negative sine lobes paired against decreasing `1/t` prove that primitive's sign.
+
+General continuous integration uses `u=(world-center)/R`; the Jacobian cancels.
+Each source piece is an exact affine `A+B*u`. A global polynomial in `u^2`
+encloses the true kernel with an explicit uniform error. Sinc/cos/Gaussian
+coefficients use their full Taylor formulas; after a ratio bound of 1/2, twice
+the next coefficient bounds the omitted tail on |u|<=1. Kaiser expands the finite
+positive I0 series in `(1-u^2)^n`, retaining its independent uniform tail.
+Product error is `Ea*|b|+Eb+Ea*Eb` with true sinc magnitude at most one.
+Analytic monomial moments integrate the polynomial against each affine piece.
+The numerator adds `piece_length*max_endpoint_magnitude*kernel_error`, while the
+denominator adds twice the kernel error. A positive denominator enclosure and
+identical RN endpoints of the full quotient are required for publication.
+Sources are scaled by an exact power of two, restored only in final rounding;
+coordinate differences divide as same-unit integers, avoiding premature underflow.
+
+Both families refine Q precision from 128 through 4096; continuous Taylor order
+is at most 512. Coefficients are separately admitted ResourceVectors, not hidden
+heap limbs or cached rounded weights. Global series can be expensive or fail on
+high frequencies/large beta/support-to-sigma ratios; unresolved zero/near-midpoint
+cases return ResourceExhausted rather than guessing a sign or publishing a fixed
+quadrature approximation. No arbitrary one-sided interval is declared negative
+zero. Current accelerated keys report FunctionUnsupported strict fallback.
+Every scale scan, partition piece, coefficient/refinement and limb operation has
+work/cancellation checks. No integration tests or external math dependency enter
+the product. MPFR/Fraction are independent manual references only.
+
+Public examples, exact fixtures, response checks and runtime commands are in
+[resampling](../../../examples/numeric_workflow/README.md#signal-resampling),
+[uniform lowpass](../../../examples/numeric_workflow/README.md#uniform-lowpass)
+and [nonuniform lowpass](../../../examples/numeric_workflow/README.md#nonuniform-lowpass).

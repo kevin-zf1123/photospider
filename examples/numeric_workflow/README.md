@@ -15,7 +15,7 @@ accepted by the parameter helpers and rejected as runtime Value facets.
 White and primary normalization use exact integer determinant checks, including
 virtual primaries and near-singular invertible matrices. ICC identity metadata
 does not by itself own profile bytes. The explicit ICC resource path below
-provides that owner; the ramp operators are still being implemented.
+provides that owner; the color-ramp operators below consume it.
 
 The editable `public_workflow()` in `color_array.cpp` attaches an RGB straight
 description to `[2,2,4]` input and uses the existing public `abs_node`, `Compiler`
@@ -1497,3 +1497,234 @@ all four groups and all 404 oracle cases passed per profile. Installed package
 0.16 consumers passed both native profiles. WSL results establish numerical
 correctness, with no performance claim. The shared forward and LUT1D arithmetic
 regressions passed 2484 and 1416 cases per native profile.
+
+## Signal resampling
+
+`photospider/numeric/resampling.hpp` exposes four ordinary workflow templates:
+`resample_linear`, `resample_pchip`, `resample_linear_multi`, and
+`resample_pchip_multi`. They append the corresponding existing CRV-01 node and
+an independent `core.identity` forwarding `new_positions`. Inputs are
+`positions[K]`, `values[K]` or `[K,C]`, and `new_positions[N]`, independently
+Float32/64. Returned `ResampledSignal` contains connectable `samples` and
+`positions` references, plus `outputs()` for explicit caller-named exports.
+Sample dtype defaults to Float64 and domain policy to Reject, with the forward
+interpolator's Clamp and LinearExtrapolate policies also available.
+
+Only sample demand validates/interpolates the old signal. Position-only demand
+preserves new-position dtype, descriptor, facets, special-value bits and owners,
+including generic sNaN/Inf/-0, without touching the old positions or values.
+Normal typed/upstream source validation still applies. IDs avoid declarations,
+existing exports and forward references; failure leaves the document unchanged.
+
+The editable `resampling.cpp::filtered_workflow` connects an explicit Hann
+low-pass to linear resampling through the installed API:
+
+```cpp
+#include <photospider/numeric/lowpass.hpp>
+#include <photospider/numeric/resampling.hpp>
+
+// Inputs 1/2/3 bind old positions, signal values and requested new positions.
+auto filter = ps::numeric::lowpass_uniform_hann_sinc_node(
+    10, ps::WorkflowInputReference{2}, 0, 2, .25,
+    ps::numeric::LowpassBoundary::Wrap);
+if (!filter.ok()) return filter.status();
+document.nodes.push_back(filter.take_value());
+auto sampled = ps::numeric::resample_linear(
+    document, ps::WorkflowInputReference{1},
+    ps::WorkflowNodeOutput{10, "values"}, ps::WorkflowInputReference{3});
+if (!sampled.ok()) return sampled.status();
+auto exports = sampled.value().outputs();
+document.outputs.insert(document.outputs.end(), exports.begin(), exports.end());
+// Compile, freeze the bindings, then request samples and/or positions.
+```
+
+With old positions `[0,1,2,3,4,5,6,7]`, input `[1,-1,1,-1,1,-1,1,-1]`
+and new positions `[0,2,4,6]`, the four output samples all have Float64 bits
+`0x3fcc6b828682ab42`: `(pi-2)/(pi+2)` rounded once. This is the measured residual
+of this finite kernel at the original Nyquist frequency. It is positive and
+nonzero; this particular short filter does not remove all aliasing. The exported
+positions are exactly `[0,2,4,6]`. Choose a larger radius or different parameters
+and rerun the independent response checks for a different quality requirement.
+
+```sh
+cmake --build build/clang21-numeric --target photospider_numeric_resampling -j 6
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_resampling strict
+```
+
+The four groups also check single/multi fixtures, independent special positions,
+transactional IDs and typed SampledSignal position metadata. Use `apple` on an
+Apple Silicon build or `x86` on a supported Clang AVX2 build.
+
+## Uniform lowpass
+
+`photospider/numeric/lowpass.hpp` provides five independent
+`lowpass_uniform_{hann_sinc,hamming_sinc,blackman_sinc,kaiser_sinc,gaussian}_node`
+helpers. Input Float32/64 arrays have rank 1..8 and at most 2^40 elements;
+static `axis` selects independent signals, output `values` keeps shape/dtype and
+has generic facets. Radius 1..4096 is required. Sinc cutoff is in `(0,.5)`
+cycles/sample; Kaiser additionally takes finite `beta>=0`. Gaussian takes
+finite `sigma>0` in samples instead of cutoff. No unused parameter is accepted.
+Boundary defaults to Reflect without endpoint repetition; Replicate, Zero and
+Wrap are explicit alternatives. Output positions remain aligned to the input.
+
+Every logical nonzero coefficient is included, even when its numerical enclosure
+is too small to affect a finite result. Exact sinc integer zeros and Hann/Blackman
+endpoints are omitted from Data support. Logical order `-R..R` controls first-NaN
+payload/sign and infinite contribution aggregation, including repeated reflected
+indices. These are successful IEEE results. Finite constant extended samples
+preserve their identical bits; other exact zeros are +0. Caller floating state
+is preserved. Inputs with attached typed semantics retain their additional
+validation requirements.
+
+The whole mathematical sum and full normalizer are enclosed before one final
+rounding. Current accelerated keys report strict scalar fallback. This is not
+an implementation with pre-rounded Float64 weights. Work/precision/capacity
+exhaustion returns an explicit failure; source support is still determined by
+mathematical nonzero taps. A partial output allocates only its requested payload.
+
+For `[0,0,1,0,0]`, radius 2 and center index 2, the exact Float64 fixtures are:
+
+| Kernel | Parameters | Center bits |
+| --- | --- | --- |
+| Hann sinc | cutoff=.25 | `3fe38d7050d05568` |
+| Hamming sinc | cutoff=.25 | `3fe2f660651f7f7c` |
+| Blackman sinc | cutoff=.25 | `3fe655124d269c1c` |
+| Kaiser sinc | cutoff=.25, beta=0 | `3fdc2755e149a310` |
+| Gaussian | sigma=1 | `3fd9c486742831f7` |
+
+```sh
+cmake --build build/clang21-numeric --target \
+  photospider_numeric_lowpass photospider_numeric_lowpass_execution -j 6
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass strict
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass_execution strict
+python3 examples/numeric_workflow/lowpass_oracle.py \
+  build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass strict
+```
+
+The 474-case independent directed MPFR oracle checks complete sums for all five
+kernels/dtypes/boundaries, impulses, exact quarter-wave and Nyquist periodic
+sinusoids, repeated logical taps, source specials and extreme Gaussian scales.
+This verifies the defined discrete response, not a universal attenuation target.
+`lowpass_execution.cpp` exercises every family under all-port negative/unaligned
+layouts and four floating modes, plus sparse 2^40-element composition, cache
+replacement, actual typed payload/upstream errors, inner cancellation, resource
+limits and data/metadata ownership after context destruction.
+
+## Nonuniform lowpass
+
+Five `lowpass_nonuniform_{hann_sinc,hamming_sinc,blackman_sinc,kaiser_sinc,gaussian}_node`
+helpers take `positions[K]` and `values`, independently Float32/64. Positions
+must be finite and strictly increasing, K=2..1048576; `axis` selects the values
+dimension of length K. Other dimensions are independent. Output `samples` has
+the original values shape/dtype and generic facets. `support_radius>0` and
+Gaussian `sigma>0` use coordinate units; sinc `cutoff>0` uses cycles per coordinate
+unit, with no .5 limit. Kaiser additionally takes `beta>=0`.
+
+The operation convolves the exact piecewise-linear reconstruction against the
+continuous kernel using coordinate-length measure. Reflect folds at the domain
+endpoints, Replicate extends endpoint values, Zero extends +0, and Wrap repeats
+the domain with a possible seam jump and no extra connecting segment. Full-kernel
+normalization remains in force at boundaries. Global positions are validated for
+each nonempty request. Values are read only at endpoints of reconstructed
+segments with positive integration length, for requested other-axis coordinates.
+An isolated contact does not add a read; algebraic cancellation cannot remove a
+required endpoint's validation. All demanded values and final results must be
+finite; source nonfinite data and final overflow fail the dependent sample.
+
+`lowpass_nonuniform.cpp` contains the full public binding/execution example. For
+`positions=[0,.75,2]`, `values=[1,2.5,5]`, `support_radius=.5`, every kernel
+returns exactly `2.5` at the middle position; inserting collinear knots preserves
+it. For `positions=[0,1]`, `values=[2,2]`, radius `.5`, Zero returns `[1,1]`
+and the other boundaries return `[2,2]`. With minimum subnormal values under Zero,
+the exact half-minimum result rounds to +0; with three minima it rounds to two
+minima, in both Float32 and Float64.
+
+```sh
+cmake --build build/clang21-numeric --target photospider_numeric_lowpass_nonuniform -j 6
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform strict
+python3 examples/numeric_workflow/nonuniform_lowpass_oracle.py \
+  build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform strict
+```
+
+The 245-case independent Fraction/directed MPFR oracle enumerates exact boundary
+copies, uses product-to-sum identities for cosine windows and exact rational
+Gaussian/Kaiser polynomial coefficients, and integrates the reconstructed affine
+pieces with explicit remainder bounds. It covers irregular gaps and narrow hats,
+collinear insertion, periodic reconstructed sinusoids, seam jumps and repeated
+periods, mixed dtypes and subnormal ties. Uniform and nonuniform outputs need not
+agree on an equally spaced input: their mathematical reconstruction/measure differ.
+
+The implementation uses exact coordinate partitions, exact paired-affine identities
+for constant/half/zero landmarks, and certified global Taylor moments for general
+signals. Precision refines from 128 to 4096 bits and Taylor order up to 512.
+Large support-to-sigma ratios, high cutoff-radius products, large beta, near
+midpoint cancellation or many repeated periods can exhaust those limits or host
+work/capacity. No unconverged approximation is published. Each stored piece owns
+four 12288-bit coordinate records plus indices; exact source copies, polynomial
+vectors and growth overlap are admitted explicitly. This first implementation
+prioritizes certified results and composability; it makes no throughput claim.
+All lowpass/resampling executables are manual and excluded from CTest/integration.
+
+All twelve CRV-11 manual groups, 474 uniform cases and 245 continuous cases
+passed on native Clang21 Strict/Apple and Ubuntu WSL Clang18 Strict/AVX2.
+Installed package0.16 consumers passed both native profiles. The focused compiler
+unit, ClangFormat21/cpplint and independent math/runtime reviews passed; required
+review fixes cover bounded scale-scan cancellation and pre-allocation output
+metadata admission. WSL results are numerical correctness evidence only.
+
+## Native signal timing and accounting
+
+`signal_benchmark.cpp` runs inverse-linear/PCHIP and all ten lowpass kernels
+through public Compiler/ExecutionContext. It verifies analytic raw bits before
+accepting every timed result and prints source-support counts, fallback counts,
+output bytes, managed payload/metadata peaks and owners retained after context
+destruction. Bindings, compilation and freeze precede each timed execution.
+
+```sh
+cmake --build build/clang21-numeric --target photospider_numeric_signal_benchmark -j 6
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_signal_benchmark strict
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_signal_benchmark apple
+```
+
+Measured on Apple M5, native Clang21 RelWithDebInfo, one CPU worker, cache off,
+three repetitions per case, Float64. The small fixture requests one output; the
+representative larger fixture requests 256. Inverse uses 33 identity knots and
+Whole query demand. Lowpass uses 1025 regularly spaced values containing isolated
+unit impulses, requesting 256 disjoint impulse centers. Uniform radius is 2,
+continuous radius is .5, sinc cutoff is .25, Kaiser beta=0, Gaussian sigma=1.
+The independent continuous impulse bits come from the Fraction/MPFR oracle.
+This declares a bounded sparse workload, not a full-limit throughput benchmark.
+
+| Operation, 256 requested | Strict median / max (ms) | Apple median / max (ms) |
+| --- | --- | --- |
+| `invert_linear` | 11.019 / 11.697 | 10.179 / 10.223 |
+| `invert_pchip` | 669.863 / 674.808 | 672.903 / 673.073 |
+| `lowpass_uniform_hann_sinc` | 444.593 / 451.396 | 446.980 / 449.168 |
+| `lowpass_uniform_hamming_sinc` | 452.191 / 452.363 | 447.984 / 448.620 |
+| `lowpass_uniform_blackman_sinc` | 454.561 / 455.322 | 449.111 / 452.224 |
+| `lowpass_uniform_kaiser_sinc` | 441.216 / 446.360 | 437.927 / 439.528 |
+| `lowpass_uniform_gaussian` | 445.108 / 448.195 | 437.444 / 439.143 |
+| `lowpass_nonuniform_hann_sinc` | 1681.032 / 1721.745 | 1664.975 / 1677.099 |
+| `lowpass_nonuniform_hamming_sinc` | 1668.530 / 1672.319 | 1683.545 / 1693.331 |
+| `lowpass_nonuniform_blackman_sinc` | 4892.051 / 4941.196 | 4850.130 / 4866.580 |
+| `lowpass_nonuniform_kaiser_sinc` | 1836.944 / 1837.451 | 1816.246 / 1819.265 |
+| `lowpass_nonuniform_gaussian` | 889.141 / 897.047 | 902.272 / 909.420 |
+
+All 48 cases passed all three repetitions, exact output checks and final-owner
+release. Every 256-output case retains 2048 payload bytes after context teardown.
+Inverse peaks were 289928 payload / 11481032 metadata bytes; its retained metadata
+was 5792 bytes. Uniform peaks were 207616 / 3878176 bytes; continuous peaks were
+207720 / 8706912 bytes. Their 256 separate fragments retained 336272 metadata
+bytes. The peak payload column combines output and continuation scratch; the
+current public ledger does not separately attribute scratch. Metadata includes
+limbs in ResourceVectors, interval maps, coefficients and dependency structures.
+Caller-preallocated source backing and legacy STL/shared-owner bookkeeping
+exclusions are not standalone scratch measurements. The executable prints the
+small-fixture rows and exact unique source support counts as well.
+
+All accelerated lowpass and non-knot PCHIP inverse evaluations reported strict
+fallback; inverse-linear did not. These timings include dependency planning,
+validation and publication, and establish no speedup. The present continuous
+Blackman global polynomial path and disjoint certificate construction are costly;
+callers should use explicit budgets and small requests while composing workflows.
+WSL timing is intentionally not used as a performance reference.

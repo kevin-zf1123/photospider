@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -57,7 +57,16 @@ strides, exact dirty support, low budgets, cancellation and post-context owners.
 The frequency response and target-downsampling attenuation require independent
 measurement; this primitive never claims ideal cutoff or zero aliasing.
 
-A conceptual public workflow binds input, axis/radius/boundary and sigma,
-then requests values using the selected operation key. Actual public invocation,
-commands and independently verified outputs are implementation requirements.
-This Proposed specification is not evidence of a registered runtime implementation.
+The maintained public workflow binds input, axis/radius/boundary and sigma,
+then requests values using the selected operation key. See the shared workflow link below for the maintained invocation, commands and
+current evidence; this Proposed specification does not claim ideal cutoff or
+zero-aliasing behavior.
+
+## Maintained implementation and validation
+
+This primitive is registered in the five-kernel uniform low-pass family. Exact taps and certified whole-sum evaluation are used for uniform signals; accelerated keys currently use the strict fallback.
+Certified precision is bounded to 128..4096 bits; unresolved
+capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed the
+shared public manual groups and independent numerical references. The linked
+workflow records exact counts, commands and installed-consumer checks.

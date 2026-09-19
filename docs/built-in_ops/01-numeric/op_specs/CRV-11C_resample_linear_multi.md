@@ -9,7 +9,7 @@ category: 01-numeric
 kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -53,7 +53,15 @@ Use the corresponding CRV-01 analytic fixtures for samples and exact byte
 comparison against new_positions for positions. Test nonfinite positions-only
 forwarding followed by failed samples demand, partial indices/columns,
 independent dirty effects, both outputs jointly/separately, profile/dtype mixing,
-strides, context-lifetime ownership, low budgets and cancellation. A conceptual
-public workflow expands this template and requests samples/positions through
-Compiler/ExecutionContext; actual run commands and verified output remain required
-for delivery. This specification does not claim current template support.
+strides, context-lifetime ownership, low budgets and cancellation. The maintained public workflow expands this template and requests samples/positions
+through Compiler/ExecutionContext; commands and current evidence are linked below.
+
+## Maintained implementation and validation
+
+This public resampling template is maintained through the corresponding helper
+in `photospider/numeric/resampling.hpp` and ordinary workflow composition. See
+[signal-resampling](../../../../examples/numeric_workflow/README.md#signal-resampling)
+and the [CRV-11 umbrella](CRV-11_resample_signal.md) for commands and shared
+validation evidence. All four template groups passed on native Clang21 Strict/Apple and WSL
+Clang18 Strict/AVX2, including an explicit filter/resample workflow and typed
+position metadata. Installed0.16 consumers passed both native profiles.

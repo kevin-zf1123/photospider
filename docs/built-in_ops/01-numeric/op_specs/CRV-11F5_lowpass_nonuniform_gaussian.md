@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -69,7 +69,15 @@ unequal spacing, boundaries/seams, extreme parameters, dtype mixing, 4-ULP
 bounds, invalid remote data nonreads, exact dirty support, budgets/cancellation,
 strides and source/result lifetime.
 
-A conceptual public workflow binds positions/values and statics, then requests
-samples through Compiler/ExecutionContext. Actual invocation and independently
-verified results remain implementation requirements. This spec makes no claim
-of current runtime registration or universal antialias rejection.
+The maintained public workflow binds positions/values and statics, then requests
+samples through Compiler/ExecutionContext. See the shared workflow link below for
+commands and current evidence; the spec does not claim universal antialias rejection.
+
+## Maintained implementation and validation
+
+This primitive is registered in the five-kernel nonuniform low-pass family. Exact partition and paired-affine integration use global Taylor moments with a rigorous tail bound; this is not local adaptive quadrature, and accelerated keys currently use the strict fallback.
+Certified precision is bounded to 128..4096 bits and order <=512; unresolved
+capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed the
+shared public manual groups and independent numerical references. The linked
+workflow records exact counts, commands and installed-consumer checks.
