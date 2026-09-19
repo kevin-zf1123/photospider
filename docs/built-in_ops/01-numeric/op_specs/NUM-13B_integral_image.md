@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -93,4 +93,37 @@ Four-corner rectangle queries on rounded floating outputs may introduce their
 own rounding/cancellation error; this operator guarantees each prefix result,
 not exact recovery from arbitrary downstream subtraction. Test exact integer
 fixtures separately from floating retrieval accuracy. Deliver public workflow
-runs and lifetime/invalidation checks when implemented; no runtime is claimed.
+runs and lifetime/invalidation checks; the implementation evidence below records the checks actually run.
+
+## Implementation and executable acceptance
+
+Six suffixed keys are registered through `numeric_scans.cpp`; public authoring
+helpers live in `photospider/numeric/scans.hpp`. Each operation retains an exact
+accumulator and a separate conversion snapshot, preserving original source
+NaN/Inf/zero classification. Empty boundaries emit positive zero without Data.
+Windows transport at most 64 numeric source values; typed Validation closure
+is accounted separately and can require additional channel values.
+
+Regional prefix requests group outputs by line and increasing boundary, scanning
+only through each line's largest requested boundary. Integral rectangles are
+streamed independently in original row-major order; repeated arithmetic is
+charged. Separate executions and `execute_atoms` observations can recompute
+source values. No persistent checkpoint or integral table is retained.
+
+The output plan and complete per-observation association rows are host-accounted.
+Each Need stage processes all requested rows; dense prefix boundary requests
+can therefore require quadratic association work even though source terms are
+scanned once. Work/capacity/stage limits reject excessive requests explicitly.
+This is not a whole-execution linear-time or once-per-Run guarantee.
+
+The manual `photospider_numeric_scans` target and `scan_oracle.py` are described
+in [the workflow example](../../../../examples/numeric_workflow/README.md).
+Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 runs passed
+2,280 independent Fraction/raw-bit cases per profile on 2026-09-19, plus
+public workflow fixtures, sparse/L-shaped support,
+integer Atom isolation, typed/Empty/zero boundaries, negative strides, fenv,
+output-cap checks, sorting work/cancellation cleanup, and 4,096 source values
+through 65 windows with four sparse results and at most 16 KiB payload. The
+installed strict/Apple consumers, focused compiler unit, formatting/lint and
+independent math/entry reviews passed. No integration test or CTest
+registration is added; specification status remains Proposed.

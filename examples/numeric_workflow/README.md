@@ -394,3 +394,44 @@ strides, work/state limits and cancellation cleanup. Select diagnostics
 describe `scalar-condition`, `bit-choice` and an ISA `scratch-store`; they do
 not claim four independent samples per SIMD operation or a performance gain.
 These are manual targets with no CTest or integration-test registration.
+
+## Prefix scans and integral images: NUM-13
+
+`photospider_numeric_scans` exercises the six `numeric.prefix_sum_*` and
+`numeric.integral_image_*` keys through the public
+`photospider/numeric/scans.hpp` constructors `prefix_sum_node` and
+`integral_image_node`. Build and run a selected profile with Clang:
+
+```sh
+cmake --build build/numeric --target photospider_numeric_scans -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_scans strict
+python3 examples/numeric_workflow/scan_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_scans strict
+```
+
+The executable accepts `strict`, `apple` and `x86` profile arguments. The
+basic output checks the prefix fixture `[1,2,3] -> [0,1,3,6]` and the integral
+fixture `[[1,2],[3,4]] -> [[0,0,0],[0,1,3],[0,4,10]]`. The public constructors
+can be placed in one `WorkflowDocument` with downstream numeric consumers;
+their inputs preserve the existing array dtype, shape and axis contracts.
+
+Each exact source sum is snapshotted before final conversion. Regional prefix
+work is grouped by line and increasing boundary, with at most 64 source
+elements per window; integral requests charge repeated rectangle work. A regional
+invocation scans a source line once, while separate observations submitted via
+`execute_atoms` may recompute it. There are no persistent scan checkpoints.
+The output plan and per-observation association rows are accounted. Every
+Need stage enumerates `Q`; dense same-line boundaries can require quadratic
+association work, although numeric source values are scanned once. Resource
+and stage limits may reject large requests. These details are implementation facts and
+do not add a once-per-Run or performance guarantee.
+
+Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed the
+manual fixtures and 2,280 independent exact oracle cases per profile. The
+manual target also checks sparse/L-shaped support, integer Atom isolation,
+typed/Empty/zero reads, output cap, negative strides/fenv flags, and sorting
+work/cancellation cleanup. A 4,096-value source is scanned once through 65
+windows for four sparse results within 16 KiB payload, with exact suffix dirty
+support. Installed strict/Apple consumers and the focused compiler unit passed. This target is excluded from the default build and has no
+CTest or integration-test registration; the current NUM-13 specifications
+remain Proposed.
