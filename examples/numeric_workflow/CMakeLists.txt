@@ -81,3 +81,7 @@ target_compile_features(photospider_numeric_bezier PRIVATE cxx_std_17)
 add_executable(photospider_numeric_parametric EXCLUDE_FROM_ALL parametric.cpp)
 target_link_libraries(photospider_numeric_parametric PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_parametric PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_baking EXCLUDE_FROM_ALL baking.cpp)
+target_link_libraries(photospider_numeric_baking PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_baking PRIVATE cxx_std_17)

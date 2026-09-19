@@ -9,7 +9,8 @@ category: 01-numeric
 kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
+verification_status: manual_public_graph_equivalence
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -37,16 +38,15 @@ inputs in its documented port order and pass its explicit static parameters.
 Export that node's values and axis directly. No adapter or additional sampling
 node is inserted.
 
-Each exported shape/dtype is inferred by its expanded source. Scalar values
-retain [count]; multi-function values retain [count,C], including C=1. This
-template uses the applicable source shape without inserting or removing a
-component axis. Axis is always Float64 [3]. For count=1 it is [start,start,0]
+Each exported shape/dtype is inferred by its expanded source. This scalar
+template returns values[count] without a component axis. Axis is always
+Float64 [3]. For count=1 it is [start,start,0]
 and no end payload is evaluated. The source's remaining domain, finite-value,
 precision and query-support restrictions are not normalized or weakened.
 
 ## Acceptance and status
 
-Conceptual analytic fixture: quadratic anchors=[[0,0],[1,1]], handles=[[[0.5,0]]], start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].
+Executed analytic fixture: quadratic anchors=[[0,0],[1,1]], handles=[[[0.5,0]]], start=[0], end=[1], count=3 -> values=[0,0.25,1], axis=[0,1,0.5].
 
 Construct this template and its explicit expansion with the same bindings,
 parameters and output demands. Compare descriptors, numerical quality and exact
@@ -55,5 +55,10 @@ values-only/axis-only/joint requests, changed source bindings, singleton count,
 partial output, low shared budgets, cancellation, cache-off and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
-could reproduce a shared numerical bug. Actual public run commands and product
-results remain implementation delivery requirements; none are claimed here.
+could reproduce a shared numerical bug. The maintained public constructor in `photospider/numeric/lut1d.hpp` and
+`examples/numeric_workflow/baking.cpp` execute this fixture. Native Clang
+strict/Apple, WSL Clang strict/AVX2 and installed consumers passed the shared
+manual acceptance described in [CRV-04](CRV-04_bake_lut1d.md). The example is
+excluded from default builds and CTest/integration registration. See the
+[numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04)
+for build/run commands and editable public-API use.

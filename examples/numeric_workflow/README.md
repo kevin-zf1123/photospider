@@ -905,3 +905,77 @@ negative/unaligned/zero strides and fenv, cache reselection, typed Image and
 failing producer order, arithmetic cancellation and second-box owner release.
 The manual executable stays outside CTest/integration registration. Validation
 platforms and bounds are in the [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-03-parametric-bezier-evaluation).
+
+
+## LUT1D baking templates: CRV-04
+
+`photospider/numeric/lut1d.hpp` provides six authoring functions:
+`bake_lut1d_expression`, `bake_lut1d_bezier`, `bake_lut1d_linear`,
+`bake_lut1d_pchip`, `bake_lut1d_linear_multi`, `bake_lut1d_pchip_multi`.
+They append ordinary source nodes to a caller-owned WorkflowDocument and return
+`BakedLut1d{values,axis}` references. Export those references explicitly or
+connect them to later nodes. No payload execution, file or frozen result is
+created during construction.
+
+For a document declaring/binding input 1=start:[0] and input 2=end:[1], the
+minimal expression template is:
+
+```cpp
+auto baked = ps::numeric::bake_lut1d_expression(
+    document, "x^2", ps::numeric::sequence_input(document.inputs[0]),
+    ps::numeric::sequence_input(document.inputs[1]), 3);
+if (!baked.ok()) throw std::runtime_error(baked.status().message);
+auto exports = baked.value().outputs();
+document.outputs.assign(exports.begin(), exports.end());
+```
+
+Request values and axis through Compiler/ExecutionContext to obtain
+values=[0,.25,1], axis=[0,1,.5]. `Fixture::build` in `baking.cpp` contains the
+complete editable path for all six sources and its hand-authored counterpart.
+Use `outputs("table2","grid2")` to export another bake without workflow-name
+collisions, or pass `.values`/`.axis` as WorkflowNodeOutput inputs. Node IDs
+are allocated around existing and referenced producer IDs, including supplied
+edges; declaration IDs use their separate namespace. Construction checks the
+65536-node limit and leaves graph contents unchanged on failure. Concurrent
+mutation of the same document requires caller synchronization.
+
+All templates require count=1..1048576; dtype defaults to Float64 and profile
+to Strict. `SequenceInput` carries a static Float32/64[1] hint for each dynamic
+endpoint; Compiler validates the actual connections. Expression coefficients
+are supplied as a named map, and canonical names are derived from the source.
+Bezier additionally requires degree=2/3 and anchors/relative handles; its domain
+defaults to Reject. Four interpolation templates take x/y and CurveDomain
+(default Reject). They always generate Float64 linspace queries, even for a
+Float32 table. Single templates return [count], multi return [count,C],
+including C=1. Both export an independent Float64 axis[3].
+
+| Template | Inputs in addition to endpoints | Endpoint/count fixture | Expected values |
+| --- | --- | --- | --- |
+| expression | `x^2` | 0 to 1, 3 | [0,.25,1] |
+| Bezier | anchors=[[0,0],[1,1]], quadratic offsets=[[[.5,0]]] | 0 to 1, 3 | [0,.25,1] |
+| linear | x=[0,1,2], y=[0,2,4] | 0 to 2, 3 | [0,2,4] |
+| PCHIP | x=[0,1,2], y=[0,1,4] | 0 to 2, 5 | [0,.3125,1,2.1875,4] |
+| linear multi | x=[0,1], y=[[0,10],[2,8]] | 0 to 1, 3 | [[0,10],[1,9],[2,8]] |
+| PCHIP multi | x=[0,1,2], y=[[0,4],[1,3],[4,0]] | .5 to 1.5, 2 | [[.3125,3.6875],[2.1875,1.8125]] |
+
+```sh
+cmake --build build/numeric --target photospider_numeric_baking -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_baking strict
+```
+
+Use `apple`/`x86` only on the corresponding CPU. Five manual groups cover
+48 generated-versus-explicit graph pairs per profile, analytic values, mixed
+endpoints and both output dtypes, values-only/axis-only/combined/ROI demand,
+read/dirty equivalence, cache binding changes, owner lifetime, source errors,
+pre-cancelled execution, work/payload limits, IDs and exports. A sparse multi
+PCHIP fixture requests two values from a million-row logical table under a
+1 MiB controlled-payload limit. The target remains outside CTest/integration.
+
+Source semantics remain visible: N=1 ignores end; axis skips function controls;
+expression/Bezier N>1 reject equal endpoints, while interpolation keeps
+linspace's repeated coordinates. Interpolation values at index zero may ignore
+end, even when the axis would fail; values requests do not force axis execution.
+Dynamic bindings and ordinary cache witnesses control reevaluation. The later
+consumer applies its own axis validity rules and approximation: a linear LUT
+through [0,.25,1] returns .125 at x=.25, whereas continuous x^2 is .0625.
+Consumer-chain implementation and acceptance are tracked under CRV-05.

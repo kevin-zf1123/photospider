@@ -5,7 +5,8 @@ kind: shared_workflow_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
+verification_status: manual_public_graph_equivalence
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -24,8 +25,9 @@ opaque bake callback or a new runtime function-object type.
 Available building blocks include expression sampling (NUM-01), a Bezier
 function sampler (CRV-02), and linspace query generation followed by CRV-01
 interpolation. The six concrete source templates inherit this completed contract.
-This target does not imply that the proposed building-block
-keys already execute or that the legacy LUT consumer accepts the new axis input.
+These building blocks and the six public constructors are implemented. Legacy
+LUT consumers retain their own interfaces; dynamic-axis consumption is tracked
+separately under CRV-05.
 
 ## Confirmed source templates
 
@@ -149,11 +151,33 @@ evaluation at 0.25 yields 0.125 rather than the continuous value 0.0625. This is
 expected discretization error, not a failure of correctly rounded sample values.
 No file should be created and no input producer run by template construction.
 
-The template authoring APIs, the expanded target registry implementations and
-actual runnable public fixtures are not implemented by these documents. Delivery
-must provide real build/run commands and observed results. These six specifications
-complete clarification while remaining Proposed; no runtime/performance success
-is inferred from a conceptual DAG or a mathematical oracle check.
+The six maintained constructors live in `photospider/numeric/lut1d.hpp` and
+append ordinary nodes to a caller-owned WorkflowDocument. `BakedLut1d` returns
+values/axis node references plus an `outputs()` method for explicit workflow
+exports, with caller-selectable labels. The constructor does not change existing
+output declarations. It reserves existing node IDs and producer references in
+the graph and supplied edges, then selects the lowest free positive IDs. It
+checks the 65536-node limit and constructs both nodes before mutation; invalid
+parameters and allocation failure leave graph contents unchanged. Compiler
+still validates actual metadata/bindings and all graph-wide constraints.
+
+On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
+Clang 18.1.3 strict/AVX2 passed five manual groups. Each profile compared
+48 generated/explicit graph pairs: six templates, two output dtypes and four
+output/ROI demand modes, including exact source support and dirty mapping.
+Analytic fixtures independently check values; named exports, C=1, mixed
+endpoint types, singleton failing-end isolation, axis function-source isolation,
+equal-endpoint/source dependency differences, cached reversed bindings and
+million-row sparse PCHIP composition are exercised. Resource limits and
+pre-cancelled execution fail explicitly; recovery checks use a new context.
+Installed 0.15 consumers, formatting/lint and independent authoring/acceptance
+reviews passed. This is manual acceptance, with no new CTest/integration entry.
+No performance or continuous-function approximation bound is inferred.
+
+See the maintained [public example and commands](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04).
+The source specifications remain Proposed independently of implementation.
+CRV-05 tracks the later scalar/channels LUT consumer chain and its separate
+discretization acceptance.
 
 - [NUM-01 expression](NUM-01_sample_expression.md).
 - [NUM-02A linspace](NUM-02A_linspace.md).

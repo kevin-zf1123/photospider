@@ -553,3 +553,32 @@ Fraction Bernstein/power expansions and closed the endpoint-overflow diagnostic
 fix using a t=1 regression whose unneeded handles are NaN. Installed 0.15
 consumers, focused compiler unit, formatting/lint and scoped math/entry reviews
 passed. No new CTest/integration registration or performance claim was added.
+
+
+## CRV-04 public LUT1D authoring
+
+`numeric/lut1d.hpp` expands six constructors into existing runtime nodes.
+Expression/Bezier export one source's two outputs; interpolation exports the
+interpolator values and Float64 linspace axis. The final table dtype does not
+alter query generation. The constructor owns metadata only and appends after
+successful local construction, reserving existing/supplied producer IDs and the
+65536-node cap. It exports references through BakedLut1d and never edits the
+caller's output labels implicitly. Source contracts supply all runtime resource,
+precision, dependency, cache and failure semantics.
+
+On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
+Clang 18.1.3 strict/AVX2 passed the five baking manual groups. Each profile
+compares 48 generated/explicit graph pairs across six sources, two dtypes and
+four demand modes; checked results include source/dirty witnesses and analytic
+values. Additional tests cover mixed scalar types, N=1 failing end, axis-only
+failing function sources, source-specific equal-endpoint and first-coordinate
+behavior, cached reversed bindings, million-row sparse multi PCHIP under 1 MiB
+payload, C=1 and multiple named bakes, reference/UINT64_MAX IDs and partial
+construction rejection. Runtime cancellation coverage here is pre-cancellation;
+resource recovery checks create a new context. Underlying source clusters cover
+arithmetic-time interruption and owner retirement. Returned results are checked
+after each helper execution context is destroyed. Installed 0.15 consumers,
+ClangFormat 21/cpplint and independent authoring/acceptance reviews passed.
+CRV-05 separately covers downstream application and the expected discretization
+error; graph equivalence alone is not a proof of approximation quality. No new
+runtime primitive, integration-test registration or performance claim is added.
