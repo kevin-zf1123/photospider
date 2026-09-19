@@ -204,3 +204,42 @@ Apple transcendental inputs recorded 1 / 256 strict fallbacks; elementary
 inputs recorded zero. Rational timing uses p/q=1/7. The executable emits max
 latency and all configuration fields as CSV for fresh measurements. WSL was
 used only for correctness.
+
+## NUM-05 validation and native timing
+
+On 2026-09-19 the nine-function public workflow suite passed 14,174 independent
+integer/Fraction/MPFR cases per profile: native Apple M5 / Clang 21 strict and
+Apple with MPFR 4.2.2, and Intel Core i9-12900 Ubuntu WSL / Clang 18 strict and
+AVX2 with MPFR 4.2.1. Exact dyadic midpoint powers, parity boundaries, extreme
+ratios, signed zeros, both-NaN priority, overflow and subnormals are included.
+These sampled checks do not establish exhaustive domain success.
+
+The manual executable also passed all nine public fixtures, both-port sparse
+support/dirty checks, UInt8/Int64 per-Atom overflow, independent/all-port negative
+and unaligned strides, zero strides, preserved fenv, typed validation on either
+port, required failing producers despite special identities, actual fallback and
+inner-work cancellation, capacity cleanup, cache mutation and composition.
+Local installed consumers and the focused compiler unit passed. The public
+manual target remains outside CTest/integration registration.
+
+The following native Apple M5 / Clang 21 RelWithDebInfo measurements use a=2,
+b=.3, Float64, Whole, one worker, cache off and three repetitions. Scope and
+capacity accounting match the NUM-04 timing above. Median microseconds are
+shown for N=1 / N=256; the executable emits max latency and full configuration
+as CSV. WSL supplies correctness results only.
+
+| Function | Strict median us, N=1 / 256 | Apple median us, N=1 / 256 |
+| --- | ---: | ---: |
+| add | 162 / 1660 | 142 / 1425 |
+| subtract | 111 / 1588 | 111 / 1476 |
+| multiply | 107 / 1534 | 108 / 1456 |
+| divide | 101 / 1598 | 106 / 1423 |
+| minimum | 91 / 178 | 89 / 216 |
+| maximum | 87 / 190 | 95 / 193 |
+| pow | 284 / 42747 | 273 / 45761 |
+| atan2 | 325 / 53030 | 325 / 51931 |
+| atan2pi | 366 / 62054 | 369 / 62801 |
+
+Peak controlled payload is 2,864 / 4,904 bytes for elementary operations and
+208,272 / 210,312 bytes for power/angles. Apple power/angles record 1 / 256
+strict fallbacks; elementary functions record zero. No speedup claim follows.

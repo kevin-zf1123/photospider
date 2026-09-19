@@ -581,3 +581,51 @@ Compilation and freezing occur before timing; synchronous execution and result
 assembly are timed, and result bits/evaluation counts are checked. Ordinary
 rational timing uses p/q=1/7. Timing is not an accelerated speedup claim; WSL
 runs remain correctness-only.
+
+## Binary mathematics: NUM-05
+
+`photospider/numeric/binary.hpp` provides `add_node`, `subtract_node`,
+`multiply_node`, `divide_node`, `minimum_node`, `maximum_node`, `pow_node`,
+`atan2_node` and `atan2pi_node`. Each takes `(id, first, second, profile)`;
+profile defaults to Strict. Angle arguments are ordered `(y,x)`, other arguments
+`(a,b)`. Both inputs must match positive rank-1..8 shape and dtype, with at most
+2^40 elements. `values` preserves shape/dtype with empty facets. Divide, power
+and angles require Float32/64; the other five accept UInt8/Int64/Float32/64.
+Use explicit broadcast/cast operators for adaptation.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_binary -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_binary strict
+python3 examples/numeric_workflow/binary_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_binary strict
+```
+
+The independent oracle uses the same MPFR 4.2+ library selection as NUM-04.
+Use `apple` or `x86` only on that CPU. The executable is a public
+WorkflowDocument -> Compiler -> ExecutionContext example. Its editable
+`cache_and_composition` fixture computes `(a+b)*b` for a=[1,2,3], b=[2,2,2],
+with expected output `[6,8,10]`. `pow([2,-2,-2],[3,3,.5])` gives
+`[8,-8,canonical_NaN]`. `atan2pi([+0,-0,1],[-0,-0,+0])` gives `[1,-1,.5]`.
+The corresponding radian angle fixture compares independently rounded pi bits.
+
+All sources are read and validated even for `NaN^0`, `1^NaN`, or NaN-selected
+minimum/maximum. Integer overflow fails only its requested Atom; floating domain
+errors/overflow produce the specified IEEE numeric result. Cache witnesses
+retain both operands even when a changed NaN leaves the result equal to one.
+Pow and angle functions use the NUM-04 bounded interval state and explicit
+work budgets shown in `Fixture::run`; ordinary accelerated transcendental
+results currently report a strict fallback. No universal refinement-success
+or performance improvement is promised.
+
+The manual executable checks nine public fixtures and precise sparse support,
+UInt8/Int64 overflow isolation, both-port typed validation and failing producers,
+independent/all-port negative strides, unaligned/zero-stride storage, caller
+floating environment, fallback/work/cancellation/capacity cleanup, escaped
+lifetime and cache invalidation through a suppressed NaN. It has no new CTest
+or integration-test registration.
+
+Run `photospider_numeric_binary strict benchmark` (or `apple` locally) for the
+nine-function N=1/256 CSV timing workload. It uses a=2, b=.3, Float64, Whole,
+one worker, cache off and three checked repetitions. Compile/freeze precede the
+timed synchronous execution and result assembly. [Recorded measurements](../../docs/built-in_ops/01-numeric/math-implementation.md#num-05-validation-and-native-timing)
+include the actual validation platforms and resource boundaries.

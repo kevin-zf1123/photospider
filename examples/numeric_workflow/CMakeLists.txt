@@ -57,3 +57,7 @@ target_compile_features(photospider_numeric_calculus PRIVATE cxx_std_17)
 add_executable(photospider_numeric_unary EXCLUDE_FROM_ALL unary.cpp)
 target_link_libraries(photospider_numeric_unary PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_unary PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_binary EXCLUDE_FROM_ALL binary.cpp)
+target_link_libraries(photospider_numeric_binary PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_binary PRIVATE cxx_std_17)
