@@ -10,6 +10,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_numeric_scans,
                               register_numeric_matrix,
                               register_numeric_calculus,
+                              register_numeric_unary,
                               register_numeric_ordering,
                               register_numeric_comparisons,
                               register_numeric_arrays,

@@ -510,3 +510,74 @@ Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,810
 independent calculus cases per profile and the manual checks. Installed
 strict/Apple consumers, focused compiler unit and scoped reviews passed.
 WSL is used for numerical correctness, with no performance claim.
+
+## Unary mathematics and exact rational pi: NUM-04
+
+`photospider/numeric/unary.hpp` provides independently named constructors for
+`abs`, `neg`, `sqrt`, `exp`, `ln`, `sin`, `cos`, `tan`, `floor`, `ceil`, `round`,
+`sign`, `reciprocal`, `sinpi`, `cospi`, `tanpi`, `sinc`, and `sincpi`. Append
+`_node(id, input, profile)` to these names. Four additional
+`sinpi_rational_node`, `cospi_rational_node`, `tanpi_rational_node` and
+`sincpi_rational_node` helpers take two same-shape Int64 input references,
+followed by output dtype (default Float64) and profile.
+
+All 66 keys have `values` output with empty facets. Generic arrays retain shape;
+use explicit broadcast/cast operators for adaptation. Most basic transforms
+support all four dtypes; neg excludes UInt8, while roots, reciprocals and
+transcendentals require Float32/64. Integer range failures affect the requested
+Atom. Rational denominators must be positive at every requested coordinate,
+including zero numerators. Both rational sources remain dependencies.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_unary -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_unary strict
+python3 examples/numeric_workflow/unary_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_unary strict
+```
+
+The independent oracle requires an MPFR 4.2+ shared library matching Python's
+architecture, only for this manual check. Set `PHOTOSPIDER_ORACLE_MPFR` to select
+it explicitly. On Apple Silicon, `/opt/homebrew/bin/python3.11` can be used with
+the native Homebrew library. The kernel itself has no external math dependency.
+The oracle prints the actual version it loaded. The constant-generation check
+uses only Python's standard library:
+
+```sh
+python3 examples/numeric_workflow/generate_math_constants.py --check
+```
+
+`unary.cpp` is an editable WorkflowDocument -> Compiler -> ExecutionContext
+example. Its fixtures include `sin(1)` -> Float64 bits `0x3feaed548f090cee`,
+`cos(1)` -> `0x3fe14a280fb5068c`, and `tan(1)` -> `0x3ff8eb245cbee3a6`.
+Exact rational `p=[0,1,1]`, `q=[1,6,2]` gives sinpi `[0,0.5,1]` and tanpi
+`[0,RN(sqrt(1/3)),canonical_NaN]`. Floating pi-multiple functions interpret the
+exact supplied float; they never multiply it by a rounded pi first.
+
+The example sets one CPU worker, a 1 MiB controlled-payload limit, and explicit
+512 Mi work units per dependency session / 1024 Mi per Run for mathematical
+refinement. These are finite example budgets, not default or universal success
+guarantees. Exact elementary state is small; transcendental state includes a
+fixed 12288-bit limb arena and uses directed precision from 128 through 4096
+fractional bits. Unresolved rounding returns ResourceExhausted. Ordinary
+accelerated transcendental values currently use a reported strict fallback;
+exact special/algebraic paths remain bitwise identical without that fallback.
+See [the mathematical implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md).
+
+Manual checks cover every function's negative strides and fenv modes/flags,
+precise sparse Data/dirty and typed validation, integer/denominator Atom errors,
+upstream failure, fallback counters, work/cancel/capacity cleanup, lifetime,
+and warm-cache changes to NaN sign/payload. Use `apple` or `x86` only on that
+CPU target. No CTest or integration-test registration is added.
+
+Native local timing is available separately:
+
+```sh
+build/numeric/examples/numeric_workflow/photospider_numeric_unary strict benchmark
+```
+
+The CSV reports all functions at N=1 and N=256, Float64, Whole demand, one worker,
+cache off, three repetitions, median/max microseconds and peak controlled payload.
+Compilation and freezing occur before timing; synchronous execution and result
+assembly are timed, and result bits/evaluation counts are checked. Ordinary
+rational timing uses p/q=1/7. Timing is not an accelerated speedup claim; WSL
+runs remain correctness-only.

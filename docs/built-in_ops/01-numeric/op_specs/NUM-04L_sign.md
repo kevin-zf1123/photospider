@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -49,6 +49,20 @@ numeric input has a defined successful numeric result.
   inherited public ROI/read-witness/cache/lifetime/resource cases.
 
 The conceptual public fixture binds the float vector above, compiles a selected
-sign key and checks output bytes and dtype. New target keys are not implemented;
-actual public executable commands and product/platform evidence belong to a
-separately authorized implementation task.
+sign key and checks output bytes and dtype. The maintained target implementation is documented below;
+the maintained public executable command and current validation boundary are documented below.
+
+## Maintained implementation and validation
+
+This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
+exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
+separate typed validation and Atom-scoped failures. Its numerical path follows
+[the shared implementation notes](../math-implementation.md).
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.
