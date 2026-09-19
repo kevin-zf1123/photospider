@@ -887,3 +887,51 @@ models, repeated extras, rounded centers, casts, shared snapshots, ICC authoring
 malformed data, cancellation, resource limits and multiwindow/partial ownership.
 The executable stays outside integration tests and CTest. Commands and modifiable
 source builders are in the [example](../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
+
+## CRV-10 inverse curves
+
+`ExactCurve::inverse` reuses the original exact PCHIP derivatives and Hermite
+formula. A linear inverse forms its entire signed rational expression and rounds
+once. For PCHIP, x/y/query are integers in units of `2^-1075`, so every binary64
+midpoint, including half a minimum subnormal, is exact. Slope denominators are
+positive after sign normalization. At candidate coordinate X, compare
+`N(X)-query*D(X)` exactly, reversing the sign for decreasing y. Coordinates outside
+the selected segment are classified by the segment boundary before evaluating
+the polynomial. Strict monotonicity makes that comparison determine root order.
+
+The ordered destination lattice contains all finite output values plus two
+infinity sentinels. Binary search never evaluates the sentinels as polynomial
+coordinates. An exact root returns directly; otherwise adjacent lattice values
+bracket the root, and one exact midpoint comparison chooses nearest/ties-to-even.
+The finite/overflow midpoint is MAX plus half its last-binade ULP, with symmetric
+negative handling. Canonical exact zero is +0; a negative nonzero root rounded to
+zero retains its sign. Selected knots/clamps convert the original x bits directly.
+An unreturned endpoint may exceed the destination range without causing failure.
+
+In inverse units let B=2100 bound differences. Slope numerators/denominators have
+less than 6303 bits, Hermite numerator less than 21009, and the comparison less
+than 21010. Segment-exterior short circuits preserve this bound. The existing
+22528-bit, 96-slot continuation-owned arena fits the arithmetic with fewer than
+64 live slots. Every refinement, allocation and limb multiplication is charged;
+failed arithmetic status is checked before interpreting a comparison as zero.
+The extracted shared Hermite helper retains forward interpolation's original
+1074-unit defaults and identical algebra.
+
+`curve_inverse.cpp` stages global x/y Control+Validation, local query
+Control+Validation, and selected pair/stencil Data+Validation before publication.
+It retains at most 16K bytes of promoted global inputs and requested-output state;
+no allocation scales with unrequested N. All x/y changes invalidate every dependent
+observation, while query changes are pointwise. Dynamic topology errors and
+requested finite/overflow failures carry the dependent Atom; host/source failures
+retain their categories. Current accelerated cubic queries explicitly report
+FunctionUnsupported strict fallback; linear, K=2 and selected paths are exact
+without that fallback. This yields a monotone mapping independent of partitions.
+
+The [public inverse workflow](../../../examples/numeric_workflow/README.md#inverse-curves)
+contains four manual groups and a 404-case independent Fraction reference that
+bisects real x with normalized Hermite evaluation. Native Clang21 Strict/Apple
+and WSL Clang18 Strict/AVX2 passed both, and the installed 0.16 consumer passed
+all four groups on both native profiles. The shared
+forward interpolation and LUT1D regressions passed 2484 and 1416 cases respectively
+on both native profiles. The focused compiler unit passed. No integration test
+was registered or run for this feature.

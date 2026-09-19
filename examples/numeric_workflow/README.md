@@ -1419,3 +1419,81 @@ output ROI does not reduce this global work. Examples provide explicit work
 budgets; large bakes may require larger work/stage/capacity limits or fail cleanly.
 The current report reader needs a window of at least 72 bytes. WSL Clang is used
 for correctness, with no performance inference.
+
+## Inverse curves
+
+`photospider/numeric/inverse_curves.hpp` provides `invert_linear_node` and
+`invert_pchip_node`. Each takes dynamic `x[K]`, `y[K]`, `query[N]`, independently
+Float32/64, and returns generic `values[N]`. `x` is finite and strictly increasing;
+`y` is finite and strictly increasing or decreasing. The static output dtype
+is Float64 by default; domain policy is Reject by default or explicit Clamp.
+K is 2..65536 and N is 1..2^40. There is no inverse extrapolation mode.
+
+This ordinary node composes with the forward helpers, NUM operations and exports:
+
+```cpp
+#include <photospider/numeric/inverse_curves.hpp>
+
+// document.inputs binds ids 1, 2, 3 to x, y, query respectively.
+auto inverse = ps::numeric::invert_pchip_node(
+    10, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    ps::WorkflowInputReference{3});
+if (!inverse.ok()) return inverse.status();
+document.nodes.push_back(inverse.take_value());
+document.outputs.push_back({"x_values", 10, "values"});
+// Compile with Compiler(registry), freeze the caller's bindings, and use
+// ExecutionContext::execute_fragments for all or selected x_values indices.
+```
+
+The complete editable `inverse.cpp` supplies the bindings and execution. Its
+linear fixture `x=[0,1,3], y=[0,2,4], query=[3,1,3]` returns `[2,0.5,2]`.
+PCHIP `x=[0,1,2], y=[0,1,4], query=[0.3125,2.1875,0.3125]` returns
+`[0.5,1.5,0.5]`. Negating y and query preserves these results. The composition
+example connects a forward interpolator's `values` directly to inverse `query`
+and recovers `[0.5,1,1.5]` for its exact dyadic samples. In general two rounded
+forward/inverse outputs need not round-trip arbitrary query bits.
+
+```sh
+cmake --build build/clang21-numeric --target photospider_numeric_inverse -j 6
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse strict
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse apple
+python3 examples/numeric_workflow/inverse_oracle.py \
+  build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse strict
+python3 examples/numeric_workflow/inverse_oracle.py \
+  build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse apple
+# A supported Clang x86-64/AVX2 build uses x86 instead of apple.
+```
+
+Linear evaluates the exact rational inverse with one final conversion. PCHIP
+inverts the original exact forward Hermite polynomial and derivatives. It compares
+that polynomial at destination IEEE lattice points and their exact midpoint,
+including subnormals and overflow boundaries. All current profiles correctly
+round the same result. Accelerated PCHIP reports a strict scalar fallback for
+non-knot queries when K>2; knot/clamp and K=2 paths need no fallback. Exact
+knot/clamp conversion preserves x's signed zero, other exact zeros are +0, and
+nonzero underflow keeps its sign. Only the returned root can fail narrowing
+overflow; an unreturned endpoint cannot reject a finite root.
+
+Each nonempty demand validates all x/y, then the requested query positions.
+Both global arrays invalidate every dependent output; query support stays local.
+Typed/upstream validation and failures remain observable, including on exact
+knot/clamp paths. Outputs own packed fragments at their requested global origins.
+The fixed integer arena and promoted 16K-byte x/y storage are host-accounted;
+root comparisons and limb operations consume work and poll cancellation. Large
+requests or extreme scales can require explicitly larger host budgets, and an
+exhausted solver returns ResourceExhausted without an approximate substitute.
+
+Four manual groups cover fixtures, global/local failures and dirty support,
+strides/floating environment, schema/Empty, cancellation/resource release,
+cache replacement, public composition, partition equivalence, typed/upstream
+failures and fallback diagnostics. `inverse_oracle.py` checks 404 independent
+Fraction cases using normalized Hermite formulas and rational root bisection,
+including both directions/dtypes, mixed input precision, zero endpoint slopes,
+normal/subnormal ties, narrow intervals, large scales and output overflow.
+These executables have no CTest or integration registration.
+
+Validated with native Clang21 Strict/Apple and Ubuntu WSL Clang18 Strict/AVX2:
+all four groups and all 404 oracle cases passed per profile. Installed package
+0.16 consumers passed both native profiles. WSL results establish numerical
+correctness, with no performance claim. The shared forward and LUT1D arithmetic
+regressions passed 2484 and 1416 cases per native profile.

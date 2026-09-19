@@ -15,6 +15,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_numeric_expression,
                               register_color_ramps,
                               register_curve_interpolation,
+                              register_curve_inverse,
                               register_bezier_function,
                               register_parametric_bezier,
                               register_lut1d_application,

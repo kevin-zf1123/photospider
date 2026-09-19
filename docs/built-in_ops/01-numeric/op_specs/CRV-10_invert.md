@@ -5,7 +5,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -149,13 +149,27 @@ Forward(inverse(query)) need not recover query bits after both outputs round.
 Validate PCHIP 4-ULP x bounds, classifications, segment bounds and cross-fallback
 monotonicity for all supported profiles, independent of request order/partition.
 Test global versus local failure support, strides, exact dirty witnesses, cache-off,
-low budgets, cancellation and owner lifetime. Future public workflows bind x/y/query,
-static dtype/policy and inspect values through Compiler/ExecutionContext with
-actual commands and independently checked outputs. This specification claims
-no already registered inverse implementation.
+low budgets, cancellation and owner lifetime. The maintained public workflow binds
+x/y/query and static dtype/policy through Compiler/ExecutionContext. See the
+inverse-curves example linked below for the command and current validation evidence.
 
 - [Linear inverse](CRV-10A_invert_linear.md).
 - [PCHIP inverse](CRV-10B_invert_pchip.md).
 
 - [Forward interpolation family](CRV-01_interpolate.md).
 - [Curve category](../curves.md).
+
+## Maintained implementation and validation
+
+The current runtime registers six keys through the public
+[`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp)
+helpers `invert_linear_node` and `invert_pchip_node`. Linear inverse uses an
+exact rational path and is bitwise identical across profiles. PCHIP uses
+the exact polynomial/lattice algorithm in strict; accelerated cubic non-knot
+queries use the strict scalar fallback, while exact knot/clamp and K=2 paths do
+not require fallback.
+
+See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
+for the shared fixture and validation details. Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18 Strict/AVX2 passed all
+four manual groups and 404 independent Fraction cases per profile. The installed
+0.16 consumer passed both native profiles. WSL checks numerical correctness only.

@@ -112,3 +112,7 @@ target_compile_features(photospider_numeric_shapers PRIVATE cxx_std_17)
 add_executable(photospider_numeric_baking3d EXCLUDE_FROM_ALL baking3d.cpp)
 target_link_libraries(photospider_numeric_baking3d PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_baking3d PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_inverse EXCLUDE_FROM_ALL inverse.cpp)
+target_link_libraries(photospider_numeric_inverse PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_inverse PRIVATE cxx_std_17)

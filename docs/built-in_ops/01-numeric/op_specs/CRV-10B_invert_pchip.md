@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -51,6 +51,18 @@ partial publication. Unrequested output overflow cannot cause a failure.
 Conceptual fixture: x=[0,1,2],y=[0,1,4],query=[0.3125,2.1875] -> values=[0.5,1.5].
 Negating y and query retains the result. Apply CRV-10's independent exact oracle,
 boundary/rounding/monotonicity, dirty/partial-read, stride, budget, cancellation
-and owner-lifetime acceptance. The future public Compiler/ExecutionContext
-workflow supplies x/y/query and static dtype/policy; actual run commands and
-verified outputs are implementation obligations, not current claimed evidence.
+and owner-lifetime acceptance. The maintained public Compiler/ExecutionContext
+workflow supplies x/y/query and static dtype/policy. See the inverse-curves example linked below for commands and
+current validation evidence.
+
+## Maintained implementation and validation
+
+The public helper is `invert_pchip_node` from
+[`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp).
+Strict uses the exact polynomial/lattice path; accelerated cubic non-knot
+queries use the strict scalar fallback, with exact knot/clamp and K=2 paths
+handled directly. See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
+for the public fixture, command and shared validation evidence. Native Clang21
+Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 404
+independent Fraction cases per profile. Installed0.16 consumers passed both
+native profiles; WSL is used for numerical correctness only.
