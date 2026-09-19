@@ -417,3 +417,94 @@ bytes for multi at N=1/64. The diagnostic does not include ordinary static
 plan storage or unmanaged host containers. The separate giant composition
 checks one last-column result over a logical [2,2^39] constant view, with actual
 value 7; it is a sparse correctness fixture, not a large dense performance test.
+
+
+## CRV-02 exact Bezier function sampling
+
+`bezier_function.cpp` registers three explicit degree-2/3 sampler profiles.
+`ExactSampling` shares NUM-01's exact weighted grid and RN64 addition/conversion.
+`ExactPolynomial` stores signed integer coefficients in units 2^-1075;
+`ExactBezier` validates exact derivative minima and solves the unique interior
+Bx root by dyadic bisection. Interval Horner bounds the whole By image. Integer
+pseudo-remainder GCD and exact low-degree root tests decide shared zeros and
+rounding midpoints; they avoid assuming that a small residual proves rounding.
+Nonzero half-subnormal boundaries use the boundary sign when the tie rounds to
+zero. Direct dyadic roots and constant ordinates use exact evaluation.
+
+The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots,
+all inside the admitted continuation. Initial coefficients have fewer than
+2105 bits. The worst degree-three integer remainder chain grows through
+4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional
+bit refinement cap stays below 26683 bits; final rounding temporaries fit the
+same arena. The static maximum live-slot bound is 44, including temporary
+GCD calls. Explicit work/cancellation runs inside long arithmetic; unresolved
+refinement or storage limits return ResourceExhausted/CapacityLimit. The solver
+has a finite budget, not a promise that every algebraic input resolves at any
+caller-selected budget. All profiles use this exact numerical path, so no
+numerical fallback is reported; profile-specific integer helpers supply the
+scalar/NEON/AVX2 operations. Diagnostics record the actual build/profile.
+
+The four-poll values protocol obtains sampling inputs, global X
+Control/Validation, then local X Data and selected Y Data/Validation, and
+finally publishes immutable packed fragments. Axis has its own two-poll state
+without the polynomial arena and ignores all controls. N=1 also ignores end.
+Topology is validated once per values continuation and searched per requested
+sample; it is not a shared persistent index across independent Atom runs.
+Knot/clamp paths read only one y. Every interior control remains required.
+`strict_math_calls` counts each attempted Bx sign evaluation in refinement,
+including failed calls, excluding topology/interval/GCD work and cache hits.
+
+On 2026-09-20, Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900 Clang
+18.1.3 strict/AVX2 passed five public manual groups and 386 independent
+Fraction/de Casteljau/rational Euclid-Sturm cases per profile. They cover RN64
+reconstruction, inverse rather than direct-t semantics, derivative topology,
+midpoints/subnormals/zero signs, selected-component errors, sparse maximum
+count, source/typed errors, strides/fenv, cache/Atom isolation and resource
+interruption/recovery. Private independent arithmetic probes compared 1758
+common-root cases and 419 inverse cases; review independently checked another
+226 topology and output-boundary cases and found/fixed the signed half-subnormal
+zero issue. Installed 0.15 consumers, focused compiler unit, ClangFormat 21,
+cpplint and final scoped math/entry reviews passed. Shared NUM-01 sampling
+extraction also passed 715 cases/profile plus its seven manual groups on native
+and WSL Clang. No integration/CTest entry was added.
+
+Native Apple M5/Clang 21 RelWithDebInfo timing below uses one worker, Float64,
+cache off and three repetitions after compile/freeze. The identity curves have
+anchors (j,j), quadratic offsets (.5,.5), or cubic outgoing (.25,.25) and
+incoming (-.25,-.25); the sampling interval is [0,K-1]. Every returned value
+matches the independently rounded exact grid coordinate. The full 48-row
+matrix per profile covers degrees 2/3, K=2/64/4096/65536, N=256/65536/1048576
+and Whole/ROI {0,N/2,N-1}. There are 32 successful rows and 16 dense resource
+failures per profile. WSL is not used for performance comparisons.
+
+Budgets are 32 MiB controlled payload, default managed capacity (16 MiB
+Metadata), default maximum_boxes=65536, 64 Mi footprint work, 64 Gi session
+work and 128 Gi Run work. Every Need reserves 4096+16384*M metadata bytes;
+full N=65536 exceeds that capacity and N=1048576 exceeds the association
+lower bound before per-point staging. Raising only the payload budget cannot
+make those dense requests complete. Successful N=256 Whole rows peak around
+14 MiB Metadata, while three-point ROI stays below 1.8 MiB even at K=65536.
+The payload peak is 523808 bytes for Whole and 519760 for ROI; separately
+accounted topology capacity contributes to Host/Metadata. Statistics describe
+managed capacities and exclude unmanaged allocation/RSS. Source counts are
+unique support coordinates; direct bound inputs do not provide physical read
+call telemetry. CSV root_calls and issued_work give distinct computation counts.
+
+| Degree | K | N | Region | Strict median/max us | Apple median/max us |
+| --- | ---: | ---: | --- | ---: | ---: |
+| 2 | 2 | 256 | Whole | 223783/227461 | 208945/274228 |
+| 2 | 2 | 1048576 | ROI3 | 883/922 | 811/1138 |
+| 2 | 65536 | 256 | Whole | 375821/385161 | 373107/379647 |
+| 2 | 65536 | 1048576 | ROI3 | 269675/269694 | 253764/253853 |
+| 3 | 2 | 256 | Whole | 356167/358147 | 334603/350061 |
+| 3 | 2 | 1048576 | ROI3 | 1569/1574 | 1367/1373 |
+| 3 | 65536 | 256 | Whole | 802690/808716 | 740536/741101 |
+| 3 | 65536 | 1048576 | ROI3 | 710799/722415 | 656185/658154 |
+
+The separate stress command uses cubic x=t^3 at t=2^-10 (q=2^-30),
+y=.75*t+.75*t^2-.5*t^3, and a rational root t=1/12 with control y values
+[-17,49,98,742]*2^-1074 whose exact result is -2^-1075. The latter rounds to
+-0. Strict median/max are 508/1057 us and 460/499 us; Apple 495/622 us and
+452/480 us. They require 10 and 8 Bx sign attempts respectively, one evaluated
+value and zero fallbacks, with 519720 payload bytes. These small measurements
+do not establish a general accelerated speedup.

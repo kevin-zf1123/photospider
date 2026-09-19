@@ -779,3 +779,70 @@ cache off, three repetitions. Compile/freeze precede timing; execution and resul
 assembly are timed and all identity-curve outputs/counters are checked. The
 manual target remains excluded from default builds and CTest/integration tests.
 WSL Clang runs are correctness-only.
+
+
+## Bezier function sampling: CRV-02
+
+`photospider/numeric/bezier.hpp` provides `sample_bezier_function_node`.
+Bind anchors:Float32/64[K,2], relative handles:Float32/64[K-1,degree-1,2],
+start:Float32/64[1] and end:Float32/64[1]. Each port chooses its dtype
+independently. Static degree is 2 or 3, count is 1..1048576, K is 2..65536,
+output dtype defaults to Float64 and `BezierDomain` defaults to Reject.
+The outputs are generic `values[count]` and one Float64 `axis[3]` tuple.
+
+```cpp
+auto node = ps::numeric::sample_bezier_function_node(
+    1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    ps::WorkflowInputReference{3}, ps::WorkflowInputReference{4}, 3, 9);
+```
+
+The editable `examples()` in `bezier.cpp` binds anchors=[[0,0],[1,1]],
+handles=[[[0,.25],[-1,-.25]]], start=[0], end=[1]. It executes through
+WorkflowDocument, Compiler and ExecutionContext. Requesting values indices
+{0,1,8} returns {0:0,1:.5,8:1}; axis is [0,1,.125]. At x=.125 the curve
+parameter is t=.5. Function sampling solves Bx(t)=x before evaluating By(t).
+Changing only count, bindings or requested Regions reuses the public API.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_bezier -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_bezier strict
+python3 examples/numeric_workflow/bezier_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_bezier strict
+```
+
+Use `apple` or `x86` only on that CPU. The three explicit profile keys use
+exact RN64 reconstruction and correctly rounded inverse/evaluation; integer
+comparison/publication helpers select scalar, NEON or AVX2. All currently
+agree bitwise, with zero numerical fallbacks. Interior exact zero is +0;
+nonzero underflow keeps its sign. Knot/clamp copies preserve the anchor zero.
+All demanded inputs, reconstructed controls and actual outputs must be finite.
+
+Nonempty values first read the dynamic sampling scalars, then validate every
+anchor/handle x and every segment's monotonicity, then read only selected y.
+C0 corners, crossed cubic handles without x folding, and y overshoot are valid.
+Knot/clamp reads only one anchor y. Axis-only never reads controls. For count=1,
+end is unread and axis is [start,start,0]. Empty requests read no payload.
+The five manual groups check these observations, sparse dirty mapping and
+cache reselection, all-port negative/unaligned/zero strides and caller fenv,
+independent Atom failures, typed Mask validation, source failure ordering,
+work/cancel/stage/capacity failures and owner release.
+
+`Fixture::run` sets explicit work budgets. Each continuation owns about
+508 KiB of exact scratch; topology uses 8*(K+(degree-1)*(K-1)) bytes and every
+requested sample also retains explicit dependency records. Per-Need metadata
+reservation is 4096+16384*M bytes for M requested values. Large dense requests
+can exhaust metadata/association limits despite a small numeric output.
+Request small Regions, as the public fixture does, to inspect large logical
+arrays under bounded resources. Work/capacity failure never reduces precision.
+See [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-02-exact-bezier-function-sampling).
+
+`photospider_numeric_bezier strict benchmark` (or `apple benchmark`) prints
+48 CSV rows for both degrees, K=2/64/4096/65536, N=256/65536/1048576,
+Whole/three-point ROI, one worker, cache off and three repetitions. Each
+successful y=x output is checked; failed dense rows retain their actual status.
+`benchmark_stress` checks a nearly stationary x fixture and signed subnormal
+y cancellation. Compile/freeze precede timing. Root calls count actual Bx sign
+attempts, while issued work also includes topology and host bookkeeping;
+source_coordinates is unique dependency support, not physical read-call count.
+This target is excluded from default builds, CTest and integration registration.
+WSL Clang validation is correctness-only.

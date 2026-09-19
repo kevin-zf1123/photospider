@@ -12,6 +12,7 @@
 
 #include "00-foundation/multi_output.hpp"
 #include "01-numeric/array_publication.hpp"
+#include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/expression_evaluator.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "photospider/numeric/expression.hpp"
@@ -48,14 +49,16 @@ struct SampleState final {
   const SampleProgram* program;
   SequenceProfile profile;
   std::conditional_t<Values, ExpressionEvaluator, EmptyEvaluator> evaluator;
-  ExactSequence first, second;
-  std::array<std::uint64_t, 68> products{};
+  ExactSampling sampling;
   std::array<std::uint64_t, 4> replicas{};
   std::array<std::uint64_t, Values ? 256 : 0> coefficients{};
   std::array<std::uint64_t, 2> endpoints{};
   std::uint32_t pending_begin = 0, pending_end = 0;
   explicit SampleState(const SampleProgram* prepared, SequenceProfile selected)
-      : program(prepared), profile(selected), evaluator(selected) {}
+      : program(prepared),
+        profile(selected),
+        evaluator(selected),
+        sampling(selected) {}
   bool required(std::uint32_t port) const {
     return port != 1 || program->count > 1;
   }
@@ -113,31 +116,13 @@ struct SampleState final {
                                 std::uint32_t wa, std::uint32_t wb,
                                 std::uint32_t divisor, bool narrow,
                                 bool subtract, const DependencyPhase& phase) {
-    auto charged = phase.consume_work(8192);
-    if (!charged.ok())
-      return Result<std::uint64_t>(charged);
-    double x = 0, y = 0;
-    std::memcpy(&x, &a, 8);
-    std::memcpy(&y, &b, 8);
-    first.set(x);
-    second.set(y);
-    sequence_multiply(&first, wa, profile, products.data());
-    sequence_multiply(&second, wb, profile, products.data());
-    if (subtract)
-      second.negative = !second.negative;
-    first.add(second);
-    const bool negative_zero = !subtract && (a >> 63) && (!wb || (b >> 63));
-    return Result<std::uint64_t>(
-        first.rounded_bits(divisor, narrow, negative_zero));
+    return sampling.weighted(a, b, wa, wb, divisor, narrow, subtract,
+                             phase.consume_work);
   }
   Result<std::uint64_t> coordinate(std::uint64_t index,
                                    const DependencyPhase& phase) {
-    if (!index)
-      return Result<std::uint64_t>(endpoints[0]);
-    if (index + 1 == program->count)
-      return Result<std::uint64_t>(endpoints[1]);
-    return rounded(endpoints[0], endpoints[1], program->count - 1 - index,
-                   index, program->count - 1, false, false, phase);
+    return sampling.coordinate(static_cast<std::uint32_t>(index),
+                               program->count, endpoints, phase.consume_work);
   }
   static bool equal(std::uint64_t a, std::uint64_t b) {
     return a == b || ((a | b) & UINT64_C(0x7fffffffffffffff)) == 0;

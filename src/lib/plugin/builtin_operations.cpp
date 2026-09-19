@@ -14,6 +14,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_numeric_binary,
                               register_numeric_expression,
                               register_curve_interpolation,
+                              register_bezier_function,
                               register_numeric_ordering,
                               register_numeric_comparisons,
                               register_numeric_arrays,

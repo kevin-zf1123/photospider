@@ -7,6 +7,7 @@ namespace ps::plugin_internal {
 Status register_builtin_operations(OperationRegistry* registry);
 Status register_numeric_layouts(OperationRegistry* registry);
 Status register_numeric_indexing(OperationRegistry* registry);
+Status register_bezier_function(OperationRegistry* registry);
 Status register_curve_interpolation(OperationRegistry* registry);
 Status register_numeric_expression(OperationRegistry* registry);
 Status register_numeric_binary(OperationRegistry* registry);

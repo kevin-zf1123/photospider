@@ -1,0 +1,84 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <utility>
+
+#include "photospider/compiler/workflow_document.hpp"
+#include "photospider/core/numeric_diagnostics.hpp"
+#include "photospider/data/value.hpp"
+
+namespace ps::numeric {
+/** @brief Finite sampling outside the anchor interval rejects or clamps x. */
+enum class BezierDomain { Reject, Clamp };
+/** @brief Authors a quadratic/cubic single-valued Bezier function sampler.
+ * @param id Nonzero workflow node id.
+ * @param anchors Float32/64 [K,2] dynamic xy anchors, K=2..65536.
+ * @param handles Independent Float32/64 [K-1,degree-1,2] relative xy offsets.
+ * Quadratic/outgoing offsets are relative to the segment start; cubic incoming
+ * offsets are relative to its end. Absolute controls reconstruct with RN64.
+ * @param start Independent Float32/64 [1] sampling start.
+ * @param end Independent Float32/64 [1] sampling end, unread for count=1.
+ * @param degree Exactly 2 or 3, fixed for the entire node.
+ * @param count Endpoint-inclusive sample count, 1..1048576,
+ * ascending/descending.
+ * @param dtype Values dtype Float32/64, default Float64.
+ * @param domain Reject (default) or Clamp; the axis is never rewritten.
+ * @param profile Explicit CPU profile; unsupported hosts fail
+ * BackendUnavailable.
+ * @return Owned node metadata; invalid authoring parameters fail
+ * InvalidArgument/InvalidDomain/Schema. Allocation can throw bad_alloc.
+ * @note Helpers are pure/concurrent-safe. Compiler validates all static edges.
+ * Outputs values[count] and axis:Float64[3] have empty facets and own immutable
+ * packed storage beyond context lifetime. Axis is one tuple observation.
+ * Values globally validate all anchor/handle x and segment monotonicity, then
+ * read only selected y. Knot/clamp reads one anchor y and preserves signed
+ * zero; axis-only reads no controls. N=1 ignores end; Empty reads no payload.
+ * Inputs, reconstructed controls and actual outputs must be finite. Numeric
+ * domain/overflow errors identify the dependent Atom; typed/upstream/resource/
+ * cancellation/stale failures retain their categories. Cache witnesses retain
+ * global x and selected y plus sampling inputs; controls never dirty axis.
+ * Sampling uses exact weighted endpoints rounded to Float64, with requested
+ * adjacent-coordinate separation checks. Interior results correctly round the
+ * mathematical inverse Bx(t)=x and By(t), after RN64 control reconstruction.
+ * A bounded exact algebraic/interval solver can exhaust work or capacity;
+ * use explicit execution budgets as shown in numeric_workflow. The caller's
+ * floating environment is preserved. No y clipping or implicit handle repair.
+ * Interior exact zero is +0. NumericDiagnostics::strict_math_calls counts
+ * actual dyadic Bx sign evaluations, including failed attempts, independently
+ * of the selected exact integer CPU profile; cache hits add no calls.
+ */
+inline Result<WorkflowNode> sample_bezier_function_node(
+    std::uint64_t id, WorkflowInput anchors, WorkflowInput handles,
+    WorkflowInput start, WorkflowInput end, std::int64_t degree,
+    std::int64_t count, ElementType dtype = ElementType::Float64,
+    BezierDomain domain = BezierDomain::Reject,
+    CpuNumericProfile profile = CpuNumericProfile::Strict) {
+  const char* suffix = profile == CpuNumericProfile::Strict ? "_strict"
+                       : profile == CpuNumericProfile::AppleSiliconNeon
+                           ? "_accelerated_apple_silicon"
+                       : profile == CpuNumericProfile::X86Avx2
+                           ? "_accelerated_x86_64"
+                           : nullptr;
+  if (!id || !suffix || (degree != 2 && degree != 3) || count < 1 ||
+      count > 1048576 ||
+      (dtype != ElementType::Float32 && dtype != ElementType::Float64) ||
+      (domain != BezierDomain::Reject && domain != BezierDomain::Clamp))
+    return Result<WorkflowNode>(
+        Status{ErrorCode::InvalidArgument,
+               "invalid Bezier id/degree/count/dtype/domain/profile",
+               FailureReason::InvalidDomain,
+               {FailureOrigin::Schema, FailureScope::Unspecified}});
+  return Result<WorkflowNode>(WorkflowNode{
+      id,
+      std::string("curve.sample_bezier_function") + suffix,
+      {std::move(anchors), std::move(handles), std::move(start),
+       std::move(end)},
+      {{"degree", degree},
+       {"count", count},
+       {"dtype",
+        std::string(dtype == ElementType::Float32 ? "float32" : "float64")},
+       {"out_of_domain",
+        std::string(domain == BezierDomain::Reject ? "reject" : "clamp")}}});
+}
+}  // namespace ps::numeric

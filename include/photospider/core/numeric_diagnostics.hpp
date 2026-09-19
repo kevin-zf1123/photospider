@@ -64,7 +64,9 @@ struct NumericDiagnostics final {
   std::array<std::uint64_t, 4> fallback_reasons{};
   /** @brief Reported strict mathematical-call attempts, including failed calls.
    * Expression generators report every dispatched mathematical primitive;
-   * operators without call-level instrumentation leave this field zero.
+   * Bezier function samplers report exact Bx sign evaluations in root
+   * refinement. These counts exclude topology checks and interval/gcd work.
+   * Operators without call-level instrumentation leave this field zero.
    */
   std::uint64_t strict_math_calls = 0;
   /** @brief Function/reason fallback counts, indexed by NumericMathFunction.

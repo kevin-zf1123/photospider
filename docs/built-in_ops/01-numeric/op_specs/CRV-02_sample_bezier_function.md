@@ -12,8 +12,8 @@ kind: primitive
 status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
-implementation_status: not_implemented
-verification_status: source_inspection_only
+implementation_status: implemented
+verification_status: manual_public_workflows_and_independent_oracle
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -24,10 +24,10 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-This draft records the Bezier anchor/handle generator clarified with the
-maintainer, its numerical/implementation contract and acceptance requirements.
-It does not modify an ADR or authorize implementation. Status remains Proposed
-until the maintainer accepts the completed specification.
+This specification records the Bezier anchor/handle generator and its
+numerical, execution and acceptance contracts. The public implementation is
+available while the specification status remains Proposed; implementation
+availability does not change the design acceptance status.
 
 ## Confirmed purpose and input model
 
@@ -439,9 +439,10 @@ be labeled a CertifiedBound QualityReport without the required kernel evidence.
 | B16 | Multiple consumers, output Values surviving context destruction, final-owner release and no mutable input/registry leakage across concurrent runs |
 | B17 | Strict cross-platform result bits; accelerated <=4 ULP on each declared CPU profile; incompatible-platform rejection and actual fallback diagnostics |
 
-### Conceptual public workflow
+### Maintained public workflow
 
-The following is a target fixture; these keys are not implemented yet:
+The public fixture is implemented through `sample_bezier_function_node` in
+`photospider/numeric/bezier.hpp`:
 
 ```text
 anchors: Float64[2,2] = [[0,0], [1,1]]
@@ -451,21 +452,17 @@ end: Float64[1] = [1]
 
 curve.sample_bezier_function_strict
   ordered inputs = [anchors, handles, start, end]
-  degree = 3
-  count = 9
-  dtype = "float64"
-  out_of_domain = "reject"
+  degree = 3, count = 9, dtype = "float64", out_of_domain = "reject"
 
 request values indices {0,1,8} -> {0:0, 1:0.5, 8:1}
 request axis -> [0,1,0.125]
 ```
 
-This runs through WorkflowDocument input declarations/bindings, Compiler and
-ExecutionContext in the eventual public test. The test must inspect actual
-index coverage, input read sets, axis bytes, failures and frozen-input changes.
-Do not replace it with a direct internal solver call. The delivery supplies
-actual build/run commands and observed results when the new operations exist.
-No current executable command for an unimplemented key is claimed here.
+It runs through WorkflowDocument input declarations/bindings, Compiler and
+ExecutionContext and checks read coverage, axis bytes, failures and binding
+changes. The maintained command and oracle are in the numeric workflow README;
+this specification does not replace the public workflow with an internal solver
+call.
 
 Benchmark both degrees and all three implementations on K=2,64,4096 and the
 supported maximum, using N=256,65536,1048576 and sparse ROIs. Report hardware,
@@ -474,26 +471,36 @@ read counts, actual root/precision work, fallback counts, managed peak and timin
 distribution. Include nearly stationary x and y-cancellation fixtures. A numeric
 pass alone does not establish accelerated speedup; measure it against strict.
 
-## Current implementation gaps and verification
+## Current implementation and verification
 
-The target requires new degree-2/3 anchor-plus-offset parsing/inference,
-dynamic endpoint and control inputs, exact global x validation, local y demand,
-inverse/y rounding algorithms, named axis output and three numerical profiles.
-Host-owned validation sharing, exact witness import and solver fallback diagnostics
-must use existing execution services or have their required API adaptations
-reviewed during a separately authorized implementation task. The new names do
-not claim availability in the default registry today.
+The maintained implementation registers the three profile keys in
+`plugins/ops/01-numeric/bezier_function.cpp`. It performs exact x topology and
+monotonicity validation, RN64 control reconstruction, an inverse solver with
+up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner
+evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena;
+the static live-slot bound is at most 44. All profiles use the same exact path,
+with no numerical fallback and 0 ULP against the independent result. The host
+reports actual `strict_math_calls` for Bx sign attempts only; topology, interval
+and integer polynomial GCD work are not counted as those calls.
 
-Implementation selection must identify supported OS/toolchain/CPU capabilities
-and actual exact/interval-arithmetic libraries, their allocator/work integration,
-correct-rounding handling and accelerated error evidence. These implementation
-prerequisites are not established by writing this specification.
+Dynamic output associations scale with the requested value count. The default
+`maximum_boxes` is 65,536, and each `NeedBatch` reserves metadata of
+`4096 + 16384*M` bytes, so dense 65,536 or 1,048,576 value requests are not
+promised under default limits. Sparse ROI requests remain the supported way to
+exercise large logical outputs. The native benchmark matrix records those
+`ResourceExhausted` outcomes separately from successful timing results. Explicit
+execution budgets are required for reproducible manual runs.
 
-The old curve registration, implementation and tests were read in this session.
-Independent Python Fraction checks cover analytic roots, t-versus-x inversion,
-derivative minima and unclipped y values. Product code, product tests, platform
-benchmarks, ADRs and shared ABI contracts have not been changed or executed by
-this specification-only task.
+Native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900 Clang 18
+strict/x86 runs passed five public manual groups and 386 independent
+Fraction/de Casteljau/GCD-Sturm cases per profile. Installed 0.15 strict and
+Apple consumers passed. The manual target is EXCLUDE_FROM_ALL and has no CTest
+or integration registration. The latest root-call counter also passed the
+native/WSL manual checks. Native measurements and their resource limits are recorded below through the linked
+implementation notes. WSL supplies correctness evidence only. See
+[the numeric workflow README](../../../../examples/numeric_workflow/README.md)
+and [math implementation](../math-implementation.md) for commands and algorithm
+notes.
 
 ## Existing implementation comparison
 

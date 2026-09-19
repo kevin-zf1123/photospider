@@ -104,6 +104,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_interpolation.cpp
   plugins/ops/01-numeric/numeric_layouts.cpp
   plugins/ops/01-numeric/numeric_indexing.cpp
+  plugins/ops/01-numeric/bezier_function.cpp
   plugins/ops/01-numeric/curve_interpolation.cpp
   plugins/ops/01-numeric/numeric_expression.cpp
   plugins/ops/01-numeric/numeric_binary.cpp
