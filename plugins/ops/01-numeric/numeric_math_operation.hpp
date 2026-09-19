@@ -14,6 +14,7 @@
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/certified_math.hpp"
 #include "01-numeric/exact_elementary.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
@@ -222,17 +223,7 @@ OperationDefinition point_math_operation(const std::string& key,
       data.roles = 1;
       for (std::size_t axis = 0; axis < first.shape.size(); ++axis)
         data.axes.push_back({static_cast<std::int32_t>(axis), {}});
-      auto validation = data;
-      validation.roles = 4;
-      for (const auto& facet : inputs[port].facets)
-        if (facet.key == "photospider.image" ||
-            facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          if (!semantic.ok())
-            return Answer(semantic.status());
-          if (semantic.value().kind == SemanticKind::Image)
-            validation.axes[2] = {-1, {0, first.shape[2]}};
-        }
+      auto validation = input_internal::validation_map(data, inputs[port]);
       maps.push_back(std::move(data));
       maps.push_back(std::move(validation));
     }

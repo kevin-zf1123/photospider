@@ -276,3 +276,44 @@ NUM-01's public workflows and independent expression oracle passed on native
 Clang and Clang WSL. C++ consumers must rebuild for 0.15 and older minor requests
 are rejected.
 The C ABI 9 descriptor/table layout remains unchanged.
+
+## CRV-06 ColorArray and explicit resource bindings
+
+Package 0.16.0 introduces a breaking C++ public layout and signature change for
+ColorArray/ICC-backed values. C++ `OperationTraits` remains version 14 and the
+semantic, physical-plan and plan-cache framing remains v14; WorkflowDocument
+schema 2, provider ABI 1 and the C operation ABI 9 remain unchanged. The C ABI
+descriptor and entrypoint layout do not carry these C++ resource bindings.
+
+`IccProfile::import` admits validated immutable ICC v2/v4 bytes under an
+explicit `ResourceBudget`; `ResourceBindings::create` seals the admitted
+profiles and supports identity selection, references and set union. ICC identity
+is content-based (SHA-256 plus length), not a path, address or ICC MD5 profile
+ID. The handles are immutable and share accepted payload owners. Admission,
+hashing, parsing, sorting and comparisons observe cancellation and work limits;
+failure publishes no partial resource.
+
+`Compiler::analyze` and `Compiler::compile` accept explicit `ResourceBindings`
+and retain them in semantic IR, optimized IR and the execution plan. A
+`ResourceBindings` set is also carried through `InputSnapshot`, `RegionalSource`,
+`DependencyRequest`/`DependencyQuery`, `ResultProgramQuery`/`ResultContinuation`
+and operation invocation. `Value`,
+`ValueFragments` and `MutableValue::publish` accept and retain the validated
+owners named by their facets; irrelevant bindings are dropped. Empty execution
+paths still validate and retain required resources even when they read no
+payload. Resource owners retire with the corresponding Value/fragment,
+snapshot, plan or Run lifetime. Partial-channel ColorArray output requests
+normalize to complete colors in plans, direct calls and retained demands; input
+transport and fragments retain their complete-channel requirement.
+
+These C++ layout, constructor and method signature changes require all C++
+package consumers to rebuild against 0.16.0. No compatibility shim or older
+minor reader is introduced. The recognized `photospider.color-array` facet now
+has typed validation and complete-color demand semantics; earlier opaque-facet
+treatment is not a compatibility contract. Persisted sample cache keys include
+`PHOTOSPIDER_CACHE_BUILD_ID`, derived from kernel/operation/header sources and
+build settings, so entries from the earlier implementation are isolated.
+ColorArray itself is outside the existing disk-cache facet allowlist, and
+resource-bearing results also bypass optional sample-only caches. Plans and
+in-memory result caches have no cross-build deserialization path. Implementation
+of CRV-06 and acceptance of its Proposed specification remain separate states.

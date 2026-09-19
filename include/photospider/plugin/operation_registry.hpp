@@ -533,6 +533,10 @@ struct PHOTOSPIDER_API OperationInvocation final {
   BufferAllocator allocator;
   /** @brief Borrowed native services; valid only during this invocation. */
   const ps_gpu_service_v9* gpu = nullptr;
+  /** @brief Explicit immutable resource owners for static output identities.
+   * Input Value owners are also admitted by invoke. No dynamic sample port.
+   */
+  ResourceBindings resources = {};
 };
 
 /** @brief Function signature for one synchronous operation invocation. */

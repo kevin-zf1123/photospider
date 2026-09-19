@@ -10,6 +10,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -367,18 +368,7 @@ OperationDefinition broadcast(const std::string& key, SequenceProfile profile) {
               ? DependencyAxis{-1, {0, 1}}
               : DependencyAxis{static_cast<std::int32_t>(axis), {0, 0}});
     }
-    auto validation = data;
-    validation.roles = 4;
-    for (const auto& facet : inputs[0].facets) {
-      if (facet.key != "photospider.image" &&
-          facet.key != "photospider.semantic")
-        continue;
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return Answer(semantic.status());
-      if (semantic.value().kind == SemanticKind::Image)
-        validation.axes[2] = {-1, {0, source.shape[2]}};
-    }
+    auto validation = input_internal::validation_map(data, inputs[0]);
     const auto& layout = std::get<std::string>(parameters.at("layout"));
     if (layout != "view" && layout != "dense")
       return Answer(numeric_ops::array_parameter_error(

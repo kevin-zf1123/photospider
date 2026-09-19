@@ -34,6 +34,8 @@ class PHOTOSPIDER_API ValueFragments final {
    * Rectangular neighbors with the same owner/mapping may coalesce; returned
    * fragment count and partition need not equal the supplied partition.
    * @param limits Bounds normalization, including cancellation.
+   * @param resources Facet resources, inferred from the first fragment when
+   * omitted. Empty CMYK coverage still requires explicit owning resources.
    * @return Complete fragments or InvalidArgument/TypeMismatch/NotFound (hole),
    * ResourceExhausted/Cancelled. Typed images require full C in every fragment.
    */
@@ -41,7 +43,8 @@ class PHOTOSPIDER_API ValueFragments final {
                                        std::vector<ValueFacet> facets,
                                        Footprint authorized,
                                        const std::vector<Value>& fragments,
-                                       const FootprintLimits& limits = {});
+                                       const FootprintLimits& limits = {},
+                                       ResourceBindings resources = {});
   /** @brief Same validation from a borrowed contiguous array, without a
    * temporary std::vector. A null pointer is valid only for count zero.
    * The array is borrowed for this call; returned fragments retain owners.
@@ -53,10 +56,12 @@ class PHOTOSPIDER_API ValueFragments final {
       ValueDescriptor descriptor, std::vector<ValueFacet> facets,
       Footprint authorized, const Value* fragments, std::size_t count,
       const FootprintLimits& limits = {},
-      std::shared_ptr<const void> metadata_lifetime = {});
+      std::shared_ptr<const void> metadata_lifetime = {},
+      ResourceBindings resources = {});
   bool valid() const noexcept { return authorized_.valid(); }
   const ValueDescriptor& descriptor() const noexcept { return descriptor_; }
   const std::vector<ValueFacet>& facets() const noexcept { return facets_; }
+  const ResourceBindings& resources() const noexcept { return resources_; }
   const Footprint& coverage() const noexcept { return authorized_; }
   const std::vector<Value>& fragments() const noexcept { return fragments_; }
   /** @brief Copies one authorized sample, with checked logical addressing.
@@ -88,6 +93,7 @@ class PHOTOSPIDER_API ValueFragments final {
  private:
   void swap(ValueFragments&) noexcept;
   std::shared_ptr<const void> metadata_lifetime_;
+  ResourceBindings resources_;
   ValueDescriptor descriptor_;
   std::vector<ValueFacet> facets_;
   Footprint authorized_;

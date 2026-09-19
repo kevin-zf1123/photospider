@@ -109,6 +109,10 @@ struct PHOTOSPIDER_API RegionalSource final {
   Read read = {};
   /** @brief Fixed maximum scratch capacity used while reading one region. */
   std::uint64_t workspace_bytes = 0;
+  /** @brief Explicit immutable owners resolving this source's facet identities.
+   * Captured and validated before callbacks; retained by published Values.
+   */
+  ResourceBindings resources = {};
 };
 
 /** @brief Synchronous ordered tile sink; the borrowed view expires on return.
@@ -366,7 +370,10 @@ class PHOTOSPIDER_API FrozenExecution final {
   std::string execution_identity_;
 };
 
-/** @brief Exact named sample subsets of the compiled output regions. */
+/** @brief Named sample subsets of the compiled output regions.
+ * ColorArray output requests expand to complete colors. Returned fragments and
+ * retained demand identities use the closure; Image requires complete channels.
+ */
 using DemandQuery = std::map<std::string, Footprint>;
 /** @brief Complete sparse result; holes remain unauthorized and unallocated. */
 struct PHOTOSPIDER_API DemandResult final {

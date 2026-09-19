@@ -626,7 +626,7 @@ Result<Value> transfer_value(const Value& source,
     auto status = copy_region(ValueView(source), &output, source.region());
     if (!status.ok())
       return Result<Value>(status);
-    return std::move(output).publish(source.facets());
+    return std::move(output).publish(source.facets(), source.resources());
   }
   auto allocated = allocator.allocate(source.bytes().size());
   if (!allocated.ok())
@@ -635,7 +635,7 @@ Result<Value> transfer_value(const Value& source,
   std::memcpy(buffer.data(), source.bytes().data(), source.bytes().size());
   return Value::from_storage(source.descriptor(), source.region(),
                              source.layout(), std::move(buffer).freeze(),
-                             source.facets());
+                             source.facets(), source.resources());
 }
 
 /**
@@ -968,15 +968,26 @@ Status retain_managed_inputs(std::vector<ExecutionBinding>* bindings,
   if (!budget->resources())
     return Status::success();
   for (auto& binding : *bindings) {
+    if (binding.source) {
+      auto source = std::make_shared<RegionalSource>(*binding.source);
+      auto resources = source->resources.reference(*budget->resources());
+      if (!resources.ok())
+        return resources.status();
+      source->resources = resources.take_value();
+      binding.source = std::move(source);
+    }
     if (!binding.value.valid())
       continue;
     const auto& value = binding.value;
     auto owner = budget->resources()->reference(value.storage());
     if (!owner.ok())
       return owner.status();
-    auto retained =
-        Value::from_storage(value.descriptor(), value.region(), value.layout(),
-                            owner.take_value(), value.facets());
+    auto resources = value.resources().reference(*budget->resources());
+    if (!resources.ok())
+      return resources.status();
+    auto retained = Value::from_storage(value.descriptor(), value.region(),
+                                        value.layout(), owner.take_value(),
+                                        value.facets(), resources.take_value());
     if (!retained.ok())
       return retained.status();
     binding.value = retained.take_value();
@@ -1099,6 +1110,7 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
       auto source = std::make_shared<RegionalSource>();
       source->descriptor = binding.snapshot->descriptor();
       source->facets = binding.snapshot->facets();
+      source->resources = binding.snapshot->resources();
       source->read = [snapshot = binding.snapshot](
                          const Region& r, std::uint8_t* bytes,
                          std::uint64_t size, const BufferAllocator&,
@@ -1128,6 +1140,10 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
         return Result<std::vector<ExecutionBinding>>(Status::failure(
             ErrorCode::TypeMismatch,
             "regional source metadata differs from declaration"));
+      auto resources = source->resources.select(source->facets);
+      if (!resources.ok())
+        return Result<std::vector<ExecutionBinding>>(resources.status());
+      source->resources = resources.take_value();
       binding.source = std::move(source);
     } else {
       auto status =
@@ -1247,6 +1263,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         abort_flights(status);
       return Result<ExecutionResult>(std::move(status));
     };
+    auto admitted_resources =
+        budget->resources() ? plan.resources().reference(*budget->resources())
+                            : Result<ResourceBindings>(plan.resources());
+    if (!admitted_resources.ok())
+      return fail(admitted_resources.status());
+    const auto resources = admitted_resources.take_value();
     auto retained_inputs = retain_managed_inputs(&bindings, budget);
     if (!retained_inputs.ok())
       return fail(retained_inputs);
@@ -1610,12 +1632,22 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (!outside.value().empty())
           return fail(Status{ErrorCode::InvalidArgument,
                              "query exceeds compiled output region"});
-        for (const auto& box : item.second.boxes())
-          if (!input_internal::complete_image_channels(step.output_descriptor,
+        auto closed = input_internal::color_output_samples(
+            {step.output_descriptor, step.output_facets}, item.second, limits);
+        if (!closed.ok())
+          return fail(closed.status());
+        outside = closed.value().subtract(scope.value(), limits);
+        if (!outside.ok())
+          return fail(outside.status());
+        if (!outside.value().empty())
+          return fail(Status{ErrorCode::InvalidArgument,
+                             "color closure exceeds compiled output region"});
+        for (const auto& box : closed.value().boxes())
+          if (!input_internal::complete_tuple_channels(step.output_descriptor,
                                                        step.output_facets, box))
             return fail(Status{ErrorCode::InvalidArgument,
                                "query requires complete image channels"});
-        wanted.emplace(item.first, item.second);
+        wanted.emplace(item.first, closed.take_value());
       }
     } else {
       for (const auto& named : plan.outputs()) {
@@ -1736,13 +1768,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       for (const auto& region : named.second.boxes()) {
         const auto rank = region.rank();
         std::vector<std::uint64_t> geometry(rank, 1), cursor;
-        const bool image = std::any_of(
-            step.output_facets.begin(), step.output_facets.end(),
-            [](const auto& facet) { return facet.key == "photospider.image"; });
-        if (image) {
-          geometry[0] = plan.tile_height();
-          geometry[1] = plan.tile_width();
-          geometry[2] = step.output_descriptor.shape[2];
+        const auto channels = input_internal::tuple_channel_axis(
+            step.output_descriptor, step.output_facets);
+        if (channels) {
+          geometry[*channels] = step.output_descriptor.shape[*channels];
+          geometry[*channels - 1] = plan.tile_width();
+          if (*channels > 1)
+            geometry[*channels - 2] = plan.tile_height();
         } else {
           geometry[rank - 1] = plan.tile_width();
           if (rank > 1)
@@ -2044,8 +2076,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (!status.ok())
                 return fail(status);
             }
-            auto empty = ValueFragments::create(
-                output.descriptor, output.facets, frame.outputs, {}, limits);
+            auto empty =
+                ValueFragments::create(output.descriptor, output.facets,
+                                       frame.outputs, {}, limits, resources);
             if (!empty.ok())
               return fail(empty.status());
             frame.complete = empty.take_value();
@@ -2105,7 +2138,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                     "source returned different coverage"));
               if (stop() != ErrorCode::Ok)
                 return fail(Status{stop(), {}});
-              auto published = std::move(writer).publish(output.facets);
+              auto published = std::move(writer).publish(
+                  output.facets, binding.source->resources);
               if (!published.ok())
                 return fail(published.status());
               frame.values.push_back(published.take_value());
@@ -2450,6 +2484,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               request.output_index = step.output_index;
               request.parameters = step.parameters;
               request.prepared = step.prepared;
+              request.resources = resources;
               request.outputs = frame.outputs;
               request.snapshot_identity = identity;
               request.backend = frame.backend;
@@ -2541,8 +2576,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                   std::find(ports->begin(), ports->end(), port) ==
                       ports->end()) {
                 const auto input = metadata(target);
-                auto empty = ValueFragments::create(
-                    input.descriptor, input.facets, query, {}, limits);
+                auto empty =
+                    ValueFragments::create(input.descriptor, input.facets,
+                                           query, {}, limits, resources);
                 if (!empty.ok())
                   return fail(empty.status());
                 frame.ready.push_back(empty.take_value());
@@ -2962,6 +2998,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         frame.backend, active_token(), frame.outputs.boxes()[0],
                         allocator};
                     call.output_index = step.output_index;
+                    call.resources = resources;
                     call.input_indices = std::move(input_indices);
                     for (const auto& input : step.inputs)
                       call.input_metadata.push_back(metadata(input));
@@ -3359,6 +3396,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             request.inputs.push_back(metadata(input));
           request.parameters = step.parameters;
           request.prepared = step.prepared;
+          request.resources = resources;
           request.outputs = member.samples;
           request.snapshot_identity = identity;
           request.output_index = step.output_index;
@@ -3703,8 +3741,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         for (auto& read : reads) {
           if (read.metadata_only) {
             const auto input = metadata(read.target);
-            auto empty = ValueFragments::create(input.descriptor, input.facets,
-                                                read.samples, {}, limits);
+            auto empty =
+                ValueFragments::create(input.descriptor, input.facets,
+                                       read.samples, {}, limits, resources);
             if (empty.ok())
               read.result.emplace(
                   Evaluation{empty.take_value(), false, Backend::Cpu, {}});
@@ -3825,13 +3864,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         if (fragment_outputs) {
           const auto& descriptor = returned->descriptor();
           std::vector<std::uint64_t> geometry(descriptor.shape.size(), 1);
-          const bool image = std::any_of(
-              returned->facets().begin(), returned->facets().end(),
-              [](const auto& f) { return f.key == "photospider.image"; });
-          if (image) {
-            geometry[0] = plan.tile_height();
-            geometry[1] = plan.tile_width();
-            geometry[2] = descriptor.shape[2];
+          const auto channels = input_internal::tuple_channel_axis(
+              descriptor, returned->facets());
+          if (channels) {
+            geometry[*channels] = descriptor.shape[*channels];
+            geometry[*channels - 1] = plan.tile_width();
+            if (*channels > 1)
+              geometry[*channels - 2] = plan.tile_height();
           } else {
             geometry.back() = plan.tile_width();
             if (geometry.size() > 1)
@@ -4036,13 +4075,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       std::function<void(std::size_t, const Value&, Backend)> retain = {},
       std::shared_ptr<gpu_internal::Device> native_device = {},
       execution_internal::ResultCache* native_cache = nullptr,
-      std::uint64_t cache_epoch = 0)
+      std::uint64_t cache_epoch = 0, ResourceBindings resources = {})
       : cpu_pool_(cpu_pool),
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
         reservation_(std::move(reservation)),
         invoke_(std::move(invoke)),
         plan_(plan),
+        resources_(std::move(resources)),
         bindings_(std::move(bindings)),
         cancellation_(std::move(cancellation)),
         maximum_parallelism_(maximum_parallelism),
@@ -4555,7 +4595,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             const auto& uploaded = found->second.second;
             auto reused = Value::from_storage(
                 uploaded.descriptor(), uploaded.region(), uploaded.layout(),
-                uploaded.storage(), inputs[input_index].facets());
+                uploaded.storage(), inputs[input_index].facets(),
+                inputs[input_index].resources());
             if (!reused.ok()) {
               finish_failure(reused.status());
               return;
@@ -4665,6 +4706,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                regional_ ? step.output_demand : Region{},
                                callback_allocator};
       call.output_index = step.output_index;
+      call.resources = resources_;
       if (native_device_ && backend == Backend::Gpu) {
         native.emplace(native_device_, cancellation_);
         call.gpu = native->service();
@@ -4982,6 +5024,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       invoke_;
   /** @brief Immutable caller-owned plan valid until `run` returns. */
   const ExecutionPlan* plan_;
+  ResourceBindings resources_;
   /** @brief Run-owned immutable Values in canonical declaration order. */
   std::vector<Value> bindings_;
   /** @brief Cooperative cancellation observation. */
@@ -5143,6 +5186,27 @@ Result<DemandKey> demand_key(const DemandQuery& query,
       }
   }
   return Result<DemandKey>(DemandKey{hash.finish(), entries});
+}
+Result<DemandQuery> close_color_demands(const DemandQuery& query,
+                                        const ExecutionPlan& plan,
+                                        const FootprintLimits& limits) {
+  auto checked = demand_key(query, plan, limits.maximum_boxes);
+  if (!checked.ok())
+    return Result<DemandQuery>(checked.status());
+  DemandQuery result;
+  for (const auto& item : query) {
+    const auto found = plan.outputs().find(item.first);
+    if (found == plan.outputs().end())
+      return Result<DemandQuery>(
+          Status{ErrorCode::InvalidArgument, "unknown color demand output"});
+    const auto& step = plan.steps()[found->second];
+    auto closed = input_internal::color_output_samples(
+        {step.output_descriptor, step.output_facets}, item.second, limits);
+    if (!closed.ok())
+      return Result<DemandQuery>(closed.status());
+    result.emplace(item.first, closed.take_value());
+  }
+  return Result<DemandQuery>(std::move(result));
 }
 Status unite_named(DemandQuery* target, const DemandQuery& values,
                    const FootprintLimits& limits) {
@@ -5453,12 +5517,16 @@ Result<DemandResult> DemandHandle::request(
   const auto failure = [&](Status status) {
     return Result<DemandResult>(lease->stop(std::move(status)));
   };
-  auto key = demand_key(query, lease->bundle->plan(),
+  auto normalized = close_color_demands(query, lease->bundle->plan(),
+                                        options.dependencies.sets);
+  if (!normalized.ok())
+    return failure(normalized.status());
+  DemandQuery original = normalized.take_value();
+  auto key = demand_key(original, lease->bundle->plan(),
                         std::min(impl_->config.maximum_metadata_entries,
                                  options.dependencies.sets.maximum_boxes));
   if (!key.ok())
     return failure(key.status());
-  DemandQuery original = query;
   auto run = *lease->bundle;
   run.plan_.current_check_ = [handle = impl_, generation = lease->generation] {
     return handle->generation.load(std::memory_order_acquire) == generation;
@@ -5544,7 +5612,12 @@ Status DemandHandle::release(const DemandQuery& query) const {
   if (!begun.ok())
     return begun.status();
   auto lease = begun.take_value();
-  auto key = demand_key(query, lease->bundle->plan(),
+  FootprintLimits limits;
+  limits.maximum_boxes = impl_->config.maximum_metadata_entries;
+  auto normalized = close_color_demands(query, lease->bundle->plan(), limits);
+  if (!normalized.ok())
+    return lease->stop(normalized.status());
+  auto key = demand_key(normalized.value(), lease->bundle->plan(),
                         impl_->config.maximum_metadata_entries);
   if (!key.ok())
     return lease->stop(key.status());
@@ -5553,7 +5626,8 @@ Status DemandHandle::release(const DemandQuery& query) const {
   if (!status.ok())
     return status;
   auto found = impl_->publications.find(key.value().value);
-  if (found == impl_->publications.end() || found->second->query != query)
+  if (found == impl_->publications.end() ||
+      found->second->query != normalized.value())
     return Status{ErrorCode::NotFound, {}};
   if (impl_->revision == UINT64_MAX)
     return Status{ErrorCode::ResourceExhausted, {}};
@@ -5758,6 +5832,15 @@ Result<ExecutionResult> ExecutionContext::execute(
     status.code = stopped;
     return Result<ExecutionResult>(std::move(status));
   }
+  auto admitted_resources =
+      impl_->budget->resources()
+          ? plan.resources().reference(*impl_->budget->resources())
+          : Result<ResourceBindings>(plan.resources());
+  if (!admitted_resources.ok())
+    return Result<ExecutionResult>(admitted_resources.status());
+  auto retained_inputs = retain_managed_inputs(&bindings.inputs, impl_->budget);
+  if (!retained_inputs.ok())
+    return Result<ExecutionResult>(retained_inputs);
   auto prepared = preflight_bindings(plan, bindings, cancellation);
   stopped = binding_stop(plan, cancellation);
   if (stopped != ErrorCode::Ok) {
@@ -5831,7 +5914,7 @@ Result<ExecutionResult> ExecutionContext::execute(
         std::map<ValueRef, Value>{}, std::map<ValueRef, Backend>{},
         std::function<void(std::size_t, const Value&, Backend)>{},
         impl_->native_device, impl_->cache.get(),
-        impl_->cache ? impl_->cache->epoch() : 0);
+        impl_->cache ? impl_->cache->epoch() : 0, admitted_resources.value());
     auto result = coordinator->run();
     if (impl_->cache && impl_->native_device &&
         !impl_->native_device->available())
@@ -5928,6 +6011,13 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           },
           requested, nullptr, snapshot_identity, nullptr, nullptr, nullptr,
           &impl_->shared_results, atom_outcomes);
+    auto admitted_resources =
+        impl_->budget->resources()
+            ? plan.resources().reference(*impl_->budget->resources())
+            : Result<ResourceBindings>(plan.resources());
+    if (!admitted_resources.ok())
+      return failure(admitted_resources.status());
+    const auto resources = admitted_resources.take_value();
     auto observation =
         std::make_shared<execution_internal::MemoryObservation>();
     std::map<ValueRef, Value> cached;
@@ -6079,7 +6169,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     // Shared coordinators execute one ready node. Dependency traversal stays on
     // the caller, so bounded coordinators never wait for another coordinator.
     const auto run_tile =
-        [this, snapshot, observation, parallelism](
+        [this, snapshot, observation, parallelism, resources](
             const ExecutionPlan& tile,
             const std::map<ValueRef, Value>& tile_cached,
             const std::map<ValueRef, Backend>& tile_backends,
@@ -6280,7 +6370,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         ++diagnostics.source_read_count;
         diagnostics.peak_active_tasks =
             std::max(diagnostics.peak_active_tasks, UINT32_C(1));
-        auto published = std::move(writer).publish(binding.source->facets);
+        auto published = std::move(writer).publish(binding.source->facets,
+                                                   binding.source->resources);
         if (!published.ok())
           return Result<ExecutionResult>(published.status());
         values[i] = published.take_value();
@@ -6309,7 +6400,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
               impl_->disk->put(keys[index], value,
                                [&] { return binding_stop(tile, token); });
           },
-          impl_->native_device, impl_->cache.get(), cache_epoch);
+          impl_->native_device, impl_->cache.get(), cache_epoch, resources);
       auto result = coordinator->run();
       if (impl_->cache && impl_->native_device &&
           !impl_->native_device->available())
@@ -6595,8 +6686,9 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     ExecutionResult result;
     result.values = std::move(shared_values);
     for (auto& output : collected) {
-      auto value = std::move(output.second)
-                       .publish(std::move(collected_facets.at(output.first)));
+      auto value =
+          std::move(output.second)
+              .publish(std::move(collected_facets.at(output.first)), resources);
       if (!value.ok())
         return failure(value.status());
       result.values.emplace(output.first, value.take_value());

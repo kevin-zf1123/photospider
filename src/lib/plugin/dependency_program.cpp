@@ -19,11 +19,13 @@
 #include "data/input_validation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/color_dependency_validation.hpp"
 #include "plugin/dependency_block.hpp"
 #include "plugin/dependency_discovery.hpp"
 #include "plugin/failure_latch.hpp"
 #include "plugin/joint_member_phase.hpp"
 #include "plugin/operation_identity.hpp"
+#include "plugin/operation_resources.hpp"
 
 namespace ps {
 namespace {
@@ -50,18 +52,12 @@ Status validate_metadata(OperationMetadata* metadata) {
   auto status = input_internal::canonicalize_facets(&metadata->facets);
   if (!status.ok())
     return status;
-  for (const auto& facet : metadata->facets)
-    if (facet.key == "photospider.image" ||
-        facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return semantic.status();
-      status =
-          validate_semantic_descriptor(semantic.value(), metadata->descriptor);
-      if (!status.ok())
-        return status;
-    }
-  return Status::success();
+  if (input_internal::tuple_channel_axis(metadata->descriptor,
+                                         metadata->facets) &&
+      metadata->atomic_trailing_axes > 1)
+    return invalid("color observations group exactly one trailing axis");
+  return input_internal::validate_port_metadata({}, metadata->descriptor,
+                                                metadata->facets);
 }
 }  // namespace
 Result<AtomKey> dependency_atom_key(const DependencyQuery& query) {
@@ -95,14 +91,17 @@ Result<Footprint> operation_observations(const OperationMetadata& output,
   if (grouped > output.descriptor.shape.size() ||
       (grouped && image_metadata(output)))
     return Result<Footprint>(invalid("invalid tuple observation metadata"));
-  if (!image_metadata(output) && !grouped)
+  const bool color =
+      input_internal::tuple_channel_axis(output.descriptor, output.facets)
+          .has_value();
+  if (!color && !grouped)
     return Result<Footprint>(samples);
   std::vector<Region> rectangles;
   for (const auto& box : samples.boxes()) {
-    if (!grouped && !input_internal::complete_image_channels(
-                        output.descriptor, output.facets, box))
+    if (image_metadata(output) && !input_internal::complete_tuple_channels(
+                                      output.descriptor, output.facets, box))
       return Result<Footprint>(
-          invalid("an image observation requires complete channels"));
+          invalid("a color observation requires complete channels"));
     auto dimensions = box.dimensions();
     dimensions.resize(dimensions.size() - (grouped ? grouped : 1));
     if (dimensions.empty())
@@ -126,7 +125,11 @@ Result<Footprint> observation_samples(const OperationMetadata& output,
   const auto grouped = output.atomic_trailing_axes;
   if (grouped > shape.size() || (grouped && image_metadata(output)))
     return Result<Footprint>(invalid("invalid tuple observation metadata"));
-  const auto trailing = grouped ? grouped : (image_metadata(output) ? 1U : 0U);
+  const auto trailing = grouped ? grouped
+                                : (input_internal::tuple_channel_axis(
+                                       output.descriptor, output.facets)
+                                       ? 1U
+                                       : 0U);
   shape.resize(shape.size() - trailing);
   if (shape.empty())
     shape.push_back(1);
@@ -411,7 +414,15 @@ struct DependencySession::Impl {
                                          rows, limits.sets);
   }
   Result<std::vector<DependencyNeed>> projection(
-      const DependencyNeedBatch& batch) const {
+      const DependencyNeedBatch& batch) {
+    const auto closure = [&](const DependencyCertificate& certificate) {
+      return dependency_internal::validate_color_certificate(
+          certificate, query.inputs, limits.sets,
+          [&](std::uint64_t amount) { return consume(amount); },
+          query.kind == ObservationKind::Atomic ? &rows : nullptr,
+          query.kind == ObservationKind::RequestRecord ? &terminal_needs
+                                                       : nullptr);
+    };
     if (traits.outputs[0].static_dependency_pieces) {
       if (!batch.static_mapping || !batch.associations.empty() ||
           !batch.request_needs.empty())
@@ -422,6 +433,9 @@ struct DependencySession::Impl {
           mapped_pieces, limits.sets);
       if (!mapped.ok())
         return Result<std::vector<DependencyNeed>>(mapped.status());
+      auto status = closure(mapped.value());
+      if (!status.ok())
+        return Result<std::vector<DependencyNeed>>(status);
       return mapped.value().backward(query.observations, limits.sets);
     }
     if (batch.static_mapping)
@@ -439,6 +453,9 @@ struct DependencySession::Impl {
           {{{0}, batch.request_needs}}, limits.sets);
       if (!projected.ok())
         return Result<std::vector<DependencyNeed>>(projected.status());
+      auto status = closure(projected.value());
+      if (!status.ok())
+        return Result<std::vector<DependencyNeed>>(status);
       return projected.value().backward(coverage.value(), limits.sets);
     }
     auto projected = DependencyCertificate::create(
@@ -446,6 +463,9 @@ struct DependencySession::Impl {
         batch.associations, limits.sets);
     if (!projected.ok())
       return Result<std::vector<DependencyNeed>>(projected.status());
+    auto status = closure(projected.value());
+    if (!status.ok())
+      return Result<std::vector<DependencyNeed>>(status);
     return projected.value().backward(query.observations, limits.sets);
   }
 };
@@ -517,6 +537,11 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                                        request.parameters);
   if (!output.ok())
     return Result<std::shared_ptr<DependencySession>>(output.status());
+  auto admitted_resources = plugin_internal::admit_operation_resources(
+      request.resources, request.inputs, output.value());
+  if (!admitted_resources.ok())
+    return Result<std::shared_ptr<DependencySession>>(
+        admitted_resources.status());
   const auto static_status = validate_static(
       validate, request.inputs, request.parameters, request.cancellation);
   if (!static_status.ok())
@@ -525,7 +550,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                                              request.limits.sets);
   if (!observations.ok())
     return Result<std::shared_ptr<DependencySession>>(observations.status());
-  if (output.value().atomic_trailing_axes) {
+  if (output.value().atomic_trailing_axes ||
+      input_internal::color_array(output.value().facets)) {
     auto closure = observation_samples(output.value(), observations.value(),
                                        request.limits.sets);
     if (!closure.ok())
@@ -571,7 +597,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                  request.backend,
                  request.cancellation,
                  request.output_index,
-                 impl->prepared.get()};
+                 impl->prepared.get(),
+                 admitted_resources.take_value()};
   const auto contract_identity = [&](bool common) {
     content_internal::Sha256 identity;
     identity.text(common ? "photospider.shared-dependency-block.v1"
@@ -976,6 +1003,7 @@ Result<std::optional<Status>> DependencySession::preflight_joint_reply(
     }
     if (projected.value().empty())
       return protocol("empty batch member Need");
+    std::map<std::uint32_t, Footprint> transport;
     for (const auto& fetch : projected.value()) {
       const auto& allowed = impl_->traits.outputs[0].input_indices;
       if (allowed && std::find(allowed->begin(), allowed->end(), fetch.port) ==
@@ -985,12 +1013,25 @@ Result<std::optional<Status>> DependencySession::preflight_joint_reply(
           impl_->consume(fetch.tags.size() + fetch.samples.boxes().size() + 1);
       if (!charged.ok())
         return Answer(std::optional<Status>(impl_->service_status()));
-      for (const auto& box : fetch.samples.boxes())
-        if (!input_internal::complete_image_channels(
-                impl_->query.inputs[fetch.port].descriptor,
-                impl_->query.inputs[fetch.port].facets, box))
-          return protocol("batch member omits complete input observation");
+      auto found = transport.find(fetch.port);
+      if (found == transport.end()) {
+        transport.emplace(fetch.port, fetch.samples);
+      } else {
+        auto joined = found->second.unite(fetch.samples, impl_->limits.sets);
+        if (!joined.ok())
+          return local(joined.status(),
+                       joined.status().code == ErrorCode::Cancelled
+                           ? FailureOrigin::Cancellation
+                           : FailureOrigin::Resource);
+        found->second = joined.take_value();
+      }
     }
+    for (const auto& entry : transport)
+      for (const auto& box : entry.second.boxes())
+        if (!input_internal::complete_tuple_channels(
+                impl_->query.inputs[entry.first].descriptor,
+                impl_->query.inputs[entry.first].facets, box))
+          return protocol("batch member omits complete input observation");
   } else {
     const auto& result = std::get<ValueFragments>(event);
     if (!result.valid() || result.coverage() != impl_->query.outputs ||
@@ -1065,7 +1106,7 @@ Result<DependencyProgress> DependencySession::poll(
     if (impl_->query.outputs.empty()) {
       auto empty = ValueFragments::create(
           impl_->query.output.descriptor, impl_->query.output.facets,
-          impl_->query.outputs, {}, impl_->limits.sets);
+          impl_->query.outputs, {}, impl_->limits.sets, impl_->query.resources);
       if (!empty.ok())
         return Result<DependencyProgress>(impl_->retire(empty.status()));
       polled = Result<DependencyPoll>(empty.take_value());
@@ -1628,7 +1669,7 @@ Result<DependencyProgress> DependencySession::poll(
       }
       for (const auto& port : transport)
         for (const auto& box : port.second.boxes())
-          if (!input_internal::complete_image_channels(
+          if (!input_internal::complete_tuple_channels(
                   impl_->query.inputs[port.first].descriptor,
                   impl_->query.inputs[port.first].facets, box))
             return Result<DependencyProgress>(impl_->retire(invalid(
@@ -1727,6 +1768,14 @@ Result<DependencyProgress> DependencySession::poll(
       if (!status.ok())
         return Result<DependencyProgress>(impl_->retire(status));
     }
+    if (result.resources().size()) {
+      auto canonical = ValueFragments::create(
+          result.descriptor(), result.facets(), result.coverage(),
+          result.fragments(), impl_->limits.sets, impl_->query.resources);
+      if (!canonical.ok())
+        return Result<DependencyProgress>(impl_->retire(canonical.status()));
+      result = canonical.take_value();
+    }
     impl_->borrowed_output_owners.clear();
     DependencyResult complete{std::move(result),
                               impl_->query.outputs,
@@ -1807,6 +1856,15 @@ Status DependencySession::supply(std::vector<ValueFragments> inputs,
         }
       if (inputs[port].coverage() != expected.value())
         return impl_->retire(invalid("dependency supply coverage mismatch"));
+      if (inputs[port].resources().size()) {
+        auto canonical = ValueFragments::create(
+            inputs[port].descriptor(), inputs[port].facets(),
+            inputs[port].coverage(), inputs[port].fragments(),
+            impl_->limits.sets, impl_->query.resources);
+        if (!canonical.ok())
+          return impl_->retire(canonical.status());
+        inputs[port] = canonical.take_value();
+      }
       for (const auto& fragment : inputs[port].fragments()) {
         status = input_internal::validate_port_value(
             impl_->traits.input_schema[port], fragment,

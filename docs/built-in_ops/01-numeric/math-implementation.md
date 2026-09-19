@@ -1,7 +1,7 @@
 # Numeric mathematical implementation
 
-This document records the implemented numerical machinery for NUM-04 and its
-shared NUM-05 facilities. Specification acceptance remains independent: the
+This document records the implemented numerical machinery for numeric and curve
+operators and their shared facilities. Specification acceptance remains independent: the
 operator specifications retain their Proposed status. Numerical correctness is
 the selected discrete mathematical result, including raw special-value rules;
 it is not a claim that every input succeeds under every resource budget.
@@ -631,3 +631,92 @@ explicit discrete expected values and rejection of repeated-grid axes.
 Installed 0.15 consumers, focused compiler unit, ClangFormat 21/cpplint and
 independent math/entry/oracle reviews passed. No new CTest/integration entry or
 performance claim was added; WSL results establish correctness only.
+
+## CRV-06 ColorArray and color ramps
+
+The 15 independent primitives provide 45 CPU-profile keys. A four-poll
+continuation reads all finite ordered stops, requested positions, then only
+selected complete color rows before publishing owned packed ColorArray tuples.
+The final channel axis is the semantic observation unit: compiler/root requests
+touching any component close to the whole color, while generic NUM consumers
+retain local Data and separately close typed Validation. Per-observation
+dependency proofs cannot borrow another Atom's validation. Joint preflight checks
+the union of declared roles before accepting complete typed transport.
+
+`ExactColorCoordinate` stores source binary64 integers in units `B=2^-1074`,
+with 144 uint64 limbs (9216 bits), 24 slots and a separate directed interval
+workspace. For adjacent stops, `U=s1-x`, `V=x-s0`, `H=U+V` in integer units.
+Floating coordinates evaluate `(U*c0+V*c1)/H * B`; rational hues evaluate
+`(U*p0*q1+V*p1*q0)/(H*q0*q1)`. Original signed Int64 numerators and positive
+denominators remain exact, including INT64_MIN. Floating numerators need fewer
+than 4200 bits and rational hue numerators fewer than 2230. Pi conversion
+multiplies or divides the whole ratio enclosure by certified pi. Equal units
+cancel symbolically; direct stored zeros retain their signs and genuine mixed
+exact zeros are +0. Polar hues retain every turn, including achromatic inputs.
+
+`ExactRgb` uses the 40960-bit/96-slot polynomial integer arena for direct
+association conversion, linear transfer and gamma=2. The latter rounds a
+signed square root of the complete rational expression using squared-midpoint
+comparisons. Intermediate premultiplied values and alpha are never rounded.
+The ordinary gamma=2 bounds, including midpoint alignment, fit below 13000
+bits. Gamma=3..8 has a separate exact weighted-power cancellation proof below
+28600 bits; this avoids an interval refinement that could never distinguish
+an exact zero. Other unrecognized exact cancellations can exhaust refinement.
+
+General gamma uses positive-domain homogeneity: normalize both straight encoded
+magnitudes by their maximum `m`, compute the signed alpha-weighted mixture `R`
+of the normalized powers, and encode as `m*sign(R)*abs(R)^(1/gamma)`. Normalized
+power bases and `abs(R)` are at most one. Gamma and its reciprocal retain their
+exact real meanings. The final `m` and alpha ratios are each split into a
+unit-scale interval and an exact binary exponent. Their exponents are passed
+to final IEEE rounding, preserving subnormal/HDR results without requiring the
+whole output magnitude to fit the interval's absolute fractional scale.
+
+The separate `DirectedColorFunctions` supplies wide positive logarithms and real
+exponential enclosures. It never substitutes the NUM exp adapter's final-IEEE
+overflow/zero result for an intermediate real. For `x<=-p`, `[0,2^-p]` encloses
+exp(x); other admitted inputs reduce by `2^17`, use a Taylor tail bound, and
+perform 17 directed squarings. The exponential's positive argument limit
+preserves room for raw products in the 12288-bit interval arena. Every bounded
+real approximation and the 128..4096 precision ladder remains host-accounted.
+
+sRGB uses the specification's exact rational constants and exponents. Decode
+branches compare exact input ratios; encode branches enclose both sides when
+the interval crosses the standard threshold. The encoder has a small downward
+jump, so a global monotonic endpoint assumption would be invalid. Direct and
+complete-stored-row-identical cases bypass transfer, while additional exact
+inverse simplifications require proof of the relevant branch. Finite hidden
+straight RGB at zero alpha has zero contribution; nonfinite source components
+still fail complete-color validation. Correctly rounded zero alpha with nonzero
+rounded RGB produces AssociationUnderflow; otherwise transparent black is +0.
+
+All profiles currently return strict bits, including the accelerated RGB entries
+whose contract allows four ULP. Profile-specific integer comparisons are used;
+there is no attempted approximate transfer backend and no fabricated fallback.
+Diagnostics distinguish `exact-linear-light` and `exact-rational-pi`. RGB counts
+all component attempts before whole-color arithmetic, records copies only after
+success, and preserves attempted counts on failure. Exact state, callbacks and
+unpublished payload retire under work, capacity or cancellation failure.
+
+ColorArray's canonical model/white/primary/transfer/hue/association metadata is
+independent of the Image semantic enum. Exact 8192-bit integer determinant tests
+validate the primary basis and positive white constraints. Explicit immutable
+ICC v2/v4 CMYK printing profiles carry SHA-256/length identity and owned bytes;
+`ResourceBindings` resolves and references the matching allocation at compiler,
+Value, snapshot, dependency, result-v2 and structured execution boundaries.
+Duplicate identities require equal original bytes and canonical owner selection.
+Empty color results retain required resources. Sample-only optional caches skip
+resource-bearing results. Package 0.16 requires C++ consumers to rebuild; C ABI 9
+and the existing semantic/digest version numbers remain unchanged.
+
+Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18.1.3 Strict/AVX2 passed
+1784 independent Fraction/Machin-pi and 352 RGB rational-root/Decimal cases per
+profile. These include sRGB golden bits and join neighbors, exact integer-gamma
+cancellation, extreme stops, tiny alpha with HDR premultiplied storage, subnormal
+output and a separately bounded huge-gamma example. ColorArray's 1847 exact
+metadata cases and ICC's 75 structural/MD5/SHA cases passed on both architectures.
+The public manuals inspect ownership/closure and workflow behavior, with commands
+in the [example README](../../../examples/numeric_workflow/README.md).
+These sampled cases and scoped proofs do not establish successful evaluation of
+every legal input under the fixed work/precision capacities. No integration test
+or new CTest registration is added; WSL supplies correctness evidence only.

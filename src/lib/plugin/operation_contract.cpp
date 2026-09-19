@@ -356,7 +356,7 @@ Result<OperationMetadata> infer_operation_output(
       return Result<OperationMetadata>(invalid("unknown output semantic rule"));
   }
   auto status = input_internal::validate_port_metadata(
-      t.outputs[0].output_schema, result.descriptor, result.facets);
+      t.outputs[0].output_schema, result);
   if (!status.ok())
     return Result<OperationMetadata>(status);
   for (const auto& facet : result.facets)

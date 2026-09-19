@@ -12,6 +12,7 @@
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_bezier.hpp"
 #include "01-numeric/exact_sampling.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -176,32 +177,11 @@ struct ParametricState final {
         Footprint::from_regions(metadata.descriptor.shape, regions, phase.sets);
     if (!data.ok())
       return data.status();
-    auto validation = data.value();
-    for (const auto& facet : metadata.facets) {
-      if (facet.key != "photospider.image" &&
-          facet.key != "photospider.semantic")
-        continue;
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return semantic.status();
-      if (semantic.value().kind != SemanticKind::Image)
-        continue;
-      std::vector<Region> closed;
-      closed.reserve(regions.size());
-      for (const auto& item : regions) {
-        auto work = phase.consume_work(3);
-        if (!work.ok())
-          return work;
-        auto dimensions = item.dimensions();
-        dimensions[2] = {0, metadata.descriptor.shape[2]};
-        closed.emplace_back(std::move(dimensions));
-      }
-      auto footprint = Footprint::from_regions(metadata.descriptor.shape,
-                                               std::move(closed), phase.sets);
-      if (!footprint.ok())
-        return footprint.status();
-      validation = footprint.take_value();
-    }
+    auto closure = input_internal::validation_closure(
+        metadata, data.value(), phase.sets, phase.consume_work);
+    if (!closure.ok())
+      return closure.status();
+    auto validation = closure.take_value();
     needs->push_back({port, 1, data.take_value(), {}});
     needs->push_back({port, 4, std::move(validation), {}});
     return Status::success();

@@ -9,6 +9,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_dot.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -76,15 +77,10 @@ struct MatrixState final {
       dimensions = {{coordinate.back(), 1}};
     }
     if (validation) {
-      for (const auto& facet : input.facets)
-        if (facet.key == "photospider.image" ||
-            facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          if (!semantic.ok())
-            return Result<Footprint>(semantic.status());
-          if (semantic.value().kind == SemanticKind::Image)
-            dimensions[2] = {0, input.descriptor.shape[2]};
-        }
+      const auto axis =
+          input_internal::tuple_channel_axis(input.descriptor, input.facets);
+      if (axis)
+        dimensions[*axis] = {0, input.descriptor.shape[*axis]};
     }
     return Footprint::from_regions(input.descriptor.shape,
                                    {Region(std::move(dimensions))}, phase.sets);

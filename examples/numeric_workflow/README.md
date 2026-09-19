@@ -5,6 +5,163 @@ from the default build and have no CTest registration. The category's
 [implementation table](../../docs/built-in_ops/01-numeric/implementation.md)
 records the remaining families.
 
+## ColorArray facilities
+
+`photospider/data/color_array.hpp` supplies a separate `ColorArrayDescriptor`,
+canonical facet/static-parameter codecs, numeric primary/white/NCL presets and
+regional sample validation. It supports Float32/64 rank 2..8, channels last,
+with logical element count at most 2^40. Static rational hue descriptions are
+accepted by the parameter helpers and rejected as runtime Value facets.
+White and primary normalization use exact integer determinant checks, including
+virtual primaries and near-singular invertible matrices. ICC identity metadata
+does not by itself own profile bytes. The explicit ICC resource path below
+provides that owner; the ramp operators are still being implemented.
+
+The editable `public_workflow()` in `color_array.cpp` attaches an RGB straight
+description to `[2,2,4]` input and uses the existing public `abs_node`, `Compiler`
+and `ExecutionContext` APIs to request one component. Its expected result is
+`abs(-12)=12`, with an empty output facet set. The Data need stays component-local;
+Validation, source support and dirty mapping include the same color's four
+channels. An invalid alpha in that color fails; an unrelated invalid color is
+not read. The example also checks typed snapshots/fragments, exact static map
+proofs, cross-atom isolation and floating environment restoration.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_color_array -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_color_array
+python3 examples/numeric_workflow/color_array_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_color_array
+```
+
+The standalone Fraction oracle checks 1,847 exact metadata decisions, including
+extreme binary64 coordinates, zero normalization scales and near-singular bases.
+These manual checks are excluded from CTest and integration registration.
+
+## Immutable ICC resources
+
+`icc.cpp` uses the installed public API to import caller-provided bytes, bind
+accepted profiles by SHA-256 plus byte length, and retain the selected owner:
+
+```cpp
+auto profile = ps::IccProfile::import(bytes, root);  // bytes is ps::ByteView
+if (!profile.ok()) return profile.status();
+auto bindings = ps::ResourceBindings::create({profile.value()}, root);
+if (!bindings.ok()) return bindings.status();
+auto compiled = ps::Compiler(registry).compile(graph, {}, bindings.value());
+```
+
+CMYK `ColorArrayDescriptor::profile` names `profile.value().identity()`.
+Pass the bindings as the last argument of `Value::create/from_storage` or
+`MutableValue::publish`. Publication resolves the identity and retains the
+accepted immutable profile independently of the importing caller. Unused
+resources are pruned; a bare CMYK digest cannot create a valid Value.
+`Compiler::analyze/compile` resolves all declared/inferred identities, including
+Empty demand. Dependency callbacks publish with `phase.query.resources`;
+ordinary callbacks receive `invocation.resources`. Structured v2 continuations
+also receive and retain the accepted query resource set. Metadata and dynamic
+numeric samples remain separate.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_icc -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_icc
+python3 examples/numeric_workflow/icc_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_icc
+# Explicit local file loader, with a 64 MiB manual loader limit:
+build/numeric/examples/numeric_workflow/photospider_numeric_icc --inspect profile.icc
+```
+
+Expected manual output ends in `PASS`; the independent Python oracle checks
+75 valid/malformed ICC structures and identities using `hashlib`. `--inspect`
+prints `OK <length> <sha256>` or `ERR <code> <diagnostic>`. The synthetic profile
+models file structure, not a printing condition. The example checks immutable
+input copying, byte-identity deduplication, cancellation/work/capacity cleanup,
+canonical fragment ancestry, snapshot patching, compiler lifetime, callbacks,
+partial-channel output closure in direct/ROI/Atom/DemandHandle/v2 paths, Empty results and an ICC reference limit that fails before callback entry.
+Resource-bearing results currently bypass the optional sample-only memory and
+disk caches. They remain reusable through owning Values, fragments and snapshots.
+The importer validates ICC v2/v4 CMYK output-device structural contracts;
+optional/private tag payloads are not a CMM transform certification. No color
+conversion or ICC LUT evaluation occurs. Public C++ consumers must rebuild for
+package 0.16.0. These targets have no integration/CTest registration.
+
+## Color ramps
+
+The independent XYZ, CMYK, CIELAB, OKLab, YCbCr and three hue forms of
+CIELCh/OKLCh/HSL have 42 registered CPU-profile keys; RGB/RGBA adds three keys.
+Their constructors are in
+`photospider/numeric/color_ramps.hpp`. The required colors dtype hint selects the
+default output dtype; Compiler checks the actual connected metadata. XYZ defaults
+to D65 and CIELAB/CIELCh to D50. CMYK requires an explicit imported/bound profile;
+YCbCr requires an explicit full NCL description. HSL defaults to sRGB/D65/sRGB
+transfer coordinates. These primitives interpolate the supplied model components.
+
+`color_ramps.cpp::examples()` demonstrates public construction and execution:
+
+```cpp
+auto node = ps::numeric::color_ramp_xyz_node(
+    1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    ps::WorkflowInputReference{3}, ps::ElementType::Float64);
+// input=[.5], stops=[0,1], colors=[[0,0,0],[.5,1,1.5]]
+// values=[[.25,.5,.75]], with an XYZ ColorArray descriptor.
+```
+
+A component request returns the complete color. `color_ramps.cpp` also checks
+Lab `[50,0,10]`, whole-row zero signs, unwrapped pi hue, achromatic hue retention
+and exact Int64 rational cancellation to `-.5`. The raw-node `--probe` path
+supports the independent `color_ramp_oracle.py` (exact Fraction formulas and
+Machin alternating-series bounds for pi); it does not use production arithmetic.
+
+`rgb_examples()` uses `color_ramp_rgb_node` through the same public execution
+path. Its default three-channel description is sRGB primaries/D65/sRGB transfer.
+With `input=[0,.5,1]`, `stops=[0,1]` and black/white colors, the middle Float64
+component is `0x3fe7880b5e230e4f` (Float32 `0x3f3c405b`). Four-channel input
+explicitly selects `ColorAssociation::Straight` or `Premultiplied`; output
+defaults to Premultiplied and can select Straight independently. Transparent
+red to opaque blue yields `[0,0,.5,.5]` at the midpoint with the default output.
+The output facet records that association. `RgbRampOptions::dtype` selects the
+destination type, and `ColorArrayDescriptor::transfer` selects Linear, Srgb or
+Gamma with an explicit positive finite Float64 exponent.
+
+The independent `rgb_ramp_oracle.py` uses rational integer-root comparisons for
+sRGB and Decimal log/exp enclosures for general gamma. It checks whole-expression
+rounding, association conversions, thresholds, HDR/negative components,
+subnormals, exact integer-gamma cancellation and invalid complete colors. Its
+huge-gamma fixture uses an analytical bound. Manual groups also cover sparse
+selected rows, a `2^38`-position constant view, exact dirty/cache replacement,
+negative/unaligned strides, descriptor mismatch, floating-environment restoration,
+Empty requests, inner RGB/pi work/cancellation, diagnostics and escaped owners.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_color_ramps -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_color_ramps strict
+python3 examples/numeric_workflow/color_ramp_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_color_ramps strict
+python3 examples/numeric_workflow/rgb_ramp_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_color_ramps strict
+```
+
+Use `apple` or `x86` only on the matching processor. Global stops are validated
+before queries; only selected complete color rows are read. Rational hue inputs
+keep original Int64 numerator/positive denominator until final rounding, with no
+angle wrapping. All non-RGB profiles promise the same correctly rounded bits.
+RGB profiles currently use exact algebraic/direct paths and certified whole
+transfer enclosures with profile-specific integer comparisons. They produce the
+strict bits, within the accelerated four-ULP contract; alpha and failure
+classification are exact. Gamma normalization and delayed exponent scaling keep
+finite final answers possible when straight RGB or a transfer intermediate
+exceeds Float64 range. No floating approximation is published before both final
+enclosing endpoints round identically.
+
+Certified unit/transfer refinement has a 4096-bit ceiling and fixed admitted
+integer capacity. Other unresolved exact cancellations or rounding boundaries
+can return ResourceExhausted/CapacityLimit; work and cancellation may stop earlier.
+These are explicit execution limits. Native Clang 21 Strict/Apple and Ubuntu WSL
+Clang 18 Strict/AVX2 passed seven manual groups and 352 RGB oracle cases per
+profile; non-RGB oracle coverage is 1784 cases per profile. The installed 0.16
+ColorArray/ICC/ramp consumers passed, as did 19 affected existing NUM/CRV manual
+consumers under Strict. The focused compiler unit, old-minor rejection,
+ClangFormat 21/cpplint and independent math, entry, ownership and cache reviews
+passed. WSL results establish numerical correctness only.
+
 ## Sequence generators
 
 `sequences.cpp` declares dynamic scalar bindings, creates a `WorkflowDocument`,

@@ -142,6 +142,10 @@ class StructuredExecution final {
     const auto started = std::chrono::steady_clock::now();
     Result<ExecutionResult> result(Status{ErrorCode::Internal, {}});
     try {
+      auto admitted = plan_.resources().reference(resources_);
+      if (!admitted.ok())
+        return Result<ExecutionResult>(admitted.status());
+      bindings_resources_ = admitted.take_value();
       result = run_body(sink, requested, fragments);
     } catch (const std::bad_alloc&) {
       result =
@@ -347,6 +351,21 @@ class StructuredExecution final {
                                     set_limits());
       if (!wanted.ok())
         return Answer(wanted.status());
+      wanted = input_internal::color_output_samples(
+          {step.output_descriptor, step.output_facets}, wanted.value(),
+          set_limits());
+      if (!wanted.ok())
+        return Answer(wanted.status());
+      auto scope = Footprint::from_regions(
+          step.output_descriptor.shape,
+          {plan_.output_regions().at(named.first)}, set_limits());
+      if (!scope.ok())
+        return Answer(scope.status());
+      auto outside = wanted.value().subtract(scope.value(), set_limits());
+      if (!outside.ok())
+        return Answer(outside.status());
+      if (!outside.value().empty())
+        return Answer(protocol("color output closure exceeds plan"));
       auto computed = value(PlanStepInput{named.second}, wanted.value());
       if (!computed.ok())
         return Answer(computed.status());
@@ -547,6 +566,7 @@ class StructuredExecution final {
     created->lease = lease.take_value();
     created->query.value_outputs = std::move(outputs);
     created->query.output_index = step.output_index;
+    created->query.resources = bindings_resources_;
     created->key = std::move(key);
     created->query.semantic_key = created->key;
     created->query.page_bytes = options_.maximum_result_window_bytes;
@@ -1058,9 +1078,9 @@ class StructuredExecution final {
       auto reference = resources_.reference(part.storage());
       if (!reference.ok())
         return retire(actor, reference.status());
-      auto owned =
-          Value::from_storage(part.descriptor(), part.region(), part.layout(),
-                              reference.take_value(), part.facets());
+      auto owned = Value::from_storage(part.descriptor(), part.region(),
+                                       part.layout(), reference.take_value(),
+                                       part.facets(), bindings_resources_);
       if (!owned.ok())
         return retire(actor, owned.status());
       owned_parts.push_back(owned.take_value());
@@ -1068,7 +1088,7 @@ class StructuredExecution final {
     auto admitted_value = ValueFragments::create_view(
         output.value.descriptor(), output.value.facets(),
         output.value.coverage(), owned_parts.data(), owned_parts.size(),
-        set_limits());
+        set_limits(), {}, bindings_resources_);
     if (!admitted_value.ok())
       return retire(actor, admitted_value.status());
     actor.value = admitted_value.take_value();
@@ -1142,14 +1162,15 @@ class StructuredExecution final {
         return failed(status);
       ++diagnostics_.source_read_count;
       diagnostics_.source_read_bytes += writer.size();
-      auto published = std::move(writer).publish(declaration.facets);
+      auto published =
+          std::move(writer).publish(declaration.facets, bindings_resources_);
       if (!published.ok())
         return failed(published.status());
       parts.push_back(published.take_value());
     }
     return ValueFragments::create_view(
         declaration.descriptor, declaration.facets, requested, parts.data(),
-        parts.size(), set_limits());
+        parts.size(), set_limits(), {}, bindings_resources_);
   }
   Result<ValueFragments> value(const PlanInput& input,
                                const Footprint& requested) {
@@ -1166,7 +1187,8 @@ class StructuredExecution final {
       return Answer(protocol("Value request domain mismatch"));
     if (requested.empty())
       return ValueFragments::create(step.output_descriptor, step.output_facets,
-                                    requested, {}, set_limits());
+                                    requested, {}, set_limits(),
+                                    bindings_resources_);
     if (step.traits.outputs[0].dependency_version == 2) {
       auto acquired = actor(index, requested);
       if (!acquired.ok())
@@ -1250,6 +1272,7 @@ class StructuredExecution final {
                                        Backend::Cpu, active_token(), region,
                                        resources_.allocator());
         invocation.output_index = step.output_index;
+        invocation.resources = bindings_resources_;
         invocation.input_indices = ports;
         invocation.input_metadata = all;
         const auto before = active_stop();
@@ -1267,7 +1290,7 @@ class StructuredExecution final {
     }
     auto assembled = ValueFragments::create_view(
         step.output_descriptor, step.output_facets, wanted.value(),
-        parts.data(), parts.size(), set_limits());
+        parts.data(), parts.size(), set_limits(), {}, bindings_resources_);
     if (!assembled.ok())
       return assembled;
     if (whole)
@@ -1307,6 +1330,7 @@ class StructuredExecution final {
                                 legacy_snapshot};
       request.output_index = step.output_index;
       request.prepared = step.prepared;
+      request.resources = bindings_resources_;
       request.cancellation = active_token();
       request.limits = options_.dependencies;
       Result<std::shared_ptr<DependencySession>> started(
@@ -1436,12 +1460,13 @@ class StructuredExecution final {
       return Answer(visited);
     return ValueFragments::create_view(
         step.output_descriptor, step.output_facets, requested, parts.data(),
-        parts.size(), set_limits());
+        parts.size(), set_limits(), {}, bindings_resources_);
   }
   const ExecutionPlan& plan_;
   std::vector<ExecutionBinding> bindings_;
   std::shared_ptr<OperationRegistry> operations_;
   ResourceBudget resources_;
+  ResourceBindings bindings_resources_;
   const ExecutionOptions& options_;
   CancellationToken cancellation_;
   std::function<ErrorCode()> stop_;

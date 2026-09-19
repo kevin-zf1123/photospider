@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "01-numeric/exact_product.hpp"
+#include "01-numeric/exact_root.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Degree <=3 polynomial arithmetic for exact algebraic boundary decisions.
@@ -306,6 +307,26 @@ class ExactPolynomial final {
     }
     restore(saved);
     return status_.ok() && result;
+  }
+  // Borrow a checked exact integer for a same-entry rational enclosure import.
+  // The owner and its work callback remain alive until the caller's end().
+  const Number& number(Index index) const { return numbers_[index]; }
+  // Odd signed sqrt of the complete ratio; used by gamma=2 color expressions.
+  // No rounded intermediate root is multiplied by a rounded alpha.
+  Result<std::uint64_t> round_signed_sqrt_ratio(Index numerator,
+                                                Index denominator, bool narrow,
+                                                int scale) {
+    if (!status_.ok())
+      return Result<std::uint64_t>(status_);
+    ratio_.numerator = numbers_[numerator].magnitude;
+    ratio_.denominator = numbers_[denominator].magnitude;
+    ratio_.negative = false;
+    auto result = round_sqrt_ratio(&ratio_, narrow, scale, *consume_);
+    if (!result.ok())
+      return result;
+    return Result<std::uint64_t>(
+        result.value() |
+        (sign(numerator) < 0 ? UINT64_C(1) << (narrow ? 31 : 63) : 0));
   }
   Result<std::uint64_t> round(Index numerator, Index denominator, bool narrow,
                               int scale = -1075) {

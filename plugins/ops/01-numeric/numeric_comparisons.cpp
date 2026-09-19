@@ -11,6 +11,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -269,17 +270,7 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
       data.roles = 1;
       for (std::size_t axis = 0; axis < first.shape.size(); ++axis)
         data.axes.push_back({static_cast<std::int32_t>(axis), {}});
-      auto validation = data;
-      validation.roles = 4;
-      for (const auto& facet : inputs[port].facets)
-        if (facet.key == "photospider.image" ||
-            facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          if (!semantic.ok())
-            return Answer(semantic.status());
-          if (semantic.value().kind == SemanticKind::Image)
-            validation.axes[2] = {-1, {0, first.shape[2]}};
-        }
+      auto validation = input_internal::validation_map(data, inputs[port]);
       maps.push_back(std::move(data));
       maps.push_back(std::move(validation));
     }
@@ -326,24 +317,12 @@ struct SelectState final {
       }
       ++stage;
       const std::uint32_t port = condition ? 1 : 2;
-      auto validation = phase.query.outputs;
-      for (const auto& facet : phase.query.inputs[port].facets)
-        if (facet.key == "photospider.image" ||
-            facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          if (!semantic.ok())
-            return Answer(semantic.status());
-          if (semantic.value().kind == SemanticKind::Image) {
-            auto dimensions = phase.query.outputs.boxes()[0].dimensions();
-            dimensions[2] = {0, phase.query.inputs[port].descriptor.shape[2]};
-            auto closure = Footprint::from_regions(
-                phase.query.inputs[port].descriptor.shape, {Region(dimensions)},
-                phase.sets);
-            if (!closure.ok())
-              return Answer(closure.status());
-            validation = closure.take_value();
-          }
-        }
+      auto closure = input_internal::validation_closure(
+          phase.query.inputs[port], phase.query.outputs, phase.sets,
+          phase.consume_work);
+      if (!closure.ok())
+        return Answer(closure.status());
+      auto validation = closure.take_value();
       return multi_output::need(phase, {{port, 1, phase.query.outputs, {}},
                                         {port, 4, std::move(validation), {}}});
     }

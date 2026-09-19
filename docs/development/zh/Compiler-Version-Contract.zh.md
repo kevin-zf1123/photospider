@@ -208,3 +208,59 @@ input metadata 与 supplied bytes、incoming state、phase/range 和 mode。公�
 承诺每个 Run 只求值一次。C++ layout 改变要求 consumer 使用 0.14 重新构建，拒绝
 旧 minor 请求。WorkflowDocument schema 2、provider ABI 1、optimizer v5 与
 result-region v6 保持不变。
+
+## NUM-01 static preparation 与 diagnostics
+
+Package 0.15.0 保持 C++ `OperationTraits` 版本 14 与 semantic framing 版本 14；
+C operation ABI 保持 C ABI 9。公开 C++ operation definition 增加 `prepare_static`、
+`OperationPreparation` 与 immutable `PreparedOperation` handle。Compiler node 和
+plan step 可以保留该 handle。Direct request 复用显式提供且匹配的 handle，或在
+preflight 中只 preparation 一次；joint request 对兼容成员只 preparation 一次。匹配
+要求 registry/definition identity、static metadata 与 copied IEEE-754 parameter bits
+一致；独立调用不会隐式共享 preparation。Request record 拥有复制后的 input，
+dependency query 仍是 borrowed。Preparation 与 plan allocation 位于 per-Atom runtime
+scratch admission 之外；没有 global cache 或 dynamic preparation state，prepared owner
+在 continuation 与 callback 退役后销毁。
+
+NUM-01 的 numeric diagnostics 增加 `strict_math_calls` 与 8x4
+`function_fallbacks` matrix。NUM-01 按每次 strict math call 计数；未 instrumented
+operator 保持 0，无法归属的 reason count 在 merge 时进入 `Other`。这些只是 observation。
+Prepared public manual、compiler/facility 检查已通过 once/ROI/output/tile/foreign/
+signed-zero/NaN/lifetime 路径；NUM-01 public workflow 与 independent expression oracle
+已在 native Clang 和 Clang WSL 通过。C++ consumer 必须针对 0.15 重建，旧 minor 请求
+被拒绝；C ABI 9 descriptor/table layout 保持不变。
+
+## CRV-06 ColorArray 与显式资源绑定
+
+Package 0.16.0 为 ColorArray/ICC-backed Value 引入 breaking C++ public
+layout 与 signature change。C++ `OperationTraits` 保持版本 14，semantic、
+physical-plan 和 plan-cache framing 保持 v14；WorkflowDocument schema 2、
+provider ABI 1 与 C operation ABI 9 保持不变。C ABI descriptor 与 entrypoint
+layout 不携带这些 C++ resource binding。
+
+`IccProfile::import` 在显式 `ResourceBudget` 下接收并验证 immutable ICC v2/v4
+bytes；`ResourceBindings::create` 封存 admitted profile，并支持按 identity
+选择、reference 与集合 union。ICC identity 基于内容（SHA-256 加 length），不
+使用 path、address 或 ICC MD5 Profile ID。Handle immutable，已接收 payload owner
+可以共享。Admission、hash、parse、sort 和 compare 都观察 cancellation 与 work
+limit；失败不会发布 partial resource。
+
+`Compiler::analyze` 与 `Compiler::compile` 接收显式 `ResourceBindings`，并将其
+保留在 semantic IR、optimized IR 与 execution plan 中。`ResourceBindings` 也会
+沿 `InputSnapshot`、`RegionalSource`、`DependencyRequest`/`DependencyQuery`、
+`ResultProgramQuery`/`ResultContinuation` 和 operation invocation 传递。`Value`、`ValueFragments` 与 `MutableValue::publish`
+接收并保留 facet 所需的 validated owner，未使用的 binding 会丢弃。即使 Empty
+execution 不读取 payload，也会验证并保留所需 resource。Resource owner 随对应
+Value/fragment、snapshot、plan 或 Run 生命周期退役。ColorArray 输出的部分通道
+请求在 plan、direct call 和 retained demand 中规范化为完整颜色；输入传输与
+fragment 继续要求完整通道。
+
+这些 C++ layout、constructor 与 method signature 变化要求所有 C++ package
+consumer 针对 0.16.0 重新构建；不提供 compatibility shim 或旧 minor reader。
+已识别的 `photospider.color-array` facet 现在执行 typed validation 与完整颜色
+demand 语义；先前的 opaque facet 处理不构成兼容契约。持久 sample cache key
+包含由 kernel、operation、header 源码及构建设置生成的
+`PHOTOSPIDER_CACHE_BUILD_ID`，因此旧实现的条目被隔离。ColorArray 本身不在
+现有 disk-cache facet allowlist 内；携带资源的结果也跳过可选 sample-only cache。
+Plan 与内存 result cache 没有跨构建反序列化入口。CRV-06 实现完成与其
+Proposed 规范被接受仍是独立状态。

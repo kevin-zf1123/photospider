@@ -26,7 +26,7 @@ Status coverage(const ValueDescriptor& descriptor,
   if (!status.ok())
     return status;
   if (region.empty() || !region.validate(descriptor.shape).ok() ||
-      !input_internal::complete_image_channels(descriptor, facets, region))
+      !input_internal::complete_tuple_channels(descriptor, facets, region))
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid snapshot coverage");
   auto count = region.element_count();
@@ -90,20 +90,13 @@ Status validate_value(const Value& value,
       coverage(value.descriptor(), value.facets(), value.region(), options);
   if (!status.ok())
     return status;
-  for (const auto& facet : value.facets())
-    if (facet.key == "photospider.image" ||
-        facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return semantic.status();
-      status = validate_semantic_value(
-          semantic.value(), value, ErrorCode::InvalidArgument, [&] {
-            return options.cancellation.cancelled() ? ErrorCode::Cancelled
-                                                    : ErrorCode::Ok;
-          });
-      if (!status.ok())
-        return status;
-    }
+  status = input_internal::validate_port_value(
+      {}, value, ErrorCode::InvalidArgument, [&] {
+        return options.cancellation.cancelled() ? ErrorCode::Cancelled
+                                                : ErrorCode::Ok;
+      });
+  if (!status.ok())
+    return status;
   return stopped(options);
 }
 }  // namespace
@@ -112,6 +105,7 @@ struct InputSnapshotStore::Impl {
   std::shared_ptr<execution_internal::MemoryBudget> budget;
 };
 struct InputSnapshot::Impl {
+  ResourceBindings resources;
   ValueDescriptor descriptor;
   std::vector<ValueFacet> facets;
   std::vector<std::uint64_t> block_extents, grid;
@@ -137,6 +131,11 @@ const std::vector<ValueFacet>& InputSnapshot::facets() const {
   if (!impl_)
     throw std::logic_error("invalid snapshot");
   return impl_->facets;
+}
+const ResourceBindings& InputSnapshot::resources() const {
+  if (!impl_)
+    throw std::logic_error("invalid snapshot");
+  return impl_->resources;
 }
 Status InputSnapshot::read(const Region& region, std::uint8_t* destination,
                            std::uint64_t size,
@@ -232,17 +231,18 @@ Result<InputSnapshot> InputSnapshotStore::import_value(
     return Result<InputSnapshot>(count.status());
   auto out = std::make_shared<InputSnapshot::Impl>();
   out->descriptor = value.descriptor();
+  out->resources = value.resources();
   out->facets = value.facets();
   out->store = impl_;
-  bool image = false;
-  for (const auto& facet : value.facets())
-    image |= facet.key == "photospider.image";
+  const auto channels =
+      input_internal::tuple_channel_axis(value.descriptor(), value.facets());
   std::uint64_t blocks = 1;
   for (std::size_t axis = 0; axis < out->descriptor.shape.size(); ++axis) {
     const auto n = out->descriptor.shape[axis];
-    const auto extent = image && axis == 2 ? n
-                                           : std::min<std::uint64_t>(
-                                                 n, impl_->config.block_size);
+    const auto extent =
+        channels && axis == *channels
+            ? n
+            : std::min<std::uint64_t>(n, impl_->config.block_size);
     const auto grid = n / extent + (n % extent != 0);
     if (grid > impl_->config.maximum_blocks / blocks)
       return Result<InputSnapshot>(Status::failure(ErrorCode::ResourceExhausted,
@@ -284,7 +284,7 @@ Result<InputSnapshot> InputSnapshotStore::import_value(
     });
     if (!status.ok())
       return Result<InputSnapshot>(status);
-    auto frozen = std::move(block).publish(value.facets());
+    auto frozen = std::move(block).publish(value.facets(), value.resources());
     if (!frozen.ok())
       return Result<InputSnapshot>(frozen.status());
     out->blocks.push_back(frozen.take_value());
@@ -370,7 +370,7 @@ Result<InputSnapshot> InputSnapshotStore::patch(
           });
       if (!status.ok())
         return Result<InputSnapshot>(status);
-      auto frozen = std::move(block).publish(value.facets());
+      auto frozen = std::move(block).publish(value.facets(), value.resources());
       if (!frozen.ok())
         return Result<InputSnapshot>(frozen.status());
       value = frozen.take_value();

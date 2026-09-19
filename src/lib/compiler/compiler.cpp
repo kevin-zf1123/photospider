@@ -543,16 +543,23 @@ bool ExecutionPlan::dependency_network() const noexcept {
   return false;
 }
 
-Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
-                                               const Region& region) const {
+Result<ExecutionPlan> ExecutionPlan::tile_plan(
+    const std::string& name, const Region& requested_region) const {
   if (!current() || operation_registry_.expired())
     return Result<ExecutionPlan>(
         Status::failure(ErrorCode::Stale, "tile parent is stale"));
   const auto named = outputs_.find(name);
-  if (named == outputs_.end() || region.empty() ||
-      !region.validate(steps_[named->second].output_descriptor.shape).ok())
+  if (named == outputs_.end() || requested_region.empty() ||
+      !requested_region.validate(steps_[named->second].output_descriptor.shape)
+           .ok())
     return Result<ExecutionPlan>(Status::failure(ErrorCode::InvalidArgument,
                                                  "invalid named tile Region"));
+  auto closed_region = input_internal::color_output_region(
+      steps_[named->second].output_descriptor,
+      steps_[named->second].output_facets, requested_region);
+  if (!closed_region.ok())
+    return Result<ExecutionPlan>(closed_region.status());
+  const auto region = closed_region.take_value();
   const auto& requested = output_regions_.at(name);
   for (std::size_t axis = 0; axis < region.rank(); ++axis) {
     const auto part = region.dimensions()[axis],
@@ -562,7 +569,7 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::InvalidArgument, "tile exceeds requested output"));
   }
-  if (!input_internal::complete_image_channels(
+  if (!input_internal::complete_tuple_channels(
           steps_[named->second].output_descriptor,
           steps_[named->second].output_facets, region))
     return Result<ExecutionPlan>(Status::failure(
@@ -590,7 +597,12 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     if (!demands[i])
       continue;
     auto& step = tile.steps_[i];
-    if (!input_internal::complete_image_channels(
+    auto closed_demand = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets, *demands[i]);
+    if (!closed_demand.ok())
+      return Result<ExecutionPlan>(closed_demand.status());
+    demands[i] = closed_demand.take_value();
+    if (!input_internal::complete_tuple_channels(
             step.output_descriptor, step.output_facets, *demands[i]))
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -710,7 +722,8 @@ Compiler::Compiler(std::shared_ptr<OperationRegistry> operations)
  * @brief Implements validated source-to-semantic lowering.
  * @copydetails Compiler::analyze
  */
-Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
+Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
+                                          ResourceBindings resources) const {
   if (!snapshot.current()) {
     return Result<SemanticGraphIR>(
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
@@ -729,6 +742,18 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     return Result<SemanticGraphIR>(Status::failure(
         ErrorCode::OperationFailed, "cannot set binary32 environment"));
   auto declarations = document.inputs;
+  ResourceBindings retained_resources;
+  const auto admit_resources =
+      [&](const std::vector<ValueFacet>& facets) -> Status {
+    auto selected = resources.select(facets);
+    if (!selected.ok())
+      return selected.status();
+    auto combined = retained_resources.unite(selected.value());
+    if (!combined.ok())
+      return combined.status();
+    retained_resources = combined.take_value();
+    return Status::success();
+  };
   std::sort(declarations.begin(), declarations.end(),
             [](const auto& a, const auto& b) { return a.id < b.id; });
   std::map<std::uint64_t, std::size_t> declaration_by_id;
@@ -747,6 +772,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     const auto status = input_internal::validate_declaration(&declaration);
     if (!status.ok())
       return Result<SemanticGraphIR>(status);
+    const auto admitted = admit_resources(declaration.facets);
+    if (!admitted.ok())
+      return Result<SemanticGraphIR>(admitted);
   }
 
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
@@ -943,6 +971,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
+      const auto admitted = admit_resources(metadata.facets);
+      if (!admitted.ok())
+        return Result<SemanticGraphIR>(admitted);
       auto selected = select_operation_output(node.traits, oi).take_value();
       for (std::size_t i = 0;
            i < input_descriptors.size() && !contract.dependency_version; ++i) {
@@ -1023,6 +1054,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       }
     }
   }
+  semantic.resources_ = std::move(retained_resources);
   semantic.outputs_ = document.outputs;
   std::sort(semantic.outputs_.begin(), semantic.outputs_.end(),
             [](const WorkflowOutput& left, const WorkflowOutput& right) {
@@ -1059,6 +1091,7 @@ Result<OptimizedGraphIR> Compiler::optimize(
   optimized.revision_ = semantic.revision();
   optimized.nodes_ = semantic.nodes();
   optimized.input_declarations_ = semantic.input_declarations();
+  optimized.resources_ = semantic.resources();
   optimized.outputs_ = semantic.outputs();
   optimized.semantic_digest_ = semantic.digest();
   optimized.digest_.value =
@@ -1134,6 +1167,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   plan.tile_width_ = options.tile_width;
   plan.revision_ = optimized.revision();
   plan.input_declarations_ = optimized.input_declarations();
+  plan.resources_ = optimized.resources();
   std::map<std::uint64_t, std::size_t> declaration_by_id;
   for (std::size_t i = 0; i < plan.input_declarations_.size(); ++i)
     declaration_by_id.emplace(plan.input_declarations_[i].id, i);
@@ -1252,12 +1286,17 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         plan.output_regions_.emplace(output.first, Region{});
         continue;
       }
-      const auto region = requested == options.output_regions.end()
-                              ? Region::whole(step.output_descriptor.shape)
-                              : requested->second;
+      auto region = requested == options.output_regions.end()
+                        ? Region::whole(step.output_descriptor.shape)
+                        : requested->second;
+      auto closed_region = input_internal::color_output_region(
+          step.output_descriptor, step.output_facets, region);
+      if (!closed_region.ok())
+        return Result<ExecutionPlan>(closed_region.status());
+      region = closed_region.take_value();
       if (region.empty() ||
           !region.validate(step.output_descriptor.shape).ok() ||
-          !input_internal::complete_image_channels(step.output_descriptor,
+          !input_internal::complete_tuple_channels(step.output_descriptor,
                                                    step.output_facets, region))
         return Result<ExecutionPlan>(Status::failure(
             ErrorCode::InvalidArgument, "invalid dependency output region"));
@@ -1323,8 +1362,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             ErrorCode::InvalidArgument,
             "planned workflow output Region is empty or out of bounds"));
       }
-      demand = requested->second;
-      if (!input_internal::complete_image_channels(
+      auto closed = input_internal::color_output_region(
+          step.output_descriptor, step.output_facets, requested->second);
+      if (!closed.ok())
+        return Result<ExecutionPlan>(closed.status());
+      demand = closed.take_value();
+      if (!input_internal::complete_tuple_channels(
               step.output_descriptor, step.output_facets, demand)) {
         return Result<ExecutionPlan>(
             Status::failure(ErrorCode::InvalidArgument,
@@ -1348,8 +1391,13 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     if (!demand_by_step[step_index].has_value()) {
       demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
     }
-    step.output_demand = demand_by_step[step_index].value();
-    if (!input_internal::complete_image_channels(
+    auto closed_demand = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets,
+        demand_by_step[step_index].value());
+    if (!closed_demand.ok())
+      return Result<ExecutionPlan>(closed_demand.status());
+    step.output_demand = closed_demand.take_value();
+    if (!input_internal::complete_tuple_channels(
             step.output_descriptor, step.output_facets, step.output_demand)) {
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -1434,11 +1482,15 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   }
   for (const auto& output : plan.outputs_) {
     const auto requested = options.output_regions.find(output.first);
-    plan.output_regions_.emplace(
-        output.first,
+    const auto& step = plan.steps_[output.second];
+    auto closed = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets,
         requested == options.output_regions.end()
-            ? Region::whole(plan.steps_[output.second].output_descriptor.shape)
+            ? Region::whole(step.output_descriptor.shape)
             : requested->second);
+    if (!closed.ok())
+      return Result<ExecutionPlan>(closed.status());
+    plan.output_regions_.emplace(output.first, closed.take_value());
   }
   auto access = native_access_plan(&plan.steps_, plan.input_declarations_,
                                    plan.outputs_, plan.output_regions_);
@@ -1464,11 +1516,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
  * @brief Implements the complete fail-before-publication compiler pipeline.
  * @copydetails Compiler::compile
  */
-Result<CompiledWorkflow> Compiler::compile(
-    const GraphContext& context, const PlanningOptions& options) const {
+Result<CompiledWorkflow> Compiler::compile(const GraphContext& context,
+                                           const PlanningOptions& options,
+                                           ResourceBindings resources) const {
   const GraphSnapshot snapshot = context.snapshot();
   const auto analyze_start = std::chrono::steady_clock::now();
-  auto semantic = analyze(snapshot);
+  auto semantic = analyze(snapshot, std::move(resources));
   const auto analyze_end = std::chrono::steady_clock::now();
   if (!semantic.ok()) {
     return Result<CompiledWorkflow>(semantic.status());

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "data/dependency_metadata.hpp"
 #include "photospider/data/value_fragments.hpp"
@@ -32,15 +33,18 @@ class ArrayPublication final {
     auto owner = std::make_shared<Owner>(Owner{metadata_, value.storage()});
     auto alias = std::shared_ptr<const CpuStorage>(owner, owner->source.get());
     return Value::from_storage(value.descriptor(), value.region(),
-                               value.layout(), std::move(alias),
-                               value.facets());
+                               value.layout(), std::move(alias), value.facets(),
+                               value.resources());
   }
   Result<ValueFragments> finish(const ValueDescriptor& descriptor,
                                 const Footprint& outputs, const Value* values,
                                 std::size_t count,
-                                const FootprintLimits& limits) const {
-    return ValueFragments::create_view(descriptor, {}, outputs, values, count,
-                                       limits, metadata_);
+                                const FootprintLimits& limits,
+                                const std::vector<ValueFacet>& facets = {},
+                                ResourceBindings resources = {}) const {
+    return ValueFragments::create_view(descriptor, facets, outputs, values,
+                                       count, limits, metadata_,
+                                       std::move(resources));
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

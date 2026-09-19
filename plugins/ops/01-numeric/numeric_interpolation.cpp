@@ -7,6 +7,7 @@
 
 #include "00-foundation/multi_output.hpp"
 #include "01-numeric/exact_interpolation.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -28,24 +29,12 @@ struct InterpolationState final {
       : kind(operation), profile(selected), exact(selected) {}
   Status add_need(const DependencyPhase& phase, std::uint32_t port,
                   std::uint32_t role, std::vector<DependencyNeed>* needs) {
-    auto validation = phase.query.outputs;
-    for (const auto& facet : phase.query.inputs[port].facets)
-      if (facet.key == "photospider.image" ||
-          facet.key == "photospider.semantic") {
-        auto semantic = decode_semantic(facet);
-        if (!semantic.ok())
-          return semantic.status();
-        if (semantic.value().kind == SemanticKind::Image) {
-          auto dimensions = phase.query.outputs.boxes()[0].dimensions();
-          dimensions[2] = {0, phase.query.inputs[port].descriptor.shape[2]};
-          auto closure =
-              Footprint::from_regions(phase.query.inputs[port].descriptor.shape,
-                                      {Region(dimensions)}, phase.sets);
-          if (!closure.ok())
-            return closure.status();
-          validation = closure.take_value();
-        }
-      }
+    auto closure = input_internal::validation_closure(
+        phase.query.inputs[port], phase.query.outputs, phase.sets,
+        phase.consume_work);
+    if (!closure.ok())
+      return closure.status();
+    auto validation = closure.take_value();
     needs->push_back({port, role, phase.query.outputs, {}});
     needs->push_back({port, 4, std::move(validation), {}});
     return Status::success();

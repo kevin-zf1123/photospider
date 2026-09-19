@@ -13,6 +13,7 @@
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_aggregate.hpp"
 #include "01-numeric/ordered_reduction.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -219,29 +220,11 @@ struct ScanState final {
   }
   Result<DependencyPoll> need(const DependencyPhase& phase, Footprint data) {
     using Answer = Result<DependencyPoll>;
-    auto validation = data;
-    for (const auto& facet : phase.query.inputs[0].facets) {
-      if (facet.key != "photospider.image" &&
-          facet.key != "photospider.semantic")
-        continue;
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return Answer(semantic.status());
-      if (semantic.value().kind == SemanticKind::Image) {
-        std::vector<Region> boxes;
-        for (const auto& box : data.boxes()) {
-          auto dimensions = box.dimensions();
-          dimensions[2] = {0, phase.query.inputs[0].descriptor.shape[2]};
-          boxes.emplace_back(std::move(dimensions));
-        }
-        auto closure =
-            Footprint::from_regions(phase.query.inputs[0].descriptor.shape,
-                                    std::move(boxes), phase.sets);
-        if (!closure.ok())
-          return Answer(closure.status());
-        validation = closure.take_value();
-      }
-    }
+    auto closure = input_internal::validation_closure(
+        phase.query.inputs[0], data, phase.sets, phase.consume_work);
+    if (!closure.ok())
+      return Answer(closure.status());
+    auto validation = closure.take_value();
     request_capacity =
         dependency_internal::metadata_owner(32768 + points.size() * 8192);
     std::vector<AtomCertificate> rows;

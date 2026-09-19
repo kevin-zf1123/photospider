@@ -22,6 +22,7 @@
 #include "plugin/builtin_operations.hpp"
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/dependency_plugin.hpp"
+#include "plugin/operation_resources.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -663,6 +664,7 @@ struct OutputSinkState final {
   std::optional<MutableValue> allocation;
   std::vector<MutableBuffer> scratch;
   Status allocation_failure;
+  ResourceBindings resources;
 };
 
 /** @brief Allocates exact regional output; exceptions never cross the C ABI. */
@@ -830,8 +832,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     if (data != state->allocation->data())
       std::memcpy(state->allocation->data(), data,
                   static_cast<std::size_t>(byte_size));
-    state->result =
-        std::move(*state->allocation).publish(std::move(owned_facets));
+    state->result = std::move(*state->allocation)
+                        .publish(std::move(owned_facets), state->resources);
     return state->result.ok() ? 1 : 0;
   } catch (const std::bad_alloc&) {
     Status failure;
@@ -1579,6 +1581,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       output.descriptor = expected.value().descriptor;
       output.region = invocation.output_region;
       output.allocator = invocation.allocator;
+      output.resources = invocation.resources;
       std::vector<std::uint64_t> output_offsets, output_extents;
       for (const auto dim : output.region.dimensions()) {
         output_offsets.push_back(dim.offset);
@@ -2055,7 +2058,20 @@ Result<ResultContinuation> OperationRegistry::start_result(
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, code);
         });
-    auto started = definition->start_result(query, scoped);
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        query.resources, query.inputs, query.output);
+    if (!admitted_resources.ok())
+      return Answer(admitted_resources.status());
+    auto normalized = query;
+    normalized.resources = admitted_resources.take_value();
+    if (normalized.value_outputs) {
+      auto closed = input_internal::color_output_samples(
+          normalized.output, *normalized.value_outputs);
+      if (!closed.ok())
+        return Answer(closed.status());
+      normalized.value_outputs = closed.take_value();
+    }
+    auto started = definition->start_result(normalized, scoped);
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
@@ -2065,6 +2081,7 @@ Result<ResultContinuation> OperationRegistry::start_result(
       return Answer(Status{ErrorCode::InvalidArgument,
                            "structured state must use host allocation"});
     state.definition_ = definition;
+    state.resources_ = normalized.resources;
     return Answer(std::move(state));
   } catch (const std::bad_alloc&) {
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
@@ -2103,7 +2120,20 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, code);
         });
-    auto started = definition->start_result(query, scoped);
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        query.resources, query.inputs, query.output);
+    if (!admitted_resources.ok())
+      return Answer(admitted_resources.status());
+    auto normalized = query;
+    normalized.resources = admitted_resources.take_value();
+    if (normalized.value_outputs) {
+      auto closed = input_internal::color_output_samples(
+          normalized.output, *normalized.value_outputs);
+      if (!closed.ok())
+        return Answer(closed.status());
+      normalized.value_outputs = closed.take_value();
+    }
+    auto started = definition->start_result(normalized, scoped);
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
@@ -2113,6 +2143,7 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
       return Answer(Status{ErrorCode::InvalidArgument,
                            "structured state must use host allocation"});
     state.definition_ = definition;
+    state.resources_ = normalized.resources;
     return Answer(std::move(state));
   } catch (const std::bad_alloc&) {
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
@@ -2359,6 +2390,18 @@ Result<Value> OperationRegistry::invoke_current(
         projected_inputs, projected_demands, invocation.parameters,
         invocation.backend, invocation.cancellation, invocation.output_region,
         invocation.allocator);
+    auto resources = invocation.resources;
+    for (const auto& input : invocation.inputs) {
+      auto joined = resources.unite(input.resources());
+      if (!joined.ok())
+        return Result<Value>(joined.status());
+      resources = joined.take_value();
+    }
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        resources, complete_metadata, expected_output.value());
+    if (!admitted_resources.ok())
+      return Result<Value>(admitted_resources.status());
+    normalized.resources = admitted_resources.take_value();
     normalized.gpu = invocation.gpu;
     normalized.output_index = invocation.output_index;
     normalized.input_indices = projected_positions;
@@ -2372,7 +2415,13 @@ Result<Value> OperationRegistry::invoke_current(
              .ok())
       return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                            "invalid operation output demand"));
-    if (!input_internal::complete_image_channels(
+    auto closed_region = input_internal::color_output_region(
+        expected_output.value().descriptor, expected_output.value().facets,
+        normalized.output_region);
+    if (!closed_region.ok())
+      return Result<Value>(closed_region.status());
+    normalized.output_region = closed_region.take_value();
+    if (!input_internal::complete_tuple_channels(
             expected_output.value().descriptor, expected_output.value().facets,
             normalized.output_region))
       return Result<Value>(Status::failure(
@@ -2425,8 +2474,7 @@ Result<Value> OperationRegistry::invoke_current(
                                            result.value().facets())
              : std::none_of(result.value().facets().begin(),
                             result.value().facets().end(), [](const auto& f) {
-                              return f.key == "photospider.image" ||
-                                     f.key == "photospider.semantic";
+                              return input_internal::typed_facet(f.key);
                             }));
     if (output_status.ok() && !facets_match)
       output_status =
@@ -2444,7 +2492,17 @@ Result<Value> OperationRegistry::invoke_current(
           output_status.code != ErrorCode::ResourceExhausted)
         output_status.code = ErrorCode::OperationFailed;
     }
-    return output_status.ok() ? result : Result<Value>(output_status);
+    if (!output_status.ok())
+      return Result<Value>(output_status);
+    if (!result.value().resources().size())
+      return result;
+    auto compatible = normalized.resources.unite(result.value().resources());
+    if (!compatible.ok())
+      return Result<Value>(compatible.status());
+    const auto& value = result.value();
+    return Value::from_storage(value.descriptor(), value.region(),
+                               value.layout(), value.storage(), value.facets(),
+                               normalized.resources);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {

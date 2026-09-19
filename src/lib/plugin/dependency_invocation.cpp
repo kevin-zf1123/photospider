@@ -9,6 +9,7 @@
 
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/operation_resources.hpp"
 
 namespace ps {
 namespace {
@@ -79,6 +80,13 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{ErrorCode::TypeMismatch,
                               "projected input metadata mismatch"});
     }
+    auto resources = invocation.resources;
+    for (const auto& input : invocation.inputs) {
+      auto joined = resources.unite(input.resources());
+      if (!joined.ok())
+        return failure(joined.status());
+      resources = joined.take_value();
+    }
     auto specialized = prepare_operation(key, metadata, invocation.parameters);
     if (!specialized.ok())
       return failure(specialized.status());
@@ -90,9 +98,19 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                            invocation.parameters);
     if (!inferred.ok())
       return failure(inferred.status());
-    const auto region = invocation.output_region.rank()
-                            ? invocation.output_region
-                            : Region::whole(inferred.value().descriptor.shape);
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        resources, metadata, inferred.value());
+    if (!admitted_resources.ok())
+      return failure(admitted_resources.status());
+    resources = admitted_resources.take_value();
+    auto region = invocation.output_region.rank()
+                      ? invocation.output_region
+                      : Region::whole(inferred.value().descriptor.shape);
+    auto closed_region = input_internal::color_output_region(
+        inferred.value().descriptor, inferred.value().facets, region);
+    if (!closed_region.ok())
+      return failure(closed_region.status());
+    region = closed_region.take_value();
     if (region.empty())
       return failure(Status::failure(ErrorCode::InvalidArgument,
                                      "empty direct output Region"));
@@ -134,6 +152,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                 {}};
       request.output_index = invocation.output_index;
       request.prepared = specialized.value();
+      request.resources = resources;
       auto started =
           start_dependency(key, std::move(request), invocation.allocator);
       if (!started.ok())
@@ -178,7 +197,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
           }
           auto fragments = ValueFragments::create(
               metadata[port].descriptor, metadata[port].facets,
-              needed.take_value(), std::move(values));
+              needed.take_value(), std::move(values), {}, resources);
           if (!fragments.ok())
             return Result<DependencyResult>(fragments.status());
           ready.push_back(fragments.take_value());
@@ -276,7 +295,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
       return failure(status);
     if (stop() != ErrorCode::Ok)
       return failure(Status{stop(), {}});
-    return std::move(output).publish(inferred.value().facets);
+    return std::move(output).publish(inferred.value().facets, resources);
   } catch (const std::bad_alloc&) {
     return failure(Status::failure(ErrorCode::ResourceExhausted,
                                    "direct dependency allocation failed"));

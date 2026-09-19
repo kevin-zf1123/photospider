@@ -148,6 +148,11 @@ class PHOTOSPIDER_API SemanticGraphIR final {
   input_declarations() const noexcept {
     return input_declarations_;
   }
+  /** @brief Frozen resources required by static input/output descriptions.
+   * Owners are separate from per-run numeric inputs and survive this stage's
+   * copies. Unused caller bindings and allocation addresses are not identity.
+   */
+  const ResourceBindings& resources() const noexcept { return resources_; }
   /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only for a compiler-produced IR whose context is unchanged.
@@ -161,7 +166,9 @@ class PHOTOSPIDER_API SemanticGraphIR final {
  private:
   friend class Compiler;
 
-  /** @brief Canonical copied input metadata, with no runtime owners. */
+  /** @brief Immutable resources required to interpret static metadata. */
+  ResourceBindings resources_;
+  /** @brief Canonical copied input metadata, with no per-run sample owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
@@ -244,6 +251,11 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
   input_declarations() const noexcept {
     return input_declarations_;
   }
+  /** @brief Frozen resources required by static input/output descriptions.
+   * Owners are separate from per-run numeric inputs and survive this stage's
+   * copies. Unused caller bindings and allocation addresses are not identity.
+   */
+  const ResourceBindings& resources() const noexcept { return resources_; }
   /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only when the source context still has the captured revision.
@@ -257,7 +269,9 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
  private:
   friend class Compiler;
 
-  /** @brief Canonical copied input metadata, with no runtime owners. */
+  /** @brief Immutable resources required to interpret static metadata. */
+  ResourceBindings resources_;
+  /** @brief Canonical copied input metadata, with no per-run sample owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
@@ -297,7 +311,9 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * mismatch, empty/out-of-bounds Regions and partial-channel image demand
    * fail before plan publication. Image coverage uses inferred facets and the
    * full logical channel extent, including generic ports and Whole outputs.
-   * Changed demand replans optimized IR.
+   * ColorArray requests instead expand the last axis to complete colors;
+   * returned output Regions record that closure. Changed demand replans
+   * optimized IR.
    */
   std::map<std::string, Region> output_regions;
   /** @brief Positive spatial tile extents; changing them only replans optimized
@@ -505,6 +521,11 @@ class PHOTOSPIDER_API ExecutionPlan final {
   input_declarations() const noexcept {
     return input_declarations_;
   }
+  /** @brief Frozen resources required by static input/output descriptions.
+   * Owners are separate from per-run numeric inputs and survive this stage's
+   * copies. Unused caller bindings and allocation addresses are not identity.
+   */
+  const ResourceBindings& resources() const noexcept { return resources_; }
   /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only when the source context still has the captured revision.
@@ -567,7 +588,9 @@ class PHOTOSPIDER_API ExecutionPlan final {
   std::vector<PlanExecutionGroup> execution_groups_;
   std::uint64_t tile_height_ = 128;
   std::uint64_t tile_width_ = 128;
-  /** @brief Canonical copied input metadata, with no runtime owners. */
+  /** @brief Immutable resources required to interpret static metadata. */
+  ResourceBindings resources_;
+  /** @brief Canonical copied input metadata, with no per-run sample owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
@@ -638,12 +661,15 @@ class PHOTOSPIDER_API Compiler final {
   /**
    * @brief Builds normalized typed semantic IR.
    * @param snapshot Coherent GraphContext document/revision snapshot.
+   * @param resources Explicit immutable profile bindings for static facets.
+   * Missing CMYK profiles fail before publication; required owners are
+   * retained.
    * @return Semantic IR or complete graph/operation validation failure.
    * @throws std::bad_alloc If staging allocation fails.
    * @note Failure publishes no partial IR.
    */
   [[nodiscard]] Result<SemanticGraphIR> analyze(
-      const GraphSnapshot& snapshot) const;
+      const GraphSnapshot& snapshot, ResourceBindings resources = {}) const;
 
   /**
    * @brief Applies deterministic semantics-preserving optimizer rules.
@@ -671,13 +697,16 @@ class PHOTOSPIDER_API Compiler final {
    * @brief Runs analyze, optimize, and plan as one fail-before-publication
    * flow.
    * @param context Independently owned source graph context.
+   * @param resources Explicit immutable profile bindings, frozen at analysis.
+   * Changing profile content requires matching metadata and recompilation.
    * @param options Caller local-capability choices.
    * @return Complete stage chain plus raw timings, or the first failure.
    * @throws std::bad_alloc If staging allocation fails.
    * @note A replacement racing the pipeline returns `Stale` before success.
    */
   [[nodiscard]] Result<CompiledWorkflow> compile(
-      const GraphContext& context, const PlanningOptions& options = {}) const;
+      const GraphContext& context, const PlanningOptions& options = {},
+      ResourceBindings resources = {}) const;
 
   /**
    * @brief Returns the frozen operation registry used by this compiler.

@@ -48,6 +48,7 @@ struct DependencyLimits final {
  * cache hits. It is provenance for routing/validation, not a semantic input:
  * deterministic programs must not derive output values or dependency choices
  * from the spelling of this identity, allocator addresses or invocation timing.
+ * ColorArray output requests expand to full-channel observations.
  */
 struct DependencyRequest final {
   std::vector<OperationMetadata> inputs;
@@ -64,6 +65,10 @@ struct DependencyRequest final {
    * Empty/axis/ROI queries do not bypass static preparation validation.
    */
   std::shared_ptr<const PreparedOperation> prepared = {};
+  /** @brief Explicit immutable resources resolving input and output identities.
+   * Validated and retained before callbacks, including Empty requests.
+   */
+  ResourceBindings resources = {};
 };
 /** @brief Validated borrowed query visible to start/poll, never retained by
  * code.
@@ -88,6 +93,10 @@ struct DependencyQuery final {
    * while its owning session remains alive. No dynamic input data is stored.
    */
   const PreparedOperation* prepared = nullptr;
+  /** @brief Session-owned accepted resources for input/output interpretation.
+   * Publication must pass this handle to retain resources named by its facets.
+   */
+  ResourceBindings resources = {};
 };
 /** @brief Extracts one canonical output/coordinate key from an Atomic query.
  * Empty or multi-observation queries fail without sample reads or allocation.

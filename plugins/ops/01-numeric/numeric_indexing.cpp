@@ -13,6 +13,7 @@
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_aggregate.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -59,14 +60,7 @@ std::uint32_t static_axis(
 }
 DependencyMappedNeed typed_map(DependencyMappedNeed data,
                                const OperationMetadata& metadata) {
-  data.roles = 4;
-  for (const auto& facet : metadata.facets) {
-    if (facet.key != "photospider.image" && facet.key != "photospider.semantic")
-      continue;
-    auto semantic = taken(decode_semantic(facet));
-    if (semantic.kind == SemanticKind::Image)
-      data.axes[2] = {-1, {0, metadata.descriptor.shape[2]}};
-  }
+  data = input_internal::validation_map(std::move(data), metadata);
   return data;
 }
 Status report_index(const DependencyPhase& phase, SequenceProfile profile,
@@ -397,24 +391,8 @@ struct IndexState final {
     const auto& metadata = phase.query.inputs[port];
     auto data = taken(
         Footprint::from_regions(metadata.descriptor.shape, points, phase.sets));
-    auto validation = data;
-    for (const auto& facet : metadata.facets) {
-      if (facet.key != "photospider.image" &&
-          facet.key != "photospider.semantic")
-        continue;
-      if (taken(decode_semantic(facet)).kind != SemanticKind::Image)
-        continue;
-      std::vector<Region> closed;
-      closed.reserve(points.size());
-      for (const auto& item : points) {
-        checked(phase.consume_work(metadata.descriptor.shape.size()));
-        auto dimensions = item.dimensions();
-        dimensions[2] = {0, metadata.descriptor.shape[2]};
-        closed.emplace_back(std::move(dimensions));
-      }
-      validation = taken(Footprint::from_regions(metadata.descriptor.shape,
-                                                 closed, phase.sets));
-    }
+    auto validation = taken(input_internal::validation_closure(
+        metadata, data, phase.sets, phase.consume_work));
     needs->push_back({port, 1, std::move(data), {}});
     needs->push_back({port, 4, std::move(validation), {}});
   }

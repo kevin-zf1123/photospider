@@ -59,23 +59,49 @@ Value::~Value() noexcept {
   layout_ = StridedLayout{};
   facets_ = std::vector<ValueFacet>{};
 }
+void Value::swap(Value& other) noexcept {
+  using std::swap;
+  swap(resources_, other.resources_);
+  swap(descriptor_, other.descriptor_);
+  swap(region_, other.region_);
+  swap(layout_, other.layout_);
+  swap(facets_, other.facets_);
+  swap(storage_, other.storage_);
+}
+Value& Value::operator=(const Value& other) {
+  if (this != &other) {
+    Value replacement(other);
+    swap(replacement);
+  }
+  return *this;
+}
+Value& Value::operator=(Value&& other) noexcept {
+  if (this != &other) {
+    Value replacement(std::move(other));
+    swap(replacement);
+  }
+  return *this;
+}
 
 Result<Value> Value::create(ValueDescriptor descriptor, Region region,
                             StridedLayout layout,
                             std::vector<std::uint8_t> bytes,
-                            std::vector<ValueFacet> facets) {
+                            std::vector<ValueFacet> facets,
+                            ResourceBindings resources) {
   auto storage = std::shared_ptr<CpuStorage>(new CpuStorage());
   storage->adopted_ =
       std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes));
   storage->capacity_ = storage->adopted_->capacity();
   return from_storage(std::move(descriptor), std::move(region),
-                      std::move(layout), std::move(storage), std::move(facets));
+                      std::move(layout), std::move(storage), std::move(facets),
+                      std::move(resources));
 }
 
 Result<Value> Value::from_storage(ValueDescriptor descriptor, Region region,
                                   StridedLayout layout,
                                   std::shared_ptr<const CpuStorage> storage,
-                                  std::vector<ValueFacet> facets) {
+                                  std::vector<ValueFacet> facets,
+                                  ResourceBindings resources) {
   if (!storage || descriptor.shape.empty() || descriptor.shape.size() > 8 ||
       descriptor.shape.size() != layout.byte_strides.size() ||
       (!layout.origin.empty() &&
@@ -125,7 +151,11 @@ Result<Value> Value::from_storage(ValueDescriptor descriptor, Region region,
   status = input_internal::canonicalize_facets(&facets);
   if (!status.ok())
     return Result<Value>(status);
+  auto selected = resources.select(facets);
+  if (!selected.ok())
+    return Result<Value>(selected.status());
   Value value;
+  value.resources_ = selected.take_value();
   value.descriptor_ = std::move(descriptor);
   value.region_ = std::move(region);
   value.layout_ = std::move(layout);
@@ -147,7 +177,8 @@ Result<Value> Value::view(const Region& region) const {
       return Result<Value>(Status::failure(
           ErrorCode::TypeMismatch, "subview exceeds available coverage"));
   }
-  return from_storage(descriptor_, region, layout_, storage_, facets_);
+  return from_storage(descriptor_, region, layout_, storage_, facets_,
+                      resources_);
 }
 
 Result<std::size_t> Value::byte_address(
@@ -247,6 +278,11 @@ const std::vector<ValueFacet>& Value::facets() const {
   }
   return facets_;
 }
+const ResourceBindings& Value::resources() const {
+  if (!valid())
+    throw std::logic_error("default Value has no resources");
+  return resources_;
+}
 
 /**
  * @brief Implements immutable byte-storage access.
@@ -311,10 +347,11 @@ Result<MutableValue> MutableValue::allocate(const ValueDescriptor& descriptor,
   writer.buffer_ = allocation.take_value();
   return Result<MutableValue>(std::move(writer));
 }
-Result<Value> MutableValue::publish(std::vector<ValueFacet> facets) && {
+Result<Value> MutableValue::publish(std::vector<ValueFacet> facets,
+                                    ResourceBindings resources) && {
   return Value::from_storage(std::move(descriptor_), std::move(region_),
                              std::move(layout_), std::move(buffer_).freeze(),
-                             std::move(facets));
+                             std::move(facets), std::move(resources));
 }
 
 }  // namespace ps

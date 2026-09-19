@@ -5,7 +5,7 @@ kind: shared_data_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -26,8 +26,8 @@ transfer explicitly where relevant, along with the model-specific channel/alpha
 information below. RGB ramp defaults are sRGB primaries, D65 and the standard
 piecewise sRGB transfer; this authoring default does not change existing linear
 Image/Layer defaults. This initial representation clarification is complete;
-all new encoding/helpers, resource ownership and operator integration remain
-implementation requirements, not changes already made to the public ABI.
+the maintained encoding/helpers, resource ownership and operator integration are recorded
+in the implementation section below; this contract remains Proposed.
 
 ColorArray rank is 2..8, all extents positive and logical elements <=2^40. The
 last axis contains the model channels; one color is [1,C]. One immutable static
@@ -42,12 +42,35 @@ describes typed Image as Float32 HWC, while
 [semantic validation](../../../../src/lib/data/semantic.cpp) restricts Image RGB
 to primaries=srgb and transfer=linear. Generic Value shapes and arbitrary facet
 storage do not by themselves establish a validated generic color-array contract.
-The new description needs explicit metadata validation, ownership, propagation,
-cache identity and operator-consumer rules before it can be implemented.
+The current implementation supplies explicit metadata validation, ownership, propagation,
+cache identity and operator-consumer rules described in the maintained section below.
 
 This specification does not silently label encoded RGB as linear RGB, expand a
 legacy semantic enum at runtime, or claim an existing assign/convert operation
 accepts this new representation.
+
+## Maintained implementation and validation
+
+The `ops-impl` branch now provides the independent public
+[`ColorArrayDescriptor` codec](../../../../include/photospider/data/color_array.hpp),
+exact white/basis checks, regional sample validation and generic NUM full-color
+Validation closure. These facilities use the canonical bytes defined below and
+keep Image/SemanticKind separate. Static rational split descriptions remain
+parameter-only. The manual [ColorArray example](../../../../examples/numeric_workflow/README.md#colorarray-facilities)
+checks public workflow composition, source support/dirty behavior, snapshot and
+fragment boundaries, and per-observation dependency proofs. It is excluded from
+CTest and integration registration.
+
+The explicit `IccProfile`/`ResourceBindings` path now resolves profile identities
+at compilation and publication, retains accepted bytes in Values/fragments and
+snapshots, and carries owners through ordinary, dependency and structured
+execution queries. Empty output retains the required profile. The codec's
+`ColorProfileIdentity` remains metadata only; a CMYK Value requires the matching
+owning binding. See the [public ICC manual](../../../../examples/numeric_workflow/README.md#immutable-icc-resources)
+for editable workflows, independent structure/identity fixtures and resource
+failure checks. Resource-bearing results bypass optional sample-only caches.
+Color ramp arithmetic is implemented; the broader family acceptance matrix is
+tracked separately. This document does not claim the entire category is complete.
 
 ## Confirmed RGB primaries and white representation
 
@@ -301,8 +324,8 @@ The metadata digest is not ownership. Compilation/output bindings retain an
 immutable budget-accounted profile resource, accessible after execution-context
 teardown while a result/read view still refers to it. Missing/unresolved resources
 fail admission; bytes cannot be loaded later from a mutable path based only on
-metadata. Existing ValueFacet bytes do not implement that resource binding, so
-explicit new resolver/owner integration is a delivery requirement. Profiles,
+metadata. The current ResourceBindings resolver and owner integration implement that resource
+binding; metadata alone still does not grant ownership. Profiles,
 tag-validation scratch and content-identity computation are bounded by host budgets.
 
 ## Integration, errors and acceptance

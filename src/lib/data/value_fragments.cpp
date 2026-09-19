@@ -52,9 +52,9 @@ void append_coalesced(std::vector<Value>* fragments, Value value) {
     }
     if (!adjacent || differing != 1)
       break;
-    auto joined =
-        Value::from_storage(prior.descriptor(), Region(dimensions),
-                            prior.layout(), prior.storage(), prior.facets());
+    auto joined = Value::from_storage(prior.descriptor(), Region(dimensions),
+                                      prior.layout(), prior.storage(),
+                                      prior.facets(), prior.resources());
     if (!joined.ok() || !same_mapping(joined.value(), value, value.region()))
       break;
     value = joined.take_value();
@@ -69,6 +69,7 @@ Status invalid(const char* message) {
 void ValueFragments::swap(ValueFragments& other) noexcept {
   using std::swap;
   swap(metadata_lifetime_, other.metadata_lifetime_);
+  swap(resources_, other.resources_);
   swap(descriptor_, other.descriptor_);
   swap(facets_, other.facets_);
   swap(authorized_, other.authorized_);
@@ -91,16 +92,16 @@ ValueFragments& ValueFragments::operator=(ValueFragments&& other) noexcept {
 Result<ValueFragments> ValueFragments::create(
     ValueDescriptor descriptor, std::vector<ValueFacet> facets,
     Footprint authorized, const std::vector<Value>& fragments,
-    const FootprintLimits& limits) {
+    const FootprintLimits& limits, ResourceBindings resources) {
   return create_view(std::move(descriptor), std::move(facets),
                      std::move(authorized), fragments.data(), fragments.size(),
-                     limits);
+                     limits, {}, std::move(resources));
 }
 Result<ValueFragments> ValueFragments::create_view(
     ValueDescriptor descriptor, std::vector<ValueFacet> facets,
     Footprint authorized, const Value* fragments, std::size_t count,
     const FootprintLimits& limits,
-    std::shared_ptr<const void> metadata_lifetime) {
+    std::shared_ptr<const void> metadata_lifetime, ResourceBindings resources) {
   if (count && !fragments)
     return Result<ValueFragments>(invalid("null fragment array"));
   if (!authorized.valid() || authorized.shape() != descriptor.shape)
@@ -113,25 +114,24 @@ Result<ValueFragments> ValueFragments::create_view(
   auto status = input_internal::canonicalize_facets(&facets);
   if (!status.ok())
     return Result<ValueFragments>(status);
-  for (const auto& facet : facets)
-    if (facet.key == "photospider.image" ||
-        facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return Result<ValueFragments>(semantic.status());
-      status = validate_semantic_descriptor(semantic.value(), descriptor);
-      if (!status.ok())
-        return Result<ValueFragments>(status);
-    }
+  status = input_internal::validate_port_metadata({}, descriptor, facets);
+  if (!status.ok())
+    return Result<ValueFragments>(status);
+  if (!resources.size() && count && fragments[0].valid())
+    resources = fragments[0].resources();
+  auto selected = resources.select(facets);
+  if (!selected.ok())
+    return Result<ValueFragments>(selected.status());
   for (const auto& region : authorized.boxes())
-    if (!input_internal::complete_image_channels(descriptor, facets, region))
+    if (!input_internal::complete_tuple_channels(descriptor, facets, region))
       return Result<ValueFragments>(
-          invalid("image fragments require full channels"));
+          invalid("color fragments require full channels"));
   auto empty = Footprint::none(descriptor.shape, limits);
   if (!empty.ok())
     return Result<ValueFragments>(empty.status());
   auto available = empty.take_value();
   ValueFragments result;
+  result.resources_ = selected.take_value();
   result.metadata_lifetime_ = std::move(metadata_lifetime);
   std::uint64_t work = limits.maximum_work;
   for (std::size_t index = 0; index < count; ++index) {
@@ -149,10 +149,16 @@ Result<ValueFragments> ValueFragments::create_view(
         !input_internal::same_facets(value.facets(), facets))
       return Result<ValueFragments>(Status::failure(
           ErrorCode::TypeMismatch, "fragment metadata mismatch"));
-    if (!input_internal::complete_image_channels(descriptor, facets,
+    if (!input_internal::complete_tuple_channels(descriptor, facets,
                                                  value.region()))
       return Result<ValueFragments>(
-          invalid("every image fragment requires full channels"));
+          invalid("every color fragment requires full channels"));
+    // Resolve duplicate identities against the canonical set before replacing
+    // per-fragment ancestry. The result then retains each profile allocation
+    // exactly once, matching resources() and retained_bytes().
+    auto compatible_resources = result.resources_.unite(value.resources());
+    if (!compatible_resources.ok())
+      return Result<ValueFragments>(compatible_resources.status());
     auto source =
         Footprint::from_regions(descriptor.shape, {value.region()}, limits);
     if (!source.ok())
@@ -186,7 +192,13 @@ Result<ValueFragments> ValueFragments::create_view(
       auto view = value.view(region);
       if (!view.ok())
         return Result<ValueFragments>(view.status());
-      append_coalesced(&result.fragments_, view.take_value());
+      auto part = view.take_value();
+      auto canonical =
+          Value::from_storage(part.descriptor(), part.region(), part.layout(),
+                              part.storage(), part.facets(), result.resources_);
+      if (!canonical.ok())
+        return Result<ValueFragments>(canonical.status());
+      append_coalesced(&result.fragments_, canonical.take_value());
     }
     auto next = available.unite(clipped.value(), limits);
     if (!next.ok())
@@ -226,7 +238,7 @@ Result<ValueFragments> ValueFragments::restrict(
     return Result<ValueFragments>(
         invalid("fragment restriction exceeds coverage"));
   return create_view(descriptor_, facets_, subset, fragments_.data(),
-                     fragments_.size(), limits, metadata_lifetime_);
+                     fragments_.size(), limits, metadata_lifetime_, resources_);
 }
 Result<Value> ValueFragments::collect(const Region& region,
                                       const BufferAllocator& allocator,
@@ -242,8 +254,8 @@ Result<Value> ValueFragments::collect(const Region& region,
   if (!outside.value().empty())
     return Result<Value>(
         Status::failure(ErrorCode::NotFound, "collection has a hole"));
-  if (!input_internal::complete_image_channels(descriptor_, facets_, region))
-    return Result<Value>(invalid("image collection requires full channels"));
+  if (!input_internal::complete_tuple_channels(descriptor_, facets_, region))
+    return Result<Value>(invalid("color collection requires full channels"));
   auto allocation = MutableValue::allocate(descriptor_, region, allocator);
   if (!allocation.ok())
     return Result<Value>(allocation.status());
@@ -262,7 +274,7 @@ Result<Value> ValueFragments::collect(const Region& region,
   if (limits.cancellation.cancelled())
     return Result<Value>(
         Status::failure(ErrorCode::Cancelled, "collection cancelled"));
-  return std::move(output).publish(facets_);
+  return std::move(output).publish(facets_, resources_);
 }
 Result<std::uint64_t> ValueFragments::retained_bytes() const {
   if (!valid())
@@ -277,6 +289,16 @@ Result<std::uint64_t> ValueFragments::retained_bytes() const {
             ErrorCode::ResourceExhausted, "fragment owner sum overflow"));
       count += bytes;
     }
+  for (std::size_t i = 0; i < resources_.size(); ++i) {
+    const auto profile = resources_.profile_at(i).take_value();
+    if (!owners.insert(profile.storage().get()).second)
+      continue;
+    const auto bytes = profile.storage()->capacity();
+    if (bytes > UINT64_MAX - count)
+      return Result<std::uint64_t>(Status::failure(
+          ErrorCode::ResourceExhausted, "fragment resource sum overflow"));
+    count += bytes;
+  }
   return Result<std::uint64_t>(count);
 }
 }  // namespace ps

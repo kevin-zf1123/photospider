@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderNumericWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.15 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.16 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_numeric_sequences sequences.cpp)
 target_link_libraries(photospider_numeric_sequences PRIVATE Photospider::kernel)
@@ -89,3 +89,14 @@ target_compile_features(photospider_numeric_baking PRIVATE cxx_std_17)
 add_executable(photospider_numeric_lut1d EXCLUDE_FROM_ALL lut1d.cpp)
 target_link_libraries(photospider_numeric_lut1d PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_lut1d PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_color_array EXCLUDE_FROM_ALL color_array.cpp)
+target_link_libraries(photospider_numeric_color_array PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_color_array PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_icc EXCLUDE_FROM_ALL icc.cpp)
+target_link_libraries(photospider_numeric_icc PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_icc PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_color_ramps EXCLUDE_FROM_ALL color_ramps.cpp)
+target_link_libraries(photospider_numeric_color_ramps PRIVATE Photospider::kernel)

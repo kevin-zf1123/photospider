@@ -14,6 +14,7 @@
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_moments.hpp"
 #include "01-numeric/ordered_reduction.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -220,28 +221,11 @@ struct ReductionState final {
       auto group = window(cursor, end);
       if (!group.ok())
         return Answer(group.status());
-      auto validation = group.value();
-      for (const auto& facet : input.facets) {
-        if (facet.key != "photospider.image" &&
-            facet.key != "photospider.semantic")
-          continue;
-        auto semantic = decode_semantic(facet);
-        if (!semantic.ok())
-          return Answer(semantic.status());
-        if (semantic.value().kind == SemanticKind::Image) {
-          std::vector<Region> boxes;
-          for (const auto& box : group.value().boxes()) {
-            auto dimensions = box.dimensions();
-            dimensions[2] = {0, input.descriptor.shape[2]};
-            boxes.emplace_back(std::move(dimensions));
-          }
-          auto closure = Footprint::from_regions(input.descriptor.shape,
-                                                 std::move(boxes), phase.sets);
-          if (!closure.ok())
-            return Answer(closure.status());
-          validation = closure.take_value();
-        }
-      }
+      auto closure = input_internal::validation_closure(
+          input, group.value(), phase.sets, phase.consume_work);
+      if (!closure.ok())
+        return Answer(closure.status());
+      auto validation = closure.take_value();
       requested = true;
       return multi_output::need(phase, {{0, 1, group.take_value(), {}},
                                         {0, 4, std::move(validation), {}}});

@@ -12,6 +12,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_curve.hpp"
+#include "data/input_validation.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -249,11 +250,17 @@ struct CurveState final {
                                   {Region(dimensions)}, phase.sets);
       if (!support.ok())
         return Answer(support.status());
+      auto closure = input_internal::validation_closure(
+          phase.query.inputs[port], support.value(), phase.sets,
+          phase.consume_work);
+      if (!closure.ok())
+        return Answer(closure.status());
       certificates.push_back({coordinate(point),
                               {{port,
-                                static_cast<std::uint8_t>(port == 1 ? 5 : 6),
+                                static_cast<std::uint8_t>(port == 1 ? 1 : 2),
                                 support.take_value(),
-                                {}}}});
+                                {}},
+                               {port, 4, closure.take_value(), {}}}});
     }
     return Answer(DependencyNeedBatch{std::move(certificates)});
   }

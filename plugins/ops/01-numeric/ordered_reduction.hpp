@@ -209,18 +209,16 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
             ? 64U
             : static_cast<std::uint64_t>(std::get<std::int64_t>(found->second));
     const auto& input = query.inputs[0];
-    const bool image = std::any_of(
-        input.facets.begin(), input.facets.end(),
-        [](const auto& facet) { return facet.key == "photospider.image"; });
-    const bool typed = std::any_of(input.facets.begin(), input.facets.end(),
-                                   [](const auto& facet) {
-                                     return facet.key == "photospider.image" ||
-                                            facet.key == "photospider.semantic";
-                                   });
+    const auto channels =
+        input_internal::tuple_channel_axis(input.descriptor, input.facets);
+    const bool typed = std::any_of(
+        input.facets.begin(), input.facets.end(), [](const auto& facet) {
+          return input_internal::typed_facet(facet.key);
+        });
     return DependencyContinuation::make<OrderedReductionState>(
         allocator, variance, block,
         Region::whole(input.descriptor.shape).element_count().value(),
-        image ? input.descriptor.shape.back() : 1, typed);
+        channels ? input.descriptor.shape[*channels] : 1, typed);
   };
   return operation;
 }

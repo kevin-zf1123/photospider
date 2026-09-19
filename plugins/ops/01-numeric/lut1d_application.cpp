@@ -14,6 +14,7 @@
 #include "01-numeric/exact_curve.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/uniform_axis.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -154,23 +155,11 @@ struct LutState final {
                                         {Region(dimensions)}, phase.sets);
     if (!data.ok())
       return data.status();
-    auto validation = data.value();
-    for (const auto& facet : input.facets) {
-      if (facet.key != "photospider.image" &&
-          facet.key != "photospider.semantic")
-        continue;
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return semantic.status();
-      if (semantic.value().kind == SemanticKind::Image) {
-        dimensions[2] = {0, input.descriptor.shape[2]};
-        auto closure = Footprint::from_regions(
-            input.descriptor.shape, {Region(dimensions)}, phase.sets);
-        if (!closure.ok())
-          return closure.status();
-        validation = closure.take_value();
-      }
-    }
+    auto closure = input_internal::validation_closure(
+        input, data.value(), phase.sets, phase.consume_work);
+    if (!closure.ok())
+      return closure.status();
+    auto validation = closure.take_value();
     needs->push_back(
         {port, static_cast<std::uint8_t>(role), data.take_value(), {}});
     needs->push_back({port, 4, std::move(validation), {}});

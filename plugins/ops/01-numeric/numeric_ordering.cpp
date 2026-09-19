@@ -13,6 +13,7 @@
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_quantile.hpp"
 #include "01-numeric/stable_order.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -123,23 +124,11 @@ struct OrderingState final {
                                           {Region(dimensions)}, phase.sets);
       if (!data.ok())
         return Answer(data.status());
-      auto validation = data.value();
-      for (const auto& facet : input.facets) {
-        if (facet.key != "photospider.image" &&
-            facet.key != "photospider.semantic")
-          continue;
-        auto semantic = decode_semantic(facet);
-        if (!semantic.ok())
-          return Answer(semantic.status());
-        if (semantic.value().kind == SemanticKind::Image) {
-          dimensions[2] = {0, input.descriptor.shape[2]};
-          auto closure = Footprint::from_regions(
-              input.descriptor.shape, {Region(dimensions)}, phase.sets);
-          if (!closure.ok())
-            return Answer(closure.status());
-          validation = closure.take_value();
-        }
-      }
+      auto closure = input_internal::validation_closure(
+          input, data.value(), phase.sets, phase.consume_work);
+      if (!closure.ok())
+        return Answer(closure.status());
+      auto validation = closure.take_value();
       return multi_output::need(phase, {{0, 1, data.take_value(), {}},
                                         {0, 4, std::move(validation), {}}});
     }

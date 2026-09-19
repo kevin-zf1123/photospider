@@ -8,7 +8,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -55,10 +55,21 @@ Use stops=[0,1], pi colors=[[0.25,0.125,1.75],[0.75,0.375,0.25]], input=[0.5].
 The result is [[0.5,0.25,1]]. Rational hues 7/4 and 1/4 agree. Repeat with C=0:
 hue remains 1. With hues 0 and 4, midpoint hue is 2. Reject CIELCh/custom-white
 metadata. Use the full CRV-06D independent oracle and execution/resource checks
-with the OKLCh description. Public workflow examples remain conceptual until
-ColorArray and operations are implemented; actual execution evidence is required.
+with the OKLCh description. The maintained public workflow and current execution evidence are linked below.
 
 - [Radian entrypoint](CRV-06F1_color_ramp_oklch.md).
 - [Floating pi entrypoint](CRV-06F2_color_ramp_oklch_pi.md).
 - [Rational pi entrypoint](CRV-06F3_color_ramp_oklch_rational_pi.md).
 - [OKLab counterpart](CRV-06E_color_ramp_oklab.md).
+
+## Maintained implementation and validation
+
+This shared OKLCh contract covers three primitives and nine profile keys.
+The public helpers are `color_ramp_oklch_node`,
+`color_ramp_oklch_pi_node` and `color_ramp_oklch_rational_pi_node` in
+[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
+Coordinates and original hue ratios use exact rational interpolation;
+conversion between radian and pi units uses certified pi, with a 4096-bit
+precision ceiling. Equal units cancel symbolically. Every profile returns
+strict bits. See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation)
+and [public workflows](../../../../examples/numeric_workflow/README.md#color-ramps).

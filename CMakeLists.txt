@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.15.0
+  VERSION 0.16.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -107,6 +107,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/lut1d_application.cpp
   plugins/ops/01-numeric/parametric_bezier.cpp
   plugins/ops/01-numeric/bezier_function.cpp
+  plugins/ops/01-numeric/color_ramps.cpp
   plugins/ops/01-numeric/curve_interpolation.cpp
   plugins/ops/01-numeric/numeric_expression.cpp
   plugins/ops/01-numeric/numeric_binary.cpp
@@ -205,6 +206,10 @@ set(
   src/lib/execution/cancellation.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
+  src/lib/data/color_array.cpp
+  src/lib/data/icc_profile.cpp
+  src/lib/data/icc_validation.cpp
+  src/lib/data/resource_bindings.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
   src/lib/plugin/dependency_metadata.cpp

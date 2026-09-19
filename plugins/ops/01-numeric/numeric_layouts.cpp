@@ -13,6 +13,7 @@
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/array_publication.hpp"
 #include "data/dependency_metadata.hpp"
+#include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -73,15 +74,10 @@ struct LayoutState final {
     for (auto value : coordinate)
       dimensions.push_back({value, 1});
     if (validation) {
-      for (const auto& facet : phase.query.inputs[0].facets)
-        if (facet.key == "photospider.image" ||
-            facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          if (!semantic.ok())
-            return Result<Footprint>(semantic.status());
-          if (semantic.value().kind == SemanticKind::Image)
-            dimensions[2] = {0, source_shape[2]};
-        }
+      const auto axis = input_internal::tuple_channel_axis(
+          phase.query.inputs[0].descriptor, phase.query.inputs[0].facets);
+      if (axis)
+        dimensions[*axis] = {0, source_shape[*axis]};
     }
     return Footprint::from_regions(phase.query.inputs[0].descriptor.shape,
                                    {Region(std::move(dimensions))}, phase.sets);
@@ -526,17 +522,7 @@ OperationDefinition layout_operation(const std::string& key, LayoutKind kind,
       for (std::size_t j = 0; j < parameters_list.value().size(); ++j)
         data.axes[parameters_list.value()[j]] = {static_cast<std::int32_t>(j),
                                                  {}};
-      auto validation = data;
-      validation.roles = 4;
-      for (const auto& facet : inputs[0].facets)
-        if (facet.key == "photospider.image" ||
-            facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          if (!semantic.ok())
-            return Answer(semantic.status());
-          if (semantic.value().kind == SemanticKind::Image)
-            validation.axes[2] = {-1, {0, input.shape[2]}};
-        }
+      auto validation = input_internal::validation_map(data, inputs[0]);
       result.static_dependency_pieces = std::vector<DependencyMapPiece>{
           {Footprint::all(result.metadata.descriptor.shape).take_value(),
            {std::move(data), std::move(validation)}}};

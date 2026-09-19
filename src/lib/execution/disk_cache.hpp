@@ -164,6 +164,10 @@ class DiskCache final {
             const Region& region, const std::vector<ValueFacet>& facets,
             const std::function<ErrorCode()>& stop = {}) noexcept {
     try {
+      // This disposable cache stores sample bytes, never immutable resources.
+      // Resource-bearing interpretations must retain their accepted owners.
+      if (!ResourceBindings{}.select(facets).ok())
+        return {};
       if (!input_internal::validate_image_storage_metadata(descriptor, facets)
                .ok() ||
           !region.validate(descriptor.shape).ok() || region.empty() ||
@@ -266,6 +270,8 @@ class DiskCache final {
   void put(const std::string& logical, const Value& value,
            const std::function<ErrorCode()>& stop = {}) noexcept {
     try {
+      if (value.resources().size())
+        return;
       if (!input_internal::validate_image_storage_value(value, stop).ok())
         return;
       auto key = disk_key(logical);
