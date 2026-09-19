@@ -5,7 +5,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -215,11 +215,10 @@ hide it, axis errors are global, dirty support is exact, and all output metadata
 matches the declared model/space. Include strides, owners after context teardown,
 low budgets, cancellation, cache-off and joint versus partitioned requests.
 
-The conceptual public workflow binds input/table/axis, explicitly supplies both
+The public workflow binds input/table/axis, explicitly supplies both
 descriptions/dtype/policy, evaluates values through Compiler/ExecutionContext,
-and inspects complete colors and output metadata. Implementations must provide
-actual run commands and independently checked expected values. No current 3D LUT
-implementation was found under plugins/ops; no runtime execution is claimed here.
+and inspects complete colors and output metadata. Actual run commands and
+independently checked expected values are linked in the implementation section.
 The [CLF v3 interpolation appendix](https://docs.acescentral.com/clf/specification/#appendix-a-interpolation)
 is a method reference, not a claim of full CLF file, domain or bitwise compatibility.
 
@@ -239,3 +238,21 @@ hue components and every supported color model.
 - [1D LUT contract](CRV-05_apply_lut1d.md).
 - [Color-array dependency](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Operator template](../../00-foundation/spec-template.md).
+
+## Maintained implementation and validation
+
+The six keys are registered in
+[`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
+Public [`lut3d.hpp`](../../../../include/photospider/numeric/lut3d.hpp) supplies
+the two method-specific constructors. `ExactLut3d` uses a common positive
+integer denominator for support classification and whole-component rounding;
+`UniformAxis` provides global rounded-grid validation. ColorArray descriptions
+and complete-color observations use the CRV-06 facilities.
+
+The [public example](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts)
+contains editable workflows, run commands and five manual acceptance groups.
+The independent Fraction oracle checks 1062 cases across the specified models,
+axis directions, boundaries and dtype combinations. Fixed arithmetic and host
+resource limits are described in the [math implementation](../math-implementation.md#crv-07-joint-three-dimensional-lut-application).
+Platform/installed-consumer validation is recorded in [implementation.md](../implementation.md).
+Specification acceptance remains Proposed, independently of implemented behavior.

@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -64,16 +64,26 @@ Malformed statics, type/description mismatch, invalid demanded colors/grid/domai
 overflow, resources and unavailable platform keys use the exact CRV-07 error
 phases/categories; failed colors publish no partial channels.
 
-## Conceptual workflow and acceptance
+## Workflow and acceptance
 
 Bind a 2x2x2 RGB table whose vertex (r,g,b) stores (r*g,g*b,b*r), axis rows
 [0,1,1], input=[[0.75,0.25,0.5]], matching RGB descriptions and dtype Float64.
-Expect values=[[0.1875,0.125,0.375]] for this method. This conceptual workflow requires
-future public Compiler/ExecutionContext registration and actual run evidence.
+Expect values=[[0.1875,0.125,0.375]] for this method. The public
+`apply_lut3d_trilinear_node` constructor and executable workflow are linked below.
 
 Use CRV-07's independent rational oracle, identity/affine/cross-component tests,
 all supported models and mixed dtypes, grid boundaries, tetrahedral split ties
 where applicable, axis directions, finite extensions, hue winding, zero signs,
 partial-channel/full-color requests, zero-weight invalid rows, exact dirty support,
-strides, budgets, cancellation and lifetime tests. No runtime or full CLF
-compatibility is claimed by this Proposed specification.
+strides, budgets, cancellation and lifetime tests. Full CLF compatibility is
+outside this Proposed specification.
+
+## Maintained implementation
+
+[`apply_lut3d_trilinear_node`](../../../../include/photospider/numeric/lut3d.hpp)
+constructs the registered primitive in
+[`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
+All profiles use exact product weights and a single final rounding; only
+positive-weight full vertices are read. See the [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts)
+for numerical/resource bounds and actual validation.

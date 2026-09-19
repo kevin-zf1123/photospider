@@ -720,3 +720,54 @@ in the [example README](../../../examples/numeric_workflow/README.md).
 These sampled cases and scoped proofs do not establish successful evaluation of
 every legal input under the fixed work/precision capacities. No integration test
 or new CTest registration is added; WSL supplies correctness evidence only.
+
+## CRV-07 joint three-dimensional LUT application
+
+`lut3d_application.cpp` registers separate trilinear and tetrahedral primitives,
+with three CPU identities each. Three `UniformAxis` instances globally validate
+the Float64 `[3,3]` dynamic axes, including every reconstructed coordinate and
+the exact RN64 step. Their independently ascending/descending keys determine
+stored cells; an interior exact hit starts at that knot, and the terminal hit
+uses the final cell. Original input colors are validated before clamp.
+
+`ExactLut3d` keeps each local coordinate as `n_i/h_i` with positive `h_i`.
+Descending cells negate numerator and denominator together without changing
+the vertex's stored index. Every weight uses common denominator `D=h0*h1*h2`.
+Trilinear numerators multiply the chosen `n_i` or `h_i-n_i`. Tetrahedral orders
+the exact fractions descending, preserving axis order on ties, then subtracts
+the scaled `S_i=n_i*h_j*h_k` to obtain `D-Sa`, `Sa-Sb`, `Sb-Sc`, `Sc`.
+Only positive weights enter the compact vertex list used in the later table
+Need. Rebuilding weights from immutable cells/queries avoids a large per-point
+integer cache while preserving exactly the declared support.
+
+The complete component numerator is `sum(W_v*C_v)`, where each finite source
+float is an integer in `2^-1074` units. One ratio rounding produces the output
+dtype. Differences need fewer than 2100 bits, denominator/weights fewer than
+6300, and weighted sums fewer than 8400; final rounding alignment stays below
+8500. The existing 40960-bit polynomial arena admits these bounds. The actual
+peak is at most 48 of 96 slots, including descending-axis normalization and
+per-component accumulation. Original contributing bits determine all-negative-
+zero results; other exact cancellations are +0 and nonzero underflow retains
+its sign. No floating local coordinate or intermediate blend is rounded.
+
+The four-poll continuation reads global axes, complete requested input colors,
+then exactly contributing table colors, and publishes complete packed results.
+It allocates no full logical table/output for sparse demand. Per-Need certificate
+reservation is `4096+32768*M` Metadata bytes in addition to managed vectors,
+grid, continuation, source windows and output owners. Dense requests can exceed
+host metadata/work budgets independently of output payload size. Work and
+cancellation checks run inside support construction as well as final sums.
+All profiles use the same exact arithmetic with their selected integer compare
+helpers, so no numerical fallback is attempted.
+
+The independent Fraction oracle reconstructs RN64 grids, selects cells and
+simplexes and rounds complete rational sums using separate Python integer IEEE
+logic. Its 1062 cases cover all eight models, source/output dtype combinations,
+all axis directions, unequal extents, split ties and cube boundaries, tiny and
+extreme values, negative-zero rules and zero-weight invalid vertices. Five public
+manual groups additionally inspect actual support/dirty/cache effects, maximum
+`256^3` scalar-backed table and `2^38`-position composition, typed strides/fenv,
+work/state/stage limits, support/final-sum interruption, per-color Atom failures
+and required upstream producer order. Executable commands are in the
+[public example](../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
+No integration or CTest entry is added, and WSL is a correctness environment.

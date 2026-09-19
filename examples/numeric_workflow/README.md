@@ -162,6 +162,54 @@ consumers under Strict. The focused compiler unit, old-minor rejection,
 ClangFormat 21/cpplint and independent math, entry, ownership and cache reviews
 passed. WSL results establish numerical correctness only.
 
+## Joint three-axis color LUTs
+
+`photospider/numeric/lut3d.hpp` exposes `apply_lut3d_trilinear_node` and
+`apply_lut3d_tetrahedral_node`. They consume `input[...,3]`,
+`table[N0,N1,N2,3]` and Float64 `axis[3,3]`, whose rows are `[start,end,step]`.
+Input/table Float32 or Float64 types may differ; output defaults to the input
+dtype hint. Each axis has 2..256 entries and independently ascends or descends
+under the same rounded-grid checks as LUT1D. `Lut3dOptions` defaults to Reject;
+Clamp validates original source colors before clamping coordinates.
+
+Both color descriptions are explicit and must use the same supported
+three-component model. Their primaries/transfer/white/hue fields may differ:
+the table itself expresses that transformation. There is no implicit transfer,
+adaptation or hue wrapping. Existing attached ColorArray descriptions must
+match. Output carries the declared target description and returns complete
+colors when any component is requested.
+
+The editable `lut3d.cpp::examples()` binds all three inputs, constructs each
+method through its public helper, compiles and runs it, and inspects values,
+facets and exact source support. For a 2x2x2 table storing `(r*g,g*b,b*r)` at
+binary vertices and input `[.75,.25,.5]`, trilinear gives
+`[.1875,.125,.375]`; tetrahedral gives `[.25,.25,.5]`. Both correctly round the
+whole exact formula once. Zero-weight vertices are excluded from reads and
+validation; the tetrahedral diagonal midpoint therefore depends on just two
+vertices. Direct/all-negative-zero mixtures preserve the specified zero signs.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_lut3d -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_lut3d strict
+python3 examples/numeric_workflow/lut3d_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_lut3d strict
+```
+
+Use `apple` or `x86` on matching processors. The five manual groups check the
+cross-component fixture; exact sparse/dirty/cache behavior; maximum 256^3 table
+and `2^38`-position public constant-view composition; all-port unaligned/negative
+strides, typed metadata, floating environment and resource interruption; and
+whole-color Atom failures with axis/query/table producer ordering. The independent
+Fraction oracle checks 1062 cases per profile, including eight axis directions,
+unequal extents, every cube/split boundary, all eight models, mixed dtypes,
+extreme cancellation/subnormals and demanded versus zero-weight invalid colors.
+The target is excluded from the default build and CTest/integration registration.
+
+Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18 Strict/AVX2 passed all five
+manual groups and 1062 oracle cases per profile. Installed 0.16 consumers,
+the focused compiler unit, ClangFormat 21/cpplint and independent math/entry
+reviews passed. WSL measurements are used only for correctness.
+
 ## Sequence generators
 
 `sequences.cpp` declares dynamic scalar bindings, creates a `WorkflowDocument`,

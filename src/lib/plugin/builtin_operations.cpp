@@ -18,6 +18,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_bezier_function,
                               register_parametric_bezier,
                               register_lut1d_application,
+                              register_lut3d_application,
                               register_numeric_ordering,
                               register_numeric_comparisons,
                               register_numeric_arrays,

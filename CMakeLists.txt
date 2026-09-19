@@ -105,6 +105,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_layouts.cpp
   plugins/ops/01-numeric/numeric_indexing.cpp
   plugins/ops/01-numeric/lut1d_application.cpp
+  plugins/ops/01-numeric/lut3d_application.cpp
   plugins/ops/01-numeric/parametric_bezier.cpp
   plugins/ops/01-numeric/bezier_function.cpp
   plugins/ops/01-numeric/color_ramps.cpp

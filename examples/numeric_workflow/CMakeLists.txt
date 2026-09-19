@@ -100,3 +100,7 @@ target_compile_features(photospider_numeric_icc PRIVATE cxx_std_17)
 
 add_executable(photospider_numeric_color_ramps EXCLUDE_FROM_ALL color_ramps.cpp)
 target_link_libraries(photospider_numeric_color_ramps PRIVATE Photospider::kernel)
+
+add_executable(photospider_numeric_lut3d EXCLUDE_FROM_ALL lut3d.cpp)
+target_link_libraries(photospider_numeric_lut3d PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_lut3d PRIVATE cxx_std_17)

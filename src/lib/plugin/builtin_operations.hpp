@@ -8,6 +8,7 @@ Status register_builtin_operations(OperationRegistry* registry);
 Status register_numeric_layouts(OperationRegistry* registry);
 Status register_numeric_indexing(OperationRegistry* registry);
 Status register_lut1d_application(OperationRegistry* registry);
+Status register_lut3d_application(OperationRegistry* registry);
 Status register_parametric_bezier(OperationRegistry* registry);
 Status register_bezier_function(OperationRegistry* registry);
 Status register_color_ramps(OperationRegistry* registry);
