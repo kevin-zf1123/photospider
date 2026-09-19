@@ -276,6 +276,15 @@ broadcast 无需预留逻辑 dense 字节。普通、直接和 structured 执行
 编译或执行前必须 freeze。成功自定义注册清除 built-in persistent-cache identity，
 失败注册保持不变。默认工厂调用仍返回 frozen registry。
 
+## 结构化 schema 特化
+
+纯每节点 metadata specializer 可以解析 protocol-2 Result schema，同时保留注册的
+Result kind、schema id 和 version。此路径拒绝返回 Value metadata、tuple grouping
+和物理 Value flags。解析后的闭式 SchemaTemplate 在输出推断前完成校验，并进入
+现有 semantic、plan、cache identity。此能力不改变公开记录布局或 C ABI。
+CRV-09 使用它解析固定 measured report metadata 和 owned sampled-table shape；
+源采样、报告与 table gate 仍是同一 frozen workflow snapshot 中的普通节点。
+
 ## 区域布局执行
 
 当前布局算子通过每节点 metadata specialization 在执行前解析 shape、permutation 或

@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 
+#include "01-numeric/exact_predicate.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 

@@ -20,6 +20,8 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_lut1d_application,
                               register_lut3d_application,
                               register_log_shapers,
+                              register_lut3d_bake_geometry,
+                              register_lut3d_bake_results,
                               register_numeric_ordering,
                               register_numeric_comparisons,
                               register_numeric_arrays,

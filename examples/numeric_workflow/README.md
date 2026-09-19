@@ -1319,3 +1319,103 @@ host work limits and cancellation can stop it earlier. Every nonempty output
 requires both shared scalars plus local input and its typed validation closure.
 Empty output reads no payload. These manual targets have no integration-test or
 CTest registration. WSL Clang supplies numerical correctness evidence only.
+
+## Measured three-dimensional LUT baking
+
+`photospider/numeric/lut3d_baking.hpp` expands a pointwise source transform into
+ordinary workflow nodes. A source builder receives generated Float64 colors and
+their descriptor, appends its source nodes and returns an output reference. It is
+called twice during authoring: once for `[N0,N1,N2,3]` grid colors, once for
+`[P,3]` validation colors. Existing shared inputs remain normal graph edges.
+The helper retains no builder/capture for execution. The caller explicitly
+asserts independence from position, batch shape and other sampled colors.
+
+```cpp
+#include <photospider/numeric/lut3d_baking.hpp>
+#include <photospider/numeric/color_ramps.hpp>
+
+auto color = ps::numeric::color_ramp_rgb_description();
+ps::numeric::Lut3dBakeOptions options{
+    {2, 2, 2}, ps::Lut3dInterpolation::Trilinear, 0, 0,
+    color, color, true, {}, ps::CpuNumericProfile::Strict};
+auto baked = ps::numeric::bake_lut3d(
+    document, registry, axis_edge,
+    [](ps::WorkflowDocument&, const ps::numeric::Lut3dSourceInput& input) {
+      return ps::Result<ps::WorkflowNodeOutput>(input.colors); // identity
+    }, options);
+// Check baked.ok(); these references do not automatically alter graph exports.
+document.outputs = {{"report", baked.value().report.source_node, "report"}};
+```
+
+The complete binding, compilation, execution and inspection code is in
+[examples() and Fixture](baking3d.cpp). `source_builder()` adds editable square,
+explicit Float32 cast, shared scalar gain, constant and cross-component sources
+using current public helpers. `available_workflow_node_ids` finds collision-free
+IDs before appending source nodes. A builder may append nodes only; an error or
+exception leaves the caller's document unchanged. Pass optional `ResourceBindings`
+when an existing document names ICC resources, and pass them to final compilation
+as usual. Source keys/profiles are preserved; choosing the bake profile only
+selects generated sampling and LUT application facilities.
+
+Bind axis Float64 `[3,3]` to `[[0,1,1],[0,1,1],[0,1,1]]` for the identity example.
+Shape extents are 2..256 independently. Each axis may ascend or descend under
+CRV-07's exact reconstructed-grid rules. Optional validation points are dynamic
+Float64 `[M,3]`, M=1..1048576; omit the argument for none. Centers of every grid
+cell are always included, with each coordinate rounded once from its two actual
+Float64 neighbors. Extras follow centers in array order and must lie in-domain;
+repeated points count separately. Source and converted colors must remain finite
+and legal in the explicitly supplied same-model descriptions. Table dtype defaults
+to the inferred source dtype; a source Float32 cast is part of the reference.
+
+`read_lut3d_bake_report(result.results.at("report"))` reads a sealed
+`curve.bake_lut3d.report` v1 Result. The fixed 289-byte payload contains pass/counts,
+validated axis, exact-error maxima rounded upward with their points/earliest
+indices, and the first failure's input/reference/LUT values. Schema metadata says
+Measured and records shape, method, tolerances, dtypes, color descriptions and
+source recipe identity. It is not a bound over the continuous domain.
+
+Identity passes zero tolerance. `facilities()` also runs the specified `(r*r,g,b)` source: the center reference
+is `[.25,.5,.5]`, applied LUT is `[.5,.5,.5]` and maximum errors are `[.25,0,0]`.
+The introductory example squares each component on a 2×2×2
+grid: its center reference is `[.25,.25,.25]`, while either applied LUT gives
+`[.5,.5,.5]`. With atol=.1/rtol=0, the report has passed=false, failed_count=1,
+max_abs_error=`[.25,.25,.25]`, first_failure_index=0. Table requests fail with
+`LutApproximationToleranceExceeded`, including a request for one exact grid
+vertex; axis-only remains independent. The relative test uses
+`abs(lut-reference)<=atol+rtol*abs(reference)` with exact arithmetic.
+
+For separate report-only inspection, export report only. Ordinary multi-output
+`execute` remains fail-fast. To retain a completed failed report from a table
+execution, use `ExecutionOptions::result_publication`, as `facilities()` does;
+the callback receives an owning ResultRef. No incomplete/erroring measurement is
+published as a successful failed report. The owned sampled-table Result is an
+intermediate with no quality guarantee. Gate checks its object association with
+the passed report before reading requested table fragments. Different shared
+parameter snapshots cause a new measurement; matching shapes alone are insufficient.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_baking3d -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_baking3d strict
+python3 examples/numeric_workflow/baking3d_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_baking3d strict
+```
+
+Use `apple`/`x86` on the corresponding CPU. Seven manual groups check independent
+outputs, duplicate extras, Float32 scope, all-grid validation even for a constant
+source, ICC authoring, malformed registered data, object association, cancellation,
+resource limits, 512-color multiwindow baking, partial output origins, negative
+unaligned source strides, caller floating environment and escaped metadata owners.
+The independent Fraction oracle checks all report fields for 480 cases, including
+eight models, both methods, both dtypes, all axis directions and cross-component
+sources. No integration-test or CTest registration is added.
+
+All work uses the final graph's single immutable binding snapshot. Geometry,
+source requests, table backing, conversion and report validation are admitted
+against host limits. Table backing is stored through bounded Result I/O windows;
+measurement keeps a fixed-size summary and requests at most 64 validation colors
+per batch. Source operators still determine their own physical work and storage,
+and full generated grid validation currently requests the complete grid. A small
+output ROI does not reduce this global work. Examples provide explicit work
+budgets; large bakes may require larger work/stage/capacity limits or fail cleanly.
+The current report reader needs a window of at least 72 bytes. WSL Clang is used
+for correctness, with no performance inference.

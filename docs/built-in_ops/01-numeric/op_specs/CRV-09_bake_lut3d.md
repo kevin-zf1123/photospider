@@ -8,7 +8,7 @@ category: 01-numeric
 kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -143,10 +143,9 @@ this measurement.
 
 No automatic file save or one-time freeze occurs. Changes to shared dynamic
 parameters or axis produce new execution-dependent results and new validation.
-This template needs explicit source sampling, global validation gating and Result
-publication support in the implementation; ordinary existing remap/sampler nodes
-alone do not establish these capabilities. They remain Proposed, not invented
-currently runnable public APIs.
+The maintained authoring API supplies explicit source sampling, global validation
+and Result publication through ordinary graph nodes. It remains a Proposed
+workflow contract rather than a new opaque runtime composition primitive.
 
 ## Structured report schema
 
@@ -154,8 +153,8 @@ Use registered SchemaTemplate id curve.bake_lut3d.report, version 1,
 PublishPolicy::CompleteBundle, observation domain [1]. All fields have fixed
 row counts. Metadata records quality=Measured, shape, interpolation, atol, rtol,
 table/source dtypes, input/output descriptions and source recipe identity.
-Dynamic axis is a data field, not compile-time metadata. The proposed schema
-fits the current <=16-field structural vocabulary but needs explicit registration.
+Dynamic axis is a data field, not compile-time metadata. The registered schema
+fits the current <=16-field structural vocabulary.
 
 | Field | Dtype | Rows / record shape | Meaning |
 | --- | --- | --- | --- |
@@ -252,9 +251,38 @@ changes, rounded centers, extra-point bounds/count, and caller-asserted source
 limitations. Test report-only/table-only/axis-only and joint requests, all-grid
 source failures outside requested table fragments, cache-off, cancellation,
 budget failure, strides and result/data lifetime. Verify finite sampled tests
-never become a CertifiedBound claim. Actual public template construction,
-invocation commands and independent result checks are implementation acceptance
-requirements; no current runtime delivery is claimed.
+never become a CertifiedBound claim. The maintained public template construction,
+invocation commands and independent result checks are linked below; this specification remains Proposed.
+
+## Maintained implementation and validation
+
+The public `bake_lut3d` authoring entry point is declared in
+[`photospider/numeric/lut3d_baking.hpp`](../../../../include/photospider/numeric/lut3d_baking.hpp).
+Its `Lut3dSourceBuilder` is authoring-only and is invoked twice while staging the
+ordinary source graph: it appends nodes and returns outputs. The helper does not
+retain the builder or its captures. The resulting graph executes the source
+transform, whose pointwise independence is asserted by the caller. Grid and
+validation evaluations share one immutable binding snapshot, including shared
+inputs and optional `ResourceBindings`; no nested execution or file save is added.
+
+`BakedLut3d` returns connectable table, axis and report references without
+computing payloads during authoring. At execution, the report retains its owned
+sampled-table Result association, which the gate checks before publishing table
+fragments. The table is gated by the measured report; axis is independent. The registered
+`curve.bake_lut3d.report` v1 CompleteBundle schema is read through
+`read_lut3d_bake_report`, and its recipe/source identity and binding provenance
+remain attached to the result. A failed tolerance report can be read as
+`passed=false`, while the dependent table fails; source, resource, cancellation
+and budget failures remain execution failures. There is no opaque compose key or
+chain object.
+
+Native Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed all
+seven manual groups and 480 independent Fraction workflow cases per profile.
+Installed 0.16 consumers, focused compiler/representation/Result metadata units,
+ClangFormat 21/cpplint and independent scoped reviews passed. WSL supplies
+correctness evidence only. See the [measured three-dimensional LUT baking workflow](../../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking)
+and [CRV-09 math notes](../math-implementation.md#crv-09-measured-lut3d-baking)
+for commands and implementation details.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

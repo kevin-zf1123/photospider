@@ -824,3 +824,66 @@ manual groups additionally inspect partition/cache/dirty behavior, all-port
 strides and fenv, ColorArray closure, Empty, inverse -0, state/work/stage limits,
 refinement cancellation, fallback diagnostics and escaped owners. See the
 [commands and editable workflow](../../../examples/numeric_workflow/README.md#scalar-coordinate-shapers).
+
+## CRV-09 measured LUT3D baking
+
+`bake_lut3d` stages an ordinary WorkflowDocument, invokes the authoring source
+builder for the grid and validation shapes and validates both through Compiler
+metadata analysis. Prefix identity protects existing nodes, declarations, layout
+origins and exports. Source output shape/dtype and attached color descriptions
+are checked; optional ICC ResourceBindings resolve unrelated/shared typed inputs.
+A SHA-256 recipe identity frames the expanded source document, designated endpoints
+and compiler semantic identity. The helper retains no executable callback.
+Both graph expansions execute under the final plan's one frozen binding snapshot.
+Source pointwise independence remains the caller's assertion.
+
+Generated axes reuse `UniformAxis`; centers reuse exact endpoint averaging with
+one RN64 conversion. Every grid color is an explicit global report dependency,
+including when a constant source ignores its generated input. Color validation
+checks source and converted table samples, then a CompleteBundle sampled-table
+Result owns converted colors with their recipe/schema. Unpack feeds that object
+to the existing CRV-07 method with explicit `table_dtype` and reject policy.
+The report associates the actual sampled-table ObjectId. Gate requires an exactly
+matching schema and that object association; it cannot reuse a passed report for
+another same-shaped table. It copies only requested complete-color table regions
+while retaining global report support.
+
+Per-component error is an exact nonnegative integer in `2^-2148` units. Opposite
+signs add magnitudes; equal signs subtract them. The threshold is
+`atol+rtol*abs(reference)` in the same units. Error needs fewer than 3173 bits;
+the threshold/product needs fewer than 4197, within the 4352-bit workspace.
+Selection compares exact integers, replacing maxima only on strict increase;
+ordinal zero initializes every component. Report rounding happens afterward:
+RN64 the maximum, compare that encoded value back to the exact integer and
+increment one positive IEEE step if it rounded downward. Unrepresentable error
+is diagnostic +Inf. The helper was independently checked against 432 Fraction
+cases including ±MAX, subnormals, opposite signs and exact tolerance boundaries.
+
+Measurement enumerates row-major centers followed by extras, at most 64 colors
+per Value request. It stores only fixed maxima/first-failure/counts. Eleven fields
+are appended through explicit Result I/O actions and sealed together; no prefix
+can claim completed measurement. Each field and the descriptor have global
+Cartesian support across axis, grid, owned table, points, source and applied
+colors. Result schema specialization preserves protocol-2 kind/id/version and
+validates all fields/domain/metadata through the closed schema vocabulary.
+The canonical resolved schema already participates in graph/plan/cache identity.
+No C++ record layout, C ABI or workflow framing version changes are required.
+
+The sampled table is packed through at most 4096-byte staging buffers and bounded
+read windows, including nonzero global window origins. Its registered validator
+scans all colors with cancellation/work accounting. The report validator checks
+canonical schema, counts/classifications, reconstructed axis and recorded point
+domains without recomputing the source. Grid and requested Value outputs have
+host-owned continuation/publication metadata; storage aliases retain admission
+past context retirement. Report/table owners retain mandatory temporary backing.
+Source callback state never enters execution. Source operation allocations and
+repeated validation count against host budgets; generated full-grid validation
+currently admits the full grid. Large dense bakes can exceed work, stage or
+capacity limits despite a small requested exported fragment.
+
+Seven public manual groups and a 480-case independent Fraction workflow oracle
+cover numerical reports, object/recipe association, both methods/dtypes and eight
+models, repeated extras, rounded centers, casts, shared snapshots, ICC authoring,
+malformed data, cancellation, resource limits and multiwindow/partial ownership.
+The executable stays outside integration tests and CTest. Commands and modifiable
+source builders are in the [example](../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).

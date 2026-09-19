@@ -544,7 +544,11 @@ using CallbackSignature = Result<Value>(const OperationInvocation&);
 /** @brief Type-erased callable implementing `CallbackSignature`. */
 using OperationCallback = std::function<CallbackSignature>;
 
-/** @brief Owned per-node Value metadata and optional physical payload bound.
+/** @brief Owned per-node Value or structured Result metadata.
+ * Result specialization requires protocol 2 and preserves the registered schema
+ * id/version and Result port kind. It may resolve fields/domain/semantic
+ * metadata through the validated closed SchemaTemplate vocabulary. Value-only
+ * physical bounds/flags and tuple metadata must remain absent for a Result.
  * Specialization cannot alter input/parameter schemas, output names, callback
  * kinds, failure delivery or resource workspaces of the registered definition.
  */

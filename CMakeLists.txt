@@ -107,6 +107,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/lut1d_application.cpp
   plugins/ops/01-numeric/lut3d_application.cpp
   plugins/ops/01-numeric/log_shaper.cpp
+  plugins/ops/01-numeric/lut3d_bake_geometry.cpp
+  plugins/ops/01-numeric/lut3d_bake_results.cpp
   plugins/ops/01-numeric/parametric_bezier.cpp
   plugins/ops/01-numeric/bezier_function.cpp
   plugins/ops/01-numeric/color_ramps.cpp
@@ -198,6 +200,9 @@ set(
   src/lib/data/layer.cpp
   src/lib/data/quality.cpp
   src/lib/data/statistics.cpp
+  src/lib/data/lut3d_bake.cpp
+  src/lib/data/lut3d_bake_validation.cpp
+  src/lib/numeric/lut3d_baking.cpp
   src/lib/plugin/statistics_operation.cpp
   src/lib/plugin/fft_operation.cpp
   src/lib/plugin/component_operation.cpp

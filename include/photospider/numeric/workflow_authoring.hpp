@@ -55,3 +55,17 @@ inline Result<std::vector<std::uint64_t>> allocate_ids(
   return Answer(std::move(ids));
 }
 }  // namespace ps::numeric::authoring_detail
+
+namespace ps::numeric {
+/** @brief Finds count unused node IDs against declarations and all references.
+ * Does not reserve or mutate the document: serialize subsequent appends to that
+ * document and recompute after another author edits it. Inputs includes any
+ * additional forward references. Returns InvalidArgument/InvalidDomain for
+ * malformed IDs or the 65536-node limit; allocation may throw bad_alloc.
+ */
+inline Result<std::vector<std::uint64_t>> available_workflow_node_ids(
+    const WorkflowDocument& document, unsigned count,
+    const std::vector<WorkflowInput>& inputs = {}) {
+  return authoring_detail::allocate_ids(document, count, inputs);
+}
+}  // namespace ps::numeric

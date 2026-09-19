@@ -365,6 +365,17 @@ built-ins. Freeze the registry before compilation or execution. Successful custo
 registration clears the built-in persistent-cache identity; failed registration
 leaves it unchanged. The default factory call remains frozen.
 
+## Structured schema specialization
+
+Pure per-node metadata specializers can resolve a protocol-2 Result schema while
+preserving its registered Result kind, schema id and version. Returned Value
+metadata, tuple grouping and physical Value flags are rejected on this path.
+The resolved closed SchemaTemplate is validated before output inference and
+included in the existing semantic/plan/cache identities. This additive behavior
+changes no public record layout or C ABI. CRV-09 uses it to specialize fixed
+measured-report metadata and owned sampled-table shape; source sampling, report
+and table gate remain ordinary nodes in one frozen workflow snapshot.
+
 ## Regional layout execution
 
 The current layout operations use per-node metadata specialization to resolve

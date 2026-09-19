@@ -1831,12 +1831,31 @@ OperationRegistry::prepare_operation(
         auto& output = traits.outputs[i];
         auto& specialization = specialized.value()[i];
         auto& metadata = specialization.metadata;
-        if (output.result_schema || metadata.result_schema)
-          return Answer(
-              Status{ErrorCode::TypeMismatch,
-                     "metadata specializer requires Value outputs",
-                     FailureReason::None,
-                     {FailureOrigin::Schema, FailureScope::Unspecified}});
+        if (output.result_schema || metadata.result_schema) {
+          if (!output.result_schema || !metadata.result_schema ||
+              output.dependency_version != 2 ||
+              output.output_schema.kind != OperationPortKind::Result ||
+              output.result_schema->id != metadata.result_schema->id ||
+              output.result_schema->version !=
+                  metadata.result_schema->version ||
+              metadata.descriptor.element_type != ElementType::UInt8 ||
+              !metadata.descriptor.shape.empty() || !metadata.facets.empty() ||
+              metadata.atomic_trailing_axes || specialization.regional_atomic ||
+              specialization.preserve_output_views ||
+              specialization.maximum_output_payload_bytes ||
+              specialization.static_dependency_pieces)
+            return Answer(
+                Status{ErrorCode::TypeMismatch,
+                       "Result specialization must preserve its registered "
+                       "kind/id/version",
+                       FailureReason::None,
+                       {FailureOrigin::Schema, FailureScope::Unspecified}});
+          auto valid = metadata.result_schema->validate();
+          if (!valid.ok())
+            return Answer(valid);
+          output.result_schema = *metadata.result_schema;
+          continue;
+        }
         output.shape_rule = OperationShapeRule::Fixed;
         output.fixed_output_shape = std::move(metadata.descriptor.shape);
         output.output_axes.clear();
