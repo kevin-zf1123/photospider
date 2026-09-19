@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -65,13 +65,15 @@ resolve destination rounding within available work/memory returns ResourceExhaus
 Apply shared block cancellation, exact group demand, owner/cache and publication
 requirements. Parallel merging must preserve exact moments and logical NaN order.
 
-Conceptual fixture: input=[1,2,3], axes="0", dtype="float64": ddof=0 yields
+Fixture: input=[1,2,3], axes="0", dtype="float64": ddof=0 yields
 [RN_Float64(2/3)], ddof=1 yields [1]. Use an independent exact rational oracle;
 include large common offsets with tiny differences, Int64 extrema, constant
 inputs, subnormals, all nonfinite patterns, NaN payload conversion, N=1 and
 invalid ddof. Source groups outside requested output must remain unobserved.
 
-Exercise public WorkflowDocument execution plus shared strided/region/resource/
-lifetime cases when implemented. Current numeric.variance uses rounded ordered
-Float64 passes as documented in the shared contract. It does not establish this
-multi-axis exact variance contract. No target runtime test is claimed here.
+The current three profile keys use `reduce_variance_node` from
+`photospider/numeric/reductions.hpp`. Exact moments retain fixed-width limb
+state and evaluate the unrounded rational variance before final destination
+rounding. The public fixture checks ddof, constant groups, large offsets and
+nonfinite handling. The shared reduction contract records the complete
+strict/Apple/WSL and installed-consumer evidence. Proposed status is unchanged.

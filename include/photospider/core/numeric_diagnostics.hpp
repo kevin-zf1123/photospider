@@ -32,6 +32,11 @@ enum class NumericFallbackReason : std::uint32_t {
 struct NumericDiagnostics final {
   CpuNumericProfile profile = CpuNumericProfile::Unspecified;
   std::array<char, 256> implementation{};
+  /** @brief Admitted numeric evaluations, including later failed attempts.
+   * Pointwise operations count output-value attempts. Exact reducers count
+   * accumulator input attempts; metadata-only reduce_count reports zero.
+   * OperationTiming::computed_elements separately counts output elements.
+   */
   std::uint64_t evaluated_values = 0;
   std::uint64_t strict_fallbacks = 0;
   /** @brief Actual logical elements formed for publication as views or packed

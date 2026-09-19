@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <functional>
 
-#include "01-numeric/exact_ratio.hpp"
+#include "01-numeric/exact_product.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Finite binary64 differences need at most 2099 bits. The smoothstep cubic
@@ -14,40 +14,6 @@ struct InterpolationWorkspace final {
   ExactRatioWorkspace<104> ratio;
   Integer distance, width, factor, square;
   explicit InterpolationWorkspace(SequenceProfile profile) : ratio(profile) {}
-  Status multiply(const Integer& a, const Integer& b, Integer* output,
-                  const std::function<Status(std::uint64_t)>& consume) {
-    // Output is distinct from both inputs; a == b is allowed for squaring.
-    output->words.fill(0);
-    const auto a_size = (ratio.top(a) + 64) / 64;
-    const auto b_size = (ratio.top(b) + 64) / 64;
-    for (int i = 0; i < a_size; ++i) {
-      auto status = consume(16 * b_size + 1);
-      if (!status.ok())
-        return status;
-      unsigned __int128 carry = 0;
-      for (int j = 0; j < b_size; ++j) {
-        const auto slot = static_cast<std::size_t>(i + j);
-        if (slot >= output->words.size())
-          return Status{ErrorCode::ResourceExhausted,
-                        "interpolation product capacity",
-                        FailureReason::CapacityLimit};
-        const auto product =
-            static_cast<unsigned __int128>(a.words[i]) * b.words[j] +
-            output->words[slot] + carry;
-        output->words[slot] = static_cast<std::uint64_t>(product);
-        carry = product >> 64;
-      }
-      const auto slot = static_cast<std::size_t>(i + b_size);
-      if (carry) {
-        if (slot >= output->words.size())
-          return Status{ErrorCode::ResourceExhausted,
-                        "interpolation carry capacity",
-                        FailureReason::CapacityLimit};
-        output->words[slot] = static_cast<std::uint64_t>(carry);
-      }
-    }
-    return Status::success();
-  }
   void difference(const BinaryParts& upper, const BinaryParts& lower,
                   Integer* output) {
     ratio.numerator.set(upper, 1074);
@@ -69,13 +35,13 @@ struct InterpolationWorkspace final {
     factor.add(width);
     factor.subtract(distance);
     factor.subtract(distance);
-    status = multiply(distance, distance, &square, consume);
+    status = multiply_fixed(distance, distance, &square, consume);
     if (status.ok())
-      status = multiply(square, factor, &ratio.numerator, consume);
+      status = multiply_fixed(square, factor, &ratio.numerator, consume);
     if (status.ok())
-      status = multiply(width, width, &square, consume);
+      status = multiply_fixed(width, width, &square, consume);
     if (status.ok())
-      status = multiply(square, width, &ratio.denominator, consume);
+      status = multiply_fixed(square, width, &ratio.denominator, consume);
     if (!status.ok())
       return Result<std::uint64_t>(status);
     ratio.negative = false;

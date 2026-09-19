@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "01-numeric/exact_ratio.hpp"
+#include "01-numeric/numeric_nan.hpp"
 #include "photospider/data/value.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -13,7 +14,7 @@ enum class AggregateKind { Sum, Minimum, Maximum };
 // in 2^-1074 units, have every prefix magnitude <2^2139. The 4352-bit ratio
 // workspace covers that bound and its final RN conversion. Integer prefixes
 // need at most 104 bits. No intermediate overflow or floating arithmetic
-// occurs.
+// occurs. finish is destructive; reset before starting another aggregate.
 struct ExactAggregate final {
   RatioWorkspace ratio;
   std::array<std::uint64_t, 4> left{}, right{};
@@ -42,6 +43,8 @@ struct ExactAggregate final {
     const bool floating = narrow || type == ElementType::Float64;
     const auto parts =
         floating ? BinaryParts::decode(bits, narrow) : BinaryParts{};
+    if (!floating)
+      all_negative_zero = false;
     if (floating) {
       all_negative_zero &= parts.negative && !parts.magnitude;
       if (parts.nan) {
@@ -95,23 +98,31 @@ struct ExactAggregate final {
   }
   Result<std::uint64_t> finish(
       const std::function<Status(std::uint64_t)>& consume) {
+    return finish_as(type, 1, consume);
+  }
+  // Caller validates destination domain and positive divisor. Numeric sum and
+  // mean may change float width or widen/narrow integer sums; min/max preserve
+  // their source dtype. Source integers enter a floating mean without casts.
+  Result<std::uint64_t> finish_as(
+      ElementType destination, std::uint64_t divisor,
+      const std::function<Status(std::uint64_t)>& consume) {
     using Answer = Result<std::uint64_t>;
     auto charged = consume(128);
     if (!charged.ok())
       return Answer(charged);
-    const bool narrow = type == ElementType::Float32;
-    const bool floating = narrow || type == ElementType::Float64;
+    const bool narrow = destination == ElementType::Float32;
+    const bool floating = narrow || destination == ElementType::Float64;
     if (has_nan)
-      return Answer(first_nan | (UINT64_C(1) << (narrow ? 22 : 51)));
+      return Answer(converted_nan(first_nan, type, destination));
     if (kind != AggregateKind::Sum)
       return Answer(selected);
     if (!floating) {
       const auto magnitude = ratio.numerator.words[0];
-      const auto limit = type == ElementType::UInt8 ? UINT64_C(255)
-                         : ratio.negative           ? UINT64_C(1) << 63
+      const auto limit = destination == ElementType::UInt8 ? UINT64_C(255)
+                         : ratio.negative                  ? UINT64_C(1) << 63
                                           : UINT64_C(0x7fffffffffffffff);
       if (RatioWorkspace::top(ratio.numerator) > 63 || magnitude > limit ||
-          (type == ElementType::UInt8 && ratio.negative && magnitude))
+          (destination == ElementType::UInt8 && ratio.negative && magnitude))
         return Answer(Status{ErrorCode::OperationFailed,
                              "integer aggregate overflow",
                              FailureReason::ArithmeticOverflow});
@@ -127,8 +138,11 @@ struct ExactAggregate final {
     if (RatioWorkspace::top(ratio.numerator) < 0)
       return Answer(all_negative_zero ? sign : 0);
     ratio.denominator.words.fill(0);
-    ratio.denominator.words[0] = 1;
-    return ratio.round(narrow, consume, -1074);
+    ratio.denominator.words[0] = divisor;
+    return ratio.round(
+        narrow, consume,
+        type == ElementType::Float32 || type == ElementType::Float64 ? -1074
+                                                                     : 0);
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

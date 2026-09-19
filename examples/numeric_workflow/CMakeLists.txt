@@ -33,3 +33,7 @@ target_compile_features(photospider_numeric_layouts PRIVATE cxx_std_17)
 add_executable(photospider_numeric_indexing EXCLUDE_FROM_ALL indexing.cpp)
 target_link_libraries(photospider_numeric_indexing PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_indexing PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_reductions EXCLUDE_FROM_ALL reductions.cpp)
+target_link_libraries(photospider_numeric_reductions PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_reductions PRIVATE cxx_std_17)

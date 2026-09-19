@@ -6,6 +6,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_numeric_interpolation,
                               register_numeric_layouts,
                               register_numeric_indexing,
+                              register_numeric_reductions,
                               register_numeric_comparisons,
                               register_numeric_arrays,
                               register_numeric_sequences,
