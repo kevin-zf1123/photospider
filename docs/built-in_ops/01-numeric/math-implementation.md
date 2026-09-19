@@ -579,6 +579,55 @@ resource recovery checks create a new context. Underlying source clusters cover
 arithmetic-time interruption and owner retirement. Returned results are checked
 after each helper execution context is destroyed. Installed 0.15 consumers,
 ClangFormat 21/cpplint and independent authoring/acceptance reviews passed.
-CRV-05 separately covers downstream application and the expected discretization
-error; graph equivalence alone is not a proof of approximation quality. No new
+CRV-05 below covers all six downstream application chains and the expected
+discretization error; graph equivalence alone is not a proof of approximation quality. No new
 runtime primitive, integration-test registration or performance claim is added.
+
+
+## CRV-05 dynamic-axis LUT1D
+
+`UniformAxis` validates finite start/end/step, singleton raw endpoint/+0 rules,
+RN64 derived step, and every rounded endpoint-weighted coordinate in table order.
+It retains an admitted ResourceVector of 8L bytes; no table value is needed for
+that validation. The four-poll LUT continuation reads shared axis, then exactly
+requested query coordinates, then selected table singleton/pairs and publishes
+all requested packed fragments. Descending lookup compares reversed numerical
+order keys; before exact linear evaluation it reverses both coordinates and
+values to meet ExactCurve's positive-denominator precondition. This is the
+same mathematical negative-denominator formula. Direct hits/clamps/singletons
+convert only the selected entry; other paths preserve both endpoint witnesses
+and apply the whole-formula zero rule. Profile-specific integer helpers retain
+identical results. ExactCurve now clears its borrowed work callback on every
+return/exception; native CRV-01 five groups and 2484 Fraction cases regressed
+successfully after that lifetime-only change.
+
+Query Control remains per scalar; recognized Image Validation closes channels
+separately. Channel tables do not share a query/index merely because a row prefix
+matches. Numeric errors carry complete global scalar Atom coordinates up to rank
+8. Full axis is revalidated per admitted continuation, with no persistent shared
+grid cache. Work is O(L+M log L) plus exact sampling/interpolation and association
+work. The default direct session work budget can be exhausted by a small grid;
+public fixtures explicitly allow 32 Gi session/64 Gi Run work units. At L=1048576,
+8 MiB of admitted grid capacity fits the default Metadata budget for a tiny Q.
+Per-stage certificate reservation is 4096+16384*M bytes, so output payload alone
+does not bound large dense requests. All output/point/grid/exact scratch and
+publication owners use host admission; resource failure never skips axis checks.
+
+On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
+Clang 18.1.3 strict/AVX2 passed 1416 independent Fraction grid/linear cases per
+profile and six manual groups. The oracle independently reconstructs RN64 knots
+and exact signed-denominator interpolation, then applies integer IEEE rounding.
+Coverage includes mixed dtypes, both orders/all domain modes/singletons, extreme
+cancellation, mismatched/overflowed/underflowed steps, collapsed coordinates,
+subnormal queries, direct and mixed/extrapolated zero signs, rank-eight queries
+and selected versus remote invalid entries. The manual path checks exact source
+support/dirty, channel Atom isolation, cache changes to all three inputs, all-port
+negative/unaligned/zero strides and fenv, typed Image closure, source failure
+ordering, axis-loop and arithmetic/second-box cancellation, work/state/stage
+admission and unpublished Payload retirement. It executes a complete maximum-L
+grid using one scalar-backed public constant table and a sparse 2^39-channel
+constant composition. All six baking constructors feed their consumer, with
+explicit discrete expected values and rejection of repeated-grid axes.
+Installed 0.15 consumers, focused compiler unit, ClangFormat 21/cpplint and
+independent math/entry/oracle reviews passed. No new CTest/integration entry or
+performance claim was added; WSL results establish correctness only.

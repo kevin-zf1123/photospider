@@ -5,7 +5,8 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: legacy_subset_only_target_not_implemented
+implementation_status: implemented
+verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -24,7 +25,9 @@ Both target interfaces are fully clarified. Mapping one
 scalar to a vector/color ramp is CRV-06 rather than this same-shape LUT family.
 Both receive explicit axis[3], use fixed linear interpolation and inherit their
 specified finite-value, exact-rounding and local-table-demand contracts. These
-proposed operations do not claim runtime implementation.
+operations are implemented through six explicit CPU-profile keys and public
+constructors, with numerical and workflow acceptance recorded in the individual
+specifications. Specification acceptance remains Proposed.
 
 - [Single-table draft](CRV-05A_apply_lut1d.md).
 - [Per-channel table specification](CRV-05B_apply_lut1d_channels.md).

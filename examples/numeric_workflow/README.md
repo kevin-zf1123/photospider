@@ -978,4 +978,73 @@ end, even when the axis would fail; values requests do not force axis execution.
 Dynamic bindings and ordinary cache witnesses control reevaluation. The later
 consumer applies its own axis validity rules and approximation: a linear LUT
 through [0,.25,1] returns .125 at x=.25, whereas continuous x^2 is .0625.
-Consumer-chain implementation and acceptance are tracked under CRV-05.
+The CRV-05 example below executes all six consumer chains and checks that
+discretization separately.
+
+
+## LUT1D application: CRV-05
+
+`apply_lut1d_node` and `apply_lut1d_channels_node` in
+`photospider/numeric/lut1d.hpp` preserve input shape and use dynamic table/axis
+inputs. Input and table independently accept Float32/64; axis is Float64[3].
+The scalar table is [L]; the channels table is [L,C] for input[...,C], with
+rank-1 [C] and C=1 retained. L is 1..1048576; input rank is 1..8 with positive
+logical products <=2^40. Output `values` has empty facets and one scalar Atom
+per input coordinate. Three explicit CPU profile keys exist for each operation.
+
+```cpp
+auto apply = ps::numeric::apply_lut1d_node(
+    1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    ps::WorkflowInputReference{3}, ps::ElementType::Float64);
+```
+
+The final required argument is the input dtype hint used for default output
+dtype. An explicit optional output dtype overrides it; Compiler independently
+validates the actual graph edges. Domain defaults to `CurveDomain::Reject`;
+Clamp and LinearExtrapolate are explicit options. Bind input=[0,.25,.5,1],
+table=[0,.25,1], axis=[0,1,.5] to obtain [0,.125,.25,1]. Reversing table and
+axis to [1,0,-.5] gives the same function. The channels fixture uses
+input=[[0,1],[.25,.5]], table=[[0,10],[2,8]], axis=[0,1,1] and returns
+[[0,8],[.5,9]], so each channel has its own query/selected pair.
+
+The complete editable workflow is `examples()` in `lut1d.cpp`.
+`baking_chains()` connects each of the six public baking templates directly:
+
+```cpp
+// baked is returned by any scalar CRV-04 template; query is a WorkflowInput.
+auto consumer = ps::numeric::apply_lut1d_node(
+    100, query, baked.values, baked.axis, ps::ElementType::Float64);
+```
+
+Use `apply_lut1d_channels_node` for multi-function bakes. The example records
+x^2 baked at [0,.5,1] then queried at .25 as .125, while continuous x^2 is
+.0625. PCHIP is also sampled before discrete linear application; the consumer
+does not retain the source interpolation method.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_lut1d -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_lut1d strict
+python3 examples/numeric_workflow/lut1d_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_lut1d strict
+```
+
+Use `apple` or `x86` only on the corresponding CPU. Every nonempty request first
+validates the entire endpoint-weighted RN64 grid and the exact derived step,
+then requested queries, then only selected table singleton/pairs. The supplied
+step is never repeatedly accumulated. L=1 requires bit-identical endpoints and
++0 step; every query remains required. Equal/collapsed grids can be produced by
+an interpolation bake but are rejected by this consumer. Invalid axis/query
+requests read no table values. Axis validation work remains global even for an
+endpoint request. Current profiles round the complete line once and agree
+bitwise, including descending pairs and finite results across huge cancellation.
+
+Six public manual groups cover analytic/domain cases, exact read/dirty support,
+invalid axes/zero signs, all-port strides and fenv, typed Image query closure,
+cache/Atom/upstream ordering, axis/arithmetic cancellation and resource/owner
+release, all six baking chains, a full 1048576-point grid and sparse 2^39
+channels. `Fixture::run` supplies explicit work budgets. Grid storage is 8L bytes;
+exact scratch and per-cell certificates are separately admitted. Large dense
+requests may exhaust metadata/association budgets. Results remain readable after
+the helper's context is destroyed. The executable stays outside default builds,
+CTest and integration tests; WSL Clang verifies correctness only. See the
+[implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-05-dynamic-axis-lut1d).

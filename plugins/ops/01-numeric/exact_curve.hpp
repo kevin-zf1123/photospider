@@ -173,6 +173,10 @@ class ExactCurve final {
     used_ = 0;
     status_ = Status::success();
     consume_ = &consume;
+    struct End {
+      const std::function<Status(std::uint64_t)>*& callback;
+      ~End() { callback = nullptr; }
+    } end{consume_};
     if (selected >= 0) {
       const auto value = input(y[0]), one = integer(1);
       return finish(value, one, narrow, y[0] == (UINT64_C(1) << 63));

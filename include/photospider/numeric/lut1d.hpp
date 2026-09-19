@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -269,5 +270,56 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
   return lut1d_detail::interpolation(document, std::move(x), std::move(y),
                                      std::move(start), std::move(end), count,
                                      dtype, domain, profile, true, true);
+}
+/** @brief Shared contract for scalar and per-channel LUT1D application.
+ * Input is Float32/64 rank 1..8, table is independent Float32/64 [L] or
+ * [L,C], axis is Float64[3]; L=1..1048576 and products <=2^40. Channels use
+ * the final input axis, including rank-1 [C] and C=1. Output values preserves
+ * input shape with empty facets. input_type is an authoring hint used only for
+ * the default output dtype; Compiler validates the actual graph edges.
+ * Helpers are pure/concurrent-safe and own metadata; allocation may throw
+ * bad_alloc. Invalid authoring parameters fail InvalidArgument/InvalidDomain.
+ * Runtime validates the full endpoint-weighted RN64 grid and axis step before
+ * input queries, then reads only selected singleton/pair table entries and
+ * typed Validation. Singleton axes require bit-identical endpoints and +0 step.
+ * Every query is read even for constant tables; invalid axes/queries/demanded
+ * entries fail OperationFailed/InvalidDomain at the dependent Atom. Actual
+ * destination overflow fails ArithmeticOverflow; host/typed/upstream errors
+ * retain their identity. Descending axes and all CurveDomain policies work.
+ * Exact selection preserves zero sign; complete linear formulas round once,
+ * with -0 exact zero only for two -0 endpoints. All profiles agree bitwise and
+ * preserve caller fenv. Owned packed fragments survive context teardown.
+ * Empty reads nothing. Global axis work, exact scratch, optional grid and
+ * per-request certificates are bounded by host budgets. Cache witnesses retain
+ * complete axis, selected input and local table coordinates. No approximation
+ * quality bound relative to the table's generating function is inferred.
+ */
+/** @brief Applies one scalar table to every requested input element. */
+inline Result<WorkflowNode> apply_lut1d_node(
+    std::uint64_t id, WorkflowInput input, WorkflowInput table,
+    WorkflowInput axis, ElementType input_type,
+    std::optional<ElementType> dtype = {},
+    CurveDomain domain = CurveDomain::Reject,
+    CpuNumericProfile profile = CpuNumericProfile::Strict) {
+  if (input_type != ElementType::Float32 && input_type != ElementType::Float64)
+    return Result<WorkflowNode>(
+        lut1d_detail::invalid("LUT1D input dtype hint requires Float32/64"));
+  return curve_detail::node(id, "apply_lut1d", std::move(input),
+                            std::move(table), std::move(axis),
+                            dtype.value_or(input_type), domain, profile);
+}
+/** @brief Applies independent table columns to corresponding input channels. */
+inline Result<WorkflowNode> apply_lut1d_channels_node(
+    std::uint64_t id, WorkflowInput input, WorkflowInput table,
+    WorkflowInput axis, ElementType input_type,
+    std::optional<ElementType> dtype = {},
+    CurveDomain domain = CurveDomain::Reject,
+    CpuNumericProfile profile = CpuNumericProfile::Strict) {
+  if (input_type != ElementType::Float32 && input_type != ElementType::Float64)
+    return Result<WorkflowNode>(
+        lut1d_detail::invalid("LUT1D input dtype hint requires Float32/64"));
+  return curve_detail::node(id, "apply_lut1d_channels", std::move(input),
+                            std::move(table), std::move(axis),
+                            dtype.value_or(input_type), domain, profile);
 }
 }  // namespace ps::numeric

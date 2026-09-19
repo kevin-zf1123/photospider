@@ -176,7 +176,7 @@ No performance or continuous-function approximation bound is inferred.
 
 See the maintained [public example and commands](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04).
 The source specifications remain Proposed independently of implementation.
-CRV-05 tracks the later scalar/channels LUT consumer chain and its separate
+CRV-05 now executes the scalar/channels LUT consumer chains and their separate
 discretization acceptance.
 
 - [NUM-01 expression](NUM-01_sample_expression.md).

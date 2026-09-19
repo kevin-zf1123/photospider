@@ -12,7 +12,8 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
+verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -98,8 +99,20 @@ read/dirty witnesses. Include C=1, single vector input, large sparse logical
 arrays, wrong C, remote bad table columns, shared bad axis, fragmented/strided
 sources, low budgets, cancellation, cache-off and owner lifetime. The public
 WorkflowDocument fixture must connect a multi-function CRV-04 table/axis and
-inspect requested output channels through Compiler/ExecutionContext when
-implemented. No target implementation, public run or platform test is claimed.
+inspect requested output channels through Compiler/ExecutionContext.
+
+The maintained `apply_lut1d_channels_node` constructor in
+`photospider/numeric/lut1d.hpp` provides the three independently named profile
+keys. `examples/numeric_workflow/lut1d.cpp` executes the analytic fixture above,
+scalar-column references, the two multi-function baking templates and sparse
+2^39-channel composition. It also verifies per-channel cache/source selection,
+independent channel failures and rank-8 Atom coordinates. The shared six manual
+groups and 1416 independent cases/profile passed on native Clang strict/Apple
+and WSL Clang strict/AVX2 on 2026-09-20; installed consumers passed. Full
+algorithm/resource boundaries and commands are linked from
+[CRV-05A](CRV-05A_apply_lut1d.md#maintained-implementation-and-verification).
+Specification status remains Proposed; the executable has no CTest/integration
+registration.
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Operator template](../../00-foundation/spec-template.md).
