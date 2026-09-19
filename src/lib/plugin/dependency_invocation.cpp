@@ -79,11 +79,11 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{ErrorCode::TypeMismatch,
                               "projected input metadata mismatch"});
     }
-    auto specialized = resolve_traits(key, metadata, invocation.parameters);
+    auto specialized = prepare_operation(key, metadata, invocation.parameters);
     if (!specialized.ok())
       return failure(specialized.status());
-    auto resolved =
-        select_operation_output(specialized.value(), invocation.output_index);
+    auto resolved = select_operation_output(specialized.value()->traits(),
+                                            invocation.output_index);
     if (!resolved.ok())
       return failure(resolved.status());
     auto inferred = infer_operation_output(resolved.value(), metadata,
@@ -133,6 +133,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                 invocation.cancellation,
                                 {}};
       request.output_index = invocation.output_index;
+      request.prepared = specialized.value();
       auto started =
           start_dependency(key, std::move(request), invocation.allocator);
       if (!started.ok())

@@ -561,6 +561,51 @@ using OperationMetadataSpecializer = std::function<Result<std::vector<
     const std::vector<OperationMetadata>&,
     const std::map<std::string, ParameterValue>&)>;
 
+/** @brief Deterministic static specialization and optional immutable program.
+ * Returned state owns only data derived from input metadata/static parameters.
+ * It must not contain mutable Run data, Value payloads, I/O state or private
+ * caches. Its destructor is noexcept and may run on any thread. Compilation
+ * owns preparation storage separately from runtime continuation budgets.
+ */
+struct OperationPreparation final {
+  std::vector<OperationOutputSpecialization> outputs;
+  std::shared_ptr<const void> state;
+};
+/** @brief Pure static preparation, called outside registry synchronization.
+ * Same validation and exception contract as OperationMetadataSpecializer.
+ * A successful explicit preparation runs this callback once; its owning handle
+ * can serve multiple outputs, requests and dynamic executions without retries.
+ */
+using OperationPreparer = std::function<Result<OperationPreparation>(
+    const std::vector<OperationMetadata>&,
+    const std::map<std::string, ParameterValue>&)>;
+/** @brief Registry-created immutable static program and resolved contracts.
+ * No public constructor or mutable state is exposed. This handle retains its
+ * definition/library until after the program destructor. It is safe to share
+ * concurrently. Addresses and derived state never enter semantic/cache
+ * identity.
+ */
+class PHOTOSPIDER_API PreparedOperation final {
+ public:
+  PreparedOperation(const PreparedOperation&) = delete;
+  PreparedOperation& operator=(const PreparedOperation&) = delete;
+  PreparedOperation(PreparedOperation&&) = delete;
+  PreparedOperation& operator=(PreparedOperation&&) = delete;
+  /** @brief Complete resolved output contracts; valid for handle lifetime. */
+  const OperationTraits& traits() const noexcept;
+  /** @brief Borrowed immutable operation-defined program, possibly nullptr.
+   * Runtime callbacks may borrow it while their owning session lives. The
+   * producing registered operation alone defines its concrete type.
+   */
+  const void* state() const noexcept;
+
+ private:
+  friend class OperationRegistry;
+  struct Impl;
+  explicit PreparedOperation(std::shared_ptr<const Impl> impl);
+  std::shared_ptr<const Impl> impl_;
+};
+
 /**
  * @brief One complete operation definition before registry publication.
  *
@@ -588,6 +633,11 @@ struct PHOTOSPIDER_API OperationDefinition final {
   ResultProgramStart start_result = {};
   /** @brief Required exactly for a metadata-specialized traits template. */
   OperationMetadataSpecializer specialize_metadata = {};
+  /** @brief Pure static Value/dependency-v1 preparation; mutually exclusive
+   * with specialize_metadata and requires_metadata_specialization must be true.
+   * Supported only for deterministic side-effect-free operations.
+   */
+  OperationPreparer prepare_static = {};
 };
 
 /**
@@ -713,6 +763,21 @@ class PHOTOSPIDER_API OperationRegistry final {
       const std::string& key, const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters) const;
 
+  /** @brief Validates complete static inputs and prepares an owning program.
+   * No Value reads or registry mutation occur. The callback runs once outside
+   * the registry lock; metadata-only definitions receive an empty program.
+   * Allocation failure is ResourceExhausted; callback exceptions are fenced as
+   * OperationFailed. Returned state and copied static metadata are plan/direct
+   * preparation storage, outside per-observation runtime scratch admission.
+   * Reuse requires this exact registry/definition and bit-identical static
+   * parameters/metadata; dynamic payloads, ROI and selected output are
+   * excluded.
+   */
+  [[nodiscard]] Result<std::shared_ptr<const PreparedOperation>>
+  prepare_operation(
+      const std::string& key, const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
+
   /**
    * @brief Invokes one operation through its exception fence.
    * @param key Exact registered operation key.
@@ -794,6 +859,10 @@ class PHOTOSPIDER_API OperationRegistry final {
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);
   bool builtins_ = false;
+  Status validate_prepared(
+      const PreparedOperation& prepared, const std::string& key,
+      const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
   Status validate_dependency_metadata(
       const std::string& key, const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters) const;

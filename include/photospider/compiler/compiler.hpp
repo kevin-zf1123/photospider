@@ -68,7 +68,8 @@ struct PHOTOSPIDER_API SemanticOutput final {
 /**
  * @brief One normalized typed node in semantic compiler IR.
  *
- * @note Traits are copied values; no callback or DSO pointer enters IR.
+ * @note Traits are copied values. Optional static preparation owns immutable
+ * derived state and its definition lease; neither enters canonical identity.
  */
 struct PHOTOSPIDER_API SemanticNode final {
   /** @brief Nonzero source node id. */
@@ -81,6 +82,10 @@ struct PHOTOSPIDER_API SemanticNode final {
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied compiler-visible operation traits. */
   OperationTraits traits;
+  /** @brief Immutable static preparation shared across outputs and executions.
+   * Retains its definition; pointer/state bytes are excluded from digests.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
   /** @brief Independent named result metadata and observation legality. */
   std::vector<SemanticOutput> outputs;
 };
@@ -375,6 +380,10 @@ struct PHOTOSPIDER_API PlanStep final {
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied semantic traits used for validation/fallback. */
   OperationTraits traits;
+  /** @brief Immutable static preparation shared across outputs and executions.
+   * Retains its definition; pointer/state bytes are excluded from digests.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
   /** @brief Statically validated output Value descriptor. */
   ValueDescriptor output_descriptor;
   /** @brief Canonical inferred output facets, independent of runtime storage.
@@ -405,7 +414,8 @@ struct PHOTOSPIDER_API PlanStep final {
 /**
  * @brief Immutable validated local physical execution plan.
  *
- * @note Plans contain no native handles, callback pointers, or daemon objects.
+ * @note Steps may retain opaque immutable preparation and definition leases.
+ * Native execution handles and daemon objects are not part of a plan.
  */
 struct PHOTOSPIDER_API PlanExecutionGroup final {
   /** @brief Semantic node owning these optional singleton step alternatives. */
@@ -620,7 +630,8 @@ class PHOTOSPIDER_API Compiler final {
    * @brief Constructs a compiler over a frozen operation set.
    * @param operations Shared registry retained by the compiler.
    * @throws std::invalid_argument If registry is null or mutable.
-   * @note Registry callbacks are not invoked during analysis or planning.
+   * @note Analysis may invoke pure metadata/static preparation hooks. Runtime
+   * execution callbacks are not invoked during analysis or planning.
    */
   explicit Compiler(std::shared_ptr<OperationRegistry> operations);
 

@@ -243,3 +243,106 @@ as CSV. WSL supplies correctness results only.
 Peak controlled payload is 2,864 / 4,904 bytes for elementary operations and
 208,272 / 210,312 bytes for power/angles. Apple power/angles record 1 / 256
 strict fallbacks; elementary functions record zero. No speedup claim follows.
+
+## NUM-01 expression and preparation
+
+The three `numeric.sample_expression_*` keys use the same bounded immutable
+postorder program. Parsing is iterative: 4096 ASCII source bytes, 256 nodes,
+height 32 and bytewise canonical free names. Decimal literals use exact integer
+conversion, including digits beyond binary64 precision; constants pi/e use
+fixed correctly rounded binary64 bits. Every primitive rounds to binary64 in
+specified left-to-right postorder. Final Float32 conversion is a separate
+rounding boundary. NUM-02 exact endpoint interpolation supplies coordinates;
+NUM-04/05 exact elementary and certified interval mathematics supply primitives.
+No compiler reassociation, host libm or floating environment defines the result.
+
+Decimal scratch uses 256 limbs (16384 bits): a 4096-digit significand needs
+at most 13607 bits, and the supported decimal-exponent branch has at most
+14680 denominator bits. Larger exponents are classified as overflow or rounded
+zero only after accounting for all source digits. Division alignment and final
+midpoint comparison fit the remaining capacity. Runtime exact/math workspace
+is part of the admitted continuation; work and cancellation checks occur in
+AST evaluation and inside long arithmetic/refinement. Bounded unresolved
+transcendental refinement returns ResourceExhausted.
+
+Pure static preparation owns the program across compiler stages, outputs and
+dynamic runs. Sealed handles validate registry/definition identity, all static
+input metadata and exact parameter bits, including signed zeros and NaNs.
+Direct preflight prepares once per call, or reuses an explicit matching handle;
+a joint request prepares once for compatible members. Static plan/program
+allocations use ordinary host storage outside runtime managed scratch. They
+have source/program size bounds, but no separately enforced preparation budget
+or global preparation cache. Session retirement destroys the continuation
+before its program; the program is destroyed before the definition/library
+lease. Package 0.15 requires a C++ rebuild; traits/framing 14 and C ABI 9 remain.
+
+At most 16 inputs use compact static mappings and two regional polls: acquire
+the shared scalars, then evaluate only the requested coordinates. Larger
+coefficient sets use staged reads of at most 16 ports. Their exact per-Atom
+certificates can require a larger box budget; the 24-coefficient fixture uses
+512. Axis-only execution does not allocate the expression evaluator, read
+coefficients or check adjacent value coordinates. Count=1 never reads end.
+An ordinary failed batch publishes no partial Value; `execute_atoms` retains
+independent successes. Coordinator metadata-admission failure now returns
+ResourceExhausted and retires unpublished state rather than escaping bad_alloc.
+
+On 2026-09-19, native Apple M5 / Clang 21 strict and Apple (MPFR 4.2.2), and
+Intel Core i9-12900 Ubuntu WSL / Clang 18.1.3 strict and AVX2 (MPFR 4.2.1),
+each passed 715 independent coordinate/literal/stepwise Fraction/MPFR cases.
+The suite includes the sensitive `1/(exp(x)-a)` boundary, adjacent coefficient
+values, intermediate RN64 cancellation, both dtypes and named coefficients.
+Separate exact-decimal/grammar probes and scoped numerical review supplement
+these sampled checks; they are not an exhaustive expression-domain proof.
+
+All four profiles passed the seven public workflow groups: sampling and axis,
+mixed bindings/plan reuse/cache/dirty, staged scalar reads/strides/fenv/diagnostics,
+schema/grammar and unused upstream failures, work/cancel/stage/payload limits,
+metadata-exhaustion recovery/Atom isolation, and second-box failure/cancellation
+with unpublished-owner release. Prepared-program and installed 0.15 workflows,
+old-minor rejection, focused compiler/resources/dependency units, formatting and
+lint passed locally. Existing installed consumer configuration also checks that
+0.14 is rejected and 0.15 is accepted. Independent scoped reviews cover the
+parser, mathematics, preparation identity/lifetime and exception cleanup.
+Manual examples are excluded from default builds and CTest/integration testing.
+
+The diagnostic `strict_math_calls` counts actual dispatched mathematical calls,
+including exact special paths and failed calls. Per-function fallback counters
+attribute accelerated strict fallbacks; rejected pre-dispatch domains add no
+call. Legacy reporters without per-function attribution merge into `Other`.
+All numeric diagnostic merging is checked for overflow before publication.
+
+### Native expression timing
+
+Apple M5 / Clang 21 / RelWithDebInfo, Float64, start=0/end=1, one worker,
+cache off, three repetitions. Compile/freeze precede timing; synchronous
+execution and result assembly are timed. Session and Run work limits are each
+2^50. Seven independently derived output checkpoints and exact counters are
+checked before a measurement is accepted. Columns show median/max microseconds.
+The three-point ROI uses indices 1, N/2 and N-2. These are observed timings,
+not a general performance guarantee or an accelerated speedup claim.
+
+| Expression | N | Demand | Strict median/max us | Apple median/max us |
+| --- | ---: | --- | ---: | ---: |
+| `2*x+1` | 256 | three-point-ROI | 220/1680 | 266/363 |
+| `2*x+1` | 256 | Whole | 3711/3789 | 3944/4808 |
+| `2*x+1` | 65536 | three-point-ROI | 174/186 | 194/227 |
+| `2*x+1` | 65536 | Whole | 856049/867781 | 829437/948635 |
+| `2*x+1` | 1048576 | three-point-ROI | 166/214 | 235/260 |
+| `2*x+1` | 1048576 | Whole | 13582296/13620404 | 12909805/13425266 |
+| `exp(x)` | 256 | three-point-ROI | 563/3116 | 634/694 |
+| `exp(x)` | 256 | Whole | 35757/35882 | 36257/36432 |
+| `exp(x)` | 65536 | three-point-ROI | 625/637 | 585/628 |
+| `exp(x)` | 65536 | Whole | 9288761/9325761 | 9519921/9924564 |
+| `exp(x)` | 1048576 | three-point-ROI | 544/583 | 555/579 |
+| `exp(x)` | 1048576 | Whole | 148981539/157373847 | 149846235/152819554 |
+
+Every row records two polls and two unique scalar source coordinates. Whole
+peak controlled payload is 218312 / 740552 / 8604872 bytes at the three N
+values; every three-point ROI uses 216288 bytes. Polynomial math-call/fallback
+counts are zero. Exp records M strict mathematical calls; strict fallback counts
+are zero, Apple counts M-1 for Whole (exp(0) is exact) and M for this ROI.
+These counters describe actual backend calls, not a distinct approximate exp
+implementation. Native results show that this exact implementation remains
+expensive for large full arrays. WSL timing is not used. The manual CSV reports
+controlled payload; static plan/program allocations and unmanaged host container
+storage are outside that field.

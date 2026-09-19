@@ -968,6 +968,24 @@ struct OperationRegistry::Impl final {
   bool frozen = false;
 };
 
+struct PreparedOperation::Impl final {
+  // Program destructors run before the definition/library lease retires.
+  std::shared_ptr<const OperationDefinition> definition;
+  std::uint64_t registry = 0;
+  OperationTraits traits;
+  std::vector<OperationMetadata> inputs;
+  std::map<std::string, ParameterValue> parameters;
+  std::shared_ptr<const void> state;
+};
+PreparedOperation::PreparedOperation(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+const OperationTraits& PreparedOperation::traits() const noexcept {
+  return impl_->traits;
+}
+const void* PreparedOperation::state() const noexcept {
+  return impl_->state.get();
+}
+
 /**
  * @brief Implements empty mutable operation registry construction.
  * @copydetails OperationRegistry::OperationRegistry
@@ -997,7 +1015,12 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
   if (!valid_key(definition.key) || !traits_status.ok() ||
       definition.traits.requires_metadata_specialization !=
-          static_cast<bool>(definition.specialize_metadata) ||
+          (static_cast<bool>(definition.specialize_metadata) ||
+           static_cast<bool>(definition.prepare_static)) ||
+      (definition.specialize_metadata && definition.prepare_static) ||
+      (definition.prepare_static &&
+       (!staged || !definition.traits.deterministic ||
+        !definition.traits.side_effect_free)) ||
       (structured ? (!definition.start_result || definition.start_dependency ||
                      definition.callback)
        : staged   ? (!definition.start_dependency || definition.callback ||
@@ -1724,112 +1747,209 @@ Result<OperationTraits> OperationRegistry::find_traits(
 Result<OperationTraits> OperationRegistry::resolve_traits(
     const std::string& key, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) const {
-  using Answer = Result<OperationTraits>;
+  auto prepared = prepare_operation(key, inputs, parameters);
+  return prepared.ok() ? Result<OperationTraits>(prepared.value()->traits())
+                       : Result<OperationTraits>(prepared.status());
+}
+Result<std::shared_ptr<const PreparedOperation>>
+OperationRegistry::prepare_operation(
+    const std::string& key, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  using PreparedAnswer = Result<std::shared_ptr<const PreparedOperation>>;
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     const auto found = impl_->definitions.find(key);
     if (found == impl_->definitions.end())
-      return Answer(
+      return PreparedAnswer(
           Status{ErrorCode::NotFound, "operation key is not registered"});
     definition = found->second;
   }
-  try {
-    auto resolved =
-        resolve_operation_traits(definition->traits, inputs.size(), parameters);
-    if (!resolved.ok())
-      return resolved;
-    auto traits = resolved.take_value();
-    if (inputs.size() != traits.input_schema.size())
-      return Answer(Status{ErrorCode::TypeMismatch,
-                           "specializer input count mismatch",
-                           FailureReason::None,
-                           {FailureOrigin::Schema, FailureScope::Unspecified}});
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      if (inputs[i].atomic_trailing_axes > inputs[i].descriptor.shape.size() ||
-          (inputs[i].atomic_trailing_axes &&
-           std::any_of(inputs[i].facets.begin(), inputs[i].facets.end(),
-                       [](const auto& facet) {
-                         return facet.key == "photospider.image";
-                       })))
+  std::shared_ptr<const void> program;
+  const auto resolve = [&]() -> Result<OperationTraits> {
+    using Answer = Result<OperationTraits>;
+    try {
+      auto resolved = resolve_operation_traits(definition->traits,
+                                               inputs.size(), parameters);
+      if (!resolved.ok())
+        return resolved;
+      auto traits = resolved.take_value();
+      if (inputs.size() != traits.input_schema.size())
         return Answer(
             Status{ErrorCode::TypeMismatch,
-                   "invalid input tuple observation metadata",
+                   "specializer input count mismatch",
                    FailureReason::None,
                    {FailureOrigin::Schema, FailureScope::Unspecified}});
-      auto status = input_internal::validate_port_metadata(
-          traits.input_schema[i], inputs[i]);
-      if (!status.ok()) {
-        if (status.detail.origin == FailureOrigin::Unspecified)
-          status.detail.origin = FailureOrigin::Schema;
-        return Answer(std::move(status));
+      for (std::size_t i = 0; i < inputs.size(); ++i) {
+        if (inputs[i].atomic_trailing_axes >
+                inputs[i].descriptor.shape.size() ||
+            (inputs[i].atomic_trailing_axes &&
+             std::any_of(inputs[i].facets.begin(), inputs[i].facets.end(),
+                         [](const auto& facet) {
+                           return facet.key == "photospider.image";
+                         })))
+          return Answer(
+              Status{ErrorCode::TypeMismatch,
+                     "invalid input tuple observation metadata",
+                     FailureReason::None,
+                     {FailureOrigin::Schema, FailureScope::Unspecified}});
+        auto status = input_internal::validate_port_metadata(
+            traits.input_schema[i], inputs[i]);
+        if (!status.ok()) {
+          if (status.detail.origin == FailureOrigin::Unspecified)
+            status.detail.origin = FailureOrigin::Schema;
+          return Answer(std::move(status));
+        }
       }
-    }
-    if (!definition->specialize_metadata)
-      return Answer(std::move(traits));
-    auto specialized = definition->specialize_metadata(inputs, parameters);
-    if (!specialized.ok())
-      return Answer(specialized.status());
-    if (specialized.value().size() != traits.outputs.size())
-      return Answer(Status{ErrorCode::InvalidArgument,
-                           "specializer changed output count",
-                           FailureReason::InvalidDomain,
-                           {FailureOrigin::Schema, FailureScope::Unspecified}});
-    for (std::size_t i = 0; i < traits.outputs.size(); ++i) {
-      auto& output = traits.outputs[i];
-      auto& specialization = specialized.value()[i];
-      auto& metadata = specialization.metadata;
-      if (output.result_schema || metadata.result_schema)
+      if (!definition->specialize_metadata && !definition->prepare_static)
+        return Answer(std::move(traits));
+      Result<std::vector<OperationOutputSpecialization>> specialized(
+          Status{ErrorCode::Internal, "uninitialized preparation"});
+      if (definition->prepare_static) {
+        auto prepared = definition->prepare_static(inputs, parameters);
+        if (!prepared.ok())
+          return Answer(prepared.status());
+        auto result = prepared.take_value();
+        program = std::move(result.state);
+        specialized = Result<std::vector<OperationOutputSpecialization>>(
+            std::move(result.outputs));
+      } else {
+        specialized = definition->specialize_metadata(inputs, parameters);
+      }
+      if (!specialized.ok())
+        return Answer(specialized.status());
+      if (specialized.value().size() != traits.outputs.size())
         return Answer(
-            Status{ErrorCode::TypeMismatch,
-                   "metadata specializer requires Value outputs",
-                   FailureReason::None,
+            Status{ErrorCode::InvalidArgument,
+                   "specializer changed output count",
+                   FailureReason::InvalidDomain,
                    {FailureOrigin::Schema, FailureScope::Unspecified}});
-      output.shape_rule = OperationShapeRule::Fixed;
-      output.fixed_output_shape = std::move(metadata.descriptor.shape);
-      output.output_axes.clear();
-      output.output_element_type = metadata.descriptor.element_type;
-      output.output_dtype_rule = OperationDtypeRule::Declared;
-      output.output_dtype_input = 0;
-      output.output_dtype_parameter.clear();
-      output.output_semantic_rule = metadata.facets.empty()
-                                        ? OperationSemanticRule::Drop
-                                        : OperationSemanticRule::Establish;
-      output.output_semantic_input = 0;
-      output.output_semantic_parameter.clear();
-      output.output_facets = std::move(metadata.facets);
-      output.atomic_trailing_axes = metadata.atomic_trailing_axes;
-      output.regional_atomic = specialization.regional_atomic;
-      output.preserve_output_views = specialization.preserve_output_views;
-      output.maximum_output_payload_bytes =
-          specialization.maximum_output_payload_bytes;
-      output.static_dependency_pieces =
-          std::move(specialization.static_dependency_pieces);
+      for (std::size_t i = 0; i < traits.outputs.size(); ++i) {
+        auto& output = traits.outputs[i];
+        auto& specialization = specialized.value()[i];
+        auto& metadata = specialization.metadata;
+        if (output.result_schema || metadata.result_schema)
+          return Answer(
+              Status{ErrorCode::TypeMismatch,
+                     "metadata specializer requires Value outputs",
+                     FailureReason::None,
+                     {FailureOrigin::Schema, FailureScope::Unspecified}});
+        output.shape_rule = OperationShapeRule::Fixed;
+        output.fixed_output_shape = std::move(metadata.descriptor.shape);
+        output.output_axes.clear();
+        output.output_element_type = metadata.descriptor.element_type;
+        output.output_dtype_rule = OperationDtypeRule::Declared;
+        output.output_dtype_input = 0;
+        output.output_dtype_parameter.clear();
+        output.output_semantic_rule = metadata.facets.empty()
+                                          ? OperationSemanticRule::Drop
+                                          : OperationSemanticRule::Establish;
+        output.output_semantic_input = 0;
+        output.output_semantic_parameter.clear();
+        output.output_facets = std::move(metadata.facets);
+        output.atomic_trailing_axes = metadata.atomic_trailing_axes;
+        output.regional_atomic = specialization.regional_atomic;
+        output.preserve_output_views = specialization.preserve_output_views;
+        output.maximum_output_payload_bytes =
+            specialization.maximum_output_payload_bytes;
+        output.static_dependency_pieces =
+            std::move(specialization.static_dependency_pieces);
+      }
+      traits.requires_metadata_specialization = false;
+      auto expanded_validation = traits;
+      expanded_validation.repeated_minimum = 0;
+      expanded_validation.repeated_maximum = 0;
+      expanded_validation.repeated_resolved = 0;
+      expanded_validation.repeated_match = false;
+      const auto valid = validate_traits(expanded_validation);
+      if (!valid.ok())
+        return Answer(valid);
+      const auto inferred = infer_operation_outputs(traits, inputs, parameters);
+      if (!inferred.ok())
+        return Answer(inferred.status());
+      return Answer(std::move(traits));
+    } catch (const std::bad_alloc&) {
+      return Answer(
+          Status{ErrorCode::ResourceExhausted,
+                 {},
+                 FailureReason::CapacityLimit,
+                 {FailureOrigin::Resource, FailureScope::Unspecified}});
+    } catch (...) {
+      return Answer(Status{ErrorCode::OperationFailed,
+                           "metadata specialization raised an exception",
+                           FailureReason::HostException,
+                           {FailureOrigin::Schema, FailureScope::Unspecified}});
     }
-    traits.requires_metadata_specialization = false;
-    auto expanded_validation = traits;
-    expanded_validation.repeated_minimum = 0;
-    expanded_validation.repeated_maximum = 0;
-    expanded_validation.repeated_resolved = 0;
-    expanded_validation.repeated_match = false;
-    const auto valid = validate_traits(expanded_validation);
-    if (!valid.ok())
-      return Answer(valid);
-    const auto inferred = infer_operation_outputs(traits, inputs, parameters);
-    if (!inferred.ok())
-      return Answer(inferred.status());
-    return Answer(std::move(traits));
+  };
+  auto resolved = resolve();
+  if (!resolved.ok())
+    return PreparedAnswer(resolved.status());
+  try {
+    auto prepared = std::make_shared<PreparedOperation::Impl>();
+    prepared->definition = definition;
+    prepared->registry = impl_->identity;
+    prepared->traits = resolved.take_value();
+    prepared->inputs = inputs;
+    prepared->parameters = parameters;
+    prepared->state = std::move(program);
+    return PreparedAnswer(std::shared_ptr<const PreparedOperation>(
+        new PreparedOperation(std::move(prepared))));
   } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Unspecified}});
-  } catch (...) {
-    return Answer(Status{ErrorCode::OperationFailed,
-                         "metadata specialization raised an exception",
-                         FailureReason::HostException,
-                         {FailureOrigin::Schema, FailureScope::Unspecified}});
+    return PreparedAnswer(
+        Status{ErrorCode::ResourceExhausted,
+               {},
+               FailureReason::CapacityLimit,
+               {FailureOrigin::Resource, FailureScope::Unspecified}});
   }
+}
+Status OperationRegistry::validate_prepared(
+    const PreparedOperation& prepared, const std::string& key,
+    const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  const auto stale = [] {
+    return Status{ErrorCode::Stale,
+                  "prepared operation does not match static inputs/registry"};
+  };
+  const auto& stored = *prepared.impl_;
+  if (stored.registry != impl_->identity ||
+      inputs.size() != stored.inputs.size() ||
+      parameters.size() != stored.parameters.size())
+    return stale();
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end() || found->second != stored.definition)
+      return stale();
+  }
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    const auto& a = inputs[i];
+    const auto& b = stored.inputs[i];
+    if (a.descriptor.element_type != b.descriptor.element_type ||
+        a.descriptor.shape != b.descriptor.shape ||
+        a.atomic_trailing_axes != b.atomic_trailing_axes ||
+        !input_internal::same_facets(a.facets, b.facets) ||
+        static_cast<bool>(a.result_schema) !=
+            static_cast<bool>(b.result_schema) ||
+        (a.result_schema && !a.result_schema->same_schema(*b.result_schema)))
+      return stale();
+  }
+  auto b = stored.parameters.begin();
+  for (const auto& a : parameters) {
+    if (a.first != b->first || a.second.index() != b->second.index())
+      return stale();
+    if (const auto* value = std::get_if<double>(&a.second)) {
+      std::uint64_t left = 0, right = 0;
+      std::memcpy(&left, value, 8);
+      const auto other = std::get<double>(b->second);
+      std::memcpy(&right, &other, 8);
+      if (left != right)
+        return stale();
+    } else if (a.second != b->second) {
+      return stale();
+    }
+    ++b;
+  }
+  return Status::success();
 }
 
 Status OperationRegistry::validate_dependency_metadata(
@@ -1859,14 +1979,23 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
           ErrorCode::NotFound, "dependency operation not registered"));
     definition = found->second;
   }
-  auto traits = resolve_traits(key, request.inputs, request.parameters);
-  if (!traits.ok())
-    return Result<std::shared_ptr<DependencySession>>(traits.status());
+  if (!request.prepared) {
+    auto prepared = prepare_operation(key, request.inputs, request.parameters);
+    if (!prepared.ok())
+      return Result<std::shared_ptr<DependencySession>>(prepared.status());
+    request.prepared = prepared.take_value();
+  } else {
+    auto status = validate_prepared(*request.prepared, key, request.inputs,
+                                    request.parameters);
+    if (!status.ok())
+      return Result<std::shared_ptr<DependencySession>>(status);
+  }
+  const auto traits = request.prepared->traits();
   return DependencySession::create(
-      "registry-" + std::to_string(impl_->identity) + ":" + key,
-      traits.take_value(), definition->start_dependency,
-      definition->validate_dependency, std::move(request), allocator,
-      definition, 0, std::move(consume_root_work));
+      "registry-" + std::to_string(impl_->identity) + ":" + key, traits,
+      definition->start_dependency, definition->validate_dependency,
+      std::move(request), allocator, definition, 0,
+      std::move(consume_root_work));
 }
 
 Result<ResultContinuation> OperationRegistry::start_result(
@@ -2008,12 +2137,34 @@ Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
   if (requests.empty())
     return Result<std::shared_ptr<DependencyJointSession>>(
         Status{ErrorCode::InvalidArgument, "empty joint requests"});
-  auto traits = resolve_traits(key, requests[0].inputs, requests[0].parameters);
-  if (!traits.ok())
-    return Result<std::shared_ptr<DependencyJointSession>>(traits.status());
+  auto prepared = requests[0].prepared;
+  if (!prepared) {
+    auto created =
+        prepare_operation(key, requests[0].inputs, requests[0].parameters);
+    if (!created.ok())
+      return Result<std::shared_ptr<DependencyJointSession>>(created.status());
+    prepared = created.take_value();
+  }
+  for (auto& request : requests) {
+    auto status =
+        validate_prepared(*prepared, key, request.inputs, request.parameters);
+    if (!status.ok()) {
+      if (!request.prepared)
+        status = Status{ErrorCode::InvalidArgument,
+                        "incompatible joint static member"};
+      return Result<std::shared_ptr<DependencyJointSession>>(status);
+    }
+    if (request.prepared) {
+      status = validate_prepared(*request.prepared, key, request.inputs,
+                                 request.parameters);
+      if (!status.ok())
+        return Result<std::shared_ptr<DependencyJointSession>>(status);
+    }
+    request.prepared = prepared;
+  }
   return DependencyJointSession::create(
       "registry-" + std::to_string(impl_->identity) + ":" + key,
-      traits.take_value(), definition->start_joint,
+      prepared->traits(), definition->start_joint,
       definition->validate_dependency, std::move(requests), allocator,
       definition, std::move(consume_root_work));
 }

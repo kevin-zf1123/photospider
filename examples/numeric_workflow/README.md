@@ -79,6 +79,87 @@ Ubuntu WSL on x86-64. Strict/NEON locally and strict/AVX2 in WSL passed the publ
 workflows and 960-case oracle. Local installed-consumer compilation and execution
 also passed. These are correctness checks; no performance result is claimed.
 
+## Expression sampling and static preparation: NUM-01
+
+`photospider/numeric/expression.hpp` provides `sample_expression_node`. The
+editable `examples()` and `bindings_errors_and_cache()` functions in
+`expression.cpp` supply the complete public WorkflowDocument, dynamic bindings,
+Compiler and ExecutionContext path. For example, their node construction is:
+
+```cpp
+auto node = ps::numeric::sample_expression_node(
+    1, "a*x+b", ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    5, {{"a", ps::WorkflowInputReference{3}},
+        {"b", ps::WorkflowInputReference{4}}},
+    ps::ElementType::Float64, ps::CpuNumericProfile::Strict);
+```
+
+Bind start=0, end=1, a=2, b=1 as Float32/64 `[1]` values. The named outputs
+are `values=[1,1.5,2,2.5,3]` and Float64 `axis=[0,1,.25]`. Reusing the plan
+with a=3, b=-1 returns `[-1,-.25,.5,1.25,2]` and the same axis. Coefficient
+names are sorted bytewise and must exactly match the free names in the source.
+Count is required in `[1,1048576]`; the default output dtype is Float64.
+The three registered keys are `numeric.sample_expression` with suffix
+`_strict`, `_accelerated_apple_silicon` or `_accelerated_x86_64`.
+
+The language supports decimal constants, `x`, `pi`, `e`, named coefficients,
+parentheses, unary signs, `+ - * / ^`, and `abs sqrt exp ln sin cos tan min max`.
+Source length is at most 4096 bytes, with at most 256 AST nodes and height 32.
+Exponentiation is right associative and binds above unary signs. Coordinates
+use exact endpoint interpolation and one binary64 rounding; each expression
+primitive then rounds to binary64 in left-to-right postorder. Final conversion
+rounds once to the selected output dtype. Inputs and intermediate values must
+be finite; failures identify the global sample and source span. Count=1 ignores
+the end payload. Axis-only requests skip coefficients and expression evaluation.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_expression photospider_numeric_prepared -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_expression strict
+build/numeric/examples/numeric_workflow/photospider_numeric_prepared
+python3 examples/numeric_workflow/expression_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_expression strict
+```
+
+Use `apple` or `x86` only on that CPU target. The oracle requires MPFR 4.2+
+through the library selection described under NUM-04. The example passes
+explicit work budgets to `execute_fragments`; complex expressions and large
+requests can exhaust a smaller budget. Ordinary accelerated transcendental
+operations currently use the strict certified backend and report per-function
+fallbacks. Unresolved bounded refinement returns ResourceExhausted.
+
+The public `OperationDefinition::prepare_static` facility parses immutable
+programs once per compiler node. Semantic nodes, optimized nodes and plan steps
+share the sealed `PreparedOperation` owner across dynamic runs and outputs.
+Direct callers can pass an explicit matching prepared handle; absent a handle,
+preflight prepares once per call, including a compatible joint request. There
+is no global preparation cache. Static source/program storage uses ordinary
+host allocations outside runtime managed-scratch admission, with operation
+size bounds and no separately enforced preparation budget. Runtime continuations
+and mathematical scratch remain admitted and metered. Package 0.15 requires
+C++ consumers to rebuild; C operation ABI 9 is unchanged.
+
+`prepared.cpp` is the editable public registration/session example. It checks
+preparation counts, metadata/parameter-bit identity, foreign-handle rejection,
+program/definition lifetime and diagnostic merge behavior. `expression.cpp`
+also checks unused failing producers, shared-scalar reads, sparse/dirty/cache
+behavior, precise failure spans, strided inputs/fenv, isolated Atom failures,
+multi-box cancellation and controlled metadata-exhaustion recovery. Up to 16
+input ports use a two-poll regional path; larger coefficient sets use bounded
+16-port staged reads and may need a larger certificate-box budget, as shown
+by the 24-coefficient fixture. Only requested sample coordinates are evaluated.
+
+For native timing, run `photospider_numeric_expression strict benchmark` or
+`apple benchmark`. This takes several minutes: `exp(x)` over 1048576 points
+is evaluated three times. CSV records `2*x+1` and `exp(x)` at N=256, 65536,
+1048576 with Whole and three-point ROI, Float64, one worker, cache off, median
+and maximum elapsed microseconds, peak controlled payload, poll/evaluation/math
+counts and fallbacks. Compile/freeze precede timing; synchronous execution and
+result assembly are timed. Seven independent checkpoints and diagnostics are
+checked. `scalar_support` counts unique input coordinates, not actual producer
+invocations. WSL supplies correctness checks only. Actual results and limits
+are in [the implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#num-01-expression-and-preparation).
+These manual executables have no CTest or integration registration.
+
 ## Array construction: NUM-03
 
 `photospider_numeric_arrays` exercises `numeric.constant` and

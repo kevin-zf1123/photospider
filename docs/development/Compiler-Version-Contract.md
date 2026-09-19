@@ -251,3 +251,28 @@ recomputes, and the trait does not join concurrent producers or promise one
 evaluation per Run. The C++ layout change requires consumers to rebuild against
 0.14; older minor requests are rejected. WorkflowDocument schema 2, provider ABI
 1, optimizer v5 and result-region v6 remain unchanged.
+
+## NUM-01 static preparation and diagnostics
+
+Package 0.15.0 keeps C++ `OperationTraits` version 14 and semantic framing
+version 14; the C operation ABI remains C ABI 9. The public C++ operation
+definition adds `prepare_static`, `OperationPreparation` and the immutable
+`PreparedOperation` handle. Compiler nodes and plan steps may retain that
+handle. Direct requests reuse an explicitly supplied matching handle or prepare
+once per preflight; joint requests prepare once for compatible members. Matching
+requires registry/definition identity, static metadata and copied IEEE-754
+parameter bits. Separate calls do not share preparation implicitly.
+Request records own their copied inputs while dependency queries remain
+borrowed. Preparation and plan allocation are outside per-Atom runtime scratch
+admission. No global cache or dynamic preparation state is introduced, and
+prepared owners are destroyed after continuations and callbacks retire.
+
+NUM-01's numeric diagnostics add `strict_math_calls` and the 8-by-4
+`function_fallbacks` matrix. NUM-01 counts each strict math call; uninstrumented
+operators contribute zero, and merge assigns unattributed reason counts to `Other`.
+These are observations only. The prepared public manual, compiler and facility
+checks passed the once/ROI/output/tile/foreign/signed-zero/NaN/lifetime paths;
+NUM-01's public workflows and independent expression oracle passed on native
+Clang and Clang WSL. C++ consumers must rebuild for 0.15 and older minor requests
+are rejected.
+The C ABI 9 descriptor/table layout remains unchanged.

@@ -39,9 +39,38 @@ optional local GPU backend, records estimated bytes, and propagates optional
 named output Regions backward into per-step output/input demands using Whole,
 elementwise-exact, or clipped Halo rules. It produces
 `ExecutionPlan`, `ExecutionPlanDigest`, and `PlanCacheKey`. No stage contains a
-callback pointer, DSO handle, allocation, native device, or daemon object.
+callback pointer, native device, or daemon object. A node or step may retain an
+immutable `PreparedOperation` owner for a registered static program; the owner
+keeps the definition lease alive and is released after dependent plan/Run
+owners. Preparation state is not runtime mutable state and does not enter
+semantic or cache identity.
 Each stage also carries a private runtime-only weak identity for the exact
 frozen operation registry; it is excluded from digests and serialization.
+
+## Static operation preparation
+
+`OperationDefinition::prepare_static` is the public pure preparation hook for
+deterministic operations such as NUM-01. `OperationRegistry::prepare_operation`
+validates complete static input metadata and parameters, including exact copied
+IEEE-754 parameter bits, then invokes the hook once outside registry
+synchronization. The returned `OperationPreparation` owns resolved output
+metadata and optional immutable state in `PreparedOperation`; it contains no
+Value payloads, Run data, I/O state or private mutable cache.
+
+Compiler nodes and plan steps retain the prepared owner across their executions.
+Direct requests may pass an existing matching handle; otherwise each direct
+preflight prepares once. A joint request prepares once for its compatible
+members. Matching identity alone does not share state between separate calls.
+Request-owned inputs and the query passed to a continuation retain
+their existing ownership boundary: a request owns its copied record, while a
+`DependencyQuery` is borrowed and cannot be retained. Preparation and plan
+storage use ordinary host allocations outside per-Atom runtime scratch
+admission; there is no separate enforced preparation budget. Operations bound
+their static source/program size. Continuation state remains subject to runtime
+limits. No global preparation cache or dynamic preparation state is
+introduced. A session destroys its continuation before its prepared owner. A prepared
+owner destroys its program before releasing the definition/library lease. The
+external registry owner may be released earlier without invalidating these leases.
 
 ## Execution
 
@@ -147,8 +176,15 @@ Raw diagnostics include compile-stage duration, execute duration, operation
 attempt timing/outcome, per-operation native dispatch/time, selected backend,
 input copy count/bytes, collected output-copy bytes, shared host access, native
 upload/result reuse, peak allocated
-bytes, fallback reason, plan digest, and result digest. They are observations,
+bytes, fallback reason, `strict_math_calls`, the 8-by-4
+`function_fallbacks` matrix, plan digest, and result digest. They are observations,
 not verdicts or release evidence.
+
+NUM-01 increments `strict_math_calls` once per strict math call and attributes
+its fallback rows per function. Merge assigns unattributed reason counts to `Other`;
+operators without instrumentation contribute zero calls rather than inferred
+counts. The diagnostic fields are observational and do not imply that NUM-01 is
+complete.
 
 ## Runtime input lowering and execution
 

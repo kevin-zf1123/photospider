@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.14.0
+  VERSION 0.15.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -104,6 +104,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_interpolation.cpp
   plugins/ops/01-numeric/numeric_layouts.cpp
   plugins/ops/01-numeric/numeric_indexing.cpp
+  plugins/ops/01-numeric/numeric_expression.cpp
   plugins/ops/01-numeric/numeric_binary.cpp
   plugins/ops/01-numeric/numeric_unary.cpp
   plugins/ops/01-numeric/numeric_calculus.cpp

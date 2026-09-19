@@ -31,9 +31,31 @@ Compiler 不引入 finite-only rule，也不规范化 NaN payload 或 infinity�
 backend，记录 estimated bytes，并使用 Whole、elementwise-exact 或 clipped Halo rule
 把 optional named output Region 反向传播为每个 step 的 output/input demand，然后产生
 `ExecutionPlan`、`ExecutionPlanDigest` 与
-`PlanCacheKey`。任何 stage 都不包含 callback pointer、DSO handle、allocation、native
-device 或 daemon object。每个 stage 还携带 exact frozen operation registry 的 private
-runtime-only weak identity；它不进入 digest/serialization。
+`PlanCacheKey`。任何 stage 都不包含 callback pointer、native device 或 daemon object。
+Node 或 step 可以保留已注册 static program 的 immutable `PreparedOperation` owner；该
+owner 保持 definition lease，等依赖它的 plan/Run owner 释放后再销毁。Preparation state
+不是 runtime mutable state，也不进入 semantic 或 cache identity。每个 stage 还携带 exact
+frozen operation registry 的 private runtime-only weak identity；它不进入
+digest/serialization。
+
+## Static operation preparation
+
+`OperationDefinition::prepare_static` 是 NUM-01 等 deterministic operation 使用的公开
+纯 preparation hook。`OperationRegistry::prepare_operation` 先验证完整 static input
+metadata 与 parameters，包括 copied IEEE-754 parameter bits，然后在 registry
+synchronization 之外调用 hook 一次。返回的 `OperationPreparation` 在
+`PreparedOperation` 中拥有已解析 output metadata 和 optional immutable state，不包含
+Value payload、Run data、I/O state 或 private mutable cache。
+
+Compiler node/plan step 跨多次执行保留这个 owner。Direct request 可以传入匹配的已有
+handle；没有 handle 时，每次 direct preflight 准备一次。Joint request 为兼容成员准备
+一次。不同调用不会仅因 identity 相同而自动共享状态。Request 自己拥有复制后的 record，continuation 收到的
+`DependencyQuery` 仍是 borrowed，不能保留。Preparation 与 plan 使用普通宿主分配，
+位于 per-Atom runtime scratch admission 之外；目前没有单独强制的 preparation budget，
+算子必须限制静态源码与程序大小。Continuation state 仍受 runtime limits 约束。没有
+global preparation cache 或 dynamic preparation state。Session 先销毁 continuation，再释放
+prepared owner；prepared owner 先销毁程序，再释放 definition/library lease。外部 registry
+owner 可以提前释放，已有 lease 仍保持有效。
 
 ## Execution
 
@@ -114,7 +136,12 @@ nonzero callback result 会让 Run 失败，不产生 CPU attempt。
 
 Raw diagnostic 包含 compile-stage duration、execute duration、operation attempt
 timing/outcome、selected backend、transfer count/bytes、实际分配峰值、fallback reason、
-plan digest 与 result digest。它们是 observation，不是 verdict 或 release evidence。
+`strict_math_calls`、8x4 的 `function_fallbacks` matrix、plan digest 与 result digest。
+它们是 observation，不是 verdict 或 release evidence。
+
+NUM-01 每次 strict math call 计一次 `strict_math_calls`，并按 function 记录 fallback。
+Merge 后无法归属的差额进入 `Other`；未 instrumented operator 不推断调用数，保持为 0。
+这些诊断字段是 observation，不表示 NUM-01 已完成。
 
 ## Runtime input 降级与执行
 

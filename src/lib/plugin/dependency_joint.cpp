@@ -267,7 +267,8 @@ Result<std::shared_ptr<DependencyJointSession>> DependencyJointSession::create(
         traits.outputs[request.output_index].failure_delivery !=
             FailureDelivery::PerAtomOutcome ||
         request.snapshot_identity != first.snapshot_identity ||
-        request.parameters != first.parameters ||
+        ((!request.prepared || request.prepared != first.prepared) &&
+         request.parameters != first.parameters) ||
         request.inputs.size() != first.inputs.size())
       return Answer(invalid("incompatible joint member"));
     for (std::size_t i = 0; i < request.inputs.size(); ++i)

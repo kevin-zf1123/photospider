@@ -8,6 +8,11 @@ namespace ps::numeric_internal {
 inline NumericDiagnostics delta(const NumericDiagnostics& current,
                                 NumericDiagnostics* previous) {
   auto result = current;
+  result.strict_math_calls -= previous->strict_math_calls;
+  for (unsigned function = 0; function < 8; ++function)
+    for (unsigned reason = 0; reason < 4; ++reason)
+      result.function_fallbacks[function][reason] -=
+          previous->function_fallbacks[function][reason];
   result.evaluated_values -= previous->evaluated_values;
   result.strict_fallbacks -= previous->strict_fallbacks;
   result.view_elements -= previous->view_elements;

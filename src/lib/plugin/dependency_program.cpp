@@ -231,6 +231,7 @@ std::uint64_t DependencyCheckpoint::metadata_entries() const {
 struct DependencySession::Impl {
   // State is declared last so its plugin destructor runs before the definition.
   std::shared_ptr<const void> definition;
+  std::shared_ptr<const PreparedOperation> prepared;
   OperationTraits traits;
   std::optional<ResourceBudget> metadata_root;
   DependencyQuery query;
@@ -552,6 +553,7 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
   if (const auto* root = resource_internal::metadata_budget())
     impl->metadata_root = *root;
   impl->definition = std::move(definition);
+  impl->prepared = std::move(request.prepared);
   impl->shared_work = std::move(shared_work);
   impl->joint_serialized = joint_serialized;
   impl->traits = resolved.take_value();
@@ -568,7 +570,8 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                  traits.outputs[0].observation_kind,
                  request.backend,
                  request.cancellation,
-                 request.output_index};
+                 request.output_index,
+                 impl->prepared.get()};
   const auto contract_identity = [&](bool common) {
     content_internal::Sha256 identity;
     identity.text(common ? "photospider.shared-dependency-block.v1"

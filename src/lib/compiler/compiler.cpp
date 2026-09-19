@@ -923,11 +923,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
                                    std::move(result_schema),
                                    atomic_trailing_axes});
     }
-    auto specialized = operations_->resolve_traits(
+    auto specialized = operations_->prepare_operation(
         source.operation, input_descriptors, source.parameters);
     if (!specialized.ok())
       return Result<SemanticGraphIR>(specialized.status());
-    node.traits = specialized.take_value();
+    node.prepared = specialized.take_value();
+    node.traits = node.prepared->traits();
     auto output = infer_operation_outputs(node.traits, input_descriptors,
                                           node.parameters);
     if (!output.ok()) {
@@ -1147,6 +1148,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.node_id = node.id;
       step.operation = node.operation;
       step.parameters = node.parameters;
+      step.prepared = node.prepared;
       step.traits = select_operation_output(node.traits, oi).take_value();
       step.effective_atomic = output.effective_atomic;
       step.whole_boundary =

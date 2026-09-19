@@ -140,6 +140,25 @@ certificate、package admission 或 process isolation。
 不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
 ABI 不构造 Value，也不提供 storage。
 
+## Static preparation 与 ownership
+
+公开 C++ operation definition 可以为 pure、deterministic preparation 提供
+`prepare_static`。`OperationRegistry::prepare_operation` 验证 static input metadata 与
+parameters，包括 copied IEEE-754 bits，然后在 registry synchronization 之外调用一次。
+返回的 `OperationPreparation` 会包装成 immutable `PreparedOperation`；其中只保存
+metadata/static-program data，不包含 Value payload、Run data、I/O state 或 mutable private
+cache。Preparation 只对相同 registry definition、static metadata 和 parameters 有效。
+
+Compiler node 和 plan step 跨执行拥有这个 prepared handle。Direct request 复用显式提供的
+匹配 handle，或在 preflight 准备一次；joint request 为兼容成员准备一次。不同调用不会
+隐式共享状态。Request 拥有复制后的 request record，而 continuation 收到的
+`DependencyQuery` 是 borrowed。Preparation 和 plan 使用普通宿主分配，位于 per-Atom
+runtime scratch admission 之外；目前没有单独强制的 preparation budget，静态源码与
+程序大小由算子限制。没有 global preparation cache 或 dynamic preparation state。
+Callback 退役后销毁 continuation，随后 session 释放 prepared owner。Prepared owner
+先销毁程序，再释放 definition/library lease；外部 registry owner 可以提前释放。
+Runtime callback pointer 和 DSO handle 不进入 semantic 或 cache identity。
+
 ## Version-nine 语义与输出契约
 
 Package 0.9.0、operation ABI/traits 9 替换 0.8/8。Host 先检查 version，再读取

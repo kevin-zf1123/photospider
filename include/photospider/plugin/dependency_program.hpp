@@ -28,6 +28,7 @@ struct JointMemberPhase;
 }
 struct OperationTraits;
 class OperationRegistry;
+class PreparedOperation;
 /** @brief Execution-scoped bounds, separate from compile-time phase limits. */
 struct DependencyLimits final {
   FootprintLimits sets;
@@ -58,6 +59,11 @@ struct DependencyRequest final {
   DependencyLimits limits = {};
   /** @brief Declaration-order selected result. */
   std::uint32_t output_index = 0;
+  /** @brief Optional static preparation owner. start validates exact registry,
+   * metadata and IEEE parameter bits before reusing it; a mismatch fails Stale.
+   * Empty/axis/ROI queries do not bypass static preparation validation.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
 };
 /** @brief Validated borrowed query visible to start/poll, never retained by
  * code.
@@ -77,6 +83,11 @@ struct DependencyQuery final {
   CancellationToken cancellation = {};
   /** @brief Declaration-order selected result. */
   std::uint32_t output_index = 0;
+  /** @brief Session-owned immutable preparation, borrowed until retirement.
+   * Do not retain the query; a continuation may borrow prepared->state() only
+   * while its owning session remains alive. No dynamic input data is stored.
+   */
+  const PreparedOperation* prepared = nullptr;
 };
 /** @brief Extracts one canonical output/coordinate key from an Atomic query.
  * Empty or multi-observation queries fail without sample reads or allocation.

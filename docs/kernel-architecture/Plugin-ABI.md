@@ -176,6 +176,31 @@ certificate, package-admission, or process-isolation system.
 There is no policy ABI/SDK/DSO, external scheduling plugin, or plugin path over
 IPC. The data-definition ABI does not construct Values or provide storage.
 
+## Static preparation and ownership
+
+The public C++ operation definition may provide `prepare_static` for a pure,
+deterministic preparation. `OperationRegistry::prepare_operation` validates
+static input metadata and parameters, including exact copied IEEE-754 bits,
+then calls it once outside registry synchronization. The returned
+`OperationPreparation` is wrapped by an immutable `PreparedOperation` whose
+state contains only metadata/static-program data; it contains no Value payload,
+Run data, I/O state or mutable private cache. Preparation is valid only for the
+same registry definition, static metadata and parameters.
+
+Compiler nodes and plan steps own the prepared handle across executions. Direct
+requests reuse an explicitly supplied matching handle or prepare once during
+preflight; a joint request prepares once for its compatible members. Separate
+calls do not share state implicitly. A request owns its
+copied request record and the `DependencyQuery` supplied to a continuation is
+borrowed. Preparation and plan allocations use ordinary host storage outside per-Atom
+runtime scratch admission; no separate preparation budget is enforced. Static
+source/program size must be bounded by the operation. There is no
+global preparation cache or dynamic preparation state. Callback retirement
+precedes destruction of its continuation. The session then releases its
+prepared owner, whose program is destroyed before the definition/library
+lease. External registry owners may be released earlier. Runtime callback
+pointers and DSO handles do not enter semantic or cache identity.
+
 ## Version-nine semantic and output contracts
 
 Package 0.9.0/operation ABI and traits 9 replace 0.8/8. The host checks version

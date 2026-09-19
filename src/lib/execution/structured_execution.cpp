@@ -1306,6 +1306,7 @@ class StructuredExecution final {
       DependencyRequest request{inputs, step.parameters, samples,
                                 legacy_snapshot};
       request.output_index = step.output_index;
+      request.prepared = step.prepared;
       request.cancellation = active_token();
       request.limits = options_.dependencies;
       Result<std::shared_ptr<DependencySession>> started(
