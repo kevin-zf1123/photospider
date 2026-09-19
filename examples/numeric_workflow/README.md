@@ -846,3 +846,62 @@ attempts, while issued work also includes topology and host bookkeeping;
 source_coordinates is unique dependency support, not physical read-call count.
 This target is excluded from default builds, CTest and integration registration.
 WSL Clang validation is correctness-only.
+
+
+## Parametric Bezier evaluation: CRV-03
+
+`evaluate_bezier_node` in `photospider/numeric/bezier.hpp` evaluates the selected
+quadratic/cubic segment at an explicit parameter. Dynamic inputs in order are
+anchors:Float32/64[K,D], relative handles:Float32/64[K-1,degree-1,D],
+segment_indices:Int64[N], t:Float32/64[N]. Each floating port is independent.
+K is 2..65536; D and N are positive, with each input/output product <=2^40.
+D=1 remains an axis. Output `values[N,D]` has empty facets and per-cell Atoms.
+No geometry or color meaning follows from D; loops and degenerate curves work.
+
+```cpp
+auto node = ps::numeric::evaluate_bezier_node(
+    1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    ps::WorkflowInputReference{3}, ps::WorkflowInputReference{4}, 2);
+```
+
+Bind anchors=[[0,0],[2,0]], handles=[[[1,2]]], segment_indices=[0,0,0],
+t=[0,.5,1]. Expected values are [[0,0],[1,1],[2,0]]. The editable `examples()`
+in `parametric.cpp` runs this graph through WorkflowDocument, Compiler and
+ExecutionContext. A cubic example anchors=[[0,0],[3,0]], offsets=[[[1,3],[-1,3]]]
+at segment=0,t=.5 yields [1.5,2.25]. Degree is explicit; dtype defaults to
+Float64 and profile to Strict. `apple` and `x86` require their corresponding CPU.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_parametric -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_parametric strict
+python3 examples/numeric_workflow/parametric_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_parametric strict
+```
+
+Handles reconstruct relative to the start anchor (quadratic/outgoing) or end
+anchor (cubic incoming), rounding each sum to Float64. The whole polynomial
+then rounds once directly to the output dtype. Current profiles agree bitwise.
+Endpoint t=0/1 reads only the corresponding anchor and preserves zero sign;
+interior exact zero is -0 only when all reconstructed controls are -0.
+Nonzero underflow keeps its sign. No control-conversion overflow is inferred
+from unused Float32 bounds when the actual result is finite.
+
+A nonempty request first reads only selected query rows, then the needed local
+control components. Unrequested bad segments/t/components do not fail it.
+Recognized Image handles retain full-channel Validation independently of the
+requested Data component. Invalid segment/t reports InvalidArgument/InvalidDomain;
+nonfinite demanded controls report OperationFailed/InvalidDomain; RN64 control
+or actual output overflow reports OperationFailed/ArithmeticOverflow, naming
+the affected output Atom. Upstream/resource/cancellation categories survive.
+
+`cache_composition_and_typed()` composes existing public `constant_node` views
+with this operator and checks two components across a 2^39-column shape and
+the last row of a 2^40-row shape. Returned owners remain readable after the
+execution context is destroyed. `Fixture::run` supplies explicit work budgets.
+Exact scratch and per-request row/output/certificate storage are accounted;
+dense requests can exhaust metadata/association limits. Five manual groups
+cover these paths plus sparse dirty support, joint Atom isolation, all-port
+negative/unaligned/zero strides and fenv, cache reselection, typed Image and
+failing producer order, arithmetic cancellation and second-box owner release.
+The manual executable stays outside CTest/integration registration. Validation
+platforms and bounds are in the [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-03-parametric-bezier-evaluation).

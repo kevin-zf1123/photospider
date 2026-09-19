@@ -81,4 +81,60 @@ inline Result<WorkflowNode> sample_bezier_function_node(
        {"out_of_domain",
         std::string(domain == BezierDomain::Reject ? "reject" : "clamp")}}});
 }
+/** @brief Authors componentwise quadratic/cubic parametric Bezier evaluation.
+ * @param id Nonzero workflow node id.
+ * @param anchors Float32/64 [K,D], K=2..65536, D>=1.
+ * @param handles Independent Float32/64 [K-1,degree-1,D] relative offsets.
+ * Quadratic/outgoing offsets use the start anchor; cubic incoming uses the end.
+ * @param segment_indices Int64 [N] dynamic segment indices, each in [0,K-2].
+ * @param t Independent Float32/64 [N] dynamic parameters, finite in [0,1].
+ * @param degree Required fixed degree 2 or 3.
+ * @param dtype Output Float32/64, default Float64.
+ * @param profile Explicit CPU profile, default Strict.
+ * @return Owning node metadata or InvalidArgument/InvalidDomain/Schema for
+ * invalid authoring arguments. Allocation may throw bad_alloc. Compiler checks
+ * input shapes/types and all logical products <=2^40 without reading payload.
+ * @note Pure/concurrent-safe authoring. Output values[N,D] has empty facets,
+ * per-cell observations and owned immutable fragments surviving context
+ * teardown. No geometry/color role, monotonicity, global topology or clipping
+ * is inferred. Requested row controls precede local component controls;
+ * endpoints read only their anchor, interiors retain all selected
+ * anchors/handles and typed closure. Controls reconstruct with RN64; the exact
+ * polynomial rounds once to dtype. Interior exact zero is -0 only if every
+ * reconstructed control is -0; nonzero underflow keeps its sign. Caller
+ * floating environment is unchanged. Invalid requested indices/t fail
+ * InvalidArgument/InvalidDomain; nonfinite demanded controls fail
+ * OperationFailed/InvalidDomain; actual reconstruction or output overflow fails
+ * OperationFailed/ArithmeticOverflow. All identify the dependent Atom;
+ * typed/upstream/resource/cancellation errors are preserved. Cache witnesses
+ * include selected row controls and local component support. Empty reads
+ * nothing; bounded resources/work can fail explicitly.
+ */
+inline Result<WorkflowNode> evaluate_bezier_node(
+    std::uint64_t id, WorkflowInput anchors, WorkflowInput handles,
+    WorkflowInput segment_indices, WorkflowInput t, std::int64_t degree,
+    ElementType dtype = ElementType::Float64,
+    CpuNumericProfile profile = CpuNumericProfile::Strict) {
+  const char* suffix = profile == CpuNumericProfile::Strict ? "_strict"
+                       : profile == CpuNumericProfile::AppleSiliconNeon
+                           ? "_accelerated_apple_silicon"
+                       : profile == CpuNumericProfile::X86Avx2
+                           ? "_accelerated_x86_64"
+                           : nullptr;
+  if (!id || !suffix || (degree != 2 && degree != 3) ||
+      (dtype != ElementType::Float32 && dtype != ElementType::Float64))
+    return Result<WorkflowNode>(
+        Status{ErrorCode::InvalidArgument,
+               "invalid parametric Bezier id/degree/dtype/profile",
+               FailureReason::InvalidDomain,
+               {FailureOrigin::Schema, FailureScope::Unspecified}});
+  return Result<WorkflowNode>(WorkflowNode{
+      id,
+      std::string("curve.evaluate_bezier") + suffix,
+      {std::move(anchors), std::move(handles), std::move(segment_indices),
+       std::move(t)},
+      {{"degree", degree},
+       {"dtype",
+        std::string(dtype == ElementType::Float32 ? "float32" : "float64")}}});
+}
 }  // namespace ps::numeric

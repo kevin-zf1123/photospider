@@ -508,3 +508,48 @@ y=.75*t+.75*t^2-.5*t^3, and a rational root t=1/12 with control y values
 452/480 us. They require 10 and 8 Bx sign attempts respectively, one evaluated
 value and zero fallbacks, with 519720 payload bytes. These small measurements
 do not establish a general accelerated speedup.
+
+
+## CRV-03 parametric Bezier evaluation
+
+`parametric_bezier.cpp` uses the existing ExactSampling and ExactPolynomial
+facilities without an inverse/topology stage. Demanded controls widen exactly,
+relative handles reconstruct with RN64, and exact Bernstein coefficients are
+converted to power form. Horner uses integer t*2^1074 and denominator
+2^(actual_degree*1074), retaining coefficient units 2^-1075. Trimming the degree
+also changes the denominator; constant/zero polynomials use denominator one.
+The exact numerator has fewer than 5329 bits for degree<=3 and t in [0,1];
+rounding temporaries need under approximately 5330 bits and at most 16 live
+arena slots. The existing 40960-bit/96-slot continuation admits those bounds
+without allocating private arithmetic state. Interior exact zero tests raw
+reconstructed-control zero signs; a nonzero underflow keeps its exact sign.
+Endpoint conversion bypasses all other controls. Finite output obeys the
+correctly converted control convex hull, including extended infinite bounds.
+
+The three-poll regional protocol projects Q onto query rows, reads/validates
+segment indices and t once per row, then declares local component control
+Data plus recognized typed Validation. Image handles close Validation across
+all channels while preserving scalar Data. Each output cell retains its own
+certificate; transport deduplicates source coordinates, and no global K/D/N
+scan or full output allocation is used for sparse demand. Explicit metadata
+reservation per Need is 4096+16384*M bytes in addition to managed row/point
+vectors, output fragments, publication owners and exact continuation scratch.
+Dense association/resource exhaustion is an explicit failure. Work checks
+cover reads, row/component loops, reconstruction, limb arithmetic and publication.
+
+On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
+Clang 18.1.3 strict/AVX2 passed 1428 independent Fraction Bernstein cases per
+profile. The oracle reconstructs controls with its own integer IEEE rounding
+and uses direct Bernstein weights instead of production power-Horner. Cases
+include mixed types, unordered/repeated segments, partial components, wide
+exponents, subnormal and near-one t, selected/unselected invalid data, RN64
+midpoints, signed zeros and Float32 finite cancellation across extreme controls.
+Five public manual groups passed on each profile: analytic and reconstruction
+fixtures; sparse dependency/dirty and Atom isolation; strides/fenv/Empty/schema
+and resource interruption; cache/large sparse composition and typed closure;
+upstream ordering. The public constant compositions check 2^39 columns and
+2^40 rows with tiny actual requests. Independent review checked 96 additional
+Fraction Bernstein/power expansions and closed the endpoint-overflow diagnostic
+fix using a t=1 regression whose unneeded handles are NaN. Installed 0.15
+consumers, focused compiler unit, formatting/lint and scoped math/entry reviews
+passed. No new CTest/integration registration or performance claim was added.

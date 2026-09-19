@@ -11,7 +11,8 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
+verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -33,8 +34,9 @@ CRV-03 target. Individual coordinate components may turn back or repeat.
 
 The mathematical operation evaluates B(t); it does not solve Bx(t)=x as
 [CRV-02](CRV-02_sample_bezier_function.md) does. Query parameters are explicit
-input data; no arc-length interpretation is implied. No runtime operation or
-implementation result is claimed.
+input data; no arc-length interpretation is implied. The three explicit profile
+keys and public `evaluate_bezier_node` constructor are implemented; Proposed
+continues to describe specification acceptance status.
 
 ## Confirmed control representation
 
@@ -228,12 +230,39 @@ An endpoint request must ignore invalid handles and the opposite endpoint; a
 component request ignores unrelated components and unrequested invalid index/t.
 Verify these by exact read logs and dirty mappings, including typed closures.
 
-The future public fixture binds all four inputs, supplies degree/dtype, names
-values and executes through Compiler/ExecutionContext. Delivery includes actual
-build/run commands and output inspection, full/partial comparisons, negative/
-zero strides, work/capacity/stage failure, cancellation, cache-off and lifetime
-after context destruction. No target registry implementation, runtime conformance
-or platform benchmark is claimed by this specification.
+The maintained public fixture in `examples/numeric_workflow/parametric.cpp`
+binds all four inputs, supplies degree/dtype and executes the named values
+through Compiler/ExecutionContext. It checks the analytic fixtures above,
+RN64 reconstruction, endpoint overflow diagnostics, sparse support/dirty,
+independent Atom failures, negative/zero/unaligned strides, caller fenv,
+work/cancel/state/stage failures and owner release, segment/t cache replacement,
+typed Image handle closure, source failure ordering and large sparse public
+constant-node composition. The latter requests two components of a logical
+2^39-column result and the last row of a logical 2^40-row result.
+
+On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
+Clang 18.1.3 strict/AVX2 passed five manual groups and 1428 independent exact
+Bernstein/RN64 cases per profile. Installed 0.15 consumers, focused compiler
+unit, formatting/lint and independent arithmetic/entry review passed. WSL
+provides numerical correctness evidence, with no performance claim.
+
+Production evaluates the whole polynomial using exact integer power-Horner
+and one final rounding after the separate RN64 control reconstruction. All
+three profiles currently agree bitwise; NEON/AVX2 use integer publication and
+arithmetic helpers. ExactPolynomial's admitted fixed workspace is reused with
+a smaller 5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse
+or global topology pass is performed. Query rows are projected/deduplicated;
+source transport is deduplicated by the host, while certificates stay per-cell.
+Per-Need certificate reservation is 4096+16384*M metadata bytes for M requested
+cells, in addition to explicit row/output owners and exact scratch. Large
+dense requests can exhaust association/metadata limits; sparse D/N requests
+need no full logical array allocation.
+
+Build/run commands and editable use are maintained in
+[the numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
+The manual target has no CTest or integration registration. See
+[implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
+for arithmetic bounds and validation scope.
 
 - [Curve category](../curves.md).
 - [Operator template](../../00-foundation/spec-template.md).

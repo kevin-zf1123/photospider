@@ -2,7 +2,7 @@
 
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
-状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；范围外的通用 Path、3D 数值求逆等继续为后续设计。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；CRV-01 与 CRV-02 已实现显式 query/采样和精确区域依赖；其余曲线与 field LUT 的实现边界以链接契约和[追踪表](implementation.md)为准。
+状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；范围外的通用 Path、3D 数值求逆等继续为后续设计。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；CRV-01～03 已实现显式 query、函数采样和参数式求值及精确区域依赖；其余曲线与 field LUT 的实现边界以链接契约和[追踪表](implementation.md)为准。
 
 本轮控制点 generator 选择二次/三次 Bézier 锚点与相对控制柄，见
 [CRV-02 具体规格](op_specs/CRV-02_sample_bezier_function.md)。每个节点静态选择 degree，
@@ -17,7 +17,7 @@ strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其�
 | --- | --- | --- | --- |
 | CRV-01 interpolate family | 单函数 x[K],y[K],query[N]→[N]；多函数 x[K],y[K,C],query[N]→[N,C] | 单／多函数与 linear/PCHIP 共四个独立算子；动态 query、全局 x 校验、按请求 y；linear 三版本位一致，PCHIP 加速最终 4 ULP 并保持形状 | [具体规格](op_specs/CRV-01_interpolate.md)，规格 Proposed；十二个 key 已实现并完成公开 workflow 验证，当前三 profile 均精确舍入；旧 sample_linear/monotone 接口单独记录 |
 | CRV-02 bezier_function | anchors/handle offsets+start/end/count → `values[N]`,`axis[3]` | 二次或三次；全局验证 x 单调，按命中段读取 y；先解 Bx(t)=x，再取 By(t)；允许尖角和 y 过冲 | [完整规格](op_specs/CRV-02_sample_bezier_function.md)，Proposed；三 profile keys 已实现并通过 public workflow/oracle 验证；默认资源限制下 dense 大请求可能 ResourceExhausted |
-| CRV-03 evaluate_bezier | anchors/handles+segment_indices[N]+t[N]→[N,D] | 同阶二次／三次参数 Bézier；控制点 RN64 重建，strict 整式正确舍入、加速最终 4 ULP；按段／分量读取 | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed；端点只读锚点、允许回折与退化 |
+| CRV-03 evaluate_bezier | anchors/handles+segment_indices[N]+t[N]→[N,D] | 同阶二次／三次参数 Bézier；控制点 RN64 重建，strict 整式正确舍入、加速最终 4 ULP；按段／分量读取 | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed；三 profile keys 和公开构造器已实现并验证，端点只读锚点、允许回折与退化 |
 | CRV-04 bake_lut1d templates | 六种函数来源+start/end/count→values/axis | 六个独立命名组合模板；作者侧 profile 默认 strict；插值查询固定 Float64；输出按需请求 | [具体规格](op_specs/CRV-04_bake_lut1d.md)，Proposed；不自动保存或冻结，离散误差单独验收 |
 | CRV-05 apply_lut1d family | input+table[L] 或 table[L,C]+axis[3]→同形结果 | 单表与逐通道多表独立；共享动态轴、固定线性插值；三版本位一致；按请求表项／通道读取 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；单点表、反向轴和三种域外策略 |
 | CRV-06 color_ramp family | input+stops+颜色表（有理色相拆分整数分子/分母）→input.shape+[C] | RGB、CMYK、XYZ、CIELAB、CIELCh(ab)、OKLab、OKLCh、HSL、YCbCr 独立实现；携带通用颜色数组描述 | [具体规格](op_specs/CRV-06_color_ramp.md)，Proposed；九种模型已澄清，LCh/HSL 各三入口，原始 hue 保留圈数 |
