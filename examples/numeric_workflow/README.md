@@ -1253,3 +1253,69 @@ requests may exhaust metadata/association budgets. Results remain readable after
 the helper's context is destroyed. The executable stays outside default builds,
 CTest and integration tests; WSL Clang verifies correctness only. See the
 [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-05-dynamic-axis-lut1d).
+
+## Scalar coordinate shapers
+
+`photospider/numeric/shapers.hpp` exposes four composable helpers. All take
+Float32 or Float64 input of rank 1..8 with positive extents, at most `2^40`
+values, and dynamic same-dtype `lower[1]`/`upper[1]` scalars. Output `values`
+retains shape/dtype and has empty facets; a shaper does not change a color
+transfer description. Bounds must be finite and strictly ordered, with
+`0<lower` additionally required for the logarithmic pair.
+
+```cpp
+#include <photospider/numeric/shapers.hpp>
+// graph is a WorkflowDocument; x/lower/upper are ordinary WorkflowInput edges.
+auto linear = ps::numeric::linear_shaper(graph, x, lower, upper, input_descriptor);
+auto inverse = ps::numeric::linear_shaper_inverse(
+    graph, linear.value(), lower, upper, input_descriptor);
+auto logarithmic = ps::numeric::log2_shaper_node(100, x, lower, upper);
+auto log_inverse = ps::numeric::log2_shaper_inverse_node(
+    101, ps::WorkflowNodeOutput{100, "values"}, lower, upper);
+```
+
+Check each `Result` before accessing its value, as the complete editable
+`Fixture` and `examples()` in [shapers.cpp](shapers.cpp) do. Linear helpers
+append ordinary remap, scalar constant, cast and constant-view nodes, return a
+connectable output reference and preserve existing exports. They reserve IDs
+against existing declarations and references. They do not register additional
+primitive keys. The inverse includes the mandatory scalar bound-order guard.
+Log helpers return nodes for the six `curve.log2_shaper{,_inverse}` CPU keys;
+add them and desired exports to the graph normally. All helpers default to
+Strict; pass `CpuNumericProfile` explicitly to select another profile.
+
+For linear bounds `[-2,2]`, input `[-2,0,2,4]` returns `[0,.5,1,1.5]`; inverse
+recovers those inputs exactly. For log bounds `[1,16]`, input `[1,2,4,16,.5,32]`
+returns `[0,.25,.5,1,-.25,1.25]`, and inverse recovers those powers. General
+rounded forward/inverse composition need not recover the original bits. No
+implicit clipping occurs; an explicit numeric clamp can be connected separately.
+Log forward rounds the complete logarithm ratio once; inverse rounds
+`lower*(upper/lower)^t` once without a rounded intermediate ratio. Input NaNs
+retain payload/sign and are quieted. Log forward maps either zero to `-Inf`,
+negative values to canonical NaN, and `+Inf` to `+Inf`; inverse maps `-Inf` to
+`+0` and `+Inf` to `+Inf`. Valid bounds are required before these numeric paths.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_shapers -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_shapers strict
+python3 examples/numeric_workflow/shaper_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_shapers strict
+```
+
+Use `apple` or `x86` on its matching architecture. Five manual groups print
+`PASS`; the independent Fraction/directed MPFR oracle prints `4196` cases and
+checks exact bits and monotonic groups. Manuals inspect public execution,
+reverse singleton partitioning, shared-bound cache replacement, pointwise and
+shared dirty support, ColorArray validation closure, signed-zero inverse guard,
+unaligned/negative strides, floating environment and work/state/stage/cancellation
+failure cleanup. The oracle needs MPFR 4.2+ as described in the existing math
+oracle setup. It is not linked into the product.
+
+Current log profiles agree bitwise. General certified evaluation in accelerated
+profiles records a strict scalar fallback; exact/special branches do not. This
+combined mapping is monotone independently of request partition. Refinement is
+bounded at 4096 fraction bits and can fail `ResourceExhausted/CapacityLimit`;
+host work limits and cancellation can stop it earlier. Every nonempty output
+requires both shared scalars plus local input and its typed validation closure.
+Empty output reads no payload. These manual targets have no integration-test or
+CTest registration. WSL Clang supplies numerical correctness evidence only.

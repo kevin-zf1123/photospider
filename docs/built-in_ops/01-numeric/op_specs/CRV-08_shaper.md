@@ -5,7 +5,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -160,9 +160,9 @@ and cross-fallback/request-partition consistency. Test invalid bound precedence,
 partial reads, shape/strides, exact dirty support, cache-off, resource cancellation
 and owners after context destruction.
 
-These are Proposed interfaces. Implementation must supply public workflow bindings
-and actual run commands/output checks through Compiler/ExecutionContext; current
-conceptual examples and arithmetic oracles are not runtime execution evidence.
+The public workflow and oracle exercise these Proposed interfaces through
+Compiler/ExecutionContext; the maintained command and current validation boundary
+are linked below.
 
 - [Linear template](CRV-08A_linear_shaper.md).
 - [Inverse linear template](CRV-08B_linear_shaper_inverse.md).
@@ -171,3 +171,21 @@ conceptual examples and arithmetic oracles are not runtime execution evidence.
 
 - [Curve category](../curves.md).
 - [NUM-06 remap_range](NUM-06B_remap_range.md).
+
+## Maintained implementation and validation
+
+The two linear authoring helpers are `linear_shaper` and `linear_shaper_inverse`
+in `photospider/numeric/shapers.hpp`; they expand to existing remap/constant
+workflow nodes and are not separate linear primitive registrations. The six log
+primitive keys are exposed by `log2_shaper_node` and `log2_shaper_inverse_node`
+across strict, Apple and x86 profiles. Log evaluation uses a certified whole
+expression with a strict certified scalar fallback and preserves monotonicity and partition
+independence. Refinement precision is bounded to 128..4096; unresolved capacity or
+rounding returns `ResourceExhausted`.
+
+See [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
+and [math implementation](../math-implementation.md) for the target command and
+shared fixture. Native Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2
+passed 4,196 independent Fraction/directed-MPFR cases per profile. All five
+manual groups passed all four profiles. Installed 0.16 consumers, the focused
+compiler unit, ClangFormat 21/cpplint and independent math/entry reviews passed. This target has no integration-test registration.

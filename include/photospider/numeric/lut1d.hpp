@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -14,6 +13,7 @@
 #include "photospider/numeric/curves.hpp"
 #include "photospider/numeric/expression.hpp"
 #include "photospider/numeric/sequences.hpp"
+#include "photospider/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
 /** @brief Owning authoring references to a generic baked table and its axis.
@@ -49,43 +49,6 @@ inline Status endpoints(const SequenceInput& start, const SequenceInput& end) {
       return invalid("LUT baking endpoints require Float32/64 [1]");
   return Status::success();
 }
-inline Result<std::vector<std::uint64_t>> allocate_ids(
-    const WorkflowDocument& document, unsigned count,
-    const std::vector<WorkflowInput>& inputs) {
-  using Answer = Result<std::vector<std::uint64_t>>;
-  if (document.nodes.size() > 65536 - count)
-    return Answer(invalid("LUT baking exceeds 65536 workflow nodes"));
-  std::set<std::uint64_t> declared, used;
-  const auto reserve_reference = [&](const WorkflowInput& input) {
-    if (const auto* source = std::get_if<WorkflowNodeOutput>(&input))
-      used.insert(source->source_node);
-  };
-  for (const auto& node : document.nodes) {
-    if (!node.id || !declared.insert(node.id).second)
-      return Answer(
-          invalid("LUT baking requires unique nonzero existing node ids"));
-    used.insert(node.id);
-    for (const auto& input : node.inputs)
-      reserve_reference(input);
-  }
-  for (const auto& output : document.outputs)
-    used.insert(output.node_id);
-  for (const auto& input : inputs)
-    reserve_reference(input);
-  std::vector<std::uint64_t> ids;
-  ids.reserve(count);
-  std::uint64_t candidate = 1;
-  for (unsigned i = 0; i < count; ++i) {
-    while (used.count(candidate)) {
-      if (candidate == UINT64_MAX)
-        return Answer(invalid("LUT baking node ids exhausted"));
-      ++candidate;
-    }
-    ids.push_back(candidate);
-    used.insert(candidate);
-  }
-  return Answer(std::move(ids));
-}
 inline Result<BakedLut1d> append(WorkflowDocument* document,
                                  std::vector<WorkflowNode> nodes) {
   // Construct all exported metadata before the only document mutation. Reserve
@@ -109,7 +72,8 @@ inline Result<BakedLut1d> interpolation(WorkflowDocument& document,
   auto valid = endpoints(start, end);
   if (!valid.ok())
     return Answer(valid);
-  auto ids = allocate_ids(document, 2, {x, y, start.source, end.source});
+  auto ids = authoring_detail::allocate_ids(document, 2,
+                                            {x, y, start.source, end.source});
   if (!ids.ok())
     return Answer(ids.status());
   auto query = linspace_node(ids.value()[0], std::move(start), std::move(end),
@@ -175,7 +139,7 @@ inline Result<BakedLut1d> bake_lut1d_expression(
   std::vector<WorkflowInput> inputs{start.source, end.source};
   for (const auto& coefficient : coefficients)
     inputs.push_back(coefficient.second);
-  auto ids = lut1d_detail::allocate_ids(document, 1, inputs);
+  auto ids = authoring_detail::allocate_ids(document, 1, inputs);
   if (!ids.ok())
     return Answer(ids.status());
   auto node = sample_expression_node(
@@ -201,7 +165,7 @@ inline Result<BakedLut1d> bake_lut1d_bezier(
   auto valid = lut1d_detail::endpoints(start, end);
   if (!valid.ok())
     return Answer(valid);
-  auto ids = lut1d_detail::allocate_ids(
+  auto ids = authoring_detail::allocate_ids(
       document, 1, {anchors, handles, start.source, end.source});
   if (!ids.ok())
     return Answer(ids.status());

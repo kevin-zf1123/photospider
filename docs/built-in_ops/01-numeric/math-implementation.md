@@ -771,3 +771,56 @@ work/state/stage limits, support/final-sum interruption, per-color Atom failures
 and required upstream producer order. Executable commands are in the
 [public example](../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
 No integration or CTest entry is added, and WSL is a correctness environment.
+
+## CRV-08 whole-formula shapers
+
+The public linear pair expands existing whole-rational remap and scalar views.
+The inverse explicitly computes `remap(lower,lower,upper,lower,lower)` before
+broadcasting the target lower bound. This enforces source bound order while
+preserving raw lower bits, including -0. Float32 zero/one literals use an exact
+existing scalar cast; graph construction performs no payload computation. The
+shared bounded ID allocator is also used by LUT1D baking.
+
+`ExactShaper` evaluates the logarithm ratio or `L*(U/L)^t` as one mathematical
+expression. Endpoints and IEEE extensions use raw bits. Equal odd significands
+reduce the forward ratio to exact integer exponent differences. For the inverse,
+write `L=l*2^e`, `U/L=(a/b)*2^d` with coprime odd `a,b`, and `t=m*2^s`.
+Exact integer square roots handle negative `s`; denominator factors must divide
+`l` before exponentiation. The resulting dyadic odd core is retained through one
+IEEE rounding, including actual midpoints and half-minsubnormal ties. A core
+larger than the destination midpoint precision need not be forced into this
+branch; certified intervals handle it. Pure powers classify very large positive
+or negative total exponents without overflow in intermediate arithmetic.
+
+Remaining cases use independently rounded log enclosures at fraction precisions
+128,256,...,4096. Forward subtracts enclosed logarithms and divides enclosed
+complete differences. Inverse first encloses `z=ln(L)+t*(ln(U)-ln(L))`; only this
+complete `z` is range-classified. It then encloses `z-k*ln(2)` near zero,
+exponentiates that residual and carries `2^k` to final rounding. This keeps
+subnormal answers representable in scratch and prevents an overflowing rounded
+`U/L` from changing semantics. Both enclosure endpoints must round to identical
+output bits. Unresolved precision is `ResourceExhausted/CapacityLimit`; work and
+cancellation failures are terminal, not refinement retries.
+
+All returned finite numeric paths correctly round the same monotone function.
+Thus their combination is monotone without sorting output requests or choosing
+a path from batch values. Accelerated keys report `FunctionUnsupported` scalar
+fallback exactly when general strict interval evaluation begins, including an
+attempt subsequently interrupted by the host. No claimed SIMD throughput or
+WSL performance result follows from this correctness path.
+
+The three-poll log continuation requests shared scalar Control/Validation,
+then local input Data/Validation, then publishes immutable generic fragments.
+Typed input closure can read the full containing color while output remains a
+scalar observation. Bounds errors precede input special values. The state uses
+host-owned fixed arithmetic, vectors and publication owners; Need reservation
+is `4096+16384*M` metadata bytes. Each certificate and extended arithmetic loop
+consumes host work. Empty is completed by the host without entering the state.
+
+The public manual and 4196-case Fraction/directed MPFR reference cover both
+dtypes, four forms, exact roots and midpoint ties, near-equal and extreme
+bounds, raw IEEE special values, under/overflow and monotonic clusters. Five
+manual groups additionally inspect partition/cache/dirty behavior, all-port
+strides and fenv, ColorArray closure, Empty, inverse -0, state/work/stage limits,
+refinement cancellation, fallback diagnostics and escaped owners. See the
+[commands and editable workflow](../../../examples/numeric_workflow/README.md#scalar-coordinate-shapers).
