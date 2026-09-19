@@ -470,3 +470,43 @@ Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,110
 independent oracle cases per profile and the manual matrix checks. Installed
 strict/Apple consumers, the focused compiler unit and scoped reviews passed.
 WSL measurements support numerical correctness only.
+
+## Discrete derivatives and cumulative integration: NUM-15
+
+`photospider/numeric/calculus.hpp` provides `derivative_1d_node(id, samples,
+step, profile)` and `integrate_1d_node(id, samples, step, initial, profile)`.
+All ports share Float32 or Float64 dtype. Samples are `[N]`, controls `[1]`, and
+output `values[N]` has empty facets. Derivatives require N>=2; integration N>=1.
+Both cap N at 2^40. Step must be finite/nonzero when it is needed; negative step
+is valid. Use explicit graph inputs with these constructors in a WorkflowDocument.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_calculus -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_calculus strict
+python3 examples/numeric_workflow/calculus_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_calculus strict
+```
+
+The executable checks derivative `[0,1,4]`, step `1` -> `[1,2,3]`, and cumulative
+integration `[0,1,2]`, step `1`, initial `0` -> `[0,0.5,2]`. Derivative endpoints
+are one-sided and interiors use a two-point central stencil; the center sample
+is not read for its own interior output. Integration output zero copies initial
+bits including sNaN/-0 without calling step or sample producers. Positive
+outputs validate step first and use an exact weighted prefix plus initial, with
+one final rounding. These formulas are discrete approximations to an underlying
+continuous function, not exact continuous differentiation/integration.
+
+Editable manual checks cover exact support/dirty, invalid-step Atom isolation,
+failing-producer order, all-port strides/fenv, Empty/schema, work/cancellation
+and release. A 4096-value constant signal is read once through 66 windows for
+four sparse integral outputs. Dense requested boundaries can incur quadratic
+association work; resource/stage limits are explicit. Separate calls and
+execute_atoms may repeat scans. There are no persistent checkpoints.
+
+The manual target is excluded from the default build and has no CTest or
+integration registration. Use `apple` or `x86` for the corresponding CPU profile.
+
+Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,810
+independent calculus cases per profile and the manual checks. Installed
+strict/Apple consumers, focused compiler unit and scoped reviews passed.
+WSL is used for numerical correctness, with no performance claim.

@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -112,5 +112,44 @@ requests. Exercise disjoint outputs, dynamic step/initial invalidation, source
 strides, low work/capacity limits, checkpoint partition invariance, cancellation,
 cache-off and result lifetime through actual public WorkflowDocument execution
 when implemented. This trapezoidal rule approximates an underlying function's
-integral; exact rounding concerns the stated discrete formula. No versioned
-runtime implementation or tests are claimed by this specification.
+integral; exact rounding concerns the stated discrete formula. Implementation evidence below records the checks actually run.
+
+
+## Implementation and executable acceptance
+
+Six suffixed calculus keys are registered in `numeric_calculus.cpp`; public
+helpers are `derivative_1d_node` and `integrate_1d_node` in
+`photospider/numeric/calculus.hpp`. Regional execution first requests step as
+Control/Validation for dependent observations. Integration always requests
+initial as Data/Validation and does not request step or samples for index zero.
+Positive outputs retain their actual sample support even when initial is NaN.
+
+Derivative uses exact integer differences and a positive step magnitude,
+including the exact interior factor two; the sign includes step's sign. The
+4352-bit ratio scratch covers all required alignment/refinement. Integration
+retains an exact unweighted sum, source classification, and first/last samples.
+A separate conversion workspace forms `2*sum-first-last`, multiplies by the
+full exact step coefficient, adds aligned initial, then rounds with scale
+-2149. Its numerator needs at most 4237 bits and rounding scratch at most 4238.
+Initial-only output is a raw copy, while positive exact-zero outputs are +0.
+
+Integration transports at most 64 samples per window and scans to the largest
+requested index once per regional invocation. Every window retains complete
+per-observation associations; dense boundary requests can incur quadratic
+metadata work. State, output plan and metadata are accounted; work/capacity/stage
+limits reject excessive requests. There are no persistent checkpoints, and
+separate executions or execute_atoms observations can repeat numeric work.
+
+The manual `photospider_numeric_calculus` target, `calculus.cpp`, and independent
+`calculus_oracle.py` are documented in
+[the workflow example](../../../../examples/numeric_workflow/README.md).
+Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,810
+independent Fraction/raw-bit cases per profile on 2026-09-19 and the manual
+workflow checks: sparse stencil/center-NaN exclusion, raw initial-only output,
+invalid-step Atom isolation and producer order, required upstream failure after
+initial NaN, all-port strides/fenv, Empty/schema, WorkLimit/cancellation and
+release. A 4096-input integral with four sparse outputs uses 66 windows and
+exact sample/step/initial dirty support. Installed strict/Apple consumers,
+focused compiler unit, formatting/lint and scoped math/entry reviews passed.
+The manual target has no CTest/integration registration; specification status
+remains Proposed independently of implementation evidence.
