@@ -24,10 +24,10 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-This draft records the endpoint-defined sequence generator as a separate
-operation from the step-defined NUM-02B arange generator. The maintainer selected
-two independent operators and specifications, rather than a shared mode switch.
-This is specification work; no runtime implementation or ADR change is implied.
+This contract records the endpoint-defined sequence generator separately from
+the step-defined NUM-02B arange generator. Both independent operators are
+implemented; their public entry points and validation are recorded below.
+Specification acceptance remains Proposed.
 
 ## Confirmed scope
 
@@ -229,9 +229,11 @@ On 2026-09-14 the strict and Apple Silicon profiles passed local public-workflow
 checks and 960 independent Fraction/IEEE cases per profile. Ubuntu WSL Clang
 strict and x86-64 AVX2 passed the same oracle. Local installed-consumer execution
 also passed. Resource, cancellation, exact cache, tuple certificates, independent
-axis failures and owner lifetime have manual checks. No integration registration
-or performance benchmark is included. Specification acceptance remains separate
-from this implementation record.
+axis failures and owner lifetime have manual checks. No integration registration is included. On 2026-09-20 the manual
+[category timing/accounting driver](../../../../examples/numeric_workflow/README.md#native-category-timing-and-accounting)
+measured N=1/256 on native Clang Strict/Apple with exact output checks and managed
+resource accounting. Specification acceptance remains separate from this
+implementation record.
 
 ## Related contracts
 

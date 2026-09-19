@@ -20,11 +20,11 @@ Each scalar element of input maps to one complete color, with output shape
 input.shape+[C]. Nonuniform stop spacing is supported. This scalar-to-color
 mapping differs from CRV-05's independent per-input-channel table application.
 
-The maintainer explicitly requires separate implementations/specifications for
-RGB, CMYK, XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. Do not implement them as an unspecified
-color-model mode of one numeric interpolator. RGB is clarified first; each other
-model's exact color definition, channel domains, reference parameters and alpha
-handling will be specified separately. CIELAB/CIELCh(ab) and OKLab/OKLCh are
+The maintainer requires separate implementations/specifications for RGB, CMYK,
+XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. They are implemented as
+separate current runtime paths, not as an unspecified color-model mode of one
+numeric interpolator. Each linked specification records its exact color
+definition, channel domains, reference parameters and alpha handling. CIELAB/CIELCh(ab) and OKLab/OKLCh are
 separate required pairs; their scales, reference whites and hue conventions
 must not be interchanged.
 

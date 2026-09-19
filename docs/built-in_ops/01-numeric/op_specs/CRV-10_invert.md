@@ -33,7 +33,8 @@ is outside this initial scope. Separate invert_linear and invert_pchip operation
 invert their corresponding forward interpolation functions. Linear solves its
 selected segment directly; PCHIP solves the corresponding cubic segment, rather
 than swapping x/y and fitting a different PCHIP curve. The following clauses
-complete the initial clarification; runtime implementation remains Proposed.
+complete the initial clarification; the runtime implementation is available
+through the six registered keys while this specification remains Proposed.
 
 Dynamic inputs are x[K], y[K], query[N]. x is finite and strictly increasing;
 y is finite and either strictly increasing or strictly decreasing globally.

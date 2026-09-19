@@ -3,7 +3,7 @@
 These editable workflows use the installed C++ API. Their targets are excluded
 from the default build and have no CTest registration. The category's
 [implementation table](../../docs/built-in_ops/01-numeric/implementation.md)
-records the remaining families.
+records the completed families and delivery validation.
 
 ## ColorArray facilities
 
@@ -1728,3 +1728,139 @@ validation and publication, and establish no speedup. The present continuous
 Blackman global polynomial path and disjoint certificate construction are costly;
 callers should use explicit budgets and small requests while composing workflows.
 WSL timing is intentionally not used as a performance reference.
+
+## Native category timing and accounting
+
+`category_benchmark.cpp` supplies a public-API, manual measurement for the 18
+remaining NUM/CRV functional clusters. It checks every returned element against
+an independent analytic bit pattern on every repetition, reads the first value
+again after the context has been destroyed, and requires all managed payload and
+metadata charges to reach zero after the retained output is released.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_category_benchmark -j 4
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark strict > build/category-strict.csv
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple > build/category-apple.csv
+```
+
+Expected: 36 CSV rows per profile, exit 0, with the fixture checks below passing.
+The actual run on 2026-09-20 used Apple M5, Clang 21, RelWithDebInfo, one CPU
+worker, CPU-only execution, and both result/dependency caches disabled. There
+are three repetitions per row. These are workflow execution times, including
+planning of runtime dependencies, validation and output publication. Graph
+construction, compilation, freeze, result checking and result destruction are
+outside the timer. The context is reused for three executions; there is no
+separate discarded warm-up. Median and maximum are reported, with no statistical
+percentile or throughput claim from three samples. No build or other acceptance
+process ran concurrently with these measurements. WSL is used only for numerical
+correctness and supplies no timing reference.
+
+Each cluster has a small analytic fixture and a declared larger exploratory
+shape: N=1 and N=256, except integration uses N+1 samples and baking uses cube
+side 2 and 5. These modest shapes exercise the current dependency machinery;
+they do not establish maximum-shape throughput or cover every primitive,
+parameter, model and dtype in a cluster. Values use Float64, with Int64 gather
+and Bézier indices and a UInt8 comparison output. All requests are Whole.
+CRV-04 has no separate arithmetic primitive; its public baking composition is
+covered by the LUT and expression workflows above.
+
+| Cluster / measured operation | Inputs and exact expected result |
+| --- | --- |
+| NUM-02 linspace | Scalars 0 and N-1; N outputs equal 0..N-1 |
+| NUM-03 constant (dense) | Scalar 1.5; N copies of the same Float64 bits |
+| NUM-06 remap_range | N copies of x=.25, input bounds [0,1], output bounds [-2,2]; every result -1 |
+| NUM-07 is_close | N copies of 1 and 1.125, atol=.125, rtol=0; every UInt8 result 1 |
+| NUM-08 smoothstep | N copies of x=.5 with bounds [0,1]; every result .5 |
+| NUM-09 transpose (dense) | [N,2] consecutive integers; output [2,N] at [j,i] equals 2*i+j |
+| NUM-10 gather | 0..N-1 with reversed Int64 indices; output N-1..0 |
+| NUM-11 reduce_sum | N unit samples; one output N, exactly N accumulator input attempts |
+| NUM-12 sort (values export) | Reversed 0..N-1; sorted values 0..N-1 |
+| NUM-13 prefix_sum | N unit samples; N+1 outputs 0..N, exactly N accumulator input attempts |
+| NUM-14 matrix_transform | N vectors [2,2], identity 2x2 matrix, bias [1,1]; every vector [3,3] |
+| NUM-15 integrate_1d | N+1 unit samples, step 1, initial 0; outputs 0..N |
+| CRV-03 evaluate_bezier | Quadratic anchors [[0,0],[2,0]], relative handle [1,2], N queries t=.5 on segment 0; [1,1] each |
+| CRV-05 apply_lut1d | Table [0,2], axis [0,1,1], N queries .25; .5 each |
+| CRV-06 color_ramp_rgb | Linear-transfer RGB black/white stops 0/1; N queries .5; [.5,.5,.5] each |
+| CRV-07 apply_lut3d_trilinear | Identity 2x2x2 XYZ table; N colors [.25,.5,.75] returned unchanged |
+| CRV-08 log2_shaper | N copies of 4, scalar bounds [1,16]; .5 each |
+| CRV-09 bake_lut3d template | Identity XYZ source, side 2/5, axis 0..1, trilinear, atol=rtol=0; globally gated table equals exact grid coordinates |
+
+Times below are **median / maximum in milliseconds**. Larger shape refers to
+the declared N=256 or side-5 fixture, not an implementation limit.
+
+| Cluster | Small Strict | Small Apple | Larger Strict | Larger Apple |
+| --- | ---: | ---: | ---: | ---: |
+| NUM-02 | 0.112 / 0.536 | 0.101 / 0.176 | 62.565 / 63.224 | 67.225 / 67.619 |
+| NUM-03 | 0.078 / 0.116 | 0.081 / 0.099 | 0.080 / 0.094 | 0.082 / 0.084 |
+| NUM-06 | 0.122 / 0.137 | 0.119 / 0.122 | 109.375 / 110.556 | 114.585 / 114.942 |
+| NUM-07 | 0.099 / 0.130 | 0.093 / 0.099 | 0.184 / 0.184 | 0.167 / 0.169 |
+| NUM-08 | 0.106 / 0.116 | 0.100 / 0.105 | 82.447 / 85.433 | 82.208 / 82.611 |
+| NUM-09 | 0.101 / 0.146 | 0.098 / 0.112 | 0.137 / 0.139 | 0.135 / 0.136 |
+| NUM-10 | 0.100 / 0.112 | 0.100 / 0.109 | 2.182 / 2.263 | 2.229 / 2.350 |
+| NUM-11 | 0.103 / 0.121 | 0.081 / 0.088 | 0.210 / 0.219 | 0.198 / 0.213 |
+| NUM-12 | 0.084 / 0.108 | 0.074 / 0.087 | 163.261 / 185.410 | 157.608 / 157.656 |
+| NUM-13 | 0.093 / 0.137 | 0.067 / 0.100 | 126.692 / 127.284 | 125.140 / 127.949 |
+| NUM-14 | 0.146 / 0.165 | 0.142 / 0.160 | 8.836 / 9.116 | 8.484 / 8.819 |
+| NUM-15 | 0.126 / 0.160 | 0.128 / 0.137 | 194.473 / 195.772 | 195.033 / 202.138 |
+| CRV-03 | 0.270 / 0.301 | 0.253 / 0.287 | 30.289 / 30.487 | 26.653 / 26.772 |
+| CRV-05 | 0.143 / 0.177 | 0.156 / 0.168 | 9.060 / 9.152 | 8.292 / 8.358 |
+| CRV-06 | 2.085 / 2.119 | 2.076 / 2.116 | 43.732 / 43.760 | 36.195 / 36.374 |
+| CRV-07 | 0.391 / 0.408 | 0.367 / 0.401 | 64.018 / 65.629 | 59.307 / 59.877 |
+| CRV-08 | 0.135 / 0.165 | 0.119 / 0.156 | 4.111 / 4.250 | 4.100 / 4.120 |
+| CRV-09 | 19.823 / 19.893 | 19.309 / 19.476 | 70.785 / 71.746 | 68.568 / 69.089 |
+
+Managed measurements below are bytes, written **small → larger**. Payload peak
+includes admitted arithmetic/continuation scratch and published storage; the
+current public counter does not separate those two contributions. Metadata peak
+covers the context's freeze and all three executions. Retained payload/metadata
+are read after context/frozen-plan destruction with only the output retained.
+These exact resource counts were equal between the two profiles. Source payloads
+are allocated before the context and excluded; legacy STL bookkeeping/control
+blocks and process RSS are outside this admission model. Output payload bytes
+equal retained payload bytes in these fixtures.
+
+| Cluster | Peak payload | Peak metadata | Retained payload | Retained metadata | Source support elements | Numeric evaluations |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| NUM-02 | 1120 → 3160 | 4960 → 1141504 | 8 → 2048 | 544 → 139264 | 1 → 2 | 1 → 256 |
+| NUM-03 | 48 → 2088 | 4272 → 4272 | 8 → 2048 | 544 → 544 | 1 → 1 | 1 → 256 |
+| NUM-06 | 3144 → 5184 | 11080 → 2214520 | 8 → 2048 | 544 → 139264 | 5 → 1280 | 1 → 256 |
+| NUM-07 | 2329 → 2584 | 5528 → 5528 | 1 → 256 | 544 → 544 | 2 → 512 | 1 → 256 |
+| NUM-08 | 7864 → 9904 | 7768 → 1828328 | 8 → 2048 | 544 → 139264 | 3 → 768 | 1 → 256 |
+| NUM-09 | 408 → 4488 | 10168 → 10168 | 16 → 4096 | 5968 → 5968 | 2 → 512 | 2 → 512 |
+| NUM-10 | 5216 → 7256 | 21832 → 3261352 | 8 → 2048 | 5792 → 5792 | 2 → 512 | 1 → 256 |
+| NUM-11 | 4176 → 4176 | 40952 → 40952 | 8 → 8 | 5792 → 5792 | 1 → 256 | 1 → 256 |
+| NUM-12 | 4224 → 38904 | 27464 → 2049328 | 8 → 2048 | 5792 → 1482752 | 1 → 256 | 1 → 256 |
+| NUM-13 | 6176 → 10256 | 96704 → 6367808 | 16 → 2056 | 5792 → 5792 | 1 → 256 | 1 → 256 |
+| NUM-14 | 2936 → 7016 | 63080 → 13586248 | 16 → 4096 | 5968 → 5968 | 8 → 518 | 2 → 512 |
+| NUM-15 | 6024 → 10104 | 81296 → 10274824 | 16 → 2056 | 5792 → 5792 | 4 → 259 | 2 → 257 |
+| CRV-03 | 519680 → 527840 | 143752 → 20597608 | 16 → 4096 | 5968 → 5968 | 8 → 518 | 2 → 512 |
+| CRV-05 | 287000 → 291080 | 110736 → 9984072 | 8 → 2048 | 5792 → 5792 | 6 → 261 | 1 → 256 |
+| CRV-06 | 723936 → 736176 | 70648 → 8192248 | 24 → 6144 | 5968 → 5968 | 9 → 264 | 3 → 768 |
+| CRV-07 | 522024 → 534264 | 129976 → 15114776 | 24 → 6144 | 5968 → 5968 | 36 → 801 | 3 → 768 |
+| CRV-08 | 208384 → 212464 | 75568 → 8832952 | 8 → 2048 | 5792 → 5792 | 3 → 258 | 1 → 256 |
+| CRV-09 | 543248 → 550808 | 424380 → 4001956 | 192 → 3000 | 6032 → 6032 | unavailable → unavailable | 3 → 192 |
+
+`source_elements` is the unique named source support union, not physical read
+calls. NUM-11/13 additionally assert actual accumulator attempts. NUM-15 reports
+2/257 sample accumulator attempts and includes two scalar controls in source
+support. CRV-09's Result path currently returns no sample dependency-evidence
+object; its source support is explicitly `unavailable`, not zero. Its only
+external source is the nine-value axis. Its 3/192 numeric evaluations are the
+interpolated validation-center components, not a claim that all generated table
+components were included in that counter. The table request still executes the
+global zero-tolerance quality gate; all expected table values are checked.
+
+Every case passed exact bits and reported zero strict fallbacks in this fixture.
+That describes these chosen exact/dyadic cases only; general logarithms, transfer
+functions and other accelerated operations can take the documented Strict
+fallback paths. Both profiles' CSVs include the same raw fields for every row.
+
+The driver explicitly admits 256 MiB live payload, 128 MiB managed metadata and
+64 MiB per-session state, with work limits of 64*2^30 execution and 32*2^30
+per-dependency units. The first attempted 256-query Bézier run reached the
+16 MiB default metadata ceiling; the final measured peak is shown above. This is
+an example of explicit caller admission, not a change to library defaults.
+Large dense association sets remain expensive, particularly sequence/remap,
+sort and prefix/integration requests. These measurements complement the sparse,
+streamed, resource-limit and independent numerical acceptance cases; they do not
+justify a production throughput promise.

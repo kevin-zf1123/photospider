@@ -1,8 +1,8 @@
 # 曲线、采样与 LUT
 
-已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)。规格表中的 Proposed 表示契约状态，不表示当前 runtime 未注册；NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，详细实现事实和验证边界见[实现进度](implementation.md)及对应 workflow README。分类表中的建议参数不覆盖现有接口。
 
-状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；范围外的通用 Path、3D 数值求逆等继续为后续设计。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；CRV-01～03 已实现显式 query、函数采样和参数式求值及精确区域依赖；其余曲线与 field LUT 的实现边界以链接契约和[追踪表](implementation.md)为准。
+状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；规格状态与运行时状态独立。NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，各簇实现事实、workflow 命令和验证边界以对应规格、README 与[实现进度](implementation.md)为准。输入使用Float32/64；控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar。
 
 本轮控制点 generator 选择二次/三次 Bézier 锚点与相对控制柄，见
 [CRV-02 具体规格](op_specs/CRV-02_sample_bezier_function.md)。每个节点静态选择 degree，

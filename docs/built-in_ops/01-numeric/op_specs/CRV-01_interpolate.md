@@ -61,11 +61,11 @@ Source inspected at the front-matter commit:
 - Static domain_min/domain_max and count generate an increasing uniform grid;
   count is 2..1048576 and out_of_domain is reject/clip. Output is a rank-1
   array with input dtype. These are not explicit-query input interfaces.
-- The [shared implementation](../../../../plugins/ops/01-numeric/curve_common.hpp)
-  validates every x/y control as finite and requires increasing x. The monotone
-  path forms rounded Float64 slopes and clips computed values to local endpoint
-  bounds. Its current rounding and demand behavior do not establish the future
-  versioned CRV-01 contracts.
+- The legacy `curve.sample_linear`/`curve.sample_monotone` implementation uses
+  Whole output and static domains; it is separate from the maintained explicit-
+  query CRV-01 keys. The current explicit-query implementation and its exact
+  demand behavior are recorded in the maintained section below and in the
+  public workflow README.
 
 ## Related specifications
 

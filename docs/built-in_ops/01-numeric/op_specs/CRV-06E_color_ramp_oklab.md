@@ -24,7 +24,8 @@ The maintainer requires separate CIELAB, CIELCh(ab), OKLab and OKLCh ramp
 implementations. This specification covers OKLab only, rather than an ambiguous
 Lab mode. Use explicit stops and a model-described color array under the
 [ramp family](CRV-06_color_ramp.md). This primitive's clarification is complete;
-its ColorArray representation and registry implementations remain Proposed.
+its ColorArray representation and registry implementation are available in the
+current runtime; the specification remains Proposed.
 
 ## Confirmed interpolation and white
 
