@@ -33,7 +33,7 @@ struct NumericDiagnostics final {
   CpuNumericProfile profile = CpuNumericProfile::Unspecified;
   std::array<char, 256> implementation{};
   /** @brief Admitted numeric evaluations, including later failed attempts.
-   * Pointwise operations count output-value attempts. Exact reducers count
+   * Most operations count output-value attempts. Exact reducers count
    * accumulator input attempts; metadata-only reduce_count reports zero.
    * OperationTiming::computed_elements separately counts output elements.
    */

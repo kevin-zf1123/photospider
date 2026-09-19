@@ -475,6 +475,16 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
     DependencyRequest request, const BufferAllocator& allocator,
     std::shared_ptr<const void> definition, std::uint64_t host_proxy_bytes,
     std::function<Status(std::uint64_t)> shared_work, bool joint_serialized) {
+  // Preserve every resolved output contract for the opt-in common namespace
+  // before selecting one independent public result. No output witness is
+  // shared.
+  std::string common_blocks;
+  if (traits.share_blocks_across_outputs) {
+    content_internal::Sha256 shared;
+    shared.text("photospider.cross-output-block-contract.v1");
+    contract_internal::append_traits(&shared, traits);
+    common_blocks = shared.finish();
+  }
   auto selected = select_operation_output(traits, request.output_index);
   if (!selected.ok())
     return Result<std::shared_ptr<DependencySession>>(selected.status());
@@ -559,43 +569,52 @@ Result<std::shared_ptr<DependencySession>> DependencySession::create(
                  request.backend,
                  request.cancellation,
                  request.output_index};
-  content_internal::Sha256 identity;
-  identity.text("photospider.dependency-contract.v1");
-  identity.text(operation);
-  identity.integer(static_cast<std::uint32_t>(impl->query.backend));
-  contract_internal::append_traits(&identity, impl->traits);
-
-  identity.integer(impl->query.parameters.size());
-  for (const auto& entry : impl->query.parameters) {
-    identity.text(entry.first);
-    identity.integer(entry.second.index());
-    if (const auto* number = std::get_if<std::int64_t>(&entry.second)) {
-      identity.integer(static_cast<std::uint64_t>(*number));
-    } else if (const auto* number = std::get_if<double>(&entry.second)) {
-      std::uint64_t bits;
-      std::memcpy(&bits, number, sizeof(bits));
-      identity.integer(bits);
-    } else if (const auto* boolean = std::get_if<bool>(&entry.second)) {
-      identity.integer(*boolean);
-    } else {
-      identity.text(std::get<std::string>(entry.second));
+  const auto contract_identity = [&](bool common) {
+    content_internal::Sha256 identity;
+    identity.text(common ? "photospider.shared-dependency-block.v1"
+                         : "photospider.dependency-contract.v1");
+    identity.text(operation);
+    identity.integer(static_cast<std::uint32_t>(impl->query.backend));
+    if (common)
+      identity.text(common_blocks);
+    else
+      contract_internal::append_traits(&identity, impl->traits);
+    identity.integer(impl->query.parameters.size());
+    for (const auto& entry : impl->query.parameters) {
+      identity.text(entry.first);
+      identity.integer(entry.second.index());
+      if (const auto* number = std::get_if<std::int64_t>(&entry.second)) {
+        identity.integer(static_cast<std::uint64_t>(*number));
+      } else if (const auto* number = std::get_if<double>(&entry.second)) {
+        std::uint64_t bits;
+        std::memcpy(&bits, number, sizeof(bits));
+        identity.integer(bits);
+      } else if (const auto* boolean = std::get_if<bool>(&entry.second)) {
+        identity.integer(*boolean);
+      } else {
+        identity.text(std::get<std::string>(entry.second));
+      }
     }
-  }
-  auto metadata_identity = [&](const OperationMetadata& metadata) {
-    identity.integer(
-        static_cast<std::uint32_t>(metadata.descriptor.element_type));
-    identity.integer(metadata.descriptor.shape.size());
-    for (auto n : metadata.descriptor.shape)
-      identity.integer(n);
-    contract_internal::append_facets(&identity, metadata.facets);
-    identity.integer(metadata.atomic_trailing_axes);
+    const auto metadata_identity = [&](const OperationMetadata& metadata) {
+      identity.integer(
+          static_cast<std::uint32_t>(metadata.descriptor.element_type));
+      identity.integer(metadata.descriptor.shape.size());
+      for (auto n : metadata.descriptor.shape)
+        identity.integer(n);
+      contract_internal::append_facets(&identity, metadata.facets);
+      identity.integer(metadata.atomic_trailing_axes);
+    };
+    if (!common)
+      metadata_identity(impl->query.output);
+    for (const auto& input : impl->query.inputs)
+      metadata_identity(input);
+    return identity.finish();
   };
-  metadata_identity(impl->query.output);
-  for (const auto& input : impl->query.inputs)
-    metadata_identity(input);
-  impl->block_identity = identity.finish();
+  const auto selected_identity = contract_identity(false);
+  impl->block_identity =
+      common_blocks.empty() ? selected_identity : contract_identity(true);
   content_internal::Sha256 scoped;
-  scoped.text(impl->block_identity);
+  scoped.text(selected_identity);
   scoped.text(impl->query.snapshot_identity);
   impl->certificate_identity = scoped.finish();
   auto status = impl->stop();

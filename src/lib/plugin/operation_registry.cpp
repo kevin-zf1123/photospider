@@ -433,8 +433,14 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 13U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 14U ||
       !traits.supports_cpu || !known_shape || !known_region ||
+      (traits.share_blocks_across_outputs &&
+       (!traits.deterministic || !traits.side_effect_free ||
+        traits.outputs[0].dependency_version != 1 ||
+        traits.outputs[0].observation_kind != ObservationKind::Atomic ||
+        traits.outputs[0].regional_atomic ||
+        traits.outputs[0].static_dependency_pieces)) ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||

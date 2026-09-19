@@ -556,12 +556,34 @@ retained metadata, including canonical box expansion. `storage_entries()`
 counts actual retained coordinates, supports and tags for cache admission,
 independently of a deduplicated source-support projection.
 
-A CPU staged Atomic output can declare `static_dependency_maps`, including
-metadata-specialized maps. Its first `DependencyNeedBatch::static_mapping`
-requests the complete registered map for Q; dynamic associations, repeated
-mapping requests, GPU, joint execution and checkpoints are excluded. Successful
-supply must precede publication. Descriptor tags are retained automatically.
+A CPU staged Atomic output can declare complete disjoint
+`static_dependency_pieces`, including metadata-specialized pieces. Each piece
+contains observation coverage and complete per-port dependencies; its
+`DependencyAxis::translation` is applied against that piece coverage. Its first
+`DependencyNeedBatch::static_mapping` requests the complete registered piece
+mapping for Q; dynamic associations, repeated mapping requests, GPU, joint
+execution and checkpoints are excluded. Successful supply must precede
+publication. Descriptor tags are retained automatically.
 Data and Validation can differ: an image source's Data may select one channel
 while Validation closes over all channels; their per-port transport union must
 satisfy the image fragment rules. The ordinary and structured executors drive
 one regional session, preserving compact certificates. C ABI 9 has no such field.
+
+## Cross-output pure block sharing
+
+`share_blocks_across_outputs` is an opt-in OperationTraits 14 flag. It is false
+by default and is accepted only for pure Atomic dependency-v1 operations. The
+host preserves a common block namespace keyed by every resolved output contract,
+static parameter, input metadata and current supplied bytes, incoming state,
+phase/range and mode. Public outputs and dependency certificates remain
+independent; this namespace is not a joint output or a concurrent producer
+coordinator. Static mappings and regional Atomic programs cannot enable it.
+Every transition in this common namespace must be independent of the selected
+output index and metadata unless that distinction is explicitly encoded in the
+incoming state or mode. The existing prohibition on depending on original Q
+still applies; the host does not infer purity from callback code.
+
+Optional retention uses the accounted result LRU only when
+`result_cache_bytes` is positive and the proof-work budget admits key/retention
+work. A miss, disabled cache or exhausted proof budget recomputes through the
+same block transition. There is no once-per-Run guarantee.

@@ -115,17 +115,17 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical v13 vectors include translated static dependency pieces.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "c4e087900f12c90f");
+  // Canonical v14 vectors include cross-output pure-block scope.
+  PS_CHECK(positive_zero.value().semantic.digest().value == "c8a5de1b47712ef1");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "ac00870cc0720875");
-  PS_CHECK(positive_zero.value().plan.digest().value == "b966c8df1ed05983");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "9b1cd19bedd430bb");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "140f1a941c460d8f");
+           "390f6b45996ecb75");
+  PS_CHECK(positive_zero.value().plan.digest().value == "e72cc0053cabe8ec");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "04d2e88f20c0077c");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "137f397bc05a0371");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "c4f3508f998e3b5d");
-  PS_CHECK(negative_zero.value().plan.digest().value == "c7ec8417a7f2be4f");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "e4fe030ba1aec7e7");
+           "68a84c5bc2af601d");
+  PS_CHECK(negative_zero.value().plan.digest().value == "eff28960aab6ba43");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "94f174f67121c013");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=

@@ -404,9 +404,26 @@ C joint table 复用 singleton 的服务及完成验证器。共享单调句柄�
 `storage_entries()` 统计实际保留的坐标、支持集和 tags，供 cache admission 使用，
 独立于去重后的源支持投影。
 
-CPU staged Atomic 输出可声明 `static_dependency_maps`，也可由 metadata specialization
-生成。首次 `DependencyNeedBatch::static_mapping` 请求 Q 对应的完整注册映射；不允许
-动态 associations、重复请求、GPU、joint 或 checkpoint。成功 supply 后才能发布，宿主
-自动保留 descriptor tags。Data 与 Validation 可不同：图像 Data 可只选一个通道，
+CPU staged Atomic 输出可声明完整不相交的 `static_dependency_pieces`，也可由 metadata
+specialization 生成。每个 piece 携带 observation coverage 和完整各端口 dependency；
+`DependencyAxis::translation` 针对该 piece coverage 应用。首次
+`DependencyNeedBatch::static_mapping` 请求 Q 对应的完整注册 pieces；不允许动态
+associations、重复请求、GPU、joint 或 checkpoint。成功 supply 后才能发布，宿主自动保留
+descriptor tags。Data 与 Validation 可不同：图像 Data 可只选一个通道，
 Validation 闭包为全部通道；每端口取数并集仍须满足 image fragment 规则。普通与
 structured executor 均推进一个区域 session 并保留紧凑证书。C ABI 9 没有该字段。
+
+## 跨 output 的 pure block sharing
+
+`share_blocks_across_outputs` 是 OperationTraits 14 的 opt-in flag，默认 false，
+仅适用于 pure Atomic dependency-v1。宿主使用包含完整 resolved output contract、static
+parameter、input metadata 与当前 supplied bytes、incoming state、phase/range 和 mode
+的 common block namespace。公开 output 与 dependency certificate 仍独立；该 namespace
+不是 joint output，也不负责并发 producer 协调。Static mapping 和 regional Atomic
+程序不能启用该字段。公共 namespace 中的 transition 必须独立于 selected output index
+与 metadata；如需区分，必须显式编码到 incoming state 或 mode。原有禁止依赖原始 Q
+的约束继续适用，宿主不会通过分析 callback 代码推断 purity。
+
+可选 retention 仅在 `result_cache_bytes` 为正且 proof-work budget 准入 key/retention
+工作时使用 accounted result LRU。miss、关闭 cache 或 proof budget 耗尽时按相同 block
+transition 重算；不保证每个 Run 只执行一次。

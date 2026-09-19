@@ -345,6 +345,18 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::uint64_t joint_continuation_bytes = 0;
   /** @brief Additional shared scratch bound per joint poll. */
   std::uint64_t joint_workspace_bytes = 0;
+  /** @brief Opts pure staged outputs into one internal block namespace.
+   * DependencyPhase::block transitions must then be independent of selected
+   * output metadata/index unless explicitly encoded in incoming state or mode.
+   * The host keys all resolved output contracts, static parameters, input
+   * metadata and current supplied bytes. Public outputs and certificates remain
+   * independent. Retention is optional and budgeted; misses recompute,
+   * including with caching disabled. This does not synchronize concurrent
+   * producers or promise a single evaluation per Run. Available only to pure
+   * Atomic dependency-v1 operations; default preserves output-scoped block
+   * keys.
+   */
+  bool share_blocks_across_outputs = false;
 
   /** @brief Exact input count, or fixed prefix count for a repeated template.
    */
@@ -369,7 +381,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 13U;
+  std::uint32_t version = 14U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.

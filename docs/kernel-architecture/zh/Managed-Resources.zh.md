@@ -60,7 +60,7 @@ I/O，已提交同步 I/O 返回后才释放 owner；cleanup 不需要新窗口�
 限额处理 65536 字节临时 payload，检查独立计数、alias 寿命、并发 admission、输入
 owner 去重、取消和有界失败。test_dependency_program 的 Need/上游/恢复例中，根
 10000 只允许上游 6000 算法单位，根 30000 允许两个各 6000 的阶段；协议另计工作。
-安装 consumer 目标 photospider_resource_consumer 仅通过已安装的 0.13 公共包运行。
+安装 consumer 目标 photospider_resource_consumer 仅通过已安装的 0.14 公共包运行。
 test_managed_dispatch 检查 Whole、source、dependency 与 atom 执行的零/累计 stage、
 零/单 Queue 槽，以及 structured source 返回错误或抛异常时的实际输入归属。
 

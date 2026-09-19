@@ -195,3 +195,16 @@ stride 分区；pure 与 active-Run sharing 仍独立。
 算术逐 piece 检查平移后的范围。C++ 字段为 `static_dependency_pieces`，不提供
 旧字段别名。repeated input template 只有在存在 metadata specializer、由其验证
 描述符关系时才能设置 `repeated_match=false`；concatenate 用它检查非拼接轴维度。
+
+## NUM-12 纯 block sharing
+
+Package 0.14.0 使用 C++ `OperationTraits` 版本 14，semantic、physical-plan 和
+plan-cache domain 使用 v14；C operation ABI 保持 C ABI 9。Opt-in
+`share_blocks_across_outputs` 默认 false，仅适用于 pure Atomic dependency-v1。
+其 common block identity 包含完整 resolved output contracts、static parameters、
+input metadata 与 supplied bytes、incoming state、phase/range 和 mode。公开 output
+与 certificate identity 仍独立。可选 result-LRU reuse 要求正数
+`result_cache_bytes` 与已计费 proof budget；miss 会重算，不能合并并发 producer，也不
+承诺每个 Run 只求值一次。C++ layout 改变要求 consumer 使用 0.14 重新构建，拒绝
+旧 minor 请求。WorkflowDocument schema 2、provider ABI 1、optimizer v5 与
+result-region v6 保持不变。

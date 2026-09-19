@@ -12,9 +12,9 @@ endif()
 set(_photospider_consumer_compile_options)
 set(_photospider_consumer_link_options)
 if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
-  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang|GNU" OR
-     NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    message(FATAL_ERROR "Sanitized consumer requires Clang or GNU C/C++")
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR
+     NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Sanitized consumer requires Clang C/C++")
   endif()
   include(CheckCCompilerFlag)
   include(CheckCXXCompilerFlag)
@@ -55,13 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.10 CONFIG QUIET COMPONENTS kernel)
+find_package(Photospider 0.13 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.13 must reject a 0.10 consumer")
+  message(FATAL_ERROR "Photospider 0.14 must reject a 0.13 consumer")
 endif()
 
 find_package(
-  Photospider 0.13 CONFIG REQUIRED
+  Photospider 0.14 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(

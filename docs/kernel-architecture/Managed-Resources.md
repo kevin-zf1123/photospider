@@ -94,7 +94,7 @@ across Whole, source, dependency and atom execution, and structured source error
 provenance through returned failures and exceptions.
 
 The installed target `photospider_resource_consumer` compiles the same public
-API behavior checks through `find_package(Photospider 0.13 CONFIG REQUIRED)`.
+API behavior checks through `find_package(Photospider 0.14 CONFIG REQUIRED)`.
 It does not include private kernel headers or link a source-tree kernel target.
 
 ## Current staged metadata and view boundaries

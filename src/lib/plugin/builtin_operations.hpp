@@ -8,6 +8,7 @@ Status register_builtin_operations(OperationRegistry* registry);
 Status register_numeric_layouts(OperationRegistry* registry);
 Status register_numeric_indexing(OperationRegistry* registry);
 Status register_numeric_reductions(OperationRegistry* registry);
+Status register_numeric_ordering(OperationRegistry* registry);
 Status register_numeric_interpolation(OperationRegistry* registry);
 Status register_numeric_ranges(OperationRegistry* registry);
 Status register_numeric_comparisons(OperationRegistry* registry);

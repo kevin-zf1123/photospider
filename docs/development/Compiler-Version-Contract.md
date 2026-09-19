@@ -236,3 +236,18 @@ execution. The C++ field is `static_dependency_pieces`; no old-field alias is
 provided. Repeated input templates may set `repeated_match=false` only when a
 metadata specializer supplies and validates their descriptor relation, as used
 by concatenate's matching non-axis extents.
+
+## NUM-12 pure block sharing
+
+Package 0.14.0 uses C++ `OperationTraits` version 14 and semantic, physical-plan
+and plan-cache domains v14. The C operation ABI remains C ABI 9. The opt-in
+`share_blocks_across_outputs` trait is false by default and applies only to pure
+Atomic dependency-v1 operations. Its common block identity includes all
+resolved output contracts, static parameters, input metadata and supplied bytes,
+incoming state, phase/range and mode. Public output and certificate identities
+remain independent. Optional result-LRU reuse requires a positive
+`result_cache_bytes` configuration and an accounted proof budget; a miss
+recomputes, and the trait does not join concurrent producers or promise one
+evaluation per Run. The C++ layout change requires consumers to rebuild against
+0.14; older minor requests are rejected. WorkflowDocument schema 2, provider ABI
+1, optimizer v5 and result-region v6 remain unchanged.
