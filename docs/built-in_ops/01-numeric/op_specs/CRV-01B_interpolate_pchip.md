@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: legacy_subset_only_target_not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -23,7 +23,7 @@ repository_commit: 6617c78c
 Inherit the [NUM baseline](NUM_common_contract.md) for status, registration,
 platforms, floating environment, resources, errors and public acceptance, with
 the explicit curve rules below taking precedence. Clarification is complete;
-this remains a Proposed target rather than an implemented operation.
+the specification remains Proposed independently of the maintained implementation.
 
 ## Confirmed interface and scope
 
@@ -250,4 +250,19 @@ a claim of bitwise compatibility or adoption of its extrapolation defaults.
 Current curve.sample_monotone instead uses controls[K,2], a static uniform
 domain/count and Whole evaluation. Its rounded-slope computation and y clipping
 are recorded in the [family implementation comparison](CRV-01_interpolate.md).
-This explicit-query target remains Proposed and unimplemented.
+This explicit-query target remains Proposed; its maintained implementation is recorded below.
+
+## Maintained implementation and validation
+
+`plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
+keys. The public `photospider/numeric/curves.hpp` constructor is
+`interpolate_pchip_node`. All profiles currently use exact rational evaluation and one
+final destination rounding. Global x validation, requested query rows and the
+local y stencil follow the demand contract above.
+
+The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
+contains the shared arithmetic/resource details and actual platform acceptance.
+See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
+for construction, explicit work budgets, commands and checked expected results.
+The manual target is excluded from default builds and CTest/integration testing.
+Specification status remains Proposed.

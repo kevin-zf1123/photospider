@@ -69,3 +69,7 @@ target_compile_features(photospider_numeric_prepared PRIVATE cxx_std_17)
 add_executable(photospider_numeric_expression EXCLUDE_FROM_ALL expression.cpp)
 target_link_libraries(photospider_numeric_expression PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_expression PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_curves EXCLUDE_FROM_ALL curves.cpp)
+target_link_libraries(photospider_numeric_curves PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_curves PRIVATE cxx_std_17)

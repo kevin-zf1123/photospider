@@ -710,3 +710,72 @@ nine-function N=1/256 CSV timing workload. It uses a=2, b=.3, Float64, Whole,
 one worker, cache off and three checked repetitions. Compile/freeze precede the
 timed synchronous execution and result assembly. [Recorded measurements](../../docs/built-in_ops/01-numeric/math-implementation.md#num-05-validation-and-native-timing)
 include the actual validation platforms and resource boundaries.
+
+## Explicit-query curves: CRV-01
+
+`photospider/numeric/curves.hpp` provides four independent helpers:
+`interpolate_linear_node`, `interpolate_pchip_node`,
+`interpolate_linear_multi_node` and `interpolate_pchip_multi_node`.
+Single-function inputs are x[K], y[K], query[N]; multi-function y is [K,C]
+and output is [N,C], preserving C=1. Each port independently accepts
+Float32/64. K is 2..65536 and positive logical products are at most 2^40.
+The sole output is named `values`, with empty facets and Float64 by default.
+For example, the editable `examples()` in `curves.cpp` constructs:
+
+```cpp
+auto node = ps::numeric::interpolate_pchip_node(
+    1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
+    ps::WorkflowInputReference{3}, ps::ElementType::Float64,
+    ps::numeric::CurveDomain::Reject, ps::CpuNumericProfile::Strict);
+```
+
+Bind x=[0,1,2], y=[0,1,4], query=[.5,1.5,.5]. Expected values are
+[.3125,2.1875,.3125]. `LinearExtrapolate` at query=[-1,3] returns [0,8]
+using the PCHIP endpoint tangents. Linear interpolation of x=[0,1,3],
+y=[0,2,4], query=[2,.5,2] returns [3,1,3]. `Clamp` selects an endpoint y.
+Direct nodes provide String `dtype` and `out_of_domain` explicitly. Helpers
+write the defaults `float64` and `reject`; all keys begin `curve.interpolate_`
+and end with the explicit `_strict`, `_accelerated_apple_silicon` or
+`_accelerated_x86_64` profile suffix.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_curves -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_curves strict
+python3 examples/numeric_workflow/curve_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_curves strict
+```
+
+Use `apple` or `x86` only on the corresponding CPU. All profiles currently use
+exact rational whole-formula evaluation, including unrounded PCHIP slopes, and
+one final RN-even conversion. Their results agree bitwise; NEON/AVX2 supply
+integer comparison/publication helpers. Exact knot and clamp paths read one y
+and preserve its signed zero. Other exact zero results are -0 only when both
+selected segment endpoints are -0. Numeric input or actual output must be finite;
+there is no intermediate slope overflow rejection or output clipping.
+
+A nonempty request validates all x knots before reading selected query rows,
+then requests only selected y endpoints/stencils and columns. Empty reads no
+payload. The regional path uses four polls and one lookup per distinct query
+row, preserving per-cell error and dependency certificates. The manual checks
+sparse support/dirty/column isolation, query/topology cache replacement, all-port
+negative and unaligned strides, zero strides, caller fenv, typed Mask validation,
+unused/required upstream failures, work/cancel/state/stage limits and escaped
+owner lifetime. `cache_composition_and_upstream()` connects a public
+`constant_node` with logical shape [2,2^39] to PCHIP and reads the last output
+column as 7 under a 4 MiB controlled-payload limit.
+
+`Fixture::run` and `direct()` show explicit work budgets. Exact arithmetic can
+exhaust the default direct-invocation discovery budget even for a small batch;
+use ExecutionOptions or DependencyRequest limits appropriate to the workload.
+The shared fixed exact workspace is about 280 KiB per admitted continuation.
+The optional x index uses 8K bytes; requested output and association metadata
+are also admitted. Work/capacity exhaustion fails explicitly. See
+[implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-01-exact-interpolation)
+for arithmetic bounds, measured resources and validation.
+
+Run `photospider_numeric_curves strict benchmark` or `apple benchmark` locally
+for the four operations at K=17, N=1/64, C=1/2, Float64, Whole, one worker,
+cache off, three repetitions. Compile/freeze precede timing; execution and result
+assembly are timed and all identity-curve outputs/counters are checked. The
+manual target remains excluded from default builds and CTest/integration tests.
+WSL Clang runs are correctness-only.

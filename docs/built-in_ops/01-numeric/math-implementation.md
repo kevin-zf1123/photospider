@@ -346,3 +346,74 @@ implementation. Native results show that this exact implementation remains
 expensive for large full arrays. WSL timing is not used. The manual CSV reports
 controlled payload; static plan/program allocations and unmanaged host container
 storage are outside that field.
+
+## CRV-01 exact interpolation
+
+Four primitives (linear/PCHIP, single/multiple functions) provide twelve profile
+keys. All use exact integer rational formulas followed by one direct RN-even
+conversion. Strict, Apple and AVX2 currently agree bitwise, including PCHIP;
+no approximate slope or per-batch clipping is used. Integer comparisons and
+publication select scalar, NEON or AVX2 paths and diagnostics identify the path.
+No strict fallback is needed for this exact implementation.
+
+Finite binary64 values are integers in units 2^-1074. Differences need fewer
+than 2099 bits; PCHIP slope numerator/denominator magnitudes are below 2^6300.
+The combined Hermite numerator is below 2^20999 and denominator below 2^18897.
+The 352-limb (22528-bit) workspace covers these bounds plus denominator
+alignment, 53 quotient trials and midpoint doubling. The fixed 96-slot arena
+uses at most 49 live slots in the formula; every slot and ratio temporary is
+part of the admitted continuation. Endpoint limits compare exact cross-products.
+Direct node/clamp conversion, two-point linear degeneration and exterior
+tangent evaluation have smaller bounds. Arithmetic polls work/cancellation
+inside limb multiplication and final division. Independent scoped arithmetic
+review also compared 3208 Fraction formula expansions successfully.
+
+The regional continuation acquires complete x Control/Validation, then the
+projection of Q onto query rows, then only column-local y Data/Validation.
+All x must be finite and increasing. Exact node/clamp reads one y, linear reads
+two, PCHIP reads its fixed local stencil even when a slope branch is zero.
+Query classification runs once per distinct requested row. Bounded rectangle
+projection and association construction add metadata work; no whole N*C array
+or full slope table is allocated. Immutable packed fragments retain correct
+global origins and owners. The public examples set explicit session/Run work
+budgets; a default direct invoke can exhaust its discovery budget on a small
+PCHIP batch. That failure preserves ResourceExhausted rather than weakening
+precision or demand.
+
+On 2026-09-19, native Apple M5 / Clang 21 strict and Apple, and Intel Core
+i9-12900 Ubuntu WSL / Clang 18.1.3 strict and AVX2, passed 2484 independent
+Fraction cases per profile. These cover mixed source/output types, all domain
+policies, random irregular knots, limiter branches, extreme finite arithmetic,
+midpoints, subnormals, signed zeros and ordered adjacent-query shape checks.
+All four profiles passed the five public manual groups: basic single/multi
+fixtures and tangent extrapolation; sparse support/dirty/Atom isolation and
+lifetime; strides/fenv/schema/Empty/resource interruption; cache reselection,
+upstream order and giant sparse public composition; typed Mask validation.
+Local installed consumers, focused compiler unit, ClangFormat 21/cpplint and
+scoped entry/math reviews passed. No new CTest or integration entry was added.
+
+The following Apple M5 / Clang 21 RelWithDebInfo native measurements use x=0..16,
+y[j,c]=j+c, query[i]=i/4+1/8, K=17, N=1/64, C=1 for single and 2 for multi,
+Float64, Whole, one worker, cache off, three repetitions. Compile/freeze precede
+timing; synchronous execution and result assembly are timed. Every returned
+sample is checked against query[i]+c, with four polls, N*C evaluations and zero
+fallbacks. Session and Run work limits are 8 Gi and 16 Gi work units. Columns
+show median/max microseconds; these measurements do not establish a general
+speedup claim. WSL supplies correctness evidence only.
+
+| Operation | N | Strict median/max us | Apple median/max us |
+| --- | ---: | ---: | ---: |
+| linear | 1 | 208/666 | 205/294 |
+| linear | 64 | 2561/2577 | 2535/2646 |
+| linear_multi | 1 | 208/244 | 208/215 |
+| linear_multi | 64 | 5159/5359 | 4755/5061 |
+| pchip | 1 | 224/246 | 230/252 |
+| pchip | 64 | 7042/7278 | 6660/7034 |
+| pchip_multi | 1 | 356/399 | 337/345 |
+| pchip_multi | 64 | 13849/13917 | 13777/14245 |
+
+Peak controlled payload is 285944/286448 bytes for single and 285952/286960
+bytes for multi at N=1/64. The diagnostic does not include ordinary static
+plan storage or unmanaged host containers. The separate giant composition
+checks one last-column result over a logical [2,2^39] constant view, with actual
+value 7; it is a sparse correctness fixture, not a large dense performance test.
