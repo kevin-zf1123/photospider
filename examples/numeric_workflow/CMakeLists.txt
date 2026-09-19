@@ -45,3 +45,7 @@ target_compile_features(photospider_numeric_ordering PRIVATE cxx_std_17)
 add_executable(photospider_numeric_scans EXCLUDE_FROM_ALL scans.cpp)
 target_link_libraries(photospider_numeric_scans PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_scans PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_matrix EXCLUDE_FROM_ALL matrix.cpp)
+target_link_libraries(photospider_numeric_matrix PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_matrix PRIVATE cxx_std_17)

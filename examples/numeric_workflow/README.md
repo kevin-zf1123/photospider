@@ -435,3 +435,38 @@ windows for four sparse results within 16 KiB payload, with exact suffix dirty
 support. Installed strict/Apple consumers and the focused compiler unit passed. This target is excluded from the default build and has no
 CTest or integration-test registration; the current NUM-13 specifications
 remain Proposed.
+
+## Exact affine matrix transforms: NUM-14
+
+`photospider/numeric/matrix.hpp` provides `matrix_transform_node(id, vectors,
+matrix, bias, profile)`. The three dynamic ports share Float32 or Float64 dtype:
+`vectors[...,Cin]`, `matrix[Cout,Cin]`, and `bias[Cout]`, with Cin/Cout in 2..4.
+Output `values[...,Cout]` has empty facets. The operation computes each complete
+dot product plus bias exactly and rounds once. Singular matrices are valid;
+there is no inverse, cast, implicit broadcasting or homogeneous division.
+
+```sh
+cmake --build build/numeric --target photospider_numeric_matrix -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix strict
+python3 examples/numeric_workflow/matrix_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_matrix strict
+```
+
+The editable workflow in `matrix.cpp` checks
+`[[1,2],[-1,0]] * [2,3] + [4,5] -> [12,3]`. A sparse output-component request
+reads each selected complete vector, the selected matrix row and its bias;
+shared row/bias transport is deduplicated. Typed Validation remains separate.
+The manual checks exercise result lifetime, cache on/off, exact support/dirty,
+negative strides on all three ports, fenv modes/flags, invalid metadata,
+cancellation and WorkLimit cleanup, and required upstream failure after NaN.
+The independent Fraction/raw-bit oracle includes 2..4 rectangular transforms,
+batches, product overflow/underflow cancellation, rounding midpoints, infinity,
+signed zero and vector-before-matrix-before-bias NaN priority.
+
+Use `apple` or `x86` on the corresponding named CPU profile. This manual target
+is excluded from the default build and has no CTest/integration registration.
+
+Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,110
+independent oracle cases per profile and the manual matrix checks. Installed
+strict/Apple consumers, the focused compiler unit and scoped reviews passed.
+WSL measurements support numerical correctness only.
