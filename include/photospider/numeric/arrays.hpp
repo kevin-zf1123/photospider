@@ -9,7 +9,7 @@
 #include "photospider/core/numeric_diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Explicit immutable view or requested packed-copy representation. */
+/** @brief Explicit immutable view or complete packed-copy representation. */
 enum class ArrayLayout { View, Dense };
 /** @brief Creates a scalar-filled array node; default view and strict CPU.
  * Pure concurrent-safe authoring with no payload access. Shape has 1..8
@@ -18,7 +18,10 @@ enum class ArrayLayout { View, Dense };
  * Output is named values, preserves input bits/dtype and has empty facets.
  * View execution through execute_fragments owns one scalar-sized copy with
  * zero strides. Ordinary/direct execution preserves a single covering view;
- * multiple owners require execute_fragments. Explicit collect packs bytes.
+ * all nonempty requests use Whole execution before consumer projection. Dense
+ * owns product(shape)*sizeof(dtype) bytes even for partial output. Empty reads
+ * no payload; input changes invalidate the complete output. Work/capacity and
+ * cancellation failures release unpublished storage. Whole counters are N/A.
  * Returns InvalidArgument/InvalidDomain/Schema for invalid authoring arguments.
  * Returned node owns its strings/metadata; allocation may throw bad_alloc.
  */
@@ -81,8 +84,11 @@ inline Result<WorkflowNode> constant_node(
  * axis_map lists one distinct output axis for each source axis. Compiler
  * checks its length against the source rank and requires each source extent
  * to equal the target extent or be one. Permutation and singleton expansion
- * preserve source bits. View retains source owners; disjoint multi-owner
- * results use execute_fragments. Other ownership/error rules match
+ * preserve source bits. Whole validates the complete source and keeps one
+ * covering original input Value for View, including offset/signed/zero strides.
+ * Multiple source owners return InvalidArgument/InvalidDomain ViewUnavailable;
+ * Dense may collect and owns the full target output. Any source change
+ * invalidates all output observations. Other ownership/error rules match
  * constant_node.
  */
 inline Result<WorkflowNode> broadcast_node(

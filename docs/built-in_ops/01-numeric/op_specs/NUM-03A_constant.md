@@ -45,8 +45,7 @@ The product of all extents must be at most 2^40, checked without integer overflo
 
 The static `layout` choice is `view` or `dense`, defaulting to view. View output
 has zero stride on all axes and only one immutable scalar backing the logical
-array. Dense output copies the scalar into packed storage for the requested
-region. Neither layout changes the logical dtype or any element bits.
+array. Dense output copies the scalar into packed storage for the complete output before consumer projection. Neither layout changes the logical dtype or any element bits.
 
 ## Static parameters and outputs
 
@@ -82,12 +81,10 @@ does not mean dense execution or dense storage, and the output must not claim
 `requires_dense_output`. The scalar-sized owned copy avoids requiring retention
 of an arbitrarily large source allocation solely because the input was a view.
 
-Dense mode uses per-region dependency execution and copies the scalar bits into
-packed requested fragments, preserving their global Regions/storage origins.
-A full dense output enumerates and stores every logical element; a sparse request
-does not allocate the intervening bounding-box gap. No implicit fill outside
-the published coverage is used. A consumer that requires contiguous full storage
-must explicitly request dense output and have sufficient resources.
+Dense mode uses one CPU Whole callback and fills the complete output before
+projection to the requested global Region. Even sparse requests allocate and
+compute the full packed output. Constant View owns one scalar copy and retains
+its whole-array Atomic tuple identity, without enumerating the logical count.
 
 Both layouts are immutable. Do not expose a writable alias, and do not assume
 that backing byte length equals shape product for view output. Published owners
@@ -106,15 +103,15 @@ need for a numerical tolerance or approximate fallback. Incompatible platform
 keys return BackendUnavailable rather than silently switching keys.
 
 For element size b, view output payload is b bytes plus O(rank) descriptor/layout
-metadata. Dense output payload is b*M for M requested elements. The maximum
+metadata. Dense output payload is b*N for N total elements, including partial consumer requests. The maximum
 logical byte count is 2^40*b, but is not a reservation in view mode. Scalar
 transport, descriptors, fragments, certificates and retained upstream owners
 remain subject to actual host resource accounting. View work is O(rank+b);
-dense work is O(M*b). Fragment/scheduling overhead is separately charged.
+dense work is O(N*b). Fragment/scheduling overhead is separately charged.
 
 Reserve before allocation, use existing host workers and work/admission limits,
 and check all byte/count products before dense allocation. Poll cancellation
-before reading, before publication and at least every 4096 copied elements or
+before reading, before publication and after at most 64 KiB of copied bytes or
 smaller admitted fill block. Resource failures stay sticky and do not silently
 switch a requested dense result to view. Cache identity includes key/profile,
 shape, layout, input metadata and all scalar bits (including NaN payload/sign).
@@ -133,7 +130,7 @@ capacity/work/stage reasons; no partial failed array is reported as success.
 | Test | Expected behavior |
 | --- | --- |
 | C01 | Int64 `[7]`, shape `[2,3]`: six logical sevens; view stores one 8-byte scalar with zero strides |
-| C02 | Same fixture with dense layout: packed 48-byte result; nonzero ROI only fills its requested coverage |
+| C02 | Same fixture with dense layout: packed 48-byte result; nonzero ROI still owns the full output |
 | C03 | Exhaustive UInt8 values, Int64 extrema, Float32/64 ±0, infinities and multiple NaN payloads preserve exact bits |
 | C04 | Output dtype matches the scalar; all output facets are empty; recognized invalid typed input is still rejected |
 | C05 | Rank 1 and 8, singleton axes, product exactly 2^40 and one above; zero/negative/malformed shape parameters reject |
@@ -158,11 +155,12 @@ helper and emits the same explicit operation key and parameters.
 
 The strict implementation performs an exact byte copy of the scalar. The two
 accelerated keys use the same bit-copy semantics and report their selected
-profile; unsupported hosts return `BackendUnavailable`. Local Clang execution
+profile key; Whole per-atom counters are unavailable; unsupported hosts return `BackendUnavailable`. Local Clang execution
 has checked an Int64 shape `[1048576,1048576]` backed by one 8-byte payload with
 zero strides, including result ownership after context destruction, and dense
 `[2,3]` execution.
 
+The following acceptance and regional implementation record predates Whole.
 Manual acceptance on 2026-09-14 passed local AppleClang 21 strict/Apple profiles
 and Ubuntu WSL Clang 18 strict/x86 profiles, plus an installed public consumer.
 Coverage includes all UInt8 values, integer extrema and IEEE bit patterns,
@@ -179,3 +177,5 @@ status of this specification.
 - [Existing scalar producer](../../../../plugins/ops/00-foundation/core_constant.cpp).
 - [Existing field producer](../../../../plugins/ops/03-generation/field_constant.cpp).
 - [Operator template](../../00-foundation/spec-template.md).
+
+Current Whole validation and timing: [array Whole](../arrays-whole.md).

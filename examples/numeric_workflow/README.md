@@ -429,8 +429,7 @@ build/numeric/examples/numeric_workflow/photospider_numeric_mappings
 
 The executable checks a `[1048576,1048576]` constant view backed by one 8-byte
 Int64 scalar, a `[3]` to `[2,3,4]` broadcast backed by three Int64 samples, a
-`[274877906944,3]` broadcast view with exact sparse support and dirty
-replication, dense packing, resource bounds, structured consumption and owner
+`[274877906944,3]` broadcast view with complete source support and Whole invalidation, dense packing, resource bounds, structured consumption and owner
 lifetime. Expected output includes `stored_bytes=8`, `last=7`, and
 `3 source samples, exact view/dirty/support passed`. The mappings executable
 compares compact mapped certificates to explicit rows and reports
@@ -452,16 +451,20 @@ The `arrays.cpp` `structured_views()` function is the runnable example: it
 registers `manual.structured_last`, composes it after the giant broadcast, and
 checks the named result is an 8-byte view with `last=7`. These executables are
 manual targets only; they have no CTest or integration-test registration. WSL
-runs use Clang for numerical correctness only. On 2026-09-14, local AppleClang 21
-strict/Apple and Ubuntu WSL Clang 18 strict/x86 runs passed, as did the local
-installed consumer. Additional checked outputs cover all UInt8 values, IEEE bit
-patterns, negative unaligned permutation, typed validation, separate owners,
-Empty, cancellation, StageLimit and exact cache updates. No performance claim is
-inferred from these runs.
+runs use Clang for numerical correctness only. The 2026-09-14 Apple/WSL and
+installed-consumer results describe the pre-Whole implementation. This migration
+was validated locally on strict and Apple profiles: UInt8/IEEE bits, negative
+unaligned permutation, full typed validation, multi-owner View rejection/Dense
+collect, Empty, active-copy cancellation, capacity/work limits and Whole cache
+invalidation. No new WSL result is claimed.
 
-Dense array implementations use 32-byte memcpy, NEON or AVX2 blocks and exact
-byte tails. Diagnostics identify `memcpy32`, `NEON-copy32` or `AVX2-copy32` plus
-build and host identity. View diagnostics identify scalar copy or owner retention.
+All six formal keys execute Whole. Constant View owns one scalar copy; broadcast
+View keeps one complete source owner and rejects multiple-owner inputs. Dense
+requests materialize the complete target before projection. Active source edits
+invalidate the whole output. Constant Dense grows a repeated prefix and copies
+at most 64 KiB between cancellation polls; broadcast keeps the Scalar/NEON/AVX2
+32-byte gather-copy blocks and exact tails. Whole numeric counters are N/A.
+[Current validation and timing](../../docs/built-in_ops/01-numeric/arrays-whole.md).
 `array_owner_and_payload_cache()` checks oversized source release, changed NaN
 payloads in a warm constant cache and final release of borrowed broadcast storage.
 
