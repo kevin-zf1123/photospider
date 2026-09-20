@@ -11,7 +11,9 @@
 #include <utility>
 
 #include "data/input_validation.hpp"
+#include "data/lut3d_bake_validation.hpp"
 #include "photospider/data/layer.hpp"
+#include "photospider/data/lut3d_bake.hpp"
 
 namespace ps {
 namespace {
@@ -399,6 +401,8 @@ Writer begin(unsigned kind) {
 }
 }  // namespace
 bool has_representation_schema(std::string_view id) noexcept {
+  if (id == "curve.bake_lut3d.report" || id == "curve.bake_lut3d.table")
+    return true;
   if (has_layer_schema(id))
     return true;
   for (unsigned i = 1; i <= 8; ++i)
@@ -407,6 +411,9 @@ bool has_representation_schema(std::string_view id) noexcept {
   return false;
 }
 Status validate_representation_schema(const SchemaTemplate& schema) {
+  if (schema.id == "curve.bake_lut3d.report" ||
+      schema.id == "curve.bake_lut3d.table")
+    return lut3d_bake_description(schema).status();
   if (has_layer_schema(schema.id))
     return validate_layer_schema(schema);
   Parsed p;
@@ -1223,6 +1230,24 @@ Status validate_representation(
     const std::function<Status(std::uint64_t)>& consume_work) {
   if (!result.valid() || !result.owned_by(resources))
     return invalid("foreign representation owner");
+  if (result.schema().id == "curve.bake_lut3d.table" ||
+      result.schema().id == "curve.bake_lut3d.report") {
+    auto admission = resources.reserve(ResourceCapacity::host(65536, 65536));
+    if (!admission.ok())
+      return admission.status();
+    ResourceAllocationScope metadata_scope(resources);
+    if (result.schema().id == "curve.bake_lut3d.table")
+      return input_internal::validate_lut3d_bake_table(
+          result, resources, maximum_window, cancellation, consume_work);
+    return read_lut3d_bake_report(result, maximum_window, cancellation,
+                                  [&](std::uint64_t count) {
+                                    auto work = resources.consume({count});
+                                    if (work.ok() && consume_work)
+                                      work = consume_work(count);
+                                    return work;
+                                  })
+        .status();
+  }
   if (has_layer_schema(result.schema().id))
     return validate_layer_result(result, resources, maximum_window,
                                  cancellation, consume_work);

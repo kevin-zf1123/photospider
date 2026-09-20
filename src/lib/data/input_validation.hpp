@@ -1,10 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "photospider/data/color_array.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::input_internal {
@@ -119,11 +122,54 @@ inline Status validate_image_storage_value(
 }
 /** @brief Checks nonempty image demand including complete channel coverage. */
 bool image_demand(const Region& region) noexcept;
-/** @brief Requires full logical C when validated facets describe an image.
+/** @brief Recognized semantic keys; ColorArray is independent of SemanticKind.
+ */
+inline bool typed_facet(const std::string& key) noexcept {
+  return key == "photospider.image" || key == "photospider.semantic" ||
+         key == "photospider.color-array";
+}
+/** @brief Recognizes the independent generic ColorArray facet. */
+inline bool color_array(const std::vector<ValueFacet>& facets) noexcept {
+  return std::any_of(facets.begin(), facets.end(), [](const auto& facet) {
+    return facet.key == "photospider.color-array";
+  });
+}
+/** @brief Validates a requested Region and closes ColorArray output channels.
+ * Image requests retain their existing all-channel admission rule. This is an
+ * output observation rule, not authorization to widen an input read.
+ */
+Result<Region> color_output_region(const ValueDescriptor& descriptor,
+                                   const std::vector<ValueFacet>& facets,
+                                   const Region& requested);
+/** @brief ColorArray output-observation closure; preserves other sample sets.
+ */
+Result<Footprint> color_output_samples(const OperationMetadata& metadata,
+                                       const Footprint& requested,
+                                       const FootprintLimits& limits = {});
+/** @brief Last channel axis for validated Image/ColorArray, otherwise absent.
+ */
+std::optional<std::size_t> tuple_channel_axis(
+    const ValueDescriptor& descriptor,
+    const std::vector<ValueFacet>& facets) noexcept;
+/** @brief Requires full logical C for validated Image/ColorArray metadata.
  * @note Generic and other typed kinds add no channel-coverage restriction.
  */
-bool complete_image_channels(const ValueDescriptor& descriptor,
+bool complete_tuple_channels(const ValueDescriptor& descriptor,
                              const std::vector<ValueFacet>& facets,
                              const Region& region) noexcept;
+/** @brief Expands only Validation to full colors; Data/Control stay local.
+ * @note Caller has validated metadata. Empty remains Empty; limits and
+ * cancellation propagate from Footprint operations without hidden supply reads.
+ */
+Result<Footprint> validation_closure(
+    const OperationMetadata& metadata, const Footprint& support,
+    const FootprintLimits& limits,
+    const std::function<Status(std::uint64_t)>& consume = {});
+/** @brief Copies a static need as Validation with fixed full channel interval.
+ * @note Caller has validated metadata and mapping rank. Source tags and all
+ * leading-axis relations remain unchanged.
+ */
+DependencyMappedNeed validation_map(DependencyMappedNeed support,
+                                    const OperationMetadata& metadata);
 
 }  // namespace ps::input_internal

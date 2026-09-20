@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -147,9 +147,9 @@ by bits, not numeric equality; check infinities and zero signs explicitly.
 Strict/accelerated identity or finite tolerance must be tested separately from
 classification/payload rules and exact dependency mapping.
 
-No new keys in this family are currently claimed as implemented or runnable.
-Implementation delivery supplies actual executable targets and run commands;
-specification-only mathematical/bit-pattern experiments are not product acceptance.
+The maintained implementation is provided by `numeric_unary.cpp` and the public
+`photospider/numeric/unary.hpp` entry points. The runnable workflow and current
+validation boundary are documented below; this does not change the Proposed status.
 
 ## Exact rational pi input counterparts
 
@@ -163,3 +163,21 @@ floating pi-multiple functions remain separate. Reduced common-angle denominator
 - [NUM category](../core.md).
 - [Operator template](../../00-foundation/spec-template.md).
 - [Current abs implementation](../../../../plugins/ops/01-numeric/numeric_abs.cpp).
+
+## Maintained implementation and validation
+
+The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
+and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
+special-value cases use explicit integer/IEEE-field, rational or algebraic-root
+handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
+accelerated profiles report `FunctionUnsupported` strict fallback for those
+results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
+pointwise, with separately retained typed validation and Atom-scoped errors.
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.

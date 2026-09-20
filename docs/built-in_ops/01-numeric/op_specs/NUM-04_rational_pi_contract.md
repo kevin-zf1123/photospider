@@ -6,7 +6,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -47,7 +47,7 @@ its whole-function bound and only its own zero/integer exact landmarks.
 
 The exact ratio must survive argument reduction and the
 mathematical reference; rounding p/q to float before evaluation is not valid.
-No new runtime key or conformance result is claimed.
+The maintained keys and execution evidence are recorded below.
 
 ## Complete type, angle and error contract
 
@@ -143,8 +143,8 @@ Each child spec supplies an analytic fixture. Delivery must execute its actual
 public WorkflowDocument through Compiler/ExecutionContext with numerator and
 denominator bindings, explicit dtype and named values, supplying real commands.
 Exercise sparse/disjoint/strided demands, source changes, cache-off, low budgets,
-cancellation, fallback reports and post-context result lifetime. No versioned
-implementation, LLVM rational-input support or product/platform run is claimed.
+cancellation, fallback reports and post-context result lifetime. The maintained
+implementation uses its own directed arithmetic backend; LLVM libc is not selected.
 
 ## Individual specifications
 
@@ -156,3 +156,21 @@ implementation, LLVM rational-input support or product/platform run is claimed.
 - [Floating unary contracts](NUM-04_unary_contract.md).
 - [Trigonometric contracts](NUM-04_trigonometric_contract.md).
 - [CIELCh exact-angle dependency](CRV-06D_color_ramp_cielch.md).
+
+## Maintained implementation and validation
+
+The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
+and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
+special-value cases use explicit integer/IEEE-field, rational or algebraic-root
+handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
+accelerated profiles report `FunctionUnsupported` strict fallback for those
+results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
+pointwise, with separately retained typed validation and Atom-scoped errors.
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.

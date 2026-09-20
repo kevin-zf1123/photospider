@@ -130,13 +130,14 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
       return failure(ErrorCode::ResourceExhausted,
                      "facet payload bound exceeded");
     }
-    if (facet.key == "photospider.image" ||
-        facet.key == "photospider.semantic") {
+    if (typed_facet(facet.key)) {
       if (++typed_count > 1)
         return failure(ErrorCode::InvalidArgument, "multiple typed semantics");
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return semantic.status();
+      const auto status = facet.key == "photospider.color-array"
+                              ? decode_color_array(facet).status()
+                              : decode_semantic(facet).status();
+      if (!status.ok())
+        return status;
     }
     total += facet.payload.size();
   }
@@ -395,6 +396,15 @@ Status validate_port_metadata(const OperationPortConstraint& port,
   }
   if (port.kind == OperationPortKind::Result)
     return failure(ErrorCode::TypeMismatch, "paged ResultRef input required");
+  if (metadata.atomic_trailing_axes > 1 &&
+      std::any_of(metadata.facets.begin(), metadata.facets.end(),
+                  [](const auto& facet) {
+                    return facet.key == "photospider.color-array";
+                  }))
+    return {ErrorCode::TypeMismatch,
+            "color observations group exactly one trailing axis",
+            FailureReason::None,
+            {FailureOrigin::Schema, FailureScope::Unspecified}};
   return validate_port_metadata(port, metadata.descriptor, metadata.facets);
 }
 
@@ -421,6 +431,15 @@ Status validate_port_metadata(const OperationPortConstraint& port,
        !(port.element_type_mask & (1U << (element - 1)))))
     return failure(ErrorCode::TypeMismatch, "port dtype/rank mismatch");
   for (const auto& facet : facets) {
+    if (facet.key == "photospider.color-array") {
+      auto color = decode_color_array(facet);
+      if (!color.ok())
+        return color.status();
+      auto status = validate_color_array_descriptor(color.value(), descriptor);
+      if (!status.ok())
+        return status;
+      continue;
+    }
     if (facet.key != "photospider.image" && facet.key != "photospider.semantic")
       continue;
     auto semantic = decode_semantic(facet);
@@ -434,12 +453,16 @@ Status validate_port_metadata(const OperationPortConstraint& port,
     return Status::success();
   if (port.kind == OperationPortKind::Typed) {
     const auto found =
-        std::find_if(facets.begin(), facets.end(), [](const auto& f) {
-          return f.key == "photospider.image" ||
-                 f.key == "photospider.semantic";
-        });
+        std::find_if(facets.begin(), facets.end(),
+                     [](const auto& f) { return typed_facet(f.key); });
     if (found == facets.end())
       return failure(ErrorCode::TypeMismatch, "typed port requires semantics");
+    if (found->key == "photospider.color-array") {
+      if (port.semantic_kind ||
+          (!port.facets.empty() && !same_facets(port.facets, facets)))
+        return failure(ErrorCode::TypeMismatch, "typed port color mismatch");
+      return Status::success();
+    }
     auto semantic = decode_semantic(*found);
     if (!semantic.ok())
       return semantic.status();
@@ -494,15 +517,78 @@ bool image_demand(const Region& region) noexcept {
          region.dimensions()[2].extent == 4;
 }
 
-bool complete_image_channels(const ValueDescriptor& descriptor,
+Result<Region> color_output_region(const ValueDescriptor& descriptor,
+                                   const std::vector<ValueFacet>& facets,
+                                   const Region& requested) {
+  auto status = requested.validate(descriptor.shape);
+  if (!status.ok())
+    return Result<Region>(status);
+  if (!color_array(facets) || requested.empty())
+    return Result<Region>(requested);
+  auto dimensions = requested.dimensions();
+  dimensions.back() = {0, descriptor.shape.back()};
+  return Result<Region>(Region(std::move(dimensions)));
+}
+std::optional<std::size_t> tuple_channel_axis(
+    const ValueDescriptor& descriptor,
+    const std::vector<ValueFacet>& facets) noexcept {
+  for (const auto& facet : facets) {
+    if (facet.key == "photospider.image" && descriptor.shape.size() == 3)
+      return 2;
+    if (facet.key == "photospider.color-array" &&
+        descriptor.shape.size() >= 2 && descriptor.shape.size() <= 8)
+      return descriptor.shape.size() - 1;
+  }
+  return std::nullopt;
+}
+bool complete_tuple_channels(const ValueDescriptor& descriptor,
                              const std::vector<ValueFacet>& facets,
                              const Region& region) noexcept {
-  const bool image =
-      std::any_of(facets.begin(), facets.end(),
-                  [](const auto& f) { return f.key == "photospider.image"; });
-  return !image || (descriptor.shape.size() == 3 && region.rank() == 3 &&
-                    !region.empty() && region.dimensions()[2].offset == 0 &&
-                    region.dimensions()[2].extent == descriptor.shape[2]);
+  const auto axis = tuple_channel_axis(descriptor, facets);
+  return !axis ||
+         (region.rank() == descriptor.shape.size() && !region.empty() &&
+          region.dimensions()[*axis].offset == 0 &&
+          region.dimensions()[*axis].extent == descriptor.shape[*axis]);
+}
+Result<Footprint> validation_closure(
+    const OperationMetadata& metadata, const Footprint& support,
+    const FootprintLimits& limits,
+    const std::function<Status(std::uint64_t)>& consume) {
+  const auto axis = tuple_channel_axis(metadata.descriptor, metadata.facets);
+  if (!axis || support.empty())
+    return Result<Footprint>(support);
+  std::vector<Region> regions;
+  regions.reserve(support.boxes().size());
+  for (const auto& box : support.boxes()) {
+    const auto& charge = consume ? consume : limits.consume_work;
+    if (charge) {
+      auto status = charge(1 + metadata.descriptor.shape.size());
+      if (!status.ok())
+        return Result<Footprint>(status);
+    }
+    auto dimensions = box.dimensions();
+    dimensions[*axis] = {0, metadata.descriptor.shape[*axis]};
+    regions.emplace_back(std::move(dimensions));
+  }
+  return Footprint::from_regions(metadata.descriptor.shape, regions, limits);
+}
+Result<Footprint> color_output_samples(const OperationMetadata& metadata,
+                                       const Footprint& requested,
+                                       const FootprintLimits& limits) {
+  if (!requested.valid() || requested.shape() != metadata.descriptor.shape)
+    return Result<Footprint>(
+        Status{ErrorCode::InvalidArgument, "output footprint domain mismatch"});
+  if (!color_array(metadata.facets))
+    return Result<Footprint>(requested);
+  return validation_closure(metadata, requested, limits);
+}
+DependencyMappedNeed validation_map(DependencyMappedNeed support,
+                                    const OperationMetadata& metadata) {
+  support.roles = 4;
+  const auto axis = tuple_channel_axis(metadata.descriptor, metadata.facets);
+  if (axis)
+    support.axes[*axis] = {-1, {0, metadata.descriptor.shape[*axis]}};
+  return support;
 }
 
 Status validate_port_value(const OperationPortConstraint& port,
@@ -517,6 +603,13 @@ Status validate_port_value(const OperationPortConstraint& port,
   if (port.kind == OperationPortKind::Value ||
       port.kind == OperationPortKind::Typed) {
     for (const auto& facet : value.facets()) {
+      if (facet.key == "photospider.color-array") {
+        auto color = decode_color_array(facet);
+        if (!color.ok())
+          return color.status();
+        return validate_color_array_value(color.value(), value, numeric_failure,
+                                          stop);
+      }
       if (facet.key != "photospider.image" &&
           facet.key != "photospider.semantic")
         continue;

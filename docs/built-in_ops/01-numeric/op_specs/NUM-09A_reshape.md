@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-09A: reshape
@@ -111,7 +111,25 @@ input, reversed axes, zero strides, unaligned offsets and owner-fragmented sourc
 Check whole versus regional logical equality and explicit view success/failure,
 auto fallback and dense results without comparing incidental physical addresses.
 
-Test exact source-read/invalidation sets, typed validation, invalid products,
-partial requests, hard mapping budgets, cache-off, cancellation and output
-lifetime. Deliver actual public WorkflowDocument execution when implemented;
-no target runtime implementation or test is claimed by this specification.
+The current nine `array.*` keys use per-node shape/permutation/count
+parameters and the public `reshape_node` helper in
+`photospider/numeric/layouts.hpp`. `TransformLayout::Auto` chooses a
+per-request-rectangle view when one affine owner can represent it and otherwise
+packs; `View` reports `ViewUnavailable`, while `Dense` always packs. Direct
+bindings remain whole dense values; a non-contiguous workflow input is produced
+by the public `transpose_node`, and direct `OperationRegistry::invoke` can
+exercise a strided `Value`.
+
+On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the public manual examples and 636 independent integer/raw-bit
+oracle cases per profile. The installed public consumer passed. Coverage includes
+exact support/dirty mapping, whole versus regional layout policy, unaligned and
+negative/zero strides, shared versus independent owners, ignored singleton steps,
+full slice endpoint validation, typed Validation closures, schema/Empty behavior,
+work/cancellation/capacity failures, fenv and escaped Value lifetime. Focused
+compiler/dependency/fragments/resources units and independent scoped review passed.
+Layout operations are `cacheable=false` because the content cache does not witness
+physical owner/stride partitions. Managed metadata and its remaining host-container
+boundaries are documented in [Managed Resources](../../../kernel-architecture/Managed-Resources.md).
+The manual target is not registered in integration tests. Specification status
+remains Proposed; no performance claim follows from correctness checks.

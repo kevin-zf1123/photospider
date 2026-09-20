@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -91,12 +91,23 @@ are the oracle. A request solely in B's output slab must not read A, even if A's
 upstream would fail. Cover slab-crossing/disjoint requests, all dtypes/sNaN bits,
 non-leading axes, owner fragmentation, negative strides, repeated use of the same
 input object, metadata cap, view/dense equality, source invalidation, cancellation
-and output lifetime after context destruction. Run through public WorkflowDocument
-execution when implemented; no runtime tests are claimed by this draft.
+and output lifetime after context destruction. The public WorkflowDocument manual target and independent oracle below
+provide executable acceptance for these behavior boundaries.
 
-The registry has bounded repeated inputs, but full-shape repeated_match does not
-express this family: only non-axis dimensions match. Compilation must validate
-that relation and infer a sum of the selected axis lengths. A registry-wide fixed
-shape or ordinary MatchAllInputs does not implement it. No target keys are
-currently registered; required inference/registration work remains implementation
-scope rather than an asserted current capability.
+The current three profile keys use the public `concatenate_node` helper in
+`photospider/numeric/indexing.hpp`. Per-node specialization validates the
+non-axis shape relation and axis-length sum. Static dependency pieces partition
+the output into disjoint slabs, with `DependencyAxis::translation` applied per piece;
+`repeated_match=false` is permitted only with the metadata specializer.
+
+The manual indexing workflow covers slab-crossing/disjoint requests, view and
+dense output, exact support, owner fragmentation, typed validation, raw bit
+transport and resource/cancellation paths. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the complete manual workflows and 3858 independent
+coordinate/contributor/Fraction cases per profile. The installed public consumer
+passed. Checks include exact reads and dirty support, typed actual-read closure,
+raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
+replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
+Focused compiler/dependency/fragments/resources units and independent scoped
+reviews passed. Manual acceptance has no integration-test registration.
+Specification status remains Proposed; no performance claim is inferred.

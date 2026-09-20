@@ -2,9 +2,14 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.10.0
+  VERSION 0.16.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
+
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR
+   NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  message(FATAL_ERROR "Photospider requires Clang for C and C++ builds")
+endif()
 
 include(CMakePackageConfigHelpers)
 include(CTest)
@@ -29,8 +34,8 @@ endif()
 set(PHOTOSPIDER_SANITIZER_MODE none)
 set(PHOTOSPIDER_SANITIZER_FLAG "")
 if(PHOTOSPIDER_ENABLE_ASAN OR PHOTOSPIDER_ENABLE_TSAN)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    message(FATAL_ERROR "Photospider sanitizers require Clang or GNU C++")
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Photospider sanitizers require Clang C++")
   endif()
   include(CheckCXXCompilerFlag)
   include(CheckLinkerFlag)
@@ -96,6 +101,36 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_minimum.cpp
   plugins/ops/01-numeric/numeric_multiply.cpp
   plugins/ops/01-numeric/numeric_sample_expression.cpp
+  plugins/ops/01-numeric/numeric_interpolation.cpp
+  plugins/ops/01-numeric/numeric_layouts.cpp
+  plugins/ops/01-numeric/numeric_indexing.cpp
+  plugins/ops/01-numeric/lut1d_application.cpp
+  plugins/ops/01-numeric/lut3d_application.cpp
+  plugins/ops/01-numeric/log_shaper.cpp
+  plugins/ops/01-numeric/lut3d_bake_geometry.cpp
+  plugins/ops/01-numeric/lut3d_bake_results.cpp
+  plugins/ops/01-numeric/parametric_bezier.cpp
+  plugins/ops/01-numeric/bezier_function.cpp
+  plugins/ops/01-numeric/color_ramps.cpp
+  plugins/ops/01-numeric/curve_interpolation.cpp
+  plugins/ops/01-numeric/curve_inverse.cpp
+  plugins/ops/01-numeric/lowpass_uniform.cpp
+  plugins/ops/01-numeric/lowpass_nonuniform.cpp
+  plugins/ops/01-numeric/numeric_expression.cpp
+  plugins/ops/01-numeric/numeric_binary.cpp
+  plugins/ops/01-numeric/numeric_unary.cpp
+  plugins/ops/01-numeric/numeric_calculus.cpp
+  plugins/ops/01-numeric/numeric_matrix.cpp
+  plugins/ops/01-numeric/numeric_scans.cpp
+  plugins/ops/01-numeric/numeric_reductions.cpp
+  plugins/ops/01-numeric/numeric_ordering.cpp
+  plugins/ops/01-numeric/numeric_ranges.cpp
+  plugins/ops/01-numeric/numeric_comparisons.cpp
+  plugins/ops/01-numeric/comparison_profiles.cpp
+  plugins/ops/01-numeric/numeric_arrays.cpp
+  plugins/ops/01-numeric/array_profiles.cpp
+  plugins/ops/01-numeric/numeric_sequences.cpp
+  plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
   plugins/ops/02-format-color/alpha_associate.cpp
@@ -156,6 +191,8 @@ set(
   src/lib/benchmark/raw_benchmark.cpp
   src/lib/compiler/compiler.cpp
   src/lib/data/dependency.cpp
+  src/lib/data/dependency_metadata.cpp
+  src/lib/data/dependency_mapping.cpp
   src/lib/data/footprint.cpp
   src/lib/data/value_fragments.cpp
   src/lib/data/fragment_atlas.cpp
@@ -166,6 +203,9 @@ set(
   src/lib/data/layer.cpp
   src/lib/data/quality.cpp
   src/lib/data/statistics.cpp
+  src/lib/data/lut3d_bake.cpp
+  src/lib/data/lut3d_bake_validation.cpp
+  src/lib/numeric/lut3d_baking.cpp
   src/lib/plugin/statistics_operation.cpp
   src/lib/plugin/fft_operation.cpp
   src/lib/plugin/component_operation.cpp
@@ -176,8 +216,13 @@ set(
   src/lib/execution/cancellation.cpp
   src/lib/data/value.cpp
   src/lib/data/semantic.cpp
+  src/lib/data/color_array.cpp
+  src/lib/data/icc_profile.cpp
+  src/lib/data/icc_validation.cpp
+  src/lib/data/resource_bindings.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
+  src/lib/plugin/dependency_metadata.cpp
   src/lib/plugin/result_program.cpp
   src/lib/plugin/dependency_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
@@ -202,7 +247,7 @@ if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
     COMPILE_OPTIONS "-fobjc-arc")
 endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
 
     src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
@@ -304,7 +349,7 @@ function(photospider_configure_kernel_target target)
     set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED ON)
   endif()
 
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
     if(NOT PHOTOSPIDER_SANITIZER_MODE STREQUAL "none")
       target_compile_options(
@@ -390,6 +435,7 @@ add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
@@ -433,7 +479,7 @@ if(BUILD_TESTING)
     target_link_libraries(${target} PRIVATE ${kernel_target})
     target_include_directories(${target} PRIVATE tests)
     target_compile_features(${target} PRIVATE cxx_std_17)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME ${target} COMMAND ${target})
@@ -633,7 +679,8 @@ if(BUILD_TESTING)
   target_include_directories(test_computed_scalar PRIVATE examples)
   add_dependencies(test_computed_scalar photospider_rgba32f_ops)
   add_test(NAME test_computed_scalar_plugin COMMAND test_computed_scalar $<TARGET_FILE:photospider_rgba32f_ops>)
-  photospider_add_test(test_result_cache Photospider::kernel tests/integration/test_result_cache.cpp)
+  # This test directly exercises private cache validation and allocation code.
+  photospider_add_test(test_result_cache photospider_test_kernel tests/integration/test_result_cache.cpp)
   target_include_directories(test_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
   photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
@@ -757,6 +804,7 @@ if(BUILD_TESTING)
   target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
+  target_include_directories(test_resources PRIVATE src/lib)
   photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)

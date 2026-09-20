@@ -39,6 +39,12 @@ class PHOTOSPIDER_API InputSnapshot final {
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
   const std::vector<ValueFacet>& facets() const;
+  /** @brief Owning resources retained by the snapshot's interpretation.
+   * @throws std::logic_error For an invalid snapshot; borrowed until
+   * retirement. Copy the set or a profile handle to extend ownership. No I/O or
+   * mutation.
+   */
+  const ResourceBindings& resources() const;
   /**
    * @brief Copies exact nonempty coverage into caller-owned packed bytes.
    * @param region Contained logical region, with all image channels.

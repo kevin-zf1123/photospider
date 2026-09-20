@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -53,17 +53,31 @@ Numerator and denominator reads follow selected rows; q<=0 in an unselected row 
 Failure categories and complete-color publication follow the shared contract,
 including ResourceExhausted on unfinished certified arithmetic.
 
-## Conceptual workflow and acceptance
+## Workflow and acceptance
 
 Bind the ordered ports above, stops=[0,1], matching color_description, and
 explicit static parameters. lightness_chroma=[[20,2],[80,4]], hue_numerator=[7,1], hue_denominator=[4,4], input=[0.5] gives [[50,3,1]].
 The example uses the default output unit and a described values result.
-This is a conceptual Compiler/ExecutionContext workflow until registration and
-ColorArray support are implemented; delivery must add actual invocation commands.
+The maintained public Compiler/ExecutionContext workflow and invocation commands are linked below.
 
 Use the shared independent arithmetic oracle, per-profile/dtype/unit fixtures,
 multi-turn and large-angle cases, whole versus partial color requests, exact dirty
 witnesses, invalid remote rows, strides, low-budget failures, cancellation and
 owner-lifetime acceptance. Include INT64_MIN and equivalent unreduced fractions.
-No runtime execution or numerical compatibility claim accompanies this Proposed
-specification.
+The maintained public workflow and current validation boundary are documented below; no performance result is claimed.
+
+## Maintained implementation and validation
+
+Public [`color_ramp_cielch_rational_pi_node`](../../../../include/photospider/numeric/color_ramps.hpp)
+constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
+implements its staged complete-color execution.
+
+Coordinates and original hue ratios use exact rational interpolation.
+Conversion between radian and pi units uses a certified pi enclosure with
+a 4096-bit precision ceiling; equal units cancel symbolically. All profiles
+return strict bits. Unresolved unit conversion returns ResourceExhausted.
+
+See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
+[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
+for resource limits and actual validation.

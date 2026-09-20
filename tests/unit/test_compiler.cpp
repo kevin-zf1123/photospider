@@ -115,17 +115,17 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical v10 vectors include Result schema presence and traits 10.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "e6ed5e44c9f529c9");
+  // Canonical v14 vectors include cross-output pure-block scope.
+  PS_CHECK(positive_zero.value().semantic.digest().value == "c8a5de1b47712ef1");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "85b905783760e4f5");
-  PS_CHECK(positive_zero.value().plan.digest().value == "30d346aa98de3a11");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "578e618519da5dd1");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "7fdf744733a10e49");
+           "390f6b45996ecb75");
+  PS_CHECK(positive_zero.value().plan.digest().value == "e72cc0053cabe8ec");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "04d2e88f20c0077c");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "137f397bc05a0371");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "4ffa0c2b617081f1");
-  PS_CHECK(negative_zero.value().plan.digest().value == "9b67c3266a4693c1");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "d7a540bfb7c52d52");
+           "68a84c5bc2af601d");
+  PS_CHECK(negative_zero.value().plan.digest().value == "eff28960aab6ba43");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "94f174f67121c013");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=

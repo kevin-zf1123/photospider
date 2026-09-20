@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -46,9 +46,9 @@ applies these numeric and dtype-conversion rules, including sNaN quieting.
 
 ## Acceptance and implementation distinction
 
-Conceptual fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[2],[5]], shape
-[2,1], in the selected output dtype. Bind through WorkflowDocument, compile the
-selected key and read values through ExecutionContext when implemented. Use
+Fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[2],[5]], shape
+[2,1], in the selected output dtype. The public manual target binds this through
+WorkflowDocument, compiles the selected key and reads values through ExecutionContext. Use
 independent exact grouping and integer/rational/bit-selection oracles. Cover
 singleton groups, non-leading/multiple axes, NaN payload order/conversion,
 signed-zero groups, infinity combinations, subnormals and source dtype extrema.
@@ -60,7 +60,10 @@ inputs first would incorrectly yield 2^53. For Float64 [MAX,MAX],
 mean is MAX despite an overflowing naive floating sum. Test both destinations
 and the shared deterministic NaN payload narrowing/expansion.
 
-Apply shared exact source-read/invalidation, resource/cancellation and owner
-lifetime fixtures. Existing legacy mean/variance behavior is distinguished in
-the shared contract. These versioned target keys remain unimplemented and no
-runtime test is claimed by this specification.
+The current three profile keys use `reduce_mean_node` from
+`photospider/numeric/reductions.hpp`. Integer sources remain exact through the
+sum/count calculation and convert only at final Float32/Float64 rounding. The
+public fixture checks the `[2,3]` axes-`1` result `[[2],[5]]` and large-integer
+no-premature-conversion cases. The shared reduction contract records the
+complete strict/Apple/WSL and installed-consumer evidence. Proposed status is
+unchanged.

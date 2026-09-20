@@ -16,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/numeric_diagnostics.hpp"
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "execution/result_callback_scope.hpp"
@@ -141,6 +142,10 @@ class StructuredExecution final {
     const auto started = std::chrono::steady_clock::now();
     Result<ExecutionResult> result(Status{ErrorCode::Internal, {}});
     try {
+      auto admitted = plan_.resources().reference(resources_);
+      if (!admitted.ok())
+        return Result<ExecutionResult>(admitted.status());
+      bindings_resources_ = admitted.take_value();
       result = run_body(sink, requested, fragments);
     } catch (const std::bad_alloc&) {
       result =
@@ -346,6 +351,21 @@ class StructuredExecution final {
                                     set_limits());
       if (!wanted.ok())
         return Answer(wanted.status());
+      wanted = input_internal::color_output_samples(
+          {step.output_descriptor, step.output_facets}, wanted.value(),
+          set_limits());
+      if (!wanted.ok())
+        return Answer(wanted.status());
+      auto scope = Footprint::from_regions(
+          step.output_descriptor.shape,
+          {plan_.output_regions().at(named.first)}, set_limits());
+      if (!scope.ok())
+        return Answer(scope.status());
+      auto outside = wanted.value().subtract(scope.value(), set_limits());
+      if (!outside.ok())
+        return Answer(outside.status());
+      if (!outside.value().empty())
+        return Answer(protocol("color output closure exceeds plan"));
       auto computed = value(PlanStepInput{named.second}, wanted.value());
       if (!computed.ok())
         return Answer(computed.status());
@@ -362,8 +382,18 @@ class StructuredExecution final {
         if (wanted.value().boxes().size() != 1)
           return Answer(
               protocol("dense structured output requires one rectangle"));
-        auto collected = computed.value().collect(
-            wanted.value().boxes()[0], resources_.allocator(), set_limits());
+        const auto& parts = computed.value().fragments();
+        const bool view =
+            step.traits.outputs[0].maximum_output_payload_bytes.has_value() ||
+            step.traits.outputs[0].preserve_output_views;
+        if (view && parts.size() != 1)
+          return Answer(Status{
+              ErrorCode::TypeMismatch,
+              "view requires execute_fragments or explicit dense layout"});
+        auto collected = view ? parts[0].view(wanted.value().boxes()[0])
+                              : computed.value().collect(
+                                    wanted.value().boxes()[0],
+                                    resources_.allocator(), set_limits());
         if (!collected.ok())
           return Answer(collected.status());
         result.values.emplace(named.first, collected.take_value());
@@ -536,6 +566,7 @@ class StructuredExecution final {
     created->lease = lease.take_value();
     created->query.value_outputs = std::move(outputs);
     created->query.output_index = step.output_index;
+    created->query.resources = bindings_resources_;
     created->key = std::move(key);
     created->query.semantic_key = created->key;
     created->query.page_bytes = options_.maximum_result_window_bytes;
@@ -1047,9 +1078,9 @@ class StructuredExecution final {
       auto reference = resources_.reference(part.storage());
       if (!reference.ok())
         return retire(actor, reference.status());
-      auto owned =
-          Value::from_storage(part.descriptor(), part.region(), part.layout(),
-                              reference.take_value(), part.facets());
+      auto owned = Value::from_storage(part.descriptor(), part.region(),
+                                       part.layout(), reference.take_value(),
+                                       part.facets(), bindings_resources_);
       if (!owned.ok())
         return retire(actor, owned.status());
       owned_parts.push_back(owned.take_value());
@@ -1057,7 +1088,7 @@ class StructuredExecution final {
     auto admitted_value = ValueFragments::create_view(
         output.value.descriptor(), output.value.facets(),
         output.value.coverage(), owned_parts.data(), owned_parts.size(),
-        set_limits());
+        set_limits(), {}, bindings_resources_);
     if (!admitted_value.ok())
       return retire(actor, admitted_value.status());
     actor.value = admitted_value.take_value();
@@ -1131,14 +1162,15 @@ class StructuredExecution final {
         return failed(status);
       ++diagnostics_.source_read_count;
       diagnostics_.source_read_bytes += writer.size();
-      auto published = std::move(writer).publish(declaration.facets);
+      auto published =
+          std::move(writer).publish(declaration.facets, bindings_resources_);
       if (!published.ok())
         return failed(published.status());
       parts.push_back(published.take_value());
     }
     return ValueFragments::create_view(
         declaration.descriptor, declaration.facets, requested, parts.data(),
-        parts.size(), set_limits());
+        parts.size(), set_limits(), {}, bindings_resources_);
   }
   Result<ValueFragments> value(const PlanInput& input,
                                const Footprint& requested) {
@@ -1155,7 +1187,8 @@ class StructuredExecution final {
       return Answer(protocol("Value request domain mismatch"));
     if (requested.empty())
       return ValueFragments::create(step.output_descriptor, step.output_facets,
-                                    requested, {}, set_limits());
+                                    requested, {}, set_limits(),
+                                    bindings_resources_);
     if (step.traits.outputs[0].dependency_version == 2) {
       auto acquired = actor(index, requested);
       if (!acquired.ok())
@@ -1239,6 +1272,7 @@ class StructuredExecution final {
                                        Backend::Cpu, active_token(), region,
                                        resources_.allocator());
         invocation.output_index = step.output_index;
+        invocation.resources = bindings_resources_;
         invocation.input_indices = ports;
         invocation.input_metadata = all;
         const auto before = active_stop();
@@ -1256,7 +1290,7 @@ class StructuredExecution final {
     }
     auto assembled = ValueFragments::create_view(
         step.output_descriptor, step.output_facets, wanted.value(),
-        parts.data(), parts.size(), set_limits());
+        parts.data(), parts.size(), set_limits(), {}, bindings_resources_);
     if (!assembled.ok())
       return assembled;
     if (whole)
@@ -1282,8 +1316,12 @@ class StructuredExecution final {
     if (!bridge.ok())
       return Answer(bridge.status());
     const std::string legacy_snapshot(snapshot_.data(), snapshot_.size());
-    auto observations = operation_observations(
-        {step.output_descriptor, step.output_facets}, requested, set_limits());
+    auto observations =
+        operation_observations({step.output_descriptor,
+                                step.output_facets,
+                                {},
+                                step.traits.outputs[0].atomic_trailing_axes},
+                               requested, set_limits());
     if (!observations.ok())
       return Answer(observations.status());
     ResourceVector<Value> parts{ResourceAllocator<Value>(resources_)};
@@ -1291,6 +1329,8 @@ class StructuredExecution final {
       DependencyRequest request{inputs, step.parameters, samples,
                                 legacy_snapshot};
       request.output_index = step.output_index;
+      request.prepared = step.prepared;
+      request.resources = bindings_resources_;
       request.cancellation = active_token();
       request.limits = options_.dependencies;
       Result<std::shared_ptr<DependencySession>> started(
@@ -1306,12 +1346,51 @@ class StructuredExecution final {
       if (!started.ok())
         return started.status();
       auto session = started.take_value();
+      NumericDiagnostics reported_numeric;
       for (;;) {
+        std::uint64_t numeric_callback_us = 0;
         Result<DependencyProgress> progress(Status{ErrorCode::Internal, {}});
         status = dispatch([&] {
+          const auto tick = std::chrono::steady_clock::now();
           progress = session->poll(resources_.allocator());
+          numeric_callback_us += static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - tick)
+                  .count());
           return Status::success();
         });
+        const auto numeric = numeric_internal::delta(
+            session->numeric_diagnostics(), &reported_numeric);
+        const auto code = status.ok() ? progress.status().code : status.code;
+        const auto elements =
+            status.ok() && progress.ok() &&
+                    std::holds_alternative<DependencyResult>(progress.value())
+                ? samples.element_count().value()
+                : 0;
+        auto timing = std::find_if(
+            diagnostics_.operation_timings.begin(),
+            diagnostics_.operation_timings.end(),
+            [&](const auto& item) { return item.output == step.result_ref(); });
+        if (timing == diagnostics_.operation_timings.end()) {
+          diagnostics_.operation_timings.push_back(
+              {step.result_ref(), Backend::Cpu, numeric_callback_us, code, 1,
+               elements});
+          diagnostics_.operation_timings.back().numeric = numeric;
+        } else {
+          auto merged = merge_numeric_diagnostics(&timing->numeric, numeric);
+          if (!merged.ok())
+            return merged;
+          if (timing->invocation_count == UINT64_MAX ||
+              elements > UINT64_MAX - timing->computed_elements ||
+              numeric_callback_us > UINT64_MAX - timing->duration_us)
+            return Status{ErrorCode::ResourceExhausted,
+                          {},
+                          FailureReason::CapacityLimit};
+          ++timing->invocation_count;
+          timing->computed_elements += elements;
+          timing->duration_us += numeric_callback_us;
+          timing->outcome = code;
+        }
         if (!status.ok())
           return status;
         if (!progress.ok())
@@ -1350,7 +1429,9 @@ class StructuredExecution final {
     };
     Status visited;
     if (step.traits.outputs[0].observation_kind ==
-        ObservationKind::RequestRecord) {
+            ObservationKind::RequestRecord ||
+        step.traits.outputs[0].static_dependency_pieces ||
+        step.traits.outputs[0].regional_atomic) {
       visited = drive(requested);
     } else {
       visited = observations.value().visit(
@@ -1365,7 +1446,10 @@ class StructuredExecution final {
             if (!observation.ok())
               return observation.status();
             auto samples = observation_samples(
-                {step.output_descriptor, step.output_facets},
+                {step.output_descriptor,
+                 step.output_facets,
+                 {},
+                 step.traits.outputs[0].atomic_trailing_axes},
                 observation.value(), set_limits());
             return samples.ok() ? drive(samples.value()) : samples.status();
           },
@@ -1376,12 +1460,13 @@ class StructuredExecution final {
       return Answer(visited);
     return ValueFragments::create_view(
         step.output_descriptor, step.output_facets, requested, parts.data(),
-        parts.size(), set_limits());
+        parts.size(), set_limits(), {}, bindings_resources_);
   }
   const ExecutionPlan& plan_;
   std::vector<ExecutionBinding> bindings_;
   std::shared_ptr<OperationRegistry> operations_;
   ResourceBudget resources_;
+  ResourceBindings bindings_resources_;
   const ExecutionOptions& options_;
   CancellationToken cancellation_;
   std::function<ErrorCode()> stop_;

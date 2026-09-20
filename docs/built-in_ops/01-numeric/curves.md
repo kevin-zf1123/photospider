@@ -1,8 +1,8 @@
 # 曲线、采样与 LUT
 
-已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
+已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)。规格表中的 Proposed 表示契约状态，不表示当前 runtime 未注册；NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，详细实现事实和验证边界见[实现进度](implementation.md)及对应 workflow README。分类表中的建议参数不覆盖现有接口。
 
-状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；范围外的通用 Path、3D 数值求逆等继续为后续设计。输入使用Float32/64；建议Float64构造系数、Float32表值。控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar；当前曲线与 field LUT 的 Whole 实现边界以链接契约为准。
+状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；规格状态与运行时状态独立。NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，各簇实现事实、workflow 命令和验证边界以对应规格、README 与[实现进度](implementation.md)为准。输入使用Float32/64；控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar。
 
 本轮控制点 generator 选择二次/三次 Bézier 锚点与相对控制柄，见
 [CRV-02 具体规格](op_specs/CRV-02_sample_bezier_function.md)。每个节点静态选择 degree，
@@ -15,11 +15,11 @@ strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其�
 
 | ID / 提议操作 | 输入 → 输出 | 参数与方法 | 验收 |
 | --- | --- | --- | --- |
-| CRV-01 interpolate family | 单函数 x[K],y[K],query[N]→[N]；多函数 x[K],y[K,C],query[N]→[N,C] | 单／多函数与 linear/PCHIP 共四个独立算子；动态 query、全局 x 校验、按请求 y；linear 三版本位一致，PCHIP 加速最终 4 ULP 并保持形状 | [具体规格](op_specs/CRV-01_interpolate.md)，Proposed；旧 sample_linear/monotone 接口单独记录 |
-| CRV-02 bezier_function | anchors/handle offsets+start/end/count → `values[N]`,`axis[3]` | 二次或三次；全局验证 x 单调，按命中段读取 y；先解 Bx(t)=x，再取 By(t)；允许尖角和 y 过冲 | [完整草稿](op_specs/CRV-02_sample_bezier_function.md)，Proposed；新接口尚未实现 |
-| CRV-03 evaluate_bezier | anchors/handles+segment_indices[N]+t[N]→[N,D] | 同阶二次／三次参数 Bézier；控制点 RN64 重建，strict 整式正确舍入、加速最终 4 ULP；按段／分量读取 | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed；端点只读锚点、允许回折与退化 |
-| CRV-04 bake_lut1d templates | 六种函数来源+start/end/count→values/axis | 六个独立命名组合模板；作者侧 profile 默认 strict；插值查询固定 Float64；输出按需请求 | [具体规格](op_specs/CRV-04_bake_lut1d.md)，Proposed；不自动保存或冻结，离散误差单独验收 |
-| CRV-05 apply_lut1d family | input+table[L] 或 table[L,C]+axis[3]→同形结果 | 单表与逐通道多表独立；共享动态轴、固定线性插值；三版本位一致；按请求表项／通道读取 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；单点表、反向轴和三种域外策略 |
+| CRV-01 interpolate family | 单函数 x[K],y[K],query[N]→[N]；多函数 x[K],y[K,C],query[N]→[N,C] | 单／多函数与 linear/PCHIP 共四个独立算子；动态 query、全局 x 校验、按请求 y；linear 三版本位一致，PCHIP 加速最终 4 ULP 并保持形状 | [具体规格](op_specs/CRV-01_interpolate.md)，规格 Proposed；十二个 key 已实现并完成公开 workflow 验证，当前三 profile 均精确舍入；旧 sample_linear/monotone 接口单独记录 |
+| CRV-02 bezier_function | anchors/handle offsets+start/end/count → `values[N]`,`axis[3]` | 二次或三次；全局验证 x 单调，按命中段读取 y；先解 Bx(t)=x，再取 By(t)；允许尖角和 y 过冲 | [完整规格](op_specs/CRV-02_sample_bezier_function.md)，Proposed；三 profile keys 已实现并通过 public workflow/oracle 验证；默认资源限制下 dense 大请求可能 ResourceExhausted |
+| CRV-03 evaluate_bezier | anchors/handles+segment_indices[N]+t[N]→[N,D] | 同阶二次／三次参数 Bézier；控制点 RN64 重建，strict 整式正确舍入、加速最终 4 ULP；按段／分量读取 | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed；三 profile keys 和公开构造器已实现并验证，端点只读锚点、允许回折与退化 |
+| CRV-04 bake_lut1d templates | 六种函数来源+start/end/count→values/axis | 六个独立命名组合模板；作者侧 profile 默认 strict；插值查询固定 Float64；输出按需请求 | [具体规格](op_specs/CRV-04_bake_lut1d.md)，Proposed；六个公开构造器已实现并通过展开图等价验证，不自动保存或冻结，离散误差单独验收 |
+| CRV-05 apply_lut1d family | input+table[L] 或 table[L,C]+axis[3]→同形结果 | 单表与逐通道多表独立；共享动态轴、固定线性插值；三版本位一致；按请求表项／通道读取 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；六个 profile keys 已实现并验证，支持单点表、反向轴、三种域外策略及六种 baking 消费链 |
 | CRV-06 color_ramp family | input+stops+颜色表（有理色相拆分整数分子/分母）→input.shape+[C] | RGB、CMYK、XYZ、CIELAB、CIELCh(ab)、OKLab、OKLCh、HSL、YCbCr 独立实现；携带通用颜色数组描述 | [具体规格](op_specs/CRV-06_color_ramp.md)，Proposed；九种模型已澄清，LCh/HSL 各三入口，原始 hue 保留圈数 |
 | CRV-07 apply_lut3d | 三分量颜色+table[N0,N1,N2,3]+axis[3,3]→同形颜色 | trilinear/tetrahedral 独立；八种模型，同模型内可改变描述；三版本整式正确舍入 | [具体规格](op_specs/CRV-07_apply_lut3d.md)，Proposed；全局轴校验、非零权重顶点按需、整颜色观察 |
 | CRV-08 shaper | 数值+共享 lower/upper→同形数值 | linear 正反为 remap 模板，log2 正反为 primitive；IEEE 值、无夹紧；log 加速 4 ULP 且单调 | [具体规格](op_specs/CRV-08_shaper.md)，Proposed；完整公式、端点精确、动态边界校验 |
@@ -42,10 +42,10 @@ PCHIP与B-spline性质可对照SciPy官方实现定义；Fourier resample的周�
 
 ## 采样和执行
 
-NUM-01 与 CRV-02 的目标采样形式为 `start,end,count`，含端点并支持反向；
+NUM-01 与 CRV-02 的采样形式为 `start,end,count`，含端点并支持反向；
 count=1 只在 start 求值且不读取 end。返回的 axis 保留起点、终点和推导步长，
 具体坐标舍入及相邻坐标重复检查见单算子规格。其他采样族的区间模式须另行澄清；
-现有代码调用继续遵循已实现参数，不以目标规格伪装成当前 registry 行为。
+CRV-02 当前通过 `sample_bezier_function_node` 公开入口进入 registry；其余目标规格仍按各自状态维护。
 
 顺序query可线性扫描区间，预处理O(K)，求值O(K+N)；无序query可二分O(NlogK)。GPU可并行query，但完整表及shape需求要明确。动态表值变化应纳入绑定快照和缓存依赖，不隐式从可变文件读取。
 

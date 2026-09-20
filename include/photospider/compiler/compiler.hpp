@@ -68,7 +68,8 @@ struct PHOTOSPIDER_API SemanticOutput final {
 /**
  * @brief One normalized typed node in semantic compiler IR.
  *
- * @note Traits are copied values; no callback or DSO pointer enters IR.
+ * @note Traits are copied values. Optional static preparation owns immutable
+ * derived state and its definition lease; neither enters canonical identity.
  */
 struct PHOTOSPIDER_API SemanticNode final {
   /** @brief Nonzero source node id. */
@@ -81,6 +82,10 @@ struct PHOTOSPIDER_API SemanticNode final {
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied compiler-visible operation traits. */
   OperationTraits traits;
+  /** @brief Immutable static preparation shared across outputs and executions.
+   * Retains its definition; pointer/state bytes are excluded from digests.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
   /** @brief Independent named result metadata and observation legality. */
   std::vector<SemanticOutput> outputs;
 };
@@ -143,6 +148,11 @@ class PHOTOSPIDER_API SemanticGraphIR final {
   input_declarations() const noexcept {
     return input_declarations_;
   }
+  /** @brief Frozen resources required by static input/output descriptions.
+   * Owners are separate from per-run numeric inputs and survive this stage's
+   * copies. Unused caller bindings and allocation addresses are not identity.
+   */
+  const ResourceBindings& resources() const noexcept { return resources_; }
   /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only for a compiler-produced IR whose context is unchanged.
@@ -156,7 +166,9 @@ class PHOTOSPIDER_API SemanticGraphIR final {
  private:
   friend class Compiler;
 
-  /** @brief Canonical copied input metadata, with no runtime owners. */
+  /** @brief Immutable resources required to interpret static metadata. */
+  ResourceBindings resources_;
+  /** @brief Canonical copied input metadata, with no per-run sample owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
@@ -239,6 +251,11 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
   input_declarations() const noexcept {
     return input_declarations_;
   }
+  /** @brief Frozen resources required by static input/output descriptions.
+   * Owners are separate from per-run numeric inputs and survive this stage's
+   * copies. Unused caller bindings and allocation addresses are not identity.
+   */
+  const ResourceBindings& resources() const noexcept { return resources_; }
   /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only when the source context still has the captured revision.
@@ -252,7 +269,9 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
  private:
   friend class Compiler;
 
-  /** @brief Canonical copied input metadata, with no runtime owners. */
+  /** @brief Immutable resources required to interpret static metadata. */
+  ResourceBindings resources_;
+  /** @brief Canonical copied input metadata, with no per-run sample owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
@@ -292,7 +311,9 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * mismatch, empty/out-of-bounds Regions and partial-channel image demand
    * fail before plan publication. Image coverage uses inferred facets and the
    * full logical channel extent, including generic ports and Whole outputs.
-   * Changed demand replans optimized IR.
+   * ColorArray requests instead expand the last axis to complete colors;
+   * returned output Regions record that closure. Changed demand replans
+   * optimized IR.
    */
   std::map<std::string, Region> output_regions;
   /** @brief Positive spatial tile extents; changing them only replans optimized
@@ -375,6 +396,10 @@ struct PHOTOSPIDER_API PlanStep final {
   std::map<std::string, ParameterValue> parameters;
   /** @brief Copied semantic traits used for validation/fallback. */
   OperationTraits traits;
+  /** @brief Immutable static preparation shared across outputs and executions.
+   * Retains its definition; pointer/state bytes are excluded from digests.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
   /** @brief Statically validated output Value descriptor. */
   ValueDescriptor output_descriptor;
   /** @brief Canonical inferred output facets, independent of runtime storage.
@@ -405,7 +430,8 @@ struct PHOTOSPIDER_API PlanStep final {
 /**
  * @brief Immutable validated local physical execution plan.
  *
- * @note Plans contain no native handles, callback pointers, or daemon objects.
+ * @note Steps may retain opaque immutable preparation and definition leases.
+ * Native execution handles and daemon objects are not part of a plan.
  */
 struct PHOTOSPIDER_API PlanExecutionGroup final {
   /** @brief Semantic node owning these optional singleton step alternatives. */
@@ -495,6 +521,11 @@ class PHOTOSPIDER_API ExecutionPlan final {
   input_declarations() const noexcept {
     return input_declarations_;
   }
+  /** @brief Frozen resources required by static input/output descriptions.
+   * Owners are separate from per-run numeric inputs and survive this stage's
+   * copies. Unused caller bindings and allocation addresses are not identity.
+   */
+  const ResourceBindings& resources() const noexcept { return resources_; }
   /**
    * @brief Reports whether the captured graph revision remains current.
    * @return True only when the source context still has the captured revision.
@@ -557,7 +588,9 @@ class PHOTOSPIDER_API ExecutionPlan final {
   std::vector<PlanExecutionGroup> execution_groups_;
   std::uint64_t tile_height_ = 128;
   std::uint64_t tile_width_ = 128;
-  /** @brief Canonical copied input metadata, with no runtime owners. */
+  /** @brief Immutable resources required to interpret static metadata. */
+  ResourceBindings resources_;
+  /** @brief Canonical copied input metadata, with no per-run sample owners. */
   std::vector<WorkflowInputDeclaration> input_declarations_;
   /** @brief Captured graph revision. */
   std::uint64_t revision_ = 0;
@@ -620,19 +653,23 @@ class PHOTOSPIDER_API Compiler final {
    * @brief Constructs a compiler over a frozen operation set.
    * @param operations Shared registry retained by the compiler.
    * @throws std::invalid_argument If registry is null or mutable.
-   * @note Registry callbacks are not invoked during analysis or planning.
+   * @note Analysis may invoke pure metadata/static preparation hooks. Runtime
+   * execution callbacks are not invoked during analysis or planning.
    */
   explicit Compiler(std::shared_ptr<OperationRegistry> operations);
 
   /**
    * @brief Builds normalized typed semantic IR.
    * @param snapshot Coherent GraphContext document/revision snapshot.
+   * @param resources Explicit immutable profile bindings for static facets.
+   * Missing CMYK profiles fail before publication; required owners are
+   * retained.
    * @return Semantic IR or complete graph/operation validation failure.
    * @throws std::bad_alloc If staging allocation fails.
    * @note Failure publishes no partial IR.
    */
   [[nodiscard]] Result<SemanticGraphIR> analyze(
-      const GraphSnapshot& snapshot) const;
+      const GraphSnapshot& snapshot, ResourceBindings resources = {}) const;
 
   /**
    * @brief Applies deterministic semantics-preserving optimizer rules.
@@ -660,13 +697,16 @@ class PHOTOSPIDER_API Compiler final {
    * @brief Runs analyze, optimize, and plan as one fail-before-publication
    * flow.
    * @param context Independently owned source graph context.
+   * @param resources Explicit immutable profile bindings, frozen at analysis.
+   * Changing profile content requires matching metadata and recompilation.
    * @param options Caller local-capability choices.
    * @return Complete stage chain plus raw timings, or the first failure.
    * @throws std::bad_alloc If staging allocation fails.
    * @note A replacement racing the pipeline returns `Stale` before success.
    */
   [[nodiscard]] Result<CompiledWorkflow> compile(
-      const GraphContext& context, const PlanningOptions& options = {}) const;
+      const GraphContext& context, const PlanningOptions& options = {},
+      ResourceBindings resources = {}) const;
 
   /**
    * @brief Returns the frozen operation registry used by this compiler.

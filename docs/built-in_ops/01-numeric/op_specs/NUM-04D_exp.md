@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -83,5 +83,19 @@ changed NaN payloads, altered host rounding settings and common cache/lifetime/
 budget/cancellation cases. An independent high-precision interval oracle is
 required; calling the production function twice is not acceptance.
 
-The new keys are not implemented. Deliver actual public target/run commands and
-measured platform benchmarks with the implementation; no such run is claimed here.
+The maintained implementation and public run command are documented below; local timing is recorded in the implementation notes.
+
+## Maintained implementation and validation
+
+This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
+exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
+separate typed validation and Atom-scoped failures. Its numerical path follows
+[the shared implementation notes](../math-implementation.md).
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.

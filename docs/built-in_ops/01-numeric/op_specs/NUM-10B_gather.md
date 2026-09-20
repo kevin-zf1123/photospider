@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -90,5 +90,20 @@ at position 1. Include both extreme legal indices, duplicates, non-leading axes,
 index/source strides, sNaN bits, disjoint requests, invalidation after index
 changes, resource exhaustion, cancellation, cache-off and owner lifetime.
 
-Deliver public WorkflowDocument execution when implemented. No versioned runtime
-implementation or test is claimed by this specification.
+The current three profile keys use the public `gather_node` helper in
+`photospider/numeric/indexing.hpp`. Index control is read only at requested
+output-axis positions, while each nonempty request still validates the observed
+indices and maps repeated indices to deduplicated source support. Output is
+owned dense storage.
+
+The manual indexing workflow checks `[[10,11,12],[20,21,22]]` with indices
+`[2,0,2]` to produce `[[12,10,12],[22,20,22]]`, exact support and changed-index
+cache replanning, strided/unaligned sources, fenv and resource limits. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the complete manual workflows and 3858 independent
+coordinate/contributor/Fraction cases per profile. The installed public consumer
+passed. Checks include exact reads and dirty support, typed actual-read closure,
+raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
+replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
+Focused compiler/dependency/fragments/resources units and independent scoped
+reviews passed. Manual acceptance has no integration-test registration.
+Specification status remains Proposed; no performance claim is inferred.

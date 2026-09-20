@@ -64,3 +64,19 @@ Compiler 在基础推导后调用；直接 session 在判断 Empty 前调用。�
 并验证 FrozenExecution 保留旧结果。`test_dependency_sampling` 还检查有限集合 radius
 关系、数值相同但边改变、控制 transpose、负坐标/端点/N=1、零权重 tap 验证、Empty
 静态错误，以及舍入模式和跨块数值不变性。
+
+## 通用元组观察与数值诊断
+
+C++ `OperationOutputTraits::atomic_trailing_axes` 将完整尾轴分为同一原子观察，
+适用于 CPU staged Atomic 输出；0 保持逐标量观察。通用 shape `{N,C}` 设置 1
+时观察 shape 为 `{N}`；axis `{3}` 设置 1 时观察 shape 为 `{1}`。宿主将部分
+样本请求闭包为完整元组，统一计算、验证和出具证书，再返回请求样本的交集。
+Image-v2 保留完整像素规则。编译器边 metadata、structured bridge 和 joint
+兼容性检查均保留分组，operation identity 包含该字段。C ABI 9 不暴露此 C++ trait。
+
+`DependencyPhase::report_numeric` 接收经过检查的增量 `NumericDiagnostics`，
+宿主以固定内联存储持有。报告包括实际 CPU profile、实现身份、计算值数量、strict
+fallback 及有界原因分类。后续失败仍保留已报告算术，体现在终态 atom progress 与
+`OperationTiming::numeric`；structured consumer 累计每个上游观察。Cache hit 和
+未请求观察不增加算术计数。这些物理诊断不改变语义身份，也不能证明精度界。
+见手动[数值 workflow](../../../examples/numeric_workflow/README.md)。

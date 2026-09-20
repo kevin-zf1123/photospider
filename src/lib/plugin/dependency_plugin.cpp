@@ -454,7 +454,7 @@ std::uint8_t* allocate_output(void* context, const ps_dependency_run_v9* region,
     auto box = decode_run(region, p->phase.query.output.descriptor.shape);
     if (!box.ok())
       return p->reject(box.status());
-    if (!input_internal::complete_image_channels(
+    if (!input_internal::complete_tuple_channels(
             p->phase.query.output.descriptor, p->phase.query.output.facets,
             box.value()))
       return p->reject(invalid("C output requires full image channels"));
@@ -493,7 +493,8 @@ int publish_output(void* context, std::uint64_t handle) noexcept {
       return p->reject(invalid("unknown or duplicate C output publication"));
     found->second.published = true;
     auto value =
-        std::move(found->second.value).publish(p->phase.query.output.facets);
+        std::move(found->second.value)
+            .publish(p->phase.query.output.facets, p->phase.query.resources);
     if (!value.ok())
       return p->reject(value.status());
     p->published.push_back(value.take_value());
@@ -867,7 +868,7 @@ Result<DependencyPoll> finish_poll(Phase& p, int result) {
     return Result<DependencyPoll>(invalid("unpublished C output allocation"));
   auto value = ValueFragments::create(
       phase.query.output.descriptor, phase.query.output.facets,
-      phase.query.outputs, p.published, phase.sets);
+      phase.query.outputs, p.published, phase.sets, phase.query.resources);
   if (!value.ok())
     return Result<DependencyPoll>(value.status());
   return Result<DependencyPoll>(value.take_value());

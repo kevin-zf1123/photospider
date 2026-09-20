@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -42,14 +42,16 @@ ties have the same representable value, so no rounding tolerance is needed.
 
 ## Acceptance and implementation distinction
 
-Conceptual fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[3],[6]], shape
-[2,1], in the selected output dtype. Bind through WorkflowDocument, compile the
-selected key and read values through ExecutionContext when implemented. Use
+Fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[3],[6]], shape
+[2,1], in the selected output dtype. The public manual target binds this through
+WorkflowDocument, compiles the selected key and reads values through ExecutionContext. Use
 independent exact grouping and integer/rational/bit-selection oracles. Cover
 singleton groups, non-leading/multiple axes, NaN payload order/conversion,
 signed-zero groups, infinity combinations, subnormals and source dtype extrema.
 
-Apply shared exact source-read/invalidation, resource/cancellation and owner
-lifetime fixtures. Existing legacy mean/variance behavior is distinguished in
-the shared contract. These versioned target keys remain unimplemented and no
-runtime test is claimed by this specification.
+The current three profile keys use `reduce_maximum_node` from
+`photospider/numeric/reductions.hpp`. They select exact maxima, propagate the
+first logical NaN and apply mixed-zero `+0` behavior. The public fixture checks
+the `[2,3]` axes-`1` result `[[3],[6]]`, multi-axis groups and bit preservation.
+The shared reduction contract records the complete strict/Apple/WSL and
+installed-consumer evidence. Proposed status is unchanged.

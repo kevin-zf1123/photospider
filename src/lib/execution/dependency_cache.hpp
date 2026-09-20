@@ -159,23 +159,23 @@ inline Result<DependencyCacheProof> dependency_cache_proof(
       return Status::success();
     };
     if (record->certificate) {
-      if (!charge(record->certificate->identity().size()) ||
-          !charge(record->certificate->rows().size()) ||
-          !charge(record->certificate->input_shapes().size()))
+      const auto& certificate = *record->certificate;
+      if (!charge(certificate.storage_entries()))
         return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      if (!charge(record->certificate->coverage().boxes().size() *
-                  (1 + 2 * record->samples.shape().size())))
-        return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      for (const auto& shape : record->certificate->input_shapes())
-        if (!charge(shape.size()))
-          return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      for (const auto& row : record->certificate->rows()) {
-        if (!charge(row.output.size()))
-          return Answer(Status{ErrorCode::ResourceExhausted, {}});
-        auto status = needs(row.inputs);
-        if (!status.ok())
-          return Answer(status);
-      }
+      auto bounded = limits;
+      bounded.maximum_work = std::min(bounded.maximum_work, *work);
+      bounded.consume_work = [&](std::uint64_t count) {
+        if (!charge(count, false))
+          return Status{ErrorCode::ResourceExhausted, {}};
+        return limits.consume_work ? limits.consume_work(count)
+                                   : Status::success();
+      };
+      auto projection = certificate.backward(certificate.coverage(), bounded);
+      if (!projection.ok())
+        return Answer(projection.status());
+      auto status = needs(projection.value());
+      if (!status.ok())
+        return Answer(status);
     } else {
       auto status = needs(record->manifest);
       if (!status.ok())

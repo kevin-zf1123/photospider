@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -96,7 +96,7 @@ upstream, resource and cancellation errors keep their existing Status categories
 
 ## Acceptance and implementation status
 
-Conceptual fixture: input=[0,10,20,30], q=[0.25], axis=0 -> values=[7.5].
+Fixture: input=[0,10,20,30], q=[0.25], axis=0 -> values=[7.5].
 Test median q=0.5, endpoints, h exactly integral and its floating neighbors,
 Int64 values above 2^53, signed-zero ties, selected/unselected infinities, NaNs
 anywhere in the source line, and both output dtypes. Use independent exact
@@ -106,5 +106,8 @@ Prove full selected-line source reads and no unrequested-line reads. For N=1,
 q's upstream must not execute even if it would fail; for N>=2 invalid q must
 fail before source values are requested. Test disjoint outputs, dynamic q/source
 invalidation, dtype/payload conversion, scratch exhaustion, cancellation,
-cache-off and output lifetime through public WorkflowDocument execution when
-implemented. No target runtime implementation or tests are claimed here.
+cache-off and output lifetime through the public WorkflowDocument execution.
+The current three profile keys use exact UInt128 rank selection and 4352-bit
+one-final-rounding interpolation. The
+[numeric workflow README](../../../../examples/numeric_workflow/README.md)
+records manual and independent oracle evidence.

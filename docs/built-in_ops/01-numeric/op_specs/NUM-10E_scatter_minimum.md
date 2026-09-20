@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -48,5 +48,15 @@ Include duplicated targets, unhit sNaN base, selected and unselected failures,
 NaN payload precedence, infinities, signed zeros, integer extrema, source strides,
 index changes, global invalid-index rejection and shared resource/lifetime tests.
 
-Deliver actual public WorkflowDocument execution and platform tests when
-implemented. These versioned keys are not registered; no runtime test is claimed.
+The current three profile keys use `scatter_minimum_node` from
+`photospider/numeric/indexing.hpp`. Matching updates are grouped with the base
+and reduced using the shared NaN-propagating minimum and signed-zero rules;
+no-hit coordinates preserve base bits. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the complete manual workflows and 3858 independent
+coordinate/contributor/Fraction cases per profile. The installed public consumer
+passed. Checks include exact reads and dirty support, typed actual-read closure,
+raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
+replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
+Focused compiler/dependency/fragments/resources units and independent scoped
+reviews passed. Manual acceptance has no integration-test registration.
+Specification status remains Proposed; no performance claim is inferred.

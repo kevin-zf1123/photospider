@@ -9,6 +9,7 @@
 
 #include "photospider/core/status.hpp"
 #include "photospider/data/region.hpp"
+#include "photospider/data/resource_bindings.hpp"
 #include "photospider/data/storage.hpp"
 
 namespace ps {
@@ -94,6 +95,15 @@ class PHOTOSPIDER_API Value final {
    * @note Default Values are useful only as container placeholders.
    */
   Value() noexcept = default;
+  Value(const Value&) = default;
+  Value& operator=(const Value&);
+  Value(Value&&) noexcept = default;
+  Value& operator=(Value&&) noexcept;
+  /** @brief Retires owned metadata before releasing its storage lifetime.
+   * Storage aliases may retain a host metadata-capacity owner in addition to
+   * payload ownership. Destruction performs no allocation.
+   */
+  ~Value() noexcept;
 
   /**
    * @brief Validates and publishes an immutable Value.
@@ -102,15 +112,20 @@ class PHOTOSPIDER_API Value final {
    * @param layout Explicit byte layout.
    * @param bytes Owned allocation bytes copied into immutable shared storage.
    * @param facets Bounded unique semantic refinements copied into the Value.
+   * @param resources Explicit immutable resources named by facets. CMYK
+   * requires its validated ICC owner; unused bindings are dropped before
+   * publication.
    * @return Complete Value or a typed validation failure.
    * @throws std::bad_alloc If owned storage cannot be allocated.
    * @note Publication is atomic; failure retains no partial Value. Layout
    * span validation ignores zero-stride and singleton axes before converting
    * logical extents into signed address arithmetic.
    */
-  [[nodiscard]] static Result<Value> create(
-      ValueDescriptor descriptor, Region region, StridedLayout layout,
-      std::vector<std::uint8_t> bytes, std::vector<ValueFacet> facets = {});
+  [[nodiscard]] static Result<Value> create(ValueDescriptor descriptor,
+                                            Region region, StridedLayout layout,
+                                            std::vector<std::uint8_t> bytes,
+                                            std::vector<ValueFacet> facets = {},
+                                            ResourceBindings resources = {});
 
   /**
    * @brief Creates one rank-one Float64 scalar Value.
@@ -172,6 +187,12 @@ class PHOTOSPIDER_API Value final {
    * @note Keys are unique; callers must interpret payloads by key/version.
    */
   [[nodiscard]] const std::vector<ValueFacet>& facets() const;
+  /** @brief Immutable resources retained by this Value's facets.
+   * @return Owning binding set borrowed until this Value changes or retires.
+   * Copy the set or a resolved ICC handle to extend its lifetime.
+   * @throws std::logic_error For an invalid/default Value. Thread-safe reads.
+   */
+  [[nodiscard]] const ResourceBindings& resources() const;
 
   /**
    * @brief Returns immutable storage bytes.
@@ -195,6 +216,8 @@ class PHOTOSPIDER_API Value final {
    * @param layout Origin-relative byte layout of that coverage.
    * @param storage Immutable owner; null is InvalidArgument.
    * @param facets Semantic metadata, canonicalized before publication.
+   * @param resources Explicit validated resource owners; unresolved CMYK fails
+   * InvalidArgument/InvalidDomain. Unused resources are not retained.
    * @return Validated Value or bounds/type/facet failure; no partial
    * publication.
    * @throws std::bad_alloc For metadata allocation failure.
@@ -202,7 +225,7 @@ class PHOTOSPIDER_API Value final {
   [[nodiscard]] static Result<Value> from_storage(
       ValueDescriptor descriptor, Region region, StridedLayout layout,
       std::shared_ptr<const CpuStorage> storage,
-      std::vector<ValueFacet> facets = {});
+      std::vector<ValueFacet> facets = {}, ResourceBindings resources = {});
   /** @brief Creates a shared read-only subview; rejects coverage outside this
    * Value. */
   [[nodiscard]] Result<Value> view(const Region& region) const;
@@ -225,6 +248,9 @@ class PHOTOSPIDER_API Value final {
   [[nodiscard]] static std::size_t element_size(ElementType type);
 
  private:
+  void swap(Value& other) noexcept;
+  // Resource ancestors retire after sample storage and interpreted metadata.
+  ResourceBindings resources_;
   /** @brief Published logical descriptor. */
   ValueDescriptor descriptor_;
   /** @brief Published logical valid coverage. */
@@ -249,6 +275,7 @@ class PHOTOSPIDER_API ValueView final {
   const Region& region() const { return value_->region(); }
   const StridedLayout& layout() const { return value_->layout(); }
   const std::vector<ValueFacet>& facets() const { return value_->facets(); }
+  const ResourceBindings& resources() const { return value_->resources(); }
   ByteView bytes() const { return value_->bytes(); }
   /** @brief Explicitly retains an owning immutable Value during this callback.
    * The shared payload stays charged until the last copy retires. Keeping many
@@ -289,7 +316,8 @@ class PHOTOSPIDER_API MutableValue final {
   const StridedLayout& layout() const noexcept { return layout_; }
   /** @brief Freezes this writer and validates facets; consumes even on failure.
    */
-  Result<Value> publish(std::vector<ValueFacet> facets = {}) &&;
+  Result<Value> publish(std::vector<ValueFacet> facets = {},
+                        ResourceBindings resources = {}) &&;
 
  private:
   ValueDescriptor descriptor_;

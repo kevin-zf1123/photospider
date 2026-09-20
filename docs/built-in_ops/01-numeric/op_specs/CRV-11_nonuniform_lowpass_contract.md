@@ -6,7 +6,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -191,10 +191,22 @@ operators need not agree even at equally spaced positions: one filters discrete
 samples and the other filters their continuous linear reconstruction.
 
 Test partial outputs, exact segment/dirty support, other-axis independence,
-strides, low budgets, cancellation, cache-off and context-lifetime owners. Future
-public workflows bind positions/values, axis/kernel parameters and inspect samples
-through Compiler/ExecutionContext with actual commands and independent results.
-No current nonlinear-integration runtime or product acceptance is claimed here.
+strides, low budgets, cancellation, cache-off and context-lifetime owners.
+The maintained public workflow binds positions/values and kernel parameters,
+then inspects samples through Compiler/ExecutionContext; commands and independent
+results are linked below.
 
 - [Resampling family](CRV-11_resample_signal.md).
 - [Uniform counterpart](CRV-11_uniform_lowpass_contract.md).
+
+## Maintained implementation and validation
+
+This shared contract covers five nonuniform kernels and 15 profile keys; it is
+not itself a registered operation. The implementation uses exact partition and
+paired-affine integration plus global Taylor moments with a rigorous tail bound,
+not local adaptive quadrature. All accelerated keys currently use the strict
+fallback; 128..4096-bit precision and order <=512 may return `ResourceExhausted`.
+See the [nonuniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple
+and WSL Clang18 Strict/AVX2 passed the shared manual groups and 245 independent
+Fraction/directed MPFR continuous cases per profile.

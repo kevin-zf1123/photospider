@@ -154,7 +154,11 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
 enum class OperationDtypeRule : std::uint32_t {
   Declared = 0,
   Input = 1,
-  Parameter = 2
+  Parameter = 2,
+  /** @brief Int64 for an Int64 source, otherwise Float64 for a floating source.
+   * Uses output_dtype_input; UInt8 is rejected. C++ metadata inference only.
+   */
+  WidenNumericInput = 3
 };
 /** @brief Statically available axis-length sources. */
 enum class OperationExtentSource : std::uint32_t {
@@ -281,6 +285,41 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
   ObservationKind observation_kind = ObservationKind::Atomic;
   /** @brief All relevant stages must implement the declared error delivery. */
   FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
+  /** @brief Number of complete trailing axes in each generic Atomic tuple.
+   * Zero retains ordinary generic-sample/image-pixel observations. Nonzero
+   * requires CPU staged Atomic execution and no recognized image facet.
+   * A partial request expands to its complete tuples; all axes grouped uses
+   * the singleton observation domain {1}. Included in contract identities.
+   */
+  std::uint32_t atomic_trailing_axes = 0;
+  /** @brief Optional actual new output payload bound for a CPU staged view.
+   * Unset reserves requested element bytes. A set bound replaces that dense
+   * lower bound; workspace, metadata and referenced owners remain accounted.
+   * The allocator still enforces this bound and failures remain sticky.
+   */
+  std::optional<std::uint64_t> maximum_output_payload_bytes = {};
+  /** @brief Disjoint complete CPU dependency pieces in observation coordinates.
+   * Coverage partitions the full inferred observation domain. Present pieces
+   * permit a multi-observation Atomic session without row enumeration. The
+   * program requests the complete static mapping once, then publishes its exact
+   * requested coverage. Dynamic requests, checkpoints, GPU and joint callbacks
+   * are excluded from this path.
+   */
+  std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
+  /** @brief Runs one normalized regional Atomic request without splitting it
+   * into samples. Each dynamic Need stage supplies complete bounded atom rows.
+   * Observations remain individual samples; successful certificates retain
+   * exact associations. CPU staged, non-joint programs only; checkpoints and
+   * pure-block services are unavailable. Included in all contract identities.
+   */
+  bool regional_atomic = false;
+  /** @brief Preserves returned immutable views at ordinary/direct collectors.
+   * New payload is admitted on actual allocation, bounded by requested bytes
+   * unless maximum_output_payload_bytes replaces that bound. Borrowed owners
+   * remain charged independently. CPU staged non-joint execution only.
+   * This permits per-rectangle auto view/copy choices without dense precharge.
+   */
+  bool preserve_output_views = false;
   /** @brief Zero for synchronous callback, one for the staged read protocol. */
   std::uint32_t dependency_version = 0;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
@@ -306,6 +345,18 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::uint64_t joint_continuation_bytes = 0;
   /** @brief Additional shared scratch bound per joint poll. */
   std::uint64_t joint_workspace_bytes = 0;
+  /** @brief Opts pure staged outputs into one internal block namespace.
+   * DependencyPhase::block transitions must then be independent of selected
+   * output metadata/index unless explicitly encoded in incoming state or mode.
+   * The host keys all resolved output contracts, static parameters, input
+   * metadata and current supplied bytes. Public outputs and certificates remain
+   * independent. Retention is optional and budgeted; misses recompute,
+   * including with caching disabled. This does not synchronize concurrent
+   * producers or promise a single evaluation per Run. Available only to pure
+   * Atomic dependency-v1 operations; default preserves output-scoped block
+   * keys.
+   */
+  bool share_blocks_across_outputs = false;
 
   /** @brief Exact input count, or fixed prefix count for a repeated template.
    */
@@ -330,7 +381,12 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 10U;
+  std::uint32_t version = 14U;
+  /** @brief Registered template requires pure per-node metadata resolution.
+   * Free inference rejects templates. OperationRegistry::resolve_traits
+   * clears this flag only after validated specialization.
+   */
+  bool requires_metadata_specialization = false;
   /** @brief Whether a derived result may enter a disposable local cache. */
   bool cacheable = true;
   /** @brief Sorted closed parameter vocabulary for semantic validation. */
@@ -477,12 +533,86 @@ struct PHOTOSPIDER_API OperationInvocation final {
   BufferAllocator allocator;
   /** @brief Borrowed native services; valid only during this invocation. */
   const ps_gpu_service_v9* gpu = nullptr;
+  /** @brief Explicit immutable resource owners for static output identities.
+   * Input Value owners are also admitted by invoke. No dynamic sample port.
+   */
+  ResourceBindings resources = {};
 };
 
 /** @brief Function signature for one synchronous operation invocation. */
 using CallbackSignature = Result<Value>(const OperationInvocation&);
 /** @brief Type-erased callable implementing `CallbackSignature`. */
 using OperationCallback = std::function<CallbackSignature>;
+
+/** @brief Owned per-node Value or structured Result metadata.
+ * Result specialization requires protocol 2 and preserves the registered schema
+ * id/version and Result port kind. It may resolve fields/domain/semantic
+ * metadata through the validated closed SchemaTemplate vocabulary. Value-only
+ * physical bounds/flags and tuple metadata must remain absent for a Result.
+ * Specialization cannot alter input/parameter schemas, output names, callback
+ * kinds, failure delivery or resource workspaces of the registered definition.
+ */
+struct OperationOutputSpecialization final {
+  OperationMetadata metadata;
+  bool regional_atomic = false;
+  bool preserve_output_views = false;
+  std::optional<std::uint64_t> maximum_output_payload_bytes = {};
+  std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
+};
+/** @brief Pure, deterministic metadata inference with no Value or I/O access.
+ * Input descriptors and static parameters are validated first. Return one
+ * record per declared output, in registry order. Exceptions are fenced;
+ * independent calls may execute concurrently. Returned metadata is owned.
+ */
+using OperationMetadataSpecializer = std::function<Result<std::vector<
+    OperationOutputSpecialization>>(  // NOLINT(whitespace/indent_namespace)
+    const std::vector<OperationMetadata>&,
+    const std::map<std::string, ParameterValue>&)>;
+
+/** @brief Deterministic static specialization and optional immutable program.
+ * Returned state owns only data derived from input metadata/static parameters.
+ * It must not contain mutable Run data, Value payloads, I/O state or private
+ * caches. Its destructor is noexcept and may run on any thread. Compilation
+ * owns preparation storage separately from runtime continuation budgets.
+ */
+struct OperationPreparation final {
+  std::vector<OperationOutputSpecialization> outputs;
+  std::shared_ptr<const void> state;
+};
+/** @brief Pure static preparation, called outside registry synchronization.
+ * Same validation and exception contract as OperationMetadataSpecializer.
+ * A successful explicit preparation runs this callback once; its owning handle
+ * can serve multiple outputs, requests and dynamic executions without retries.
+ */
+using OperationPreparer = std::function<Result<OperationPreparation>(
+    const std::vector<OperationMetadata>&,
+    const std::map<std::string, ParameterValue>&)>;
+/** @brief Registry-created immutable static program and resolved contracts.
+ * No public constructor or mutable state is exposed. This handle retains its
+ * definition/library until after the program destructor. It is safe to share
+ * concurrently. Addresses and derived state never enter semantic/cache
+ * identity.
+ */
+class PHOTOSPIDER_API PreparedOperation final {
+ public:
+  PreparedOperation(const PreparedOperation&) = delete;
+  PreparedOperation& operator=(const PreparedOperation&) = delete;
+  PreparedOperation(PreparedOperation&&) = delete;
+  PreparedOperation& operator=(PreparedOperation&&) = delete;
+  /** @brief Complete resolved output contracts; valid for handle lifetime. */
+  const OperationTraits& traits() const noexcept;
+  /** @brief Borrowed immutable operation-defined program, possibly nullptr.
+   * Runtime callbacks may borrow it while their owning session lives. The
+   * producing registered operation alone defines its concrete type.
+   */
+  const void* state() const noexcept;
+
+ private:
+  friend class OperationRegistry;
+  struct Impl;
+  explicit PreparedOperation(std::shared_ptr<const Impl> impl);
+  std::shared_ptr<const Impl> impl_;
+};
 
 /**
  * @brief One complete operation definition before registry publication.
@@ -509,6 +639,13 @@ struct PHOTOSPIDER_API OperationDefinition final {
   /** @brief Alternative structured stage protocol 2; exclusive with callbacks.
    */
   ResultProgramStart start_result = {};
+  /** @brief Required exactly for a metadata-specialized traits template. */
+  OperationMetadataSpecializer specialize_metadata = {};
+  /** @brief Pure static Value/dependency-v1 preparation; mutually exclusive
+   * with specialize_metadata and requires_metadata_specialization must be true.
+   * Supported only for deterministic side-effect-free operations.
+   */
+  OperationPreparer prepare_static = {};
 };
 
 /**
@@ -623,6 +760,31 @@ class PHOTOSPIDER_API OperationRegistry final {
 
   [[nodiscard]] Result<OperationTraits> find_traits(
       const std::string& key) const;
+  /** @brief Resolves a registered template against complete static inputs.
+   * Performs parameter/port validation and pure specialization outside the
+   * registry lock. No payload reads or registry mutation. Returns owning
+   * traits usable by ordinary inference; malformed metadata is a Schema
+   * failure, allocation exhaustion is ResourceExhausted, and callback
+   * exceptions are OperationFailed. The definition lease spans the call.
+   */
+  [[nodiscard]] Result<OperationTraits> resolve_traits(
+      const std::string& key, const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
+
+  /** @brief Validates complete static inputs and prepares an owning program.
+   * No Value reads or registry mutation occur. The callback runs once outside
+   * the registry lock; metadata-only definitions receive an empty program.
+   * Allocation failure is ResourceExhausted; callback exceptions are fenced as
+   * OperationFailed. Returned state and copied static metadata are plan/direct
+   * preparation storage, outside per-observation runtime scratch admission.
+   * Reuse requires this exact registry/definition and bit-identical static
+   * parameters/metadata; dynamic payloads, ROI and selected output are
+   * excluded.
+   */
+  [[nodiscard]] Result<std::shared_ptr<const PreparedOperation>>
+  prepare_operation(
+      const std::string& key, const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
 
   /**
    * @brief Invokes one operation through its exception fence.
@@ -688,7 +850,8 @@ class PHOTOSPIDER_API OperationRegistry final {
   [[nodiscard]] std::vector<std::string> keys() const;
   /** @brief Verifiable built-in build identity, empty for custom/DSO
    * registries.
-   * @note Immutable after construction; does not grant trust or sandboxing.
+   * @note Immutable after freeze; successful extension clears the identity;
+   * does not grant trust or sandboxing.
    * @throws std::bad_alloc For the returned copied string.
    */
   std::string persistent_cache_identity() const;
@@ -701,8 +864,13 @@ class PHOTOSPIDER_API OperationRegistry final {
       std::shared_ptr<std::atomic<ErrorCode>> failure) const;
   friend class ExecutionContext;
   friend class Compiler;
-  friend std::shared_ptr<OperationRegistry> make_default_operation_registry();
+  friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
+      bool);
   bool builtins_ = false;
+  Status validate_prepared(
+      const PreparedOperation& prepared, const std::string& key,
+      const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
   Status validate_dependency_metadata(
       const std::string& key, const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters) const;
@@ -729,13 +897,15 @@ class PHOTOSPIDER_API OperationRegistry final {
 };
 
 /**
- * @brief Creates the maintained built-in operation set and freezes it.
- * @return Shared read-only registry containing constant, identity, add, and
- * delay, image exposure-gain, and image opacity operations.
+ * @brief Creates the maintained built-in operation set.
+ * @param freeze Whether to freeze immediately (default true). Pass false to
+ * register embedding operations, then freeze before compilation/execution.
+ * @return Shared registry owning all maintained built-in operations.
  * @throws std::bad_alloc If construction fails.
- * @note The caller may instead assemble a custom registry before freezing.
+ * @note Adding custom operations clears the built-in persistent cache identity.
+ * Mutation is serialized; freeze must precede concurrent execution.
  */
 [[nodiscard]] PHOTOSPIDER_API std::shared_ptr<OperationRegistry>
-make_default_operation_registry();
+make_default_operation_registry(bool freeze = true);
 
 }  // namespace ps

@@ -12,9 +12,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-03B: broadcast
@@ -176,20 +176,40 @@ The public target workflow binds a small indexed integer matrix, creates the
 selected broadcast key with shape/map/layout, compiles and requests full plus
 nonzero/disjoint outputs. Check logical indices, strides/owners, actual source
 reads and dirty support. Use the explicit coordinate formula as an independent
-oracle. The eventual implementation supplies a runnable target and real command;
-none is invented for these unimplemented keys.
+oracle. The current implementation's runnable target and command are recorded
+in the workflow README and implementation table.
 
-## Implementation boundary
+## Current implementation status
 
-Zero-stride Value storage is already supported, but per-node shape String and
-axis-map inference, general regional broadcast and profile registrations remain
-target work. These need compiler-visible validation/inference and exact staged
-input mappings, not hidden callback-only shape changes. This specification does
-not accept a shared ABI extension or authorize product code changes. Platform
-benchmarks and product integration tests have not been run for the new operators.
+The three keys are registered with per-node metadata specialization. The
+specializer validates `shape`, the explicit injective `axis_map`, extent
+compatibility, layout and source dtype, then produces a compact static
+dependency mapping. `broadcast_node` in `photospider/numeric/arrays.hpp` is the
+public authoring helper and emits these parameters without implicit alignment.
 
-The Value runtime permits zero-stride views, but that capability does not by
-itself establish a registered general broadcast operation.
+The implementation preserves source owners for view output, uses zero strides
+for expanded axes and inherited strides for mapped axes, and packs only the
+requested region for dense output. Local Clang execution checked `[3]` to
+`[2,3,4]` with `axis_map=[1]`, exact sparse source support and dirty
+replication, a `[274877906944,3]` view backed by three Int64 samples, and a
+structured consumer reading the giant view through an 8-byte result view.
+`examples/numeric_workflow/mappings.cpp` compares compact mapped certificates
+with explicit rows over 64 queries, 8 dirty subsets and 3 roles, including
+large replication and bounded materialization.
+
+Manual acceptance on 2026-09-14 passed local AppleClang 21 strict/Apple profiles
+and Ubuntu WSL Clang 18 strict/x86 profiles, plus an installed public consumer.
+It includes negative-stride unaligned permutation, independent owners, image Data
+versus complete-pixel Validation, invalid unselected alpha, bit patterns, Empty,
+collector cancellation, StageLimit, capacity/schema/profile failures, final source
+owner release after context destruction, and warm
+cache reuse after an unobserved edit versus refresh after an observed edit.
+Dense execution gathers at most 32 bytes into charged continuation scratch,
+then uses the selected memcpy/NEON/AVX2 copy path with exact bounded tails.
+Diagnostics identify the concrete ISA path. Independent mapped/row set comparison
+includes bounded canonical box expansion.
+No performance benchmark or new integration-test registration is included. This
+does not change the Proposed status of this specification.
 
 - [NUM-03 category](../core.md).
 - [NUM-03A constant](NUM-03A_constant.md).

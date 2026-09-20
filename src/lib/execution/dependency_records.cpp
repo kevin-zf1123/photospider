@@ -39,7 +39,10 @@ Target target(const ExecutionPlan& plan, const PlanInput& input) {
 OperationMetadata metadata(const ExecutionPlan& plan, const PlanInput& input) {
   if (const auto* step = std::get_if<PlanStepInput>(&input)) {
     const auto& p = plan.steps().at(step->step_index);
-    return {p.output_descriptor, p.output_facets};
+    return {p.output_descriptor,
+            p.output_facets,
+            {},
+            p.traits.outputs[0].atomic_trailing_axes};
   }
   const auto& p = plan.input_declarations().at(
       std::get<PlanWorkflowInput>(input).declaration_index);
@@ -83,9 +86,7 @@ struct ExecutionDependencies::Impl {
         total += 1 + need.tags.size() + need.samples.boxes().size();
     };
     if (record.certificate) {
-      total += record.certificate->rows().size();
-      for (const auto& row : record.certificate->rows())
-        add(row.inputs);
+      total += record.certificate->metadata_entries();
     } else {
       add(record.manifest);
     }
@@ -337,7 +338,7 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
         return Result<Impl::Record>(Status{ErrorCode::ResourceExhausted, {}});
       return Result<Impl::Record>(old);
     }
-    const auto scan = old.certificate->rows().size();
+    const auto scan = old.certificate->metadata_entries();
     const auto base = 1 + samples.boxes().size() + old.inputs.size();
     if (base > available || scan > work)
       return Result<Impl::Record>(Status{ErrorCode::ResourceExhausted, {}});
@@ -525,9 +526,8 @@ Status DependencyRecords::append_record(
     return Status{ErrorCode::Cancelled, {}};
   const auto& step = plan_->steps().at(index);
   if (certificate) {
-    auto rebound = DependencyCertificate::create(
-        certificate_identity(index), certificate->coverage(),
-        certificate->input_shapes(), certificate->rows(), limits_);
+    auto rebound =
+        certificate->with_identity(certificate_identity(index), limits_);
     if (!rebound.ok())
       return rebound.status();
     certificate = rebound.take_value();
@@ -536,7 +536,10 @@ Status DependencyRecords::append_record(
       step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord;
   ExecutionDependencies::Impl::Record candidate{
       step.result_ref(),
-      {step.output_descriptor, step.output_facets},
+      {step.output_descriptor,
+       step.output_facets,
+       {},
+       step.traits.outputs[0].atomic_trailing_axes},
       std::move(outputs),
       {},
       std::move(certificate),
@@ -631,8 +634,12 @@ Status DependencyRecords::append_legacy(std::size_t index,
   if (step.whole_boundary ||
       step.traits.outputs[0].observation_kind == ObservationKind::RequestRecord)
     return append_record(index, outputs, {}, std::move(needs));
-  auto observations = operation_observations(
-      {step.output_descriptor, step.output_facets}, outputs, limits_);
+  auto observations =
+      operation_observations({step.output_descriptor,
+                              step.output_facets,
+                              {},
+                              step.traits.outputs[0].atomic_trailing_axes},
+                             outputs, limits_);
   if (!observations.ok())
     return observations.status();
   std::vector<AtomCertificate> rows;
@@ -665,8 +672,12 @@ Status DependencyRecords::append_empty(std::size_t index,
     std::vector<std::vector<std::uint64_t>> inputs;
     for (const auto& input : step.inputs)
       inputs.push_back(metadata(*plan_, input).descriptor.shape);
-    auto observations = operation_observations(
-        {step.output_descriptor, step.output_facets}, outputs, limits_);
+    auto observations =
+        operation_observations({step.output_descriptor,
+                                step.output_facets,
+                                {},
+                                step.traits.outputs[0].atomic_trailing_axes},
+                               outputs, limits_);
     if (!observations.ok())
       return observations.status();
     auto empty = DependencyCertificate::create(
@@ -889,9 +900,8 @@ DependencyRecords::rebind_cached(
     copy->identity = observation_identity(item.step, copy->samples);
     if (item.record->certificate) {
       const auto& source = *item.record->certificate;
-      auto certificate = DependencyCertificate::create(
-          certificate_identity(item.step), source.coverage(),
-          source.input_shapes(), source.rows(), limits_);
+      auto certificate =
+          source.with_identity(certificate_identity(item.step), limits_);
       if (!certificate.ok())
         return Answer(certificate.status());
       copy->certificate = certificate.take_value();

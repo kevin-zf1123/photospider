@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -49,7 +49,7 @@ For UInt8/Int64, compute the exact integer result and reject only when that
 result is outside the destination range. Overflow fails the requested observation
 without wrapping, saturation or promotion. No floating conversion is permitted.
 
-## Acceptance and implementation gap
+## Acceptance and legacy comparison
 
 Conceptual public fixture: `[1,2,3] + [4,5,6] -> [5,7,9]`, repeated for supported dtypes.
 Include signed-zero operand combinations, extrema, subnormal/normal boundaries,
@@ -60,5 +60,25 @@ separately. Apply all shared public execution and resource cases.
 
 The current legacy operation uses finite-only Float32/Float64 arithmetic and
 Whole execution. It does not implement this versioned IEEE-like contract or
-establish the required per-coordinate support. No runtime implementation or
-public execution test is delivered by this specification-only change.
+establish the required per-coordinate support. The maintained versioned implementation and public example are described below.
+
+## Maintained implementation
+
+The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
+with independently named constructors in `photospider/numeric/binary.hpp`.
+The shared adapter retains both inputs as exact pointwise Data and separately
+retains typed validation, including when a numeric identity determines a result.
+Exact elementary operations use bounded integer/ratio arithmetic; ordinary
+power and angle results use the certified directed backend and report accelerated
+strict fallback. See [math implementation](../math-implementation.md) for
+rounding, scratch, work accounting and unresolved-refinement limits.
+
+The [public example and commands](../../../../examples/numeric_workflow/README.md)
+include this operation, an editable add/multiply composition, independent
+integer/Fraction/MPFR oracles and direct error/resource checks. The manual target
+is excluded from default builds and has no CTest/integration registration.
+
+The combined family passed 14,174 independent cases per profile on native
+Clang strict/Apple and Ubuntu WSL Clang strict/AVX2, plus expanded manual and
+local installed-consumer checks. [Measured validation scope](../math-implementation.md#num-05-validation-and-native-timing)
+records oracle versions, native timings and limitations.

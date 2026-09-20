@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -55,5 +55,17 @@ For Int64, base=INT64_MAX with matching updates [1,-1] must return INT64_MAX
 without a partial-sum overflow failure. The same grouping principle applies to
 finite floating cancellation; compare exact sums with one final rounding.
 
-Deliver actual public WorkflowDocument execution and platform tests when
-implemented. These versioned keys are not registered; no runtime test is claimed.
+The current three profile keys use `scatter_sum_node` from
+`photospider/numeric/indexing.hpp`. Matching contributors are accumulated by
+the exact aggregate workspace and rounded once for floating output; Int64 uses
+final range checking. The public fixture produces `[10,25,34]` and checks exact
+contributor support, exceptional values, overflow attribution and cleanup.
+On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the complete manual workflows and 3858 independent
+coordinate/contributor/Fraction cases per profile. The installed public consumer
+passed. Checks include exact reads and dirty support, typed actual-read closure,
+raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
+replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
+Focused compiler/dependency/fragments/resources units and independent scoped
+reviews passed. Manual acceptance has no integration-test registration.
+Specification status remains Proposed; no performance claim is inferred.

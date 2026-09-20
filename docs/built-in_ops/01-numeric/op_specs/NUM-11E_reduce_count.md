@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -55,10 +55,14 @@ publication and during any materialized chunk fill, releasing unpublished work
 on failure. Do not use an input-reader helper that implicitly executes upstream
 sample computation.
 
-Conceptual fixture: input shape [2,3,4], axes="1,2" produces Int64 shape [2,1,1]
+Fixture: input shape [2,3,4], axes="1,2" produces Int64 shape [2,1,1]
 with values [[[12]],[[12]]], independently of sample bytes. An instrumented
 upstream whose numeric evaluation would fail must show zero sample reads. Test
 all dtypes, NaN/Inf/zero-filled source descriptors, full reduction, axis order
 normalization, invalid/duplicate axes, shape changes, byte-only source changes,
-partial output requests, resource cleanup and count-owner lifetime through public
-WorkflowDocument execution when implemented. No versioned runtime/test is claimed.
+partial output requests, resource cleanup and count-owner lifetime through the
+public manual target. The current three profile keys use `reduce_count_node`
+from `photospider/numeric/reductions.hpp`; the count path is metadata-only and
+may publish one 8-byte zero-stride owner for repeated Int64 counts. The giant
+metadata-count fixture is covered by the full manual evidence in the shared
+reduction contract. Proposed status is unchanged.

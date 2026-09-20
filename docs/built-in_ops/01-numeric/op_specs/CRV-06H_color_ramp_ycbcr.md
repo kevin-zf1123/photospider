@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -95,17 +95,32 @@ or rejected positions use OperationFailed/InvalidDomain. Final overflow uses
 OperationFailed/ArithmeticOverflow. Preserve resource/cancellation/upstream error
 categories and fail the complete color atom; no partly valid tuple is published.
 
-Conceptual fixture: stops=[0,1], colors=[[0,0,0],[1,0.5,-0.5]], input=[0.5]
+Fixture: stops=[0,1], colors=[[0,0,0],[1,0.5,-0.5]], input=[0.5]
 returns [[0.5,0.25,-0.25]] with unchanged declared YCbCr description. Include
 finite Y' outside [0,1], large signed chroma, descriptor mismatches, custom matrix
 validation, all float dtype combinations and signed zeros. Use independent exact
 rational interpolation/rounding as the numeric oracle. Apply CRV-06C's full
 partial-request, dirty, stride, budget, cancellation and owner-lifetime acceptance.
-The public Compiler/ExecutionContext workflow and actual invocation evidence are
-implementation obligations; this Proposed document claims no runtime execution.
+The maintained public Compiler/ExecutionContext workflow and current runtime evidence
+are linked below; the document remains Proposed.
 
 - [Ramp family](CRV-06_color_ramp.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [BT.709-6](https://www.itu.int/rec/R-REC-BT.709-6-201506-I).
 - [BT.601-7](https://www.itu.int/dms_pubrec/itu-r/rec/bt/R-REC-BT.601-7-201103-I%21%21PDF-E.pdf).
 - [BT.2020-2](https://www.itu.int/rec/R-REC-BT.2020-2-201510-I/en).
+
+## Maintained implementation and validation
+
+Public [`color_ramp_ycbcr_node`](../../../../include/photospider/numeric/color_ramps.hpp)
+constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
+implements its staged complete-color execution.
+
+All profiles use exact rational component interpolation and return strict
+bits, with one destination rounding. Complete-color metadata and regional
+validation remain attached to the result.
+
+See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
+[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
+for resource limits and actual validation.

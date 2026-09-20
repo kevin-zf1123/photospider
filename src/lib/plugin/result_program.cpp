@@ -3,6 +3,8 @@
 #include <utility>
 #include <vector>
 
+#include "data/input_validation.hpp"
+
 namespace ps {
 Status ResultProgramPhase::read(std::uint32_t input,
                                 const std::vector<std::uint64_t>& coordinate,
@@ -38,6 +40,7 @@ void ResultContinuation::reset() noexcept {
   poll_ = nullptr;
   storage_ = {};
   definition_.reset();
+  resources_ = {};
 }
 ResultContinuation::~ResultContinuation() noexcept {
   reset();
@@ -51,6 +54,7 @@ ResultContinuation& ResultContinuation::operator=(
     reset();
     storage_ = std::move(other.storage_);
     definition_ = std::move(other.definition_);
+    resources_ = std::move(other.resources_);
     destroy_ = std::exchange(other.destroy_, nullptr);
     poll_ = std::exchange(other.poll_, nullptr);
   }
@@ -60,6 +64,30 @@ Result<ResultProgramPoll> ResultContinuation::poll(
     const ResultProgramPhase& phase) {
   if (!poll_)
     return Result<ResultProgramPoll>(Status{ErrorCode::Stale, {}});
-  return poll_(storage_.data(), phase);
+  if (!resources_.size() && !phase.query.resources.size() &&
+      !input_internal::color_array(phase.query.output.facets))
+    return poll_(storage_.data(), phase);
+  auto query = phase.query;
+  query.resources = resources_;
+  if (query.value_outputs) {
+    FootprintLimits limits;
+    limits.consume_work = phase.consume_work;
+    limits.cancellation = query.cancellation;
+    auto closed = input_internal::color_output_samples(
+        query.output, *query.value_outputs, limits);
+    if (!closed.ok())
+      return Result<ResultProgramPoll>(closed.status());
+    query.value_outputs = closed.take_value();
+  }
+  ResultProgramPhase normalized{query,
+                                phase.values,
+                                phase.results,
+                                phase.io,
+                                phase.allocator,
+                                phase.resources,
+                                phase.consume_work,
+                                phase.failure,
+                                phase.failure_observer};
+  return poll_(storage_.data(), normalized);
 }
 }  // namespace ps

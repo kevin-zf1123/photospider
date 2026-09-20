@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-06A: clamp
@@ -69,10 +69,19 @@ and bit-selection as an independent oracle. Verify disjoint support, typed
 validation, invalidation, lifetime, resource exhaustion and cancellation as
 defined by the shared execution contract.
 
-## Current implementation gap
+## Current implementation status
 
-The current legacy numeric.clamp instead uses one Float32/Float64
-input with static Float64 min/max parameters and finite-only Whole execution.
-It does not implement this new dynamic limit contract.
+The three versioned keys use closed matching-shape/input-dtype inference and
+pure metadata validation for their three inputs. The implementation reads
+`input`, `lower` and `upper` arrays, validates bounds per requested atom, preserves selected bits and
+reports `InvalidBounds` with coordinate and bound information. It uses raw
+IEEE/integer order keys and shared scalar/NEON/AVX2 comparison facilities.
+The public composition example is in `examples/numeric_workflow/ranges.cpp`.
 
-These versioned keys remain unimplemented. No public runtime test is claimed.
+Local strict and Apple profile runs passed the broadcast-to-remap-to-clamp
+composition, invalid-bound atom isolation, sparse support, upstream endpoint
+dependency, work-limit and cancellation-cleanup checks. Ubuntu WSL Clang 18
+strict/x86 and the installed public consumer also passed on 2026-09-14. Additional checks cover
+recognized typed validation, bound cache edits, arbitrary strides, global ROI
+origins and schema failures. This does not change the Proposed status of
+this specification.

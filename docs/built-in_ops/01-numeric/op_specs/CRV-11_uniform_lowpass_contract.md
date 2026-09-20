@@ -6,7 +6,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -190,10 +190,9 @@ requirement; this primitive does not infer that target or guarantee zero aliasin
 
 Verify whole/ROI/disjoint equivalence, exact wrap/reflection dirty support,
 zero-tap nonreads, N=1, short signals, strides, source/result lifetime, low budgets,
-cancellation and cache-off. Future public workflows bind input and required
-statics, request values through Compiler/ExecutionContext, and provide actual
-run commands and independent expected outputs. No runtime implementation is
-claimed by this Proposed contract.
+cancellation and cache-off. The maintained public workflow binds input and
+required statics and requests values through Compiler/ExecutionContext, with
+actual commands and independently checked outputs linked below.
 
 Primary method references: [SciPy firwin](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html),
 [Blackman](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.windows.blackman.html),
@@ -204,3 +203,13 @@ this implementation and do not claim SciPy floating-point parity.
 
 - [Resampling family](CRV-11_resample_signal.md).
 - [Operator template](../../00-foundation/spec-template.md).
+
+## Maintained implementation and validation
+
+This shared contract covers five uniform kernels and 15 profile keys; it is not
+itself a registered operation. The public low-pass helpers and implementation use
+exact tap construction and certified whole sums; accelerated keys currently use
+the strict fallback. Certified precision is 128..4096 bits and
+may fail `ResourceExhausted`. See the [uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed
+the shared manual groups and 474 independent directed MPFR cases per profile.

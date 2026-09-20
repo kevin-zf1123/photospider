@@ -206,7 +206,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v10");
+  digest.text("semantic-graph-ir-v14");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -286,7 +286,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v10");
+  digest.text("physical-plan-v14");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -470,7 +470,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v10");
+  digest.text("plan-cache-key-v14");
   digest.text(plan);
   return digest.finish();
 }
@@ -543,16 +543,23 @@ bool ExecutionPlan::dependency_network() const noexcept {
   return false;
 }
 
-Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
-                                               const Region& region) const {
+Result<ExecutionPlan> ExecutionPlan::tile_plan(
+    const std::string& name, const Region& requested_region) const {
   if (!current() || operation_registry_.expired())
     return Result<ExecutionPlan>(
         Status::failure(ErrorCode::Stale, "tile parent is stale"));
   const auto named = outputs_.find(name);
-  if (named == outputs_.end() || region.empty() ||
-      !region.validate(steps_[named->second].output_descriptor.shape).ok())
+  if (named == outputs_.end() || requested_region.empty() ||
+      !requested_region.validate(steps_[named->second].output_descriptor.shape)
+           .ok())
     return Result<ExecutionPlan>(Status::failure(ErrorCode::InvalidArgument,
                                                  "invalid named tile Region"));
+  auto closed_region = input_internal::color_output_region(
+      steps_[named->second].output_descriptor,
+      steps_[named->second].output_facets, requested_region);
+  if (!closed_region.ok())
+    return Result<ExecutionPlan>(closed_region.status());
+  const auto region = closed_region.take_value();
   const auto& requested = output_regions_.at(name);
   for (std::size_t axis = 0; axis < region.rank(); ++axis) {
     const auto part = region.dimensions()[axis],
@@ -562,7 +569,7 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::InvalidArgument, "tile exceeds requested output"));
   }
-  if (!input_internal::complete_image_channels(
+  if (!input_internal::complete_tuple_channels(
           steps_[named->second].output_descriptor,
           steps_[named->second].output_facets, region))
     return Result<ExecutionPlan>(Status::failure(
@@ -590,7 +597,12 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     if (!demands[i])
       continue;
     auto& step = tile.steps_[i];
-    if (!input_internal::complete_image_channels(
+    auto closed_demand = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets, *demands[i]);
+    if (!closed_demand.ok())
+      return Result<ExecutionPlan>(closed_demand.status());
+    demands[i] = closed_demand.take_value();
+    if (!input_internal::complete_tuple_channels(
             step.output_descriptor, step.output_facets, *demands[i]))
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -632,11 +644,13 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(const std::string& name,
     if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
                            OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
-    step.planned_bytes =
-        std::max(step.traits.estimated_bytes,
-                 dense.ok() ? dense.value().bytes
-                            : static_cast<std::uint64_t>(
-                                  Value::element_size(packed.element_type)));
+    step.planned_bytes = std::max(
+        step.traits.estimated_bytes,
+        step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+            step.traits.outputs[0].preserve_output_views ? 0
+            : dense.ok()                                 ? dense.value().bytes
+                         : static_cast<std::uint64_t>(
+                               Value::element_size(packed.element_type))));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t port = 0; port < step.inputs.size() &&
                                step.traits.workspace_input_multiplier != 0;
@@ -708,7 +722,8 @@ Compiler::Compiler(std::shared_ptr<OperationRegistry> operations)
  * @brief Implements validated source-to-semantic lowering.
  * @copydetails Compiler::analyze
  */
-Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
+Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
+                                          ResourceBindings resources) const {
   if (!snapshot.current()) {
     return Result<SemanticGraphIR>(
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
@@ -727,6 +742,18 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     return Result<SemanticGraphIR>(Status::failure(
         ErrorCode::OperationFailed, "cannot set binary32 environment"));
   auto declarations = document.inputs;
+  ResourceBindings retained_resources;
+  const auto admit_resources =
+      [&](const std::vector<ValueFacet>& facets) -> Status {
+    auto selected = resources.select(facets);
+    if (!selected.ok())
+      return selected.status();
+    auto combined = retained_resources.unite(selected.value());
+    if (!combined.ok())
+      return combined.status();
+    retained_resources = combined.take_value();
+    return Status::success();
+  };
   std::sort(declarations.begin(), declarations.end(),
             [](const auto& a, const auto& b) { return a.id < b.id; });
   std::map<std::uint64_t, std::size_t> declaration_by_id;
@@ -745,6 +772,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     const auto status = input_internal::validate_declaration(&declaration);
     if (!status.ok())
       return Result<SemanticGraphIR>(status);
+    const auto admitted = admit_resources(declaration.facets);
+    if (!admitted.ok())
+      return Result<SemanticGraphIR>(admitted);
   }
 
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
@@ -846,6 +876,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
   semantic.nodes_.reserve(document.nodes.size());
   std::map<ValueRef, ValueDescriptor> output_by_value;
   std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
+  std::map<ValueRef, std::uint32_t> tuple_axes;
   while (!ready.empty()) {
     const std::uint64_t id = ready.top();
     ready.pop();
@@ -875,6 +906,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       ValueDescriptor descriptor;
       std::vector<ValueFacet> facets;
       std::shared_ptr<const SchemaTemplate> result_schema;
+      std::uint32_t atomic_trailing_axes = 0;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
         const auto ref =
             result_ports.at({producer->source_node, producer->source_port});
@@ -882,6 +914,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
         descriptor = output_by_value.at(ref);
         facets = output_facets.at(ref);
         result_schema = result_schemas.at(ref);
+        atomic_trailing_axes = tuple_axes.at(ref);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
@@ -900,13 +933,30 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
           }
         }
       }
-      const auto status = input_internal::validate_port_metadata(
-          port, OperationMetadata{descriptor, facets, result_schema});
-      if (!status.ok())
+      auto status = input_internal::validate_port_metadata(
+          port, OperationMetadata{descriptor, facets, result_schema,
+                                  atomic_trailing_axes});
+      if (!status.ok()) {
+        if (status.detail.origin == FailureOrigin::Unspecified &&
+            (status.code == ErrorCode::TypeMismatch ||
+             status.code == ErrorCode::InvalidArgument)) {
+          status.detail.origin = FailureOrigin::Schema;
+          if (status.code == ErrorCode::InvalidArgument &&
+              status.reason == FailureReason::None)
+            status.reason = FailureReason::InvalidDomain;
+        }
         return Result<SemanticGraphIR>(status);
-      input_descriptors.push_back(
-          {std::move(descriptor), std::move(facets), std::move(result_schema)});
+      }
+      input_descriptors.push_back({std::move(descriptor), std::move(facets),
+                                   std::move(result_schema),
+                                   atomic_trailing_axes});
     }
+    auto specialized = operations_->prepare_operation(
+        source.operation, input_descriptors, source.parameters);
+    if (!specialized.ok())
+      return Result<SemanticGraphIR>(specialized.status());
+    node.prepared = specialized.take_value();
+    node.traits = node.prepared->traits();
     auto output = infer_operation_outputs(node.traits, input_descriptors,
                                           node.parameters);
     if (!output.ok()) {
@@ -921,6 +971,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
+      const auto admitted = admit_resources(metadata.facets);
+      if (!admitted.ok())
+        return Result<SemanticGraphIR>(admitted);
       auto selected = select_operation_output(node.traits, oi).take_value();
       for (std::size_t i = 0;
            i < input_descriptors.size() && !contract.dependency_version; ++i) {
@@ -951,6 +1004,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       output_facets.emplace(ref, metadata.facets);
       output_by_value.emplace(ref, metadata.descriptor);
       result_schemas.emplace(ref, metadata.result_schema);
+      tuple_axes.emplace(ref, metadata.atomic_trailing_axes);
       node.outputs.push_back({contract.key, metadata.descriptor,
                               metadata.facets, atomic, metadata.result_schema});
     }
@@ -1000,6 +1054,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot) const {
       }
     }
   }
+  semantic.resources_ = std::move(retained_resources);
   semantic.outputs_ = document.outputs;
   std::sort(semantic.outputs_.begin(), semantic.outputs_.end(),
             [](const WorkflowOutput& left, const WorkflowOutput& right) {
@@ -1036,6 +1091,7 @@ Result<OptimizedGraphIR> Compiler::optimize(
   optimized.revision_ = semantic.revision();
   optimized.nodes_ = semantic.nodes();
   optimized.input_declarations_ = semantic.input_declarations();
+  optimized.resources_ = semantic.resources();
   optimized.outputs_ = semantic.outputs();
   optimized.semantic_digest_ = semantic.digest();
   optimized.digest_.value =
@@ -1111,6 +1167,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   plan.tile_width_ = options.tile_width;
   plan.revision_ = optimized.revision();
   plan.input_declarations_ = optimized.input_declarations();
+  plan.resources_ = optimized.resources();
   std::map<std::uint64_t, std::size_t> declaration_by_id;
   for (std::size_t i = 0; i < plan.input_declarations_.size(); ++i)
     declaration_by_id.emplace(plan.input_declarations_[i].id, i);
@@ -1125,6 +1182,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.node_id = node.id;
       step.operation = node.operation;
       step.parameters = node.parameters;
+      step.prepared = node.prepared;
       step.traits = select_operation_output(node.traits, oi).take_value();
       step.effective_atomic = output.effective_atomic;
       step.whole_boundary =
@@ -1147,11 +1205,14 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       if (!dense_output.ok() && step.traits.outputs[0].output_schema.kind ==
                                     OperationPortKind::RgbaFloat32)
         return Result<ExecutionPlan>(dense_output.status());
-      step.planned_bytes = std::max(
-          node.traits.estimated_bytes,
-          dense_output.ok() ? dense_output.value().bytes
-                            : static_cast<std::uint64_t>(Value::element_size(
-                                  step.output_descriptor.element_type)));
+      step.planned_bytes =
+          std::max(node.traits.estimated_bytes,
+                   step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+                       step.traits.outputs[0].preserve_output_views ? 0
+                       : dense_output.ok()
+                           ? dense_output.value().bytes
+                           : static_cast<std::uint64_t>(Value::element_size(
+                                 step.output_descriptor.element_type))));
       if (step.output_result_schema)
         step.planned_bytes = 0;
       step.inputs.reserve(node.inputs.size());
@@ -1225,12 +1286,17 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
         plan.output_regions_.emplace(output.first, Region{});
         continue;
       }
-      const auto region = requested == options.output_regions.end()
-                              ? Region::whole(step.output_descriptor.shape)
-                              : requested->second;
+      auto region = requested == options.output_regions.end()
+                        ? Region::whole(step.output_descriptor.shape)
+                        : requested->second;
+      auto closed_region = input_internal::color_output_region(
+          step.output_descriptor, step.output_facets, region);
+      if (!closed_region.ok())
+        return Result<ExecutionPlan>(closed_region.status());
+      region = closed_region.take_value();
       if (region.empty() ||
           !region.validate(step.output_descriptor.shape).ok() ||
-          !input_internal::complete_image_channels(step.output_descriptor,
+          !input_internal::complete_tuple_channels(step.output_descriptor,
                                                    step.output_facets, region))
         return Result<ExecutionPlan>(Status::failure(
             ErrorCode::InvalidArgument, "invalid dependency output region"));
@@ -1249,13 +1315,15 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       for (auto& step : plan.steps_) {
         auto metadata = std::make_shared<ResultProgramMetadata>();
         metadata->output = {step.output_descriptor, step.output_facets,
-                            step.output_result_schema};
+                            step.output_result_schema,
+                            step.traits.outputs[0].atomic_trailing_axes};
         for (const auto& input : step.inputs) {
           if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
             const auto& source = plan.steps_[producer->step_index];
-            metadata->inputs.push_back({source.output_descriptor,
-                                        source.output_facets,
-                                        source.output_result_schema});
+            metadata->inputs.push_back(
+                {source.output_descriptor, source.output_facets,
+                 source.output_result_schema,
+                 source.traits.outputs[0].atomic_trailing_axes});
           } else {
             const auto& source =
                 plan.input_declarations_[std::get<PlanWorkflowInput>(input)
@@ -1294,8 +1362,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             ErrorCode::InvalidArgument,
             "planned workflow output Region is empty or out of bounds"));
       }
-      demand = requested->second;
-      if (!input_internal::complete_image_channels(
+      auto closed = input_internal::color_output_region(
+          step.output_descriptor, step.output_facets, requested->second);
+      if (!closed.ok())
+        return Result<ExecutionPlan>(closed.status());
+      demand = closed.take_value();
+      if (!input_internal::complete_tuple_channels(
               step.output_descriptor, step.output_facets, demand)) {
         return Result<ExecutionPlan>(
             Status::failure(ErrorCode::InvalidArgument,
@@ -1319,8 +1391,13 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     if (!demand_by_step[step_index].has_value()) {
       demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
     }
-    step.output_demand = demand_by_step[step_index].value();
-    if (!input_internal::complete_image_channels(
+    auto closed_demand = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets,
+        demand_by_step[step_index].value());
+    if (!closed_demand.ok())
+      return Result<ExecutionPlan>(closed_demand.status());
+    step.output_demand = closed_demand.take_value();
+    if (!input_internal::complete_tuple_channels(
             step.output_descriptor, step.output_facets, step.output_demand)) {
       return Result<ExecutionPlan>(
           Status::failure(ErrorCode::InvalidArgument,
@@ -1368,11 +1445,13 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
                            OperationPortKind::RgbaFloat32)
       return Result<ExecutionPlan>(dense.status());
-    step.planned_bytes =
-        std::max(step.traits.estimated_bytes,
-                 dense.ok() ? dense.value().bytes
-                            : static_cast<std::uint64_t>(
-                                  Value::element_size(packed.element_type)));
+    step.planned_bytes = std::max(
+        step.traits.estimated_bytes,
+        step.traits.outputs[0].maximum_output_payload_bytes.value_or(
+            step.traits.outputs[0].preserve_output_views ? 0
+            : dense.ok()                                 ? dense.value().bytes
+                         : static_cast<std::uint64_t>(
+                               Value::element_size(packed.element_type))));
     std::uint64_t workspace = step.traits.workspace_bytes;
     for (std::size_t i = 0; i < step.inputs.size(); ++i) {
       if (step.traits.workspace_input_multiplier == 0)
@@ -1403,11 +1482,15 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   }
   for (const auto& output : plan.outputs_) {
     const auto requested = options.output_regions.find(output.first);
-    plan.output_regions_.emplace(
-        output.first,
+    const auto& step = plan.steps_[output.second];
+    auto closed = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets,
         requested == options.output_regions.end()
-            ? Region::whole(plan.steps_[output.second].output_descriptor.shape)
+            ? Region::whole(step.output_descriptor.shape)
             : requested->second);
+    if (!closed.ok())
+      return Result<ExecutionPlan>(closed.status());
+    plan.output_regions_.emplace(output.first, closed.take_value());
   }
   auto access = native_access_plan(&plan.steps_, plan.input_declarations_,
                                    plan.outputs_, plan.output_regions_);
@@ -1433,11 +1516,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
  * @brief Implements the complete fail-before-publication compiler pipeline.
  * @copydetails Compiler::compile
  */
-Result<CompiledWorkflow> Compiler::compile(
-    const GraphContext& context, const PlanningOptions& options) const {
+Result<CompiledWorkflow> Compiler::compile(const GraphContext& context,
+                                           const PlanningOptions& options,
+                                           ResourceBindings resources) const {
   const GraphSnapshot snapshot = context.snapshot();
   const auto analyze_start = std::chrono::steady_clock::now();
-  auto semantic = analyze(snapshot);
+  auto semantic = analyze(snapshot, std::move(resources));
   const auto analyze_end = std::chrono::steady_clock::now();
   if (!semantic.ok()) {
     return Result<CompiledWorkflow>(semantic.status());

@@ -6,7 +6,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -91,13 +91,25 @@ IndexOutOfBounds with j, index and destination extent. Integer result overflow
 uses OperationFailed with FailureReason::ArithmeticOverflow at the requested
 coordinate. Upstream/typed/resource/cancellation errors retain existing categories.
 
-Use independent index grouping and exact integer/rational or bit-selection
-oracles. Source-read logs must distinguish overwritten replace updates from
-aggregate contributors. Exercise duplicates, unhit positions with sNaN base,
-invalid indices outside Q, disjoint requests, negative/zero input strides,
-changed index targets, output lifetime, low index/accumulator budgets and
-cancellation. Include actual public WorkflowDocument fixtures per operation when
-implemented; no runtime result is claimed by this draft.
+The twelve scatter keys use the public `scatter_replace_node`, `scatter_sum_node`,
+`scatter_minimum_node` and `scatter_maximum_node` helpers. Regional Atomic
+callbacks retain an explicit association row per requested output: full index
+Control/validation, then exact base/update Data and typed Validation. Stable
+radix grouping retains increasing update position within each target. Bounded
+binary lookup and source-set construction charge their actual mapping work;
+replacement reads only the last match and aggregates retain all contributors.
+The fixed exact workspace admits all limb storage through its continuation.
+
+`examples/numeric_workflow/indexing.cpp` and `index_oracle.py` provide the
+public manual acceptance path. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the complete manual workflows and 3858 independent
+coordinate/contributor/Fraction cases per profile. The installed public consumer
+passed. Checks include exact reads and dirty support, typed actual-read closure,
+raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
+replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
+Focused compiler/dependency/fragments/resources units and independent scoped
+reviews passed. Manual acceptance has no integration-test registration.
+Specification status remains Proposed; no performance claim is inferred.
 
 Floating environment, fixed NaN bit patterns and basic arithmetic conventions
 follow [NUM-04](NUM-04_unary_contract.md), with the explicit no-hit/replacement

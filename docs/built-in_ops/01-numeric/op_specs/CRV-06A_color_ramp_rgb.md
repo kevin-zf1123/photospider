@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -25,7 +25,7 @@ floating environment, bounded execution and public acceptance. The new color-arr
 descriptor, complete-color observation, alpha and precision rules below override
 the baseline's generic empty-facet/per-component conventions. Clarification of
 this primitive is complete; its shared color-management representation remains
-an explicit Proposed implementation dependency.
+an explicit Proposed contract implemented by the current runtime.
 
 ## Confirmed color domain and operation
 
@@ -85,8 +85,8 @@ C components and reads complete selected stop colors. Other input positions and
 unselected stop colors are not read. Apply alpha and finite-color constraints
 to the entire color before publication; a component request cannot hide another
 component's failure. Mapping this color unit into the host atom/region protocol
-is an explicit implementation prerequisite, not a claim of existing ColorArray
-support. The ordering validation protocol is stated below.
+uses the implemented full-color Atom/region closure. The ordering validation
+protocol is stated below.
 
 For every nonempty request, globally validate all stops for finiteness and strict
 order. Read only requested input positions and the complete one or two selected
@@ -155,8 +155,8 @@ a positive finite static exponent. PQ/HLG/log encodings are outside this initial
 RGB ramp scope. Finite negative and greater-than-one RGB values are supported.
 For sRGB/gamma, apply the positive-domain transfer to absolute magnitude and
 restore the original sign; do not clamp RGB to [0,1]. Nonfinite demanded color
-data and nonfinite final outputs fail. No current registry or color-management
-implementation is claimed by this draft.
+data and nonfinite final outputs fail. The maintained implementation and
+validation evidence are linked below.
 
 ## Complete interface and mathematical evaluation
 
@@ -228,8 +228,8 @@ on the identical-color shortcut.
 The observation domain has shape S, excluding the final color axis. Normalize a
 request touching any component at p to the complete color at p. An AtomKey names
 p in that observation domain, and a failure affects that complete color. This
-fits the host's observation-coordinate concept, but new ColorArray planning and
-validation adapters are required; current Image handling does not implement it.
+uses the host's observation-coordinate protocol and the implemented ColorArray
+planning/validation adapters. Image retains its separate existing rules.
 
 For requested positions P, Control support is input[P] and all stops[0:K]. Validate
 global stop ordering before segment lookup, then each finite input before colors.
@@ -289,7 +289,7 @@ Bound diagnostics and include the offending color/stop/index when available.
 
 ## Acceptance and implementation status
 
-Conceptual RGB fixture: stops=[0,1], colors=[[0,0,0],[1,1,1]], input=[0,0.5,1],
+RGB fixture: stops=[0,1], colors=[[0,0,0],[1,1,1]], input=[0,0.5,1],
 sRGB/D65/sRGB transfer gives black, RN_dtype(E(1/2)) in all middle components,
 and white. The strict middle bits are Float32 0x3f3c405b and Float64
 0x3fe7880b5e230e4f. An independent rational midpoint comparison verifies these
@@ -313,9 +313,24 @@ through Compiler/ExecutionContext and inspect the color facet and numerical
 results using actual supplied build/run commands. Validate full-color expansion,
 remote invalid colors remaining unread, exact stop/input dirty effects, typed
 closures, strides, low budgets, cancellation, cache-off and post-context lifetime.
-No current ColorArray runtime, new ramp registry key or executed platform result
-is claimed. FMT-COLOR metadata/validation and planning integration are required
-before this specification can become an implemented public workflow.
+The maintained ColorArray/runtime path and current validation boundary are recorded
+below; the document remains Proposed.
 
 - [Color management category](../../02-format-color/representation.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
+
+## Maintained implementation and validation
+
+Public [`color_ramp_rgb_node`](../../../../include/photospider/numeric/color_ramps.hpp)
+constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
+implements its staged complete-color execution.
+
+Direct, linear and gamma=2 paths use exact rational/root arithmetic.
+Other gamma and sRGB paths use certified whole-expression enclosures.
+Current profiles return strict bits; the accelerated RGB contract permits
+up to four ULP while retaining exact alpha and failure classification.
+
+See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
+[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
+for resource limits and actual validation.

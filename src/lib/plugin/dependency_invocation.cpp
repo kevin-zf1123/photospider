@@ -9,6 +9,7 @@
 
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/operation_resources.hpp"
 
 namespace ps {
 namespace {
@@ -43,20 +44,6 @@ Result<Value> OperationRegistry::invoke_dependency_current(
   try {
     if (stop() != ErrorCode::Ok)
       return failure(Status{stop(), {}});
-    auto found = find_traits(key);
-    if (!found.ok())
-      return failure(found.status());
-    auto selected =
-        select_operation_output(found.value(), invocation.output_index);
-    if (!selected.ok())
-      return failure(selected.status());
-    auto resolved = resolve_operation_traits(
-        selected.value(),
-        invocation.input_metadata.empty() ? invocation.inputs.size()
-                                          : invocation.input_metadata.size(),
-        invocation.parameters);
-    if (!resolved.ok())
-      return failure(resolved.status());
     if (invocation.input_demands.size() != invocation.inputs.size())
       return failure(
           Status::failure(ErrorCode::InvalidArgument,
@@ -93,13 +80,37 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{ErrorCode::TypeMismatch,
                               "projected input metadata mismatch"});
     }
+    auto resources = invocation.resources;
+    for (const auto& input : invocation.inputs) {
+      auto joined = resources.unite(input.resources());
+      if (!joined.ok())
+        return failure(joined.status());
+      resources = joined.take_value();
+    }
+    auto specialized = prepare_operation(key, metadata, invocation.parameters);
+    if (!specialized.ok())
+      return failure(specialized.status());
+    auto resolved = select_operation_output(specialized.value()->traits(),
+                                            invocation.output_index);
+    if (!resolved.ok())
+      return failure(resolved.status());
     auto inferred = infer_operation_output(resolved.value(), metadata,
                                            invocation.parameters);
     if (!inferred.ok())
       return failure(inferred.status());
-    const auto region = invocation.output_region.rank()
-                            ? invocation.output_region
-                            : Region::whole(inferred.value().descriptor.shape);
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        resources, metadata, inferred.value());
+    if (!admitted_resources.ok())
+      return failure(admitted_resources.status());
+    resources = admitted_resources.take_value();
+    auto region = invocation.output_region.rank()
+                      ? invocation.output_region
+                      : Region::whole(inferred.value().descriptor.shape);
+    auto closed_region = input_internal::color_output_region(
+        inferred.value().descriptor, inferred.value().facets, region);
+    if (!closed_region.ok())
+      return failure(closed_region.status());
+    region = closed_region.take_value();
     if (region.empty())
       return failure(Status::failure(ErrorCode::InvalidArgument,
                                      "empty direct output Region"));
@@ -140,6 +151,8 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                 invocation.cancellation,
                                 {}};
       request.output_index = invocation.output_index;
+      request.prepared = specialized.value();
+      request.resources = resources;
       auto started =
           start_dependency(key, std::move(request), invocation.allocator);
       if (!started.ok())
@@ -184,7 +197,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
           }
           auto fragments = ValueFragments::create(
               metadata[port].descriptor, metadata[port].facets,
-              needed.take_value(), std::move(values));
+              needed.take_value(), std::move(values), {}, resources);
           if (!fragments.ok())
             return Result<DependencyResult>(fragments.status());
           ready.push_back(fragments.take_value());
@@ -206,6 +219,35 @@ Result<Value> OperationRegistry::invoke_dependency_current(
       if (stop() != ErrorCode::Ok)
         return failure(Status{stop(), {}});
       return result;
+    }
+    if (resolved.value().outputs[0].maximum_output_payload_bytes ||
+        resolved.value().outputs[0].preserve_output_views) {
+      auto result = run(samples.value());
+      if (!result.ok())
+        return failure(result.status());
+      const auto& fragments = result.value().value.fragments();
+      if (fragments.size() != 1)
+        return failure(
+            Status{ErrorCode::TypeMismatch,
+                   "view requires execute_fragments or explicit dense layout"});
+      if (stop() != ErrorCode::Ok)
+        return failure(Status{stop(), {}});
+      return fragments[0].view(region);
+    }
+    if (resolved.value().outputs[0].static_dependency_pieces ||
+        resolved.value().outputs[0].regional_atomic) {
+      auto result = run(samples.value());
+      if (!result.ok())
+        return failure(result.status());
+      FootprintLimits limits;
+      limits.cancellation = invocation.cancellation;
+      auto collected =
+          result.value().value.collect(region, invocation.allocator, limits);
+      if (!collected.ok())
+        return failure(collected.status());
+      if (stop() != ErrorCode::Ok)
+        return failure(Status{stop(), {}});
+      return collected;
     }
     auto allocation = MutableValue::allocate(inferred.value().descriptor,
                                              region, invocation.allocator);
@@ -229,7 +271,10 @@ Result<Value> OperationRegistry::invoke_dependency_current(
           auto result = run(requested.value());
           if (!result.ok())
             return result.status();
-          return requested.value().visit(
+          auto visible = requested.value().intersect(samples.value());
+          if (!visible.ok())
+            return visible.status();
+          return visible.value().visit(
               [&](const auto& sample) {
                 std::uint64_t offset = 0;
                 for (std::size_t axis = 0; axis < sample.size(); ++axis)
@@ -250,7 +295,7 @@ Result<Value> OperationRegistry::invoke_dependency_current(
       return failure(status);
     if (stop() != ErrorCode::Ok)
       return failure(Status{stop(), {}});
-    return std::move(output).publish(inferred.value().facets);
+    return std::move(output).publish(inferred.value().facets, resources);
   } catch (const std::bad_alloc&) {
     return failure(Status::failure(ErrorCode::ResourceExhausted,
                                    "direct dependency allocation failed"));

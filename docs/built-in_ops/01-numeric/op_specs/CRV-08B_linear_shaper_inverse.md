@@ -9,7 +9,7 @@ category: 01-numeric
 kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -44,15 +44,24 @@ Invalid bounds use InvalidArgument/InvalidDomain; shape/dtype mismatch uses
 TypeMismatch. Numeric special results succeed. Resource, backend, stale,
 upstream and cancellation failures preserve the shared categories and atom scope.
 
-## Conceptual workflow and acceptance
+## Public workflow and acceptance
 
 lower=-2, upper=2, input=[0,0.5,1,1.5] -> [-2,0,2,4].
-Bind these ports through the future public Compiler/ExecutionContext interface
+Bind these ports through the public Compiler/ExecutionContext interface
 after template expansion and check named values.
-This is a conceptual fixture, not an already executed runtime workflow.
+The maintained public workflow executes this fixture through Compiler/ExecutionContext.
 
 Apply the shared independent oracle, endpoint/extreme/subnormal/NaN fixtures,
 partial-request and dirty witnesses, strides, resource limits, cancellation,
 cache-off and lifetime checks. Use an exact rational whole-formula oracle; inverse acceptance includes lower>=upper rejection.
-Actual public invocation commands and results are required for implementation
-delivery. This Proposed document establishes no current runtime registration.
+The maintained target command and current validation boundary are linked below; the
+specification remains Proposed.
+
+## Maintained implementation and validation
+
+The public entry point is `linear_shaper_inverse` in `photospider/numeric/shapers.hpp`. This linear helper expands to existing remap/constant nodes and is not a linear primitive.
+See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
+for the shared command, fixture and validation evidence. Native Clang 21
+strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 4,196 independent
+Fraction/directed-MPFR cases per profile. All five manual groups passed
+all four profiles.

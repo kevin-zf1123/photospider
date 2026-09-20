@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -24,7 +24,8 @@ The maintainer requires separate CIELAB, CIELCh(ab), OKLab and OKLCh ramp
 implementations. This specification covers CIELAB only, rather than an ambiguous
 Lab mode. Use explicit stops and a model-described color array under the
 [ramp family](CRV-06_color_ramp.md). This primitive's clarification is complete;
-its ColorArray representation and registry implementations remain Proposed.
+its ColorArray representation and registry implementation are available in the
+current runtime; the specification remains Proposed.
 
 ## Confirmed interpolation and white
 
@@ -105,19 +106,34 @@ OperationFailed/ArithmeticOverflow at the complete color Atom. Host resource,
 backend, upstream/typed, cancellation and stale errors retain their categories,
 origin and scope. No partial successful Lab tuple is published.
 
-Conceptual fixture: stops=[0,1], colors=[[20,10,-20],[80,-10,40]], input=[0.5]
+Fixture: stops=[0,1], colors=[[20,10,-20],[80,-10,40]], input=[0.5]
 -> values=[[50,0,10]], with the same explicit D50 CIELAB description. Also use
 L* outside [0,100], large opposite signed a*/b*, white mismatch, all source/destination
 dtype combinations, direct signed zeros and final narrowing overflow. Independent
 exact rational interpolation and bit conversion are the numeric oracle.
 
-The future public workflow binds input/stops/colors, supplies the complete
+The public workflow binds input/stops/colors, supplies the complete
 description/dtype/policy, and inspects named values and metadata through Compiler/
-ExecutionContext. Delivery provides actual run commands and outputs. Verify
+ExecutionContext; run commands and checked results are linked below. Verify
 full-color request expansion, unselected invalid colors remaining unread,
 global-stop failures, exact dirty witnesses, strides, low budgets, cancellation,
-cache-off and descriptor/data lifetime after context teardown. No new runtime,
-color conversion compatibility or platform result is claimed by this specification.
+cache-off and descriptor/data lifetime after context teardown. This coordinate
+interpolation does not perform color-model conversion.
 
 - [Color-array dependency](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
+
+## Maintained implementation and validation
+
+Public [`color_ramp_cielab_node`](../../../../include/photospider/numeric/color_ramps.hpp)
+constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
+implements its staged complete-color execution.
+
+All profiles use exact rational component interpolation and return strict
+bits, with one destination rounding. Complete-color metadata and regional
+validation remain attached to the result.
+
+See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
+[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
+for resource limits and actual validation.

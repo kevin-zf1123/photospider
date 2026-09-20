@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -69,6 +69,20 @@ ROI without reading remote samples, source mutations, cache-off, and common
 ownership/cancellation/budget tests.
 
 Conceptual public fixture: input `[-1,-0,0,4,+Inf]` produces
-`[canonical_NaN,-0,+0,2,+Inf]` with the same dtype and no facets. The new keys
-are not implemented; delivery must supply the actual public executable and
-run commands. NUM-01's expression sqrt has a different input/output/error contract.
+`[canonical_NaN,-0,+0,2,+Inf]` with the same dtype and no facets. The maintained public executable and run command are documented below. NUM-01's
+expression sqrt has a different input/output/error contract.
+
+## Maintained implementation and validation
+
+This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
+exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
+separate typed validation and Atom-scoped failures. Its numerical path follows
+[the shared implementation notes](../math-implementation.md).
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.

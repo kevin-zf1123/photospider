@@ -196,3 +196,124 @@ error-code projection. C++ callback outcome/supply signatures now use AtomKey;
 consumers rebuild without an output-index shim. Joint contract 2 is a new
 trait value in existing v10 canonical framing; contract 1 semantics and C
 layouts remain. See [Atom errors and quality](../kernel-architecture/Atom-Errors-and-Quality.md).
+
+## Numeric tuple and diagnostics contracts
+
+Package 0.13.0 uses C++ OperationTraits 13, generic trailing-axis observation
+grouping, numeric axis dtype inference and host-owned CPU numeric diagnostics.
+Semantic, physical-plan and plan-cache domains use v13 because output
+grouping, regional execution and view traits enter operation identity. Dependency protocol 2, joint contract 2,
+result-region v6, WorkflowDocument schema 2 and the C operation ABI 9 remain.
+C++ consumers rebuild against 0.13; requests for older minor packages are rejected.
+The C ABI loader rejects dtype rules outside its existing v9 enum. Its layout
+does not expose the new C++ grouping, dtype rule or diagnostics callbacks.
+
+Kernel C/C++ builds require Clang, including Apple Clang. Correctness runs on
+Ubuntu WSL use Clang too. The manual [numeric workflows](../../examples/numeric_workflow/README.md)
+exercise the installed public API without adding integration-test registrations.
+
+## NUM-09 layout implementation
+
+Package version is 0.13.0 with C++ `OperationTraits` version 13.
+The operation plugin ABI remains C ABI 9; its descriptor and entrypoint layout
+are unchanged. The nine `array.reshape`, `array.transpose` and `array.slice`
+keys use the existing C++ traits and dependency protocol and do not add a C ABI
+field or compatibility alias. C++ installed consumers must rebuild for the
+0.13 package.
+
+Layout traits carry per-node shape/permutation/count metadata, regional atomic
+execution where applicable, and `preserve_output_views`. Static dependency
+pieces replace the earlier static dependency maps; each piece carries disjoint
+observation coverage and complete per-port dependencies. These fields affect
+the C++ operation identity. The layout operations set `cacheable=false`, since
+the current content cache does not witness physical owner/stride partitions;
+pure and active-Run sharing remain separate.
+
+Static mapping identity includes each disjoint piece's full observation coverage
+and every `DependencyAxis::translation`. Translations use signed Int64 values;
+creation checks each translated piece with widened integer arithmetic before
+execution. The C++ field is `static_dependency_pieces`; no old-field alias is
+provided. Repeated input templates may set `repeated_match=false` only when a
+metadata specializer supplies and validates their descriptor relation, as used
+by concatenate's matching non-axis extents.
+
+## NUM-12 pure block sharing
+
+Package 0.14.0 uses C++ `OperationTraits` version 14 and semantic, physical-plan
+and plan-cache domains v14. The C operation ABI remains C ABI 9. The opt-in
+`share_blocks_across_outputs` trait is false by default and applies only to pure
+Atomic dependency-v1 operations. Its common block identity includes all
+resolved output contracts, static parameters, input metadata and supplied bytes,
+incoming state, phase/range and mode. Public output and certificate identities
+remain independent. Optional result-LRU reuse requires a positive
+`result_cache_bytes` configuration and an accounted proof budget; a miss
+recomputes, and the trait does not join concurrent producers or promise one
+evaluation per Run. The C++ layout change requires consumers to rebuild against
+0.14; older minor requests are rejected. WorkflowDocument schema 2, provider ABI
+1, optimizer v5 and result-region v6 remain unchanged.
+
+## NUM-01 static preparation and diagnostics
+
+Package 0.15.0 keeps C++ `OperationTraits` version 14 and semantic framing
+version 14; the C operation ABI remains C ABI 9. The public C++ operation
+definition adds `prepare_static`, `OperationPreparation` and the immutable
+`PreparedOperation` handle. Compiler nodes and plan steps may retain that
+handle. Direct requests reuse an explicitly supplied matching handle or prepare
+once per preflight; joint requests prepare once for compatible members. Matching
+requires registry/definition identity, static metadata and copied IEEE-754
+parameter bits. Separate calls do not share preparation implicitly.
+Request records own their copied inputs while dependency queries remain
+borrowed. Preparation and plan allocation are outside per-Atom runtime scratch
+admission. No global cache or dynamic preparation state is introduced, and
+prepared owners are destroyed after continuations and callbacks retire.
+
+NUM-01's numeric diagnostics add `strict_math_calls` and the 8-by-4
+`function_fallbacks` matrix. NUM-01 counts each strict math call; uninstrumented
+operators contribute zero, and merge assigns unattributed reason counts to `Other`.
+These are observations only. The prepared public manual, compiler and facility
+checks passed the once/ROI/output/tile/foreign/signed-zero/NaN/lifetime paths;
+NUM-01's public workflows and independent expression oracle passed on native
+Clang and Clang WSL. C++ consumers must rebuild for 0.15 and older minor requests
+are rejected.
+The C ABI 9 descriptor/table layout remains unchanged.
+
+## CRV-06 ColorArray and explicit resource bindings
+
+Package 0.16.0 introduces a breaking C++ public layout and signature change for
+ColorArray/ICC-backed values. C++ `OperationTraits` remains version 14 and the
+semantic, physical-plan and plan-cache framing remains v14; WorkflowDocument
+schema 2, provider ABI 1 and the C operation ABI 9 remain unchanged. The C ABI
+descriptor and entrypoint layout do not carry these C++ resource bindings.
+
+`IccProfile::import` admits validated immutable ICC v2/v4 bytes under an
+explicit `ResourceBudget`; `ResourceBindings::create` seals the admitted
+profiles and supports identity selection, references and set union. ICC identity
+is content-based (SHA-256 plus length), not a path, address or ICC MD5 profile
+ID. The handles are immutable and share accepted payload owners. Admission,
+hashing, parsing, sorting and comparisons observe cancellation and work limits;
+failure publishes no partial resource.
+
+`Compiler::analyze` and `Compiler::compile` accept explicit `ResourceBindings`
+and retain them in semantic IR, optimized IR and the execution plan. A
+`ResourceBindings` set is also carried through `InputSnapshot`, `RegionalSource`,
+`DependencyRequest`/`DependencyQuery`, `ResultProgramQuery`/`ResultContinuation`
+and operation invocation. `Value`,
+`ValueFragments` and `MutableValue::publish` accept and retain the validated
+owners named by their facets; irrelevant bindings are dropped. Empty execution
+paths still validate and retain required resources even when they read no
+payload. Resource owners retire with the corresponding Value/fragment,
+snapshot, plan or Run lifetime. Partial-channel ColorArray output requests
+normalize to complete colors in plans, direct calls and retained demands; input
+transport and fragments retain their complete-channel requirement.
+
+These C++ layout, constructor and method signature changes require all C++
+package consumers to rebuild against 0.16.0. No compatibility shim or older
+minor reader is introduced. The recognized `photospider.color-array` facet now
+has typed validation and complete-color demand semantics; earlier opaque-facet
+treatment is not a compatibility contract. Persisted sample cache keys include
+`PHOTOSPIDER_CACHE_BUILD_ID`, derived from kernel/operation/header sources and
+build settings, so entries from the earlier implementation are isolated.
+ColorArray itself is outside the existing disk-cache facet allowlist, and
+resource-bearing results also bypass optional sample-only caches. Plans and
+in-memory result caches have no cross-build deserialization path. Implementation
+of CRV-06 and acceptance of its Proposed specification remain separate states.

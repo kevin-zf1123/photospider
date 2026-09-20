@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-08A: mix
@@ -72,11 +72,14 @@ origins. Budget exhaustion or cancellation fails without publishing a partial
 observation; check at least every 64 simple samples and extended-arithmetic stage.
 Follow inherited cache, floating-environment and final-owner release requirements.
 
-Conceptual fixture: a=[10,10,10], b=[20,20,20], t=[0,0.25,1] -> [10,12.5,20].
-An independent exact rational oracle verifies interior rounding. Source-read logs
-must show a support {0,1}, b support {1,2}. Test endpoints with selected sNaN
-bits, unselected failures, interior NaN quieting, infinity combinations, signed
-zeros, finite extrema and subnormals, invalid t including NaN/Inf, disjoint
-requests and typed-validation closure. Include budget/cancellation, invalidation
-when t changes branch and public WorkflowDocument execution when implemented.
-No versioned runtime implementation or test is claimed here.
+The public `examples/numeric_workflow/interpolation.cpp` fixture uses
+`WorkflowDocument`, `Compiler`, `ExecutionContext` and explicit broadcasts
+of endpoint and edge scalars. It checks `a=[10,10,10]`, `b=[20,20,20]`,
+`t=[0,0.25,1] -> [10,12.5,20]`, exact selected supports `{0,1}` and `{1,2}`,
+typed-validation closure, cache branch replacement, layouts/ROI, empty demand,
+caller floating-environment preservation and cleanup under WorkLimit and
+cancellation. `interpolation_oracle.py` independently decodes IEEE values and
+uses `Fraction` plus direct destination rounding; the local strict and Apple
+profile runs passed 5242 cases per profile. Ubuntu WSL Clang strict/x86
+also passed 5242 cases per profile; the installed consumer passed locally. These are manual targets without CTest or
+integration-test registration, and no performance result is claimed.
