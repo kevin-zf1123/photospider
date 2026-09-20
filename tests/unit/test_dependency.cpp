@@ -126,9 +126,90 @@ int boundaries() {
            ErrorCode::Cancelled);
   return 0;
 }
+int translated_pieces() {
+  const auto all = Footprint::all({5}).take_value();
+  const auto first =
+      Footprint::from_regions({5}, {Region({{0, 2}})}).take_value();
+  const auto second =
+      Footprint::from_regions({5}, {Region({{2, 3}})}).take_value();
+  std::vector<DependencyMapPiece> pieces{{first, {{0, 1, {{0, {}, 3}}, {}}}},
+                                         {second, {{0, 1, {{0, {}, -2}}, {}}}}};
+  auto certificate =
+      DependencyCertificate::create_mapped("translated", all, {{5}}, pieces);
+  PS_CHECK(certificate.ok());
+  const std::uint64_t expected[] = {3, 4, 0, 1, 2};
+  for (std::uint64_t i = 0; i < 5; ++i) {
+    auto query = Footprint::from_regions({5}, {Region({{i, 1}})}).take_value();
+    auto source =
+        Footprint::from_regions({5}, {Region({{expected[i], 1}})}).take_value();
+    PS_CHECK(certificate.value().backward(query).value()[0].samples == source);
+    PS_CHECK(certificate.value().transpose({0, 1, source, {}}).value() ==
+             query);
+    auto restricted = certificate.value().restrict(query).take_value();
+    PS_CHECK(restricted.row({i}).value().inputs[0].samples == source);
+    auto explicit_row =
+        DependencyCertificate::create("translated", query, {{5}},
+                                      {{{i}, {{0, 1, source, {}}}}})
+            .take_value();
+    PS_CHECK(restricted.merge(explicit_row).ok());
+  }
+  auto left = certificate.value().restrict(first).take_value();
+  auto right = certificate.value().restrict(second).take_value();
+  PS_CHECK(left.merge(right).value().backward(all).value()[0].samples == all);
+  for (std::int64_t shift :
+       {INT64_MIN, INT64_MAX, static_cast<std::int64_t>(-1),
+        static_cast<std::int64_t>(4)}) {
+    auto invalid = pieces;
+    invalid[0].inputs[0].axes[0].translation = shift;
+    PS_CHECK(
+        !DependencyCertificate::create_mapped("invalid", all, {{5}}, invalid)
+             .ok());
+  }
+  const std::uint64_t extent = UINT64_C(1) << 40;
+  auto huge = Footprint::all({extent}).take_value();
+  auto slab = Footprint::from_regions({extent}, {Region({{extent - 5, 5}})})
+                  .take_value();
+  auto compact = DependencyCertificate::create_mapped(
+      "giant", slab, {{5}},
+      {{slab,
+        {{0, 1, {{0, {}, -static_cast<std::int64_t>(extent - 5)}}, {}}}}});
+  PS_CHECK(compact.ok());
+  PS_CHECK(compact.value().backward(slab).value()[0].samples == all);
+  PS_CHECK(compact.value().transpose({0, 1, all, {}}).value() == slab);
+  FootprintLimits low;
+  low.maximum_work = 1;
+  PS_CHECK(compact.value().transpose({0, 1, all, {}}, low).status().code ==
+           ErrorCode::ResourceExhausted);
+  const auto negative_domain =
+      Footprint::from_regions({(UINT64_C(1) << 63) + 1},
+                              {Region({{UINT64_C(1) << 63, 1}})})
+          .take_value();
+  const auto singleton = Footprint::all({1}).take_value();
+  auto negative_edge =
+      DependencyCertificate::create_mapped(
+          "negative-edge", negative_domain, {{1}},
+          {{negative_domain, {{0, 1, {{0, {}, INT64_MIN}}, {}}}}})
+          .take_value();
+  PS_CHECK(negative_edge.backward(negative_domain).value()[0].samples ==
+           singleton);
+  PS_CHECK(negative_edge.transpose({0, 1, singleton, {}}).value() ==
+           negative_domain);
+  auto positive_edge = DependencyCertificate::create_mapped(
+                           "positive-edge", singleton, {{UINT64_C(1) << 63}},
+                           {{singleton, {{0, 1, {{0, {}, INT64_MAX}}, {}}}}})
+                           .take_value();
+  auto tail =
+      Footprint::from_regions({UINT64_C(1) << 63},
+                              {Region({{UINT64_C(0x7ffffffffffffffe), 2}})})
+          .take_value();
+  PS_CHECK(positive_edge.transpose({0, 1, tail, {}}).value() == singleton);
+  static_cast<void>(huge);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(exhaustive() == 0);
   PS_CHECK(boundaries() == 0);
+  PS_CHECK(translated_pieces() == 0);
   return 0;
 }

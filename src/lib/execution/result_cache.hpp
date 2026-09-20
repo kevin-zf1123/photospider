@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "data/input_validation.hpp"
 #include "execution/dependency_cache.hpp"
 #include "execution/memory_budget.hpp"
 #include "photospider/execution/execution.hpp"
@@ -167,7 +168,8 @@ class ResultCache final {
       std::set<const CpuStorage*> owners;
       std::uint64_t capacity = 0;
       for (const auto& value : values) {
-        if (!value.valid() || !domain.owns(*value.storage()))
+        if (!value.valid() || value.resources().size() ||
+            !domain.owns(*value.storage()))
           return;
         if (owners.insert(value.storage().get()).second) {
           const auto bytes = value.storage()->capacity();
@@ -265,8 +267,7 @@ class ResultCache final {
                                })
               : std::none_of(value.facets().begin(), value.facets().end(),
                              [](const auto& f) {
-                               return f.key == "photospider.image" ||
-                                      f.key == "photospider.semantic";
+                               return input_internal::typed_facet(f.key);
                              });
     if (value.descriptor().element_type !=
             step.output_descriptor.element_type ||
@@ -274,25 +275,19 @@ class ResultCache final {
         !value.view(step.output_demand).ok() || !facets_match)
       return Result<Value>(Status::failure(ErrorCode::OperationFailed,
                                            "cached output contract mismatch"));
-    for (const auto& facet : value.facets()) {
-      if (facet.key != "photospider.image" &&
-          facet.key != "photospider.semantic")
-        continue;
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return Result<Value>(semantic.status());
-      auto status = validate_semantic_value(semantic.value(), value,
-                                            ErrorCode::OperationFailed, stop);
-      if (!status.ok())
-        return Result<Value>(status);
-    }
+    auto status = input_internal::validate_port_value(
+        {}, value, ErrorCode::OperationFailed, stop);
+    if (!status.ok())
+      return Result<Value>(status);
     return Result<Value>(std::move(value));
   }
   /** @brief Optional retention is fenced; allocation failure cannot fail work.
    */
   void put(const std::string& key, const Value& value, std::uint64_t epoch,
            bool native = false) noexcept {
-    if (key.empty() || !value.valid())
+    // This optional LRU accounts sample allocations. Resource-bearing Values
+    // remain owned by Runs/results until resource-aware cache admission exists.
+    if (key.empty() || !value.valid() || value.resources().size())
       return;
     try {
       const auto owner = value.storage();

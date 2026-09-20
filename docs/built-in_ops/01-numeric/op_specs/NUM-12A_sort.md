@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -54,6 +54,13 @@ Values and indices can be requested independently or jointly. Share one stable
 ordering for a given line/input version; compute the union of required input
 lines without allocating or publishing an unrequested output. Internal original
 indices needed by stable sorting are scratch, not a forced public indices result.
+
+The implementation uses the host's optional accounted pure-block cache to reuse
+a completed line permutation across outputs. Reuse requires positive result
+cache capacity and admitted proof work. Cache-off, eviction or proof exhaustion
+may recompute the same stable order; there is no once-per-Run evaluation promise.
+Each observation still obtains its complete current source line and independent
+Data/Validation witness.
 For values at sorted coordinate k, copy the source value at the corresponding
 stable original index. No additional source outside the full line is needed.
 
@@ -89,7 +96,7 @@ contract without forcing either complete logical output into memory.
 
 ## Acceptance and implementation status
 
-Conceptual fixture: input=[3,1,1,2], axis=0 yields values=[1,1,2,3] and
+Fixture: input=[3,1,1,2], axis=0 yields values=[1,1,2,3] and
 indices=[1,2,3,0]. Independent stable ordering with original-index tie breaks
 is the oracle. Float fixture [3,-0,+0,NaN_a,2,NaN_b] yields indices
 [1,2,4,0,3,5], preserving both NaN bit patterns and zero order in values.
@@ -98,5 +105,7 @@ Test each output alone and joint equality, partial sorted positions, unrequested
 lines with failing upstream values, all-NaN lines, singleton lines, repeated
 integers above 2^53, reverse/zero input strides, multi-axis shapes, source-read
 logs, full-line dirty propagation, sorting scratch limits, cancellation and
-result lifetime. Deliver actual public WorkflowDocument runs when implemented;
-no versioned runtime implementation or test is claimed by this document.
+result lifetime. The current three profile keys use the public ordering workflow
+and exact stable ordering implementation. The
+[numeric workflow README](../../../../examples/numeric_workflow/README.md)
+records the manual evidence. Proposed status is unchanged.

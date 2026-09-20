@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -25,7 +25,7 @@ Both inputs must have exactly the same shape and dtype; output shape is preserve
 Use explicit broadcast and cast operations for shape/type adaptation. The
 operator-specific files decide supported dtypes and output dtype, mathematical
 rules, integer overflow and any permitted accelerated approximation. All are
-Proposed; this work does not change runtime code or ADRs.
+Proposed; specification acceptance is independent of implementation status.
 
 | Spec | Supported dtypes | Accelerated quality |
 | --- | --- | --- |
@@ -106,8 +106,7 @@ zeros, subnormals, extrema, NaN payload priority, valid strided inputs, disjoint
 requests, typed validation, overflow isolation and resource/cancellation cleanup.
 A conceptual WorkflowDocument fixture binds both arrays, compiles a selected key,
 and reads requested values through ExecutionContext. Implementation delivery
-must provide actual runnable public fixtures and results; these Proposed specs
-make no claim that those versioned keys already execute.
+provides actual runnable public fixtures and results as documented below.
 
 ## Current implementation comparison
 
@@ -121,3 +120,24 @@ None of those legacy names establishes the newly proposed versioned contracts.
 - [Current maximum](../../../../plugins/ops/01-numeric/numeric_maximum.cpp).
 - [Unary IEEE-style conventions](NUM-04_unary_contract.md).
 - [NUM category](../core.md).
+
+## Maintained implementation
+
+All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
+with independently named constructors in `photospider/numeric/binary.hpp`.
+The shared adapter retains both inputs as exact pointwise Data and separately
+retains typed validation, including when a numeric identity determines a result.
+Exact elementary operations use bounded integer/ratio arithmetic; ordinary
+power and angle results use the certified directed backend and report accelerated
+strict fallback. See [math implementation](../math-implementation.md) for
+rounding, scratch, work accounting and unresolved-refinement limits.
+
+The [public example and commands](../../../../examples/numeric_workflow/README.md)
+include this operation, an editable add/multiply composition, independent
+integer/Fraction/MPFR oracles and direct error/resource checks. The manual target
+is excluded from default builds and has no CTest/integration registration.
+
+The combined family passed 14,174 independent cases per profile on native
+Clang strict/Apple and Ubuntu WSL Clang strict/AVX2, plus expanded manual and
+local installed-consumer checks. [Measured validation scope](../math-implementation.md#num-05-validation-and-native-timing)
+records oracle versions, native timings and limitations.

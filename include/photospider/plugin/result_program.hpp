@@ -30,6 +30,7 @@ struct ResultProgramMetadata final {
 /** @brief Borrowed static query for one structured-protocol continuation.
  * value_outputs is absent for ResultRef outputs, including empty collections.
  * page_bytes is a physical work-window choice, excluded from semantic_key.
+ * ColorArray value_outputs requests are closed to full colors at start/poll.
  */
 struct ResultProgramQuery final {
   ResultProgramQuery(
@@ -46,6 +47,10 @@ struct ResultProgramQuery final {
   std::uint32_t output_index = 0;
   std::uint64_t page_bytes = 4096;
   CancellationToken cancellation;
+  /** @brief Explicit immutable owners resolving Value input/output identities.
+   * The continuation retains the admitted set independently of this query.
+   */
+  ResourceBindings resources = {};
 };
 struct ResultValueNeed final {
   std::uint32_t input = 0;
@@ -175,6 +180,7 @@ class PHOTOSPIDER_API ResultContinuation final {
   friend class OperationRegistry;
   void reset() noexcept;
   std::shared_ptr<const void> definition_;
+  ResourceBindings resources_;
   MutableBuffer storage_;
   using Destroy = void (*)(void*) noexcept;  // NOLINT(readability/casting)
   Destroy destroy_ = nullptr;

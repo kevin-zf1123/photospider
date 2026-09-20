@@ -5,7 +5,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -99,3 +99,23 @@ these are Proposed templates, not new registered interpolation primitives.
 - [nonuniform blackman_sinc](CRV-11F3_lowpass_nonuniform_blackman_sinc.md).
 - [nonuniform kaiser_sinc](CRV-11F4_lowpass_nonuniform_kaiser_sinc.md).
 - [nonuniform gaussian](CRV-11F5_lowpass_nonuniform_gaussian.md).
+
+## Maintained implementation and validation
+
+The four public resampling templates are maintained through the public
+`resampling.hpp` authoring helpers. Uniform and nonuniform low-pass families each
+provide 15 registered profile keys (five kernels across strict, Apple and x86);
+accelerated low-pass keys currently use the strict fallback. Uniform evaluation
+uses exact taps and a certified whole sum. Nonuniform evaluation uses exact
+partition and paired-affine pieces with global Taylor moments and a rigorous tail
+bound; it is not local adaptive quadrature.
+
+Certified precision ranges from 128 to 4096 bits and polynomial order is bounded
+by 512; capacity or unresolved rounding may return `ResourceExhausted`. See the
+[signal-resampling workflow](../../../../examples/numeric_workflow/README.md#signal-resampling),
+[uniform low-pass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
+and [nonuniform low-pass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
+Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed all twelve
+manual groups, 474 directed MPFR uniform cases and 245 Fraction/directed MPFR
+continuous cases per profile. Installed0.16 consumers passed both native
+profiles. WSL validates numerical correctness only; no integration test is registered.

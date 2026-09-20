@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -50,9 +50,9 @@ applies these numeric and dtype-conversion rules, including sNaN quieting.
 
 ## Acceptance and implementation distinction
 
-Conceptual fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[6],[15]], shape
-[2,1], in the selected output dtype. Bind through WorkflowDocument, compile the
-selected key and read values through ExecutionContext when implemented. Use
+Fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[6],[15]], shape
+[2,1], in the selected output dtype. The public manual target binds this through
+WorkflowDocument, compiles the selected key and reads values through ExecutionContext. Use
 independent exact grouping and integer/rational/bit-selection oracles. Cover
 singleton groups, non-leading/multiple axes, NaN payload order/conversion,
 signed-zero groups, infinity combinations, subnormals and source dtype extrema.
@@ -62,7 +62,10 @@ For Int64, [INT64_MAX,1,-1] must return INT64_MAX. Explicit UInt8 output require
 final range validation independently of the integer default. Test each supported
 destination and rejection of cross-domain dtype selection.
 
-Apply shared exact source-read/invalidation, resource/cancellation and owner
-lifetime fixtures. Existing legacy mean/variance behavior is distinguished in
-the shared contract. These versioned target keys remain unimplemented and no
-runtime test is claimed by this specification.
+The current three profile keys use `reduce_sum_node` from
+`photospider/numeric/reductions.hpp`. They stream selected groups in at most
+64-value windows and use exact aggregate state with one final destination
+conversion. The public fixture checks `[[1,2,3],[4,5,6]]`, axes `1`, producing
+`[[6],[15]]`, plus dtype selection, overflow and exceptional values. The shared
+reduction contract records the complete strict/Apple/WSL and installed-consumer
+evidence. Proposed status is unchanged.

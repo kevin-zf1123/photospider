@@ -46,6 +46,8 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
  */
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
+  digest->integer(traits.requires_metadata_specialization);
+  digest->integer(traits.share_blocks_across_outputs);
   digest->integer(traits.joint_contract);
   digest->integer(traits.joint_continuation_bytes);
   digest->integer(traits.joint_workspace_bytes);
@@ -65,6 +67,44 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   if (output.result_schema)
     digest->text(output.result_schema->canonical());
   digest->text(output.key);
+  digest->integer(output.regional_atomic);
+  digest->integer(output.preserve_output_views);
+  digest->integer(output.static_dependency_pieces.has_value());
+  if (output.static_dependency_pieces) {
+    digest->integer(output.static_dependency_pieces->size());
+    for (const auto& piece : *output.static_dependency_pieces) {
+      digest->integer(piece.coverage.shape().size());
+      for (auto extent : piece.coverage.shape())
+        digest->integer(extent);
+      digest->integer(piece.coverage.boxes().size());
+      for (const auto& box : piece.coverage.boxes())
+        for (const auto& dimension : box.dimensions()) {
+          digest->integer(dimension.offset);
+          digest->integer(dimension.extent);
+        }
+      digest->integer(piece.inputs.size());
+      for (const auto& map : piece.inputs) {
+        digest->integer(map.port);
+        digest->integer(map.roles);
+        digest->integer(map.axes.size());
+        for (const auto& axis : map.axes) {
+          digest->integer(static_cast<std::uint32_t>(axis.observation_axis));
+          digest->integer(axis.fixed.offset);
+          digest->integer(axis.fixed.extent);
+          digest->integer(static_cast<std::uint64_t>(axis.translation));
+        }
+        digest->integer(map.tags.size());
+        for (const auto& tag : map.tags) {
+          digest->integer(tag.kind);
+          digest->integer(tag.id);
+        }
+      }
+    }
+  }
+
+  digest->integer(output.maximum_output_payload_bytes.has_value());
+  if (output.maximum_output_payload_bytes)
+    digest->integer(*output.maximum_output_payload_bytes);
   digest->integer(output.input_indices.has_value());
   if (output.input_indices) {
     digest->integer(output.input_indices->size());
@@ -140,6 +180,7 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
       static_cast<std::uint32_t>(traits.outputs[0].observation_kind));
   digest->integer(
       static_cast<std::uint32_t>(traits.outputs[0].failure_delivery));
+  digest->integer(traits.outputs[0].atomic_trailing_axes);
   digest->integer(traits.outputs[0].dependency_version);
   digest->integer(traits.outputs[0].continuation_bytes);
   digest->integer(traits.outputs[0].maximum_dependency_stages);

@@ -12,7 +12,8 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: legacy_subset_only_target_not_implemented
+implementation_status: implemented
+verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -24,7 +25,8 @@ Inherit the [NUM baseline](NUM_common_contract.md) and the explicitly cited
 [CRV-01A linear contract](CRV-01A_interpolate_linear.md) for unchanged rounding,
 resources, host errors, ownership and acceptance. The uniform axis, arbitrary
 input shape and singleton-table rules below take precedence. Clarification is
-complete; the target remains Proposed and unimplemented.
+complete; specification status remains Proposed while the public operation is
+implemented.
 
 ## Confirmed purpose
 
@@ -226,7 +228,43 @@ reject/clip policy, validating the whole table under Whole execution. Current
 [lut.apply_1d](../../../../plugins/ops/01-numeric/lut_apply_1d.cpp) uses typed
 Float32 input/table with semantic sample origin/step. Neither is this generic
 three-input dynamic-axis, versioned contract. No runtime tests of the new keys
-are claimed by this specification.
+are inferred from those legacy operations. The implemented target is validated
+as recorded below.
+
+### Maintained implementation and verification
+
+`plugins/ops/01-numeric/lut1d_application.cpp` registers the six scalar/channels
+profile keys. `UniformAxis` validates all three raw axis values, exact step and
+the entire directly reconstructed grid, retaining an admitted 8L-byte index.
+Each requested query is classified independently before local table Data is
+requested. Descending pairs reorder x and y together before using ExactCurve's
+positive-denominator linear formula. Every profile correctly rounds the full
+formula and preserves the specified signed-zero/finite classifications.
+
+`apply_lut1d_node` in `photospider/numeric/lut1d.hpp` takes the three dynamic
+references and an explicit input dtype hint for its default output dtype.
+Compiler checks actual edge types and shapes. The complete public fixtures and
+commands are in the [numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).
+The three-poll Needs plus final publication preserve exact scalar Atom support;
+Image input Validation closes full channels independently of query Control.
+Each explicit per-cell Need reserves 4096+16384*M metadata bytes, in addition
+to grid, point, output and exact scratch owners. Default work/metadata limits do
+not promise every dense request will complete. Global grid work is required
+even for an endpoint query; it can exhaust caller-selected budgets.
+
+On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
+Clang 18.1.3 strict/AVX2 passed six manual groups and 1416 independent Fraction
+grid/linear cases per profile. They exercise ascending/descending and singleton
+axes, finite extreme cancellation, underflow/zero signs, mismatched and collapsed
+axes, mixed dtypes, typed support, rank-8 error Atoms, cache reselection,
+strides/fenv, arithmetic and axis-loop cancellation, state/work/stage limits and
+owner release. The public constant-node fixtures validate a full L=1048576 grid
+while reading one scalar-backed table entry, and one component of a 2^39-channel
+logical table. All six CRV-04 templates are connected directly to scalar/channels
+consumers and their discrete expected values checked. Installed 0.15 consumers,
+focused compiler unit, formatting/lint and independent math/entry reviews passed.
+The manual executable is excluded from default builds and CTest/integration;
+WSL is used for correctness only.
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Baking templates](CRV-04_bake_lut1d.md).

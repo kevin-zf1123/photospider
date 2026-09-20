@@ -1,0 +1,142 @@
+cmake_minimum_required(VERSION 3.21)
+project(PhotospiderNumericWorkflow LANGUAGES CXX)
+if(NOT TARGET Photospider::kernel)
+  find_package(Photospider 0.16 CONFIG REQUIRED COMPONENTS kernel)
+endif()
+add_executable(photospider_numeric_sequences sequences.cpp)
+target_link_libraries(photospider_numeric_sequences PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_sequences PRIVATE cxx_std_17)
+add_executable(photospider_numeric_facilities facilities.cpp)
+target_link_libraries(photospider_numeric_facilities PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_facilities PRIVATE cxx_std_17)
+# Manual acceptance executables deliberately have no add_test registration.
+add_executable(photospider_numeric_arrays arrays.cpp)
+target_link_libraries(photospider_numeric_arrays PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_arrays PRIVATE cxx_std_17)
+add_executable(photospider_numeric_mappings mappings.cpp)
+target_link_libraries(photospider_numeric_mappings PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_mappings PRIVATE cxx_std_17)
+add_executable(photospider_numeric_comparisons comparisons.cpp)
+target_link_libraries(photospider_numeric_comparisons PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_comparisons PRIVATE cxx_std_17)
+add_executable(photospider_numeric_ranges ranges.cpp)
+target_link_libraries(photospider_numeric_ranges PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_ranges PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_interpolation EXCLUDE_FROM_ALL interpolation.cpp)
+target_link_libraries(photospider_numeric_interpolation PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_interpolation PRIVATE cxx_std_17)
+add_executable(photospider_numeric_layouts EXCLUDE_FROM_ALL layouts.cpp)
+target_link_libraries(photospider_numeric_layouts PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_layouts PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_indexing EXCLUDE_FROM_ALL indexing.cpp)
+target_link_libraries(photospider_numeric_indexing PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_indexing PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_reductions EXCLUDE_FROM_ALL reductions.cpp)
+target_link_libraries(photospider_numeric_reductions PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_reductions PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_ordering EXCLUDE_FROM_ALL ordering.cpp)
+target_link_libraries(photospider_numeric_ordering PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_ordering PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_scans EXCLUDE_FROM_ALL scans.cpp)
+target_link_libraries(photospider_numeric_scans PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_scans PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_matrix EXCLUDE_FROM_ALL matrix.cpp)
+target_link_libraries(photospider_numeric_matrix PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_matrix PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_calculus EXCLUDE_FROM_ALL calculus.cpp)
+target_link_libraries(photospider_numeric_calculus PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_calculus PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_unary EXCLUDE_FROM_ALL unary.cpp)
+target_link_libraries(photospider_numeric_unary PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_unary PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_binary EXCLUDE_FROM_ALL binary.cpp)
+target_link_libraries(photospider_numeric_binary PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_binary PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_prepared EXCLUDE_FROM_ALL prepared.cpp)
+target_link_libraries(photospider_numeric_prepared PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_prepared PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_expression EXCLUDE_FROM_ALL expression.cpp)
+target_link_libraries(photospider_numeric_expression PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_expression PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_curves EXCLUDE_FROM_ALL curves.cpp)
+target_link_libraries(photospider_numeric_curves PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_curves PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_bezier EXCLUDE_FROM_ALL bezier.cpp)
+target_link_libraries(photospider_numeric_bezier PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_bezier PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_parametric EXCLUDE_FROM_ALL parametric.cpp)
+target_link_libraries(photospider_numeric_parametric PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_parametric PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_baking EXCLUDE_FROM_ALL baking.cpp)
+target_link_libraries(photospider_numeric_baking PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_baking PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_lut1d EXCLUDE_FROM_ALL lut1d.cpp)
+target_link_libraries(photospider_numeric_lut1d PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_lut1d PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_color_array EXCLUDE_FROM_ALL color_array.cpp)
+target_link_libraries(photospider_numeric_color_array PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_color_array PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_icc EXCLUDE_FROM_ALL icc.cpp)
+target_link_libraries(photospider_numeric_icc PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_icc PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_color_ramps EXCLUDE_FROM_ALL color_ramps.cpp)
+target_link_libraries(photospider_numeric_color_ramps PRIVATE Photospider::kernel)
+
+add_executable(photospider_numeric_lut3d EXCLUDE_FROM_ALL lut3d.cpp)
+target_link_libraries(photospider_numeric_lut3d PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_lut3d PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_shapers EXCLUDE_FROM_ALL shapers.cpp)
+target_link_libraries(photospider_numeric_shapers PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_shapers PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_baking3d EXCLUDE_FROM_ALL baking3d.cpp)
+target_link_libraries(photospider_numeric_baking3d PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_baking3d PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_inverse EXCLUDE_FROM_ALL inverse.cpp)
+target_link_libraries(photospider_numeric_inverse PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_inverse PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_resampling EXCLUDE_FROM_ALL resampling.cpp)
+target_link_libraries(photospider_numeric_resampling PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_resampling PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_lowpass EXCLUDE_FROM_ALL lowpass.cpp)
+target_link_libraries(photospider_numeric_lowpass PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_lowpass PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_lowpass_nonuniform EXCLUDE_FROM_ALL lowpass_nonuniform.cpp)
+target_link_libraries(photospider_numeric_lowpass_nonuniform PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_lowpass_nonuniform PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_lowpass_execution EXCLUDE_FROM_ALL lowpass_execution.cpp)
+target_link_libraries(photospider_numeric_lowpass_execution PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_lowpass_execution PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_signal_benchmark EXCLUDE_FROM_ALL signal_benchmark.cpp)
+target_link_libraries(photospider_numeric_signal_benchmark PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_signal_benchmark PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_category_benchmark EXCLUDE_FROM_ALL category_benchmark.cpp)
+target_link_libraries(photospider_numeric_category_benchmark PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_category_benchmark PRIVATE cxx_std_17)

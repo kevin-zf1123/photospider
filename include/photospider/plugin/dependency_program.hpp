@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
+#include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/dependency.hpp"
 #include "photospider/data/fragment_atlas.hpp"
 #include "photospider/data/quality.hpp"
@@ -27,6 +28,7 @@ struct JointMemberPhase;
 }
 struct OperationTraits;
 class OperationRegistry;
+class PreparedOperation;
 /** @brief Execution-scoped bounds, separate from compile-time phase limits. */
 struct DependencyLimits final {
   FootprintLimits sets;
@@ -46,6 +48,7 @@ struct DependencyLimits final {
  * cache hits. It is provenance for routing/validation, not a semantic input:
  * deterministic programs must not derive output values or dependency choices
  * from the spelling of this identity, allocator addresses or invocation timing.
+ * ColorArray output requests expand to full-channel observations.
  */
 struct DependencyRequest final {
   std::vector<OperationMetadata> inputs;
@@ -57,6 +60,15 @@ struct DependencyRequest final {
   DependencyLimits limits = {};
   /** @brief Declaration-order selected result. */
   std::uint32_t output_index = 0;
+  /** @brief Optional static preparation owner. start validates exact registry,
+   * metadata and IEEE parameter bits before reusing it; a mismatch fails Stale.
+   * Empty/axis/ROI queries do not bypass static preparation validation.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
+  /** @brief Explicit immutable resources resolving input and output identities.
+   * Validated and retained before callbacks, including Empty requests.
+   */
+  ResourceBindings resources = {};
 };
 /** @brief Validated borrowed query visible to start/poll, never retained by
  * code.
@@ -76,6 +88,15 @@ struct DependencyQuery final {
   CancellationToken cancellation = {};
   /** @brief Declaration-order selected result. */
   std::uint32_t output_index = 0;
+  /** @brief Session-owned immutable preparation, borrowed until retirement.
+   * Do not retain the query; a continuation may borrow prepared->state() only
+   * while its owning session remains alive. No dynamic input data is stored.
+   */
+  const PreparedOperation* prepared = nullptr;
+  /** @brief Session-owned accepted resources for input/output interpretation.
+   * Publication must pass this handle to retain resources named by its facets.
+   */
+  ResourceBindings resources = {};
 };
 /** @brief Extracts one canonical output/coordinate key from an Atomic query.
  * Empty or multi-observation queries fail without sample reads or allocation.
@@ -87,9 +108,33 @@ PHOTOSPIDER_API Result<AtomKey> dependency_atom_key(
  * request_needs. The host preserves rows separately from their transport union.
  * A program may repeat/control reads, consuming execution fuel on every stage.
  */
-struct DependencyNeedBatch final {
+struct PHOTOSPIDER_API DependencyNeedBatch final {
+ private:
+  friend class DependencySession;
+  void reseal_metadata();
+  std::shared_ptr<const dependency_internal::MetadataOwner> metadata_owner_;
+  void swap(DependencyNeedBatch&) noexcept;
+
+ public:
+  DependencyNeedBatch() = default;
+  /** @brief Adopts caller-owned boundary vectors under the current metadata
+   * scope. Programs must admit temporary construction before building vectors.
+   * Copies separately admit their deep-copy capacity; moves transfer owners.
+   * Allocation failure throws bad_alloc and preserves assignment targets.
+   */
+  DependencyNeedBatch(std::vector<AtomCertificate> associations,
+                      std::vector<DependencyNeed> request_needs = {},
+                      bool static_mapping = false);
+  DependencyNeedBatch(const DependencyNeedBatch&);
+  DependencyNeedBatch& operator=(const DependencyNeedBatch&);
+  DependencyNeedBatch(DependencyNeedBatch&&) noexcept = default;
+  DependencyNeedBatch& operator=(DependencyNeedBatch&&) noexcept;
   std::vector<AtomCertificate> associations;
   std::vector<DependencyNeed> request_needs;
+  /** @brief Requests the complete registered static mapping once. Both other
+   * lists must be empty. Only a CPU regional mapping program may use this.
+   */
+  bool static_mapping = false;
 };
 /** @brief A poll either suspends for declared inputs or completes its exact
  * set.
@@ -292,6 +337,11 @@ struct PHOTOSPIDER_API DependencyPhase final {
    */
   Status read(std::uint32_t port, const std::vector<std::uint64_t>& coordinate,
               void* destination, std::size_t size) const;
+  /** @brief Host-owned cumulative numeric report for this observation.
+   * Borrowed for one poll; malformed reports and service failures are sticky.
+   * Report only arithmetic actually performed, including strict fallbacks.
+   */
+  std::function<Status(const NumericDiagnostics&)> report_numeric = {};
 };
 /** @brief Address-stable, move-only state allocated through the host allocator.
  * @note Destruction runs exactly once before its storage lease retires. A state
@@ -442,6 +492,7 @@ struct DependencyResult final {
   ObservationKind kind = ObservationKind::Atomic;
   std::optional<DependencyCertificate> certificate;
   std::vector<DependencyNeed> request_dependencies;
+  NumericDiagnostics numeric = {};
 };
 /** @brief Poll result delivered by the validated direct protocol driver. */
 using DependencyProgress = std::variant<DependencyNeedBatch, DependencyResult>;
@@ -496,6 +547,11 @@ class PHOTOSPIDER_API DependencySession final {
   /** @brief Total charged work and number of actual program polls. */
   std::uint64_t consumed_work() const;
   std::uint32_t poll_count() const;
+  /** @brief Actual cumulative numeric work, retained after success or failure.
+   * The returned inline record owns its text; concurrent calls are serialized
+   * with poll/supply. Querying statistics never retries computation.
+   */
+  NumericDiagnostics numeric_diagnostics() const;
 
  private:
   friend class OperationRegistry;
@@ -533,6 +589,10 @@ struct DependencyAtomProgress final {
   AtomKey key;
   Result<DependencyProgress> outcome;
   std::optional<QualityReport> quality = {};
+  /** @brief Incremental actual work since the previous event, including Need.
+   * Terminal work is included exactly once, also on arithmetic failure.
+   */
+  NumericDiagnostics numeric = {};
 };
 /** @brief Direct joint start/poll/supply driver, with independent member
  * validation.

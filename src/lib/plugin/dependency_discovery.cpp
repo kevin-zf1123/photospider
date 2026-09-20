@@ -66,7 +66,7 @@ Result<std::vector<DependencyNeed>> decode_discovery(
     }
     Region region(std::move(dimensions));
     const auto& input = query.inputs[port];
-    if (!input_internal::complete_image_channels(input.descriptor, input.facets,
+    if (!input_internal::complete_tuple_channels(input.descriptor, input.facets,
                                                  region))
       return Answer(invalid("GPU discovery omits image channel closure"));
     groups[{port, roles}].push_back(std::move(region));

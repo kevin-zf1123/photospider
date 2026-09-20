@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "data/dependency_metadata.hpp"
 
 namespace ps {
 namespace {
@@ -116,6 +119,14 @@ Result<DependencyCertificate> DependencyCertificate::create(
     std::string identity, Footprint coverage,
     std::vector<std::vector<std::uint64_t>> input_shapes,
     std::vector<AtomCertificate> rows, const FootprintLimits& limits) {
+  return create_owned(std::move(identity), std::move(coverage),
+                      std::move(input_shapes), std::move(rows), limits, {});
+}
+Result<DependencyCertificate> DependencyCertificate::create_owned(
+    std::string identity, Footprint coverage,
+    std::vector<std::vector<std::uint64_t>> input_shapes,
+    std::vector<AtomCertificate> rows, const FootprintLimits& limits,
+    const std::shared_ptr<const dependency_internal::MetadataOwner>& source) {
   auto status = bounded(rows.size(), limits);
   if (!status.ok())
     return Result<DependencyCertificate>(status);
@@ -182,22 +193,52 @@ Result<DependencyCertificate> DependencyCertificate::create(
   if (!status.ok())
     return Result<DependencyCertificate>(status);
   DependencyCertificate result;
+  result.metadata_owner_ = dependency_internal::metadata_owner(
+      dependency_internal::certificate_bytes(identity, coverage, input_shapes,
+                                             rows, {}, false),
+      source);
   result.identity_ = std::move(identity);
   result.coverage_ = std::move(coverage);
   result.input_shapes_ = std::move(input_shapes);
   result.rows_ = std::move(rows);
+  result.metadata_entries_ = published_entries;
+  result.storage_entries_ = result.measure_storage();
   return Result<DependencyCertificate>(std::move(result));
 }
 Result<DependencyCertificate> DependencyCertificate::restrict(
     const Footprint& subset, const FootprintLimits& limits) const {
+  if (mapped_)
+    return restrict_mapped(subset, limits);
   auto outside = subset.subtract(coverage_, limits);
   if (!outside.ok())
     return Result<DependencyCertificate>(outside.status());
   if (!outside.value().empty())
     return Result<DependencyCertificate>(invalid("unknown certificate row"));
-  std::vector<AtomCertificate> selected;
-  std::uint64_t entries = 0;
+  dependency_internal::MetadataBytes construction_bytes;
+  construction_bytes.add(dependency_internal::certificate_bytes(
+      identity_, subset, input_shapes_, {}, {}, true));
+  const auto selected_count = subset.element_count().value();
+  if (selected_count > limits.maximum_boxes)
+    return Result<DependencyCertificate>(
+        Status{ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
+  construction_bytes.add(selected_count, sizeof(AtomCertificate));
   std::uint64_t scanned = 0;
+  for (const auto& row : rows_) {
+    if (++scanned > limits.maximum_work)
+      return Result<DependencyCertificate>(
+          Status{ErrorCode::ResourceExhausted, {}, FailureReason::WorkLimit});
+    if (limits.cancellation.cancelled())
+      return Result<DependencyCertificate>(Status{ErrorCode::Cancelled, {}});
+    if (subset.contains(row.output)) {
+      construction_bytes.block(row.output, true);
+      construction_bytes.needs(row.inputs, true);
+    }
+  }
+  auto construction = dependency_internal::metadata_owner(
+      construction_bytes.bytes, metadata_owner_);
+  std::vector<AtomCertificate> selected;
+  selected.reserve(selected_count);
+  std::uint64_t entries = 0;
   for (const auto& row : rows_) {
     auto stop = stopped(limits);
     if (!stop.ok())
@@ -229,10 +270,13 @@ Result<DependencyCertificate> DependencyCertificate::restrict(
       selected.push_back(row);
     }
   }
-  return create(identity_, subset, input_shapes_, std::move(selected), limits);
+  return create_owned(identity_, subset, input_shapes_, std::move(selected),
+                      limits, metadata_owner_);
 }
 Result<std::vector<DependencyNeed>> DependencyCertificate::backward(
     const Footprint& subset, const FootprintLimits& limits) const {
+  if (mapped_)
+    return backward_mapped(subset, limits);
   auto restricted = restrict(subset, limits);
   if (!restricted.ok())
     return Result<std::vector<DependencyNeed>>(restricted.status());
@@ -243,6 +287,8 @@ Result<std::vector<DependencyNeed>> DependencyCertificate::backward(
 }
 Result<Footprint> DependencyCertificate::transpose(
     const DependencyNeed& dirty, const FootprintLimits& limits) const {
+  if (mapped_)
+    return transpose_mapped(dirty, limits);
   auto status = stopped(limits);
   if (!status.ok())
     return Result<Footprint>(status);
@@ -290,6 +336,8 @@ Result<DependencyCertificate> DependencyCertificate::merge(
       input_shapes_ != other.input_shapes_)
     return Result<DependencyCertificate>(
         invalid("incompatible certificate identities"));
+  if (mapped_ || other.mapped_)
+    return merge_mapped(other, limits);
   auto coverage = coverage_.unite(other.coverage_, limits);
   if (!coverage.ok())
     return Result<DependencyCertificate>(coverage.status());
@@ -301,9 +349,38 @@ Result<DependencyCertificate> DependencyCertificate::merge(
     return Result<DependencyCertificate>(status);
   // Both row lists are canonical. Check every selected row before copying its
   // nested supports; matching overlap never requires a second owned row.
+  dependency_internal::MetadataBytes construction_bytes;
+  construction_bytes.add(dependency_internal::certificate_bytes(
+      identity_, coverage.value(), input_shapes_, {}, {}, true));
+  construction_bytes.add(count.value(), sizeof(AtomCertificate));
+  std::uint64_t work = limits.maximum_work;
+  std::size_t scan_left = 0, scan_right = 0;
+  while (scan_left < rows_.size() || scan_right < other.rows_.size()) {
+    auto charged = consume_work(1, &work, limits);
+    if (!charged.ok())
+      return Result<DependencyCertificate>(charged);
+    const AtomCertificate* row = nullptr;
+    if (scan_right == other.rows_.size() ||
+        (scan_left < rows_.size() &&
+         rows_[scan_left].output < other.rows_[scan_right].output)) {
+      row = &rows_[scan_left++];
+    } else if (scan_left == rows_.size() ||
+               other.rows_[scan_right].output < rows_[scan_left].output) {
+      row = &other.rows_[scan_right++];
+    } else {
+      row = &rows_[scan_left++];
+      ++scan_right;
+    }
+    construction_bytes.block(row->output, true);
+    construction_bytes.needs(row->inputs, true);
+  }
+  auto construction = dependency_internal::metadata_owner(
+      construction_bytes.bytes,
+      metadata_owner_ ? metadata_owner_ : other.metadata_owner_);
   std::vector<AtomCertificate> rows;
+  rows.reserve(count.value());
   std::size_t left = 0, right = 0;
-  std::uint64_t entries = 0, work = limits.maximum_work;
+  std::uint64_t entries = 0;
   while (left < rows_.size() || right < other.rows_.size()) {
     const AtomCertificate* row;
     const AtomCertificate* overlap = nullptr;
@@ -341,7 +418,8 @@ Result<DependencyCertificate> DependencyCertificate::merge(
     entries += weight.value();
     rows.push_back(*row);
   }
-  return create(identity_, coverage.take_value(), input_shapes_,
-                std::move(rows), limits);
+  return create_owned(
+      identity_, coverage.take_value(), input_shapes_, std::move(rows), limits,
+      metadata_owner_ ? metadata_owner_ : other.metadata_owner_);
 }
 }  // namespace ps

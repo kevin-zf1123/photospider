@@ -10,7 +10,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -109,4 +109,32 @@ Source-read logs for only output component r must show the full selected vector,
 matrix[r,:], bias[r] and no other numeric rows. Test matrix/bias sharing,
 strides, typed-validation closure, invalidation, low budgets, cancellation and
 owner lifetime through public WorkflowDocument execution when implemented.
-These versioned keys remain unimplemented; no runtime tests are claimed.
+The implementation evidence below records checks actually run.
+
+## Implementation and executable acceptance
+
+`numeric_matrix.cpp` registers all three keys. The public
+`photospider/numeric/matrix.hpp` helper `matrix_transform_node` authors the three
+explicit input edges. `exact_dot.hpp` uses a host-owned 4352-bit accumulator in
+units of 2^-2148; at most four binary64 products plus bias require 4198 magnitude
+bits. No product is independently rounded. Source NaN classification precedes
+generated invalid products; all required inputs and Validation have already
+arrived before numeric evaluation.
+
+One regional Need associates each requested output with its complete vector,
+selected matrix row and bias. Transport unions deduplicate overlapping vectors
+and shared rows/bias; source/result metadata and actual retained payload are
+charged. The result is packed only over requested rectangles. This does not
+promise sharing across separate executions or a once-per-Run transition.
+
+The manual `photospider_numeric_matrix` executable and `matrix_oracle.py` live
+in [the numeric workflow example](../../../../examples/numeric_workflow/README.md).
+Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,110
+independent Fraction/raw-bit cases per profile on 2026-09-19, plus editable
+public fixtures, cache on/off, sparse support/dirty and deduplicated row/bias
+transport, typed/Empty inputs, metadata errors, all-port negative strides,
+fenv modes/flags, exact-work WorkLimit/cancellation and release checks, and
+required upstream failure after vector NaN. Installed strict/Apple consumers,
+the focused compiler unit, formatting/lint and scoped math/entry reviews passed.
+No integration test or CTest registration is added. Specification status
+remains Proposed independently of this implementation evidence.

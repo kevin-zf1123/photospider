@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "fuzz/operation_contract_ir_fuzz.hpp"
+#include "photospider/plugin/operation_registry.hpp"
 #include "support/test_support.hpp"
 
 #ifndef PS_OPERATION_VALID_SEED_PATH
@@ -52,11 +53,12 @@ int main() {
 
   const std::vector<std::uint8_t> valid =
       read_seed(PS_OPERATION_VALID_SEED_PATH);
+  PS_CHECK(!valid.empty() && valid[0] == ps::OperationTraits{}.version);
   PS_CHECK(exercise_operation_contract_ir_input(valid.data(), valid.size()) ==
            OperationContractIrStage::CompilerAccepted);
 
   // Current C++ traits reject old schemas independently of C plugin ABI 9.
-  for (const auto version : {8, 9}) {
+  for (const auto version : {8, 9, 10, 11, 12, 13}) {
     auto old_version = valid;
     PS_CHECK(!old_version.empty());
     old_version[0] = version;
@@ -67,6 +69,7 @@ int main() {
 
   const std::vector<std::uint8_t> duplicate =
       read_seed(PS_OPERATION_DUPLICATE_SEED_PATH);
+  PS_CHECK(!duplicate.empty() && duplicate[0] == ps::OperationTraits{}.version);
   PS_CHECK(exercise_operation_contract_ir_input(duplicate.data(),
                                                 duplicate.size()) ==
            OperationContractIrStage::DuplicateSchemaRejected);

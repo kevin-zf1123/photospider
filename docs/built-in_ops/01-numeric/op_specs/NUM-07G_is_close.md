@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-07G: is_close
@@ -66,4 +66,11 @@ requested output coordinates when implemented. Apply the inherited strided,
 disjoint, typed-validation, lifetime, cache and budget/cancellation cases;
 resource exhaustion must fail rather than guess a near-threshold predicate.
 
-This key is proposed and no runtime test is claimed.
+The default registry implements all three profile keys using a bounded exact
+4352-bit predicate workspace. On 2026-09-14, the 3760-case independent Fraction
+oracle, including maximum relative tolerances and underflow/equality boundaries,
+passed with AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86.
+The installed public workflow passed, including `MAX/-MAX` with rtol=1.5,
+Empty/tolerance validation, work/state exhaustion and cancellation cleanup.
+The specification remains Proposed; these are manual checks outside integration
+tests, with no performance claim.

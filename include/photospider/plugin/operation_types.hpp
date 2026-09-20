@@ -32,5 +32,10 @@ struct PHOTOSPIDER_API OperationMetadata final {
   /** @brief Alternative paged edge type; descriptor/facets are empty when set.
    */
   std::shared_ptr<const SchemaTemplate> result_schema = {};
+  /** @brief Inferred producer tuple grouping, independent of Value facets.
+   * Only producer output contracts establish this field. Input declarations
+   * and standalone Values default to sample observations. No payload is held.
+   */
+  std::uint32_t atomic_trailing_axes = 0;
 };
 }  // namespace ps

@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -41,12 +41,16 @@ round to a subnormal, +0 or +Inf according to output dtype. Charge all moment,
 root/refinement and limb storage/work and return ResourceExhausted if correct
 rounding cannot be established within the budget.
 
-Conceptual fixture: input=[1,2,3], axes="0", dtype="float64": ddof=0 yields
+Fixture: input=[1,2,3], axes="0", dtype="float64": ddof=0 yields
 [RN_Float64(sqrt(2/3))], ddof=1 yields [1]. For Float64 [MAX,-MAX] with ddof=0,
 standard deviation is exactly MAX even though rounding its variance to Float64
 would overflow. This fixture detects an incorrect variance-then-sqrt composition.
 Test tiny moments that would prematurely underflow, large common offsets, integer
 sources, exact root boundaries, all NaN/Inf/zero cases, and inherited resource,
-region, cancellation and owner-lifetime behavior using an independent exact or
-directed root oracle and actual public WorkflowDocument execution when implemented.
-These target keys remain unimplemented; no runtime tests are claimed here.
+region, cancellation and owner-lifetime behavior using the independent root
+oracle and public manual target. The current three profile keys use
+`reduce_std_node` from `photospider/numeric/reductions.hpp` and compute exact
+variance before the correctly rounded square root; they do not compose a
+rounded variance with a native sqrt. The shared reduction contract records the
+complete strict/Apple/WSL and installed-consumer evidence. Proposed status is
+unchanged.

@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -113,9 +113,28 @@ Use independent exact integer/rational or directed high-precision oracles, with
 explicit NaN bit mapping. Test whole versus nonzero/disjoint output requests,
 multiple axes, singleton groups, strided inputs, selected versus unrequested group
 failures, deterministic partitioning, source invalidation, low accumulator/index
-budgets, cancellation and output-owner lifetime. Each operator supplies a public
-WorkflowDocument fixture to run at implementation delivery; this design work does
-not claim executable target keys.
+budgets, cancellation and output-owner lifetime. The current implementation
+registers 21 keys, with public constructors in
+`photospider/numeric/reductions.hpp`, the manual workflow in
+`examples/numeric_workflow/reductions.cpp`, and the independent oracle in
+`reduction_oracle.py`. Value-reading reducers stream groups through windows of
+at most 64 logical values, use one scalar observation group per requested output
+coordinate, and retain exact accumulator state in bounded host continuations.
+Diagnostics count admitted accumulator input attempts as `evaluated_values`;
+output observations are reported separately as `computed_elements`.
+`reduce_count` evaluates zero numeric inputs and can publish one 8-byte
+zero-stride owner for repeated counts.
+
+Local Clang 21 strict and Apple full manual workflows passed, including streamed
+4096-element groups under a 16 KiB live-payload limit, giant 2^40 count with an
+8-byte owner and zero producer calls, atom support/dirty/overflow isolation,
+typed validation, Empty, cancellation, ddof and strided-NaN cases. The strict
+and Apple installed consumers passed. Ubuntu WSL Clang 18.1.3
+strict/x86 full manual workflows passed, including the required third-window
+source failure after an earlier NaN. The updated oracle passed 4740 cases per
+profile, and the additional cross-window cases passed. Scoped implementation
+and arithmetic reviews closed all required findings. This does not change the
+Proposed status.
 
 Existing numeric.mean and numeric.variance use
 [ordered reduction](../../../../plugins/ops/01-numeric/ordered_reduction.hpp):

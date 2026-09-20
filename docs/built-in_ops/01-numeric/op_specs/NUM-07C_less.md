@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-07C: less
@@ -43,4 +43,10 @@ comparison helper. Include Int64 extrema and values above 2^53, signed zeros,
 subnormal neighbors, infinities, signaling/quiet NaNs in either input position
 and the shared disjoint/strided/resource/typed-validation acceptance cases.
 
-The proposed keys are not implemented and no public runtime test is claimed.
+The default registry implements all three profile keys. On 2026-09-14, the
+public workflow and 3760-case independent comparison/Fraction oracle passed
+with AppleClang 21 strict/Apple locally and Ubuntu WSL Clang 18 strict/x86.
+The installed public consumer also passed. The manual workflow checks source
+support, special bits, typed validation, strided inputs, cancellation/resources
+and composition with select. No integration-test registration or performance
+claim is included; the specification remains Proposed.

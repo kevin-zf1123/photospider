@@ -31,9 +31,31 @@ Compiler 不引入 finite-only rule，也不规范化 NaN payload 或 infinity�
 backend，记录 estimated bytes，并使用 Whole、elementwise-exact 或 clipped Halo rule
 把 optional named output Region 反向传播为每个 step 的 output/input demand，然后产生
 `ExecutionPlan`、`ExecutionPlanDigest` 与
-`PlanCacheKey`。任何 stage 都不包含 callback pointer、DSO handle、allocation、native
-device 或 daemon object。每个 stage 还携带 exact frozen operation registry 的 private
-runtime-only weak identity；它不进入 digest/serialization。
+`PlanCacheKey`。任何 stage 都不包含 callback pointer、native device 或 daemon object。
+Node 或 step 可以保留已注册 static program 的 immutable `PreparedOperation` owner；该
+owner 保持 definition lease，等依赖它的 plan/Run owner 释放后再销毁。Preparation state
+不是 runtime mutable state，也不进入 semantic 或 cache identity。每个 stage 还携带 exact
+frozen operation registry 的 private runtime-only weak identity；它不进入
+digest/serialization。
+
+## Static operation preparation
+
+`OperationDefinition::prepare_static` 是 NUM-01 等 deterministic operation 使用的公开
+纯 preparation hook。`OperationRegistry::prepare_operation` 先验证完整 static input
+metadata 与 parameters，包括 copied IEEE-754 parameter bits，然后在 registry
+synchronization 之外调用 hook 一次。返回的 `OperationPreparation` 在
+`PreparedOperation` 中拥有已解析 output metadata 和 optional immutable state，不包含
+Value payload、Run data、I/O state 或 private mutable cache。
+
+Compiler node/plan step 跨多次执行保留这个 owner。Direct request 可以传入匹配的已有
+handle；没有 handle 时，每次 direct preflight 准备一次。Joint request 为兼容成员准备
+一次。不同调用不会仅因 identity 相同而自动共享状态。Request 自己拥有复制后的 record，continuation 收到的
+`DependencyQuery` 仍是 borrowed，不能保留。Preparation 与 plan 使用普通宿主分配，
+位于 per-Atom runtime scratch admission 之外；目前没有单独强制的 preparation budget，
+算子必须限制静态源码与程序大小。Continuation state 仍受 runtime limits 约束。没有
+global preparation cache 或 dynamic preparation state。Session 先销毁 continuation，再释放
+prepared owner；prepared owner 先销毁程序，再释放 definition/library lease。外部 registry
+owner 可以提前释放，已有 lease 仍保持有效。
 
 ## Execution
 
@@ -114,7 +136,12 @@ nonzero callback result 会让 Run 失败，不产生 CPU attempt。
 
 Raw diagnostic 包含 compile-stage duration、execute duration、operation attempt
 timing/outcome、selected backend、transfer count/bytes、实际分配峰值、fallback reason、
-plan digest 与 result digest。它们是 observation，不是 verdict 或 release evidence。
+`strict_math_calls`、8x4 的 `function_fallbacks` matrix、plan digest 与 result digest。
+它们是 observation，不是 verdict 或 release evidence。
+
+NUM-01 每次 strict math call 计一次 `strict_math_calls`，并按 function 记录 fallback。
+Merge 后无法归属的差额进入 `Other`；未 instrumented operator 不推断调用数，保持为 0。
+这些诊断字段是 observation，不表示 NUM-01 已完成。
 
 ## Runtime input 降级与执行
 
@@ -227,3 +254,70 @@ Validation witness；公开 binding name 标识输入路由。跨 plan 命中时
 输入端口重绑定各 record 与 certificate，再发布；歧义拓扑只导致可选缓存未命中。
 Flight 身份仍限定 plan/snapshot。模板 hash 与重绑定计入 cache-work 预算。
 回归覆盖节点/输入声明重编号、兄弟裁剪和多层缓存生产者 DAG。
+
+## 按节点推导的数组视图
+
+标记 `requires_metadata_specialization` 的 C++ definition 提供纯
+`specialize_metadata` callback。Registry 先验证普通参数与输入契约，在 mutex 外通过
+保留的 definition lease 调用，再验证固定输出数量及 metadata。Compiler 与直接入口
+使用 `resolve_traits`；未解析模板不能推导占位 descriptor。Shape、dtype、facets、tuple
+分组、payload 上限和 static dependency pieces 成为不可变节点 traits 并进入阶段
+identity。该过程不得读取像素或依赖查询改变 metadata。每个 piece 保持不相交的
+observation coverage 与完整各端口 dependency，替代旧的 static dependency maps 表述。
+
+CPU staged 输出的 `maximum_output_payload_bytes` 替换 dense payload admission 下限。
+发布时另外核对新增输出 owner 的实际容量；借用 owner 必须已由该 session 接收。
+源 owner、metadata 和 workspace 仍计费。因此 scalar-backed constant 和 source-backed
+broadcast 无需预留逻辑 dense 字节。普通、直接和 structured 执行保留单一覆盖 view；
+多个 owner 使用 `execute_fragments` 或显式 dense layout。`ValueFragments::collect`
+显式生成 packed copy，并遵守取消。
+
+`make_default_operation_registry(false)` 允许在 built-ins 旁注册 embedding 算子。
+编译或执行前必须 freeze。成功自定义注册清除 built-in persistent-cache identity，
+失败注册保持不变。默认工厂调用仍返回 frozen registry。
+
+## 结构化 schema 特化
+
+纯每节点 metadata specializer 可以解析 protocol-2 Result schema，同时保留注册的
+Result kind、schema id 和 version。此路径拒绝返回 Value metadata、tuple grouping
+和物理 Value flags。解析后的闭式 SchemaTemplate 在输出推断前完成校验，并进入
+现有 semantic、plan、cache identity。此能力不改变公开记录布局或 C ABI。
+CRV-09 使用它解析固定 measured report metadata 和 owned sampled-table shape；
+源采样、报告与 table gate 仍是同一 frozen workflow snapshot 中的普通节点。
+
+## 区域布局执行
+
+当前布局算子通过每节点 metadata specialization 在执行前解析 shape、permutation 或
+counts 与 layout。适用时，`regional_atomic` 将原始 query 及其 normalized 请求矩形集合
+传给 callback；每个逻辑样本仍是 Atomic observation，不把矩形集合转换成一个 Atomic
+observation。`preserve_output_views` 允许合法 affine view 保留 source owner；此时 output
+payload admission 通过现有 nonblocking reserve 和 cache-reclaim 路径按实际新分配容量
+计算，不按逻辑 dense 大小预留。由于这些算子设置
+`cacheable=false`，content cache 不复用同一物理 owner/stride 分区；pure 与 active-Run
+sharing 仍是独立路径。
+
+Dependency certificate 和 `NeedBatch` metadata 在各自公开边界复制并计费。
+`DependencyCertificate` 或 `DependencyNeedBatch` copy 会重新准入 metadata 容量并拥有
+新的 metadata owner，不复制源 owner。宿主在接受可变 batch 前调用 private
+`reseal_metadata()` 重新封存。`DependencySession` 及其 callback 优先使用当前 TLS
+resource root；没有 active TLS 时恢复 session start 保存的 root，包含跨 scope 的 work
+和 metadata。`ValueFragments` publication 通过 lifetime token 保留已发布 metadata；每个
+发布的 `Value` 保留 immutable storage alias，直到最后 owner 销毁。
+
+这些机制不改变 legacy 边界。调用方取出裸 `Value` 或返回 raw vector 后自行复制时，不在
+publication token 的计费范围内。Empty 容器和当前实现内部的 geometry 工作尚未全面计费；
+受控资源模型也不证明所有进程 RSS 都受到控制。
+
+## 分段静态映射
+
+`static_dependency_pieces` 用互不相交的 coverage 集合划分完整的推导 observation
+域。每个 piece 记录逐端口 Data/Control/Validation 关系和可选 descriptor tags。
+选择的输入轴可以加有符号 translation；固定区间的 translation 必须为零。证书
+创建按对应 piece 坐标检查源域，backward 与 transpose 使用加宽算术和精确裁剪，
+因此可表达 concatenate 分段而不枚举其中的逻辑样本。
+
+Session 在回调前将每个声明 piece 与 Q 求交，分别保留 descriptor evidence。
+裁剪、axes/tags 复制和 descriptor 扩展计入 Session 及 shared work 限额；保留的
+geometry 容量包含 vector 扩容及构造重叠。资源不足不会扩大 Q 或请求未命中源端口。
+动态 regional 算子保留有界显式行：gather 记录观察到的索引位置，scatter 记录全局
+索引扫描和每个输出的实际贡献者。

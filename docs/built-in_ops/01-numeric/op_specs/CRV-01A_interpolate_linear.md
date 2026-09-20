@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: legacy_subset_only_target_not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -253,19 +253,33 @@ irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
   low work/capacity/stage, cancellation, and owner lifetime after context teardown.
 
 Numerical precision, exact dependency support and resource behavior are separate
-acceptance obligations. Source inspection and mathematical oracle checks are not
-runtime acceptance of the proposed keys.
+acceptance obligations. The maintained public workflow and independent oracle
+provide the current runtime acceptance evidence for the Proposed key.
 
 ## Existing implementation distinction
 
 The existing curve.sample_linear takes controls[K,2] and static domain/count,
 validates all controls and materializes Whole output. See the
 [family source comparison](CRV-01_interpolate.md). It does not implement this
-separate-x/y, explicit-query interface. No runtime implementation or target
-workflow execution is claimed by this document.
+separate-x/y, explicit-query interface. The maintained target workflow and current validation boundary are recorded below.
 
 ## Specification dependencies
 
 - [CRV-01 family decisions](CRV-01_interpolate.md).
 - [Operator template](../../00-foundation/spec-template.md).
 - [Foundation execution contract](../../00-foundation/contracts.md).
+
+## Maintained implementation and validation
+
+`plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
+keys. The public `photospider/numeric/curves.hpp` constructor is
+`interpolate_linear_node`. All profiles currently use exact rational evaluation and one
+final destination rounding. Global x validation, requested query rows and the
+local y stencil follow the demand contract above.
+
+The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
+contains the shared arithmetic/resource details and actual platform acceptance.
+See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
+for construction, explicit work budgets, commands and checked expected results.
+The manual target is excluded from default builds and CTest/integration testing.
+Specification status remains Proposed.

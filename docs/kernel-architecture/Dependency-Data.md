@@ -68,7 +68,7 @@ See [Cache Model](Cache-Model.md) for generic snapshot identity and ownership.
 
 ## Staged C++ programs and current Run integration
 
-OperationTraits 9 distinguishes local `Atomic` and terminal `RequestRecord`,
+C++ OperationTraits 11 distinguishes local `Atomic` and terminal `RequestRecord`,
 request-only failure delivery, dependency protocol version, continuation byte
 bound and finite stage bound. Exactly one synchronous callback or staged start
 function is registered. Staged programs require deterministic, side-effect-free
@@ -85,8 +85,9 @@ rectangular approximation.
 immutable input-bundle identity. Generic Atomic starts accept at most one sample;
 image-v2 starts accept at most one complete pixel. RequestRecord starts preserve
 the complete original query. ABI 9 adds the validated `start_joint` driver for
-PerAtomOutcome Atomic outputs. Singleton starts still accept only one observation;
-changing a failure flag does not authorize multiple observations in that session.
+PerAtomOutcome Atomic outputs. Ordinary singleton starts accept one observation (with tuple closure where declared);
+changing a failure flag does not authorize multiple observations. The explicit
+static-mapping path below accepts a regional Atomic query.
 
 A continuation is placement-constructed in its host allocation. `poll` consumes
 only supplied fragments and either returns exact associated Needs or a complete
@@ -540,3 +541,49 @@ cancellation, proportional scratch, deep dependency chains and GPU fallback
 ancestry. `joint_groups`, `joint_polls` and `joint_fallbacks` report the physical
 path actually taken. Unrequested pure siblings have no registered demand and do
 not run.
+
+## Compact static mappings
+
+`DependencyCertificate::create_mapped` retains disjoint coverage pieces and
+port/role axis maps. Each input axis selects a distinct observation axis or a
+fixed interval; tags remain explicit. This closed representation supports exact
+broadcast/permutation backward demand and dirty transpose without enumerating
+replicated output samples. Restriction and equal-map merge remain geometric;
+different maps on overlapping coverage may require bounded row comparison.
+`row` resolves one observation; `materialize` explicitly requests bounded rows.
+`rows()` throws for mapped certificates. All transformations charge work and
+retained metadata, including canonical box expansion. `storage_entries()`
+counts actual retained coordinates, supports and tags for cache admission,
+independently of a deduplicated source-support projection.
+
+A CPU staged Atomic output can declare complete disjoint
+`static_dependency_pieces`, including metadata-specialized pieces. Each piece
+contains observation coverage and complete per-port dependencies; its
+`DependencyAxis::translation` is applied against that piece coverage. Its first
+`DependencyNeedBatch::static_mapping` requests the complete registered piece
+mapping for Q; dynamic associations, repeated mapping requests, GPU, joint
+execution and checkpoints are excluded. Successful supply must precede
+publication. Descriptor tags are retained automatically.
+Data and Validation can differ: an image source's Data may select one channel
+while Validation closes over all channels; their per-port transport union must
+satisfy the image fragment rules. The ordinary and structured executors drive
+one regional session, preserving compact certificates. C ABI 9 has no such field.
+
+## Cross-output pure block sharing
+
+`share_blocks_across_outputs` is an opt-in OperationTraits 14 flag. It is false
+by default and is accepted only for pure Atomic dependency-v1 operations. The
+host preserves a common block namespace keyed by every resolved output contract,
+static parameter, input metadata and current supplied bytes, incoming state,
+phase/range and mode. Public outputs and dependency certificates remain
+independent; this namespace is not a joint output or a concurrent producer
+coordinator. Static mappings and regional Atomic programs cannot enable it.
+Every transition in this common namespace must be independent of the selected
+output index and metadata unless that distinction is explicitly encoded in the
+incoming state or mode. The existing prohibition on depending on original Q
+still applies; the host does not infer purity from callback code.
+
+Optional retention uses the accounted result LRU only when
+`result_cache_bytes` is positive and the proof-work budget admits key/retention
+work. A miss, disabled cache or exhausted proof budget recomputes through the
+same block transition. There is no once-per-Run guarantee.

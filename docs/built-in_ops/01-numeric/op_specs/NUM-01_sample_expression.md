@@ -12,8 +12,8 @@ kind: primitive
 status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
-implementation_status: legacy_subset_only_target_not_implemented
-verification_status: source_inspection_only
+implementation_status: implemented
+verification_status: public_workflows_and_independent_oracles
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -24,10 +24,8 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-This draft records requirements clarified with the maintainer, explicit contract
-details and current implementation gaps. It does not change the accepted runtime
-contract by itself. This session edits
-operator specifications only; it does not authorize runtime implementation.
+This specification records the selected expression contract. Its Proposed status
+is independent of the maintained implementation and validation recorded below.
 
 ## 1. Confirmed purpose
 
@@ -463,10 +461,10 @@ with the AST source span/function or input name. Domain failures before an x is
 available say so instead of inventing one. Existing bounded diagnostic storage
 may truncate explanatory text; structured origin and scope remain authoritative.
 
-## 7. Existing implementation facts
+## 7. Legacy implementation comparison
 
-Inspected on branch `ops-specs` at commit `30478d33`. These are current behavior,
-not automatic decisions about the target specification.
+The unsuffixed legacy key was inspected at `ops-specs@30478d33`. It remains a
+separate interface; the maintained suffixed keys implement the contract above.
 
 | Area | Current behavior |
 | --- | --- |
@@ -487,60 +485,55 @@ Primary implementation sources:
 - [Implemented expression/LUT contract](../../../kernel-architecture/Expression-and-LUT-Operations.md).
 - [Public integration workflows](../../../../tests/integration/test_expression_operations.cpp).
 
-### Required implementation gaps identified so far
+## 8. Maintained implementation and numerical boundary
 
-- The current registration takes `step`, whereas the target takes `end`.
-- The current generator executes Whole. The target requires per-index staged
-  `values` evaluation and an independently requestable `axis` output.
-- The current generator only publishes Float32. Float64 output selection and
-  the target Float64 default require corresponding inference/callback changes.
-- Named coefficients, `pi`, `e`, `tan`, and the selected `ln` spelling require
-  parser/evaluator changes relative to the current language.
-- Current interval parameters and inferred SampledSignal metadata are static.
-  The target carries the dynamic sampling axis as a second Value payload and
-  requires new multi-output inference. It does not require mutable Value facets.
-- Current coefficients are one Float64 array addressed with `c[index]`. The
-  target uses separately connected named scalars. The existing repeated-input
-  trait supports a bounded homogeneous trailing group, but requires at least
-  one member when active; a coefficient-free expression must be resolved
-  explicitly rather than supplied with a dummy coefficient by assumption.
-  Its current repeated-input validator also enforces matching dtypes; accepting
-  mixed Float32/Float64 named scalars is another lowering/registration gap.
-- The current sampled semantic validator requires `sample_step > 0`, including
-  singleton signals. The target's separate signed axis payload avoids using that
-  facet to represent a descending signal. The existing sampled validator is not
-  being redefined by this specification.
-- The current generator does not provide correctly rounded strict math,
-  per-platform numerical profiles, or step-level strict fallback reporting.
-  These require verified math implementations and host-owned diagnostics support.
-- The current `lut.apply_1d` implementation also requires an increasing table
-  domain. Supporting descending generator output does not establish direct
-  compatibility with that consumer. It additionally has no separate axis input.
-  Consumer adaptation or an explicit conversion path remains to be specified.
+`plugins/ops/01-numeric/numeric_expression.cpp` registers all three selected
+keys. `photospider/numeric/expression.hpp` provides `sample_expression_node`;
+it validates the free-name/connection map and writes all four static parameters.
+Zero coefficients use a fixed start prefix plus a repeated `[end,coefficients...]`
+group. Pure metadata preparation accepts mixed floating scalar dtypes.
 
-See [semantic validation](../../../../src/lib/data/semantic.cpp) and
-[generator/LUT inference](../../../../src/lib/plugin/operation_semantics.cpp).
+The bounded iterative parser retains left-to-right postorder, source spans and
+canonical names. Decimal literals are converted from their complete token using
+16384-bit exact ratio scratch, including a nonzero digit at the far end of a
+4096-byte midpoint literal. This compile-time scratch is not per-sample storage.
+A registry-sealed `PreparedOperation` owns one immutable AST across the compiled
+node's outputs and dynamic executions. Direct invocation/joint preflight also
+prepare once. Static preparation storage is outside runtime scratch admission;
+its source/node bounds are explicit. There is no global AST cache.
 
-## 8. Implementation prerequisites and acceptance scope
+Runtime coordinates use the exact NUM-02 limb machinery, with NUM-01's stricter
+interval and neighbor validation. Mixed Float32 inputs widen by IEEE fields,
+and final Float32 conversion rounds once. The evaluator uses the shared exact
+and certified mathematical backend at each Float64 primitive. Every intermediate
+is checked before its parent executes. Ordinary accelerated transcendental
+steps currently use a reported strict fallback; this implementation supplies
+strict bits without claiming a faster approximate backend. See
+[mathematical implementation](../math-implementation.md) for rounding proofs and
+fixed-refinement resource limits.
 
-This draft specifies the target rather than accepting a shared API/ABI change.
-The current implementation gaps in section 7 must be resolved during a separately
-authorized implementation task. In particular, the implementation must identify
-the exact zero-coefficient/mixed-dtype binding mechanism, host diagnostics
-integration, strict math implementation and each accelerated platform's supported
-OS/toolchain/ISA/library versions. Merely calling a platform `std::` math function
-does not establish either profile's accuracy.
+For at most 16 total scalar ports, the prepared values contract uses at most
+three compact static pieces (first/interior/last). One session reads the required
+scalars once and evaluates the requested coordinates into owned fragments.
+Larger signatures retain bounded 16-port stages per Atom. Sixteen is an
+implementation batching choice, not a host ABI limit. Both paths retain exact
+Data/Validation roles and per-Atom failure delivery; `execute_atoms` isolates
+samples, while ordinary regional failure publishes no partial result. Axis has
+its own smaller continuation and never allocates the transcendental arena.
+Per-session and Run work budgets both apply; large regional requests need
+explicit fuel sufficient for all their mathematical work.
 
-LUT application is a separate consumer specification. It must accept the explicit
-axis payload, define ascending/descending lookup and interpolation, and enforce
-its own minimum table size. NUM-01 does not promise that the legacy LUT key accepts
-these new outputs. A singleton values output can directly feed a compatible
-numeric scalar consumer; generators do not bypass consumer range validation.
+Diagnostics report actual strict mathematical-call attempts and an 8-by-4
+function/reason fallback matrix. Failed attempts retain consumed work/counts;
+cache hits add none. Controlled coordinator allocation failures return a
+`ResourceExhausted` status and retire unpublished owners/flights, allowing a
+subsequent small request in the same context.
 
-The algorithm, binding and numerical conventions written during clarification
-are normative draft choices for review. Status remains Proposed until the
-maintainer accepts the completed operator specification. No implementation,
-ADR amendment, commit or publication is performed by this document.
+Package 0.15 requires C++ consumers to rebuild. C++ OperationTraits/semantic
+framing 14, C operation ABI 9, document schema 2 and provider ABI 1 remain.
+The old positive-step SampledSignal consumer remains a separate legacy contract;
+new sampling-aware LUT consumers connect the explicit values and axis ports.
+Specification acceptance remains Proposed.
 
 ## 9. Acceptance contract
 
@@ -587,10 +580,9 @@ ExecutionContext test, not only parser or callback unit tests. Use declared
 input bindings and named output edges, request both full and regional results,
 and inspect actual producer read counts and returned bytes.
 
-### Conceptual target workflow
+### Public workflow example
 
-The target keys are not implemented yet. This DAG is an acceptance fixture,
-not a claim of a runnable current API constructor:
+The public helper and executable implement this DAG:
 
 ```text
 start: Float32[1] = [0] ----+
@@ -610,9 +602,8 @@ numeric.sample_expression_strict
 
 Changing only a to 3 and b to -1 yields `[-1,-0.25,0.5,1.25,2]` with the same
 axis and plan. Repeat with the appropriate accelerated key on each target CPU.
-An implementation delivery must supply the actual executable target, build/run
-commands and observed output for this workflow. There are no invented target
-commands in this design-only draft.
+The [editable public example](../../../../examples/numeric_workflow/README.md)
+contains the constructor, execution commands and checked expected outputs.
 
 Performance acceptance records hardware, OS/compiler, math library/profile, N,
 AST, dtype, requested M, cache state, fallback counts, admitted peak resources
@@ -621,15 +612,18 @@ fixtures at N=256, 65536 and 1048576, including small ROIs. No platform speedup
 claim is accepted without measurement on that platform; a numeric success alone
 does not demonstrate acceleration.
 
-### This session's verification
+### Actual validation
 
-The legacy generator/parser/metadata/consumer code and public tests were read.
-A standalone Python Fraction check passed four fixtures: ascending T01,
-descending T02, the changed-coefficient workflow, and T07's exact rational midpoint
-rounding to `[1,1,nextafter(1,+inf)]` for N=3. Markdown relative links and
-whitespace checks passed. Product executable tests
-and accelerated benchmarks have not been run or claimed during specification
-clarification.
+The public `photospider_numeric_expression` and `photospider_numeric_prepared`
+manual targets cover mixed bindings, plan reuse, ascending/descending/singleton
+axes, sparse/dirty/cache behavior, exact spans, invalid schemas/names, unused
+failing producers, work/cancellation/stage/capacity failures, metadata failure
+recovery, caller fenv, strided storage, multi-box ownership and isolated Atom
+outcomes. They are excluded from default builds and have no CTest/integration
+registration. The independent Python oracle combines exact rational coordinates,
+stepwise integer/Fraction rounding and MPFR mathematical enclosures. Platform
+results, native timing and remaining limits are recorded in
+[the implementation notes](../math-implementation.md).
 
 ## 10. Related requirements
 

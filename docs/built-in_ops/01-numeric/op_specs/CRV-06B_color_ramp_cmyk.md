@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -30,8 +30,8 @@ It is a separate implementation from RGB and the other CRV-06 model ramps.
 Only four channels C,M,Y,K are supported in this version, each finite in [0,1].
 Zero means no amount of that ink and one means the channel's full amount.
 No CMYKA or implicit alpha association is provided; coverage may be handled by
-separate explicit data/operations. This clarification is complete, while the
-target registry and shared ICC-resource infrastructure remain unimplemented.
+separate explicit data/operations. This clarification is complete; the current
+registry and shared ICC-resource infrastructure implement the public path below.
 
 Validate per-channel amounts only. Do not derive a total-ink limit from profile
 tables, redistribute K, perform black generation or alter the supplied recipe.
@@ -143,7 +143,7 @@ interpolation has no expected output overflow. Resource/cancellation/backend,
 stale and upstream/typed errors retain their original Status/source/scope.
 No partial color or unowned profile reference is published on failure.
 
-Conceptual fixture under a valid frozen CMYK printing profile: stops=[0,1],
+Fixture under a valid frozen CMYK printing profile: stops=[0,1],
 colors=[[0,0,0,0],[1,0.5,0,0.25]], input=[0.5] ->
 values=[[0.5,0.25,0,0.125]]. An independent rational interpolation oracle
 verifies all three profiles by bits. Check K=1, exact stops, zeros, boundaries,
@@ -156,16 +156,31 @@ resource and inspect output profile identity as well as amounts. Check different
 file paths with identical frozen content, changed content requiring recompilation,
 missing/RGB/DeviceLink/ICCmax/malformed profiles, exact read/dirty sets, partial
 channel requests expanding to full CMYK, strides, low resource budgets, cancellation,
-cache-off and profile/value lifetime after context destruction. Actual commands
-and product results are delivery obligations; no target runtime or CMM result is
-claimed by this design. CMYK/RGB conversion requires its own profile transform.
+cache-off and profile/value lifetime after context destruction. The maintained public commands and current runtime evidence are linked in the
+umbrella contract; CMYK/RGB conversion requires its own profile transform.
 
 Profile-format references are the
 [ICC v2/v4 specification catalogue](https://www.color.org/icc_specs2/).
 The selected supported profile subset is a Photospider contract and does not
-claim conformance of an unimplemented validator or CMM.
+claim a general ICC color-management engine or arbitrary profile-type support.
 
 - [Ramp family](CRV-06_color_ramp.md).
 - [Color-array description dependency](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Color-management category](../../02-format-color/representation.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
+
+## Maintained implementation and validation
+
+Public [`color_ramp_cmyk_node`](../../../../include/photospider/numeric/color_ramps.hpp)
+constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
+implements its staged complete-color execution.
+
+All profiles use exact rational component interpolation and return strict
+bits, with one destination rounding. Complete-color metadata and regional
+validation remain attached to the result.
+The output also retains the explicitly imported and bound ICC profile.
+
+See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
+[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
+for resource limits and actual validation.

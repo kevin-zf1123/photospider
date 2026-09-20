@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -20,11 +20,11 @@ Each scalar element of input maps to one complete color, with output shape
 input.shape+[C]. Nonuniform stop spacing is supported. This scalar-to-color
 mapping differs from CRV-05's independent per-input-channel table application.
 
-The maintainer explicitly requires separate implementations/specifications for
-RGB, CMYK, XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. Do not implement them as an unspecified
-color-model mode of one numeric interpolator. RGB is clarified first; each other
-model's exact color definition, channel domains, reference parameters and alpha
-handling will be specified separately. CIELAB/CIELCh(ab) and OKLab/OKLCh are
+The maintainer requires separate implementations/specifications for RGB, CMYK,
+XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. They are implemented as
+separate current runtime paths, not as an unspecified color-model mode of one
+numeric interpolator. Each linked specification records its exact color
+definition, channel domains, reference parameters and alpha handling. CIELAB/CIELCh(ab) and OKLab/OKLCh are
 separate required pairs; their scales, reference whites and hue conventions
 must not be interchanged.
 
@@ -34,10 +34,10 @@ association behavior, while CMYK is four ink channels without alpha.
 
 The model-specific operation clarifications are complete in the linked specs.
 Each declares stop constraints, input/output types, interpolation, boundaries,
-precision, dependencies and output semantics. The shared ColorArray representation
-has its initial validation/encoding contract specified and remains Proposed,
-requiring implementation.
-No target runtime registration or color compatibility result is claimed.
+precision, dependencies and output semantics. The shared ColorArray
+representation and the 45-key implementation are available through the current
+public runtime while this family remains Proposed. Validation is recorded below;
+remaining category work is tracked in [implementation.md](../implementation.md).
 
 ## Confirmed RGB color description requirement
 
@@ -81,3 +81,29 @@ it is not silently discarded into an untyped numeric array.
 - [XYZ ramp specification](CRV-06I_color_ramp_xyz.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
 - [Foundation color and execution contracts](../../00-foundation/contracts.md).
+
+## Maintained implementation and validation
+
+The current runtime registers 45 CRV-06 keys and exposes 15 primitive helpers
+through `photospider/numeric/color_ramps.hpp`; this shared contract is not itself
+a registered operation. ColorArray codec/metadata and full-color closure are
+implemented, with ICC import/bind and immutable ownership through compiler,
+Value, snapshot and dependency paths.
+
+RGB direct, linear and gamma=2 paths are exact; sRGB and general-gamma paths use
+certified full expressions. Gamma normalization and deferred scaling preserve HDR
+and alpha precision. Coordinate arithmetic uses up to 9,216 bits; RGB polynomial
+work uses 40,960 bits. The 4,096-bit value is the interval precision ceiling for
+relevant certified steps, not the integer-capacity bound. Accelerated RGB permits
+4 ULP by contract, while all current profiles return strict bits; non-RGB profiles
+require strict bits.
+
+Native arm64 Clang strict/Apple and Ubuntu WSL x86 Clang 18 strict/AVX2 passed
+seven manual groups, including RGB full-color Atom isolation, and the reported
+independent Fraction/pi/RGB oracle cases. ICC, metadata and owner evidence also
+passed. Installed 0.16 ColorArray/ICC and seven ramp groups passed under strict
+and Apple profiles. The 19 existing NUM/CRV manual consumers passed strict
+regression, focused `test_compiler` passed, and the 67 changed C++ files passed
+ClangFormat 21 and cpplint. These results do not claim the whole category
+complete. See the [numeric workflow README](../../../../examples/numeric_workflow/README.md)
+and [implementation tracking](../implementation.md).

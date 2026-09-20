@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -92,8 +92,8 @@ For pi multiples, test positive/negative large integers, half/quarter-integers
 and neighboring representable values. Check that radian pi rounded to dtype is
 not silently treated as the exact pi-multiple input 1. Validate actual strict
 fallback for unsupported fast argument ranges and common public execution,
-regional demand and lifetime/resource cases. No current target execution or
-platform benchmark is claimed by these Proposed specifications.
+regional demand and lifetime/resource cases. Implementation evidence is recorded
+separately below; Proposed specification status does not imply missing runtime keys.
 
 
 ## LLVM libc candidate backend (source review, 2026-09-14)
@@ -119,3 +119,21 @@ uses an MPFR Sinpi oracle and exercises rounding modes. This source review did
 not run those tests. Adoption requires a pinned LLVM revision, recorded build
 options and target features, and actual conformance checks on both CPU targets;
 mutable upstream links describe candidate evidence, not a frozen dependency.
+
+## Maintained implementation and validation
+
+The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
+and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
+special-value cases use explicit integer/IEEE-field, rational or algebraic-root
+handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
+accelerated profiles report `FunctionUnsupported` strict fallback for those
+results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
+pointwise, with separately retained typed validation and Atom-scoped errors.
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.

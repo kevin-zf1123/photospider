@@ -39,9 +39,38 @@ optional local GPU backend, records estimated bytes, and propagates optional
 named output Regions backward into per-step output/input demands using Whole,
 elementwise-exact, or clipped Halo rules. It produces
 `ExecutionPlan`, `ExecutionPlanDigest`, and `PlanCacheKey`. No stage contains a
-callback pointer, DSO handle, allocation, native device, or daemon object.
+callback pointer, native device, or daemon object. A node or step may retain an
+immutable `PreparedOperation` owner for a registered static program; the owner
+keeps the definition lease alive and is released after dependent plan/Run
+owners. Preparation state is not runtime mutable state and does not enter
+semantic or cache identity.
 Each stage also carries a private runtime-only weak identity for the exact
 frozen operation registry; it is excluded from digests and serialization.
+
+## Static operation preparation
+
+`OperationDefinition::prepare_static` is the public pure preparation hook for
+deterministic operations such as NUM-01. `OperationRegistry::prepare_operation`
+validates complete static input metadata and parameters, including exact copied
+IEEE-754 parameter bits, then invokes the hook once outside registry
+synchronization. The returned `OperationPreparation` owns resolved output
+metadata and optional immutable state in `PreparedOperation`; it contains no
+Value payloads, Run data, I/O state or private mutable cache.
+
+Compiler nodes and plan steps retain the prepared owner across their executions.
+Direct requests may pass an existing matching handle; otherwise each direct
+preflight prepares once. A joint request prepares once for its compatible
+members. Matching identity alone does not share state between separate calls.
+Request-owned inputs and the query passed to a continuation retain
+their existing ownership boundary: a request owns its copied record, while a
+`DependencyQuery` is borrowed and cannot be retained. Preparation and plan
+storage use ordinary host allocations outside per-Atom runtime scratch
+admission; there is no separate enforced preparation budget. Operations bound
+their static source/program size. Continuation state remains subject to runtime
+limits. No global preparation cache or dynamic preparation state is
+introduced. A session destroys its continuation before its prepared owner. A prepared
+owner destroys its program before releasing the definition/library lease. The
+external registry owner may be released earlier without invalidating these leases.
 
 ## Execution
 
@@ -147,8 +176,15 @@ Raw diagnostics include compile-stage duration, execute duration, operation
 attempt timing/outcome, per-operation native dispatch/time, selected backend,
 input copy count/bytes, collected output-copy bytes, shared host access, native
 upload/result reuse, peak allocated
-bytes, fallback reason, plan digest, and result digest. They are observations,
+bytes, fallback reason, `strict_math_calls`, the 8-by-4
+`function_fallbacks` matrix, plan digest, and result digest. They are observations,
 not verdicts or release evidence.
+
+NUM-01 increments `strict_math_calls` once per strict math call and attributes
+its fallback rows per function. Merge assigns unattributed reason counts to `Other`;
+operators without instrumentation contribute zero calls rather than inferred
+counts. The diagnostic fields are observational and do not imply that NUM-01 is
+complete.
 
 ## Runtime input lowering and execution
 
@@ -303,3 +339,89 @@ input ports before publication; ambiguous topology is an optional cache miss.
 Flight identity remains plan/snapshot-specific. Template hashing and rebinding
 consume the optional cache-work budget. Node/declaration renumbering, sibling
 pruning and a multi-level cached producer DAG have direct regressions.
+
+## Metadata-specialized array views
+
+C++ definitions marked `requires_metadata_specialization` provide a pure
+`specialize_metadata` callback. The registry validates ordinary parameters and
+input contracts first, invokes the callback outside its mutex under the retained
+definition lease, and validates the fixed-count output metadata. Compiler and
+direct entry points use `resolve_traits`; unresolved templates cannot infer their
+placeholder descriptor. Shape, dtype, facets, tuple grouping, payload bounds and
+static dependency pieces become immutable per-node traits and enter stage identity.
+No pixel access or query-dependent metadata is permitted.
+
+`maximum_output_payload_bytes` replaces the dense payload admission floor for a
+CPU staged output. Publication separately checks the actual capacities of newly
+owned output buffers; borrowed owners must have been supplied in that session.
+Source owners, metadata and workspace remain charged. This permits scalar-backed
+constant and source-backed broadcast views without reserving logical dense bytes.
+Ordinary/direct and structured execution preserve a single covering view;
+multiple owners use `execute_fragments` or explicitly selected dense layout.
+`ValueFragments::collect` is an explicit packed copy and observes cancellation.
+
+`make_default_operation_registry(false)` permits embedding registration alongside
+built-ins. Freeze the registry before compilation or execution. Successful custom
+registration clears the built-in persistent-cache identity; failed registration
+leaves it unchanged. The default factory call remains frozen.
+
+## Structured schema specialization
+
+Pure per-node metadata specializers can resolve a protocol-2 Result schema while
+preserving its registered Result kind, schema id and version. Returned Value
+metadata, tuple grouping and physical Value flags are rejected on this path.
+The resolved closed SchemaTemplate is validated before output inference and
+included in the existing semantic/plan/cache identities. This additive behavior
+changes no public record layout or C ABI. CRV-09 uses it to specialize fixed
+measured-report metadata and owned sampled-table shape; source sampling, report
+and table gate remain ordinary nodes in one frozen workflow snapshot.
+
+## Regional layout execution
+
+The current layout operations use per-node metadata specialization to resolve
+shape, permutation or counts and layout before execution. `regional_atomic`
+passes the original query and its normalized requested rectangle set to the
+callback where required. Each logical sample remains an Atomic observation;
+the rectangle set is not converted into one Atomic observation.
+`preserve_output_views` lets a valid affine view retain its source owner;
+output payload admission uses the actual newly allocated capacity through the
+existing nonblocking reserve and cache-reclaim path, rather than a dense
+logical-size reservation. The same
+physical owner/stride partition is intentionally not reused by the content
+cache because these operations are `cacheable=false`; pure and active-Run
+sharing are independent paths.
+
+Dependency certificates and `NeedBatch` metadata are copied and accounted at
+their public boundaries. A `DependencyCertificate` or `DependencyNeedBatch`
+copy admits fresh metadata capacity and owns a new metadata owner; it does not
+copy the source owner. The host invokes private `reseal_metadata()` when a
+mutable batch is finalized before acceptance. A `DependencySession` and its
+callbacks use the active TLS resource root when present, and otherwise restore
+the root saved at session start, including cross-scope work and metadata.
+`ValueFragments` publication
+passes a lifetime token for owned publication metadata; each published `Value`
+retains its immutable storage alias until the final owner is destroyed.
+
+These mechanisms do not change legacy boundaries. A caller that extracts a raw
+`Value` or returns a raw vector and then copies it is outside the publication
+token's accounting. Empty containers and geometry work internal to the current
+implementation are not comprehensively charged, and the managed-resource
+model does not certify that all process RSS is controlled.
+
+## Partitioned static mappings
+
+`static_dependency_pieces` partitions the complete inferred observation domain
+into disjoint coverage sets. Each piece records per-port Data/Control/Validation
+relations and optional descriptor tags. Selected input axes may add a signed
+translation; fixed intervals require zero translation. Certificate construction
+checks only the selected piece's coordinates against the source domain, while
+backward and transpose use widened arithmetic and exact clipping. This supports
+concatenation slabs without enumerating their logical samples.
+
+A Session intersects each declared piece with Q before callbacks and retains
+descriptor evidence separately. Clipping work, copied axes/tags and descriptor
+expansion charge Session and shared work limits. Its retained geometry ledger
+includes vector capacity growth and construction overlap; resource exhaustion
+never widens Q or requests an unhit source port. Generic dynamic regional
+operations retain bounded explicit rows: gather records observed index positions,
+and scatter records its global index scan plus each output's actual contributors.

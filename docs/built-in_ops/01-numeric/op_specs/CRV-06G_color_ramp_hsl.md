@@ -7,7 +7,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -71,8 +71,7 @@ Use independent exact-rational and certified-pi oracles, both output units/dtype
 mixed source precision, large multi-turn angles, q=0 demand failures, no remote
 reads, partial-channel/full-color expansion, strides, budgets and owner lifetime.
 Public Compiler/ExecutionContext workflow bindings and values/description checks
-are conceptual until implemented; actual commands and runtime evidence are required
-before claiming delivery. Source HSL-to-RGB extension semantics will be fixed by
+are maintained; current commands and runtime evidence are linked below. Source HSL-to-RGB extension semantics will be fixed by
 separate conversion specifications, not guessed by this interpolation operation.
 
 - [Ramp family](CRV-06_color_ramp.md).
@@ -81,3 +80,15 @@ separate conversion specifications, not guessed by this interpolation operation.
 - [Rational pi entrypoint](CRV-06G3_color_ramp_hsl_rational_pi.md).
 - [CIELCh unnormalized-hue contract](CRV-06D_color_ramp_cielch.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
+
+## Maintained implementation and validation
+
+This shared HSL contract covers three primitives and nine profile keys.
+The public helpers are `color_ramp_hsl_node`,
+`color_ramp_hsl_pi_node` and `color_ramp_hsl_rational_pi_node` in
+[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
+Coordinates and original hue ratios use exact rational interpolation;
+conversion between radian and pi units uses certified pi, with a 4096-bit
+precision ceiling. Equal units cancel symbolically. Every profile returns
+strict bits. See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation)
+and [public workflows](../../../../examples/numeric_workflow/README.md#color-ramps).

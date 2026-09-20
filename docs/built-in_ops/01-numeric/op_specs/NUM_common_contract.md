@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: target_contract_not_implemented
+implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
 ---
@@ -27,12 +27,14 @@ Front matter separates specification status, document maturity and implementatio
 status. D1_draft identifies a draft of the D1 mathematical scope; it is neither
 Accepted nor an implementation gate. repository_branch/repository_commit record
 the source-inspection baseline, not a claim that the new draft files existed in
-that commit. Shared contracts register no operation and inherit implementation
-gaps from their primitive specifications. Existing unsuffixed implementations
-are only the explicitly linked legacy subsets.
+that commit. Shared contracts register no operation; the primitive specifications and
+[implementation table](../implementation.md) record the maintained runtime and
+its validation. Existing unsuffixed implementations are only the explicitly
+linked legacy subsets.
 
-The proposed_operation_keys lists are the target default-registry names. Each
-primitive has three separate CPU implementations: strict, Apple Silicon CPU
+The proposed_operation_keys lists identify the maintained default-registry
+names; specification acceptance remains Proposed. Each primitive has three
+independently registered CPU entries: strict, Apple Silicon CPU
 accelerated, and x86-64 CPU accelerated. No implicit mode dispatcher, unsuffixed
 alias, GPU path or new runtime dtype is defined. Strict is portable across the
 CPU targets actually supported by a conforming build. Accelerated keys require
@@ -78,8 +80,9 @@ edges. Output descriptors depend only on input descriptors and declared static
 parameters; no numeric producer is executed to infer a descriptor. A scalar
 or an axis array carrying runtime values is still Data/Control, not descriptor
 metadata. A changed shape/dtype/parameter requires inference and plan validation.
-The proposed per-node inference and registration must actually support these
-relations; current closed inference traits alone do not establish implementation.
+Per-node metadata specialization implements these relations before planning.
+The primitive registrations and public workflow examples exercise the resolved
+descriptors, including explicit Result schema specialization where specified.
 
 ## Demand, errors and returned observations
 
@@ -140,15 +143,16 @@ Each algorithm's stated cancellation interval also applies inside long exact
 arithmetic, sorting or refinement; a native call must have bounded work or a
 cooperative replacement. Exhaustion fails rather than weakening accuracy.
 
-Each primitive's conceptual fixture supplies purpose and a minimal future public
-workflow. Implementation acceptance must supply its actual target/run command,
+Each primitive's fixture supplies purpose and a minimal public workflow.
+Implementation acceptance supplies its actual target/run command,
 bindings, named outputs and inspected results through Compiler/ExecutionContext.
 Keep a separate independent integer/rational, bit-pattern or directed-precision
 oracle, and compare exact bits or the explicitly allowed ULP rule. Verify required
 reads and dirty support separately from numeric equality. Exercise only the
 relevant shape, special-value, layout, lifetime, low-budget and cancellation cases
-listed in the primitive/family contracts. These documents contain no claim of
-running the unimplemented target keys.
+listed in the primitive/family contracts. Maintained commands, independent
+oracles and actual results are linked from the individual implementation sections
+and the [public numeric workflows](../../../../examples/numeric_workflow/README.md).
 
 Performance evidence records an analytic fixture and a declared representative
 large shape within the operation's limits, dtype, requested region, backend and
@@ -157,10 +161,17 @@ output/scratch/retained managed peaks and quality/fallback results. Scans/reduce
 also report actual source elements processed; sparse reads report their support
 size. Hardware throughput thresholds and speedups are not yet measured or
 promised. Implementation delivery supplies measured results and accounting
-exclusions instead of treating asymptotic complexity as a benchmark.
+exclusions instead of treating asymptotic complexity as a benchmark. The
+[native category driver](../../../../examples/numeric_workflow/README.md#native-category-timing-and-accounting)
+records the remaining 18 clusters; expression, unary/binary, interpolation,
+function sampling and inverse/lowpass measurements are linked from the same
+workflow README. Each measurement declares its representative operation and
+shape; it is not a complete parameter or platform matrix.
 
 No unresolved user-facing semantic choice is recorded by this baseline. Concrete
-backend selection, inference/reporting adapters and runnable acceptance fixtures
-are implementation obligations, not evidence that these Proposed contracts are
-already installed or accepted. External compatibility claims remain limited to
-the cited source/version evidence in individual files.
+backend selection, metadata specialization, diagnostics and runnable fixtures are
+implemented and covered by the category delivery record. The 330 specified
+primitive keys were queried successfully through the default public registry.
+Implementation completion does not promote Proposed specifications to Accepted.
+External compatibility claims remain limited to the cited source/version evidence
+in individual files.

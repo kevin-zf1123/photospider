@@ -176,7 +176,8 @@ Result<Value> evaluate_dependency_block(
             phase.sets.maximum_work, phase.query.cancellation);
         if (!status.ok())
           return fail(status);
-        auto result = std::move(writer).publish(incoming.facets());
+        auto result =
+            std::move(writer).publish(incoming.facets(), incoming.resources());
         return result.ok() ? result : fail(result.status());
       }
     }

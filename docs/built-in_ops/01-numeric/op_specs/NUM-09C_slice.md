@@ -11,9 +11,9 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
+implementation_status: implemented_manual_acceptance
+repository_branch: ops-impl
+repository_commit: current working tree
 ---
 
 # NUM-09C: slice
@@ -97,6 +97,24 @@ its upstream would fail; source read is exactly starts. Include multi-axis mixed
 positive/negative steps, signed-zero/sNaN data, dynamic control changes, singleton
 axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads.
 
-Exercise public WorkflowDocument execution and inherited typed-validation,
-cache-off, cancellation, budget and lifetime fixtures when implemented. No
-versioned runtime implementation or test is claimed by this specification.
+The current nine `array.*` keys include the three explicit slice profiles.
+`slice_node` in `photospider/numeric/layouts.hpp` emits static `counts` and
+dynamic Int64[rank] `starts`/`steps`; `counts[j]==1` omits `steps[j]` from both
+validation and dependency reads. Control dependencies use exact roles and
+Data support contains only requested mapped points, with no bounding gap.
+View strides are source stride times step, with zero stride on singleton axes;
+`auto` falls back to packed output when a requested rectangle is not affine.
+
+On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
+strict/AVX2 passed the public manual examples and 636 independent integer/raw-bit
+oracle cases per profile. The installed public consumer passed. Coverage includes
+exact support/dirty mapping, whole versus regional layout policy, unaligned and
+negative/zero strides, shared versus independent owners, ignored singleton steps,
+full slice endpoint validation, typed Validation closures, schema/Empty behavior,
+work/cancellation/capacity failures, fenv and escaped Value lifetime. Focused
+compiler/dependency/fragments/resources units and independent scoped review passed.
+Layout operations are `cacheable=false` because the content cache does not witness
+physical owner/stride partitions. Managed metadata and its remaining host-container
+boundaries are documented in [Managed Resources](../../../kernel-architecture/Managed-Resources.md).
+The manual target is not registered in integration tests. Specification status
+remains Proposed; no performance claim follows from correctness checks.

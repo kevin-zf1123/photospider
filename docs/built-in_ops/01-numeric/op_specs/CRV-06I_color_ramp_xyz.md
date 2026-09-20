@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -84,7 +84,7 @@ upstream errors retain their established identity. No partial XYZ tuple succeeds
 
 ## Acceptance and current implementation boundary
 
-Conceptual fixture: stops=[0,1], colors=[[0,0,0],[0.5,1,1.5]], input=[0.5]
+Fixture: stops=[0,1], colors=[[0,0,0],[0.5,1,1.5]], input=[0.5]
 returns [[0.25,0.5,0.75]] with the selected relative-XYZ/white description.
 Use independent exact rational interpolation and destination rounding, negative
 values, HDR, extreme cancellation, mixed dtype, direct signed zeros, white/scale
@@ -92,9 +92,23 @@ mismatches, full-color request expansion, remote invalid rows, exact dirty mappi
 strides, low budgets, cancellation, cache-off and owner lifetime acceptance.
 
 Existing XYZ image/model conversion support does not implement this generic
-color-ramp interface. Delivery must provide actual public Compiler/ExecutionContext
-bindings, run commands and independently checked values/metadata. This Proposed
-document claims no current color_ramp_xyz registration or runtime test result.
+color-ramp interface. The maintained public Compiler/ExecutionContext bindings, commands and independently
+checked values/metadata are linked below; the document remains Proposed.
 
 - [Generic color-array contract](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Color ramp family](CRV-06_color_ramp.md).
+
+## Maintained implementation and validation
+
+Public [`color_ramp_xyz_node`](../../../../include/photospider/numeric/color_ramps.hpp)
+constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
+implements its staged complete-color execution.
+
+All profiles use exact rational component interpolation and return strict
+bits, with one destination rounding. Complete-color metadata and regional
+validation remain attached to the result.
+
+See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
+[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
+for resource limits and actual validation.

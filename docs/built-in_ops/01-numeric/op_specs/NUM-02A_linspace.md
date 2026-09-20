@@ -13,8 +13,8 @@ kind: primitive
 status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
-implementation_status: not_implemented
-repository_branch: ops-specs
+implementation_status: implemented
+repository_branch: ops-impl
 repository_commit: 30478d33
 ---
 
@@ -24,10 +24,10 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-This draft records the endpoint-defined sequence generator as a separate
-operation from the step-defined NUM-02B arange generator. The maintainer selected
-two independent operators and specifications, rather than a shared mode switch.
-This is specification work; no runtime implementation or ADR change is implied.
+This contract records the endpoint-defined sequence generator separately from
+the step-defined NUM-02B arange generator. Both independent operators are
+implemented; their public entry points and validation are recorded below.
+Specification acceptance remains Proposed.
 
 ## Confirmed scope
 
@@ -212,21 +212,28 @@ Compile once, execute increasing and decreasing endpoint bindings, then request
 selected value indices and check actual producer reads and returned bytes.
 Use independent rational/IEEE rounding oracles, not a second production call.
 Implementation delivery must provide the real public test target, run command
-and observed results. These new keys are not presently runnable.
+and observed results.
 
-This clarification session independently verified L05 using Python Fraction
-arithmetic and Float32 packing. Product tests and CPU benchmarks have not been
-run for this proposed operation. Register/inference/staged execution and numeric
-backend work remain implementation tasks; no shared ABI change is accepted here.
+## Implementation
 
-## Existing implementation
+The six sequence keys, including all three linspace profiles, are registered in
+`plugins/ops/01-numeric/numeric_sequences.cpp`. `exact_sequence.hpp` uses bounded
+integer limbs for exact binary rational formulas and direct IEEE rounding;
+`sequence_profiles.cpp` supplies scalar, NEON and AVX2 widening multiplication.
+C++ tuple observation metadata makes axis one atomic observation. The public
+`numeric/sequences.hpp` authoring helpers write explicit count/dtype parameters.
 
-On branch `ops-specs` at `30478d33`, searches of plugins, src, include, tests
-and current kernel documentation found no independent `numeric.linspace`
-registration. The legacy `numeric.sample_expression` can sample `x`, but has
-different static-domain, output metadata and coefficient-input requirements.
-The separate `field.coordinate` operation generates rank-2 coordinate fields;
-it is not this rank-1 endpoint-defined sequence interface.
+The manually invoked [numeric workflow](../../../../examples/numeric_workflow/README.md)
+provides build/run commands, editable graph construction and expected results.
+On 2026-09-14 the strict and Apple Silicon profiles passed local public-workflow
+checks and 960 independent Fraction/IEEE cases per profile. Ubuntu WSL Clang
+strict and x86-64 AVX2 passed the same oracle. Local installed-consumer execution
+also passed. Resource, cancellation, exact cache, tuple certificates, independent
+axis failures and owner lifetime have manual checks. No integration registration is included. On 2026-09-20 the manual
+[category timing/accounting driver](../../../../examples/numeric_workflow/README.md#native-category-timing-and-accounting)
+measured N=1/256 on native Clang Strict/Apple with exact output checks and managed
+resource accounting. Specification acceptance remains separate from this
+implementation record.
 
 ## Related contracts
 

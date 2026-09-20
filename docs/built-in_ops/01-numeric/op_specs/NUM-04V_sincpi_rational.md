@@ -11,7 +11,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -46,8 +46,22 @@ Use independent exact reduction and directed function/algebraic-root rounding,
 not a floating quotient fed into the old sincpi helper.
 
 Provide a real public WorkflowDocument run with numerator/denominator bindings,
-static dtype and named values when implemented. Verify actual sparse read/dirty
-sets, bad unrequested denominators, all valid input layouts, source changes,
-cache-off, low limb/work budgets, cancellation, fallback reporting and result
-lifetime. These new keys remain unimplemented; no product/platform result is
-claimed. The existing floating sincpi specification retains its own input domain.
+static dtype and named values through the maintained public workflow. Verify actual
+sparse read/dirty sets, invalid denominators, source changes, cache-off, budgets,
+cancellation, fallback reporting and result lifetime. The validation boundary is
+recorded below; local timing is recorded in the implementation notes. The existing floating sincpi specification retains its own input domain.
+
+## Maintained implementation and validation
+
+This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
+exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
+separate typed validation and Atom-scoped failures. Its numerical path follows
+[the shared implementation notes](../math-implementation.md).
+
+The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
+cover this operation. The combined NUM-04 family suite passed 7,524 independent
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
+local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
+record the scope and limitations. Manual targets have no CTest/integration
+registration; MPFR is used only by the independent Python oracle.

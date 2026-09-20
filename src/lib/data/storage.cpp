@@ -76,8 +76,9 @@ BufferAllocator BufferAllocator::limited(std::uint64_t maximum_bytes,
             std::lock_guard<std::mutex> lock(state->mutex);
             if (bytes > maximum_bytes - state->live)
               return Result<std::shared_ptr<void>>(
-                  Status::failure(ErrorCode::ResourceExhausted,
-                                  "allocator live sublimit exceeded"));
+                  Status{ErrorCode::ResourceExhausted,
+                         "allocator live sublimit exceeded",
+                         FailureReason::CapacityLimit});
             state->live += bytes;
             lease->bytes = bytes;
           }
@@ -152,8 +153,9 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
     }
     if (size == 0 || size > static_cast<std::uint64_t>(INT64_MAX) ||
         size > std::numeric_limits<std::size_t>::max()) {
-      return reject(Status::failure(ErrorCode::ResourceExhausted,
-                                    "CPU allocation size is not addressable"));
+      return reject(Status{ErrorCode::ResourceExhausted,
+                           "CPU allocation size is not addressable",
+                           FailureReason::CapacityLimit});
     }
     MutableBuffer result;
     result.storage_ = std::shared_ptr<CpuStorage>(new CpuStorage());
@@ -170,7 +172,8 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
     result.storage_->capacity_ = size;
     return Result<MutableBuffer>(std::move(result));
   } catch (const std::bad_alloc&) {
-    return reject(Status{ErrorCode::ResourceExhausted, {}});
+    return reject(
+        Status{ErrorCode::ResourceExhausted, {}, FailureReason::CapacityLimit});
   } catch (...) {
     return reject(
         Status{ErrorCode::OperationFailed, {}, FailureReason::HostException});

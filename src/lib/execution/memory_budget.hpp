@@ -35,6 +35,12 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
       std::uint64_t bytes, const std::function<ErrorCode()>& stop = {},
       std::shared_ptr<MemoryObservation> observation = {},
       const std::function<void()>& reclaim = {});
+  // Each allocation reserves its actual payload before malloc, with no
+  // speculative dense reservation. The phase allocator adds its own quota.
+  BufferAllocator on_demand_allocator(
+      std::shared_ptr<MemoryObservation> observation,
+      std::function<Result<std::shared_ptr<MemoryReservation>>(std::uint64_t)>
+          admission = {});
   std::pair<std::uint64_t, std::uint64_t> peaks(
       const std::shared_ptr<MemoryObservation>& observation) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -203,6 +209,69 @@ class MemoryReservation final
   bool sealed_ = false;
   bool admitted_ = false;
 };
+
+// A driver-owned admission capability. Allocator copies may retain State, but
+// closing the driver fences callbacks before borrowed Run/context state
+// retires. The lock serializes close with admission; payload leases do not
+// retain State.
+class ScopedMemoryAdmission final {
+ public:
+  using Admit =
+      std::function<Result<std::shared_ptr<MemoryReservation>>(std::uint64_t)>;
+  explicit ScopedMemoryAdmission(Admit admit)
+      : state_(std::make_shared<State>(std::move(admit))) {}
+  ~ScopedMemoryAdmission() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->admit = {};
+  }
+  ScopedMemoryAdmission(const ScopedMemoryAdmission&) = delete;
+  ScopedMemoryAdmission& operator=(const ScopedMemoryAdmission&) = delete;
+  Admit callback() const {
+    return
+        [state = state_](
+            std::uint64_t bytes) -> Result<std::shared_ptr<MemoryReservation>> {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          if (!state->admit)
+            return Result<std::shared_ptr<MemoryReservation>>(Status{
+                ErrorCode::OperationFailed, "retired allocation admission"});
+          return state->admit(bytes);
+        };
+  }
+
+ private:
+  struct State {
+    std::mutex mutex;
+    Admit admit;
+    explicit State(Admit callback) : admit(std::move(callback)) {}
+  };
+  std::shared_ptr<State> state_;
+};
+
+inline BufferAllocator MemoryBudget::on_demand_allocator(
+    std::shared_ptr<MemoryObservation> observation,
+    std::function<Result<std::shared_ptr<MemoryReservation>>(std::uint64_t)>
+        admission) {
+  auto self = shared_from_this();
+  return BufferAllocator(
+      [self, observation = std::move(observation),
+       admission = std::move(admission)](
+          std::uint64_t bytes) -> Result<std::shared_ptr<void>> {
+        auto admitted = admission ? admission(bytes)
+                                  : self->reserve(bytes, {}, observation);
+        if (!admitted.ok()) {
+          auto status = admitted.status();
+          if (status.code == ErrorCode::ResourceExhausted &&
+              status.reason == FailureReason::None)
+            status.reason = FailureReason::CapacityLimit;
+          return Result<std::shared_ptr<void>>(status);
+        }
+        auto reservation = admitted.take_value();
+        auto allocation = reservation->allocate(bytes);
+        reservation->seal();
+        return allocation;
+      },
+      self);
+}
 
 inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
     std::uint64_t bytes, const std::function<ErrorCode()>& stop,

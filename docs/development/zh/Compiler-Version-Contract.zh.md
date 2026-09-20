@@ -162,3 +162,105 @@ C ABI 9 保留按不同输出分组的 joint contract 1 和原错误码投影。
 supply 签名使用 AtomKey，消费方重新构建，不提供 output-index shim。
 joint contract 2 使用既有 v10 canonical framing 中的新 trait 值；contract 1
 语义和 C 布局保持原样。见[原子错误与质量](../../kernel-architecture/zh/Atom-Errors-and-Quality.zh.md)。
+
+## 数值元组与诊断契约
+
+Package 0.13.0 使用 C++ OperationTraits 13、通用尾轴观察分组、数值 axis dtype
+推导和宿主持有的 CPU 数值诊断。输出分组、regional execution 与 view traits 进入 operation identity，因此 semantic、
+physical-plan、plan-cache 域使用 v13。Dependency protocol 2、joint contract 2、
+result-region v6、WorkflowDocument schema 2 和 C operation ABI 9 保持不变。
+C++ 消费方须针对 0.13 重编译；旧 minor package 请求被拒绝。C ABI loader 拒绝既有
+v9 枚举之外的 dtype rule；其布局不增加 C++ 分组、新 dtype rule 或诊断回调。
+
+内核 C/C++ 构建要求 Clang，包含 Apple Clang；Ubuntu WSL 正确性验证也使用
+Clang。[数值 workflow](../../../examples/numeric_workflow/README.md) 通过安装后的
+公开 API 手动运行，不新增集成测试注册。
+
+## NUM-09 布局实现
+
+Package 版本为 0.13.0，C++ `OperationTraits` 版本为 13。operation
+plugin ABI 保持 C ABI 9，descriptor 与 entrypoint 布局不变。九个
+`array.reshape`、`array.transpose` 和 `array.slice` key 使用现有 C++ traits 与
+dependency protocol，不增加 C ABI 字段、兼容别名或 shim。C++ installed consumer
+须针对 0.13 package 重新构建。
+
+布局 traits 携带每节点 shape/permutation/count metadata，并在适用时携带
+regional atomic execution 和 `preserve_output_views`。Static dependency pieces 替代
+之前的 static dependency maps；每个 piece 携带不相交的 observation coverage 与完整的
+各端口 dependency。这些字段进入 C++ operation identity。布局算子设置 `cacheable=false`，因为当前 content cache 不记录物理 owner/
+stride 分区；pure 与 active-Run sharing 仍独立。
+
+静态映射 identity 包含每个互不相交 piece 的完整 observation coverage 和每个
+`DependencyAxis::translation`。translation 是有符号 Int64；创建时使用加宽整数
+算术逐 piece 检查平移后的范围。C++ 字段为 `static_dependency_pieces`，不提供
+旧字段别名。repeated input template 只有在存在 metadata specializer、由其验证
+描述符关系时才能设置 `repeated_match=false`；concatenate 用它检查非拼接轴维度。
+
+## NUM-12 纯 block sharing
+
+Package 0.14.0 使用 C++ `OperationTraits` 版本 14，semantic、physical-plan 和
+plan-cache domain 使用 v14；C operation ABI 保持 C ABI 9。Opt-in
+`share_blocks_across_outputs` 默认 false，仅适用于 pure Atomic dependency-v1。
+其 common block identity 包含完整 resolved output contracts、static parameters、
+input metadata 与 supplied bytes、incoming state、phase/range 和 mode。公开 output
+与 certificate identity 仍独立。可选 result-LRU reuse 要求正数
+`result_cache_bytes` 与已计费 proof budget；miss 会重算，不能合并并发 producer，也不
+承诺每个 Run 只求值一次。C++ layout 改变要求 consumer 使用 0.14 重新构建，拒绝
+旧 minor 请求。WorkflowDocument schema 2、provider ABI 1、optimizer v5 与
+result-region v6 保持不变。
+
+## NUM-01 static preparation 与 diagnostics
+
+Package 0.15.0 保持 C++ `OperationTraits` 版本 14 与 semantic framing 版本 14；
+C operation ABI 保持 C ABI 9。公开 C++ operation definition 增加 `prepare_static`、
+`OperationPreparation` 与 immutable `PreparedOperation` handle。Compiler node 和
+plan step 可以保留该 handle。Direct request 复用显式提供且匹配的 handle，或在
+preflight 中只 preparation 一次；joint request 对兼容成员只 preparation 一次。匹配
+要求 registry/definition identity、static metadata 与 copied IEEE-754 parameter bits
+一致；独立调用不会隐式共享 preparation。Request record 拥有复制后的 input，
+dependency query 仍是 borrowed。Preparation 与 plan allocation 位于 per-Atom runtime
+scratch admission 之外；没有 global cache 或 dynamic preparation state，prepared owner
+在 continuation 与 callback 退役后销毁。
+
+NUM-01 的 numeric diagnostics 增加 `strict_math_calls` 与 8x4
+`function_fallbacks` matrix。NUM-01 按每次 strict math call 计数；未 instrumented
+operator 保持 0，无法归属的 reason count 在 merge 时进入 `Other`。这些只是 observation。
+Prepared public manual、compiler/facility 检查已通过 once/ROI/output/tile/foreign/
+signed-zero/NaN/lifetime 路径；NUM-01 public workflow 与 independent expression oracle
+已在 native Clang 和 Clang WSL 通过。C++ consumer 必须针对 0.15 重建，旧 minor 请求
+被拒绝；C ABI 9 descriptor/table layout 保持不变。
+
+## CRV-06 ColorArray 与显式资源绑定
+
+Package 0.16.0 为 ColorArray/ICC-backed Value 引入 breaking C++ public
+layout 与 signature change。C++ `OperationTraits` 保持版本 14，semantic、
+physical-plan 和 plan-cache framing 保持 v14；WorkflowDocument schema 2、
+provider ABI 1 与 C operation ABI 9 保持不变。C ABI descriptor 与 entrypoint
+layout 不携带这些 C++ resource binding。
+
+`IccProfile::import` 在显式 `ResourceBudget` 下接收并验证 immutable ICC v2/v4
+bytes；`ResourceBindings::create` 封存 admitted profile，并支持按 identity
+选择、reference 与集合 union。ICC identity 基于内容（SHA-256 加 length），不
+使用 path、address 或 ICC MD5 Profile ID。Handle immutable，已接收 payload owner
+可以共享。Admission、hash、parse、sort 和 compare 都观察 cancellation 与 work
+limit；失败不会发布 partial resource。
+
+`Compiler::analyze` 与 `Compiler::compile` 接收显式 `ResourceBindings`，并将其
+保留在 semantic IR、optimized IR 与 execution plan 中。`ResourceBindings` 也会
+沿 `InputSnapshot`、`RegionalSource`、`DependencyRequest`/`DependencyQuery`、
+`ResultProgramQuery`/`ResultContinuation` 和 operation invocation 传递。`Value`、`ValueFragments` 与 `MutableValue::publish`
+接收并保留 facet 所需的 validated owner，未使用的 binding 会丢弃。即使 Empty
+execution 不读取 payload，也会验证并保留所需 resource。Resource owner 随对应
+Value/fragment、snapshot、plan 或 Run 生命周期退役。ColorArray 输出的部分通道
+请求在 plan、direct call 和 retained demand 中规范化为完整颜色；输入传输与
+fragment 继续要求完整通道。
+
+这些 C++ layout、constructor 与 method signature 变化要求所有 C++ package
+consumer 针对 0.16.0 重新构建；不提供 compatibility shim 或旧 minor reader。
+已识别的 `photospider.color-array` facet 现在执行 typed validation 与完整颜色
+demand 语义；先前的 opaque facet 处理不构成兼容契约。持久 sample cache key
+包含由 kernel、operation、header 源码及构建设置生成的
+`PHOTOSPIDER_CACHE_BUILD_ID`，因此旧实现的条目被隔离。ColorArray 本身不在
+现有 disk-cache facet allowlist 内；携带资源的结果也跳过可选 sample-only cache。
+Plan 与内存 result cache 没有跨构建反序列化入口。CRV-06 实现完成与其
+Proposed 规范被接受仍是独立状态。

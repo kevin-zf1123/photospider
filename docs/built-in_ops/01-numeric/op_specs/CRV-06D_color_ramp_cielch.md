@@ -8,7 +8,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -20,7 +20,7 @@ This is the independently required CIELCh(ab) ramp, distinct from CIELAB,
 OKLab and OKLCh. The initial variant has three color channels and no alpha.
 Use explicit stops and a complete color-array description. This shared contract
 defines three independent input entrypoints; it does not register a runtime
-input-representation mode. Clarification is complete; implementation is pending.
+input-representation mode. The three primitives are implemented separately.
 
 ## Coordinates and unnormalized hue
 
@@ -59,7 +59,7 @@ must match. For rational input, the description interprets the coordinated ports
 as one color table; lightness_chroma[K,2] alone is not a complete three-channel
 ColorArray. Output is a complete CIELCh(ab) ColorArray whose hue unit is the
 selected floating output_hue_unit. No RGB transfer, gamut conversion, alpha or
-white adaptation occurs. No invented current runtime metadata API is implied.
+white adaptation occurs. The public ColorArray codec supplies the description.
 
 ## Exact interpolation and unit conversion
 
@@ -145,10 +145,10 @@ or normalization mode is accepted.
 
 Test channel requests expanding to full colors, unselected invalid rows unread,
 selected q=0 failing even at C=0, global stop failures, exact dirty support,
-strides, budgets, cancellation, cache-off and output lifetime. Future implementation
-provides a public Compiler/ExecutionContext workflow with entrypoint-specific
-ports and named values plus metadata, actual commands and independent expected
-results. No current operation registration or runtime result is claimed.
+strides, budgets, cancellation, cache-off and output lifetime. The public
+Compiler/ExecutionContext workflow binds the entrypoint-specific ports and
+checks named values and metadata, with commands and independent expected
+results linked below.
 
 - [Radian entrypoint](CRV-06D1_color_ramp_cielch.md).
 - [Floating pi entrypoint](CRV-06D2_color_ramp_cielch_pi.md).
@@ -162,3 +162,15 @@ and do not replace the existing floating pi-multiple operations.
 - [CIELAB counterpart](CRV-06C_color_ramp_cielab.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Operator template](../../00-foundation/spec-template.md).
+
+## Maintained implementation and validation
+
+This shared CIELCh contract covers three primitives and nine profile keys.
+The public helpers are `color_ramp_cielch_node`,
+`color_ramp_cielch_pi_node` and `color_ramp_cielch_rational_pi_node` in
+[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
+Coordinates and original hue ratios use exact rational interpolation;
+conversion between radian and pi units uses certified pi, with a 4096-bit
+precision ceiling. Equal units cancel symbolically. Every profile returns
+strict bits. See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation)
+and [public workflows](../../../../examples/numeric_workflow/README.md#color-ramps).

@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
@@ -51,6 +51,17 @@ partial publication. Unrequested output overflow cannot cause a failure.
 Conceptual fixture: x=[0,1,3],y=[0,2,4],query=[3,1,3] -> values=[2,0.5,2].
 Negating y and query retains the result. Apply CRV-10's independent exact oracle,
 boundary/rounding/monotonicity, dirty/partial-read, stride, budget, cancellation
-and owner-lifetime acceptance. The future public Compiler/ExecutionContext
-workflow supplies x/y/query and static dtype/policy; actual run commands and
-verified outputs are implementation obligations, not current claimed evidence.
+and owner-lifetime acceptance. The maintained public Compiler/ExecutionContext
+workflow supplies x/y/query and static dtype/policy. See the inverse-curves example linked below for commands and
+current validation evidence.
+
+## Maintained implementation and validation
+
+The public helper is `invert_linear_node` from
+[`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp).
+The exact rational path is bitwise identical across profiles.
+See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
+for the public fixture, command and shared validation evidence. Native Clang21
+Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 404
+independent Fraction cases per profile. Installed0.16 consumers passed both
+native profiles; WSL is used for numerical correctness only.

@@ -22,6 +22,7 @@
 #include "plugin/builtin_operations.hpp"
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/dependency_plugin.hpp"
+#include "plugin/operation_resources.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -433,8 +434,14 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 10U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 14U ||
       !traits.supports_cpu || !known_shape || !known_region ||
+      (traits.share_blocks_across_outputs &&
+       (!traits.deterministic || !traits.side_effect_free ||
+        traits.outputs[0].dependency_version != 1 ||
+        traits.outputs[0].observation_kind != ObservationKind::Atomic ||
+        traits.outputs[0].regional_atomic ||
+        traits.outputs[0].static_dependency_pieces)) ||
       (traits.allows_cpu_fallback && !traits.supports_gpu) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
@@ -657,6 +664,7 @@ struct OutputSinkState final {
   std::optional<MutableValue> allocation;
   std::vector<MutableBuffer> scratch;
   Status allocation_failure;
+  ResourceBindings resources;
 };
 
 /** @brief Allocates exact regional output; exceptions never cross the C ABI. */
@@ -824,8 +832,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     if (data != state->allocation->data())
       std::memcpy(state->allocation->data(), data,
                   static_cast<std::size_t>(byte_size));
-    state->result =
-        std::move(*state->allocation).publish(std::move(owned_facets));
+    state->result = std::move(*state->allocation)
+                        .publish(std::move(owned_facets), state->resources);
     return state->result.ok() ? 1 : 0;
   } catch (const std::bad_alloc&) {
     Status failure;
@@ -861,11 +869,17 @@ int plugin_cancelled(void* context) noexcept {
 Status validate_operation_parameters(
     const OperationTraits& traits,
     const std::map<std::string, ParameterValue>& parameters) {
+  const auto schema_error = [](ErrorCode code, std::string message) {
+    return Status{code,
+                  std::move(message),
+                  FailureReason::InvalidDomain,
+                  {FailureOrigin::Schema, FailureScope::Unspecified}};
+  };
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
   if (!schema_status.ok() ||
       parameters.size() > traits.parameter_schema.size()) {
-    return Status::failure(
+    return schema_error(
         ErrorCode::InvalidArgument,
         "operation parameters exceed or contradict the published schema");
   }
@@ -873,20 +887,20 @@ Status validate_operation_parameters(
     const auto parameter = parameters.find(declaration.key);
     if (parameter == parameters.end()) {
       if (declaration.required) {
-        return Status::failure(
+        return schema_error(
             ErrorCode::InvalidArgument,
             "required operation parameter is missing: " + declaration.key);
       }
       continue;
     }
     if (!parameter_type_matches(parameter->second, declaration.type)) {
-      return Status::failure(
+      return schema_error(
           ErrorCode::InvalidArgument,
           "operation parameter has the wrong type: " + declaration.key);
     }
     if (declaration.type == OperationParameterType::String &&
         std::get<std::string>(parameter->second).size() > 8192U) {
-      return Status::failure(
+      return schema_error(
           ErrorCode::InvalidArgument,
           "operation string parameter exceeds bounds: " + declaration.key);
     }
@@ -906,8 +920,8 @@ Status validate_operation_parameters(
               value <= spec.maximum;
     }
     if (!valid)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "parameter outside finite interval: " + spec.key);
+      return schema_error(ErrorCode::InvalidArgument,
+                          "parameter outside finite interval: " + spec.key);
   }
   for (const auto& parameter : parameters) {
     const auto declaration = std::lower_bound(
@@ -918,7 +932,7 @@ Status validate_operation_parameters(
         });
     if (declaration == traits.parameter_schema.end() ||
         declaration->key != parameter.first) {
-      return Status::failure(
+      return schema_error(
           ErrorCode::InvalidArgument,
           "operation parameter key is unknown: " + parameter.first);
     }
@@ -956,6 +970,24 @@ struct OperationRegistry::Impl final {
   bool frozen = false;
 };
 
+struct PreparedOperation::Impl final {
+  // Program destructors run before the definition/library lease retires.
+  std::shared_ptr<const OperationDefinition> definition;
+  std::uint64_t registry = 0;
+  OperationTraits traits;
+  std::vector<OperationMetadata> inputs;
+  std::map<std::string, ParameterValue> parameters;
+  std::shared_ptr<const void> state;
+};
+PreparedOperation::PreparedOperation(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+const OperationTraits& PreparedOperation::traits() const noexcept {
+  return impl_->traits;
+}
+const void* PreparedOperation::state() const noexcept {
+  return impl_->state.get();
+}
+
 /**
  * @brief Implements empty mutable operation registry construction.
  * @copydetails OperationRegistry::OperationRegistry
@@ -984,6 +1016,13 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const bool staged = definition.traits.outputs[0].dependency_version == 1;
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
   if (!valid_key(definition.key) || !traits_status.ok() ||
+      definition.traits.requires_metadata_specialization !=
+          (static_cast<bool>(definition.specialize_metadata) ||
+           static_cast<bool>(definition.prepare_static)) ||
+      (definition.specialize_metadata && definition.prepare_static) ||
+      (definition.prepare_static &&
+       (!staged || !definition.traits.deterministic ||
+        !definition.traits.side_effect_free)) ||
       (structured ? (!definition.start_result || definition.start_dependency ||
                      definition.callback)
        : staged   ? (!definition.start_dependency || definition.callback ||
@@ -1016,6 +1055,7 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   }
   const std::string& immutable_key = immutable_definition->key;
   impl_->definitions.emplace(immutable_key, immutable_definition);
+  builtins_ = false;
   return Status::success();
 }
 
@@ -1054,6 +1094,7 @@ bool copy_contract(const ps_operation_contract_v9* c, OperationTraits* t) {
     return true;
   if (reinterpret_cast<std::uintptr_t>(c) % alignof(ps_operation_contract_v9) ||
       c->struct_size != sizeof(*c) || c->repeated_match > 1 ||
+      c->dtype_rule > PS_OPERATION_DTYPE_PARAMETER_V9 ||
       !records(c->axes, c->axis_count, 8) ||
       !copy_text(c->dtype_parameter, c->dtype_parameter_size,
                  &t->outputs[0].output_dtype_parameter) ||
@@ -1540,6 +1581,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       output.descriptor = expected.value().descriptor;
       output.region = invocation.output_region;
       output.allocator = invocation.allocator;
+      output.resources = invocation.resources;
       std::vector<std::uint64_t> output_offsets, output_extents;
       for (const auto dim : output.region.dimensions()) {
         output_offsets.push_back(dim.offset);
@@ -1666,6 +1708,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
     }
     impl_->definitions.swap(replacement);
+    builtins_ = false;
   }
   return Status::success();
 }
@@ -1704,6 +1747,233 @@ Result<OperationTraits> OperationRegistry::find_traits(
   return Result<OperationTraits>(iterator->second->traits);
 }
 
+Result<OperationTraits> OperationRegistry::resolve_traits(
+    const std::string& key, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  auto prepared = prepare_operation(key, inputs, parameters);
+  return prepared.ok() ? Result<OperationTraits>(prepared.value()->traits())
+                       : Result<OperationTraits>(prepared.status());
+}
+Result<std::shared_ptr<const PreparedOperation>>
+OperationRegistry::prepare_operation(
+    const std::string& key, const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  using PreparedAnswer = Result<std::shared_ptr<const PreparedOperation>>;
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return PreparedAnswer(
+          Status{ErrorCode::NotFound, "operation key is not registered"});
+    definition = found->second;
+  }
+  std::shared_ptr<const void> program;
+  const auto resolve = [&]() -> Result<OperationTraits> {
+    using Answer = Result<OperationTraits>;
+    try {
+      auto resolved = resolve_operation_traits(definition->traits,
+                                               inputs.size(), parameters);
+      if (!resolved.ok())
+        return resolved;
+      auto traits = resolved.take_value();
+      if (inputs.size() != traits.input_schema.size())
+        return Answer(
+            Status{ErrorCode::TypeMismatch,
+                   "specializer input count mismatch",
+                   FailureReason::None,
+                   {FailureOrigin::Schema, FailureScope::Unspecified}});
+      for (std::size_t i = 0; i < inputs.size(); ++i) {
+        if (inputs[i].atomic_trailing_axes >
+                inputs[i].descriptor.shape.size() ||
+            (inputs[i].atomic_trailing_axes &&
+             std::any_of(inputs[i].facets.begin(), inputs[i].facets.end(),
+                         [](const auto& facet) {
+                           return facet.key == "photospider.image";
+                         })))
+          return Answer(
+              Status{ErrorCode::TypeMismatch,
+                     "invalid input tuple observation metadata",
+                     FailureReason::None,
+                     {FailureOrigin::Schema, FailureScope::Unspecified}});
+        auto status = input_internal::validate_port_metadata(
+            traits.input_schema[i], inputs[i]);
+        if (!status.ok()) {
+          if (status.detail.origin == FailureOrigin::Unspecified)
+            status.detail.origin = FailureOrigin::Schema;
+          return Answer(std::move(status));
+        }
+      }
+      if (!definition->specialize_metadata && !definition->prepare_static)
+        return Answer(std::move(traits));
+      Result<std::vector<OperationOutputSpecialization>> specialized(
+          Status{ErrorCode::Internal, "uninitialized preparation"});
+      if (definition->prepare_static) {
+        auto prepared = definition->prepare_static(inputs, parameters);
+        if (!prepared.ok())
+          return Answer(prepared.status());
+        auto result = prepared.take_value();
+        program = std::move(result.state);
+        specialized = Result<std::vector<OperationOutputSpecialization>>(
+            std::move(result.outputs));
+      } else {
+        specialized = definition->specialize_metadata(inputs, parameters);
+      }
+      if (!specialized.ok())
+        return Answer(specialized.status());
+      if (specialized.value().size() != traits.outputs.size())
+        return Answer(
+            Status{ErrorCode::InvalidArgument,
+                   "specializer changed output count",
+                   FailureReason::InvalidDomain,
+                   {FailureOrigin::Schema, FailureScope::Unspecified}});
+      for (std::size_t i = 0; i < traits.outputs.size(); ++i) {
+        auto& output = traits.outputs[i];
+        auto& specialization = specialized.value()[i];
+        auto& metadata = specialization.metadata;
+        if (output.result_schema || metadata.result_schema) {
+          if (!output.result_schema || !metadata.result_schema ||
+              output.dependency_version != 2 ||
+              output.output_schema.kind != OperationPortKind::Result ||
+              output.result_schema->id != metadata.result_schema->id ||
+              output.result_schema->version !=
+                  metadata.result_schema->version ||
+              metadata.descriptor.element_type != ElementType::UInt8 ||
+              !metadata.descriptor.shape.empty() || !metadata.facets.empty() ||
+              metadata.atomic_trailing_axes || specialization.regional_atomic ||
+              specialization.preserve_output_views ||
+              specialization.maximum_output_payload_bytes ||
+              specialization.static_dependency_pieces)
+            return Answer(
+                Status{ErrorCode::TypeMismatch,
+                       "Result specialization must preserve its registered "
+                       "kind/id/version",
+                       FailureReason::None,
+                       {FailureOrigin::Schema, FailureScope::Unspecified}});
+          auto valid = metadata.result_schema->validate();
+          if (!valid.ok())
+            return Answer(valid);
+          output.result_schema = *metadata.result_schema;
+          continue;
+        }
+        output.shape_rule = OperationShapeRule::Fixed;
+        output.fixed_output_shape = std::move(metadata.descriptor.shape);
+        output.output_axes.clear();
+        output.output_element_type = metadata.descriptor.element_type;
+        output.output_dtype_rule = OperationDtypeRule::Declared;
+        output.output_dtype_input = 0;
+        output.output_dtype_parameter.clear();
+        output.output_semantic_rule = metadata.facets.empty()
+                                          ? OperationSemanticRule::Drop
+                                          : OperationSemanticRule::Establish;
+        output.output_semantic_input = 0;
+        output.output_semantic_parameter.clear();
+        output.output_facets = std::move(metadata.facets);
+        output.atomic_trailing_axes = metadata.atomic_trailing_axes;
+        output.regional_atomic = specialization.regional_atomic;
+        output.preserve_output_views = specialization.preserve_output_views;
+        output.maximum_output_payload_bytes =
+            specialization.maximum_output_payload_bytes;
+        output.static_dependency_pieces =
+            std::move(specialization.static_dependency_pieces);
+      }
+      traits.requires_metadata_specialization = false;
+      auto expanded_validation = traits;
+      expanded_validation.repeated_minimum = 0;
+      expanded_validation.repeated_maximum = 0;
+      expanded_validation.repeated_resolved = 0;
+      expanded_validation.repeated_match = false;
+      const auto valid = validate_traits(expanded_validation);
+      if (!valid.ok())
+        return Answer(valid);
+      const auto inferred = infer_operation_outputs(traits, inputs, parameters);
+      if (!inferred.ok())
+        return Answer(inferred.status());
+      return Answer(std::move(traits));
+    } catch (const std::bad_alloc&) {
+      return Answer(
+          Status{ErrorCode::ResourceExhausted,
+                 {},
+                 FailureReason::CapacityLimit,
+                 {FailureOrigin::Resource, FailureScope::Unspecified}});
+    } catch (...) {
+      return Answer(Status{ErrorCode::OperationFailed,
+                           "metadata specialization raised an exception",
+                           FailureReason::HostException,
+                           {FailureOrigin::Schema, FailureScope::Unspecified}});
+    }
+  };
+  auto resolved = resolve();
+  if (!resolved.ok())
+    return PreparedAnswer(resolved.status());
+  try {
+    auto prepared = std::make_shared<PreparedOperation::Impl>();
+    prepared->definition = definition;
+    prepared->registry = impl_->identity;
+    prepared->traits = resolved.take_value();
+    prepared->inputs = inputs;
+    prepared->parameters = parameters;
+    prepared->state = std::move(program);
+    return PreparedAnswer(std::shared_ptr<const PreparedOperation>(
+        new PreparedOperation(std::move(prepared))));
+  } catch (const std::bad_alloc&) {
+    return PreparedAnswer(
+        Status{ErrorCode::ResourceExhausted,
+               {},
+               FailureReason::CapacityLimit,
+               {FailureOrigin::Resource, FailureScope::Unspecified}});
+  }
+}
+Status OperationRegistry::validate_prepared(
+    const PreparedOperation& prepared, const std::string& key,
+    const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  const auto stale = [] {
+    return Status{ErrorCode::Stale,
+                  "prepared operation does not match static inputs/registry"};
+  };
+  const auto& stored = *prepared.impl_;
+  if (stored.registry != impl_->identity ||
+      inputs.size() != stored.inputs.size() ||
+      parameters.size() != stored.parameters.size())
+    return stale();
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end() || found->second != stored.definition)
+      return stale();
+  }
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    const auto& a = inputs[i];
+    const auto& b = stored.inputs[i];
+    if (a.descriptor.element_type != b.descriptor.element_type ||
+        a.descriptor.shape != b.descriptor.shape ||
+        a.atomic_trailing_axes != b.atomic_trailing_axes ||
+        !input_internal::same_facets(a.facets, b.facets) ||
+        static_cast<bool>(a.result_schema) !=
+            static_cast<bool>(b.result_schema) ||
+        (a.result_schema && !a.result_schema->same_schema(*b.result_schema)))
+      return stale();
+  }
+  auto b = stored.parameters.begin();
+  for (const auto& a : parameters) {
+    if (a.first != b->first || a.second.index() != b->second.index())
+      return stale();
+    if (const auto* value = std::get_if<double>(&a.second)) {
+      std::uint64_t left = 0, right = 0;
+      std::memcpy(&left, value, 8);
+      const auto other = std::get<double>(b->second);
+      std::memcpy(&right, &other, 8);
+      if (left != right)
+        return stale();
+    } else if (a.second != b->second) {
+      return stale();
+    }
+    ++b;
+  }
+  return Status::success();
+}
+
 Status OperationRegistry::validate_dependency_metadata(
     const std::string& key, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) const {
@@ -1731,11 +2001,23 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
           ErrorCode::NotFound, "dependency operation not registered"));
     definition = found->second;
   }
+  if (!request.prepared) {
+    auto prepared = prepare_operation(key, request.inputs, request.parameters);
+    if (!prepared.ok())
+      return Result<std::shared_ptr<DependencySession>>(prepared.status());
+    request.prepared = prepared.take_value();
+  } else {
+    auto status = validate_prepared(*request.prepared, key, request.inputs,
+                                    request.parameters);
+    if (!status.ok())
+      return Result<std::shared_ptr<DependencySession>>(status);
+  }
+  const auto traits = request.prepared->traits();
   return DependencySession::create(
-      "registry-" + std::to_string(impl_->identity) + ":" + key,
-      definition->traits, definition->start_dependency,
-      definition->validate_dependency, std::move(request), allocator,
-      definition, 0, std::move(consume_root_work));
+      "registry-" + std::to_string(impl_->identity) + ":" + key, traits,
+      definition->start_dependency, definition->validate_dependency,
+      std::move(request), allocator, definition, 0,
+      std::move(consume_root_work));
 }
 
 Result<ResultContinuation> OperationRegistry::start_result(
@@ -1759,8 +2041,7 @@ Result<ResultContinuation> OperationRegistry::start_result(
         !query.page_bytes)
       return Answer(
           Status{ErrorCode::InvalidArgument, "invalid structured start"});
-    auto resolved = resolve_operation_traits(
-        definition->traits, query.inputs.size(), query.parameters);
+    auto resolved = resolve_traits(key, query.inputs, query.parameters);
     if (!resolved.ok())
       return Answer(resolved.status());
     auto selected =
@@ -1796,7 +2077,20 @@ Result<ResultContinuation> OperationRegistry::start_result(
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, code);
         });
-    auto started = definition->start_result(query, scoped);
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        query.resources, query.inputs, query.output);
+    if (!admitted_resources.ok())
+      return Answer(admitted_resources.status());
+    auto normalized = query;
+    normalized.resources = admitted_resources.take_value();
+    if (normalized.value_outputs) {
+      auto closed = input_internal::color_output_samples(
+          normalized.output, *normalized.value_outputs);
+      if (!closed.ok())
+        return Answer(closed.status());
+      normalized.value_outputs = closed.take_value();
+    }
+    auto started = definition->start_result(normalized, scoped);
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
@@ -1806,6 +2100,7 @@ Result<ResultContinuation> OperationRegistry::start_result(
       return Answer(Status{ErrorCode::InvalidArgument,
                            "structured state must use host allocation"});
     state.definition_ = definition;
+    state.resources_ = normalized.resources;
     return Answer(std::move(state));
   } catch (const std::bad_alloc&) {
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
@@ -1844,7 +2139,20 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, code);
         });
-    auto started = definition->start_result(query, scoped);
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        query.resources, query.inputs, query.output);
+    if (!admitted_resources.ok())
+      return Answer(admitted_resources.status());
+    auto normalized = query;
+    normalized.resources = admitted_resources.take_value();
+    if (normalized.value_outputs) {
+      auto closed = input_internal::color_output_samples(
+          normalized.output, *normalized.value_outputs);
+      if (!closed.ok())
+        return Answer(closed.status());
+      normalized.value_outputs = closed.take_value();
+    }
+    auto started = definition->start_result(normalized, scoped);
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
@@ -1854,6 +2162,7 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
       return Answer(Status{ErrorCode::InvalidArgument,
                            "structured state must use host allocation"});
     state.definition_ = definition;
+    state.resources_ = normalized.resources;
     return Answer(std::move(state));
   } catch (const std::bad_alloc&) {
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
@@ -1875,9 +2184,37 @@ Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
           Status{ErrorCode::NotFound, {}});
     definition = found->second;
   }
+  if (requests.empty())
+    return Result<std::shared_ptr<DependencyJointSession>>(
+        Status{ErrorCode::InvalidArgument, "empty joint requests"});
+  auto prepared = requests[0].prepared;
+  if (!prepared) {
+    auto created =
+        prepare_operation(key, requests[0].inputs, requests[0].parameters);
+    if (!created.ok())
+      return Result<std::shared_ptr<DependencyJointSession>>(created.status());
+    prepared = created.take_value();
+  }
+  for (auto& request : requests) {
+    auto status =
+        validate_prepared(*prepared, key, request.inputs, request.parameters);
+    if (!status.ok()) {
+      if (!request.prepared)
+        status = Status{ErrorCode::InvalidArgument,
+                        "incompatible joint static member"};
+      return Result<std::shared_ptr<DependencyJointSession>>(status);
+    }
+    if (request.prepared) {
+      status = validate_prepared(*request.prepared, key, request.inputs,
+                                 request.parameters);
+      if (!status.ok())
+        return Result<std::shared_ptr<DependencyJointSession>>(status);
+    }
+    request.prepared = prepared;
+  }
   return DependencyJointSession::create(
       "registry-" + std::to_string(impl_->identity) + ":" + key,
-      definition->traits, definition->start_joint,
+      prepared->traits(), definition->start_joint,
       definition->validate_dependency, std::move(requests), allocator,
       definition, std::move(consume_root_work));
 }
@@ -1984,18 +2321,6 @@ Result<Value> OperationRegistry::invoke_current(
     return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
                                          "operation backend is unavailable"));
   }
-  auto selected =
-      select_operation_output(definition->traits, invocation.output_index);
-  if (!selected.ok())
-    return Result<Value>(selected.status());
-  auto resolved_result = resolve_operation_traits(
-      selected.value(),
-      invocation.input_metadata.empty() ? invocation.inputs.size()
-                                        : invocation.input_metadata.size(),
-      invocation.parameters);
-  if (!resolved_result.ok())
-    return Result<Value>(resolved_result.status());
-  auto resolved_shape = resolved_result.take_value();
   auto complete_metadata = invocation.input_metadata;
   if (complete_metadata.empty()) {
     complete_metadata.resize(metadata_count);
@@ -2003,6 +2328,15 @@ Result<Value> OperationRegistry::invoke_current(
       complete_metadata[positions[i]] = {invocation.inputs[i].descriptor(),
                                          invocation.inputs[i].facets()};
   }
+  auto resolved_result =
+      resolve_traits(key, complete_metadata, invocation.parameters);
+  if (!resolved_result.ok())
+    return Result<Value>(resolved_result.status());
+  auto selected =
+      select_operation_output(resolved_result.value(), invocation.output_index);
+  if (!selected.ok())
+    return Result<Value>(selected.status());
+  auto resolved_shape = selected.take_value();
   auto expected_output = expected_callback_output_descriptor(
       resolved_shape, invocation.inputs, invocation.parameters,
       complete_metadata);
@@ -2075,6 +2409,18 @@ Result<Value> OperationRegistry::invoke_current(
         projected_inputs, projected_demands, invocation.parameters,
         invocation.backend, invocation.cancellation, invocation.output_region,
         invocation.allocator);
+    auto resources = invocation.resources;
+    for (const auto& input : invocation.inputs) {
+      auto joined = resources.unite(input.resources());
+      if (!joined.ok())
+        return Result<Value>(joined.status());
+      resources = joined.take_value();
+    }
+    auto admitted_resources = plugin_internal::admit_operation_resources(
+        resources, complete_metadata, expected_output.value());
+    if (!admitted_resources.ok())
+      return Result<Value>(admitted_resources.status());
+    normalized.resources = admitted_resources.take_value();
     normalized.gpu = invocation.gpu;
     normalized.output_index = invocation.output_index;
     normalized.input_indices = projected_positions;
@@ -2088,7 +2434,13 @@ Result<Value> OperationRegistry::invoke_current(
              .ok())
       return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
                                            "invalid operation output demand"));
-    if (!input_internal::complete_image_channels(
+    auto closed_region = input_internal::color_output_region(
+        expected_output.value().descriptor, expected_output.value().facets,
+        normalized.output_region);
+    if (!closed_region.ok())
+      return Result<Value>(closed_region.status());
+    normalized.output_region = closed_region.take_value();
+    if (!input_internal::complete_tuple_channels(
             expected_output.value().descriptor, expected_output.value().facets,
             normalized.output_region))
       return Result<Value>(Status::failure(
@@ -2141,8 +2493,7 @@ Result<Value> OperationRegistry::invoke_current(
                                            result.value().facets())
              : std::none_of(result.value().facets().begin(),
                             result.value().facets().end(), [](const auto& f) {
-                              return f.key == "photospider.image" ||
-                                     f.key == "photospider.semantic";
+                              return input_internal::typed_facet(f.key);
                             }));
     if (output_status.ok() && !facets_match)
       output_status =
@@ -2160,7 +2511,17 @@ Result<Value> OperationRegistry::invoke_current(
           output_status.code != ErrorCode::ResourceExhausted)
         output_status.code = ErrorCode::OperationFailed;
     }
-    return output_status.ok() ? result : Result<Value>(output_status);
+    if (!output_status.ok())
+      return Result<Value>(output_status);
+    if (!result.value().resources().size())
+      return result;
+    auto compatible = normalized.resources.unite(result.value().resources());
+    if (!compatible.ok())
+      return Result<Value>(compatible.status());
+    const auto& value = result.value();
+    return Value::from_storage(value.descriptor(), value.region(),
+                               value.layout(), value.storage(), value.facets(),
+                               normalized.resources);
   } catch (const std::bad_alloc&) {
     throw;
   } catch (const std::exception& error) {
@@ -2192,18 +2553,21 @@ std::vector<std::string> OperationRegistry::keys() const {
  * @brief Implements the maintained frozen built-in operation set.
  * @copydetails make_default_operation_registry
  */
-std::shared_ptr<OperationRegistry> make_default_operation_registry() {
+std::shared_ptr<OperationRegistry> make_default_operation_registry(
+    bool freeze) {
   auto registry = std::make_shared<OperationRegistry>();
   const auto status =
       plugin_internal::register_builtin_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
   registry->builtins_ = true;
-  registry->freeze();
+  if (freeze)
+    registry->freeze();
   return registry;
 }
 
 std::string OperationRegistry::persistent_cache_identity() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
   return builtins_ ? PHOTOSPIDER_CACHE_BUILD_ID : "";
 }
 

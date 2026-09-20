@@ -43,8 +43,9 @@ bool coherent(const ResourceCapacity& c) {
          c[ResourceKind::Shared] <= c[ResourceKind::Device];
 }
 Status exhausted() {
-  return Status::failure(ErrorCode::ResourceExhausted,
-                         "managed resource capacity exhausted");
+  return Status{ErrorCode::ResourceExhausted,
+                "managed resource capacity exhausted",
+                FailureReason::CapacityLimit};
 }
 }  // namespace
 
@@ -251,7 +252,15 @@ Status ResourceBudget::consume(ResourceWork work) const {
       work.io_requests > limit.maximum_io_requests - issued.io_requests ||
       work.stages > limit.maximum_stages - issued.stages) {
     resource_internal::metadata_failure(*this, ErrorCode::ResourceExhausted);
-    return exhausted();
+    const bool work_limit =
+        work.work > limit.maximum_work - issued.work ||
+        work.io_bytes > limit.maximum_io_bytes - issued.io_bytes ||
+        work.io_requests > limit.maximum_io_requests - issued.io_requests;
+    return Status{
+        ErrorCode::ResourceExhausted,
+        work_limit ? "managed resource work exhausted"
+                   : "managed resource stages exhausted",
+        work_limit ? FailureReason::WorkLimit : FailureReason::StageLimit};
   }
   issued.work += work.work;
   issued.io_bytes += work.io_bytes;

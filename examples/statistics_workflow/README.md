@@ -65,6 +65,11 @@ and host capacity, the 65,536-bin multipass recipe, disk exhaustion after a fiel
 histogram publication, cross-row HW, 257-bin paged output, and 65,537 logical
 input samples. Failed runs assert that Disk and Payload accounting returns to zero. It checks result and window
 ownership after `ExecutionContext` destruction and final mandatory disk release.
+Single-Run fixtures use a 64 KiB managed Host/Metadata cap. The changed-snapshot
+fixture retains the first Run's global results during the second execution and
+explicitly admits 128 KiB for their combined metadata and active workspace.
+Its oracle still checks distinct ObjectIds, the old total 57, and the new total
+58; the smaller explicit resource-failure fixtures are unchanged.
 Empty statistics have `count=total=0, valid=0`; all-zero selected values have
 `count>0, total=0, valid=1`. Both fail explicitly when asked to grade.
 
