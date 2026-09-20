@@ -33,8 +33,8 @@ and in the named family contract take precedence.
 
 Inherit the [scatter contract](NUM-10_scatter_contract.md) in full: base/indices/
 updates port order, static axis, same value dtype/non-axis dimensions, four
-supported dtypes, generic dense output, global index validation, exact contributor
-support, index invalidation, errors, resources and immutable ownership. Integer
+supported dtypes, generic dense output, global index validation, numerical contributor
+selection, index invalidation, errors, resources and immutable ownership. Integer
 results remain exact; accelerated floating results obey the shared final FP32
 bound. Input base is never modified.
 
@@ -49,8 +49,9 @@ charged to host budgets. No unordered floating atomic accumulation is allowed.
 
 If no update matches, copy base without arithmetic, including sNaN bits. For
 aggregate variants with matching updates, use the shared exceptional-value
-priority and zero rules. Unrequested base/update values are not evaluated;
-indices remains globally validated even for a partial output request.
+priority and zero rules. Whole reads and validates complete base/updates/indices, while only the
+specified contributors enter arithmetic. Unselected upstream/typed failures
+can fail the Run. The complete output is computed before consumer projection.
 
 ## Acceptance and implementation status
 
@@ -65,17 +66,7 @@ For Int64, base=INT64_MAX with matching updates [1,-1] must return INT64_MAX
 without a partial-sum overflow failure. The same grouping principle applies to
 finite floating cancellation; compare exact sums with one final rounding.
 
-The current three profile keys use `scatter_sum_node` from
-`photospider/numeric/indexing.hpp`. Matching contributors are accumulated by
-the exact aggregate workspace and rounded once for floating output; Int64 uses
-final range checking. The public fixture produces `[10,25,34]` and checks exact
-contributor support, exceptional values, overflow attribution and cleanup.
-On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed the complete manual workflows and 3858 independent
-coordinate/contributor/Fraction cases per profile. The installed public consumer
-passed. Checks include exact reads and dirty support, typed actual-read closure,
-raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
-replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
-Focused compiler/dependency/fragments/resources units and independent scoped
-reviews passed. Manual acceptance has no integration-test registration.
-Specification status remains Proposed; no performance claim is inferred.
+All formal profile keys use CPU Whole. Current public workflows, independent
+coordinate/contributor/Fraction oracles, failure/resource checks and performance
+are in [NUM-10 Whole execution](../indexing-whole.md). Earlier 2026-09-14
+regional strict/Apple/WSL and installed checks predate this migration.

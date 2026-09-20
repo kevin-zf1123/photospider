@@ -104,7 +104,7 @@ def main():
         for shape, values in arrays:
             row += ' ' + ','.join(map(str, shape)) + ' ' + ' '.join(f'{v:x}' for v in values)
         rows.append(row + '\n')
-        expected.append(reference(operation, dtype, axis, arrays))
+        expected.append('error' if operation == 'concatenate' and layout == 'view' else reference(operation, dtype, axis, arrays))
 
     for dtype, width in [(1, 8), (2, 64), (3, 64), (4, 32)]:
         sign = 1 << (width-1)

@@ -83,6 +83,10 @@ inline void resources(const ps::WorkflowNode& node,
               traits.outputs[0].dependency_version == 0 &&
               traits.outputs[0].continuation_bytes == 0,
           "formal profile has one Whole callback and admitted workspace");
+  const auto output_region =
+      traits.outputs[0].shape_rule == ps::OperationShapeRule::Fixed
+          ? ps::Region::whole(traits.outputs[0].fixed_output_shape)
+          : inputs[0].region();
   for (unsigned mode = 0; mode < (traits.workspace_bytes ? 3U : 2U); ++mode) {
     ps::ResourceLimits limits;
     if (mode == 0)
@@ -97,7 +101,7 @@ inline void resources(const ps::WorkflowNode& node,
     {
       ps::ResourceAllocationScope scope(budget);
       ps::OperationInvocation call(inputs, demands, node.parameters,
-                                   ps::Backend::Cpu, {}, inputs[0].region(),
+                                   ps::Backend::Cpu, {}, output_region,
                                    budget.allocator());
       auto result = registry->invoke(node.operation, call);
       require(!result.ok() &&
@@ -124,7 +128,7 @@ inline void resources(const ps::WorkflowNode& node,
     ps::ResourceAllocationScope scope(budget);
     ps::OperationInvocation call(inputs, demands, node.parameters,
                                  ps::Backend::Cpu, cancellation.token(),
-                                 inputs[0].region(), budget.allocator());
+                                 output_region, budget.allocator());
     outcome = registry->invoke(node.operation, call).status();
   } catch (...) {
     done.store(true);

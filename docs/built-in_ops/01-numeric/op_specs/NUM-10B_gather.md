@@ -45,45 +45,29 @@ actual-read typed input validation remains required. Shapes are positive rank
 1..8, with input/output logical count bounded by the NUM array limit 2^40 and
 1<=M<=2^40 subject to that output limit. No implicit broadcast, cast, rank
 squeezing, negative-axis shorthand or static layout parameter is provided.
-Output is dense per requested rectangle in every profile.
+Output is complete dense storage in every profile.
 
-## Staged demand and exact support
+## Whole demand and support
 
-For requested Q, let J be the set of axis-coordinate values occurring in Q.
-Read indices exactly on J as retained Control support and require every observed
-index in [0,input.shape[axis]). Negative indices, clipping and wrap are not
-supported. Unrequested indices are not checked and do not cause failure. Empty
-Q reads neither input nor indices.
-
-After index validation, compute the exact source Data set S(Q) by the mapping
-above; deduplicate identical complete source coordinates. Repeated output slices
-reuse those reads. Distinct rows sharing the same axis index are still distinct
-source coordinates. Add required typed-validation closure separately; never
-replace irregular source sets with bounding gaps or Whole reads silently.
-
-A change to an observed index invalidates and replans the output coordinates
-using it. A change to source Data invalidates every witnessed output that maps
-to it, including duplicates. Retain index/source/validation witnesses and include
-metadata, axis/profile and relevant dependencies in cache identity.
+For every nonempty demand, collect and validate the complete source and complete
+index vector. Every index must lie in [0,input.shape[axis]); any invalid index
+fails Domain/Run even if its output coordinate was not requested. Empty reads
+nothing. All source/index edits invalidate the complete output. Repeated indices
+still select identical raw source values in their original output order.
 
 ## Storage, resources and errors
 
-Read legal immutable source/control layouts through checked addresses. Copy raw
-bits into owned packed output fragments with correct global Region/storage
-origins. Result owners can outlive execution context; no writable alias, hidden
-zero or unrequested SIMD tail read is permitted. Profiles are bitwise equivalent;
-platform-specific names reject incompatible platforms.
-
-For Mq requested elements and Jq distinct used indices, mapping is O(Mq*r+Jq),
-with actual dedup/set work charged separately. Account requested output payload,
-indices/control witnesses, source dedup metadata, source/validation owners and
-scratch. Allocation does not scale with the input bounding interval merely
-because indices are far apart. Large irregular sets may fail ResourceExhausted;
-never widen support to evade a budget. Poll cancellation per stage/mapping block
-and at least every 4096 copied elements. Release unpublished state on failure.
+The complete output is packed and owned, costing N*dtype_size bytes; complete
+source/index collection may add their full payloads. Index plan metadata is16*M
+bytes (one key/position pair per entry), with no source-set dedup descriptors.
+Plan lookup is direct by output-axis position; mapped source coordinates are
+reused in bounded rank8 vectors. Work is O(M+N*rank), with cancellation/work
+checks during index scan and each output copy. Capacity, typed or upstream
+failures remain failures and publish no partial result. Arbitrary legal input
+strides/origins preserve raw bits, including unaligned samples and sNaNs.
 
 Compile/preflight rejects dtype/rank/shape/axis violations and output count above
-the array cap. An observed invalid index fails with InvalidArgument,
+the array cap. Any invalid index fails with InvalidArgument,
 FailureReason::InvalidDomain and diagnostic IndexOutOfBounds, reporting the
 index-array position, actual index and source extent. No partial failed
 observation is published. Source/typed/resource/cancellation failures retain
@@ -94,25 +78,12 @@ existing categories and inherited [array ownership rules](NUM-09A_reshape.md).
 Conceptual fixture: input=[[10,11,12],[20,21,22]], indices=[2,0,2], axis=1
 produces [[12,10,12],[22,20,22]]. Use independent integer mapping and raw-bit
 comparison, plus source-read logs proving distinct-source dedup and precise index
-support. A request only at output axis position 0 must not read an invalid index
+support. A request only at output axis position 0 must still reject an invalid index
 at position 1. Include both extreme legal indices, duplicates, non-leading axes,
 index/source strides, sNaN bits, disjoint requests, invalidation after index
 changes, resource exhaustion, cancellation, cache-off and owner lifetime.
 
-The current three profile keys use the public `gather_node` helper in
-`photospider/numeric/indexing.hpp`. Index control is read only at requested
-output-axis positions, while each nonempty request still validates the observed
-indices and maps repeated indices to deduplicated source support. Output is
-owned dense storage.
-
-The manual indexing workflow checks `[[10,11,12],[20,21,22]]` with indices
-`[2,0,2]` to produce `[[12,10,12],[22,20,22]]`, exact support and changed-index
-cache replanning, strided/unaligned sources, fenv and resource limits. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed the complete manual workflows and 3858 independent
-coordinate/contributor/Fraction cases per profile. The installed public consumer
-passed. Checks include exact reads and dirty support, typed actual-read closure,
-raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
-replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
-Focused compiler/dependency/fragments/resources units and independent scoped
-reviews passed. Manual acceptance has no integration-test registration.
-Specification status remains Proposed; no performance claim is inferred.
+All formal profile keys use CPU Whole. Current public workflows, independent
+coordinate/contributor/Fraction oracles, failure/resource checks and performance
+are in [NUM-10 Whole execution](../indexing-whole.md). Earlier 2026-09-14
+regional strict/Apple/WSL and installed checks predate this migration.

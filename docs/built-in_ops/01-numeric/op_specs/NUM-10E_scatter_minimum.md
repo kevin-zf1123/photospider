@@ -33,8 +33,8 @@ and in the named family contract take precedence.
 
 Inherit the [scatter contract](NUM-10_scatter_contract.md) in full: base/indices/
 updates port order, static axis, same value dtype/non-axis dimensions, four
-supported dtypes, generic dense output, global index validation, exact contributor
-support, index invalidation, errors, resources and immutable ownership. All three
+supported dtypes, generic dense output, global index validation, numerical contributor
+selection, index invalidation, errors, resources and immutable ownership. All three
 profiles produce identical bits. Input base is never modified.
 
 ## Update semantics
@@ -45,8 +45,9 @@ ignores a NaN or converts Int64 through floating point.
 
 If no update matches, copy base without arithmetic, including sNaN bits. For
 aggregate variants with matching updates, use the shared exceptional-value
-priority and zero rules. Unrequested base/update values are not evaluated;
-indices remains globally validated even for a partial output request.
+priority and zero rules. Whole reads and validates complete base/updates/indices, while only the
+specified contributors enter arithmetic. Unselected upstream/typed failures
+can fail the Run. The complete output is computed before consumer projection.
 
 ## Acceptance and implementation status
 
@@ -57,15 +58,7 @@ Include duplicated targets, unhit sNaN base, selected and unselected failures,
 NaN payload precedence, infinities, signed zeros, integer extrema, source strides,
 index changes, global invalid-index rejection and shared resource/lifetime tests.
 
-The current three profile keys use `scatter_minimum_node` from
-`photospider/numeric/indexing.hpp`. Matching updates are grouped with the base
-and reduced using the shared NaN-propagating minimum and signed-zero rules;
-no-hit coordinates preserve base bits. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed the complete manual workflows and 3858 independent
-coordinate/contributor/Fraction cases per profile. The installed public consumer
-passed. Checks include exact reads and dirty support, typed actual-read closure,
-raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
-replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
-Focused compiler/dependency/fragments/resources units and independent scoped
-reviews passed. Manual acceptance has no integration-test registration.
-Specification status remains Proposed; no performance claim is inferred.
+All formal profile keys use CPU Whole. Current public workflows, independent
+coordinate/contributor/Fraction oracles, failure/resource checks and performance
+are in [NUM-10 Whole execution](../indexing-whole.md). Earlier 2026-09-14
+regional strict/Apple/WSL and installed checks predate this migration.

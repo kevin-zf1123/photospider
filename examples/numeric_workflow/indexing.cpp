@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -40,6 +41,7 @@ ps::Value array(std::vector<std::uint64_t> shape,
                                       std::move(buffer).freeze()));
 }
 struct Fixture {
+  std::uint64_t maximum_work = UINT64_C(1) << 40;
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
@@ -66,6 +68,7 @@ struct Fixture {
     config.cpu_workers = 1;
     config.maximum_live_bytes = 65536;
     config.managed_resources = ps::ResourceLimits{};
+    config.managed_resources->maximum_work = maximum_work;
     ps::ExecutionContext execution(registry, config);
     auto frozen = execution.freeze(plan.value().plan, bindings);
     if (!frozen.ok())
@@ -81,7 +84,15 @@ void concatenate(ps::CpuNumericProfile profile) {
         1, {ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2}}, 1,
         layout, profile));
     Fixture fixture(node, {array({2, 2}, {1, 2, 3, 4}), array({2, 1}, {5, 6})});
-    auto answer = take(fixture.run(take(ps::Footprint::all({2, 3}))));
+    auto full = fixture.run(take(ps::Footprint::all({2, 3})));
+    if (layout == ps::numeric::ArrayLayout::View) {
+      require(!full.ok() && full.status().message.find("ViewUnavailable") !=
+                                std::string::npos,
+              "multi-owner concatenate View fails");
+      fixture.document.nodes[0].parameters["layout"] = std::string("dense");
+      full = fixture.run(take(ps::Footprint::all({2, 3})));
+    }
+    auto answer = take(std::move(full));
     const std::int64_t expected[] = {1, 2, 5, 3, 4, 6};
     for (std::uint64_t i = 0; i < 2; ++i)
       for (std::uint64_t j = 0; j < 3; ++j) {
@@ -112,24 +123,31 @@ void concatenate(ps::CpuNumericProfile profile) {
     fixture.document.nodes.push_back({2, "manual.unhit_concat", {}, {}});
     auto requested = take(
         ps::Footprint::from_regions({2, 3}, {ps::Region({{0, 2}, {2, 1}})}));
-    auto only_b = take(fixture.run(requested));
-    require(reads == 0, "unhit concat input is not evaluated");
-    auto support = take(only_b.dependencies.source_support());
-    require(
-        support.find("input0") == support.end() || support.at("input0").empty(),
-        "unhit concat input has no source support");
-    require(support.at("input1") == take(ps::Footprint::all({2, 1})),
-            "B translated support");
-    const auto dirty = take(
-        ps::Footprint::from_regions({2, 1}, {ps::Region({{1, 1}, {0, 1}})}));
-    require(
-        take(only_b.dependencies.potential_dirty("input1", dirty))
-                .at("values") == take(ps::Footprint::from_regions(
-                                     {2, 3}, {ps::Region({{1, 1}, {2, 1}})})),
-        "B dirty shifts to the output slab");
+    auto only_b = fixture.run(requested);
+    require(!only_b.ok() && reads == 1,
+            "Whole concatenate reads even unselected input");
   }
-  std::cout << "concatenate: [[1,2,5],[3,4,6]], view/dense, hit-only reads and "
-               "translated dirty passed\n";
+  // Two strided Values share one complete affine backing through public invoke.
+  auto whole = array({2, 3}, {1, 2, 5, 3, 4, 6});
+  auto left = take(ps::Value::from_storage({ps::ElementType::Int64, {2, 2}},
+                                           ps::Region::whole({2, 2}),
+                                           {0, {24, 8}}, whole.storage()));
+  auto right = take(ps::Value::from_storage({ps::ElementType::Int64, {2, 1}},
+                                            ps::Region::whole({2, 1}),
+                                            {16, {24, 8}}, whole.storage()));
+  auto node = take(ps::numeric::concatenate_node(
+      1, {ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2}}, 1,
+      ps::numeric::ArrayLayout::View, profile));
+  const std::vector<ps::Value> inputs{left, right};
+  const std::vector<ps::Region> demands{left.region(), right.region()};
+  ps::OperationInvocation call(inputs, demands, node.parameters);
+  auto result =
+      take(ps::make_default_operation_registry()->invoke(node.operation, call));
+  require(result.storage() == whole.storage() &&
+              result.layout().byte_strides == whole.layout().byte_strides,
+          "concatenate shared owner affine view");
+  std::cout << "concatenate: [[1,2,5],[3,4,6]], Whole Dense, shared-owner View "
+               "and unselected failure passed\n";
 }
 void gather(ps::CpuNumericProfile profile) {
   auto node =
@@ -149,18 +167,15 @@ void gather(ps::CpuNumericProfile profile) {
   const auto wanted =
       take(ps::Footprint::from_regions({2, 3}, {ps::Region({{0, 2}, {0, 1}})}));
   fixture.bindings.inputs[1].value = array({3}, {2, -1, 2});
-  auto partial = take(fixture.run(wanted));
-  const auto support = take(partial.dependencies.source_support());
-  require(support.at("input1") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{0, 1}})})),
-          "gather ignores invalid unrequested index");
-  require(support.at("input0") == take(ps::Footprint::from_regions(
-                                      {2, 3}, {ps::Region({{0, 2}, {2, 1}})})),
-          "gather exact mapped slice support");
+  auto partial = fixture.run(wanted);
+  require(
+      !partial.ok() && partial.status().detail.scope == ps::FailureScope::Run,
+      "gather validates all indices even for partial output");
   auto invalid = fixture.run(take(ps::Footprint::all({2, 3})));
   require(invalid.status().code == ps::ErrorCode::InvalidArgument &&
               invalid.status().reason == ps::FailureReason::InvalidDomain &&
-              invalid.status().detail.atom.has_value() &&
+              !invalid.status().detail.atom &&
+              invalid.status().detail.scope == ps::FailureScope::Run &&
               invalid.status().message.find("IndexOutOfBounds") !=
                   std::string::npos,
           "gather index error attribution");
@@ -203,14 +218,9 @@ void scatter(ps::CpuNumericProfile profile) {
     const auto support = take(result.dependencies.source_support());
     require(support.at("input1") == take(ps::Footprint::all({3})),
             "scatter retains full index scan");
-    if (!kind) {
-      require(support.at("input0") == take(ps::Footprint::from_regions(
-                                          {3}, {ps::Region({{0, 1}})})),
-              "replace skips overwritten base");
-      require(support.at("input2") == take(ps::Footprint::from_regions(
-                                          {3}, {ps::Region({{1, 2}})})),
-              "replace skips earlier duplicate update");
-    }
+    require(support.at("input0") == take(ps::Footprint::all({3})) &&
+                support.at("input2") == take(ps::Footprint::all({3})),
+            "Whole scatter reads complete base and updates");
     fixture.bindings.inputs[1].value = array({3}, {1, 1, 3});
     auto invalid = fixture.run(
         take(ps::Footprint::from_regions({3}, {ps::Region({{0, 1}})})));
@@ -232,8 +242,8 @@ void scatter(ps::CpuNumericProfile profile) {
       require(overflow.status().code == ps::ErrorCode::OperationFailed &&
                   overflow.status().reason ==
                       ps::FailureReason::ArithmeticOverflow &&
-                  overflow.status().detail.atom.has_value() &&
-                  overflow.status().detail.atom->coordinate[0] == 0,
+                  !overflow.status().detail.atom &&
+                  overflow.status().detail.scope == ps::FailureScope::Run,
               "integer final overflow belongs to actual atom");
     }
   }
@@ -253,74 +263,70 @@ void failure_diagnostics(ps::CpuNumericProfile profile) {
   auto node = take(ps::numeric::scatter_sum_node(
       1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
       ps::WorkflowInputReference{3}, 0, profile));
-  const std::vector<ps::Value> inputs{array({5}, {1, 2, 3, 4, INT64_MAX}),
-                                      array({1}, {4}), array({1}, {1})};
-  ps::DependencyRequest request;
+  std::vector<ps::Value> inputs{array({5}, {1, 2, 3, 4, INT64_MAX}),
+                                array({1}, {4}), array({1}, {1})};
+  std::vector<ps::Region> demands;
   for (const auto& value : inputs)
-    request.inputs.push_back({value.descriptor(), {}});
-  request.parameters = node.parameters;
-  request.outputs = take(ps::Footprint::all({5}));
-  request.snapshot_identity = "failed-index-attempt";
-  for (unsigned failure_kind : {0U, 1U, 2U}) {
-    bool armed = false, copy_report_rejected = false;
-    unsigned single_units_at_four = 0;
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(registry->start_dependency(
-        node.operation, request, ps::BufferAllocator{},
-        [&](std::uint64_t amount) {
-          if (failure_kind == 1 && armed && amount >= 512)
-            return ps::Status{ps::ErrorCode::ResourceExhausted,
-                              "arithmetic work limit",
-                              ps::FailureReason::WorkLimit};
-          // After evaluation 4, the one-unit services are source read followed
-          // by the copy report. Reject precisely the latter admission.
-          if (failure_kind == 2 && armed && amount == 1 &&
-              session->numeric_diagnostics().evaluated_values == 4 &&
-              ++single_units_at_four == 2) {
-            copy_report_rejected = true;
-            return ps::Status{ps::ErrorCode::ResourceExhausted,
-                              "copy report work limit",
-                              ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    require(session->poll().ok(), "scatter control need");
+    demands.push_back(value.region());
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  {
+    ps::ResourceAllocationScope scope(budget);
+    ps::OperationInvocation call(inputs, demands, node.parameters,
+                                 ps::Backend::Cpu, {}, ps::Region::whole({5}),
+                                 budget.allocator());
+    auto result = registry->invoke(node.operation, call);
     require(
-        session
-            ->supply({fragments(inputs[0], false), fragments(inputs[1], true),
-                      fragments(inputs[2], false)},
-                     request.snapshot_identity)
-            .ok(),
-        "scatter control supply");
-    require(session->poll().ok(), "scatter data need");
-    require(
-        session
-            ->supply({fragments(inputs[0], true), fragments(inputs[1], false),
-                      fragments(inputs[2], true)},
-                     request.snapshot_identity)
-            .ok(),
-        "scatter data supply");
-    armed = true;
-    auto failed = session->poll();
-    require(failed.status().reason ==
-                (failure_kind ? ps::FailureReason::WorkLimit
-                              : ps::FailureReason::ArithmeticOverflow),
-            "final aggregate overflow");
-    const auto diagnostics = session->numeric_diagnostics();
-    if (failure_kind == 2) {
-      require(
-          copy_report_rejected && diagnostics.evaluated_values == 4 &&
-              diagnostics.copied_elements == 0,
-          "copy report WorkLimit prevents the flush before recording copies");
-    } else {
-      require(
-          diagnostics.evaluated_values == 5 && diagnostics.copied_elements == 4,
-          "failure retains five evaluations and four already copied values");
-    }
+        !result.ok() &&
+            result.status().reason == ps::FailureReason::ArithmeticOverflow &&
+            result.status().detail.scope == ps::FailureScope::Run,
+        "late aggregate overflow fails complete output");
   }
-  std::cout
-      << "failed scatter diagnostics: evaluated=5 copied=4 after final "
-         "overflow/arithmetic WorkLimit, plus copy-report budget gate passed\n";
+  require(budget.statistics().live[ps::ResourceKind::Payload] == 0 &&
+              budget.statistics().live[ps::ResourceKind::Metadata] == 0,
+          "failure releases output, scratch and dynamic index plan");
+  std::vector<std::int64_t> base(16384, 1), indices(16384), updates(16384, 2);
+  for (unsigned i = 0; i < indices.size(); ++i)
+    indices[i] = i;
+  const std::vector<ps::Value> large{
+      array({16384}, base), array({16384}, indices), array({16384}, updates)};
+  for (const auto* name : {"scatter_replace", "scatter_sum", "scatter_minimum",
+                           "scatter_maximum", "gather", "concatenate"}) {
+    auto checked_node = node;
+    auto suffix =
+        node.operation.substr(std::string("array.scatter_sum").size());
+    checked_node.operation = std::string("array.") + name + suffix;
+    auto checked_inputs = large;
+    if (std::string(name) == "gather")
+      checked_inputs.resize(2);
+    if (std::string(name) == "concatenate") {
+      checked_inputs = {large[0], large[2]};
+      checked_node.parameters["layout"] = std::string("dense");
+    }
+    point_math_checks::resources(
+        checked_node, checked_inputs,
+        std::string(name) == "concatenate" ? 262144 : 131072);
+  }
+  ps::ResourceLimits limited;
+  limited.capacity[ps::ResourceKind::Metadata] = 128;
+  ps::ResourceBudget metadata_budget(limited);
+  {
+    ps::ResourceAllocationScope scope(metadata_budget);
+    std::vector<ps::Region> regions;
+    for (const auto& value : large)
+      regions.push_back(value.region());
+    ps::OperationInvocation call(large, regions, node.parameters,
+                                 ps::Backend::Cpu, {}, large[0].region(),
+                                 metadata_budget.allocator());
+    auto failed = registry->invoke(node.operation, call);
+    require(!failed.ok() &&
+                failed.status().code == ps::ErrorCode::ResourceExhausted,
+            "index plan metadata capacity failure");
+  }
+  require(metadata_budget.statistics().live[ps::ResourceKind::Metadata] == 0 &&
+              metadata_budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "index metadata failure releases ownership");
+  std::cout << "Whole scatter overflow, work/output/scratch budgets and active "
+               "cancellation passed; counters=N/A\n";
 }
 void layouts_environment(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
@@ -432,19 +438,14 @@ void cache_and_limits(ps::CpuNumericProfile profile) {
   require(changed.values.at("values").read({0}, &value, 8).ok() && value == 30,
           "changed gather index replans result");
   require(take(changed.dependencies.source_support()).at("input0") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{2, 1}})})),
+              take(ps::Footprint::all({3})),
           "new cache witness replaces old source support");
   Fixture limits(node, {array({3}, {10, 20, 30}), array({1}, {0})});
   ps::ExecutionOptions options;
-  options.dependencies.maximum_work = 1;
+  limits.maximum_work = 1;
   require(limits.run(query.at("values"), options).status().reason ==
               ps::FailureReason::WorkLimit,
           "gather work exhaustion");
-  options = {};
-  options.dependencies.maximum_state_bytes = 1;
-  require(limits.run(query.at("values"), options).status().code ==
-              ps::ErrorCode::ResourceExhausted,
-          "gather state capacity");
   std::cout << "warm gather cache, changed-index replanning and work/state "
                "limits passed\n";
 }
@@ -483,40 +484,28 @@ void typed_empty_cancel(ps::CpuNumericProfile profile) {
         {"axis", static_cast<std::int64_t>(2)}};
     if (name == "concatenate")
       parameters["layout"] = std::string("view");
-    ps::OperationInvocation invocation(
-        inputs, demands, parameters, ps::Backend::Cpu, {},
-        ps::Region({{0, 1}, {0, 1}, {name == "concatenate" ? 4U : 0U, 1}}));
-    const auto answer = registry->invoke(key, invocation);
-    const bool unused_bad = name == "concatenate" || name == "scatter_replace";
-    require(answer.ok() == unused_bad,
-            "typed validation follows hit-only source/actual aggregate "
-            "contributors");
-    ps::DependencyRequest request;
-    for (const auto& value : inputs)
-      request.inputs.push_back({value.descriptor(), value.facets()});
-    request.parameters = parameters;
     const std::vector<std::uint64_t> shape =
         name == "concatenate" ? std::vector<std::uint64_t>{1, 1, 8}
                               : std::vector<std::uint64_t>{1, 1, 4};
-    request.outputs = take(ps::Footprint::none(shape));
-    request.snapshot_identity = "index-boundaries";
-    auto empty = take(registry->start_dependency(key, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty index operation reads no payload");
-    request.outputs = take(ps::Footprint::all(shape));
+    ps::OperationInvocation invocation(inputs, demands, parameters,
+                                       ps::Backend::Cpu, {},
+                                       ps::Region::whole(shape));
+    require(!registry->invoke(key, invocation).ok(),
+            "Whole validates every active typed input");
+    ps::WorkflowNode authored{1, key, {}, parameters};
+    for (unsigned port = 0; port < inputs.size(); ++port)
+      authored.inputs.push_back(ps::WorkflowInputReference{port + 1});
+    Fixture empty_fixture(authored, inputs);
+    require(empty_fixture.run(take(ps::Footprint::none(shape))).ok(),
+            "Whole Empty skips invalid typed payload");
     ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    auto cancelled =
-        take(registry->start_dependency(key, request, resources.allocator()));
-    require(cancelled->poll().ok(), "index first need before cancellation");
     cancellation.cancel();
-    require(cancelled->poll().status().code == ps::ErrorCode::Cancelled,
-            "index cancellation after need");
-    cancelled.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "cancelled index continuation releases payload");
+    ps::OperationInvocation cancelled(inputs, demands, parameters,
+                                      ps::Backend::Cpu, cancellation.token(),
+                                      ps::Region::whole(shape));
+    require(registry->invoke(key, cancelled).status().code ==
+                ps::ErrorCode::Cancelled,
+            "pre-cancelled Whole indexing");
   }
   std::cout << "all six indexing operations: typed actual-read closure, Empty "
                "and cancellation cleanup passed\n";
@@ -593,6 +582,9 @@ void oracle(ps::CpuNumericProfile profile) {
       else if (result.status().message.find("IndexOutOfBounds") !=
                std::string::npos)
         std::cout << "index\n";
+      else if (result.status().message.find("ViewUnavailable") !=
+               std::string::npos)
+        std::cout << "error\n";
       else
         throw std::runtime_error(result.status().message);
       continue;

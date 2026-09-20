@@ -572,44 +572,24 @@ for current commands, validation, performance and older-platform boundaries.
 
 ## Indexing and scatter: NUM-10
 
-`photospider_numeric_indexing` exercises the eighteen `array.*` keys through
-the public helpers in `photospider/numeric/indexing.hpp`: `concatenate_node`,
-`gather_node`, `scatter_replace_node`, `scatter_sum_node`,
-`scatter_minimum_node` and `scatter_maximum_node`. Build and run with Clang:
+All eighteen formal profile keys use Whole through the public helpers in
+`photospider/numeric/indexing.hpp`. Complete inputs are read/validated, including
+unselected concatenate ports and overwritten scatter values. Numerical selection
+and exact contributor order remain unchanged. Dense owns the complete output;
+concatenate View requires one compatible affine owner across every input.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_indexing -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_indexing strict
-python3 examples/numeric_workflow/index_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+cmake --build build/clang21-numeric --target photospider_numeric_indexing -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+python3 examples/numeric_workflow/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
 ```
 
-The executable accepts `strict`, `apple` and `x86`; these select the profile
-and are not operation-key suffixes. The basic fixtures include concatenate
-`[[1,2],[3,4]] + [[5],[6]] -> [[1,2,5],[3,4,6]]`, gather
-`[[10,11,12],[20,21,22]]` with indices `[2,0,2]` ->
-`[[12,10,12],[22,20,22]]`, scatter replace `[10,3,4]`, scatter sum
-`[10,25,34]`, scatter minimum `[10,2,4]`, and scatter maximum
-`[10,23,34]` for the documented duplicate-target fixtures.
-
-The manual workflow also checks exact disjoint support, static dependency piece
-translation, duplicate contributor grouping, global index validation, raw and
-quiet NaN behavior, signed zeros, negative/zero/unaligned strides, changed
-index cache witnesses, typed validation, diagnostics, fenv, WorkLimit, state
-limits and cancellation cleanup. `index_oracle.py` independently checks
-integer coordinate mapping, contributor selection and Fraction aggregate
-results. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed all manual checks and 3858 oracle cases per profile. The
-installed public consumer and focused compiler/dependency/fragments/resources
-units passed. Diagnostics retain `evaluated=5, copied=4` after the fifth value
-fails; a copy-report WorkLimit stops before the next block is copied. The shared
-static-piece mapping and aggregate math received independent scoped reviews.
-Indexing diagnostics use their own family/algorithm identity plus the selected
-copy path, host, floating-point build flags and complete Clang version string.
-The complete longest report, including vendor version metadata and its trailing
-NUL, is checked against the 256-byte field at compilation.
-These targets have no CTest or integration-test registration; no performance
-result is claimed.
+Use `apple` or `x86` to select an available accelerated profile. Expected fixtures:
+concatenate `[[1,2,5],[3,4,6]]`, gather `[[12,10,12],[22,20,22]]`, scatter
+replace/sum/min/max `[10,3,4]`/`[10,25,34]`/`[10,2,4]`/`[10,23,34]`.
+See [NUM-10 Whole execution](../../docs/built-in_ops/01-numeric/indexing-whole.md)
+for independent oracle, resources, timing and profiling evidence. Earlier WSL
+regional validation is not current Whole validation.
 
 ## Reductions: NUM-11
 

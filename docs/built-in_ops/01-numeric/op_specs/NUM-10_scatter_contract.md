@@ -43,17 +43,15 @@ j; sum/minimum/maximum include base first and then all matching updates ordered
 by increasing j, defining priority for exceptional values. Numeric aggregate
 rounding is specified separately; this order is not an implicit rounded-sum rule.
 
-For every nonempty requested output Q, scan and validate all indices before
-source value reads. Every index must be nonnegative and less than the base axis
-extent; any invalid index fails the observation, even outside Q. No negative
-index interpretation, wrap, clipping or ignored out-of-range update is allowed.
-Empty Q reads nothing. Retain the full index scan as Control/validation evidence.
+Every nonempty request collects and validates complete base, indices and updates
+before callback. All indices must be in [0,base.shape[axis]); an invalid index
+fails Domain/Run with IndexOutOfBounds even outside the consumer projection.
+Empty reads nothing. All active source edits invalidate the complete output.
 
-For output q, let J(q)={j:indices[j]=q[axis]}. If J is empty, read and copy base[q].
-For replace with nonempty J, read only updates at j=max J, with other coordinates
-from q; do not read overwritten base or earlier updates. For aggregate variants,
-read base[q] and all updates selected by J. No unrelated update value is read.
-Recognized typed-input validation may add separately declared support.
+For numerical evaluation, J(q)={j:indices[j]=q[axis]}. No hit copies base raw
+bits. Replace copies updates[max J] raw bits. Aggregates evaluate base followed
+by increasing matching j. Earlier overwritten or unrelated values do not enter
+the arithmetic, but their upstream/typed failures can fail Whole preparation.
 
 ## Types, storage and resource contract
 
@@ -61,35 +59,26 @@ Support UInt8, Int64, Float32 and Float64 for base/updates/output, with no impli
 conversion. Shapes have rank 1..8 with positive extents; base/output and updates
 logical element counts are each <=2^40, indices has 1<=M<=2^40 subject to update
 shape constraints. Output facets are empty; recognized typed input obligations
-remain attached to actually required reads. There are no static parameters other
+cover all active input values. There are no static parameters other
 than axis and no layout/atomic-order mode.
 
-Output is newly owned dense storage per requested rectangle; it never mutates
-base. Preserve original bits on replacement or no-hit paths. Legal source strides,
-offsets, zero/negative strides and unaligned elements are supported. Return exact
-requested coverage with correct global origins; do not allocate the entire base
-or fabricate values outside Q.
+Output owns complete packed base.shape storage, including for sparse demand.
+Inputs may also require complete packed collection; immutable negative/zero
+strides and unaligned elements remain valid. No writable alias is returned.
 
-For M indices, N requested output elements and C selected contributions, required
-work is O(M+N+C) plus coordinate/set and exact arithmetic work. An implementation
-may build bounded target buckets or scan indices in budgeted chunks, but must
-finish required global validation before publishing. Charge index scan work even
-for tiny Q, as well as index/source owners, target buckets, exact accumulators,
-output bytes, typed validation, fragment metadata and scratch. There is no
-unbudgeted full-index cache or unordered atomic accumulation.
+For M indices and N complete output elements, stable eight-pass radix grouping
+costs O(M); per-output range lookup costs O(log M), followed by actual contributor
+arithmetic. The plan and sort scratch each contain M pairs of two uint64 values
+(peak32*M metadata bytes), with sort scratch released after grouping. The exact
+accumulator is a fixed admitted workspace. Bounded rank<=8 coordinate vectors
+are reused. No per-output dependency descriptors, source-set dedup or numeric
+atom diagnostics remain. All metadata allocations and numerical work obey the
+host ledger; cancellation is checked during scan, sorting, each output and
+extended exact arithmetic. Any failure releases unpublished output/state.
 
-Retain full index-control/validation witnesses plus exact base/update supports.
-Index changes invalidate and replan observations that depended on the scan;
-source changes invalidate only their retained contributors or validation support.
-Earlier overwritten replace updates do not form value dependencies. Account
-optional immutable index-plan caches, keyed by source versions and geometry;
-cache-off does not change results or ownership.
-
-Check cancellation per scan/mapping stage, at least every 4096 copied values,
-and during extended arithmetic/refinement. Use host workers and budgets. Budget
-failure returns ResourceExhausted rather than broadening reads, dropping updates
-or changing numeric order. Published result owners survive context destruction;
-failed observations publish no partial result and release unpublished state.
+Index/source edits invalidate all output observations. Content caching retains
+full logical input witnesses. Aggregate order, raw selection and immutable
+owner lifetime are independent of cache policy.
 
 ## Common errors and acceptance
 
@@ -97,28 +86,13 @@ Compile/preflight rejects unsupported dtype, mismatched rank/non-axis shape,
 wrong index dtype/shape, invalid axis or logical count excess. Runtime invalid
 indices use InvalidArgument, FailureReason::InvalidDomain and diagnostic
 IndexOutOfBounds with j, index and destination extent. Integer result overflow
-uses OperationFailed with FailureReason::ArithmeticOverflow at the requested
-coordinate. Upstream/typed/resource/cancellation errors retain existing categories.
+uses OperationFailed with FailureReason::ArithmeticOverflow at the failing complete-output
+coordinate with Domain/Run attribution. Upstream/typed/resource/cancellation errors retain existing categories.
 
-The twelve scatter keys use the public `scatter_replace_node`, `scatter_sum_node`,
-`scatter_minimum_node` and `scatter_maximum_node` helpers. Regional Atomic
-callbacks retain an explicit association row per requested output: full index
-Control/validation, then exact base/update Data and typed Validation. Stable
-radix grouping retains increasing update position within each target. Bounded
-binary lookup and source-set construction charge their actual mapping work;
-replacement reads only the last match and aggregates retain all contributors.
-The fixed exact workspace admits all limb storage through its continuation.
-
-`examples/numeric_workflow/indexing.cpp` and `index_oracle.py` provide the
-public manual acceptance path. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed the complete manual workflows and 3858 independent
-coordinate/contributor/Fraction cases per profile. The installed public consumer
-passed. Checks include exact reads and dirty support, typed actual-read closure,
-raw/quiet NaN and zero rules, strided input, four fenv modes, changed-index cache
-replanning, Empty, cancellation, work/state limits and failed-attempt diagnostics.
-Focused compiler/dependency/fragments/resources units and independent scoped
-reviews passed. Manual acceptance has no integration-test registration.
-Specification status remains Proposed; no performance claim is inferred.
+All formal profile keys use CPU Whole. Current public workflows, independent
+coordinate/contributor/Fraction oracles, failure/resource checks and performance
+are in [NUM-10 Whole execution](../indexing-whole.md). Earlier 2026-09-14
+regional strict/Apple/WSL and installed checks predate this migration.
 
 Floating environment, fixed NaN bit patterns and basic arithmetic conventions
 follow [NUM-04](NUM-04_unary_contract.md), with the explicit no-hit/replacement
