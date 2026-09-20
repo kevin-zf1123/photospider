@@ -376,7 +376,7 @@ through the library selection described under NUM-04. The example passes
 explicit work budgets to `execute_fragments`; complex expressions and large
 requests can exhaust a smaller budget. Accelerated expressions propagate strict RN64 reference enclosures across
 four-sample batches using admitted SLEEF binary64 kernels. Only rejected samples
-replay strict evaluation and report per-function fallbacks. Unresolved bounded refinement returns ResourceExhausted.
+replay strict evaluation; Whole per-atom counters are unavailable. Unresolved bounded refinement returns ResourceExhausted.
 
 The public `OperationDefinition::prepare_static` facility parses immutable
 programs once per compiler node. Semantic nodes, optimized nodes and plan steps
@@ -385,27 +385,27 @@ Direct callers can pass an explicit matching prepared handle; absent a handle,
 preflight prepares once per call, including a compatible joint request. There
 is no global preparation cache. Static source/program storage uses ordinary
 host allocations outside runtime managed-scratch admission, with operation
-size bounds and no separately enforced preparation budget. Runtime continuations
-and mathematical scratch remain admitted and metered. Package 0.15 requires
-C++ consumers to rebuild; C operation ABI 9 is unchanged.
+size bounds and no separately enforced preparation budget. Runtime mathematical
+scratch is admitted and metered. Package 0.17/traits15 requires C++ consumers to
+rebuild; C operation ABI9 remains. Whole callbacks receive the owning prepared
+handle and reuse the compiled AST.
 
-`prepared.cpp` is the editable public registration/session example. It checks
-preparation counts, metadata/parameter-bit identity, foreign-handle rejection,
-program/definition lifetime and diagnostic merge behavior. `expression.cpp`
-also checks unused failing producers, shared-scalar reads, sparse/dirty/cache
-behavior, precise failure spans, strided inputs/fenv, isolated Atom failures,
-multi-box cancellation and controlled metadata-exhaustion recovery. Up to 16
-input ports use a two-poll regional path; larger coefficient sets use bounded
-16-port staged reads and may need a larger certificate-box budget, as shown
-by the 24-coefficient fixture. Only requested sample coordinates are evaluated.
+`prepared.cpp` checks preparation reuse, exact seals, static projections, tuple
+metadata, cross-registry rejection and owner lifetime. `expression.cpp` checks
+independent numerical results, count=1 end exclusion, axis coefficient exclusion,
+cache/dirty behavior, exact failure spans, strided inputs/fenv, Whole failure
+release, admitted arithmetic cancellation and output/scratch/work budgets.
+All active scalars are collected once and all N values are evaluated before
+projection. Any values failure has Run scope; positive-only `ln(x)` ROI fails
+if another coordinate in the domain is zero. Partial output owns count*4/8
+bytes plus scratch. Axis remains a separate three-component tuple.
 
 For native timing, run `photospider_numeric_expression strict benchmark` or
 `apple benchmark`. This takes several minutes: `exp(x)` over 1048576 points
 is evaluated three times. CSV records `2*x+1` and `exp(x)` at N=256, 65536,
 1048576 with Whole and three-point ROI, Float64, one worker, cache off, median
-and maximum elapsed microseconds, peak controlled payload, poll/evaluation/math
-counts and fallbacks. Compile/freeze precede timing; synchronous execution and
-result assembly are timed. Seven independent checkpoints and diagnostics are
+and maximum elapsed microseconds, peak controlled payload, invocations and unavailable per-atom numeric counters. Compile/freeze precede timing; synchronous execution and
+result assembly are timed. Seven independent checkpoints and callback count are
 checked. `scalar_support` counts unique input coordinates, not actual producer
 invocations. WSL supplies correctness checks only. Actual results and limits
 are in [the implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#num-01-expression-and-preparation).

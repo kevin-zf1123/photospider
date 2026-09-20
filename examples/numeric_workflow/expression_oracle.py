@@ -106,7 +106,7 @@ def reference(row):
             return end
         return rounded(((count-1-i)*a+i*b)/(count-1))
     result = []
-    for i in selected:
+    for i in range(count):
         x = coordinate(i)
         for neighbor in (i-1, i+1):
             if 0 <= neighbor < count and number(x, 3) == number(coordinate(neighbor), 3):
@@ -115,7 +115,7 @@ def reference(row):
         if dtype == 4:
             value = rounded(number(value, 3), 32, bool(value & SIGN))
         result.append(value)
-    return result, axis
+    return [result[i] for i in selected], axis
 
 
 def cases():

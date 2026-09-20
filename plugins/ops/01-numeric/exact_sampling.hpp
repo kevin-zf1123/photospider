@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <optional>
 
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/sequence_profiles.hpp"
@@ -15,7 +16,10 @@ struct ExactSampling final {
   ExactSequence first, second;
   std::array<std::uint64_t, 68> products{};
   SequenceProfile profile;
-  explicit ExactSampling(SequenceProfile selected) : profile(selected) {}
+  // True only while a caller-owned Float32Environment covers every use.
+  bool environment_established;
+  explicit ExactSampling(SequenceProfile selected, bool normalized = false)
+      : profile(selected), environment_established(normalized) {}
   Result<std::uint64_t> weighted(
       std::uint64_t a, std::uint64_t b, std::uint32_t wa, std::uint32_t wb,
       std::uint32_t divisor, bool narrow, bool subtract,
@@ -26,8 +30,10 @@ struct ExactSampling final {
     double x = 0, y = 0;
     std::memcpy(&x, &a, 8);
     std::memcpy(&y, &b, 8);
-    input_internal::Float32Environment environment;
-    if (environment.active()) {
+    std::optional<input_internal::Float32Environment> environment;
+    if (!environment_established)
+      environment.emplace();
+    if (environment_established || environment->active()) {
       const double left = x * wa, right = (subtract ? -y : y) * wb;
       const double sum = left + right;
       const double z = sum - left;

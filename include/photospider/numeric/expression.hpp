@@ -27,19 +27,22 @@ namespace ps::numeric {
  * Allocation can throw bad_alloc; the helper is pure/concurrent-safe.
  * @note Compilation owns one immutable AST across requests and dynamic runs.
  * Inputs may have mixed floating dtypes. Runtime computes RN64 coordinates and
- * checks requested adjacent-coordinate separation. Strict evaluates
- * left-to-right postorder with RN64 at each primitive and one final dtype
- * conversion. Accelerated retains that stepwise result as its reference and
- * certifies the final output under CpuNumericProfile's FP32 bound, replaying
- * uncertain samples strictly. Whole, ROI and SIMD tails retain the same
- * fixed-profile results. All required inputs/intermediates must be finite;
- * numeric failures identify the requested Atom and source span.
+ * checks every adjacent-coordinate separation for a values request. Strict
+ * evaluates left-to-right postorder with RN64 at each primitive and one final
+ * dtype conversion. Accelerated retains that stepwise result as its reference
+ * and certifies the final output under CpuNumericProfile's FP32 bound,
+ * replaying uncertain samples strictly. Whole, ROI and SIMD tails retain the
+ * same fixed-profile results. All required inputs/intermediates must be finite;
+ * numeric failures identify the global sample/x/source span with Run scope.
  * Work/capacity/cancellation/upstream failures retain their categories. Bounded
  * strict refinement can exhaust. Both outputs own immutable packed bytes beyond
- * context lifetime. Axis-only skips coefficients/AST; Empty skips all payloads.
+ * context lifetime. Nonempty Whole values materialize count*sizeof(dtype)
+ * bytes before consumer projection, plus fixed exact-math workspace; active
+ * input changes invalidate all values. Axis-only skips coefficients and AST
+ * evaluation, retaining its independent three-component tuple. count=1 omits
+ * end at runtime; Empty skips all payloads.
  * Cache witnesses retain evaluated and validation dependencies even under
- * algebraic cancellation. Strict math calls and per-function accelerated
- * fallbacks are diagnostics.
+ * algebraic cancellation. Whole per-atom numeric counters are unavailable.
  */
 PHOTOSPIDER_API Result<WorkflowNode> sample_expression_node(
     std::uint64_t id, std::string expression, WorkflowInput start,

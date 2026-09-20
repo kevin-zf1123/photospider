@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/expression_program.hpp"
@@ -26,11 +27,16 @@ struct AcceleratedExpression final {
                   const std::array<std::uint64_t, 256>& coefficients,
                   std::size_t count, bool narrow, std::uint64_t* output,
                   bool* accepted,
-                  const std::function<Status(std::uint64_t)>& consume) {
+                  const std::function<Status(std::uint64_t)>& consume,
+                  bool environment_established = false) {
     using K = ExpressionKind;
-    input_internal::Float32Environment environment;
+    // Whole callers may hold the environment across all coordinate/AST batches.
+    std::optional<input_internal::Float32Environment> environment;
+    if (!environment_established)
+      environment.emplace();
     for (std::size_t lane = 0; lane < count; ++lane)
-      accepted[lane] = environment.active() && accelerated_math_available();
+      accepted[lane] = (environment_established || environment->active()) &&
+                       accelerated_math_available();
     for (unsigned i = 0; i < program.size; ++i) {
       auto charged = consume(count * 32);
       if (!charged.ok())

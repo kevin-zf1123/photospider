@@ -293,7 +293,7 @@ at most 13607 bits, and the supported decimal-exponent branch has at most
 14680 denominator bits. Larger exponents are classified as overflow or rounded
 zero only after accounting for all source digits. Division alignment and final
 midpoint comparison fit the remaining capacity. Runtime exact/math workspace
-is part of the admitted continuation; work and cancellation checks occur in
+is part of the admitted Whole workspace; work and cancellation checks occur in
 AST evaluation and inside long arithmetic/refinement. Bounded unresolved
 transcendental refinement returns ResourceExhausted.
 
@@ -301,22 +301,23 @@ Pure static preparation owns the program across compiler stages, outputs and
 dynamic runs. Sealed handles validate registry/definition identity, all static
 input metadata and exact parameter bits, including signed zeros and NaNs.
 Direct preflight prepares once per call, or reuses an explicit matching handle;
-a joint request prepares once for compatible members. Static plan/program
+Whole execution receives and reuses the sealed plan owner. Static plan/program
 allocations use ordinary host storage outside runtime managed scratch. They
 have source/program size bounds, but no separately enforced preparation budget
-or global preparation cache. Session retirement destroys the continuation
-before its program; the program is destroyed before the definition/library
-lease. Package 0.15 requires a C++ rebuild; traits/framing 14 and C ABI 9 remain.
+or global preparation cache. The synchronous callback borrows the AST while
+holding its preparation owner. Package 0.17/traits15 requires a C++ rebuild;
+canonical framing14 and C ABI9 remain.
 
-At most 16 inputs use compact static mappings and two regional polls: acquire
-the shared scalars, then evaluate only the requested coordinates. Larger
-coefficient sets use staged reads of at most 16 ports. Their exact per-Atom
-certificates can require a larger box budget; the 24-coefficient fixture uses
-512. Axis-only execution does not allocate the expression evaluator, read
-coefficients or check adjacent value coordinates. Count=1 never reads end.
-An ordinary failed batch publishes no partial Value; `execute_atoms` retains
-independent successes. Coordinator metadata-admission failure now returns
-ResourceExhausted and retires unpublished state rather than escaping bad_alloc.
+All nonempty values requests execute Whole with static active-input projection,
+no per-index stages or dependency certificates. The selected output materializes
+all N values before consumer projection; any numerical failure is Run scoped.
+Axis-only skips coefficients, AST evaluation and adjacent-coordinate validation;
+its actual scratch omits the evaluator, while common workspace admission reserves
+the maximum values state. Count=1 excludes end. Whole numeric counters are
+unavailable. Current migration checks and timing are in
+[expression Whole](expression-whole.md).
+
+The following dated results describe the pre-Whole implementation.
 
 On 2026-09-19, native Apple M5 / Clang 21 strict and Apple (MPFR 4.2.2), and
 Intel Core i9-12900 Ubuntu WSL / Clang 18.1.3 strict and AVX2 (MPFR 4.2.1),
