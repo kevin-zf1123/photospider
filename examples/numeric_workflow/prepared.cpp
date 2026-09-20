@@ -387,6 +387,174 @@ void whole_preparation() {
   std::cout << "Whole preparation: compile reuse, static projections, tuple, "
                "direct seals passed\n";
 }
+struct SplitOwner {
+  ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase& phase) {
+    std::vector<ps::Value> parts;
+    for (const auto& box : phase.query.outputs.boxes()) {
+      const auto range = box.dimensions()[0];
+      for (std::uint64_t i = range.offset; i < range.offset + range.extent;
+           ++i) {
+        auto writer = take(
+            ps::MutableValue::allocate(phase.query.output.descriptor,
+                                       ps::Region({{i, 1}}), phase.allocator));
+        double value = static_cast<double>(i);
+        std::memcpy(writer.data(), &value, 8);
+        parts.push_back(take(std::move(writer).publish()));
+      }
+    }
+    return ps::Result<ps::DependencyPoll>(take(ps::ValueFragments::create(
+        phase.query.output.descriptor, {}, phase.query.outputs,
+        std::move(parts), phase.sets)));
+  }
+};
+void whole_views() {
+  auto operations = std::make_shared<ps::OperationRegistry>();
+  unsigned called = 0;
+  ps::OperationDefinition view;
+  view.key = "manual.whole_view";
+  view.traits.input_count = 1;
+  view.traits.input_schema.resize(1);
+  auto& output = view.traits.outputs[0];
+  output.shape_rule = ps::OperationShapeRule::MatchAllInputs;
+  output.region_rule = ps::OperationRegionRule::Whole;
+  output.preserve_output_views = true;
+  output.requires_input_views = true;
+  output.maximum_output_payload_bytes = 0;
+  output.output_dtype_rule = ps::OperationDtypeRule::Input;
+  view.callback = [&](const ps::OperationInvocation& call) {
+    ++called;
+    return ps::Result<ps::Value>(call.inputs[0]);
+  };
+  auto broken = view;
+  broken.key = "manual.broken_view";
+  broken.callback = [](const ps::OperationInvocation& call) {
+    auto denied = call.allocator.allocate(1);
+    return ps::Result<ps::Value>(call.inputs[0]);
+  };
+  require(operations->register_operation(std::move(broken)).ok(),
+          "register bound probe");
+  auto automatic = view;
+  automatic.key = "manual.whole_auto";
+  automatic.traits.outputs[0].requires_input_views = false;
+  require(operations->register_operation(std::move(view)).ok() &&
+              operations->register_operation(std::move(automatic)).ok(),
+          "register Whole view policies");
+  ps::OperationDefinition split;
+  split.key = "manual.split_owner";
+  split.traits.input_count = 0;
+  split.traits.input_schema.clear();
+  auto& split_output = split.traits.outputs[0];
+  split_output.shape_rule = ps::OperationShapeRule::Fixed;
+  split_output.fixed_output_shape = {4};
+  split_output.output_element_type = ps::ElementType::Float64;
+  split_output.region_rule = ps::OperationRegionRule::Dependency;
+  split_output.dependency_version = 1;
+  split_output.regional_atomic = true;
+  split_output.preserve_output_views = true;
+  split_output.continuation_bytes = sizeof(SplitOwner);
+  split_output.maximum_dependency_stages = 1;
+  split.start_dependency = [](const auto&, const auto& allocator) {
+    return ps::DependencyContinuation::make<SplitOwner>(allocator);
+  };
+  const std::uint64_t extent = UINT64_C(1) << 30;
+  ps::OperationDefinition huge;
+  huge.key = "manual.huge_view";
+  huge.traits.input_count = 0;
+  huge.traits.input_schema.clear();
+  auto& huge_output = huge.traits.outputs[0];
+  huge_output.region_rule = ps::OperationRegionRule::Whole;
+  huge_output.shape_rule = ps::OperationShapeRule::Fixed;
+  huge_output.fixed_output_shape = {extent};
+  huge_output.output_element_type = ps::ElementType::Float64;
+  huge_output.preserve_output_views = true;
+  huge_output.maximum_output_payload_bytes = 8;
+  huge.callback = [extent](const ps::OperationInvocation& call) {
+    auto storage = take(call.allocator.allocate(8));
+    const double value = 7;
+    std::memcpy(storage.data(), &value, 8);
+    return ps::Value::from_storage({ps::ElementType::Float64, {extent}},
+                                   call.output_region, {0, {0}},
+                                   std::move(storage).freeze());
+  };
+  require(operations->register_operation(std::move(split)).ok() &&
+              operations->register_operation(std::move(huge)).ok() &&
+              operations->freeze().ok(),
+          "register split-owner and huge view producers");
+  ps::WorkflowDocument document;
+  document.nodes = {
+      {1, "manual.huge_view", {}, {}},
+      {2, "manual.whole_view", {ps::WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"values", 2, "value"}};
+  ps::GraphContext graph(document);
+  auto plan = take(ps::Compiler(operations).compile(graph));
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.maximum_live_bytes = 65536;
+  config.result_cache_bytes = 0;
+  config.managed_resources = ps::ResourceLimits{};
+  ps::ExecutionContext context(operations, config);
+  ps::ExecutionBindings bindings;
+  auto result = take(context.execute(plan.plan, bindings));
+  require(result.values.at("values").bytes().size() == 8 &&
+              result.values.at("values").layout().byte_strides[0] == 0 &&
+              called == 1,
+          "Whole keeps huge zero-stride source without dense input/output "
+          "allocation");
+  document.inputs.clear();
+  document.nodes = {
+      {1, "manual.split_owner", {}, {}},
+      {2, "manual.whole_view", {ps::WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"values", 2, "value"}};
+  ps::GraphContext split_graph(document);
+  auto split_plan = take(ps::Compiler(operations).compile(split_graph));
+  auto failed = context.execute(split_plan.plan);
+  require(!failed.ok() &&
+              failed.status().message.find("ViewUnavailable") !=
+                  std::string::npos &&
+              called == 1,
+          "explicit Whole View rejects multiple owners before callback");
+  document.nodes[1].operation = "manual.whole_auto";
+  ps::GraphContext auto_graph(document);
+  auto auto_plan = take(ps::Compiler(operations).compile(auto_graph));
+  auto collected = take(context.execute(auto_plan.plan));
+  require(called == 2 && collected.values.at("values").bytes().size() == 32,
+          "Whole Auto may collect multiple owners");
+  const double expected[] = {0, 1, 2, 3};
+  require(std::memcmp(collected.values.at("values").bytes().data(), expected,
+                      32) == 0,
+          "Auto collection preserves complete values");
+  auto external_storage = take(ps::BufferAllocator{}.allocate(32));
+  std::memcpy(external_storage.data(), expected, 32);
+  auto external = take(ps::Value::from_storage(
+      {ps::ElementType::Float64, {4}}, ps::Region::whole({4}), {0, {8}},
+      std::move(external_storage).freeze()));
+  document.inputs = {{1,
+                      "external",
+                      external.descriptor(),
+                      external.region(),
+                      external.layout(),
+                      {}}};
+  document.nodes = {
+      {1, "manual.whole_view", {ps::WorkflowInputReference{1}}, {}}};
+  document.outputs = {{"values", 1, "value"}};
+  ps::GraphContext external_graph(document);
+  auto external_plan = take(ps::Compiler(operations).compile(external_graph));
+  ps::ExecutionBindings external_bindings;
+  external_bindings.inputs = {{"external", external}};
+  auto external_result =
+      take(context.execute(external_plan.plan, external_bindings));
+  require(external_result.values.at("values").storage() == external.storage(),
+          "Whole view retains external input owner without post-callback copy");
+  const std::vector<ps::Value> direct_inputs{ps::Value::from_float64(1)};
+  const std::vector<ps::Region> direct_demands{ps::Region::whole({1})};
+  const std::map<std::string, ps::ParameterValue> parameters;
+  ps::OperationInvocation direct(direct_inputs, direct_demands, parameters);
+  require(operations->invoke("manual.broken_view", direct).status().reason ==
+              ps::FailureReason::CapacityLimit,
+          "ignored Whole view allocation rejection remains sticky");
+  std::cout << "Whole view: huge zero-stride backing, strict multi-owner "
+               "failure and Auto collect passed\n";
+}
 void numeric_function_counters() {
   ps::NumericDiagnostics report;
   report.profile = ps::CpuNumericProfile::Strict;
@@ -425,6 +593,7 @@ int main() {
     auto counts = std::make_shared<Counts>();
     numeric_function_counters();
     whole_preparation();
+    whole_views();
     compiler_and_direct(counts);
     seals_and_lifetime(counts);
     direct_joint(counts);

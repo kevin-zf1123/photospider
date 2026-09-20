@@ -327,3 +327,25 @@ static specialized input projections and CPU Whole Atomic tuples. The C
 operation ABI remains 9: no C structure or entry point changes. Existing
 projection/tuple fields already enter canonical identities; no prepared pointer
 or new serialization field is added. Document and framing versions are unchanged.
+
+### CPU Whole input views
+
+Package 0.18 / OperationTraits16 extends CPU Whole view publication. A view
+output prefers one original Value covering each complete input demand, retaining
+its strides, storage and resources. If no covering Value exists, Auto may
+collect; `requires_input_views=true` instead returns Domain/Run
+InvalidArgument/InvalidDomain with ViewUnavailable before callback. It requires
+CPU Whole `preserve_output_views`, excludes GPU/joint/Result and participates
+in compiled identity. Typed validation still covers all active input samples.
+The ordinary and structured execution bridges follow the same rule.
+
+Explicit output payload bounds and on-demand view allocation apply to Whole.
+Borrowed input owners remain charged independently; callback allocation is
+limited to declared output payload plus workspace, with sticky failure. Returned
+new backing storage must also fit the output bound. Direct calls already supply
+one Value per input and preserve that physical representation.
+
+This changes C++ trait/specialization layout, requiring an installed-consumer
+rebuild and rejecting package0.17 consumers. Canonical framing14, document2,
+C operation ABI9 and provider ABI1 are unchanged; traits16 changes semantic
+identity. No daemon ownership or persistent format is introduced.

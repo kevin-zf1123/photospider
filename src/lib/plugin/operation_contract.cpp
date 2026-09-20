@@ -45,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 15)
+  if (count > 1024 || traits.version != 16)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -414,14 +414,22 @@ namespace input_internal {
 Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return invalid("select one output contract");
-  if ((t.outputs[0].regional_atomic || t.outputs[0].preserve_output_views) &&
+  const auto& selected = t.outputs[0];
+  const bool staged_atomic =
+      selected.region_rule == OperationRegionRule::Dependency &&
+      selected.dependency_version == 1;
+  const bool whole = selected.region_rule == OperationRegionRule::Whole &&
+                     selected.dependency_version == 0;
+  if ((selected.regional_atomic || selected.preserve_output_views) &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
-       t.outputs[0].observation_kind != ObservationKind::Atomic ||
-       t.outputs[0].region_rule != OperationRegionRule::Dependency ||
-       t.outputs[0].dependency_version != 1 ||
-       t.outputs[0].requires_dense_output))
+       selected.observation_kind != ObservationKind::Atomic ||
+       selected.requires_dense_output ||
+       (selected.regional_atomic ? !staged_atomic : !(staged_atomic || whole))))
     return invalid(
-        "regional/view output requires CPU non-joint staged Atomic execution");
+        "regional/view output requires CPU non-joint Atomic execution");
+  if (selected.requires_input_views &&
+      (!whole || !selected.preserve_output_views))
+    return invalid("original input views require CPU Whole view output");
   if (t.outputs[0].static_dependency_pieces &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        t.outputs[0].observation_kind != ObservationKind::Atomic ||
@@ -430,11 +438,10 @@ Status validate_operation_contract(const OperationTraits& t) {
     return invalid(
         "static mapping requires CPU singleton/regional Atomic execution");
   if (t.outputs[0].maximum_output_payload_bytes &&
-      (!t.supports_cpu || t.supports_gpu ||
-       t.outputs[0].region_rule != OperationRegionRule::Dependency ||
-       t.outputs[0].dependency_version != 1 ||
+      (!t.supports_cpu || t.supports_gpu || !(staged_atomic || whole) ||
        t.outputs[0].requires_dense_output))
-    return invalid("explicit output payload bound requires a CPU staged view");
+    return invalid(
+        "explicit output payload bound requires a CPU Whole or staged view");
 
   if (t.outputs[0].dependency_version &&
       (!t.deterministic || !t.side_effect_free))

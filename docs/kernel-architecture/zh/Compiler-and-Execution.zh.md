@@ -334,3 +334,21 @@ Whole 输出的注册输入投影。缺省保留注册投影，空 vector 不读
 越界或扩大注册投影均拒绝。完整 metadata 始终必要，投影复用既有 traits/digest 字段。
 CPU Whole Atomic 输出可保留 generic trailing-axis tuple 身份；GPU、image tuple
 及其他非法组合仍被拒绝。
+
+### CPU Whole 输入视图
+
+package0.18 / OperationTraits16 扩展 CPU Whole 视图发布。视图输出优先保留
+覆盖完整输入需求的原始 Value、strides、storage 和 resources；不存在单个
+覆盖 Value 时，Auto 可以 collect，`requires_input_views=true` 则在 callback
+之前返回 Domain/Run 的 InvalidArgument/InvalidDomain、ViewUnavailable。
+该字段要求 CPU Whole 的 `preserve_output_views`，排除 GPU/joint/Result，
+并参与编译身份。typed 验证仍覆盖全部有效输入。普通和 structured 执行桥接
+遵循同一规则。
+
+Whole 支持显式输出 payload 上界和按实际分配计费。借用输入 owner 独立计费；
+callback allocator 限制为输出上界加 workspace，分配失败保持 sticky；新返回
+backing 也必须满足输出上界。直接调用已经逐输入提供单个 Value。
+
+C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。
+canonical framing14、document2、C operation ABI9 和 provider ABI1 不变；
+traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。

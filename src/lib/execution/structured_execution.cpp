@@ -1258,8 +1258,26 @@ class StructuredExecution final {
         auto ready = value(step.inputs[port], needed.value());
         if (!ready.ok())
           return Answer(ready.status());
-        auto collected = ready.value().collect(
-            demand.value(), resources_.allocator(), set_limits());
+        std::optional<Value> original;
+        if (step.traits.outputs[0].preserve_output_views) {
+          for (const auto& fragment : ready.value().fragments()) {
+            auto view = fragment.view(demand.value());
+            if (view.ok()) {
+              original = view.take_value();
+              break;
+            }
+          }
+          if (!original && step.traits.outputs[0].requires_input_views)
+            return Answer(Status{
+                ErrorCode::InvalidArgument,
+                "ViewUnavailable: Whole input requires multiple fragments",
+                FailureReason::InvalidDomain,
+                {FailureOrigin::Domain, FailureScope::Run}});
+        }
+        auto collected = original ? Result<Value>(std::move(*original))
+                                  : ready.value().collect(
+                                        demand.value(), resources_.allocator(),
+                                        set_limits());
         if (!collected.ok())
           return Answer(collected.status());
         inputs.push_back(collected.take_value());
@@ -1272,6 +1290,7 @@ class StructuredExecution final {
                                        Backend::Cpu, active_token(), region,
                                        resources_.allocator());
         invocation.output_index = step.output_index;
+        invocation.prepared = step.prepared;
         invocation.resources = bindings_resources_;
         invocation.input_indices = ports;
         invocation.input_metadata = all;

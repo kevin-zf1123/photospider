@@ -55,13 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.16 CONFIG QUIET COMPONENTS kernel)
+find_package(Photospider 0.17 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.17 must reject a 0.16 consumer")
+  message(FATAL_ERROR "Photospider 0.18 must reject a 0.17 consumer")
 endif()
 
 find_package(
-  Photospider 0.17 CONFIG REQUIRED
+  Photospider 0.18 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(

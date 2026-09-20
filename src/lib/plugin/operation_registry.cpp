@@ -434,7 +434,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 15U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 16U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free ||
@@ -1866,6 +1866,7 @@ OperationRegistry::prepare_operation(
               !metadata.descriptor.shape.empty() || !metadata.facets.empty() ||
               metadata.atomic_trailing_axes || specialization.regional_atomic ||
               specialization.preserve_output_views ||
+              specialization.requires_input_views ||
               specialization.maximum_output_payload_bytes ||
               specialization.static_dependency_pieces)
             return Answer(
@@ -1896,6 +1897,7 @@ OperationRegistry::prepare_operation(
         output.atomic_trailing_axes = metadata.atomic_trailing_axes;
         output.regional_atomic = specialization.regional_atomic;
         output.preserve_output_views = specialization.preserve_output_views;
+        output.requires_input_views = specialization.requires_input_views;
         output.maximum_output_payload_bytes =
             specialization.maximum_output_payload_bytes;
         output.static_dependency_pieces =
@@ -2509,7 +2511,50 @@ Result<Value> OperationRegistry::invoke_current(
               "input demand omits required output/halo coverage"));
       }
     }
+    std::shared_ptr<std::atomic<ErrorCode>> view_allocation_failure;
+    if (resolved.outputs[0].preserve_output_views ||
+        resolved.outputs[0].maximum_output_payload_bytes) {
+      auto count = normalized.output_region.element_count();
+      const auto width =
+          Value::element_size(expected_output.value().descriptor.element_type);
+      if (!count.ok() || count.value() > UINT64_MAX / width)
+        return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
+      const auto payload =
+          resolved.outputs[0].maximum_output_payload_bytes.value_or(
+              count.value() * width);
+      if (payload > UINT64_MAX - resolved.workspace_bytes)
+        return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
+      view_allocation_failure =
+          std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+      normalized.allocator = normalized.allocator.limited(
+          payload + resolved.workspace_bytes,
+          [failure = view_allocation_failure](ErrorCode code) {
+            auto expected = ErrorCode::Ok;
+            failure->compare_exchange_strong(expected, code);
+          });
+    }
     auto result = definition->callback(normalized);
+    if (view_allocation_failure &&
+        view_allocation_failure->load() != ErrorCode::Ok)
+      return Result<Value>(
+          Status{view_allocation_failure->load(),
+                 {},
+                 FailureReason::CapacityLimit,
+                 {FailureOrigin::Resource, FailureScope::Run}});
+    if (result.ok() && resolved.outputs[0].maximum_output_payload_bytes) {
+      const bool borrowed =
+          std::any_of(projected_inputs.begin(), projected_inputs.end(),
+                      [&](const auto& input) {
+                        return input.storage() == result.value().storage();
+                      });
+      if (!borrowed && result.value().bytes().size() >
+                           *resolved.outputs[0].maximum_output_payload_bytes)
+        return Result<Value>(
+            Status{ErrorCode::ResourceExhausted,
+                   "Whole output payload bound exceeded",
+                   FailureReason::CapacityLimit,
+                   {FailureOrigin::Resource, FailureScope::Run}});
+    }
     if (!result.ok()) {
       return result;
     }

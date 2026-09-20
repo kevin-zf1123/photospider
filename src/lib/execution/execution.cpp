@@ -2981,8 +2981,29 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         continue;
                       input_indices.push_back(static_cast<std::uint32_t>(port));
                       const auto& box = frame.parts[port].boxes().at(0);
-                      auto dense =
-                          frame.ready[port].collect(box, allocator, limits);
+                      std::optional<Value> original;
+                      if (step.traits.outputs[0].preserve_output_views) {
+                        for (const auto& fragment :
+                             frame.ready[port].fragments()) {
+                          auto view = fragment.view(box);
+                          if (view.ok()) {
+                            original = view.take_value();
+                            break;
+                          }
+                        }
+                        if (!original &&
+                            step.traits.outputs[0].requires_input_views)
+                          return Result<Value>(Status{
+                              ErrorCode::InvalidArgument,
+                              "ViewUnavailable: Whole input requires multiple "
+                              "fragments",
+                              FailureReason::InvalidDomain,
+                              {FailureOrigin::Domain, FailureScope::Run}});
+                      }
+                      auto dense = original
+                                       ? Result<Value>(std::move(*original))
+                                       : frame.ready[port].collect(
+                                             box, allocator, limits);
                       if (!dense.ok())
                         return Result<Value>(dense.status());
                       if (native) {
@@ -3030,9 +3051,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     callback_us = duration_us(callback_started);
                     if (!computed.ok())
                       return computed;
-                    if (!call.allocator.owns(*computed.value().storage()))
-                      return transfer_value(computed.value(), call.allocator,
-                                            true);
+                    if (!call.allocator.owns(*computed.value().storage())) {
+                      const auto storage = computed.value().storage();
+                      const bool borrowed = std::any_of(
+                          inputs.begin(), inputs.end(), [&](const auto& input) {
+                            return input.storage() == storage;
+                          });
+                      if (!borrowed)
+                        return transfer_value(computed.value(), call.allocator,
+                                              true);
+                    }
                     return computed;
                   },
                   pump, budget->resources().get());

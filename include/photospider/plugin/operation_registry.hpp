@@ -292,10 +292,11 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * uses the singleton observation domain {1}. Included in contract identities.
    */
   std::uint32_t atomic_trailing_axes = 0;
-  /** @brief Optional actual new output payload bound for a CPU staged view.
-   * Unset reserves requested element bytes. A set bound replaces that dense
-   * lower bound; workspace, metadata and referenced owners remain accounted.
-   * The allocator still enforces this bound and failures remain sticky.
+  /** @brief Optional actual new output payload bound for a CPU Whole or staged
+   * view. Unset reserves requested element bytes. A set bound replaces that
+   * dense lower bound; workspace, metadata and referenced owners remain
+   * accounted. The allocator still enforces this bound and failures remain
+   * sticky.
    */
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
   /** @brief Disjoint complete CPU dependency pieces in observation coordinates.
@@ -316,10 +317,18 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
   /** @brief Preserves returned immutable views at ordinary/direct collectors.
    * New payload is admitted on actual allocation, bounded by requested bytes
    * unless maximum_output_payload_bytes replaces that bound. Borrowed owners
-   * remain charged independently. CPU staged non-joint execution only.
-   * This permits per-rectangle auto view/copy choices without dense precharge.
+   * remain charged independently. CPU Whole or staged non-joint execution only.
+   * Whole prefers an original covering input view, collecting only when needed.
+   * This permits auto view/copy choices without dense precharge.
    */
   bool preserve_output_views = false;
+  /** @brief CPU Whole requires one original covering Value per active input.
+   * Requires preserve_output_views. If an input needs collection across owner
+   * fragments, execution returns InvalidArgument/InvalidDomain ViewUnavailable
+   * before callback. Direct calls already supply one Value per input. This
+   * property is part of compiled identity; it does not limit typed validation.
+   */
+  bool requires_input_views = false;
   /** @brief Zero for synchronous callback, one for the staged read protocol. */
   std::uint32_t dependency_version = 0;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
@@ -381,7 +390,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 15U;
+  std::uint32_t version = 16U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -564,6 +573,7 @@ struct OperationOutputSpecialization final {
   OperationMetadata metadata;
   bool regional_atomic = false;
   bool preserve_output_views = false;
+  bool requires_input_views = false;
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
   std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
   /** @brief Optional static-parameter-derived input projection for CPU Whole.
