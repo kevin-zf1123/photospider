@@ -3,19 +3,20 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
-#include "00-foundation/multi_output.hpp"
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_moments.hpp"
-#include "01-numeric/ordered_reduction.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -113,233 +114,152 @@ const char* operation_name(ReductionKind kind) {
   }
   return "invalid";
 }
-Status report(const DependencyPhase& phase, SequenceProfile profile,
-              ReductionKind kind, std::uint64_t processed,
-              std::uint64_t copied = 0) {
-  NumericDiagnostics result;
-  result.profile =
-      static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-  const auto length = std::snprintf(
-      result.implementation.data(), result.implementation.size(),
-      "photospider.reduction/1;%s;exact-limbs;replica-store%s",
-      operation_name(kind), numeric_ops::numeric_build_identity());
-  if (length < 0 ||
-      static_cast<std::size_t>(length) >= result.implementation.size())
-    return Status{ErrorCode::OperationFailed, "reduction identity too long"};
-  // Reducers count consumed accumulator inputs here; OperationTiming separately
-  // records computed output elements. Count has no numeric input evaluations.
-  result.evaluated_values = processed;
-  result.copied_elements = copied;
-  return phase.report_numeric(result);
-}
 struct ReductionState final {
-  ReductionKind kind;
-  SequenceProfile profile;
-  ReductionMetadata metadata;
-  bool requested = false;
-  std::uint64_t cursor = 0, end = 0;
   std::variant<numeric_ops::ExactAggregate, numeric_ops::ExactMoments>
       arithmetic;
-  std::array<std::uint64_t, 4> replicas{};
-  ReductionState(ReductionKind operation, SequenceProfile selected,
-                 ReductionMetadata description, ElementType input_type)
-      : kind(operation),
-        profile(selected),
-        metadata(std::move(description)),
-        arithmetic(std::in_place_type<numeric_ops::ExactAggregate>, selected,
-                   operation == ReductionKind::Minimum
+  ReductionState(ReductionKind kind, SequenceProfile profile, ElementType type)
+      : arithmetic(std::in_place_type<numeric_ops::ExactAggregate>, profile,
+                   kind == ReductionKind::Minimum
                        ? numeric_ops::AggregateKind::Minimum
-                   : operation == ReductionKind::Maximum
+                   : kind == ReductionKind::Maximum
                        ? numeric_ops::AggregateKind::Maximum
                        : numeric_ops::AggregateKind::Sum,
-                   input_type) {
+                   type) {
     if (kind == ReductionKind::Variance || kind == ReductionKind::Std)
-      arithmetic.emplace<numeric_ops::ExactMoments>(selected, input_type);
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    // A bounded logical window is transported at each stage; accumulated
-    // exact arithmetic retains no source payload owners between windows.
-    auto construction = dependency_internal::metadata_owner(32768);
-    const auto& input = phase.query.inputs[0];
-    const auto window = [&](std::uint64_t begin,
-                            std::uint64_t stop) -> Result<Footprint> {
-      auto shape = input.descriptor.shape;
-      for (std::size_t j = 0; j < shape.size(); ++j)
-        if (!(metadata.mask & (1U << j)))
-          shape[j] = 1;
-      auto local = numeric_ops::ordered_range(shape, begin, stop, phase.sets);
-      if (!local.ok())
-        return Result<Footprint>(local.status());
-      std::vector<Region> boxes;
-      for (const auto& box : local.value().boxes()) {
-        auto dimensions = box.dimensions();
-        for (std::size_t j = 0; j < shape.size(); ++j)
-          if (!(metadata.mask & (1U << j)))
-            dimensions[j].offset =
-                phase.query.outputs.boxes()[0].dimensions()[j].offset;
-        boxes.emplace_back(std::move(dimensions));
-      }
-      return Footprint::from_regions(input.descriptor.shape, std::move(boxes),
-                                     phase.sets);
-    };
-    Status status;
-    if (requested) {
-      auto group = window(cursor, end);
-      if (!group.ok())
-        return Answer(group.status());
-      const auto width = Value::element_size(input.descriptor.element_type);
-      status = group.value().visit(
-          [&](const auto& coordinate) {
-            auto work = phase.consume_work(
-                (phase.inputs[0].fragments().size() + 1) * coordinate.size() +
-                1);
-            if (!work.ok())
-              return work;
-            std::uint64_t bits = 0;
-            auto read = phase.read(0, coordinate, &bits, width);
-            if (!read.ok())
-              return read;
-            // Admission precedes the next numeric evaluation; later failures
-            // retain the already admitted input-attempt count.
-            auto counted = report(phase, profile, kind, 1);
-            if (!counted.ok())
-              return counted;
-            return std::visit(
-                [&](auto& state) {
-                  return state.add(bits, phase.consume_work);
-                },
-                arithmetic);
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!status.ok())
-        return Answer(status);
-      cursor = end;
-    }
-    if (cursor < metadata.count) {
-      end = cursor + std::min(UINT64_C(64), metadata.count - cursor);
-      auto group = window(cursor, end);
-      if (!group.ok())
-        return Answer(group.status());
-      auto closure = input_internal::validation_closure(
-          input, group.value(), phase.sets, phase.consume_work);
-      if (!closure.ok())
-        return Answer(closure.status());
-      auto validation = closure.take_value();
-      requested = true;
-      return multi_output::need(phase, {{0, 1, group.take_value(), {}},
-                                        {0, 4, std::move(validation), {}}});
-    }
-    Result<std::uint64_t> calculated(
-        Status{ErrorCode::Internal, "uninitialized reduction"});
-    if (auto* moments = std::get_if<numeric_ops::ExactMoments>(&arithmetic))
-      calculated = moments->finish(metadata.output.element_type, metadata.count,
-                                   metadata.ddof, kind == ReductionKind::Std,
-                                   phase.consume_work);
-    else
-      calculated =
-          std::get<numeric_ops::ExactAggregate>(arithmetic)
-              .finish_as(metadata.output.element_type,
-                         kind == ReductionKind::Mean ? metadata.count : 1,
-                         phase.consume_work);
-    if (!calculated.ok()) {
-      auto failure = calculated.status();
-      if (failure.reason == FailureReason::ArithmeticOverflow) {
-        failure.detail.origin = FailureOrigin::Domain;
-        failure.detail.scope = FailureScope::Atom;
-        auto atom = dependency_atom_key(phase.query);
-        if (!atom.ok())
-          return Answer(atom.status());
-        failure.detail.atom = atom.take_value();
-      }
-      return Answer(failure);
-    }
-    numeric_ops::ArrayPublication publication(1, metadata.output.shape.size());
-    auto allocation = MutableValue::allocate(
-        metadata.output, phase.query.outputs.boxes()[0], phase.allocator);
-    if (!allocation.ok())
-      return Answer(allocation.status());
-    auto output = allocation.take_value();
-    const auto output_width = Value::element_size(metadata.output.element_type);
-    if (output.size() != output_width)
-      return Answer(Status{ErrorCode::Internal,
-                           "reducer requires one output observation"});
-    status = report(phase, profile, kind, 0, 1);
-    if (!status.ok())
-      return Answer(status);
-    numeric_ops::select_words(replicas.data(), calculated.value(),
-                              calculated.value(), 1, profile);
-    std::memcpy(output.data(), replicas.data(), output_width);
-    auto value = std::move(output).publish();
-    if (!value.ok())
-      return Answer(value.status());
-    auto retained = publication.retain(value.take_value());
-    if (!retained.ok())
-      return Answer(retained.status());
-    if (phase.query.cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto result = publication.finish(metadata.output, phase.query.outputs,
-                                     &retained.value(), 1, phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+      arithmetic.emplace<numeric_ops::ExactMoments>(profile, type);
   }
 };
-struct CountState final {
-  SequenceProfile profile;
-  std::uint64_t count;
-  bool requested = false;
-  std::array<std::uint64_t, 4> replicas{};
-  CountState(SequenceProfile selected, std::uint64_t size)
-      : profile(selected), count(size) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    if (!requested) {
-      requested = true;
-      return Answer(DependencyNeedBatch{{}, {}, true});
-    }
-    auto status =
-        phase.consume_work(phase.query.inputs[0].descriptor.shape.size() + 16);
+Result<Value> execute_reduction(const OperationInvocation& call,
+                                ReductionKind kind, SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    const auto* budget = resource_internal::metadata_budget();
+    const std::function<Status(std::uint64_t)> work =
+        [&](std::uint64_t amount) {
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, {}};
+          return budget ? budget->consume({amount}) : Status::success();
+        };
+    auto status = work(1);
     if (!status.ok())
       return Answer(status);
-    status = report(phase, profile, ReductionKind::Count, 0);
-    if (!status.ok())
-      return Answer(status);
-    auto allocation = phase.allocator.allocate(8);
-    if (!allocation.ok())
-      return Answer(allocation.status());
-    auto buffer = allocation.take_value();
-    numeric_ops::select_words(replicas.data(), count, count, 1, profile);
-    std::memcpy(buffer.data(), replicas.data(), 8);
-    auto owner = std::move(buffer).freeze();
-    const auto& descriptor = phase.query.output.descriptor;
-    numeric_ops::ArrayPublication publication(
-        phase.query.outputs.boxes().size(), descriptor.shape.size());
-    ResourceVector<Value> values;
-    values.reserve(phase.query.outputs.boxes().size());
-    for (const auto& box : phase.query.outputs.boxes()) {
-      status = phase.consume_work(descriptor.shape.size() + 1);
+    const auto input_metadata =
+        call.input_metadata.empty()
+            ? OperationMetadata{call.inputs[0].descriptor(),
+                                call.inputs[0].facets()}
+            : call.input_metadata[0];
+    auto parsed = metadata(kind, input_metadata, call.parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
+    const auto& description = parsed.value();
+    if (kind == ReductionKind::Count) {
+      status = work(input_metadata.descriptor.shape.size() + 16);
       if (!status.ok())
         return Answer(status);
-      std::vector<std::uint64_t> origin;
-      origin.reserve(descriptor.shape.size());
-      for (const auto& dimension : box.dimensions())
-        origin.push_back(dimension.offset);
-      auto value = Value::from_storage(
-          descriptor, box,
-          {0, std::vector<std::int64_t>(origin.size(), 0), origin}, owner);
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
+      auto allocated = call.allocator.allocate(8);
+      if (!allocated.ok())
+        return Answer(allocated.status());
+      auto bytes = allocated.take_value();
+      std::array<std::uint64_t, 4> replicas{};
+      numeric_ops::select_words(replicas.data(), description.count,
+                                description.count, 1, profile);
+      std::memcpy(bytes.data(), replicas.data(), 8);
+      status = work(1);
+      if (!status.ok())
+        return Answer(status);
+      return Value::from_storage(
+          description.output, call.output_region,
+          {0, std::vector<std::int64_t>(description.output.shape.size(), 0)},
+          std::move(bytes).freeze());
     }
-    if (phase.query.cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto result = publication.finish(descriptor, phase.query.outputs,
-                                     values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    auto scratch = call.allocator.allocate(sizeof(ReductionState));
+    if (!scratch.ok())
+      return Answer(scratch.status());
+    auto buffer = scratch.take_value();
+    std::unique_ptr<ReductionState, void (*)(ReductionState*)> state(
+        new (buffer.data()) ReductionState(
+            kind, profile, input_metadata.descriptor.element_type),
+        [](ReductionState* item) { item->~ReductionState(); });
+    auto allocated = MutableValue::allocate(description.output,
+                                            call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
+    const auto& input = call.inputs[0];
+    const auto& shape = input.descriptor().shape;
+    const auto width = Value::element_size(input.descriptor().element_type),
+               out_width = Value::element_size(description.output.element_type);
+    std::vector<std::uint64_t> coordinate(shape.size(), 0),
+        source(shape.size(), 0);
+    auto count = call.output_region.element_count();
+    if (!count.ok())
+      return Answer(count.status());
+    for (std::uint64_t group = 0; group < count.value(); ++group) {
+      std::visit([](auto& arithmetic) { arithmetic.reset(); },
+                 state->arithmetic);
+      source = coordinate;
+      for (std::uint64_t i = 0; i < description.count; ++i) {
+        status = work(shape.size() + 1);
+        if (!status.ok())
+          return Answer(status);
+        auto address = input.byte_address(source);
+        if (!address.ok())
+          return Answer(address.status());
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, input.bytes().data() + address.value(), width);
+        status = std::visit(
+            [&](auto& arithmetic) { return arithmetic.add(bits, work); },
+            state->arithmetic);
+        if (!status.ok())
+          return Answer(status);
+        for (std::size_t j = shape.size(); j; --j)
+          if (description.mask & (1U << (j - 1))) {
+            if (++source[j - 1] < shape[j - 1])
+              break;
+            source[j - 1] = 0;
+          }
+      }
+      Result<std::uint64_t> result(
+          Status{ErrorCode::Internal, "uninitialized reduction"});
+      if (auto* moments =
+              std::get_if<numeric_ops::ExactMoments>(&state->arithmetic))
+        result =
+            moments->finish(description.output.element_type, description.count,
+                            description.ddof, kind == ReductionKind::Std, work);
+      else
+        result =
+            std::get<numeric_ops::ExactAggregate>(state->arithmetic)
+                .finish_as(description.output.element_type,
+                           kind == ReductionKind::Mean ? description.count : 1,
+                           work);
+      if (!result.ok()) {
+        auto failure = result.status();
+        if (failure.reason == FailureReason::ArithmeticOverflow) {
+          failure.detail = {FailureOrigin::Domain, FailureScope::Run};
+          failure.message += " output linear=" + std::to_string(group);
+        }
+        return Answer(failure);
+      }
+      std::array<std::uint64_t, 4> replicas{};
+      numeric_ops::select_words(replicas.data(), result.value(), result.value(),
+                                1, profile);
+      std::memcpy(output.data() + group * out_width, replicas.data(),
+                  out_width);
+      for (std::size_t j = coordinate.size(); j; --j) {
+        if (++coordinate[j - 1] < description.output.shape[j - 1])
+          break;
+        coordinate[j - 1] = 0;
+      }
+    }
+    status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
   }
-};
+}
 OperationDefinition reduction_operation(const std::string& key,
                                         ReductionKind kind,
                                         SequenceProfile profile) {
@@ -361,14 +281,9 @@ OperationDefinition reduction_operation(const std::string& key,
   output.key = "values";
   output.shape_rule = OperationShapeRule::Fixed;
   output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = kind == ReductionKind::Count
-                                  ? sizeof(CountState)
-                                  : sizeof(ReductionState);
-  output.maximum_dependency_stages = kind == ReductionKind::Count ? 2 : 1048576;
-  if (kind != ReductionKind::Count)
-    output.failure_delivery = FailureDelivery::PerAtomOutcome;
+  output.region_rule = OperationRegionRule::Whole;
+  traits.workspace_bytes =
+      kind == ReductionKind::Count ? 0 : sizeof(ReductionState);
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -384,26 +299,13 @@ OperationDefinition reduction_operation(const std::string& key,
     if (kind == ReductionKind::Count) {
       result.maximum_output_payload_bytes = 8;
       result.preserve_output_views = true;
-      auto all = Footprint::all(result.metadata.descriptor.shape);
-      if (!all.ok())
-        return Answer(all.status());
-      result.static_dependency_pieces =
-          std::vector<DependencyMapPiece>{{all.take_value(), {}}};
+      result.input_indices = std::vector<std::uint32_t>{};
     }
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_dependency = [kind, profile](const auto& query,
-                                               const auto& allocator) {
-    auto resolved = metadata(kind, query.inputs[0], query.parameters);
-    if (!resolved.ok())
-      return Result<DependencyContinuation>(resolved.status());
-    if (kind == ReductionKind::Count)
-      return DependencyContinuation::make<CountState>(allocator, profile,
-                                                      resolved.value().count);
-    return DependencyContinuation::make<ReductionState>(
-        allocator, kind, profile, resolved.take_value(),
-        query.inputs[0].descriptor.element_type);
+  operation.callback = [kind, profile](const OperationInvocation& call) {
+    return execute_reduction(call, kind, profile);
   };
   return operation;
 }

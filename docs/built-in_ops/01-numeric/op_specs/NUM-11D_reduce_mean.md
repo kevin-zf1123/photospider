@@ -69,10 +69,6 @@ inputs first would incorrectly yield 2^53. For Float64 [MAX,MAX],
 mean is MAX despite an overflowing naive floating sum. Test both destinations
 and the shared deterministic NaN payload narrowing/expansion.
 
-The current three profile keys use `reduce_mean_node` from
-`photospider/numeric/reductions.hpp`. Integer sources remain exact through the
-sum/count calculation and convert only at final Float32/Float64 rounding. The
-public fixture checks the `[2,3]` axes-`1` result `[[2],[5]]` and large-integer
-no-premature-conversion cases. The shared reduction contract records the
-complete strict/Apple/WSL and installed-consumer evidence. Proposed status is
-unchanged.
+The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.

@@ -58,9 +58,6 @@ independent exact grouping and integer/rational/bit-selection oracles. Cover
 singleton groups, non-leading/multiple axes, NaN payload order/conversion,
 signed-zero groups, infinity combinations, subnormals and source dtype extrema.
 
-The current three profile keys use `reduce_minimum_node` from
-`photospider/numeric/reductions.hpp`. They select exact integer/floating minima,
-propagate the first logical NaN and apply signed-zero rules. The public fixture
-checks the `[2,3]` axes-`1` result `[[1],[4]]`, multi-axis groups and bit
-preservation. The shared reduction contract records the complete strict/Apple/
-WSL and installed-consumer evidence. Proposed status is unchanged.
+The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.

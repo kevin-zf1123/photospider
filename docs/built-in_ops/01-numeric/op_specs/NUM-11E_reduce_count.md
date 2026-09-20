@@ -49,8 +49,8 @@ axes/profile and metadata dependencies belong to output inference/cache identity
 Empty output requests publish no values and request no upstream sample work.
 
 Compute the checked axis product with O(rank) work. The implementation may own
-one Int64 count and expose immutable zero-stride fragments for Q, or materialize
-requested packed counts; no dense physical layout is promised. Account actual
+one Int64 count and expose one complete immutable zero-stride output before
+projection; no dense physical layout is promised. Account actual
 count backing/output fragments and metadata, and do not reserve the entire
 logical payload merely to express repeated counts. Keep exact Region origins and
 coverage, with no implicit missing data. Final owners may outlive the context.
@@ -70,8 +70,6 @@ upstream whose numeric evaluation would fail must show zero sample reads. Test
 all dtypes, NaN/Inf/zero-filled source descriptors, full reduction, axis order
 normalization, invalid/duplicate axes, shape changes, byte-only source changes,
 partial output requests, resource cleanup and count-owner lifetime through the
-public manual target. The current three profile keys use `reduce_count_node`
-from `photospider/numeric/reductions.hpp`; the count path is metadata-only and
-may publish one 8-byte zero-stride owner for repeated Int64 counts. The giant
-metadata-count fixture is covered by the full manual evidence in the shared
-reduction contract. Proposed status is unchanged.
+public manual target. The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.

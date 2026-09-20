@@ -593,41 +593,22 @@ regional validation is not current Whole validation.
 
 ## Reductions: NUM-11
 
-`photospider_numeric_reductions` exercises the 21 versioned keys through the
-public constructors in `photospider/numeric/reductions.hpp`: sum, minimum,
-maximum, mean, count, variance and standard deviation, each with strict,
-Apple and x86 profile selection. Build and run with Clang:
+The21 formal sum/minimum/maximum/mean/count/variance/std keys use Whole with
+exact group arithmetic. Numeric reducers read all input groups and own complete
+output; unrequested overflow is a Run failure. Count excludes source payload
+and still represents a huge keepdims output with8 bytes.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_reductions -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 examples/numeric_workflow/reduction_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_reductions strict
+cmake --build build/clang21-numeric --target photospider_numeric_reductions -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
+python3 examples/numeric_workflow/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
 ```
 
-The CLI profile arguments are `strict`, `apple` and `x86`; they select the
-profile and are not operation-key suffixes. The basic fixture reduces
-`[[1,2,3],[4,5,6]]` over axis `1` and expects sum `[[6],[15]]`, minimum
-`[[1],[4]]`, maximum `[[3],[6]]`, mean `[[2],[5]]`, count `[[3],[3]]`,
-variance `2/3` and standard deviation `sqrt(2/3)` in the selected output
-dtype. Axes remain as extent-one keepdims dimensions.
-
-The implementation streams value-reading groups through at most 64-value
-windows and uses fixed exact accumulator state. `evaluated_values` counts
-admitted accumulator input attempts; output observation counts are reported as
-`computed_elements`. `reduce_count` reads no numeric samples and can return a
-single 8-byte zero-stride owner for repeated counts. `reduction_oracle.py`
-checks exact Fraction moments, NaN payload conversion and midpoint-square root
-rounding. Local Clang 21 strict and Apple full manual workflows passed,
-including streamed 4096-element groups under a 16 KiB live-payload limit,
-giant 2^40 count with an 8-byte owner and zero producer calls, atom
-support/dirty/overflow isolation, typed validation, Empty, cancellation, ddof,
-strided-NaN and required third-window source-failure-after-NaN checks. Strict
-and Apple installed consumers passed. Ubuntu WSL Clang 18.1.3 strict/x86 full
-manual workflows and the updated 4740-case oracle per profile passed. Scoped
-implementation and arithmetic reviews closed all required findings. These are
-manual targets without CTest or integration-test registration, and no performance
-result is claimed.
+Use `apple` or `x86` for available accelerated profiles. On input[[1,2,3],[4,5,6]],
+axes1 gives sums[6,15], minima[1,4], maxima[3,6], means[2,5], counts[3,3],
+variance[2/3,2/3] and std[sqrt(2/3),sqrt(2/3)] with final destination rounding.
+See [NUM-11 Whole execution](../../docs/built-in_ops/01-numeric/reductions-whole.md)
+for independent validation, full-memory implications and timing evidence.
 
 ## Ordering and quantile: NUM-12
 

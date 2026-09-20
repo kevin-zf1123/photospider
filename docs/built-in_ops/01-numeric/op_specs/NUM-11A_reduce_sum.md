@@ -71,10 +71,6 @@ For Int64, [INT64_MAX,1,-1] must return INT64_MAX. Explicit UInt8 output require
 final range validation independently of the integer default. Test each supported
 destination and rejection of cross-domain dtype selection.
 
-The current three profile keys use `reduce_sum_node` from
-`photospider/numeric/reductions.hpp`. They stream selected groups in at most
-64-value windows and use exact aggregate state with one final destination
-conversion. The public fixture checks `[[1,2,3],[4,5,6]]`, axes `1`, producing
-`[[6],[15]]`, plus dtype selection, overflow and exceptional values. The shared
-reduction contract records the complete strict/Apple/WSL and installed-consumer
-evidence. Proposed status is unchanged.
+The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.
