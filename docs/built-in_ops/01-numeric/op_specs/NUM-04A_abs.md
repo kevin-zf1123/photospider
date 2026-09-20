@@ -33,7 +33,7 @@ and in the named family contract take precedence.
 
 Compute per-element absolute value, preserving input shape and dtype. Inherit
 the [NUM-04 common contract](NUM-04_unary_contract.md) for ports, generic output,
-regional data/validation demand, NaN handling, ownership, budgets and public
+Whole data/validation demand, NaN handling, ownership, budgets and public
 acceptance. There are no static operation parameters.
 
 ## Selected mathematical and type contract
@@ -49,10 +49,9 @@ have a cleared sign and set quiet bit. Finite float magnitudes do not change,
 including subnormals. No clipping or saturating integer mode is included.
 All three versions have identical logical result bits and semantic failures.
 
-An Int64-minimum failure is OperationFailed/ArithmeticOverflow for its actually
-requested atom. Other requested observations can succeed under the host's atom
-API; ordinary execute remains fail-fast. Reading an unrequested INT64_MIN is not
-authorized. UInt8 cannot produce an arithmetic error, and floating NaN/Inf is a
+An Int64-minimum failure is OperationFailed/ArithmeticOverflow with Run scope
+and no Atom key. It fails the complete Whole invocation, including when the
+offending coordinate lies outside the consumer projection. UInt8 cannot produce an arithmetic error, and floating NaN/Inf is a
 successful numeric result subject to any preexisting typed-input obligations.
 
 ## Reference algorithm and resource difference
@@ -72,7 +71,7 @@ fallback is required.
 
 - UInt8: all 256 inputs return identical bits.
 - Int64: `[-7,0,7,INT64_MAX]` gives `[7,0,7,INT64_MAX]`; INT64_MIN fails only
-  where requested, without saturation or wraparound.
+  anywhere in a nonempty Whole invocation, without saturation or wraparound.
 - Float32: raw `0x80000000` -> `0x00000000`, `0xff800000` -> `0x7f800000`,
   and signaling NaN `0xff812345` -> quiet `0x7fc12345`.
 - Float64: `0xfff0000000000042` -> `0x7ff8000000000042`; normal/subnormal
@@ -100,8 +99,8 @@ No removal/migration of the legacy key is performed by this specification.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

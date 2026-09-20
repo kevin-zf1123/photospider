@@ -42,7 +42,7 @@ or angle-unit parameter.
 
 One input `input` and output `values` have identical shape and dtype, Float32 or
 Float64. Integer inputs require explicit cast. Output facets are empty. Inherit
-all [unary contract](NUM-04_unary_contract.md) requirements for exact regional
+all [unary contract](NUM-04_unary_contract.md) requirements for Whole
 demand, typed validation, ownership, invalidation, errors, cache, resources and
 cancellation. Both platform accelerated keys reject incompatible platforms.
 
@@ -51,7 +51,7 @@ dtype. It is not defined as a rounded sine followed by a rounded division.
 Accelerated finite nonzero results permit at most four FP32-scaled ULP from
 strict; NaN/Inf/zero classification and sign and specified landmarks match strict
 exactly. Use [exp's fallback rules](NUM-04D_exp.md) when an approximation cannot
-meet the bound, reporting strict fallback. Insufficient refinement or memory
+meet the bound, with per-value diagnostics N/A. Insufficient refinement or memory
 budget yields ResourceExhausted rather than an unverified numeric result.
 
 Avoid spurious intermediate overflow and loss of accuracy around zero. A stable
@@ -84,8 +84,8 @@ NaN fixtures checked separately using exact input payload bits.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

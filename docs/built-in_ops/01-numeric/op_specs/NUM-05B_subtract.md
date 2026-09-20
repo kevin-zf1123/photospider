@@ -56,7 +56,7 @@ is -0; the other signed-zero pairs and exact nonzero cancellation produce +0.
 This sign rule does not negate a propagated input NaN.
 
 For UInt8/Int64, compute the exact integer result and reject only when that
-result is outside the destination range. Overflow fails the requested observation
+result is outside the destination range. Overflow fails the complete Whole invocation
 without wrapping, saturation or promotion. No floating conversion is permitted.
 
 ## Acceptance and legacy comparison
@@ -65,25 +65,25 @@ Conceptual public fixture: `[4,5,6] - [1,2,3] -> [3,3,3]`, repeated for supporte
 Include signed-zero operand combinations, extrema, subnormal/normal boundaries,
 all infinity combinations and NaNs with distinct payloads in both input orders.
 Use exact rational rounding as the floating oracle and arbitrary-precision
-integers for integer cases; verify requested overflow and unrequested overflow
-separately. Apply all shared public execution and resource cases.
+integers for integer cases; verify that overflow both inside and outside the consumer projection
+fails the complete invocation. Apply all shared public execution and resource cases.
 
 The current legacy operation uses finite-only Float32/Float64 arithmetic and
 Whole execution. It does not implement this versioned IEEE-like contract or
-establish the required per-coordinate support. The maintained versioned implementation and public example are described below.
+establish the full-input typed and numeric semantics. The maintained versioned implementation and public example are described below.
 
 ## Maintained implementation
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
-The shared adapter retains both inputs as exact pointwise Data and separately
-retains typed validation, including when a numeric identity determines a result.
+The shared Whole adapter retains and validates both complete inputs, including
+when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
 operations retain checked exact arithmetic. Accelerated ordinary positive-base
 power and angle results use SLEEF binary64 enclosures within the shared admitted
 ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
-candidates dispatch the certified strict backend and report strict fallback. See [math implementation](../math-implementation.md) for
+candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)

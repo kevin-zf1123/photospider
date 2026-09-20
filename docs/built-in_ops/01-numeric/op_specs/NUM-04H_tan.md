@@ -82,8 +82,8 @@ the maintained public run command is documented below; local timing is recorded 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

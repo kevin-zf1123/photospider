@@ -716,7 +716,7 @@ void measure(const Case& c, const std::string& profile) {
   ps::ValueFragments retained;
   std::vector<std::int64_t> times;
   std::uint64_t source_elements = 0, evaluated = 0, fallbacks = 0;
-  bool source_support_available = false;
+  bool source_support_available = false, numeric_available = false;
   std::map<std::string, std::vector<std::uint64_t>> callback_times;
   {
     ps::GraphContext graph(c.document);
@@ -747,6 +747,7 @@ void measure(const Case& c, const std::string& profile) {
                             std::chrono::steady_clock::now() - start)
                             .count());
       source_elements = evaluated = fallbacks = 0;
+      numeric_available = true;
       source_support_available = result.dependencies.valid();
       if (source_support_available) {
         for (const auto& entry : take(result.dependencies.source_support()))
@@ -765,6 +766,8 @@ void measure(const Case& c, const std::string& profile) {
                  node.operation == "curve.unpack_lut3d" ||
                  node.operation == "curve.gate_lut3d"))
               callbacks[node.operation] += timing.duration_us;
+        numeric_available &=
+            timing.numeric.profile != ps::CpuNumericProfile::Unspecified;
         evaluated += timing.numeric.evaluated_values;
         fallbacks += timing.numeric.strict_fallbacks;
       }
@@ -820,7 +823,9 @@ void measure(const Case& c, const std::string& profile) {
             << stats.live[ps::ResourceKind::Metadata] << ','
             << (source_support_available ? std::to_string(source_elements)
                                          : "unavailable")
-            << ',' << evaluated << ',' << fallbacks << '\n'
+            << ',' << (numeric_available ? std::to_string(evaluated) : "N/A")
+            << ',' << (numeric_available ? std::to_string(fallbacks) : "N/A")
+            << '\n'
             << std::flush;
   for (auto& entry : callback_times) {
     auto& samples = entry.second;

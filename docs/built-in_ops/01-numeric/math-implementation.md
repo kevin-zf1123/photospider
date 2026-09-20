@@ -139,12 +139,17 @@ including domain/failure classification. The same kernel handles vector tails.
 `2*x+1` and ordinary exp can therefore avoid both per-sample continuation work
 and multiprecision math. Cancellation and all continuation storage are accounted.
 
-Diagnostics identify the numerical implementation, compiler/OS/build identity
+Dependency-path diagnostics identify the numerical implementation, compiler/OS/build identity
 and actual selected profile. The build identity includes the pinned SLEEF sources
 and integration module, preventing old/new accelerated cache identity reuse. Evaluations
 are admitted before arithmetic; copied values are counted before their fixed
 publication store. Both counts and an already attempted fallback survive a later
 resource or cancellation failure. Cache hits add no fabricated arithmetic work.
+
+NUM-04/05 now use Whole callbacks. Their arithmetic and fallback rules are
+unchanged, but per-value diagnostics described above are unavailable (N/A).
+The older timing and regional acceptance tables below describe their recorded
+revisions; see [current Whole measurements](point-math-whole.md).
 
 ## Independent reference and execution
 

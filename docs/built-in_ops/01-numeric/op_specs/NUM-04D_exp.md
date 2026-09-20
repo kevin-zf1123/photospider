@@ -33,7 +33,7 @@ and in the named family contract take precedence.
 
 For each observed Float32/Float64 x, compute the natural exponential e^x and
 preserve dtype/shape. Inherit [NUM-04 common requirements](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, generic output, exact regional
+for the parameter-free input/values interface, generic output, Whole
 and typed-validation demand, NaN bits, lifetime, resource accounting and public
 acceptance. Integer inputs require explicit conversion.
 
@@ -51,9 +51,8 @@ correct underflow may produce positive subnormal or +0, all as successful numeri
 results. There is no domain Status failure for a generic floating input.
 
 An accelerated argument range without an established bound/classification path
-falls back to strict. Report actual operation/profile/platform/ISA, evaluated
-elements and strict fallback reason/count through host-owned diagnostics. No
-third output is added. Resource/cancellation/upstream failure cannot be erased
+falls back to strict. Formal keys retain profile identity, but per-value
+evaluation/fallback counters are unavailable (N/A) in Whole callbacks. Resource/cancellation/upstream failure cannot be erased
 by a mathematical fallback. Fixed profile, inputs and dtype must give identical
 bits across batching/SIMD widths and scheduling; platform profiles can differ
 within the accepted tolerance.
@@ -71,9 +70,8 @@ with ResourceExhausted rather than guess if the available budget cannot resolve 
 Accelerated implementations publish their actual library/algorithm/version and
 supported argument ranges with accuracy justification; no blanket std::exp or
 vector-library name establishes the four-ULP bound. Unverified cases take strict
-fallback. Work is per requested sample plus actual reduction/refinement cost;
-scratch and temporary growth remain under inherited host budgets. No unrequested
-SIMD tail is evaluated to fill a vector.
+fallback. Work is per full-input sample plus actual reduction/refinement cost;
+scratch and temporary growth remain under inherited host budgets. SIMD tails do not read beyond the complete logical input.
 
 ## Independent acceptance
 
@@ -82,7 +80,7 @@ positive/negative finite inputs with independently resolved destination rounding
 Include neighbors around the overflow boundary, normal/subnormal boundary and
 underflow-to-zero boundary for both dtypes. Strict compares bits. Accelerated
 checks finite ULP distance and separate exact classification/NaN/zero behavior.
-Include hard-to-round inputs and forced input-range fallback with diagnostics.
+Include hard-to-round inputs and forced input-range fallback.
 
 Use a public WorkflowDocument fixture binding `[0,-Inf,+Inf]`; values must be
 `[1,+0,+Inf]`, with generic output facets. Also execute nonzero/disjoint regions,
@@ -95,8 +93,8 @@ The maintained implementation and public run command are documented below; local
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

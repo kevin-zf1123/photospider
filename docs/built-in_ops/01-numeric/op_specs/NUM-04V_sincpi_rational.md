@@ -31,7 +31,7 @@ values remain exact.
 Compute sin(pi*p/q)/(pi*p/q) with exact pi and the exact Int64 fraction p/q. Inherit the
 [rational pi contract](NUM-04_rational_pi_contract.md) in full: ordered numerator/
 denominator inputs, identical positive rank-1..8 shapes, q>0, unreduced fraction
-support, floating output dtype default Float64, exact requested-position demand,
+support, floating output dtype default Float64, Whole demand,
 integer range-safe reduction, errors, resources, fallback, cache and ownership.
 Output values preserves shape with empty facets. No implicit floating division
 or conversion of p/q defines this operation.
@@ -57,14 +57,14 @@ not a floating quotient fed into the old sincpi helper.
 Provide a real public WorkflowDocument run with numerator/denominator bindings,
 static dtype and named values through the maintained public workflow. Verify actual
 sparse read/dirty sets, invalid denominators, source changes, cache-off, budgets,
-cancellation, fallback reporting and result lifetime. The validation boundary is
+cancellation, fallback behavior and result lifetime. The validation boundary is
 recorded below; local timing is recorded in the implementation notes. The existing floating sincpi specification retains its own input domain.
 
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

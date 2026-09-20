@@ -84,7 +84,7 @@ All precision growth, reduction work and fallback is host-accounted; exhaustion
 is ResourceExhausted rather than an inaccurate result or a silent range limit.
 
 The common ROI, typed-validation, owner/cache, cancellation and diagnostic
-requirements apply. Work is per requested sample plus actual reduction/refinement
+requirements apply. Work is per full-input sample plus actual reduction/refinement
 cost, with actual temporary capacities charged. Platform-specific keys do not
 execute on incompatible platforms. No GPU/Metal or private worker pool is added.
 
@@ -101,7 +101,7 @@ For pi multiples, test positive/negative large integers, half/quarter-integers
 and neighboring representable values. Check that radian pi rounded to dtype is
 not silently treated as the exact pi-multiple input 1. Validate actual strict
 fallback for unsupported fast argument ranges and common public execution,
-regional demand and lifetime/resource cases. Implementation evidence is recorded
+Whole demand and lifetime/resource cases. Implementation evidence is recorded
 separately below; Proposed specification status does not imply missing runtime keys.
 
 
@@ -138,9 +138,11 @@ use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
 SLEEF binary64 kernels and conservative final-error checks within the
 [admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
 Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
-Rejected candidates use strict evaluation and report actual fallback. Unresolved
-strict rounding may return `ResourceExhausted`. Data stays precisely pointwise,
-with separately retained typed validation and Atom-scoped errors.
+Rejected candidates use strict evaluation . Unresolved
+strict rounding may return `ResourceExhausted`. Nonempty requests use Whole execution with full-input typed validation,
+complete packed output allocation and Run-scoped arithmetic errors. Empty requests
+read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
+on this callback path; numerical fallback behavior is unchanged.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent

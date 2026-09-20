@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <optional>
 
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/exact_root.hpp"
@@ -38,7 +39,9 @@ struct ExactElementary final {
   }
   Result<std::uint64_t> evaluate(
       ElementaryKind kind, ElementType dtype, std::uint64_t a, std::uint64_t b,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const std::function<Status(std::uint64_t)>& consume,
+      const input_internal::Float32Environment* borrowed_environment =
+          nullptr) {
     using Answer = Result<std::uint64_t>;
     auto charged = consume(1024);
     if (!charged.ok())
@@ -190,9 +193,16 @@ struct ExactElementary final {
         return Answer(negative ? sign : 0);
     }
     // Single IEEE operations are correctly rounded by the hardware. Keep the
-    // bit-level special table above, and restore flags and controls on return.
-    input_internal::Float32Environment environment;
-    if (environment.active()) {
+    // bit-level special table above; the owning guard restores flags/controls.
+    // A Whole callback can lend its live RN-even/gradual-underflow guard.
+    // A borrowed guard must live on this thread throughout the call; callers
+    // must not alter fenv until its destruction restores the outer flags.
+    // Standalone callers retain a local guard and restore their own flags.
+    std::optional<input_internal::Float32Environment> environment;
+    if (!borrowed_environment)
+      environment.emplace();
+    if (borrowed_environment ? borrowed_environment->active()
+                             : environment->active()) {
       const double left = numeric_double(a, narrow),
                    right = numeric_double(b, narrow);
       if (narrow) {

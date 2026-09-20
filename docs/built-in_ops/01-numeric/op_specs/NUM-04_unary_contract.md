@@ -92,24 +92,19 @@ facets are empty. Input facets retain existing metadata and actually observed
 typed-semantic validation; an invalid typed NaN does not become valid just
 because generic numeric NaNs are allowed by the arithmetic profile.
 
-For requested output Q, Data support is the identical input-coordinate set Q.
-Recognized input semantics may add required validation support, such as full
-image channels. Declare that closure separately, retain it and do not silently
-read a bounding gap for disjoint Q. Empty Q reads no input data. Unrequested
-numeric exceptions do not run and have no effect on other observations.
+Every nonempty request uses synchronous Whole execution. Data support and typed
+validation cover each complete input, including gaps outside the consumer's
+projection. Empty requests read no payload and invoke no callback. Any changed
+input coordinate invalidates all observed output coordinates. Metadata inference
+still depends only on metadata and the static profile.
 
-Use regional dependency execution wherever necessary to express this exact
-support and typed validation. Changed input Data invalidates the corresponding
-output coordinates; changed validation inputs invalidate the observations that
-retained them. No blanket Whole validation pass is added. Output descriptors
-depend on input metadata and static numeric profile, not runtime numeric values.
-
-Read legal immutable strided/offset/unaligned inputs at logical coordinates.
-Publish packed owned output fragments covering requested global coordinates,
-with correct Region/storage origins and element-size strides. Do not expose
-writable aliases or implicit zero-filled gaps. Published owners may outlive
-the context; release unpublished work on failure and published bytes at the
-final owner. SIMD tails cannot read unrequested input coordinates.
+Integer overflow and invalid rational denominators fail the complete invocation
+with Run scope and no Atom key, including when outside the consumer projection.
+No partial output is published. Already terminal results retain their lifetime.
+Read legal immutable strided/offset/unaligned inputs, including zero/negative
+strides and shifted origins. Allocate one complete packed owned output and let
+the executor project it onto requested global coordinates. Owners may outlive
+the context; release unpublished output and scratch on every failure.
 
 ## Rounding, versions and resources
 
@@ -128,15 +123,13 @@ IEEE classifications, signed-zero rules and NaN payload handling remain exact
 even if finite numeric results permit a tolerance. Platform-specific keys on
 unsupported hosts return BackendUnavailable, without silent key replacement.
 
-For M requested elements and destination size b, output payload is M*b; requested
-input fragments, validation closure and O(rank) coordinate state are additionally
-accounted. Simple transforms cost O(M); the particular spec must account for
-nonconstant math work or exact-rounding refinement. No full logical array
-allocation is required for a small request. Use host workers, allocator,
-admission/work/stage limits and actual capacity accounting, including temporary
-growth overlap. Bound scalar/SIMD batches and poll cancellation before reads,
-at least every 64 simple elements, within long math/refinement work and before
-publication. Resource failures are sticky, not reasons to return a weaker value.
+For N full logical elements and destination size b, output capacity is N*b,
+even for a one-element consumer. Full collected input owners and one fixed
+arithmetic workspace are additional live capacity. Account output, scratch and
+all refinement work through the worker allocator/resource scope. Managed limits
+are capacity accounting, not an RSS guarantee. Simple transforms cost O(N).
+Poll cancellation before reads, within long refinement and before publication.
+Sparse requests may therefore use substantially more memory and work.
 
 Cache identities include operation/profile version, input metadata and exact
 observed bits, including NaN payload/sign. Required validation and upstream
@@ -182,9 +175,11 @@ use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
 SLEEF binary64 kernels and conservative final-error checks within the
 [admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
 Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
-Rejected candidates use strict evaluation and report actual fallback. Unresolved
-strict rounding may return `ResourceExhausted`. Data stays precisely pointwise,
-with separately retained typed validation and Atom-scoped errors.
+Rejected candidates use strict evaluation . Unresolved
+strict rounding may return `ResourceExhausted`. Nonempty requests use Whole execution with full-input typed validation,
+complete packed output allocation and Run-scoped arithmetic errors. Empty requests
+read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
+on this callback path; numerical fallback behavior is unchanged.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent

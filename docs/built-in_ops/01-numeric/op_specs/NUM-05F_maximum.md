@@ -70,14 +70,14 @@ see the execution entry below.
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
-The shared adapter retains both inputs as exact pointwise Data and separately
-retains typed validation, including when a numeric identity determines a result.
+The shared Whole adapter retains and validates both complete inputs, including
+when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware
 arithmetic after exact special-value classification, with exact fallback; integer
 operations retain checked exact arithmetic. Accelerated ordinary positive-base
 power and angle results use SLEEF binary64 enclosures within the shared admitted
 ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
-candidates dispatch the certified strict backend and report strict fallback. See [math implementation](../math-implementation.md) for
+candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)

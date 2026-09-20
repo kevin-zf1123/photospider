@@ -70,7 +70,7 @@ high-precision oracle for ordinary arguments and midpoint-sensitive cases.
 
 Apply shared disjoint demand, typed-validation closure, invalidation, ownership,
 cache, cancellation and resource checks. Verify unsupported accelerated ranges
-actually use strict fallback and report it. Float32 LLVM libc is a candidate
+actually use strict fallback. Float32 LLVM libc is a candidate
 as documented in the shared contract; it supplies no implicit Float64 coverage.
 The maintained public run command and current validation boundary are documented below;
 local timing is recorded in the implementation notes.
@@ -78,8 +78,8 @@ local timing is recorded in the implementation notes.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

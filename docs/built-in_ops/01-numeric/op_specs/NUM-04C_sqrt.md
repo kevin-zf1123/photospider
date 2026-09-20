@@ -33,7 +33,7 @@ and in the named family contract take precedence.
 
 Compute the nonnegative square root for each observed Float32/Float64 value,
 preserving shape and dtype. Inherit the [NUM-04 common contract](NUM-04_unary_contract.md)
-for the parameter-free input/values interface, regional/typed-validation demand,
+for the parameter-free input/values interface, Whole/typed-validation demand,
 NaN propagation, generic output, lifetime and resource/public acceptance rules.
 Integer input is TypeMismatch; conversion must be explicit.
 
@@ -84,8 +84,8 @@ expression sqrt has a different input/output/error contract.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)

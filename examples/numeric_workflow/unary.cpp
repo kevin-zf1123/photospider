@@ -16,6 +16,7 @@
 
 #include "accuracy.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -261,42 +262,29 @@ void examples(ps::CpuNumericProfile profile) {
                "strict/FP32-bound fixtures and escaped lifetime\n";
 }
 
-ps::DependencyResult direct(const ps::WorkflowNode& node,
-                            const std::vector<ps::Value>& inputs,
-                            const ps::Footprint& demand) {
+struct DirectResult {
+  ps::ValueFragments value;
+};
+DirectResult direct(const ps::WorkflowNode& node,
+                    const std::vector<ps::Value>& inputs,
+                    const ps::Footprint& demand) {
   auto registry = ps::make_default_operation_registry();
-  ps::DependencyRequest request;
+  std::vector<ps::Region> regions;
   for (const auto& input : inputs)
-    request.inputs.push_back({input.descriptor(), input.facets()});
-  request.parameters = node.parameters;
-  request.outputs = demand;
-  request.snapshot_identity = "unary-direct";
-  request.limits.maximum_work = 512 * 1024 * 1024;
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(registry->start_dependency(node.operation, request,
-                                                 resources.allocator()));
-  auto first = take(session->poll());
-  if (std::holds_alternative<ps::DependencyResult>(first))
-    return std::get<ps::DependencyResult>(std::move(first));
-  std::vector<ps::Footprint> wanted;
-  for (const auto& input : inputs)
-    wanted.push_back(take(ps::Footprint::none(input.descriptor().shape)));
-  for (const auto& need : take(session->pending_reads()))
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-  std::vector<ps::ValueFragments> supplied;
-  for (unsigned port = 0; port < inputs.size(); ++port) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[port].descriptor(), inputs[port].facets(),
-        take(ps::Footprint::all(inputs[port].descriptor().shape)),
-        {inputs[port]}));
-    supplied.push_back(take(all.restrict(wanted[port])));
-  }
-  require(session->supply(supplied, request.snapshot_identity).ok(),
-          "unary direct supply");
-  return std::get<ps::DependencyResult>(take(session->poll()));
+    regions.push_back(input.region());
+  ps::OperationInvocation invocation(
+      inputs, regions, node.parameters, ps::Backend::Cpu, {},
+      ps::Region::whole(inputs[0].descriptor().shape));
+  auto value = take(registry->invoke(node.operation, invocation));
+  auto fragments = take(ps::ValueFragments::create(
+      value.descriptor(), {},
+      take(ps::Footprint::all(value.descriptor().shape)), {value}));
+  return {take(fragments.restrict(demand))};
 }
+
 void layouts_and_fallback(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
+  point_math_checks::layouts(authored("abs", Type::Float32, profile), 1);
   auto all = take(ps::Footprint::all({3}));
   fenv_t saved;
   require(fegetenv(&saved) == 0, "save unary fenv");
@@ -354,175 +342,78 @@ void layouts_and_fallback(ps::CpuNumericProfile profile) {
     }
   }
   require(fesetenv(&saved) == 0, "restore unary fenv");
-  auto sine = direct(
-      authored("sin", Type::Float64, profile),
-      {array(Type::Float64, {3}, {0, 0x3ff0000000000000, 0x7ff0000000000042})},
-      all);
-  require(
-      sine.numeric.evaluated_values == 3 && sine.numeric.copied_elements == 3 &&
-          sine.numeric.strict_fallbacks == 0 &&
-          sine.numeric.fallback_reasons[static_cast<unsigned>(
-              ps::NumericFallbackReason::FunctionUnsupported)] ==
-              sine.numeric.strict_fallbacks,
-      "ordinary sin uses the bounded SIMD path, special values never fallback");
-  auto landmark = direct(
-      authored("sinpi_rational", Type::Float64, profile),
-      {array(Type::Int64, {3}, {1, 1, 1}), array(Type::Int64, {3}, {3, 4, 6})},
-      all);
-  require(landmark.numeric.strict_fallbacks == 0,
-          "exact algebraic landmarks do not fallback");
-  std::cout
-      << "22 functions: all-port negative strides and four fenv modes/flags; "
-         "actual strict-fallback and landmark counters passed\n";
+  std::cout << "22 functions: all-port negative strides and four fenv "
+               "modes/flags passed\n";
 }
+
 void sparse_atoms_and_typed(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry();
+  auto edges = take(ps::Footprint::from_regions(
+      {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
   for (const std::string operation : {"abs", "neg"}) {
     Fixture fixture(
         authored(operation, Type::Int64, profile),
         {array(Type::Int64, {3}, {UINT64_MAX, 0x8000000000000000, 3})});
-    auto edges = take(ps::Footprint::from_regions(
-        {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
-    auto result = take(fixture.run({{"values", edges}}));
-    require(take(result.dependencies.source_support()).at("input0") == edges,
-            "integer unrequested overflow excluded");
-    auto remote =
+    auto result = fixture.run({{"values", edges}});
+    require(
+        !result.ok() &&
+            result.status().reason == ps::FailureReason::ArithmeticOverflow &&
+            result.status().detail.scope == ps::FailureScope::Run &&
+            !result.status().detail.atom,
+        "unrequested overflow fails Whole without Atom identity");
+    fixture.bindings.inputs[0].value = array(Type::Int64, {3}, {1, 2, 3});
+    auto good = take(fixture.run({{"values", edges}}));
+    require(take(good.dependencies.source_support()).at("input0") ==
+                take(ps::Footprint::all({3})),
+            "Whole input support");
+    auto middle =
         take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}));
-    require(take(result.dependencies.potential_dirty("input0", remote))
-                .at("values")
-                .empty(),
-            "unrequested integer overflow not dirty");
-    ps::GraphContext graph(fixture.document);
-    auto plan = take(ps::Compiler(registry).compile(graph));
-    ps::ExecutionContextConfig config;
-    config.cpu_workers = 1;
-    config.managed_resources = ps::ResourceLimits{};
-    ps::ExecutionContext context(registry, config);
-    auto atoms = take(
-        context.execute_atoms(plan.plan, fixture.bindings,
-                              {{"values", take(ps::Footprint::all({3}))}}));
-    unsigned good = 0, bad = 0;
-    for (const auto& atom : atoms.atoms) {
-      if (atom.outcome.ok()) {
-        ++good;
-      } else {
-        ++bad;
-        require(atom.key.coordinate[0] == 1 &&
-                    atom.outcome.status().reason ==
-                        ps::FailureReason::ArithmeticOverflow &&
-                    atom.outcome.status().detail.atom == atom.key,
-                "integer overflow Atom");
-      }
-    }
-    require(good == 2 && bad == 1, "integer atom isolation");
+    require(take(good.dependencies.potential_dirty("input0", middle))
+                    .at("values") == edges,
+            "any input dirties all observed outputs");
   }
   Fixture rational(
       authored("sinpi_rational", Type::Float32, profile),
       {array(Type::Int64, {3}, {1, 1, 1}), array(Type::Int64, {3}, {6, 0, 2})});
-  auto edges = take(ps::Footprint::from_regions(
-      {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
-  auto selected = take(rational.run({{"values", edges}}));
-  const auto support = take(selected.dependencies.source_support());
-  require(support.at("input0") == edges && support.at("input1") == edges,
-          "rational both exact supports");
-  auto invalid = rational.run({{"values", take(ps::Footprint::from_regions(
-                                              {3}, {ps::Region({{1, 1}})}))}});
+  auto invalid = rational.run({{"values", edges}});
   require(
-      !invalid.ok() &&
-          invalid.status().detail.scope == ps::FailureScope::Atom &&
-          invalid.status().detail.atom->coordinate[0] == 1 &&
+      !invalid.ok() && invalid.status().detail.scope == ps::FailureScope::Run &&
+          !invalid.status().detail.atom &&
           invalid.status().message.find("port=1 bits=0") != std::string::npos,
-      "denominator diagnostic includes actual atom and bits");
+      "unrequested denominator fails Whole with denominator diagnostic");
   const auto facet = take(ps::encode_semantic(ps::rgba_semantics()));
   for (const std::string operation : {"abs", "sqrt", "sin"}) {
     auto node = authored(operation, Type::Float32, profile);
-    ps::DependencyRequest request;
-    request.inputs = {{{Type::Float32, {1, 1, 4}}, {facet}}};
-    request.outputs = take(ps::Footprint::from_regions(
-        {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
-    request.snapshot_identity = "unary-typed";
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    auto session = take(registry->start_dependency(node.operation, request,
-                                                   resources.allocator()));
-    require(session->poll().ok(), "typed unary Need");
-    unsigned data = 0, validation = 0;
-    for (const auto& need : take(session->pending_reads())) {
-      if (need.roles & 1)
-        data += take(need.samples.element_count());
-      if (need.roles & 4)
-        validation += take(need.samples.element_count());
-    }
-    require(data == 1 && validation == 4,
-            "separate typed full-channel validation");
-    request.outputs = take(ps::Footprint::none({1, 1, 4}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "Empty unary no start/poll");
+    auto value = array(Type::Float32, {1, 1, 4}, {0, 0, 0, 0x3f800000});
+    value =
+        take(ps::Value::from_storage(value.descriptor(), value.region(),
+                                     value.layout(), value.storage(), {facet}));
+    Fixture fixture(node, {value});
+    auto empty =
+        take(fixture.run({{"values", take(ps::Footprint::none({1, 1, 4}))}}));
+    require(empty.diagnostics.operation_timings.empty(),
+            "Empty has no callback");
+    auto result = take(fixture.run(
+        {{"values", take(ps::Footprint::from_regions(
+                        {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}))}}));
+    require(take(result.dependencies.source_support()).at("input0") ==
+                take(ps::Footprint::all({1, 1, 4})),
+            "Whole typed support includes all channels");
   }
-  std::cout << "sparse Data/dirty, integer Atom overflow, rational denominator "
+  std::cout << "Whole Data/dirty, integer overflow, rational denominator "
                "diagnostics and typed/Empty checks passed\n";
 }
 void cancellation_and_cache(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
-  auto registry = ps::make_default_operation_registry();
-  auto node = authored("sin", Type::Float64, profile);
-  auto source = array(Type::Float64, {1}, {0x4000000000000000});
-  ps::DependencyRequest request;
-  request.inputs = {{source.descriptor(), {}}};
-  request.outputs = take(ps::Footprint::all({1}));
-  request.snapshot_identity = "unary-interrupt";
-  request.limits.maximum_work = 512 * 1024 * 1024;
-  auto supplied = take(ps::ValueFragments::create(source.descriptor(), {},
-                                                  request.outputs, {source}));
-  for (bool cancel : {false, true}) {
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    bool armed = false, interrupted = false;
-    std::uint64_t charged = 0;
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(registry->start_dependency(
-        node.operation, request, resources.allocator(),
-        [&](std::uint64_t work) {
-          if (armed && session->numeric_diagnostics().evaluated_values == 1 &&
-              (charged += work) > 100000) {
-            interrupted = true;
-            if (cancel)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "unary interval work",
-                                ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    require(session->poll().ok() &&
-                session->supply({supplied}, request.snapshot_identity).ok(),
-            "unary supply before refinement");
-    armed = true;
-    auto result = session->poll();
-    require(
-        interrupted && !result.ok() &&
-            result.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-        "sticky interval work/cancel");
-    require(session->numeric_diagnostics().evaluated_values == 1 &&
-                session->numeric_diagnostics().copied_elements == 0 &&
-                session->numeric_diagnostics().strict_fallbacks ==
-                    (profile == ps::CpuNumericProfile::Strict ? 0U : 1U),
-            "failed numeric/fallback counts retained");
-    session.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "interval scratch and output release");
-  }
-  request.cancellation = {};
-  request.limits.maximum_state_bytes = 1024;
-  auto limited = registry->start_dependency(node.operation, request);
-  require(!limited.ok() &&
-              limited.status().code == ps::ErrorCode::ResourceExhausted,
-          "fixed interval capacity admission");
+  point_math_checks::resources(
+      authored("abs", Type::Float64, profile),
+      {array(Type::Float64, {16384},
+             std::vector<std::uint64_t>(16384, 0x4000000000000000))});
+  point_math_checks::resources(
+      authored("sin", Type::Float64, profile),
+      {array(Type::Float64, {16384},
+             std::vector<std::uint64_t>(16384, 0x4000000000000000))});
   Fixture fixture(authored("sin", Type::Float64, profile),
                   {array(Type::Float64, {1}, {0x7ff0000000000042})});
   ps::InputSnapshotStore snapshots;
@@ -551,7 +442,7 @@ void cancellation_and_cache(ps::CpuNumericProfile profile) {
   require(changed.values.at("values").read({0}, &bits, 8).ok() &&
               bits == 0xfff8000000000051,
           "changed NaN payload/sign invalidates cache");
-  std::cout << "interval WorkLimit/cancel/capacity, failed fallback counters, "
+  std::cout << "Whole work/cancel/capacity, "
                "release and warm-cache NaN mutation passed\n";
 }
 
@@ -563,29 +454,34 @@ void schema_and_upstream(ps::CpuNumericProfile profile) {
   request.inputs = {{{Type::Int64, {1}}, {}}};
   request.outputs = take(ps::Footprint::none({1}));
   request.snapshot_identity = "unary-schema";
-  auto bad = registry->start_dependency(node.operation, request);
+  auto bad = registry->resolve_traits(node.operation, request.inputs,
+                                      request.parameters);
   require(!bad.ok() && bad.status().code == ps::ErrorCode::TypeMismatch,
           "integer sqrt rejects");
   node = authored("neg", Type::UInt8, profile);
   request.inputs[0].descriptor.element_type = Type::UInt8;
-  bad = registry->start_dependency(node.operation, request);
+  bad = registry->resolve_traits(node.operation, request.inputs,
+                                 request.parameters);
   require(!bad.ok() && bad.status().code == ps::ErrorCode::TypeMismatch,
           "UInt8 neg rejects");
   node = authored("sinpi_rational", Type::Float32, profile);
   request.inputs = {{{Type::Int64, {1}}, {}}, {{Type::Int64, {2}}, {}}};
   request.parameters = node.parameters;
-  bad = registry->start_dependency(node.operation, request);
+  bad = registry->resolve_traits(node.operation, request.inputs,
+                                 request.parameters);
   require(!bad.ok() && bad.status().code == ps::ErrorCode::TypeMismatch,
           "rational shape relation");
   request.inputs[1].descriptor.shape = {1};
   request.parameters.clear();
-  bad = registry->start_dependency(node.operation, request);
+  bad = registry->resolve_traits(node.operation, request.inputs,
+                                 request.parameters);
   require(!bad.ok() && bad.status().code == ps::ErrorCode::InvalidArgument,
           "direct rational dtype required");
   node = authored("abs", Type::Float32, profile);
   request.parameters.clear();
   request.inputs = {{{Type::Float32, {(UINT64_C(1) << 40) + 1}}, {}}};
-  bad = registry->start_dependency(node.operation, request);
+  bad = registry->resolve_traits(node.operation, request.inputs,
+                                 request.parameters);
   require(!bad.ok() && bad.status().code == ps::ErrorCode::TypeMismatch,
           "unary 2^40 cap");
   const auto facet = take(ps::encode_semantic(ps::rgba_semantics()));
@@ -596,17 +492,9 @@ void schema_and_upstream(ps::CpuNumericProfile profile) {
   request.inputs = {{invalid_image.descriptor(), {facet}}};
   request.outputs = take(ps::Footprint::from_regions(
       {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(registry->start_dependency(node.operation, request,
-                                                 resources.allocator()));
-  require(session->poll().ok(), "typed Need before invalid alpha");
-  auto fragments = take(ps::ValueFragments::create(
-      invalid_image.descriptor(), {facet}, take(ps::Footprint::all({1, 1, 4})),
-      {invalid_image}));
-  auto invalid = session->supply({fragments}, request.snapshot_identity);
-  require(
-      !invalid.ok() && session->numeric_diagnostics().evaluated_values == 0,
-      "typed validation rejects invalid unselected alpha before arithmetic");
+  Fixture typed(node, {invalid_image});
+  auto invalid = typed.run({{"values", request.outputs}});
+  require(!invalid.ok(), "Whole typed validation rejects invalid alpha");
   auto failed_registry = ps::make_default_operation_registry(false);
   unsigned calls = 0;
   ps::OperationDefinition failure;
@@ -693,7 +581,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       options.maximum_dependency_cache_work = 0;
       ps::DemandQuery query{{"values", take(ps::Footprint::all({size}))}};
       std::vector<std::int64_t> times;
-      std::uint64_t peak = 0, fallbacks = 0, reference = 0;
+      std::uint64_t peak = 0, reference = 0;
       for (unsigned repeat = 0; repeat < 8; ++repeat) {
         const auto start = std::chrono::steady_clock::now();
         auto result =
@@ -703,11 +591,9 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                               std::chrono::steady_clock::now() - start)
                               .count());
         peak = std::max(peak, result.diagnostics.peak_live_bytes);
-        fallbacks = 0;
         std::uint64_t evaluated = 0;
         for (const auto& timing : result.diagnostics.operation_timings) {
-          evaluated += timing.numeric.evaluated_values;
-          fallbacks += timing.numeric.strict_fallbacks;
+          evaluated += timing.computed_elements;
         }
         require(evaluated == size,
                 "benchmark actually evaluates requested elements");
@@ -717,6 +603,12 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                 result.values.at("values").read({size - 1}, &last, 8).ok() &&
                 first == last,
             "benchmark constant signal result check");
+        for (std::uint64_t i = 0; i < size; ++i) {
+          std::uint64_t bits = 0;
+          require(result.values.at("values").read({i}, &bits, 8).ok() &&
+                      bits == first,
+                  "benchmark verifies every output element");
+        }
         if (repeat)
           require(first == reference, "benchmark repeated bits");
         reference = first;
@@ -724,7 +616,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       std::sort(times.begin(), times.end());
       std::cout << operation << ',' << selected << ',' << size
                 << ",Float64,Whole,1,off,7," << times[3] << ',' << times[6]
-                << ',' << peak << ',' << fallbacks << '\n';
+                << ',' << peak << ",N/A\n";
     }
   }
 }

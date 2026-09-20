@@ -976,8 +976,8 @@ followed by output dtype (default Float64) and profile.
 All 66 keys have `values` output with empty facets. Generic arrays retain shape;
 use explicit broadcast/cast operators for adaptation. Most basic transforms
 support all four dtypes; neg excludes UInt8, while roots, reciprocals and
-transcendentals require Float32/64. Integer range failures affect the requested
-Atom. Rational denominators must be positive at every requested coordinate,
+transcendentals require Float32/64. Integer range failures affect the complete Whole invocation.
+Rational denominators must be positive at every logical coordinate,
 including zero numerators. Both rational sources remain dependencies.
 
 ```sh
@@ -1006,18 +1006,19 @@ Exact rational `p=[0,1,1]`, `q=[1,6,2]` gives sinpi `[0,0.5,1]` and tanpi
 exact supplied float; they never multiply it by a rounded pi first.
 
 The example sets one CPU worker, a 1 MiB controlled-payload limit, and explicit
-512 Mi work units per dependency session / 1024 Mi per Run for mathematical
-refinement. These are finite example budgets, not default or universal success
+512 Mi dependency work / 1024 Mi total execution work units. Callback arithmetic
+uses the worker ResourceBudget; direct budget/cancellation checks use an explicit
+ResourceAllocationScope. These are finite example budgets, not default or universal success
 guarantees. Exact elementary state is small; transcendental state includes a
 fixed 12288-bit limb arena and uses directed precision from 128 through 4096
 fractional bits. Unresolved rounding returns ResourceExhausted. Ordinary accelerated transcendental values use SLEEF binary64 kernels and
 conservative final-error checks in the documented ranges. Rejected candidates
-use reported strict fallback; special/algebraic paths retain their exact rules.
+use strict fallback; special/algebraic paths retain their exact rules.
 See [the mathematical implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md).
 
 Manual checks cover every function's negative strides and fenv modes/flags,
-precise sparse Data/dirty and typed validation, integer/denominator Atom errors,
-upstream failure, fallback counters, work/cancel/capacity cleanup, lifetime,
+full-input support/dirty and typed validation, Whole integer/denominator errors,
+upstream failure, work/cancel/capacity cleanup, lifetime,
 and warm-cache changes to NaN sign/payload. Use `apple` or `x86` only on that
 CPU target. No CTest or integration-test registration is added.
 
@@ -1028,9 +1029,9 @@ build/numeric/examples/numeric_workflow/photospider_numeric_unary strict benchma
 ```
 
 The CSV reports all functions at N=1 and N=256, Float64, Whole demand, one worker,
-cache off, three repetitions, median/max microseconds and peak controlled payload.
+cache off, seven repetitions, median/max microseconds and peak controlled payload.
 Compilation and freezing occur before timing; synchronous execution and result
-assembly are timed, and result bits/evaluation counts are checked. Ordinary
+assembly are timed, and result bits/computed element counts are checked. Ordinary
 rational timing uses p/q=1/7. Timing is not an accelerated speedup claim; WSL
 runs remain correctness-only.
 
@@ -1061,18 +1062,18 @@ with expected output `[6,8,10]`. `pow([2,-2,-2],[3,3,.5])` gives
 The corresponding radian angle fixture compares independently rounded pi bits.
 
 All sources are read and validated even for `NaN^0`, `1^NaN`, or NaN-selected
-minimum/maximum. Integer overflow fails only its requested Atom; floating domain
+minimum/maximum. Integer overflow anywhere fails the complete Whole invocation; floating domain
 errors/overflow produce the specified IEEE numeric result. Cache witnesses
 retain both operands even when a changed NaN leaves the result equal to one.
 Pow and angle functions use the NUM-04 bounded interval state and explicit
 work budgets shown in `Fixture::run`; ordinary accelerated power/angle results use bounded SLEEF candidates,
-with reported strict fallback only when their final enclosure is rejected. No universal refinement-success
+with strict fallback only when their final enclosure is rejected. No universal refinement-success
 or performance improvement is promised.
 
-The manual executable checks nine public fixtures and precise sparse support,
-UInt8/Int64 overflow isolation, both-port typed validation and failing producers,
+The manual executable checks nine public fixtures and full-input support,
+Whole UInt8/Int64 overflow, both-port typed validation and failing producers,
 independent/all-port negative strides, unaligned/zero-stride storage, caller
-floating environment, fallback/work/cancellation/capacity cleanup, escaped
+floating environment, work/cancellation/capacity cleanup, escaped
 lifetime and cache invalidation through a suppressed NaN. It has no new CTest
 or integration-test registration.
 
@@ -1081,6 +1082,15 @@ nine-function N=1/256 CSV timing workload. It uses a=2, b=.3, Float64, Whole,
 one worker, cache off and three checked repetitions. Compile/freeze precede the
 timed synchronous execution and result assembly. [Recorded measurements](../../docs/built-in_ops/01-numeric/math-implementation.md#num-05-validation-and-native-timing)
 include the actual validation platforms and resource boundaries.
+
+Nonempty requests collect and validate complete inputs, allocate a complete packed
+output plus one fixed arithmetic workspace, then project to the consumer. Any
+input change invalidates all observed outputs; errors outside the projection still
+fail the invocation with Run scope and no Atom key. Empty invokes no callback.
+Whole numeric fallback/evaluated counters are N/A. The unchanged arithmetic core
+retains exact special cases and each profile's own finite error contract.
+See [Whole migration measurements](../../docs/built-in_ops/01-numeric/point-math-whole.md)
+for old/new public timings, core timings, budgets and profiler evidence.
 
 ## Explicit-query curves: CRV-01
 

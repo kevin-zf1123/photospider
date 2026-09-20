@@ -36,7 +36,7 @@ stored in the original floating dtype. UInt8 and Int64 are exact identity.
 Shape and dtype are preserved; there are no operation parameters or implicit
 conversion to an integer output array. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the input/values interface,
-regional/typed-validation support, output facets, resources and lifetime.
+Whole/typed-validation support, output facets, resources and lifetime.
 
 ## Exact semantics
 
@@ -57,7 +57,7 @@ No arithmetic overflow or ULP tolerance is needed for this operation.
 
 Work is O(M), element scratch O(1) and output payload M*b, plus common mapping
 and typed-validation costs. SIMD must preserve zero signs and NaN quieting and
-must not evaluate outside requested coverage. Inherited sticky failure,
+evaluate the full logical input for every nonempty request. Inherited sticky failure,
 cancellation, cache-off and final-owner rules apply.
 
 Analytic public fixture: [-1.5,-0,+0,0.25,1.5] -> [-2,-0,+0,+0,1].
@@ -74,8 +74,8 @@ This specification alone does not claim a product test run.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
