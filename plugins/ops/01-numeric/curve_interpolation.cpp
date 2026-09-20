@@ -144,13 +144,13 @@ struct CurveState final {
     return Result<std::uint64_t>(bits);
   }
   Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied) const {
+                std::uint64_t copied, bool fallback = false) const {
     NumericDiagnostics result;
     result.profile =
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         result.implementation.data(), result.implementation.size(),
-        "photospider.curve/1;%s%s;exact-rational;%s%s",
+        "photospider.curve/2;%s%s;exact-rational;%s%s",
         pchip ? "pchip" : "linear", multi ? "-multi" : "",
         profile == SequenceProfile::Strict         ? "scalar-u64"
         : profile == SequenceProfile::AppleSilicon ? "NEON-u64x2"
@@ -161,6 +161,11 @@ struct CurveState final {
       return {ErrorCode::Internal, "curve diagnostic identity"};
     result.evaluated_values = evaluated;
     result.copied_elements = copied;
+    if (fallback && profile != SequenceProfile::Strict) {
+      result.strict_fallbacks = 1;
+      result.fallback_reasons[static_cast<unsigned>(
+          NumericFallbackReason::RoundingUnresolved)] = 1;
+    }
     return phase.report_numeric(result);
   }
   Status initialize(const DependencyPhase& phase) {
@@ -362,7 +367,8 @@ struct CurveState final {
         return Answer(status);
       auto value = arithmetic.evaluate(
           pchip, knots.size(), row.first, row.count, row.segment, row.selected,
-          row.bits, x, y, narrow, phase.consume_work);
+          row.bits, x, y, narrow, phase.consume_work,
+          [&] { return report(phase, 0, 0, true); });
       if (!value.ok())
         return Answer(value.status());
       if (BinaryParts::decode(value.value(), narrow).infinite)

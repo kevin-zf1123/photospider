@@ -6,12 +6,21 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06: color-ramp family
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Confirmed representation and model split
 
@@ -95,8 +104,8 @@ certified full expressions. Gamma normalization and deferred scaling preserve HD
 and alpha precision. Coordinate arithmetic uses up to 9,216 bits; RGB polynomial
 work uses 40,960 bits. The 4,096-bit value is the interval precision ceiling for
 relevant certified steps, not the integer-capacity bound. Accelerated RGB permits
-4 ULP by contract, while all current profiles return strict bits; non-RGB profiles
-require strict bits.
+the shared FP32 4 ULP by contract. Current implementations return strict bits,
+while the same accelerated allowance applies to non-RGB arithmetic.
 
 Native arm64 Clang strict/Apple and Ubuntu WSL x86 Clang 18 strict/AVX2 passed
 seven manual groups, including RGB full-color Atom isolation, and the reported

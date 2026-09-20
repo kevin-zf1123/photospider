@@ -61,11 +61,11 @@ struct Fixture {
       document.outputs.push_back({"indices", node.id, "indices"});
     document.nodes = {std::move(node)};
   }
-  ps::Result<ps::DemandResult> run(const ps::DemandQuery& query,
-                                   bool cache = true,
-                                   std::uint64_t proof_work = UINT64_C(64) *
-                                                              1024 * 1024,
-                                   std::uint64_t cache_bytes = 65536) {
+  ps::Result<ps::DemandResult> run(
+      const ps::DemandQuery& query, bool cache = true,
+      std::uint64_t proof_work = UINT64_C(64) * 1024 * 1024,
+      std::uint64_t cache_bytes = 65536,
+      std::uint64_t work = UINT64_C(128) * 1024 * 1024) {
     ps::GraphContext graph(document);
     auto plan = ps::Compiler(registry).compile(graph);
     if (!plan.ok())
@@ -80,7 +80,7 @@ struct Fixture {
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
     ps::ExecutionOptions options;
-    options.maximum_dependency_work = UINT64_C(128) * 1024 * 1024;
+    options.maximum_dependency_work = work;
     options.dependencies.maximum_work = UINT64_C(16) * 1024 * 1024;
     options.maximum_dependency_cache_work = cache ? proof_work : 0;
     return context.execute_fragments(snapshot.value(), query, {}, options);
@@ -187,9 +187,10 @@ void examples(ps::CpuNumericProfile profile) {
                   actual == indices[i],
               "sort indices stable ties");
     }
-    if (cache)
-      require(answer.diagnostics.block_cache_hits >= 4,
-              "cross-output permutation reuse");
+    std::uint64_t invocations = 0;
+    for (const auto& timing : answer.diagnostics.operation_timings)
+      invocations += timing.invocation_count;
+    require(invocations == 4, "two regional polls per independent sort output");
   }
   Fixture quantile(
       take(ps::numeric::quantile_node(1, ps::WorkflowInputReference{1},
@@ -231,14 +232,10 @@ void sharing_and_sparse(ps::CpuNumericProfile profile) {
                   actual == 126 - 2 * (i / 2) + i % 2,
               "long stable indices");
     }
-    if (mode == 1)
-      require(answer.diagnostics.block_cache_hits == 255 &&
-                  answer.diagnostics.block_cache_misses == 1,
-              "one admitted permutation reused across 256 differing-dtype "
-              "observations");
-    else
-      require(answer.diagnostics.block_cache_hits == 0,
-              "disabled/exhausted/too-small cache recomputes equivalently");
+    std::uint64_t invocations = 0;
+    for (const auto& timing : answer.diagnostics.operation_timings)
+      invocations += timing.invocation_count;
+    require(invocations == 4, "regional sort is independent of cache capacity");
     require(take(answer.dependencies.source_support()).at("input0") == row,
             "selected full-line source support");
     const auto changed = take(
@@ -262,9 +259,45 @@ void sharing_and_sparse(ps::CpuNumericProfile profile) {
     require(take(answer.dependencies.source_support()).at("input0") == row,
             "partial sorted position still reads full line");
   }
-  std::cout << "128-element line: differing output dtypes share one "
-               "permutation; cache-off/proof exhaustion/retention refusal, "
+  std::cout << "128-element line: each output reuses its "
+               "permutation; cache capacities, "
                "sparse outputs and line dirty passed\n";
+}
+void nonlast_axis_lines(ps::CpuNumericProfile profile) {
+  std::vector<std::uint64_t> source(256);
+  for (std::uint64_t row = 0; row < 128; ++row) {
+    source[row * 2] = 127 - row;
+    source[row * 2 + 1] = 1127 - row;
+  }
+  Fixture fixture(take(ps::numeric::sort_node(1, ps::WorkflowInputReference{1},
+                                              0, profile)),
+                  {array(ps::ElementType::Int64, {128, 2}, source)}, true);
+  const auto all = take(ps::Footprint::all({128, 2}));
+  const auto sparse = take(ps::Footprint::from_regions(
+      {128, 2},
+      {ps::Region({{1, 31}, {0, 2}}), ps::Region({{65, 62}, {0, 2}})}));
+  for (const auto& q : {all, sparse}) {
+    // Two lines per output fit; rebuilding 128 times per line does not.
+    auto answer =
+        take(fixture.run({{"values", q}, {"indices", q}}, false, 0, 0, 500000));
+    require(
+        q.visit(
+             [&](const auto& at) {
+               std::uint64_t value = 0, index = 0;
+               require(answer.values.at("values").read(at, &value, 8).ok() &&
+                           value == at[0] + at[1] * 1000,
+                       "non-last-axis stable values");
+               require(answer.values.at("indices").read(at, &index, 8).ok() &&
+                           index == 127 - at[0],
+                       "non-last-axis original indices");
+               return ps::Status::success();
+             },
+             4096)
+            .ok(),
+        "non-last-axis result traversal");
+  }
+  std::cout << "non-last axis and disjoint boxes reuse each line within a "
+               "bounded work budget\n";
 }
 void probability_dependencies(ps::CpuNumericProfile profile) {
   unsigned calls = 0;
@@ -778,6 +811,7 @@ int main(int argc, char** argv) {
     } else {
       examples(profile);
       sharing_and_sparse(profile);
+      nonlast_axis_lines(profile);
       probability_dependencies(profile);
       failure_and_schema(profile);
       typed_layout_environment(profile);

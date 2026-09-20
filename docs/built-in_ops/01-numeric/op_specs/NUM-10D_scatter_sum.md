@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-10D: scatter_sum
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -25,8 +34,9 @@ and in the named family contract take precedence.
 Inherit the [scatter contract](NUM-10_scatter_contract.md) in full: base/indices/
 updates port order, static axis, same value dtype/non-axis dimensions, four
 supported dtypes, generic dense output, global index validation, exact contributor
-support, index invalidation, errors, resources and immutable ownership. All three
-profiles produce identical bits. Input base is never modified.
+support, index invalidation, errors, resources and immutable ownership. Integer
+results remain exact; accelerated floating results obey the shared final FP32
+bound. Input base is never modified.
 
 ## Update semantics
 

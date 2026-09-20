@@ -6,6 +6,9 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 verification_status: manual_public_graph_equivalence
 clarification_status: complete
 repository_branch: ops-specs
@@ -13,6 +16,12 @@ repository_commit: 6617c78c
 ---
 
 # CRV-04: bake_lut1d workflow templates
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Confirmed scope and composition boundary
 
@@ -101,9 +110,9 @@ repeatedly adding rounded axis.step is not generally equivalent. count=1 retains
 axis=[start,start,0] and never reads end payload. Source metadata still validates.
 
 Each expanded node preserves its own exactness/tolerance. In particular,
-sample_expression strict is stepwise Float64; linear strict/accelerated are
-whole-formula bit-identical; PCHIP and Bezier accelerated follow their respective
-final-error contracts. A shared authoring profile does not equate those formulas.
+sample_expression strict is stepwise Float64; linear strict is whole-formula
+correctly rounded. Linear, PCHIP and Bezier accelerated results follow the shared
+final FP32 bound relative to their respective strict reference formulas. A shared authoring profile does not equate those formulas.
 Baking discrete samples supplies no automatic bound on the later LUT consumer's
 interpolation error relative to a continuous function.
 

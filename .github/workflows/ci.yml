@@ -19,6 +19,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare SLEEF 3.9.0 source
+        uses: actions/checkout@v7
+        with:
+          repository: shibatch/sleef
+          ref: 906ca7512ee483296780a81a21b9ca715d40dfe1
+          path: third_party/sleef
+          persist-credentials: false
       - name: Verify Clang
         run: |
           "$CC" --version
@@ -46,6 +53,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare SLEEF 3.9.0 source
+        uses: actions/checkout@v7
+        with:
+          repository: shibatch/sleef
+          ref: 906ca7512ee483296780a81a21b9ca715d40dfe1
+          path: third_party/sleef
+          persist-credentials: false
       - name: Verify Clang
         run: |
           "$CC" --version

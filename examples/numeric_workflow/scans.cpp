@@ -451,7 +451,7 @@ void streaming(ps::CpuNumericProfile profile) {
     if (!status.ok())
       throw std::runtime_error(status.message);
   }
-  require(next == 4096 && windows == 65 &&
+  require(next == 4096 && windows == 64 &&
               session->numeric_diagnostics().evaluated_values == 4096,
           "one scan per line");
   auto changed =
@@ -463,7 +463,7 @@ void streaming(ps::CpuNumericProfile profile) {
                    {4097}, {ps::Region({{129, 1}}), ps::Region({{4096, 1}})})),
       "exact suffix dirty");
   std::cout
-      << "4096 source terms scanned once through 65 windows, four sparse "
+      << "4096 source terms scanned once through 64 windows, four sparse "
          "outputs, cache off, <=16KiB payload; exact suffix dirty passed\n";
 }
 }  // namespace

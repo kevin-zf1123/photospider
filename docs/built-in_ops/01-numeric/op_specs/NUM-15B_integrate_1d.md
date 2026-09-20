@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-15B: integrate_1d
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -39,7 +48,7 @@ and all port dtype/shape constraints are still checked at compile/preflight.
 ## Whole-formula quality and special values
 
 At i>0, evaluate the entire initial-plus-area expression mathematically, rounding
-only once to output dtype. All three CPU versions are bitwise equivalent.
+only once to output dtype. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 For finite sources, an equivalent exact expression is
 
     initial + step/2 * (samples[0] + 2*sum(samples[1:i]) + samples[i])
@@ -148,7 +157,7 @@ independent Fraction/raw-bit cases per profile on 2026-09-19 and the manual
 workflow checks: sparse stencil/center-NaN exclusion, raw initial-only output,
 invalid-step Atom isolation and producer order, required upstream failure after
 initial NaN, all-port strides/fenv, Empty/schema, WorkLimit/cancellation and
-release. A 4096-input integral with four sparse outputs uses 66 windows and
+release. A 4096-input integral with four sparse outputs uses 64 windows and
 exact sample/step/initial dirty support. Installed strict/Apple consumers,
 focused compiler unit, formatting/lint and scoped math/entry reviews passed.
 The manual target has no CTest/integration registration; specification status

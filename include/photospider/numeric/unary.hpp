@@ -64,12 +64,12 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * rational denominators are attributed to the requested Atom. IEEE nonfinite
  * results succeed; source, typed, work, capacity and cancellation failures keep
  * their categories. Results own immutable packed storage beyond context life.
- * Math is RN-even with gradual underflow and unchanged caller fenv. Simple
- * operations are exact; transcendental ordinary values use directed bounds up
- * to 4096 fractional bits and fail ResourceExhausted if rounding is unresolved.
- * Accelerated transcendental profiles currently use an explicit strict fallback
- * for ordinary values, recorded as FunctionUnsupported; exact special/algebraic
- * paths retain bitwise equivalence. Named profiles require their CPU target.
+ * Strict math is RN-even with gradual underflow and unchanged caller fenv.
+ * Directed refinement has a 4096-bit ceiling and can fail ResourceExhausted.
+ * Accelerated arithmetic follows CpuNumericProfile's final FP32 error bound;
+ * bounded binary64 SIMD kernels handle admitted ordinary ranges, with reported
+ * strict fallback for unresolved cases. Special/algebraic paths remain exact.
+ * Named profiles require their CPU target.
  * The accompanying numeric_workflow example shows explicit math work/state
  * budgets, public execution, oracle commands and checkable expected results.
  */

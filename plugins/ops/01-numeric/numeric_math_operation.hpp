@@ -40,9 +40,9 @@ struct PointMathState final {
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         report.implementation.data(), report.implementation.size(),
-        "photospider.math/1;%s;%s;replica-store%s", name,
+        "photospider.math/2;sleef3.9.0;4ulp32;%s;%s;replica-store%s", name,
         std::is_same_v<Arithmetic, CertifiedMath> ? "certified-Q128..4096"
-                                                  : "exact-bits-ratio-root",
+                                                  : "exact-hardware-ratio-root",
         numeric_build_identity());
     if (length < 0 ||
         static_cast<std::size_t>(length) >= report.implementation.size())

@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-13B: integral_image
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -48,7 +57,7 @@ first. Preserve the shared payload conversion and mixed-infinity/zero rules.
 Only requested rectangle results are rounded or range-checked. Internal exact
 partial sums may exceed the destination range without failing an unrequested
 result. Do not treat already rounded integral_image outputs as exact reusable
-arithmetic state. All three CPU profiles are bitwise equivalent.
+arithmetic state. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 
 For Q, source Data support is the exact union of its anchored rectangles, keeping
 all batch coordinates separate. Disjoint requested corners can produce an L-shaped
@@ -123,7 +132,7 @@ Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 runs passed
 public workflow fixtures, sparse/L-shaped support,
 integer Atom isolation, typed/Empty/zero boundaries, negative strides, fenv,
 output-cap checks, sorting work/cancellation cleanup, and 4,096 source values
-through 65 windows with four sparse results and at most 16 KiB payload. The
+through 64 windows with four sparse results and at most 16 KiB payload. The
 installed strict/Apple consumers, focused compiler unit, formatting/lint and
 independent math/entry reviews passed. No integration test or CTest
 registration is added; specification status remains Proposed.

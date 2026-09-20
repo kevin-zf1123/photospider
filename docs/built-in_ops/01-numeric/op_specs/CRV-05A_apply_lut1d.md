@@ -13,6 +13,9 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
@@ -20,6 +23,12 @@ repository_commit: 6617c78c
 ---
 
 # CRV-05A: apply_lut1d
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) and the explicitly cited
 [CRV-01A linear contract](CRV-01A_interpolate_linear.md) for unchanged rounding,
@@ -86,9 +95,9 @@ promotion. Integer numeric inputs require explicit conversion before application
 
 ## Confirmed numerical quality and table demand
 
-Inherit CRV-01A linear's numerical and local-read rules: strict and both CPU
-accelerated versions correctly round the complete selected linear interpolation
-or extrapolation expression once to output dtype, with identical bits. Actual
+Inherit CRV-01A linear's numerical and local-read rules: strict correctly rounds
+the complete selected linear interpolation or extrapolation expression once to
+output dtype. Both accelerated versions obey the shared final FP32 bound. Actual
 requested input values, selected table entries and final output must be finite.
 Nonfinite demanded data or final overflow fails the affected observation.
 

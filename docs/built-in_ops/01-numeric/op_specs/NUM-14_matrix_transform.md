@@ -13,9 +13,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-14: matrix_transform
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -34,8 +43,7 @@ Components follow y[r]=sum_c matrix[r,c]*vectors[c]+bias[r], defining matrix
 row/column orientation independently of actual storage strides. No numeric
 parameters are static; Cin/Cout are inferred from validated input shapes.
 For finite operands, evaluate the complete dot product plus bias as exact
-mathematical arithmetic and correctly round once to output dtype. Every CPU
-profile is bitwise equivalent; no separately rounded products or FMA chain define
+mathematical arithmetic and correctly round once to output dtype. Strict defines the reference; accelerated follows the shared FP32-scaled bound; no separately rounded products or FMA chain define
 the contract. Singular matrices are valid. This operator performs no inverse or
 implicit homogeneous-coordinate division.
 

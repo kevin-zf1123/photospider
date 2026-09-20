@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-05H: atan2
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -61,7 +70,7 @@ or underflowing y/x intermediate that destroys quadrant or accuracy information.
 
 ## Numerical quality, implementation and resources
 
-Accelerated finite nonzero outputs are within four output-dtype ULP of strict.
+Accelerated finite nonzero outputs are within four FP32-scaled ULP of strict.
 NaN/Inf/zero classification and signs match strict, and all entries of the table
 match the strict rounded output exactly. Apply [exp's fallback, diagnostic and
 refinement rules](NUM-04D_exp.md), including per-profile independence from vector
@@ -99,9 +108,12 @@ The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
 The shared adapter retains both inputs as exact pointwise Data and separately
 retains typed validation, including when a numeric identity determines a result.
-Exact elementary operations use bounded integer/ratio arithmetic; ordinary
-power and angle results use the certified directed backend and report accelerated
-strict fallback. See [math implementation](../math-implementation.md) for
+Floating elementary operations use controlled correctly rounded hardware
+arithmetic after exact special-value classification, with exact fallback; integer
+operations retain checked exact arithmetic. Accelerated ordinary positive-base
+power and angle results use SLEEF binary64 enclosures within the shared admitted
+ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
+candidates dispatch the certified strict backend and report strict fallback. See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)

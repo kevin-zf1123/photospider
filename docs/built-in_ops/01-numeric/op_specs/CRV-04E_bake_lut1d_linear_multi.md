@@ -10,6 +10,9 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 verification_status: manual_public_graph_equivalence
 clarification_status: complete
 repository_branch: ops-specs
@@ -17,6 +20,12 @@ repository_commit: 6617c78c
 ---
 
 # CRV-04E: bake_lut1d_linear_multi
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
 profile/defaults, count/dtype, named outputs, lazy demand, resources, errors,

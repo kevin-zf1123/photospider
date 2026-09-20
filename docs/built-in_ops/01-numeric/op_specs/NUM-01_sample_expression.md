@@ -16,9 +16,18 @@ implementation_status: implemented
 verification_status: public_workflows_and_independent_oracles
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-01: sample_expression
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -174,14 +183,13 @@ unless an explicit numerical-profile difference is documented.
   supported CPU implementations. Each primitive consumes already rounded
   Float64 operands. This is not exact-real evaluation of the complete expression
   followed by one final rounding; `(a+b)-a` retains both arithmetic roundings.
-- `accelerated`: platform-specific implementations. The selected
-  accelerated bound is: each `sin`, `cos`,
-  `tan`, `exp`, `ln` or power result is within four representable Float64 steps
-  of its correctly rounded Float64 reference. Composite expression acceptance
-  propagates the per-step bounds rather than applying a universal absolute
-  tolerance. Basic arithmetic retains the strict operation order and Float64
-  rounding; SIMD across samples and scheduling across requested samples must not
-  introduce expression reassociation, FMA contraction or Float32 intermediates.
+- `accelerated`: platform-specific SIMD implementations with a final-output
+  bound of four FP32-scaled ULP under the shared acceleration contract, including
+  Float64 outputs. The reference is the complete strict stepwise RN64 AST.
+  Propagate conservative enclosures through each node and final dtype conversion.
+  Reject an uncertain domain, zero-denominator or overflow decision and replay
+  the affected sample strictly. Internal FMA or mixed precision is permitted
+  only when the enclosure still covers the strict reference.
 
 An accelerated mathematical step that cannot guarantee its error bound for the
 actual operands may use strict evaluation. Report the selected accelerated
@@ -196,19 +204,10 @@ Reports describe work actually performed; a result-cache hit does not invent
 new strict calls. This is execution diagnostics, not a third data output. The
 current callback/reporting API adaptation is an explicit implementation dependency.
 
-Four representable steps are measured by ordered finite-value ULP distance,
-including near zero; this is not four times a relative epsilon at all values.
-The strict mathematical reference evaluates each function at its actual rounded
-Float64 operands, not at an idealized unrounded expression input.
-
-Each profile makes domain, zero-denominator and overflow decisions from its
-own actual intermediate operands. The maintainer explicitly permits different
-success/failure results near numerically sensitive boundaries: for example,
-`1/(exp(x)-a)` can fail in strict and succeed in accelerated when `a` equals
-the strict rounded exponential. The four-ULP bound is per function call, not
-a bound on the final expression relative to strict and not a shared failure
-predicate. At identical operands, a domain error or nonfinite reference result
-must fail; the approximation allowance cannot turn it into a finite success.
+The final output uses the shared FP32-scaled bound. The reference consumes the
+original input bits and applies each strict RN64 step. Sensitive expressions
+such as `1/(exp(x)-a)` preserve strict failure classification: uncertainty
+triggers strict replay of the affected sample.
 
 For deterministic signed-zero behavior, `sin(-0)`, `tan(-0)` and `sqrt(-0)`
 return `-0`; `cos(±0)=1`, `exp(±0)=1`, and `ln(1)=+0`. A zero base to a positive
@@ -504,11 +503,11 @@ its source/node bounds are explicit. There is no global AST cache.
 
 Runtime coordinates use the exact NUM-02 limb machinery, with NUM-01's stricter
 interval and neighbor validation. Mixed Float32 inputs widen by IEEE fields,
-and final Float32 conversion rounds once. The evaluator uses the shared exact
+and final Float32 conversion rounds once. The strict evaluator uses the shared exact
 and certified mathematical backend at each Float64 primitive. Every intermediate
-is checked before its parent executes. Ordinary accelerated transcendental
-steps currently use a reported strict fallback; this implementation supplies
-strict bits without claiming a faster approximate backend. See
+is checked before its parent executes. Accelerated evaluation batches four requested samples and propagates RN64
+reference enclosures through the AST, using SLEEF 3.9.0 on admitted domains.
+Rejected samples replay through the strict evaluator with actual fallback diagnostics. See
 [mathematical implementation](../math-implementation.md) for rounding proofs and
 fixed-refinement resource limits.
 
@@ -543,16 +542,10 @@ strict result bits, metadata/axis bits and the first failing AST span in the
 specified evaluation order. A fixed-precision approximation with no rounding
 resolution is insufficient for hard-to-round fixtures.
 
-For accelerated functions, compare each actual primitive operand/result pair
-with the independently correctly rounded reference and enforce <=4 finite
-representable-step distance. `sqrt` and basic arithmetic still require strict
-rounding. Test exact zeros, extrema and subnormal boundaries explicitly.
-Composite acceptance propagates outward-rounded allowed intervals through the
-AST, splitting at domain boundaries/extrema where necessary; it is not a global
-`atol/rtol` comparison with strict. Primitive checks are required even when a
-composite enclosure becomes wide or crosses an allowed failure boundary.
-Testing supplies measured evidence; it does not fabricate a CertifiedBound
-QualityReport or prove an untested library domain.
+For accelerated expressions, compare the final output with the independent
+strict stepwise reference under the shared FP32-scaled bound. Primitive checks
+are additional diagnostics, not a replacement for final-error acceptance.
+Test exact zeros, sensitive cancellation and subnormal boundaries explicitly.
 
 | ID | Fixture and independent expected behavior |
 | --- | --- |
@@ -572,8 +565,8 @@ QualityReport or prove an untested library domain.
 | T14 | Dirty/cache tests: coefficient changes affect values only; N=1 end changes affect neither; N>=2 endpoint changes affect both; profile changes cannot reuse another profile's numeric entry |
 | T15 | Small ROI under a budget too small for full values; rejected allocation/work/stage limits; cancellation during AST and strict refinement; all unpublished ownership released |
 | T16 | Cache-off, multiple consumers, context destruction with live output Values, and release by the final owner |
-| T17 | Strict bit equality on supported Apple Silicon and x86-64 builds; accelerated primitive ULP checks, input-domain fallback, wrong-platform BackendUnavailable and fallback diagnostics |
-| T18 | Sensitive `1/(exp(x)-a)` boundary: verify each profile against its actual intermediates, permitting the selected success/failure difference |
+| T17 | Strict bit equality on supported Apple Silicon and x86-64 builds; accelerated final FP32-scaled ULP checks, input-domain fallback, wrong-platform BackendUnavailable and fallback diagnostics |
+| T18 | Sensitive `1/(exp(x)-a)` boundary: require strict-equivalent failure classification and final-error acceptance |
 
 All three operation keys require a public WorkflowDocument -> Compiler ->
 ExecutionContext test, not only parser or callback unit tests. Use declared

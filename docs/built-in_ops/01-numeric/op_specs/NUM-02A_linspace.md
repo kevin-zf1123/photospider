@@ -14,11 +14,20 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 repository_branch: ops-impl
 repository_commit: 30478d33
 ---
 
 # NUM-02A: linspace
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -76,9 +85,8 @@ This differs intentionally from NUM-01's duplicate-sampling-coordinate rejection
 
 Follow the maintainer's general rule for subsequent NUM specifications: strict,
 Apple Silicon CPU accelerated and x86-64 CPU accelerated have independently
-named keys. For sequence generation, all three are bitwise equivalent; an
-accelerated implementation may optimize the algorithm but cannot relax rounding.
-Approximate-operator exceptions require their own explicitly selected tolerance.
+named keys. Strict sequence values retain correct rounding; accelerated floating values
+follow the shared FP32-scaled bound. Axis and selected endpoints remain exact.
 
 ## Axis, special values and rounding
 

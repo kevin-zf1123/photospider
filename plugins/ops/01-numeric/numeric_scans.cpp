@@ -100,7 +100,7 @@ struct ScanState final {
   numeric_ops::ExactAggregate accumulator, conversion;
   ResourceVector<ScanPoint> points;
   ResourceVector<MutableValue> outputs;
-  std::size_t current = 0;
+  std::size_t current = 0, line_end = 0;
   std::uint64_t cursor = 0, end = 0;
   std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
   std::unique_ptr<numeric_ops::ArrayPublication> publication;
@@ -145,8 +145,9 @@ struct ScanState final {
   Result<Footprint> window(const DependencyPhase& phase) const {
     auto shape = phase.query.inputs[0].descriptor.shape;
     for (std::size_t j = 0; j < shape.size(); ++j)
-      shape[j] =
-          (description.mask & (1U << j)) ? points[current].coordinate[j] : 1;
+      shape[j] = (description.mask & (1U << j))
+                     ? (integral ? points[current].coordinate[j] : shape[j])
+                     : 1;
     auto local = numeric_ops::ordered_range(shape, cursor, end, phase.sets);
     if (!local.ok())
       return Result<Footprint>(local.status());
@@ -239,12 +240,75 @@ struct ScanState final {
                                      points[j].coordinate.begin() + rank),
           {}};
       if (j == current ||
-          (!integral && j > current && same_line(points[current], points[j])))
-        row.inputs = {{0, 1, data, {}}, {0, 4, validation, {}}};
+          (!integral && j > current && same_line(points[current], points[j]))) {
+        if (!integral && points[j].coordinate[description.axis] < end) {
+          std::vector<RegionDimension> dimensions(rank);
+          for (std::size_t axis = 0; axis < rank; ++axis)
+            dimensions[axis] = {points[j].coordinate[axis], 1};
+          dimensions[description.axis] = {
+              cursor, points[j].coordinate[description.axis] - cursor};
+          auto partial =
+              Footprint::from_regions(phase.query.inputs[0].descriptor.shape,
+                                      {Region(dimensions)}, phase.sets);
+          if (!partial.ok())
+            return Answer(partial.status());
+          auto checked = input_internal::validation_closure(
+              phase.query.inputs[0], partial.value(), phase.sets,
+              phase.consume_work);
+          if (!checked.ok())
+            return Answer(checked.status());
+          row.inputs = {{0, 1, partial.take_value(), {}},
+                        {0, 4, checked.take_value(), {}}};
+        } else {
+          row.inputs = {{0, 1, data, {}}, {0, 4, validation, {}}};
+        }
+      }
       rows.push_back(std::move(row));
     }
     requested = true;
     return Answer(DependencyNeedBatch{std::move(rows)});
+  }
+  Status store_current(const DependencyPhase& phase) {
+    const auto required = count();
+    // Final conversion may destroy its workspace. Continue only from the
+    // original exact carry, including source NaN and infinity
+    // classifications.
+    auto status = phase.consume_work(sizeof(accumulator) / 8 + 1);
+    if (!status.ok())
+      return status;
+    conversion = accumulator;
+    auto calculated =
+        required ? conversion.finish_as(description.output.element_type, 1,
+                                        phase.consume_work)
+                 : Result<std::uint64_t>(UINT64_C(0));
+    if (!calculated.ok()) {
+      auto failure = calculated.status();
+      if (failure.reason == FailureReason::ArithmeticOverflow) {
+        failure.detail.origin = FailureOrigin::Domain;
+        failure.detail.scope = FailureScope::Atom;
+        failure.detail.atom =
+            AtomKey{phase.query.output_index,
+                    static_cast<std::uint32_t>(description.output.shape.size()),
+                    points[current].coordinate};
+      }
+      return failure;
+    }
+    status = report(phase, 0, 1);
+    if (!status.ok())
+      return status;
+    numeric_ops::select_words(replicas.data(), calculated.value(),
+                              calculated.value(), 1, profile);
+    const auto width = Value::element_size(description.output.element_type);
+    std::memcpy(outputs[points[current].fragment].data() +
+                    points[current].offset * width,
+                replicas.data(), width);
+    ++current;
+    if (integral || (current < points.size() &&
+                     !same_line(points[current - 1], points[current]))) {
+      accumulator.reset();
+      cursor = 0;
+    }
+    return Status::success();
   }
   Result<DependencyPoll> poll(const DependencyPhase& phase) {
     using Answer = Result<DependencyPoll>;
@@ -274,61 +338,51 @@ struct ScanState final {
             if (!read.ok())
               return read;
             charged = report(phase, 1, 0);
-            return charged.ok() ? accumulator.add(bits, phase.consume_work)
-                                : charged;
+            if (!charged.ok())
+              return charged;
+            auto added = accumulator.add(bits, phase.consume_work);
+            if (!added.ok())
+              return added;
+            if (!integral) {
+              ++cursor;
+              if (current < points.size() && count() == cursor)
+                return store_current(phase);
+            }
+            return Status::success();
           },
           phase.sets.maximum_work, phase.query.cancellation);
       if (!status.ok())
         return Answer(status);
-      cursor = end;
+      if (integral)
+        cursor = end;
       requested = false;
     }
     while (current < points.size()) {
       const auto required = count();
       if (cursor < required) {
-        end = cursor + std::min(UINT64_C(64), required - cursor);
+        auto target = required;
+        if (!integral) {
+          if (line_end <= current) {
+            line_end = current;
+            while (line_end + 1 < points.size() &&
+                   same_line(points[current], points[line_end + 1])) {
+              auto charged =
+                  phase.consume_work(description.output.shape.size() + 1);
+              if (!charged.ok())
+                return Answer(charged);
+              ++line_end;
+            }
+          }
+          target = points[line_end].coordinate[description.axis];
+        }
+        end = cursor + std::min(UINT64_C(64), target - cursor);
         auto source = window(phase);
         return source.ok() ? need(phase, source.take_value())
                            : Answer(source.status());
       }
-      // Final conversion may destroy its workspace. Continue only from the
-      // original exact carry, including source NaN and infinity
-      // classifications.
-      auto status = phase.consume_work(sizeof(accumulator) / 8 + 1);
+      auto status = store_current(phase);
       if (!status.ok())
         return Answer(status);
-      conversion = accumulator;
-      auto calculated =
-          required ? conversion.finish_as(description.output.element_type, 1,
-                                          phase.consume_work)
-                   : Result<std::uint64_t>(UINT64_C(0));
-      if (!calculated.ok()) {
-        auto failure = calculated.status();
-        if (failure.reason == FailureReason::ArithmeticOverflow) {
-          failure.detail.origin = FailureOrigin::Domain;
-          failure.detail.scope = FailureScope::Atom;
-          failure.detail.atom = AtomKey{
-              phase.query.output_index,
-              static_cast<std::uint32_t>(description.output.shape.size()),
-              points[current].coordinate};
-        }
-        return Answer(failure);
-      }
-      status = report(phase, 0, 1);
-      if (!status.ok())
-        return Answer(status);
-      numeric_ops::select_words(replicas.data(), calculated.value(),
-                                calculated.value(), 1, profile);
-      const auto width = Value::element_size(description.output.element_type);
-      std::memcpy(outputs[points[current].fragment].data() +
-                      points[current].offset * width,
-                  replicas.data(), width);
-      ++current;
-      if (integral || (current < points.size() &&
-                       !same_line(points[current - 1], points[current]))) {
-        accumulator.reset();
-        cursor = 0;
-      }
     }
     ResourceVector<Value> values;
     values.reserve(outputs.size());

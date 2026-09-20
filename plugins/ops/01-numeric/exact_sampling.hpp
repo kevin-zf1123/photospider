@@ -5,6 +5,7 @@
 #include <cstring>
 #include <functional>
 
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -25,6 +26,30 @@ struct ExactSampling final {
     double x = 0, y = 0;
     std::memcpy(&x, &a, 8);
     std::memcpy(&y, &b, 8);
+    input_internal::Float32Environment environment;
+    if (environment.active()) {
+      const double left = x * wa, right = (subtract ? -y : y) * wb;
+      const double sum = left + right;
+      const double z = sum - left;
+      const double residual = (left - (sum - z)) + (right - z);
+      // Products and sum must be exact; only the final division may round.
+      // Exclude tiny products whose FMA residual could itself underflow.
+      if (std::isfinite(sum) && (x == 0 || std::abs(x) >= 0x1p-900) &&
+          (y == 0 || std::abs(y) >= 0x1p-900) &&
+          std::fma(x, static_cast<double>(wa), -left) == 0 &&
+          std::fma(subtract ? -y : y, static_cast<double>(wb), -right) == 0 &&
+          residual == 0 && divisor && !narrow) {
+        const double value = sum / divisor;
+        const bool negative_zero = !subtract && (a >> 63) && (!wb || (b >> 63));
+        return Result<std::uint64_t>(
+            value == 0 ? (static_cast<std::uint64_t>(
+                              sum == 0 ? negative_zero : std::signbit(sum))
+                          << 63)
+                       : numeric_bits(value));
+      }
+      if (narrow && wa == 1 && wb == 0 && divisor == 1 && (!subtract || x != 0))
+        return Result<std::uint64_t>(numeric_bits(x, true));
+    }
     first.set(x);
     second.set(y);
     sequence_multiply(&first, wa, profile, products.data());

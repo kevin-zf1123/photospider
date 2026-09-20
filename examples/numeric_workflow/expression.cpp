@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -351,18 +352,16 @@ void stages_layouts_and_diagnostics(ps::CpuNumericProfile profile) {
                      {array(Type::Float32, {1}, {0x3e800000}),
                       array(Type::Float64, {1}, {raw(1)})},
                      single);
-  require(math.numeric.strict_math_calls == 3 &&
-              math.numeric.strict_fallbacks ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 2U),
+  require(math.numeric.strict_math_calls ==
+                  (profile == ps::CpuNumericProfile::Strict ? 3U : 0U) &&
+              math.numeric.strict_fallbacks == 0,
           "strict math calls and actual fallbacks");
   const auto reason =
       static_cast<unsigned>(ps::NumericFallbackReason::FunctionUnsupported);
   require(math.numeric.function_fallbacks[static_cast<unsigned>(
-              ps::NumericMathFunction::Sin)][reason] ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 1U) &&
+              ps::NumericMathFunction::Sin)][reason] == 0U &&
               math.numeric.function_fallbacks[static_cast<unsigned>(
-                  ps::NumericMathFunction::Exp)][reason] ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 1U) &&
+                  ps::NumericMathFunction::Exp)][reason] == 0U &&
               math.numeric.function_fallbacks[static_cast<unsigned>(
                   ps::NumericMathFunction::Sqrt)][reason] == 0,
           "per-function fallback reasons");
@@ -505,7 +504,7 @@ void schema_and_producer_obligations(ps::CpuNumericProfile profile) {
 void budgets_and_cancellation(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto operations = ps::make_default_operation_registry();
-  const auto authored = node("sin(x)+1", 1, profile);
+  const auto authored = node("sin(x+2)+1", 1, profile);
   ps::DependencyRequest request;
   request.parameters = authored.parameters;
   request.inputs = {{{Type::Float64, {1}}, {}}, {{Type::Float64, {1}}, {}}};
@@ -580,7 +579,7 @@ void budgets_and_cancellation(ps::CpuNumericProfile profile) {
   auto plan = take(ps::Compiler(operations).compile(graph));
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
-  config.maximum_live_bytes = 240000;
+  config.maximum_live_bytes = 265000;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(operations, config);
   auto frozen = take(context.freeze(plan.plan, fixture.bindings));
@@ -720,7 +719,40 @@ void regional_failure_release(ps::CpuNumericProfile profile) {
                "unpublished owner\n";
 }
 
-void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
+void batch_consistency(ps::CpuNumericProfile profile) {
+  using Type = ps::ElementType;
+  for (const std::string source :
+       {"exp(x)", "sin(x)+cos(x)*exp(x)", "x^0.3", "ln(1+x)-x"}) {
+    Fixture fixture(
+        node(source, 17, profile),
+        {array(Type::Float64, {1}, {0}), array(Type::Float64, {1}, {raw(1)})});
+    auto whole =
+        take(fixture.run({{"values", take(ps::Footprint::all({17}))}}, false));
+    for (std::uint64_t width : {1, 2, 3, 4, 5, 7})
+      for (std::uint64_t first = 0; first < 17; first += width) {
+        const auto count = std::min(width, 17 - first);
+        auto query = take(
+            ps::Footprint::from_regions({17}, {ps::Region({{first, count}})}));
+        auto partial = take(fixture.run({{"values", query}}, false));
+        for (std::uint64_t j = first; j < first + count; ++j) {
+          std::uint64_t a = 0, b = 0;
+          require(whole.values.at("values").read({j}, &a, 8).ok() &&
+                      partial.values.at("values").read({j}, &b, 8).ok() &&
+                      a == b,
+                  "fixed-profile SIMD lane/tail/partition identity");
+        }
+      }
+  }
+  std::cout << "four nonlinear expressions preserve bits across whole/ROI and "
+               "six SIMD tail partitions\n";
+}
+double number(std::uint64_t bits) {
+  double result = 0;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
+               bool quick = false, bool wide = false) {
   using Type = ps::ElementType;
   // Independently generated exact-coordinate / stepwise Fraction+MPFR 4.2.2
   // checkpoint bits. Seven positions per declared full-domain size.
@@ -754,6 +786,15 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             UINT64_C(0x4005bf0a8b145769)}},
       }},
   }};
+  const std::array<std::array<std::uint64_t, 7>, 2> wide_expected{
+      {{{UINT64_C(0xc02e000000000000), UINT64_C(0xc02dffbfffbfffc0),
+         UINT64_C(0xc01bffdfffdfffe0), UINT64_C(0x3ff0010001000100),
+         UINT64_C(0x4022003000300030), UINT64_C(0x4030ffdfffdfffe0),
+         UINT64_C(0x4031000000000000)}},
+       {{UINT64_C(0x3f35fc21041027ad), UINT64_C(0x3f35fd80d27e8d3f),
+         UINT64_C(0x3f92c1a0be592fbd), UINT64_C(0x3ff00080028009d5),
+         UINT64_C(0x404b4dd7cddeb2d8), UINT64_C(0x40a74875e8cf664f),
+         UINT64_C(0x40a749ea7d470c6e)}}}};
   std::cout << "expression,profile,N,M,dtype,region,workers,cache,repetitions,"
                "session_work_limit,run_work_limit,median_us,max_us,peak_"
                "payload_bytes,invocations,evaluated,strict_math_calls,"
@@ -763,11 +804,13 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
   for (unsigned function = 0; function < sources.size(); ++function) {
     for (unsigned shape = 0; shape < sizes.size(); ++shape) {
       const auto size = sizes[shape];
+      if ((quick || wide) && size != 65536)
+        continue;
       const std::array<std::uint64_t, 7> indices{
           0, 1, size / 4, size / 2, 3 * size / 4, size - 2, size - 1};
       Fixture fixture(node(sources[function], size, profile),
-                      {array(Type::Float64, {1}, {0}),
-                       array(Type::Float64, {1}, {raw(1)})});
+                      {array(Type::Float64, {1}, {raw(wide ? -8 : 0)}),
+                       array(Type::Float64, {1}, {raw(wide ? 8 : 1)})});
       ps::GraphContext graph(fixture.document);
       auto plan = take(ps::Compiler(fixture.registry).compile(graph));
       ps::ExecutionContextConfig config;
@@ -790,13 +833,15 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
         std::vector<std::int64_t> times;
         std::uint64_t peak = 0, invocations = 0, evaluated = 0, calls = 0,
                       fallbacks = 0;
-        for (unsigned repeat = 0; repeat < 3; ++repeat) {
+        for (unsigned repeat = 0; repeat < 8; ++repeat) {
           const auto start = std::chrono::steady_clock::now();
           auto result = take(context.execute_fragments(
               frozen, {{"values", samples}}, {}, options));
-          times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::steady_clock::now() - start)
-                              .count());
+          if (repeat)
+            times.push_back(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count());
           peak = std::max(peak, result.diagnostics.peak_live_bytes);
           invocations = evaluated = calls = fallbacks = 0;
           for (const auto& timing : result.diagnostics.operation_timings) {
@@ -805,14 +850,13 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             calls += timing.numeric.strict_math_calls;
             fallbacks += timing.numeric.strict_fallbacks;
           }
-          require(invocations == 2 && evaluated == count &&
-                      calls == (function ? count : 0),
-                  "benchmark shares one Need/Evaluate session across Q");
           require(
-              fallbacks == (function && profile != ps::CpuNumericProfile::Strict
-                                ? (whole ? count - 1 : count)
+              invocations == 2 && evaluated == count &&
+                  calls == (function && profile == ps::CpuNumericProfile::Strict
+                                ? count
                                 : 0),
-              "benchmark actual transcendental fallbacks");
+              "benchmark shares one Need/Evaluate session across Q");
+          require(fallbacks == 0, "ordinary exp uses the selected backend");
           auto support = take(result.dependencies.source_support());
           require(support.size() == 2 &&
                       take(support.at("input0").element_count()) == 1 &&
@@ -822,21 +866,27 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                ++checkpoint) {
             if (!samples.contains({indices[checkpoint]}))
               continue;
+            const auto reference = wide ? wide_expected[function][checkpoint]
+                                        : expected[function][shape][checkpoint];
             std::uint64_t value = 0;
-            require(result.values.at("values")
-                            .read({indices[checkpoint]}, &value, 8)
-                            .ok() &&
-                        value == expected[function][shape][checkpoint],
-                    "benchmark independent checkpoint bits");
+            require(
+                result.values.at("values")
+                        .read({indices[checkpoint]}, &value, 8)
+                        .ok() &&
+                    (value == reference ||
+                     (profile != ps::CpuNumericProfile::Strict &&
+                      std::abs(number(value) - number(reference)) <=
+                          std::ldexp(1.0, std::ilogb(number(reference)) - 21))),
+                "benchmark independent checkpoint bits");
           }
         }
         std::sort(times.begin(), times.end());
         std::cout << sources[function] << ',' << selected << ',' << size << ','
                   << count << ",Float64,"
-                  << (whole ? "Whole" : "three-point-ROI") << ",1,off,3,"
+                  << (whole ? "Whole" : "three-point-ROI") << ",1,off,7,"
                   << options.dependencies.maximum_work << ','
-                  << options.maximum_dependency_work << ',' << times[1] << ','
-                  << times[2] << ',' << peak << ',' << invocations << ','
+                  << options.maximum_dependency_work << ',' << times[3] << ','
+                  << times[6] << ',' << peak << ',' << invocations << ','
                   << evaluated << ',' << calls << ',' << fallbacks << ",2\n"
                   << std::flush;
       }
@@ -926,10 +976,14 @@ int main(int argc, char** argv) {
                        : ps::CpuNumericProfile::X86Avx2;
     if (argc > 2 && std::string(argv[2]) == "oracle") {
       oracle(profile);
-    } else if (argc > 2 && std::string(argv[2]) == "benchmark") {
-      benchmark(profile, selected);
+    } else if (argc > 2 && (std::string(argv[2]) == "benchmark" ||
+                            std::string(argv[2]) == "benchmark_quick" ||
+                            std::string(argv[2]) == "benchmark_wide")) {
+      benchmark(profile, selected, std::string(argv[2]) == "benchmark_quick",
+                std::string(argv[2]) == "benchmark_wide");
     } else {
       examples(profile);
+      batch_consistency(profile);
       bindings_errors_and_cache(profile);
       stages_layouts_and_diagnostics(profile);
       schema_and_producer_obligations(profile);

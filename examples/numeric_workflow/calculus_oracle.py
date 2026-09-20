@@ -88,6 +88,8 @@ def cases():
                 yield 1,dtype,samples,index,step,initial
 
 
+from accuracy_oracle import accepted
+
 def main():
     rows = list(cases())
     encoded, wanted = [], []
@@ -100,7 +102,7 @@ def main():
     actual = result.stdout.splitlines()
     assert len(actual) == len(wanted), (len(actual),len(wanted),result.stderr)
     for index,(got,expected) in enumerate(zip(actual,wanted)):
-        assert got == expected, (index,rows[index],got,expected)
+        assert accepted(got, expected, rows[index][1], sys.argv[2] if len(sys.argv)>2 else "strict"), (index,rows[index],got,expected)
     print(f'{len(rows)} independent exact calculus cases passed ({sys.argv[2] if len(sys.argv)>2 else "strict"})')
 
 

@@ -474,8 +474,7 @@ void resources_and_fallback(ps::CpuNumericProfile profile) {
     auto normal = direct(node, sources, all);
     require(normal.numeric.evaluated_values == 1 &&
                 normal.numeric.copied_elements == 1 &&
-                normal.numeric.strict_fallbacks ==
-                    (profile == ps::CpuNumericProfile::Strict ? 0U : 1U),
+                normal.numeric.strict_fallbacks == 0,
             "ordinary binary fallback count");
     ps::DependencyRequest request;
     request.inputs = {{sources[0].descriptor(), {}},
@@ -483,6 +482,7 @@ void resources_and_fallback(ps::CpuNumericProfile profile) {
     request.outputs = all;
     request.snapshot_identity = "binary-resource";
     request.limits.maximum_work = 512 * 1024 * 1024;
+    sources[0] = array(Type::Float64, {1}, {raw(0x1p200)});
     std::vector<ps::ValueFragments> supplied;
     for (const auto& value : sources)
       supplied.push_back(take(
@@ -498,7 +498,7 @@ void resources_and_fallback(ps::CpuNumericProfile profile) {
           node.operation, request, resources.allocator(),
           [&](std::uint64_t work) {
             if (armed && session->numeric_diagnostics().evaluated_values == 1 &&
-                (charged += work) > 100000) {
+                (charged += work) > 30000) {
               interrupted = true;
               if (mode)
                 cancellation.cancel();
@@ -629,13 +629,14 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       ps::DemandQuery query{{"values", take(ps::Footprint::all({size}))}};
       std::vector<std::int64_t> times;
       std::uint64_t peak = 0, fallbacks = 0, reference = 0;
-      for (unsigned repeat = 0; repeat < 3; ++repeat) {
+      for (unsigned repeat = 0; repeat < 8; ++repeat) {
         const auto start = std::chrono::steady_clock::now();
         auto result =
             take(context.execute_fragments(snapshot, query, {}, options));
-        times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - start)
-                            .count());
+        if (repeat)
+          times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count());
         peak = std::max(peak, result.diagnostics.peak_live_bytes);
         fallbacks = 0;
         std::uint64_t evaluated = 0;
@@ -657,7 +658,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       }
       std::sort(times.begin(), times.end());
       std::cout << operation << ',' << selected << ',' << size
-                << ",Float64,Whole,1,off,3," << times[1] << ',' << times[2]
+                << ",Float64,Whole,1,off,7," << times[3] << ',' << times[6]
                 << ',' << peak << ',' << fallbacks << '\n';
     }
   }

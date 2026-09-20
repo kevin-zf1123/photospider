@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-12B: quantile
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -36,8 +45,7 @@ For a line of length N, let x[0..N-1] denote stable ascending numerical order.
 Compute h=(N-1)*q exactly, j=floor(h), and w=h-j exactly. If w=0, select x[j];
 otherwise interpolate (1-w)*x[j]+w*x[j+1]. This also covers q=1 without an
 out-of-range x[N] access. For finite samples, only the final selected/interpolated
-mathematical result is correctly rounded to output dtype. All three CPU profiles
-are bitwise equivalent. No rounded floating h or preliminary Int64-to-float
+mathematical result is correctly rounded to output dtype. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound. No rounded floating h or preliminary Int64-to-float
 conversion is permitted. There is no interpolation-method parameter.
 
 ## Exceptional values and zero signs

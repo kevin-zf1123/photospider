@@ -4,6 +4,7 @@
 #include <cstring>
 #include <functional>
 
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/exact_root.hpp"
 #include "01-numeric/numeric_nan.hpp"
 #include "photospider/data/value.hpp"
@@ -187,6 +188,64 @@ struct ExactElementary final {
         return Answer(infinity | (negative ? sign : 0));
       if (y.infinite || !x.magnitude)
         return Answer(negative ? sign : 0);
+    }
+    // Single IEEE operations are correctly rounded by the hardware. Keep the
+    // bit-level special table above, and restore flags and controls on return.
+    input_internal::Float32Environment environment;
+    if (environment.active()) {
+      const double left = numeric_double(a, narrow),
+                   right = numeric_double(b, narrow);
+      if (narrow) {
+        const float u = static_cast<float>(left), v = static_cast<float>(right);
+        float result = 0;
+        switch (kind) {
+          case ElementaryKind::Sqrt:
+            result = std::sqrt(u);
+            break;
+          case ElementaryKind::Reciprocal:
+            result = 1.0f / u;
+            break;
+          case ElementaryKind::Add:
+            result = u + v;
+            break;
+          case ElementaryKind::Subtract:
+            result = u - v;
+            break;
+          case ElementaryKind::Multiply:
+            result = u * v;
+            break;
+          case ElementaryKind::Divide:
+            result = u / v;
+            break;
+          default:
+            break;
+        }
+        return Answer(numeric_bits(result, true));
+      }
+      double result = 0;
+      switch (kind) {
+        case ElementaryKind::Sqrt:
+          result = std::sqrt(left);
+          break;
+        case ElementaryKind::Reciprocal:
+          result = 1.0 / left;
+          break;
+        case ElementaryKind::Add:
+          result = left + right;
+          break;
+        case ElementaryKind::Subtract:
+          result = left - right;
+          break;
+        case ElementaryKind::Multiply:
+          result = left * right;
+          break;
+        case ElementaryKind::Divide:
+          result = left / right;
+          break;
+        default:
+          break;
+      }
+      return Answer(numeric_bits(result));
     }
     ratio.numerator.words.fill(0);
     ratio.denominator.words.fill(0);

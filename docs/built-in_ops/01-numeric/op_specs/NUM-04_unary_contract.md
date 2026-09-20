@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-04: shared unary contract
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -30,9 +39,9 @@ All remain Proposed until their completed specifications are accepted.
 | --- | --- | --- |
 | [NUM-04A abs](NUM-04A_abs.md) | All four | Bitwise strict equivalence |
 | [NUM-04B neg](NUM-04B_neg.md) | Int64, Float32/64 | Bitwise strict equivalence |
-| [NUM-04C sqrt](NUM-04C_sqrt.md) | Float32/64 | Correct rounding, bitwise strict equivalence |
-| [NUM-04D exp](NUM-04D_exp.md) | Float32/64 | <=4 output-dtype ULP for nonzero finite results |
-| [NUM-04E ln](NUM-04E_ln.md) | Float32/64 | <=4 output-dtype ULP for nonzero finite results |
+| [NUM-04C sqrt](NUM-04C_sqrt.md) | Float32/64 | Strict correct rounding; accelerated final FP32-scaled bound |
+| [NUM-04D exp](NUM-04D_exp.md) | Float32/64 | <=4 FP32-scaled ULP for nonzero finite results |
+| [NUM-04E ln](NUM-04E_ln.md) | Float32/64 | <=4 FP32-scaled ULP for nonzero finite results |
 | [NUM-04F sin](NUM-04F_sin.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04G cos](NUM-04G_cos.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04H tan](NUM-04H_tan.md) | Float32/64 | <=4 ULP plus exact named landmarks |
@@ -40,7 +49,7 @@ All remain Proposed until their completed specifications are accepted.
 | [NUM-04J ceil](NUM-04J_ceil.md) | All four | Bitwise strict equivalence |
 | [NUM-04K round](NUM-04K_round.md) | All four | Bitwise strict equivalence, ties-to-even |
 | [NUM-04L sign](NUM-04L_sign.md) | All four | Bitwise strict equivalence |
-| [NUM-04M reciprocal](NUM-04M_reciprocal.md) | Float32/64 | Correct rounding, bitwise strict equivalence |
+| [NUM-04M reciprocal](NUM-04M_reciprocal.md) | Float32/64 | Strict correct rounding; accelerated final FP32-scaled bound |
 | [NUM-04N sinpi](NUM-04N_sinpi.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04O cospi](NUM-04O_cospi.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04P tanpi](NUM-04P_tanpi.md) | Float32/64 | <=4 ULP plus exact named landmarks |
@@ -167,16 +176,19 @@ floating pi-multiple functions remain separate. Reduced common-angle denominator
 ## Maintained implementation and validation
 
 The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
-special-value cases use explicit integer/IEEE-field, rational or algebraic-root
-handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
-accelerated profiles report `FunctionUnsupported` strict fallback for those
-results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
-pointwise, with separately retained typed validation and Atom-scoped errors.
+and exposed through `photospider/numeric/unary.hpp`. Bit-level special cases
+precede controlled hardware elementary arithmetic. Strict transcendental results
+use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
+SLEEF binary64 kernels and conservative final-error checks within the
+[admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
+Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
+Rejected candidates use strict evaluation and report actual fallback. Unresolved
+strict rounding may return `ResourceExhausted`. Data stays precisely pointwise,
+with separately retained typed validation and Atom-scoped errors.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
 and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration

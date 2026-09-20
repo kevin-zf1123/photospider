@@ -12,6 +12,9 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
@@ -19,6 +22,12 @@ repository_commit: 6617c78c
 ---
 
 # CRV-03: evaluate_bezier
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for status, registry/profile
 identity, platform availability, floating environment, resource/error handling
@@ -93,7 +102,7 @@ consistently with CRV-02. Raw anchor controls preserve their widened bits.
 Strict evaluates the mathematical Bezier polynomial of those controls at the
 exact supplied t, then correctly rounds once directly to output Float32/Float64.
 The two independently named CPU accelerated versions allow at most four final
-output-dtype representable steps from strict. At t=0/1, all versions correctly
+FP32-scaled representable steps from strict. At t=0/1, all versions correctly
 convert the selected anchor directly and preserve its zero sign. Intermediate
 de Casteljau or polynomial roundings do not define the strict reference.
 

@@ -87,13 +87,13 @@ struct LutState final {
     return Result<std::uint64_t>(numeric_ops::ExactBezier::widen(bits, narrow));
   }
   Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied) const {
+                std::uint64_t copied, bool fallback = false) const {
     NumericDiagnostics result;
     result.profile =
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         result.implementation.data(), result.implementation.size(),
-        "photospider.lut1d/1;exact-linear;%s%s",
+        "photospider.lut1d/2;certified-linear;%s%s",
         profile == SequenceProfile::Strict         ? "scalar-u64"
         : profile == SequenceProfile::AppleSilicon ? "NEON-u64x2"
                                                    : "AVX2-u64x4",
@@ -103,6 +103,11 @@ struct LutState final {
       return {ErrorCode::Internal, "LUT1D diagnostic identity"};
     result.evaluated_values = evaluated;
     result.copied_elements = copied;
+    if (fallback && profile != SequenceProfile::Strict) {
+      result.strict_fallbacks = 1;
+      result.fallback_reasons[static_cast<unsigned>(
+          NumericFallbackReason::RoundingUnresolved)] = 1;
+    }
     return phase.report_numeric(result);
   }
   Status initialize(const DependencyPhase& phase) {
@@ -295,12 +300,17 @@ struct LutState final {
         std::swap(x[0], x[1]);
         std::swap(y[0], y[1]);
       }
-      auto status = report(phase, 1, 0);
+      const bool known_fallback =
+          !narrow && point.count > 1 && profile != SequenceProfile::Strict;
+      auto status = report(phase, 1, 0, known_fallback);
       if (!status.ok())
         return Answer(status);
-      auto value = arithmetic.evaluate(false, 2, 0, point.count, 0,
-                                       point.count == 1 ? 0 : -1, point.query,
-                                       x, y, narrow, phase.consume_work);
+      auto value = arithmetic.evaluate(
+          false, 2, 0, point.count, 0, point.count == 1 ? 0 : -1, point.query,
+          x, y, narrow, phase.consume_work, [&] {
+            return known_fallback ? Status::success()
+                                  : report(phase, 0, 0, true);
+          });
       if (!value.ok())
         return Answer(value.status());
       if (BinaryParts::decode(value.value(), narrow).infinite)

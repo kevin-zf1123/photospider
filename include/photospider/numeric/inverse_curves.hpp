@@ -35,7 +35,8 @@ inline Result<WorkflowNode> node(std::uint64_t id, bool pchip, WorkflowInput x,
  * dependencies. Empty reads no payload. Output owns packed regions with correct
  * global origins beyond context teardown; arbitrary legal source strides apply.
  *
- * One complete rational expression rounds once, identically on every profile.
+ * Strict rounds the complete rational expression once. Accelerated follows
+ * CpuNumericProfile's FP32 bound and retains the monotone inverse mapping.
  * Knot/clamp conversion preserves x's zero sign; other exact zero is +0 and
  * nonzero underflow preserves sign. Invalid topology/nonfinite query/rejected
  * domain fails OperationFailed/InvalidDomain at the dependent Atom. Only the
@@ -56,12 +57,13 @@ inline Result<WorkflowNode> invert_linear_node(
  * Shares invert_linear_node's interface, global validation, errors and owners.
  * It does not swap x/y and fit a new curve. Exact destination lattice and
  * midpoint sign tests include zero-derivative, subnormal and overflow
- * boundaries. Current accelerated keys use a reported strict scalar solver on
- * non-knot cubic queries; exact knot/clamp and K=2 paths do not need that
- * fallback. The combined mapping correctly rounds the same monotone inverse
- * independently of request order/partition. Host work/cancellation checks cover
- * every root comparison and limb multiplication; no approximate result replaces
- * exhaustion.
+ * boundaries. Accelerated Float32 uses certified bracketed iteration with
+ * unique destination rounding; Float64 and unresolved cases use a reported
+ * strict solver. Exact collinear stencils reduce to linear inversion, while
+ * knot/clamp conversions remain exact. The combined mapping follows the same
+ * monotone inverse independently of request order/partition. Host
+ * work/cancellation checks cover every root comparison and limb multiplication;
+ * no approximate result replaces exhaustion.
  */
 inline Result<WorkflowNode> invert_pchip_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,

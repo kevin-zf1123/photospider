@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06E: color_ramp_oklab
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 The maintainer requires separate CIELAB, CIELCh(ab), OKLab and OKLCh ramp
 implementations. This specification covers OKLab only, rather than an ambiguous
@@ -65,7 +74,8 @@ An attached colors description must match the explicit description, including wh
 For each selected adjacent pair, w=(input-stops[j])/(stops[j+1]-stops[j])
 exactly, and component c returns RN_dtype((1-w)*colors[j,c]+w*colors[j+1,c]).
 Treat inputs as exact binary rationals and round only once at the destination.
-All three CPU versions are bitwise identical. No OKLab-to-XYZ, RGB conversion,
+Strict is correctly rounded; accelerated finite arithmetic follows the shared
+FP32-scaled final-result bound. No OKLab-to-XYZ, RGB conversion,
 white adaptation or approximate perceptual model enters this arithmetic.
 Exact hit/clamp/K=1 paths correctly convert the selected row directly.
 Direct/identical-color paths preserve zero signs; other exact mixed zeros are +0,

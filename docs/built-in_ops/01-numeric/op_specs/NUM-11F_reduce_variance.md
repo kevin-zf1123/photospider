@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-11F: reduce_variance
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -37,7 +46,7 @@ For finite inputs, let mu=sum(x)/N exactly. Compute
 
 as an exact mathematical rational, then correctly round V directly to output
 dtype. No rounded intermediate mean, square or partial sum defines the result.
-All three CPU profiles are bitwise equivalent. Integer sources participate
+Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound. Integer sources participate
 exactly without conversion to float. The exact numerator is nonnegative;
 clamping a negative approximate variance to zero is not an accuracy proof.
 

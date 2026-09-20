@@ -13,6 +13,9 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 verification_status: manual_public_workflows_and_independent_oracle
 clarification_status: complete
 repository_branch: ops-specs
@@ -20,6 +23,12 @@ repository_commit: 6617c78c
 ---
 
 # CRV-05B: apply_lut1d_channels
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Confirmed channel interface
 
@@ -31,8 +40,8 @@ It does not map one scalar to C outputs; that is the separate color-ramp family.
 
 Inherit [single-table CRV-05A](CRV-05A_apply_lut1d.md) for floating dtype rules,
 output default matching input, complete shared-axis validation, descending axes,
-singleton tables, three domain modes, exact interpolation/zero rules and bitwise
-equivalence of all three CPU versions. Output facets are empty. Each input/table
+singleton tables, three domain modes, strict whole-formula interpolation, exact
+zero/selection rules and the shared accelerated final FP32 bound. Output facets are empty. Each input/table
 Value has one dtype; channels do not carry independently selected dtypes or axes.
 Require C>=1, 1<=L<=1048576, positive input extents and input rank 1..8.
 A rank-1 input [C] is one vector. Input and table logical element counts must
@@ -91,7 +100,7 @@ Conceptual fixture: table=[[0,10],[2,8]], axis=[0,1,1],
 input=[[0,1],[0.25,0.5]] -> values=[[0,8],[0.5,9]]. This detects an incorrect
 implementation that shares a query/index across all channels in an input row.
 Use independent per-channel exact rational interpolation and coordinate checks.
-All three CPU profiles match result bits; run shared endpoint, signed-zero,
+Strict matches result bits; accelerated results meet the shared FP32 bound; run shared endpoint, signed-zero,
 domain, singleton-table, descending-axis and mixed-dtype cases for each channel.
 
 Compare selected channels with independent scalar CRV-05A nodes and check exact

@@ -59,13 +59,14 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * Outputs own immutable packed storage beyond context lifetime. Typed,
  * upstream, resource, stale and cancellation failures retain their categories.
  * Cache witnesses include complete x, selected query and selected y. Empty
- * reads none. All profiles currently evaluate exact rational slopes and
- * complete formulas, then round once directly to output dtype, preserving
- * caller fenv. Ordinary exact zero is -0 only for two -0 segment endpoints;
- * node/clamp retains y zero. CPU-specific profiles require their target. PCHIP
- * extrapolates its endpoint tangent; linear extrapolates its endpoint secant.
- * See numeric_workflow examples for explicit resource budgets and executable
- * composition.
+ * reads none. Strict rounds complete exact rational formulas once. Accelerated
+ * follows CpuNumericProfile's bound while preserving cross-query monotonicity;
+ * the current fast Float32 path requires a uniquely rounded enclosure and
+ * Float64 uses exact formulas. Caller fenv is preserved. Ordinary exact zero is
+ * -0 only for two -0 segment endpoints; node/clamp retains y zero. CPU-specific
+ * profiles require their target. PCHIP extrapolates its endpoint tangent;
+ * linear extrapolates its endpoint secant. See numeric_workflow examples for
+ * explicit resource budgets and executable composition.
  */
 /** @brief Piecewise-linear single-function interpolation; shared contract
  * above. */

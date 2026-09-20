@@ -5,6 +5,48 @@ from the default build and have no CTest registration. The category's
 [implementation table](../../docs/built-in_ops/01-numeric/implementation.md)
 records the completed families and delivery validation.
 
+## Accelerated FP32 quality and performance
+
+The accelerated floating contract is a final-output bound of 4 FP32 ULP.
+Float64 outputs retain Float64 storage and are checked directly against the
+FP32-scaled absolute bound. Strict results, special values and discrete results
+remain exact; zero, FP32 subnormal range and wider references use strict.
+`accuracy_oracle.py` implements this independent acceptance rule without narrowing
+Float64 errors. Curve monotonicity additionally requires unique final rounding.
+See [the contract](../../docs/built-in_ops/01-numeric/op_specs/NUM_accelerated_contract.md)
+and [current implementation and measurements](../../docs/built-in_ops/01-numeric/op_specs/NUM_accelerated_contract.md#current-implementation).
+
+```sh
+cmake --build build/numeric --target photospider_numeric_expression photospider_numeric_unary photospider_numeric_binary photospider_numeric_category_benchmark photospider_numeric_inventory -j 6
+build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
+python3 examples/numeric_workflow/expression_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
+build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_quick
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple extended
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple legacy
+build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_wide
+python3 examples/numeric_workflow/cost_inventory.py build/numeric/examples/numeric_workflow/photospider_numeric_inventory
+```
+
+Use `x86` on AVX2/FMA hosts and `strict` for exact references. Benchmark drivers
+perform one warmup and seven measured runs, reporting median and maximum; plan
+compilation and input freeze are outside timing. Cache is disabled and one host
+worker is used. The expression quick benchmark retains N=65536 Whole and sparse
+queries. Its public checks include nonlinear Whole/ROI/tail equality and resource
+failure cleanup. The ordering workflow includes non-last-axis and disjoint-box
+line reuse under a fixed work budget. `extended` covers the remaining 49 modern
+basenames, and `legacy` covers 20 legacy value keys plus four individually timed
+Result callbacks within the bake workflow. Source-support counts are unique
+certified elements, not internal read-call counts. Callback times and whole
+execution times remain separately labeled.
+
+For the internal math layer only, build/run `photospider_numeric_math_benchmark
+apple`; this in-tree developer target uses private headers. The other benchmark
+and correctness workflows use the public API. `signal_benchmark apple invert`
+or `signal_benchmark apple lowpass_uniform_` filters a hotspot without changing
+its workload or timing protocol. Optional category argument 3 filters operation
+names within `basic`/`extended` modes.
+
 ## ColorArray facilities
 
 `photospider/data/color_array.hpp` supplies a separate `ColorArrayDescriptor`,
@@ -142,7 +184,8 @@ python3 examples/numeric_workflow/rgb_ramp_oracle.py \
 Use `apple` or `x86` only on the matching processor. Global stops are validated
 before queries; only selected complete color rows are read. Rational hue inputs
 keep original Int64 numerator/positive denominator until final rounding, with no
-angle wrapping. All non-RGB profiles promise the same correctly rounded bits.
+angle wrapping. Current non-RGB implementations return strict bits; accelerated arithmetic
+permits the shared final FP32-scaled bound.
 RGB profiles currently use exact algebraic/direct paths and certified whole
 transfer enclosures with profile-specific integer comparisons. They produce the
 strict bits, within the accelerated four-ULP contract; alpha and failure
@@ -328,9 +371,9 @@ python3 examples/numeric_workflow/expression_oracle.py \
 Use `apple` or `x86` only on that CPU target. The oracle requires MPFR 4.2+
 through the library selection described under NUM-04. The example passes
 explicit work budgets to `execute_fragments`; complex expressions and large
-requests can exhaust a smaller budget. Ordinary accelerated transcendental
-operations currently use the strict certified backend and report per-function
-fallbacks. Unresolved bounded refinement returns ResourceExhausted.
+requests can exhaust a smaller budget. Accelerated expressions propagate strict RN64 reference enclosures across
+four-sample batches using admitted SLEEF binary64 kernels. Only rejected samples
+replay strict evaluation and report per-function fallbacks. Unresolved bounded refinement returns ResourceExhausted.
 
 The public `OperationDefinition::prepare_static` facility parses immutable
 programs once per compiler node. Semantic nodes, optimized nodes and plan steps
@@ -470,9 +513,9 @@ layout and ROI behavior, empty demand, sNaN caller fenv preservation, WorkLimit
 and cancellation cleanup. `interpolation_oracle.py` uses raw IEEE decoding,
 `Fraction` and direct destination rounding.
 
-Local strict and Apple profile runs passed 5242 oracle cases per profile and
+Local strict and Apple profile runs passed 5244 oracle cases per profile and
 the complete manual workflow. Ubuntu WSL Clang strict/x86 passed the same
-5242 cases per profile and manual checks; the installed consumer passed locally. The smoothstep implementation uses a bounded 104-limb
+5244 cases per profile and manual checks; the installed consumer passed locally. The smoothstep implementation uses a bounded 104-limb
 (6656-bit) exact cubic workspace with scalar `u128` multiplication and
 NEON/AVX2 comparison helpers. Diagnostics describe the selected profile and
 implementation; no performance result is claimed. This executable is a manual
@@ -788,7 +831,7 @@ continuous function, not exact continuous differentiation/integration.
 
 Editable manual checks cover exact support/dirty, invalid-step Atom isolation,
 failing-producer order, all-port strides/fenv, Empty/schema, work/cancellation
-and release. A 4096-value constant signal is read once through 66 windows for
+and release. A 4096-value constant signal is read once through 64 windows for
 four sparse integral outputs. Dense requested boundaries can incur quadratic
 association work; resource/stage limits are explicit. Separate calls and
 execute_atoms may repeat scans. There are no persistent checkpoints.
@@ -848,9 +891,9 @@ The example sets one CPU worker, a 1 MiB controlled-payload limit, and explicit
 refinement. These are finite example budgets, not default or universal success
 guarantees. Exact elementary state is small; transcendental state includes a
 fixed 12288-bit limb arena and uses directed precision from 128 through 4096
-fractional bits. Unresolved rounding returns ResourceExhausted. Ordinary
-accelerated transcendental values currently use a reported strict fallback;
-exact special/algebraic paths remain bitwise identical without that fallback.
+fractional bits. Unresolved rounding returns ResourceExhausted. Ordinary accelerated transcendental values use SLEEF binary64 kernels and
+conservative final-error checks in the documented ranges. Rejected candidates
+use reported strict fallback; special/algebraic paths retain their exact rules.
 See [the mathematical implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md).
 
 Manual checks cover every function's negative strides and fenv modes/flags,
@@ -903,8 +946,8 @@ minimum/maximum. Integer overflow fails only its requested Atom; floating domain
 errors/overflow produce the specified IEEE numeric result. Cache witnesses
 retain both operands even when a changed NaN leaves the result equal to one.
 Pow and angle functions use the NUM-04 bounded interval state and explicit
-work budgets shown in `Fixture::run`; ordinary accelerated transcendental
-results currently report a strict fallback. No universal refinement-success
+work budgets shown in `Fixture::run`; ordinary accelerated power/angle results use bounded SLEEF candidates,
+with reported strict fallback only when their final enclosure is rejected. No universal refinement-success
 or performance improvement is promised.
 
 The manual executable checks nine public fixtures and precise sparse support,
@@ -954,10 +997,12 @@ python3 examples/numeric_workflow/curve_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_curves strict
 ```
 
-Use `apple` or `x86` only on the corresponding CPU. All profiles currently use
-exact rational whole-formula evaluation, including unrounded PCHIP slopes, and
-one final RN-even conversion. Their results agree bitwise; NEON/AVX2 supply
-integer comparison/publication helpers. Exact knot and clamp paths read one y
+Use `apple` or `x86` only on the corresponding CPU. Strict and Float64 outputs use exact rational whole-formula evaluation,
+including unrounded PCHIP slopes, and one final RN-even conversion. Accelerated
+Float32 candidates require uniquely rounded enclosures to preserve monotonicity;
+unresolved cases use exact fallback. Collinear PCHIP stencils use the equivalent
+linear formula after exact cross-product checks. NEON/AVX2 also supply integer
+comparison/publication helpers. Exact knot and clamp paths read one y
 and preserve its signed zero. Other exact zero results are -0 only when both
 selected segment endpoints are -0. Numeric input or actual output must be finite;
 there is no intermediate slope overflow rejection or output clipping.
@@ -1490,17 +1535,17 @@ exhausted solver returns ResourceExhausted without an approximate substitute.
 Four manual groups cover fixtures, global/local failures and dirty support,
 strides/floating environment, schema/Empty, cancellation/resource release,
 cache replacement, public composition, partition equivalence, typed/upstream
-failures and fallback diagnostics. `inverse_oracle.py` checks 404 independent
+failures and fallback diagnostics. `inverse_oracle.py` checks 407 independent
 Fraction cases using normalized Hermite formulas and rational root bisection,
 including both directions/dtypes, mixed input precision, zero endpoint slopes,
 normal/subnormal ties, narrow intervals, large scales and output overflow.
 These executables have no CTest or integration registration.
 
 Validated with native Clang21 Strict/Apple and Ubuntu WSL Clang18 Strict/AVX2:
-all four groups and all 404 oracle cases passed per profile. Installed package
+all four groups and all 407 oracle cases passed per profile. Installed package
 0.16 consumers passed both native profiles. WSL results establish numerical
 correctness, with no performance claim. The shared forward and LUT1D arithmetic
-regressions passed 2484 and 1416 cases per native profile.
+regressions passed 2487 and 1416 cases per native profile.
 
 ## Signal resampling
 

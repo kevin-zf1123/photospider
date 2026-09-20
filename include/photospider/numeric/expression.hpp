@@ -26,16 +26,20 @@ namespace ps::numeric {
  * names/id/count/dtype/profile fails InvalidArgument/InvalidDomain/Schema.
  * Allocation can throw bad_alloc; the helper is pure/concurrent-safe.
  * @note Compilation owns one immutable AST across requests and dynamic runs.
- * Inputs may have mixed floating dtypes. Runtime computes RN64 coordinates,
- * checks requested adjacent-coordinate separation, then evaluates left-to-right
- * postorder with RN64 at each primitive and one final dtype conversion.
- * All required inputs/intermediates must be finite; numeric failures identify
- * the requested Atom and source span. Work/capacity/cancellation/upstream
- * failures retain their categories. Bounded strict refinement can exhaust.
- * Both outputs own immutable packed bytes beyond context lifetime. Axis-only
- * skips coefficients/AST; Empty skips all payloads. Cache witnesses retain
- * evaluated and validation dependencies even under algebraic cancellation.
- * Strict math calls and per-function accelerated fallbacks are diagnostics.
+ * Inputs may have mixed floating dtypes. Runtime computes RN64 coordinates and
+ * checks requested adjacent-coordinate separation. Strict evaluates
+ * left-to-right postorder with RN64 at each primitive and one final dtype
+ * conversion. Accelerated retains that stepwise result as its reference and
+ * certifies the final output under CpuNumericProfile's FP32 bound, replaying
+ * uncertain samples strictly. Whole, ROI and SIMD tails retain the same
+ * fixed-profile results. All required inputs/intermediates must be finite;
+ * numeric failures identify the requested Atom and source span.
+ * Work/capacity/cancellation/upstream failures retain their categories. Bounded
+ * strict refinement can exhaust. Both outputs own immutable packed bytes beyond
+ * context lifetime. Axis-only skips coefficients/AST; Empty skips all payloads.
+ * Cache witnesses retain evaluated and validation dependencies even under
+ * algebraic cancellation. Strict math calls and per-function accelerated
+ * fallbacks are diagnostics.
  */
 PHOTOSPIDER_API Result<WorkflowNode> sample_expression_node(
     std::uint64_t id, std::string expression, WorkflowInput start,

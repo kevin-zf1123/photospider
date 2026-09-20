@@ -244,14 +244,26 @@ struct DirectedInterval final {
   void multiply(Interval output, Interval a, Interval b) {
     Frame frame(*this);
     auto result = interval();
+    if (!a.low.negative && !b.low.negative) {
+      multiply(result.low, a.low, b.low, true);
+      multiply(result.high, a.high, b.high, false);
+      copy(output, result);
+      return;
+    }
     auto& candidate = number();
+    auto& product = number();
     bool first = true;
     for (const auto* left : {&a.low, &a.high})
       for (const auto* right : {&b.low, &b.high}) {
-        multiply(candidate, *left, *right, true);
+        auto status = multiply_fixed(left->magnitude, right->magnitude,
+                                     &product.magnitude, *consume);
+        if (!status.ok())
+          throw status;
+        product.negative = left->negative != right->negative;
+        shift(candidate, product, -static_cast<int>(precision), true);
         if (first || compare(candidate, result.low) < 0)
           copy(result.low, candidate);
-        multiply(candidate, *left, *right, false);
+        shift(candidate, product, -static_cast<int>(precision), false);
         if (first || compare(candidate, result.high) > 0)
           copy(result.high, candidate);
         first = false;
@@ -357,7 +369,11 @@ struct DirectedInterval final {
                     bool lower) const {
     work(kWords * 4);
     std::uint64_t remainder = 0;
-    for (std::size_t j = kWords; j; --j) {
+    const auto words = static_cast<std::size_t>((top(value) + 64) / 64);
+    // High words are zero even when output aliases value or reuses a slot.
+    std::fill(output.magnitude.words.begin() + words,
+              output.magnitude.words.end(), 0);
+    for (std::size_t j = words; j; --j) {
       const auto numerator = (static_cast<unsigned __int128>(remainder) << 64) |
                              value.magnitude.words[j - 1];
       output.magnitude.words[j - 1] =

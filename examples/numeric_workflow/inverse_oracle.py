@@ -145,8 +145,18 @@ def cases():
                 yield pchip,out,0,3,3,3,[0,bits(1),bits(2)],rawbad,[0]
 
 
+from accuracy_oracle import accepted_values
+
 def main():
     rows = list(cases())
+    for direction in (-1,1):
+        x = [F(0),F(1,2),F(3),F(7)]
+        y = [direction*(3*v+2) for v in x]
+        rows.append((1,3,0,3,3,3,[bits(v) for v in x],
+                     [bits(v) for v in y], [bits(direction*v) for v in (F(3),F(5),F(17))]))
+    # Every hardware secant underflows to zero, but the exact secants differ.
+    rows.append((1,3,0,3,3,3,[bits(F(i)*F(2)**600) for i in (0,1,2)],
+                 [bits(F(i)*F(2)**-600) for i in (0,1,3)], [bits(F(2)**-601)]))
     encoded, expected = [], []
     for pchip,out,policy,xt,yt,qt,x,y,q in rows:
         line = f'{pchip} 0 {out} {policy} {len(x)} {len(q)} 1'
@@ -159,7 +169,7 @@ def main():
     actual = result.stdout.splitlines()
     assert len(actual) == len(expected), (len(actual),len(expected),result.stderr)
     for i,(got,want) in enumerate(zip(actual,expected)):
-        assert got == want, (i,rows[i],got,want,result.stderr[:1000])
+        assert accepted_values(got,want,rows[i][1],profile), (i,rows[i],got,want,result.stderr[:1000])
     print(f'{len(rows)} independent Fraction inverse cases passed ({profile})')
 
 

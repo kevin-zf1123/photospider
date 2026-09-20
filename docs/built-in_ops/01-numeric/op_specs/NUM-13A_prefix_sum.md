@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-13A: prefix_sum
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -39,7 +48,7 @@ dtypes, required static dtype with integer default Int64 or floating default
 Float64, explicit same-domain destination selection and one final range check
 or correctly rounded conversion. Each requested prefix is the exact sum of its
 own source interval, not a recurrence on previously rounded output values.
-All three CPU profiles are bitwise equivalent.
+Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 
 Empty prefixes yield integer zero or floating +0 without reading input values.
 For nonempty prefixes, source NaN priority follows original logical axis order,
@@ -130,7 +139,7 @@ Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 runs passed
 public workflow fixtures, sparse/L-shaped support,
 integer Atom isolation, typed/Empty/zero boundaries, negative strides, fenv,
 output-cap checks, sorting work/cancellation cleanup, and 4,096 source values
-through 65 windows with four sparse results and at most 16 KiB payload. The
+through 64 windows with four sparse results and at most 16 KiB payload. The
 installed strict/Apple consumers, focused compiler unit, formatting/lint and
 independent math/entry reviews passed. No integration test or CTest
 registration is added; specification status remains Proposed.

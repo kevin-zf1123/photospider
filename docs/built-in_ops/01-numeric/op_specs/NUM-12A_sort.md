@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-12A: sort
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -55,12 +64,12 @@ ordering for a given line/input version; compute the union of required input
 lines without allocating or publishing an unrequested output. Internal original
 indices needed by stable sorting are scratch, not a forced public indices result.
 
-The implementation uses the host's optional accounted pure-block cache to reuse
-a completed line permutation across outputs. Reuse requires positive result
-cache capacity and admitted proof work. Cache-off, eviction or proof exhaustion
-may recompute the same stable order; there is no once-per-Run evaluation promise.
-Each observation still obtains its complete current source line and independent
-Data/Validation witness.
+The implementation batches requested positions within each output evaluation.
+An accounted continuation retains the most recently sorted line permutation;
+positions on that line reuse it regardless of result-cache capacity. Different
+outputs have independent continuations and may sort the same line separately.
+There is no once-per-Run evaluation promise. Each observation retains its
+complete source-line Data/Validation witness.
 For values at sorted coordinate k, copy the source value at the corresponding
 stable original index. No additional source outside the full line is needed.
 

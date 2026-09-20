@@ -211,7 +211,7 @@ void bounded_refinement(const std::string& profile, bool cancel) {
   request.inputs.assign(5, {{ps::ElementType::Float64, {1}}, {}});
   request.outputs = take(ps::Footprint::all({1}));
   request.snapshot_identity = "range-refinement";
-  request.limits.maximum_work = cancel ? 1048576 : 4096;
+  request.limits.maximum_work = cancel ? 1048576 : 2048;
   request.cancellation = cancellation.token();
   {
     auto session = take(registry->start_dependency(
@@ -219,7 +219,7 @@ void bounded_refinement(const std::string& profile, bool cancel) {
         [&](std::uint64_t work) {
           if (refining) {
             issued += work;
-            if (cancel && issued > 4000)
+            if (cancel && issued > 1500)
               cancellation.cancel();
           }
           return ps::Status::success();
@@ -235,14 +235,19 @@ void bounded_refinement(const std::string& profile, bool cancel) {
             "range operand supply");
     refining = true;
     auto result = session->poll(resources.allocator());
-    require(result.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-            "extended ratio fails without weakening arithmetic");
+    if (result.status().code !=
+        (cancel ? ps::ErrorCode::Cancelled : ps::ErrorCode::ResourceExhausted))
+      throw std::runtime_error(
+          std::string(
+              "extended ratio fails without weakening arithmetic: cancel=") +
+          std::to_string(cancel) + " code=" +
+          std::to_string(static_cast<unsigned>(result.status().code)) +
+          " message=" + result.status().message);
     if (!cancel)
       require(result.status().reason == ps::FailureReason::WorkLimit,
               "ratio WorkLimit reason");
     else
-      require(issued > 4000, "cancellation occurs during ratio work");
+      require(issued > 1500, "cancellation occurs during ratio work");
     require(session->numeric_diagnostics().evaluated_values == 1,
             "failed extended evaluation retains diagnostic attempt");
   }

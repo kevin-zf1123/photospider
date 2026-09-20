@@ -140,3 +140,17 @@ target_compile_features(photospider_numeric_signal_benchmark PRIVATE cxx_std_17)
 add_executable(photospider_numeric_category_benchmark EXCLUDE_FROM_ALL category_benchmark.cpp)
 target_link_libraries(photospider_numeric_category_benchmark PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_category_benchmark PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_inventory EXCLUDE_FROM_ALL inventory.cpp)
+target_link_libraries(photospider_numeric_inventory PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_inventory PRIVATE cxx_std_17)
+
+# Internal kernel layer; installed-package workflows use the public targets above.
+if(EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/certified_math.hpp")
+  add_executable(photospider_numeric_math_benchmark EXCLUDE_FROM_ALL math_benchmark.cpp)
+  target_include_directories(photospider_numeric_math_benchmark PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/ops" "${CMAKE_SOURCE_DIR}/src/lib")
+  target_link_libraries(photospider_numeric_math_benchmark PRIVATE Photospider::kernel)
+  target_compile_features(photospider_numeric_math_benchmark PRIVATE cxx_std_17)
+  target_compile_options(photospider_numeric_math_benchmark PRIVATE -fno-fast-math -ffp-contract=off)
+endif()

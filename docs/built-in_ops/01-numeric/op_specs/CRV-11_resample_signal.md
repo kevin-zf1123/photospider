@@ -6,12 +6,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-11: signal resampling and antialias filtering
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Position interpolation and antialias low-pass filtering are separate capabilities.
 Named linear/PCHIP resampling templates reuse CRV-01. A separate low-pass
@@ -105,8 +114,10 @@ these are Proposed templates, not new registered interpolation primitives.
 The four public resampling templates are maintained through the public
 `resampling.hpp` authoring helpers. Uniform and nonuniform low-pass families each
 provide 15 registered profile keys (five kernels across strict, Apple and x86);
-accelerated low-pass keys currently use the strict fallback. Uniform evaluation
-uses exact taps and a certified whole sum. Nonuniform evaluation uses exact
+accelerated uniform keys reuse certified coefficient enclosures and bound the
+complete convolution before final-error acceptance, with strict fallback when
+unresolved. Exact tap support is unchanged. Nonuniform accelerated keys retain
+strict fallback. Nonuniform evaluation uses exact
 partition and paired-affine pieces with global Taylor moments and a rigorous tail
 bound; it is not local adaptive quadrature.
 

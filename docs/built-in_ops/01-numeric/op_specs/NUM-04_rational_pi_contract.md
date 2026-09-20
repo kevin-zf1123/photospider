@@ -7,12 +7,21 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # NUM-04: exact rational pi-multiple inputs
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for metadata, platform keys,
 floating environment, error scope, resources and public execution acceptance.
@@ -34,7 +43,7 @@ dtype, default Float64. Exact ratio processing and denominator validation are
 per requested position; an unrequested invalid denominator does not fail it.
 Each operation has strict and independently named Apple Silicon/x86-64 CPU
 accelerated versions. Strict correctly rounds the exact mathematical result;
-accelerated allows at most four final output-dtype representable steps, retaining
+accelerated allows at most four final FP32-scaled representable steps, retaining
 the corresponding floating pi-function's exact classification/zero/pole rules.
 Use strict fallback with diagnostics when the guarantee cannot be met.
 
@@ -160,16 +169,19 @@ implementation uses its own directed arithmetic backend; LLVM libc is not select
 ## Maintained implementation and validation
 
 The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
-special-value cases use explicit integer/IEEE-field, rational or algebraic-root
-handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
-accelerated profiles report `FunctionUnsupported` strict fallback for those
-results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
-pointwise, with separately retained typed validation and Atom-scoped errors.
+and exposed through `photospider/numeric/unary.hpp`. Bit-level special cases
+precede controlled hardware elementary arithmetic. Strict transcendental results
+use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
+SLEEF binary64 kernels and conservative final-error checks within the
+[admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
+Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
+Rejected candidates use strict evaluation and report actual fallback. Unresolved
+strict rounding may return `ResourceExhausted`. Data stays precisely pointwise,
+with separately retained typed validation and Atom-scoped errors.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
 and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration

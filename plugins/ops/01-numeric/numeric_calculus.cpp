@@ -60,7 +60,7 @@ struct CalculusState final {
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         result.implementation.data(), result.implementation.size(),
-        "photospider.calculus/1;%s;exact-rational;replica-store%s",
+        "photospider.calculus/2;%s;bounded-final-rational;replica-store%s",
         integral ? "integrate_1d" : "derivative_1d",
         numeric_ops::numeric_build_identity());
     if (length < 0 ||
@@ -127,8 +127,8 @@ struct CalculusState final {
       } else if (!integral || (j >= current && index > 0)) {
         std::vector<Region> boxes;
         if (integral) {
-          boxes.emplace_back(
-              std::vector<RegionDimension>{{cursor, end - cursor}});
+          boxes.emplace_back(std::vector<RegionDimension>{
+              {cursor, std::min(end, index + 1) - cursor}});
         } else {
           const auto pair = stencil(phase, index);
           boxes.emplace_back(std::vector<RegionDimension>{{pair.first, 1}});
@@ -218,13 +218,22 @@ struct CalculusState final {
         auto added = arithmetic.add(bits, phase.consume_work);
         if (!added.ok())
           return Answer(added);
+        if (current < points.size() && points[current].index == j && j > 0) {
+          auto result = arithmetic.integral(step, initial, phase.consume_work);
+          if (!result.ok())
+            return Answer(result.status());
+          auto stored = store(phase, current, result.value());
+          if (!stored.ok())
+            return Answer(stored);
+          ++current;
+        }
       }
       cursor = end;
     }
     while (current < points.size()) {
       const auto index = points[current].index;
       if (integral && index > 0 && cursor <= index) {
-        end = cursor + std::min(UINT64_C(64), index + 1 - cursor);
+        end = cursor + std::min(UINT64_C(64), points.back().index + 1 - cursor);
         return need(phase, false);
       }
       Result<std::uint64_t> result(initial);

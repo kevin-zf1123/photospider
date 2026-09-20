@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "accuracy.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -232,7 +233,7 @@ void examples(ps::CpuNumericProfile profile) {
     for (unsigned j = 0; j < 3; ++j) {
       std::uint64_t bits = 0;
       require(result.values.at("values").read({j}, &bits, 8).ok() &&
-                  bits == expected[operation][j],
+                  numeric_accuracy(bits, expected[operation][j], profile),
               "unary fixture/lifetime");
     }
   }
@@ -250,13 +251,14 @@ void examples(ps::CpuNumericProfile profile) {
     auto result = take(fixture.run({{"values", all}}, false));
     for (unsigned j = 0; j < 3; ++j) {
       std::uint64_t bits = 0;
-      require(result.values.at("values").read({j}, &bits, 8).ok() &&
-                  bits == rational_expected[operation][j],
-              "rational pi fixture");
+      require(
+          result.values.at("values").read({j}, &bits, 8).ok() &&
+              numeric_accuracy(bits, rational_expected[operation][j], profile),
+          "rational pi fixture");
     }
   }
   std::cout << "18 unary functions and four exact-rational pi workflows passed "
-               "bitwise fixtures and escaped lifetime\n";
+               "strict/FP32-bound fixtures and escaped lifetime\n";
 }
 
 ps::DependencyResult direct(const ps::WorkflowNode& node,
@@ -356,14 +358,13 @@ void layouts_and_fallback(ps::CpuNumericProfile profile) {
       authored("sin", Type::Float64, profile),
       {array(Type::Float64, {3}, {0, 0x3ff0000000000000, 0x7ff0000000000042})},
       all);
-  require(sine.numeric.evaluated_values == 3 &&
-              sine.numeric.copied_elements == 3 &&
-              sine.numeric.strict_fallbacks ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 1U) &&
-              sine.numeric.fallback_reasons[static_cast<unsigned>(
-                  ps::NumericFallbackReason::FunctionUnsupported)] ==
-                  sine.numeric.strict_fallbacks,
-          "ordinary sin fallback once, special values never");
+  require(
+      sine.numeric.evaluated_values == 3 && sine.numeric.copied_elements == 3 &&
+          sine.numeric.strict_fallbacks == 0 &&
+          sine.numeric.fallback_reasons[static_cast<unsigned>(
+              ps::NumericFallbackReason::FunctionUnsupported)] ==
+              sine.numeric.strict_fallbacks,
+      "ordinary sin uses the bounded SIMD path, special values never fallback");
   auto landmark = direct(
       authored("sinpi_rational", Type::Float64, profile),
       {array(Type::Int64, {3}, {1, 1, 1}), array(Type::Int64, {3}, {3, 4, 6})},
@@ -467,7 +468,7 @@ void cancellation_and_cache(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry();
   auto node = authored("sin", Type::Float64, profile);
-  auto source = array(Type::Float64, {1}, {0x3ff0000000000000});
+  auto source = array(Type::Float64, {1}, {0x4000000000000000});
   ps::DependencyRequest request;
   request.inputs = {{source.descriptor(), {}}};
   request.outputs = take(ps::Footprint::all({1}));
@@ -693,13 +694,14 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       ps::DemandQuery query{{"values", take(ps::Footprint::all({size}))}};
       std::vector<std::int64_t> times;
       std::uint64_t peak = 0, fallbacks = 0, reference = 0;
-      for (unsigned repeat = 0; repeat < 3; ++repeat) {
+      for (unsigned repeat = 0; repeat < 8; ++repeat) {
         const auto start = std::chrono::steady_clock::now();
         auto result =
             take(context.execute_fragments(snapshot, query, {}, options));
-        times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - start)
-                            .count());
+        if (repeat)
+          times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - start)
+                              .count());
         peak = std::max(peak, result.diagnostics.peak_live_bytes);
         fallbacks = 0;
         std::uint64_t evaluated = 0;
@@ -721,7 +723,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       }
       std::sort(times.begin(), times.end());
       std::cout << operation << ',' << selected << ',' << size
-                << ",Float64,Whole,1,off,3," << times[1] << ',' << times[2]
+                << ",Float64,Whole,1,off,7," << times[3] << ',' << times[6]
                 << ',' << peak << ',' << fallbacks << '\n';
     }
   }

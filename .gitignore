@@ -173,3 +173,9 @@ __pycache__/
 !/examples/atom_outcomes_workflow/CMakeLists.txt
 !/examples/atom_outcomes_workflow/main.cpp
 !/examples/atom_outcomes_workflow/README.md
+
+# Private numeric math adapter; builders supply the ignored upstream source.
+!third_party/
+!third_party/SLEEF.md
+!third_party/photospider_sleef.c
+/third_party/sleef/

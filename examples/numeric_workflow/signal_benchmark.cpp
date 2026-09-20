@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "accuracy.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/inverse_curves.hpp"
 #include "photospider/numeric/lowpass.hpp"
@@ -188,7 +189,8 @@ ps::WorkflowNode authored(bool continuous, unsigned kernel,
                      kernel == 4 ? 1. : .25, LowpassBoundary::Reflect,
                      profile));
 }
-void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
+void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
+               const std::string& filter) {
   std::cout << "operation,profile,input_shape,requested,dtype,region,workers,"
                "cache,repetitions,median_us,max_us,output_bytes,peak_payload,"
                "peak_metadata,retained_payload,retained_metadata,source_"
@@ -249,6 +251,8 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             UINT64_C(0x3fe82a4d23df6f86)};
         expected.assign(count, (continuous ? nonuniform : uniform)[kernel]);
       }
+      if (!filter.empty() && node.operation.find(filter) == std::string::npos)
+        continue;
       Fixture fixture(node, inputs);
       fixture.document.outputs = {{"result", 1, output}};
       auto wanted = region({size}, std::move(regions));
@@ -271,14 +275,16 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
         options.maximum_dependency_work = UINT64_C(64) * 1024 * 1024 * 1024;
         options.dependencies.maximum_work = UINT64_C(32) * 1024 * 1024 * 1024;
         options.maximum_dependency_cache_work = 0;
-        for (unsigned repeat = 0; repeat < 3; ++repeat) {
+        for (unsigned repeat = 0; repeat < 8; ++repeat) {
           retained = {};
           const auto start = std::chrono::steady_clock::now();
           auto result = take(context.execute_fragments(
               frozen, {{"result", wanted}}, {}, options));
-          times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::steady_clock::now() - start)
-                              .count());
+          if (repeat)
+            times.push_back(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count());
           source_elements = evaluated = fallbacks = 0;
           for (const auto& support : take(result.dependencies.source_support()))
             source_elements += take(support.second.element_count());
@@ -287,17 +293,14 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             fallbacks += timing.numeric.strict_fallbacks;
           }
           require(evaluated == count, "benchmark output accounting");
-          require(fallbacks == (profile == ps::CpuNumericProfile::Strict ||
-                                        operation == 0
-                                    ? 0U
-                                    : count),
-                  "benchmark fallback accounting");
+          require(fallbacks <= evaluated,
+                  "benchmark actual fallback accounting");
           for (unsigned i = 0; i < count; ++i) {
             std::uint64_t bits = 0;
             require(result.values.at("result")
                             .read({operation < 2 ? i : 4 * i + 2}, &bits, 8)
                             .ok() &&
-                        bits == expected[i],
+                        numeric_accuracy(bits, expected[i], profile),
                     "independent analytic benchmark bits");
           }
           retained = result.values.at("result");
@@ -307,8 +310,8 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
       const auto stats = budget.statistics();
       std::cout << node.operation << ',' << selected << ','
                 << (operation < 2 ? 33 : size) << ',' << count << ",Float64,"
-                << (operation < 2 ? "Whole" : "disjoint") << ",1,off,3,"
-                << times[1] << ',' << times[2] << ',' << count * 8 << ','
+                << (operation < 2 ? "Whole" : "disjoint") << ",1,off,7,"
+                << times[3] << ',' << times[6] << ',' << count * 8 << ','
                 << stats.peak[ps::ResourceKind::Payload] << ','
                 << stats.peak[ps::ResourceKind::Metadata] << ','
                 << stats.live[ps::ResourceKind::Payload] << ','
@@ -330,7 +333,7 @@ int main(int argc, char** argv) {
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon
                              : ps::CpuNumericProfile::X86Avx2;
-    benchmark(profile, selected);
+    benchmark(profile, selected, argc > 2 ? argv[2] : "");
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

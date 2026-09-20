@@ -18,6 +18,12 @@ repository_commit: current working tree
 
 # NUM-08A: mix
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -50,7 +56,7 @@ or two same-sign infinities, returns that infinity. Opposite infinities yield
 the fixed positive quiet NaN. These are successful numeric results.
 
 For finite a/b in the interior, correctly round the exact real expression
-(1-t)*a+t*b directly to dtype once. Every profile is bitwise equivalent. Two
+(1-t)*a+t*b directly to dtype once. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound. Two
 negative-zero endpoints yield -0; other exact zero interior results yield +0.
 A nonzero exact result rounding to zero retains its mathematical sign. Since
 t is in [0,1], finite endpoints cannot produce an infinite mathematical-range
@@ -80,6 +86,6 @@ typed-validation closure, cache branch replacement, layouts/ROI, empty demand,
 caller floating-environment preservation and cleanup under WorkLimit and
 cancellation. `interpolation_oracle.py` independently decodes IEEE values and
 uses `Fraction` plus direct destination rounding; the local strict and Apple
-profile runs passed 5242 cases per profile. Ubuntu WSL Clang strict/x86
-also passed 5242 cases per profile; the installed consumer passed locally. These are manual targets without CTest or
+profile runs passed 5244 cases per profile. Ubuntu WSL Clang strict/x86
+also passed 5244 cases per profile; the installed consumer passed locally. These are manual targets without CTest or
 integration-test registration, and no performance result is claimed.

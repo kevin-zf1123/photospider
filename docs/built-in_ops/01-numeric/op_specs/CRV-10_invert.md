@@ -6,12 +6,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-10: one-dimensional inverse lookup
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM execution baseline](NUM_common_contract.md) for specification/
 registration status, CPU target identity, floating environment, diagnostic provenance,
@@ -21,9 +30,8 @@ caller floating environment is preserved. This is limited inheritance: the ports
 output kinds/facets, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
-Where a 4-ULP final bound is stated, it means at most four adjacent
-representable steps in the output dtype from the correctly rounded strict result,
-measured by monotone IEEE bit-pattern distance for nonzero finite values.
+A stated four-ULP final bound uses the shared FP32-scaled contract for both
+Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
 
 
@@ -54,9 +62,8 @@ observations, not unrequested outputs.
 
 Strict inverts the forward mathematical curve before destination rounding, then
 correctly rounds x directly to output dtype. It does not invert the many-to-one
-floating output map or an accelerated approximation. Linear all three versions
-are bitwise identical. PCHIP accelerated Apple Silicon/x86-64 allow at most
-4 ULP final x error, while preserving inverse monotonic direction and the selected
+floating output map or an accelerated approximation. Linear and PCHIP accelerated Apple Silicon/x86-64 allow at most
+4 FP32-scaled ULP final x error, while preserving inverse monotonic direction and the selected
 x segment's converted bounds. A small forward residual alone is not an x-error
 guarantee near zero derivative. Request order/partition cannot affect results.
 
@@ -166,11 +173,14 @@ The current runtime registers six keys through the public
 [`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp)
 helpers `invert_linear_node` and `invert_pchip_node`. Linear inverse uses an
 exact rational path and is bitwise identical across profiles. PCHIP uses
-the exact polynomial/lattice algorithm in strict; accelerated cubic non-knot
-queries use the strict scalar fallback, while exact knot/clamp and K=2 paths do
-not require fallback.
+the exact polynomial/lattice algorithm in strict and for general Float64 output.
+Accelerated Float32 output first tries bracketed refinement and accepts only a
+uniquely rounded output; uncertainty uses strict scalar fallback. Exact cross
+products reduce collinear stencils to linear inversion, while knot/clamp and
+K=2 paths remain direct. Scalar integer comparison is scoped to inverse work
+and restores the surrounding numeric profile.
 
 See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
 for the shared fixture and validation details. Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18 Strict/AVX2 passed all
-four manual groups and 404 independent Fraction cases per profile. The installed
+four manual groups and 407 independent Fraction cases per profile. The installed
 0.16 consumer passed both native profiles. WSL checks numerical correctness only.

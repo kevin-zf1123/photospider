@@ -71,7 +71,7 @@ struct SampleState final {
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         diagnostics.implementation.data(), diagnostics.implementation.size(),
-        "photospider.expression/1;RN64-postorder;Q128..4096;integer-ISA%s",
+        "photospider.expression/2;final-4ulp32;sleef3.9.0;RN64-Q-fallback%s",
         numeric_build_identity());
     if (length < 0 ||
         static_cast<std::size_t>(length) >= diagnostics.implementation.size())
@@ -158,8 +158,8 @@ struct SampleState final {
                            &owned, 1, phase.sets);
     return result.ok() ? Answer(result.take_value()) : Answer(result.status());
   }
-  Result<std::uint64_t> evaluate_sample(std::uint64_t index,
-                                        const DependencyPhase& phase) {
+  Result<std::uint64_t> validated_coordinate(std::uint64_t index,
+                                             const DependencyPhase& phase) {
     auto current = coordinate(index, phase);
     if (!current.ok())
       return Result<std::uint64_t>(current.status());
@@ -175,6 +175,13 @@ struct SampleState final {
             index, true, current.value(), FailureReason::ArithmeticOverflow,
             "duplicate adjacent sampling coordinate"));
     }
+    return current;
+  }
+  Result<std::uint64_t> evaluate_sample(std::uint64_t index,
+                                        const DependencyPhase& phase) {
+    auto current = validated_coordinate(index, phase);
+    if (!current.ok())
+      return current;
     auto reported = report(phase, 1, 0);
     if (!reported.ok())
       return Result<std::uint64_t>(reported);
@@ -213,15 +220,44 @@ struct SampleState final {
         return Answer(allocated.status());
       auto writer = allocated.take_value();
       const auto range = box.dimensions()[0];
-      for (std::uint64_t local = 0; local < range.extent; ++local) {
-        auto value = evaluate_sample(range.offset + local, phase);
-        if (!value.ok())
-          return Answer(value.status());
-        auto reported = report(phase, 0, 1);
-        if (!reported.ok())
-          return Answer(reported);
-        select_words(replicas.data(), value.value(), value.value(), 1, profile);
-        std::memcpy(writer.data() + local * width, replicas.data(), width);
+      for (std::uint64_t local = 0; local < range.extent;) {
+        const auto count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(4, range.extent - local));
+        std::array<std::uint64_t, 4> coordinates{}, results{};
+        std::array<bool, 4> accepted{};
+        if (profile != SequenceProfile::Strict) {
+          for (std::size_t lane = 0; lane < count; ++lane) {
+            auto coordinate =
+                validated_coordinate(range.offset + local + lane, phase);
+            if (!coordinate.ok())
+              return Answer(coordinate.status());
+            coordinates[lane] = coordinate.value();
+          }
+          auto status = evaluator.accelerated.evaluate(
+              program->expression, coordinates.data(), coefficients, count,
+              program->dtype == ElementType::Float32, results.data(),
+              accepted.data(), phase.consume_work);
+          if (!status.ok())
+            return Answer(status);
+        }
+        for (std::size_t lane = 0; lane < count; ++lane) {
+          if (!accepted[lane]) {
+            auto value = evaluate_sample(range.offset + local + lane, phase);
+            if (!value.ok())
+              return Answer(value.status());
+            results[lane] = value.value();
+          } else {
+            auto reported = report(phase, 1, 0);
+            if (!reported.ok())
+              return Answer(reported);
+          }
+          auto reported = report(phase, 0, 1);
+          if (!reported.ok())
+            return Answer(reported);
+          std::memcpy(writer.data() + (local + lane) * width, &results[lane],
+                      width);
+        }
+        local += count;
       }
       auto value = std::move(writer).publish();
       if (!value.ok())

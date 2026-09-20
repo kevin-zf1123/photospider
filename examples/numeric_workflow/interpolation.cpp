@@ -231,7 +231,7 @@ void bounded_refinement(const std::string& profile, bool cancel,
   request.inputs.assign(3, {{ps::ElementType::Float64, {1}}, {}});
   request.outputs = take(ps::Footprint::all({1}));
   request.snapshot_identity = "interpolation-refinement";
-  request.limits.maximum_work = cancel ? 1048576 : 4096;
+  request.limits.maximum_work = cancel ? 1048576 : 2048;
   request.cancellation = cancellation.token();
   {
     auto session = take(registry->start_dependency(
@@ -239,7 +239,7 @@ void bounded_refinement(const std::string& profile, bool cancel,
         [&](std::uint64_t work) {
           if (refining) {
             issued += work;
-            if (cancel && issued > 4000)
+            if (cancel && issued > 1500)
               cancellation.cancel();
           }
           return ps::Status::success();
@@ -274,9 +274,13 @@ void bounded_refinement(const std::string& profile, bool cancel,
     }
     refining = true;
     const auto result = session->poll(resources.allocator());
-    require(result.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-            "exact cubic cancellation/work failure");
+    if (result.status().code !=
+        (cancel ? ps::ErrorCode::Cancelled : ps::ErrorCode::ResourceExhausted))
+      throw std::runtime_error(
+          std::string("exact cubic cancellation/work failure: cancel=") +
+          std::to_string(cancel) + " code=" +
+          std::to_string(static_cast<unsigned>(result.status().code)) +
+          " message=" + result.status().message);
     if (!cancel)
       require(result.status().reason == ps::FailureReason::WorkLimit,
               "cubic work reason");

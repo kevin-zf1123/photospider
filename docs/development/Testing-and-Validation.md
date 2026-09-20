@@ -4,6 +4,15 @@ This document defines maintained repository validation after the breaking
 scope reset. Tests validate long-lived software behavior, not migration
 completion or provenance.
 
+## Build prerequisite
+
+Before configuring a checkout or source archive, download the pinned SLEEF
+3.9.0 source into `third_party/sleef/` using the
+[documented commands](../../third_party/SLEEF.md). This ignored directory must
+also be supplied for offline builds. CI checks out the same upstream commit
+separately before configuration; CMake never downloads it. Installed-package
+consumers do not need this source dependency.
+
 ## Development loop
 
 During implementation, use scoped formatting/lint, affected targets, and

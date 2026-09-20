@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_quantile.hpp"
+#include "01-numeric/pointwise_execution.hpp"
 #include "01-numeric/stable_order.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
@@ -53,7 +55,8 @@ Status report(const DependencyPhase& phase, SequenceProfile profile,
       static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
   const auto length = std::snprintf(
       result.implementation.data(), result.implementation.size(),
-      "photospider.ordering/1;%s;stable-tuple-heapsort;exact-rational%s",
+      "photospider.ordering/"
+      "2;%s;stable-tuple-heapsort;bounded-final-rational%s",
       quantile ? "quantile" : "sort", numeric_ops::numeric_build_identity());
   if (length < 0 ||
       static_cast<std::size_t>(length) >= result.implementation.size())
@@ -69,6 +72,8 @@ struct OrderingState final {
   numeric_ops::QuantilePosition position;
   numeric_ops::StableOrderWorkspace ordering;
   numeric_ops::ExactQuantile arithmetic;
+  std::optional<Value> cached_permutation;
+  std::uint64_t cached_line = 0;
   std::array<std::uint64_t, 4> replicas{};
   OrderingState(bool probability, std::uint32_t selected_axis,
                 SequenceProfile selected)
@@ -76,8 +81,65 @@ struct OrderingState final {
         axis(selected_axis),
         profile(selected),
         arithmetic(selected) {}
+  Result<DependencyPoll> sort_region(const DependencyPhase& phase) {
+    using Answer = Result<DependencyPoll>;
+    if (!stage) {
+      ++stage;
+      return Answer(DependencyNeedBatch{{}, {}, true});
+    }
+    const auto& input = phase.query.inputs[0].descriptor;
+    const auto count = input.shape[axis];
+    return numeric_ops::publish_numeric_lines(
+        phase, axis,
+        [&](const std::vector<std::uint64_t>& at) -> Result<std::uint64_t> {
+          using Bits = Result<std::uint64_t>;
+          auto status = report(phase, profile, false, 1);
+          if (!status.ok())
+            return Bits(status);
+          std::uint64_t line = 0;
+          for (std::size_t j = 0; j < at.size(); ++j)
+            if (j != axis)
+              line = line * input.shape[j] + at[j];
+          auto coordinate = at;
+          const auto read = [&](std::uint64_t index, std::uint64_t* bits) {
+            auto charged = phase.consume_work(
+                (phase.inputs[0].fragments().size() + 1) * coordinate.size() +
+                1);
+            if (!charged.ok())
+              return charged;
+            coordinate[axis] = index;
+            *bits = 0;
+            return phase.read(0, coordinate, bits,
+                              Value::element_size(input.element_type));
+          };
+          if (!cached_permutation || cached_line != line) {
+            cached_permutation.reset();
+            auto value =
+                ordering.build(count, input.element_type, profile,
+                               phase.allocator, phase.consume_work, read);
+            if (!value.ok())
+              return Bits(value.status());
+            cached_permutation = value.take_value();
+            cached_line = line;
+          }
+          std::uint64_t index = 0, bits = 0;
+          std::memcpy(&index, cached_permutation->bytes().data() + at[axis] * 8,
+                      8);
+          if (phase.query.output_index == 1) {
+            bits = index;
+          } else {
+            status = read(index, &bits);
+            if (!status.ok())
+              return Bits(status);
+          }
+          status = report(phase, profile, false, 0, 1);
+          return status.ok() ? Bits(bits) : Bits(status);
+        });
+  }
   Result<DependencyPoll> poll(const DependencyPhase& phase) {
     using Answer = Result<DependencyPoll>;
+    if (!quantile)
+      return sort_region(phase);
     auto construction = dependency_internal::metadata_owner(8192);
     const auto& input = phase.query.inputs[0];
     const auto count = input.descriptor.shape[axis];
@@ -276,7 +338,7 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     traits.input_schema[1].element_type_mask = 12;
   }
   traits.requires_metadata_specialization = true;
-  traits.share_blocks_across_outputs = true;
+  traits.share_blocks_across_outputs = quantile;
   traits.workspace_input_multiplier = 16;
   traits.parameter_schema = {{"axis", OperationParameterType::Int64}};
   if (quantile)
@@ -320,6 +382,23 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     results[0].metadata.descriptor = {type, shape};
     if (!quantile)
       results[1].metadata.descriptor = {ElementType::Int64, shape};
+    if (!quantile) {
+      DependencyMappedNeed data;
+      data.port = 0;
+      data.roles = 1;
+      for (std::size_t j = 0; j < shape.size(); ++j)
+        data.axes.push_back(
+            j == axis.value()
+                ? DependencyAxis{-1, {0, shape[j]}}
+                : DependencyAxis{static_cast<std::int32_t>(j), {}});
+      auto validation = input_internal::validation_map(data, inputs[0]);
+      auto all = Footprint::all(shape);
+      if (!all.ok())
+        return Answer(all.status());
+      for (auto& result : results)
+        result.static_dependency_pieces =
+            std::vector<DependencyMapPiece>{{all.value(), {data, validation}}};
+    }
     return Answer(std::move(results));
   };
   operation.start_dependency = [quantile, profile](const auto& query,

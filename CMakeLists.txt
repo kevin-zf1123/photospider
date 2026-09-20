@@ -273,6 +273,8 @@ elseif(MSVC)
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
+include(cmake/NumericMath.cmake)
+
 # Disposable disk entries are compatible only with this maintained implementation.
 file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
@@ -280,7 +282,13 @@ file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.mm" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.metal" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/*.cpp")
-list(APPEND _cache_identity_inputs "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
+file(GLOB_RECURSE _numeric_math_identity_inputs CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sleef/src/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sleef/src/*.c")
+list(APPEND _cache_identity_inputs ${_numeric_math_identity_inputs}
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/photospider_sleef.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/NumericMath.cmake"
+  "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt")
 list(SORT _cache_identity_inputs)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _cache_config)
@@ -322,6 +330,7 @@ target_include_directories(
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 function(photospider_configure_kernel_target target)
+  target_sources(${target} PRIVATE $<TARGET_OBJECTS:photospider_numeric_math>)
   set_target_properties(
     ${target}
     PROPERTIES CXX_EXTENSIONS OFF
@@ -909,3 +918,6 @@ if(BUILD_TESTING)
     target_link_libraries(test_inpaint_ns PRIVATE opencv_core opencv_photo)
   endif()
 endif()
+
+install(FILES third_party/sleef/LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider RENAME SLEEF.txt)

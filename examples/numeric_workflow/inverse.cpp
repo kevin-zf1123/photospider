@@ -568,11 +568,12 @@ void cache_composition_and_validation(ps::CpuNumericProfile profile) {
         fallbacks += timing.numeric.strict_fallbacks;
       }
     }
-    require(
-        evaluated == 3 &&
-            fallbacks ==
-                (pchip && profile != ps::CpuNumericProfile::Strict ? 2U : 0U),
-        "inverse exact/fallback diagnostics");
+    if (evaluated != 3 ||
+        fallbacks != (profile != ps::CpuNumericProfile::Strict ? 2U : 0U))
+      throw std::runtime_error(
+          "inverse exact/fallback diagnostics: pchip=" + std::to_string(pchip) +
+          " evaluated=" + std::to_string(evaluated) +
+          " fallbacks=" + std::to_string(fallbacks));
     for (unsigned i = 0; i < 3; ++i) {
       std::uint64_t actual = 0;
       require(restored.values.at("values").read({i}, &actual, 8).ok() &&

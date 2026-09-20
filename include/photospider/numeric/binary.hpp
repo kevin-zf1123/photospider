@@ -43,13 +43,13 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
  * bad_alloc. Invalid id/profile fails InvalidArgument/InvalidDomain/Schema.
  * Runtime results own immutable packed storage beyond context life. Cache
  * witnesses retain both inputs and their exact bits, including NaN payloads.
- * Arithmetic is RN-even with gradual underflow and unchanged caller fenv.
- * Ordinary pow/angle values use directed refinement through 4096 fractional
- * bits; unresolved rounding fails ResourceExhausted. Accelerated profiles
- * report FunctionUnsupported strict fallback for ordinary transcendental
- * values; special/algebraic cases are exact. Named profiles require their CPU.
- * See examples/numeric_workflow for editable workflows and explicit math
- * budgets.
+ * Strict arithmetic is RN-even with gradual underflow and unchanged fenv.
+ * Strict pow/angle refinement has a 4096-bit ceiling; unresolved rounding fails
+ * ResourceExhausted. Accelerated floating arithmetic follows
+ * CpuNumericProfile's final FP32 bound and reports strict fallback when it
+ * cannot certify a result. Integer, special and selected algebraic results
+ * remain exact. Named profiles require their CPU target. See
+ * examples/numeric_workflow for editable workflows and explicit math budgets.
  */
 /** @brief Exact a+b; UInt8/Int64/Float32/64, checked integer range.
  * @note Uses the shared binary execution/ownership/error contract above.

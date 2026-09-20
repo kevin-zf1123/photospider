@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-15A: derivative_1d
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -39,8 +48,7 @@ Use first-order one-sided endpoints and central interior differences:
 
 For N=2 both results use the same one-sided quotient. There is no edge-order
 parameter or automatic higher-order stencil. For finite samples, evaluate the
-whole rational quotient exactly and correctly round once to output dtype; all
-three CPU versions are bitwise equivalent. Neither an overflowing naive
+whole rational quotient exactly and correctly round once to output dtype; accelerated uses the shared FP32-scaled bound. Neither an overflowing naive
 subtraction nor 2*step intermediate changes the mathematical result.
 
 Exact zero results are +0. Nonzero exact results that underflow retain their sign;
@@ -122,7 +130,7 @@ independent Fraction/raw-bit cases per profile on 2026-09-19 and the manual
 workflow checks: sparse stencil/center-NaN exclusion, raw initial-only output,
 invalid-step Atom isolation and producer order, required upstream failure after
 initial NaN, all-port strides/fenv, Empty/schema, WorkLimit/cancellation and
-release. A 4096-input integral with four sparse outputs uses 66 windows and
+release. A 4096-input integral with four sparse outputs uses 64 windows and
 exact sample/step/initial dirty support. Installed strict/Apple consumers,
 focused compiler unit, formatting/lint and scoped math/entry reviews passed.
 The manual target has no CTest/integration registration; specification status

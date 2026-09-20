@@ -14,11 +14,20 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 repository_branch: ops-impl
 repository_commit: 30478d33
 ---
 
 # NUM-02B: arange
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -31,7 +40,8 @@ terminating a floating-point loop at an end value.
 The selected output support includes Int64 as well as Float32/Float64 sequences.
 Integer mode computes exactly without a Float64 intermediate, including integers
 whose magnitude exceeds 2^53. The three independent strict/CPU-accelerated keys
-follow the common NUM rule and must give identical result bits.
+follow the common NUM rule: integer values and axis metadata stay exact;
+floating values in accelerated profiles obey the shared final FP32 bound.
 
 The selected outputs are `values[N]` and `axis=[start,last,step]`. Axis dtype is
 Int64 for an Int64 sequence and Float64 for Float32/Float64 sequences. The axis
@@ -141,8 +151,9 @@ direct-rounding protection. SIMD/parallel implementations operate on requested
 global indices and must not evaluate tail indices outside the request. No
 speculative prefix overflow rejects a later exact in-range value.
 
-The three keys produce identical bits and semantic failures. Use strict fallback
-when an accelerated rounding path cannot establish equality. Unsupported CPU
+The three keys preserve identical semantic failures and exact integer/axis
+results. Use strict fallback when a floating accelerated path cannot establish
+the shared final FP32 bound or strict-reference failure classification. Unsupported CPU
 platform keys return BackendUnavailable, without silent operator substitution.
 Report actual platform/profile and fallback counts through host-owned execution
 diagnostics as required for NUM-02A/NUM-01. Resource, upstream and cancellation

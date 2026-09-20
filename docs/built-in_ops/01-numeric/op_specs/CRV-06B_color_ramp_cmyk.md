@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06B: color_ramp_cmyk
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Confirmed model and numeric interpretation
 
@@ -63,8 +72,8 @@ color; unselected colors are not validated. Attached source color descriptions
 must match the explicit static CMYK profile description.
 
 Each channel is interpolated by the exact mathematical linear formula, with one
-final output-dtype rounding. All three independently named CPU versions are
-bitwise equivalent; no four-ULP allowance is introduced. No transfer decoding,
+final output-dtype rounding. Strict correctly rounds the whole formula; accelerated follows the shared
+FP32-scaled final-result allowance. No transfer decoding,
 RGB conversion, premultiplication or ICC table evaluation participates in this
 formula. Inherit RGB ramp's direct/mixed zero-sign rules where no alpha exists.
 

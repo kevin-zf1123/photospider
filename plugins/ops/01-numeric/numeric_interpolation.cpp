@@ -7,6 +7,7 @@
 
 #include "00-foundation/multi_output.hpp"
 #include "01-numeric/exact_interpolation.hpp"
+#include "01-numeric/pointwise_execution.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -48,8 +49,9 @@ struct InterpolationState final {
                                                                  : "AVX2-u64x4";
     const auto length = std::snprintf(
         diagnostics.implementation.data(), diagnostics.implementation.size(),
-        "photospider.interpolation/1;exact-ratio;scalar-u128-product;%s%s", isa,
-        numeric_ops::numeric_build_identity());
+        "photospider.interpolation/"
+        "2;bounded-final-ratio;scalar-u128-product;%s%s",
+        isa, numeric_ops::numeric_build_identity());
     if (length < 0 ||
         static_cast<std::size_t>(length) >= diagnostics.implementation.size())
       return Status{ErrorCode::OperationFailed,
@@ -72,9 +74,49 @@ struct InterpolationState final {
       status.detail.atom = atom.take_value();
     return Result<DependencyPoll>(status);
   }
+  Result<DependencyPoll> smoothstep(const DependencyPhase& phase) {
+    if (!stage) {
+      ++stage;
+      return Result<DependencyPoll>(DependencyNeedBatch{{}, {}, true});
+    }
+    return numeric_ops::publish_numeric_points(
+        phase, [&](const auto& at) -> Result<std::uint64_t> {
+          using Answer = Result<std::uint64_t>;
+          const bool narrow = phase.query.output.descriptor.element_type ==
+                              ElementType::Float32;
+          auto status = phase.consume_work(128);
+          if (!status.ok())
+            return Answer(status);
+          for (unsigned port = 0; port < 3; ++port) {
+            status = phase.read(port, at, &bits[port], narrow ? 4 : 8);
+            if (!status.ok())
+              return Answer(status);
+            parts[port] = BinaryParts::decode(bits[port], narrow);
+          }
+          status = report(phase);
+          if (!status.ok())
+            return Answer(status);
+          for (unsigned port = 1; port < 3; ++port)
+            if (parts[port].nan || parts[port].infinite)
+              return Answer(invalid(phase, port).status());
+          if (parts[1].order_key() >= parts[2].order_key())
+            return Answer(invalid(phase, 1).status());
+          if (parts[0].nan)
+            return Answer(bits[0] | (UINT64_C(1) << (narrow ? 22 : 51)));
+          if (parts[0].order_key() <= parts[1].order_key())
+            return Answer(UINT64_C(0));
+          if (parts[0].order_key() >= parts[2].order_key())
+            return Answer(narrow ? UINT64_C(0x3f800000)
+                                 : UINT64_C(0x3ff0000000000000));
+          return exact.smoothstep(parts[0], parts[1], parts[2], narrow,
+                                  phase.consume_work);
+        });
+  }
   Result<DependencyPoll> poll(const DependencyPhase& phase) {
     using Answer = Result<DependencyPoll>;
     const bool mix = kind == InterpolationKind::Mix;
+    if (!mix)
+      return smoothstep(phase);
     if (!stage) {
       ++stage;
       std::vector<DependencyNeed> needs;
@@ -223,6 +265,12 @@ OperationDefinition interpolation_operation(const std::string& key,
     }
     return numeric_ops::sequence_profile_available(profile);
   };
+  if (kind == InterpolationKind::Smoothstep) {
+    traits.requires_metadata_specialization = true;
+    operation.specialize_metadata = [](const auto& inputs, const auto&) {
+      return numeric_ops::pointwise_specialization(inputs);
+    };
+  }
   operation.start_dependency = [kind, profile](const auto&,
                                                const auto& allocator) {
     return DependencyContinuation::make<InterpolationState>(allocator, kind,

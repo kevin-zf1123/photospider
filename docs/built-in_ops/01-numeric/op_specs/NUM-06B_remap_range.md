@@ -18,6 +18,12 @@ repository_commit: current working tree
 
 # NUM-06B: remap_range
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -50,7 +56,7 @@ preserved; map infinities according to the sign of the exact slope. A constant
 target interval maps non-NaN infinities to the target constant.
 
 For ordinary finite inputs, correctly round the entire exact rational formula
-directly to output dtype once. All three CPU profiles are bitwise equivalent;
+directly to output dtype once. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound;
 intermediate rounded subtraction/multiplication/division does not define the
 operation. Mathematical output overflow yields the correctly signed infinity
 as a successful numeric result; gradual underflow preserves the result sign.
@@ -76,7 +82,7 @@ and constant targets, exact endpoints, signed zeros, infinities and NaN payloads
 invalid bounds concurrent with input NaN, near-equal source bounds, output
 overflow/subnormals and representable results with overflowing naive differences.
 Use an independent exact rational oracle with direct Float32/Float64 rounding;
-verify all CPU profiles bitwise. Execute shared disjoint support, validation,
+verify strict bits and accelerated final FP32-scaled accuracy. Execute shared disjoint support, validation,
 invalidation, owner/cache, budget/cancellation and public entry-point cases when
 implemented. Output storage covers requested coordinates only, with all actual
 source and result capacities accounted under the shared contract.
@@ -84,7 +90,10 @@ source and result capacities accounted under the shared contract.
 This remains distinct from `encode_range`. The three versioned keys are
 registered with closed matching-shape/input-dtype inference, pure metadata
 validation and five explicit dynamic inputs.
-Exact rational evaluation, endpoint precedence, invalid-bound diagnostics and
+Exact rational numerator/denominator construction uses a bounded final hardware
+quotient in accelerated profiles only when its enclosure passes the final-error
+gate; unresolved cases use exact rounding. Regional mapped-input execution,
+endpoint precedence, invalid-bound diagnostics and
 the public broadcast-to-remap-to-clamp workflow are implemented. Local strict
 and Apple runs passed the 2826-case independent Fraction oracle, endpoint and
 invalid-bound cases, sparse support, resource and cancellation cleanup.

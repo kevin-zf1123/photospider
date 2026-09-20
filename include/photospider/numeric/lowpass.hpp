@@ -73,10 +73,11 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * dtype/shape/axis and backend availability. No source payload is read at
  * authoring.
  *
- * Runtime rounds the exact normalized whole sum once. Coefficients are
- * certified real enclosures, never pre-rounded Float64 weights. Current
- * accelerated keys report strict scalar fallback. Logical zero taps are
- * omitted; every nonzero tap remains a dependency, including Gaussian
+ * Strict rounds the exact normalized whole sum once. Accelerated follows
+ * CpuNumericProfile's final FP32 bound, reusing certified coefficient
+ * enclosures and propagating convolution error. Unresolved cases report strict
+ * fallback; rounded weights alone do not define the reference. Logical zero
+ * taps are omitted; every nonzero tap remains a dependency, including Gaussian
  * underflow. NaN propagation follows first logical tap from -R to R, preserving
  * payload/sign and quieting sNaN. Signed infinite contributions of both signs
  * produce canonical positive qNaN; one sign gives that infinity. Numeric

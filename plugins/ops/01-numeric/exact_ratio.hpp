@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
 #include "photospider/core/status.hpp"
@@ -84,7 +85,7 @@ struct ExactRatioWorkspace final {
   }
   Result<std::uint64_t> round(
       bool narrow, const std::function<Status(std::uint64_t)>& consume,
-      int scale = -1074) {
+      int scale = -1074, bool approximate = false) {
     using Answer = Result<std::uint64_t>;
     const auto capacity = [] {
       return Answer(Status{ErrorCode::ResourceExhausted,
@@ -100,6 +101,90 @@ struct ExactRatioWorkspace final {
           Status{ErrorCode::InvalidArgument, "zero exact denominator"});
     if (n_top < 0)
       return Answer(UINT64_C(0));
+    // A power-of-two denominator needs only bit extraction and ties-to-even.
+    // This is also the common finish path for exact sums, dots and prefixes.
+    bool dyadic = true;
+    for (std::size_t i = 0; i < Words; ++i)
+      if (denominator.words[i] != (i == static_cast<unsigned>(d_top) / 64
+                                       ? UINT64_C(1) << (d_top % 64)
+                                       : 0)) {
+        dyadic = false;
+        break;
+      }
+    if (dyadic) {
+      const unsigned fraction = narrow ? 23 : 52;
+      const int minimum = narrow ? -149 : -1074;
+      const int binary_scale = scale - d_top;
+      int quantum =
+          std::max(minimum, n_top + binary_scale - static_cast<int>(fraction));
+      const int shift_bits = quantum - binary_scale;
+      const auto bit = [&](int index) {
+        return index >= 0 && index < static_cast<int>(Words * 64) &&
+               ((numerator.words[index / 64] >> (index % 64)) & 1);
+      };
+      std::uint64_t significand = 0;
+      for (unsigned i = 0; i <= fraction; ++i)
+        if (bit(shift_bits + static_cast<int>(i)))
+          significand |= UINT64_C(1) << i;
+      bool sticky = false;
+      if (shift_bits > 1) {
+        const auto bits = static_cast<unsigned>(shift_bits - 1);
+        const auto whole = std::min<std::size_t>(bits / 64, Words);
+        for (std::size_t i = 0; i < whole; ++i)
+          sticky |= numerator.words[i] != 0;
+        if (whole < Words && bits % 64)
+          sticky |= (numerator.words[whole] &
+                     ((UINT64_C(1) << (bits % 64)) - 1)) != 0;
+      }
+      if (bit(shift_bits - 1) && (sticky || (significand & 1)))
+        ++significand;
+      if (significand == (UINT64_C(1) << (fraction + 1))) {
+        significand >>= 1;
+        ++quantum;
+      }
+      std::uint64_t exponent = 0;
+      if (significand >= (UINT64_C(1) << fraction)) {
+        exponent = quantum - minimum + 1;
+        significand -= UINT64_C(1) << fraction;
+      }
+      const auto maximum = narrow ? 255U : 2047U;
+      if (exponent >= maximum) {
+        exponent = maximum;
+        significand = 0;
+      }
+      return Answer(
+          (static_cast<std::uint64_t>(negative) << (narrow ? 31 : 63)) |
+          (exponent << fraction) | significand);
+    }
+    // Bound the integer ratio using its leading 53 bits. Discarded low bits
+    // widen the endpoint, so cancellation in constructing numerator remains
+    // exact. No original Float64 operand is narrowed to Float32.
+    if (approximate && profile != SequenceProfile::Strict) {
+      input_internal::Float32Environment environment;
+      const int exponent = n_top - d_top + scale;
+      if (environment.active() && exponent >= -127 && exponent <= 128) {
+        const auto normalized = [](const Integer& integer, int highest) {
+          std::uint64_t head = 0;
+          for (unsigned i = 0; i < 53; ++i) {
+            const int index = highest - static_cast<int>(i);
+            if (index >= 0 && ((integer.words[index / 64] >> (index % 64)) & 1))
+              head |= UINT64_C(1) << (52 - i);
+          }
+          const double low = std::ldexp(static_cast<double>(head), -52);
+          return FastInterval{low, highest > 52 ? numeric_up(low) : low};
+        };
+        auto value =
+            normalized(numerator, n_top) / normalized(denominator, d_top);
+        value = {numeric_down(std::ldexp(value.low, exponent)),
+                 numeric_up(std::ldexp(value.high, exponent))};
+        if (negative)
+          value = -value;
+        auto fast =
+            value.accepted(value.low + (value.high - value.low) * .5, narrow);
+        if (fast)
+          return Answer(*fast);
+      }
+    }
     const unsigned fraction = narrow ? 23 : 52;
     const int minimum = narrow ? -149 : -1074;
     int ratio_top = n_top - d_top;

@@ -529,10 +529,10 @@ void streaming(ps::CpuNumericProfile profile) {
     require(session->supply(supplied, request.snapshot_identity).ok(),
             "integral window supply");
   }
-  require(next == 4096 && windows == 66 &&
+  require(next == 4096 && windows == 64 &&
               session->numeric_diagnostics().evaluated_values == 4096,
           "integral scans source once");
-  std::cout << "4096 inputs, four sparse integral outputs, 66 bounded windows "
+  std::cout << "4096 inputs, four sparse integral outputs, 64 bounded windows "
                "and exact sample/step/initial dirty passed\n";
 }
 }  // namespace

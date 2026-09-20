@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-05: shared binary contract
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -35,7 +44,7 @@ Proposed; specification acceptance is independent of implementation status.
 | [NUM-05D divide](NUM-05D_divide.md) | Float32/64 | Bitwise strict equivalence |
 | [NUM-05E minimum](NUM-05E_minimum.md) | All four | Bitwise strict equivalence |
 | [NUM-05F maximum](NUM-05F_maximum.md) | All four | Bitwise strict equivalence |
-| [NUM-05G pow](NUM-05G_pow.md) | Float32/64 | <=4 output-dtype ULP; exact special classification |
+| [NUM-05G pow](NUM-05G_pow.md) | Float32/64 | <=4 FP32-scaled ULP; exact special classification |
 | [NUM-05H atan2](NUM-05H_atan2.md) | Float32/64 | <=4 ULP; exact special directions |
 | [NUM-05I atan2pi](NUM-05I_atan2pi.md) | Float32/64 | <=4 ULP; exact special directions |
 
@@ -94,7 +103,7 @@ An integer overflow at an unrequested coordinate does not fail another request.
 Inherit [NUM-04 execution conventions](NUM-04_unary_contract.md) for floating
 environment restoration, gradual underflow, NaN bits, cache identity, backend
 availability, ownership, cancellation and resource accounting. Simple arithmetic
-uses round-to-nearest/ties-to-even and has bitwise equivalent CPU profiles. Work
+uses round-to-nearest/ties-to-even and uses strict bits or the accelerated final FP32-scaled bound. Work
 is O(requested elements) for basic operations; charge actual temporary/output
 capacity and check cancellation at least every 64 scalar elements and before
 publication. Refinement for mathematical functions adds explicitly budgeted work.
@@ -127,9 +136,12 @@ All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
 The shared adapter retains both inputs as exact pointwise Data and separately
 retains typed validation, including when a numeric identity determines a result.
-Exact elementary operations use bounded integer/ratio arithmetic; ordinary
-power and angle results use the certified directed backend and report accelerated
-strict fallback. See [math implementation](../math-implementation.md) for
+Floating elementary operations use controlled correctly rounded hardware
+arithmetic after exact special-value classification, with exact fallback; integer
+operations retain checked exact arithmetic. Accelerated ordinary positive-base
+power and angle results use SLEEF binary64 enclosures within the shared admitted
+ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
+candidates dispatch the certified strict backend and report strict fallback. See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)

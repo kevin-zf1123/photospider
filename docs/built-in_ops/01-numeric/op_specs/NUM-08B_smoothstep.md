@@ -18,6 +18,12 @@ repository_commit: current working tree
 
 # NUM-08B: smoothstep
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -41,7 +47,7 @@ edges, quiet an input NaN preserving payload/sign; otherwise:
   t=(input-edge0)/(edge1-edge0) is an exact mathematical rational.
 
 There is only final destination rounding; no intermediate rounded t or polynomial
-steps define the result. All three CPU profiles are bitwise equivalent, with
+steps define the result. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound, with
 outputs in [0,1]. The exact source midpoint yields 0.5. Interior values rounding
 to zero yield +0. Positive source width must not overflow merely because naive
 subtraction would exceed the floating range.
@@ -80,16 +86,19 @@ fixture and shared disjoint/strided/resource/validation/lifetime cases are
 covered by the manual target described below.
 
 The three versioned keys implement the generic dynamic-edge contract through
-the existing `MatchAllInputs` and `validate_dependency` path; no metadata
-specialization callback is used. The exact cubic uses a 104-limb workspace
+regional mapped-input execution and the existing matching-input metadata rules.
+Exact cubic construction uses a 104-limb workspace
 (6656 bits), scalar `u128` multiplication and profile-specific NEON/AVX2
 comparison helpers, with every temporary owned by the host continuation.
+Accelerated final quotient candidates must pass a conservative final-error gate;
+unresolved results use exact rounding. Project accepted values onto the proven
+[0,1] output range to preserve the upper/lower edge contract.
 
 The public interpolation workflow checks midpoint and endpoint semantics,
 invalid-edge atom isolation, sparse all-port support, upstream edge failure,
 typed closure, cache/layout behavior, empty demand, sNaN/floating-environment
 preservation and bounded refinement cleanup. Local strict and Apple profile
-runs passed 5242 independent Fraction cases per profile. Ubuntu WSL Clang
+runs passed 5244 independent Fraction cases per profile. Ubuntu WSL Clang
 strict/x86 passed the same oracle and manual checks; the installed consumer
 also passed locally. The status is implementation
 evidence only and does not change this specification's Proposed status; the
@@ -97,4 +106,5 @@ workflow is a manual target with no CTest or integration-test registration.
 
 The existing `field.smoothstep` remains a distinct rank-2 operation with static
 Float64 edges and Float32 coverage output. The versioned `numeric.smoothstep`
-keys above provide this dynamic-edge, dtype-preserving exact contract.
+keys above provide the dynamic-edge, dtype-preserving contract with exact strict
+rounding and the shared accelerated final FP32 bound.
