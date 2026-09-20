@@ -73,10 +73,13 @@ disjoint, typed-validation, lifetime, cache and budget/cancellation cases;
 resource exhaustion must fail rather than guess a near-threshold predicate.
 
 The default registry implements all three profile keys using a bounded exact
-4352-bit predicate workspace. On 2026-09-14, the 3760-case independent Fraction
+4352-bit predicate workspace with Whole input/output execution. For the historical
+pre-Whole implementation on 2026-09-14, the 3760-case independent Fraction
 oracle, including maximum relative tolerances and underflow/equality boundaries,
 passed with AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86.
 The installed public workflow passed, including `MAX/-MAX` with rtol=1.5,
 Empty/tolerance validation, work/state exhaustion and cancellation cleanup.
 The specification remains Proposed; these are manual checks outside integration
 tests, with no performance claim.
+
+Current Whole execution, capacity and validation: [NUM-07 measurements](../comparison-whole.md).

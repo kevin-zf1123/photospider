@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool value, const char* message) {
@@ -101,13 +102,9 @@ void examples(const std::string& profile) {
             "select fixture");
   }
   const auto support = take(selected.dependencies.source_support());
-  require(support.at("input1") ==
-              take(ps::Footprint::from_regions(
-                  {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})})),
-          "selected true support");
-  require(support.at("input2") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})})),
-          "selected false support");
+  require(support.at("input1") == take(ps::Footprint::all({3})) &&
+              support.at("input2") == take(ps::Footprint::all({3})),
+          "select retains both full branches");
   const auto maximum = UINT64_C(0x7fefffffffffffff);
   Fixture close(
       registry, "numeric.is_close" + profile,
@@ -118,7 +115,7 @@ void examples(const std::string& profile) {
   std::uint8_t actual = 1;
   require(checked.values.at("values").read({0}, &actual, 1).ok() && actual == 0,
           "exact is_close avoids infinity overflow");
-  std::cout << "NUM-07: six predicates; select=[10,2,30] exact true/false "
+  std::cout << "NUM-07: six predicates; select=[10,2,30] Whole true/false "
                "support; MAX/-MAX is_close=0 passed\n";
 }
 void selected_failures(const std::string& profile) {
@@ -154,37 +151,42 @@ void selected_failures(const std::string& profile) {
   config.cpu_workers = 1;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext execution(registry, config);
-  auto result = take(execution.execute(plan.plan, fixture.bindings));
-  require(reads[0] == std::vector<std::uint64_t>({0, 2}) &&
-              reads[1] == std::vector<std::uint64_t>({1}),
-          "select never evaluates unselected source errors");
+  auto result = execution.execute(plan.plan, fixture.bindings);
+  require(
+      !result.ok() && result.status().message == "unselected source failure",
+      "Whole select exposes unselected source failure");
   fixture.bindings.inputs[0].value = raw(ps::ElementType::UInt8, {1, 2, 1});
-  auto atoms = take(
-      execution.execute_atoms(plan.plan, fixture.bindings,
-                              {{"values", take(ps::Footprint::all({3}))}}));
-  require(atoms.atoms.size() == 3, "select atom outcome count");
-  unsigned successful = 0, failed = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++successful;
-      continue;
-    }
-    ++failed;
-    const auto& status = atom.outcome.status();
-    require(status.code == ps::ErrorCode::InvalidArgument &&
-                status.reason == ps::FailureReason::InvalidDomain &&
-                status.detail.origin == ps::FailureOrigin::Domain &&
-                status.detail.scope == ps::FailureScope::Atom &&
-                atom.key.coordinate[0] == 1 &&
-                status.message.find("InvalidCondition") != std::string::npos &&
-                status.message.find("byte=2") != std::string::npos,
-            "InvalidCondition preserves actual atom and byte");
+  auto priority = execution.execute(plan.plan, fixture.bindings);
+  require(
+      !priority.ok() &&
+          priority.status().message == "unselected source failure",
+      "Whole branch collection failure precedes invalid condition callback");
+  for (unsigned port = 1; port < 3; ++port) {
+    fixture.bindings.inputs[port].source.reset();
+    fixture.bindings.inputs[port].value =
+        raw(ps::ElementType::Int64, {1, 2, 3});
   }
-  require(successful == 2 && failed == 1,
-          "invalid select observation is isolated");
-  std::cout << "select: unselected source errors suppressed; byte=2 fails only "
-               "atom 1 passed\n";
+  auto snapshot = take(execution.freeze(plan.plan, fixture.bindings));
+  auto empty = take(execution.execute_fragments(
+      snapshot, {{"values", take(ps::Footprint::none({3}))}}));
+  require(empty.diagnostics.operation_timings.empty(),
+          "Empty select skips invalid condition");
+
+  auto failed = execution.execute_fragments(
+      snapshot,
+      {{"values", take(ps::Footprint::from_regions(
+                      {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}))}});
+  require(!failed.ok() &&
+              failed.status().code == ps::ErrorCode::InvalidArgument &&
+              failed.status().reason == ps::FailureReason::InvalidDomain &&
+              failed.status().detail.scope == ps::FailureScope::Run &&
+              !failed.status().detail.atom &&
+              failed.status().message.find("byte=2") != std::string::npos,
+          "invalid unprojected condition fails Whole");
+  std::cout << "Whole select: unselected source failures, collection priority, "
+               "invalid condition passed\n";
 }
+
 void copy_types_and_typed_closure(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
   for (auto type : {ps::ElementType::UInt8, ps::ElementType::Int64,
@@ -221,7 +223,7 @@ void copy_types_and_typed_closure(const std::string& profile) {
       {take(ps::encode_semantic(ps::rgba_semantics()))}));
   auto generic = take(ps::Value::from_storage(
       input.descriptor(), input.region(), input.layout(), rgba.storage()));
-  const auto region = ps::Region({{0, 1}, {0, 1}, {0, 1}});
+  const auto region = ps::Region::whole({1, 1, 4});
   for (unsigned condition : {0, 1}) {
     auto bytes = raw(ps::ElementType::UInt8, {condition, 0, 0, 0});
     auto control = take(ps::Value::from_storage(
@@ -234,8 +236,8 @@ void copy_types_and_typed_closure(const std::string& profile) {
     ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
                                  {}, region);
     auto output = registry->invoke("numeric.select" + profile, call);
-    require(condition ? !output.ok() : output.ok(),
-            "only selected typed branch adds invalid alpha validation closure");
+    require(!output.ok(),
+            "Whole validates invalid typed branch for either condition");
   }
   ps::DependencyRequest request;
   request.inputs = {{{ps::ElementType::Float64, {1}}, {}},
@@ -243,24 +245,19 @@ void copy_types_and_typed_closure(const std::string& profile) {
   request.parameters = {{"atol", 0.0}, {"rtol", 0.0}};
   request.outputs = take(ps::Footprint::none({1}));
   request.snapshot_identity = "comparison-empty";
-  auto empty =
-      take(registry->start_dependency("numeric.is_close" + profile, request));
-  require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-              empty->poll_count() == 0,
-          "Empty comparison performs no callback reads");
   for (auto bits : {UINT64_C(0xbff0000000000000), UINT64_C(0x7ff0000000000000),
                     UINT64_C(0x7ff0000000000001)}) {
     double tolerance = 0;
     std::memcpy(&tolerance, &bits, 8);
     request.parameters["rtol"] = tolerance;
-    auto invalid =
-        registry->start_dependency("numeric.is_close" + profile, request);
+    auto invalid = registry->resolve_traits("numeric.is_close" + profile,
+                                            request.inputs, request.parameters);
     require(invalid.status().code == ps::ErrorCode::InvalidArgument &&
                 invalid.status().reason == ps::FailureReason::InvalidDomain &&
                 invalid.status().detail.origin == ps::FailureOrigin::Schema,
             "invalid tolerance rejected even for Empty");
   }
-  std::cout << "select copy bits and selected typed closure; Empty and "
+  std::cout << "select copy bits and full typed validation; Empty and "
                "tolerance schema passed\n";
 }
 struct SavedEnvironment {
@@ -314,49 +311,28 @@ void composition_and_resources(const std::string& profile) {
                 actual == expected[i],
             "comparison output composes as select condition");
   }
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  ps::DependencyRequest request;
-  request.inputs = {{{ps::ElementType::Float64, {1}}, {}},
-                    {{ps::ElementType::Float64, {1}}, {}}};
-  request.parameters = {{"atol", 0.0}, {"rtol", 0.0}};
-  request.outputs = take(ps::Footprint::all({1}));
-  request.snapshot_identity = "exact-predicate-work";
-  request.limits.maximum_work = 512;
-  {
-    auto session = take(registry->start_dependency(
-        "numeric.is_close" + profile, request, resources.allocator()));
-    require(session->poll(resources.allocator()).ok(), "predicate first stage");
-    auto first = raw(ps::ElementType::Float64, {UINT64_C(0x3ff0000000000000)});
-    auto fragments = take(ps::ValueFragments::create(first.descriptor(), {},
-                                                     request.outputs, {first}));
-    require(
-        session->supply({fragments, fragments}, request.snapshot_identity).ok(),
-        "predicate work probe supply");
-    auto failed = session->poll(resources.allocator());
-    require(failed.status().code == ps::ErrorCode::ResourceExhausted &&
-                failed.status().reason == ps::FailureReason::WorkLimit,
-            "is_close exhausted work never guesses a predicate");
+  for (const std::string operation : {"equal", "is_close"}) {
+    std::map<std::string, ps::ParameterValue> parameters;
+    if (operation == "is_close")
+      parameters = {{"atol", 0.0}, {"rtol", 0.0}};
+    auto input =
+        raw(ps::ElementType::Float64,
+            std::vector<std::uint64_t>(16384, UINT64_C(0x3ff0000000000000)));
+    point_math_checks::resources(
+        {1, "numeric." + operation + profile, {}, parameters}, {input, input},
+        16384);
   }
-  require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-          "failed predicate releases continuation and unpublished output");
-  ps::CancellationSource cancellation;
-  cancellation.cancel();
-  request.limits.maximum_work = 1048576;
-  request.cancellation = cancellation.token();
-  auto stopped = registry->start_dependency("numeric.is_close" + profile,
-                                            request, resources.allocator());
-  require(stopped.status().code == ps::ErrorCode::Cancelled,
-          "cancelled numeric start");
-  request.cancellation = {};
-  request.limits.maximum_state_bytes = 64;
-  auto limited = registry->start_dependency("numeric.is_close" + profile,
-                                            request, resources.allocator());
-  require(limited.status().code == ps::ErrorCode::ResourceExhausted &&
-              limited.status().reason == ps::FailureReason::CapacityLimit,
-          "predicate state capacity rejects insufficient memory");
-  std::cout << "composed less -> select=[1,2,2]; exact work/state limits, "
-               "cancellation and cleanup passed\n";
+  auto branch =
+      raw(ps::ElementType::Int64, std::vector<std::uint64_t>(16384, 1));
+  point_math_checks::resources(
+      {1, "numeric.select" + profile, {}, {}},
+      {raw(ps::ElementType::UInt8, std::vector<std::uint64_t>(16384, 1)),
+       branch, branch},
+      16384 * 8);
+  std::cout << "composed less -> select=[1,2,2]; Whole "
+               "work/capacity/cancellation and cleanup passed\n";
 }
+
 void selected_cache(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
   Fixture fixture(registry, "numeric.select" + profile,
@@ -379,7 +355,7 @@ void selected_cache(const std::string& profile) {
   auto demand = take(execution.open_demand(plan.plan, fixture.bindings));
   const ps::DemandQuery query{{"values", take(ps::Footprint::all({3}))}};
   take(demand.request(query));
-  require(take(demand.request(query)).diagnostics.cache_hits >= 3,
+  require(take(demand.request(query)).diagnostics.cache_hits > 0,
           "select warm per-observation cache");
   fixture.bindings.inputs[1].snapshot =
       std::make_shared<const ps::InputSnapshot>(take(
@@ -387,8 +363,8 @@ void selected_cache(const std::string& profile) {
   require(demand.replace_bindings(fixture.bindings).ok(),
           "replace unselected branch data");
   auto unchanged = take(demand.request(query));
-  require(unchanged.diagnostics.cache_hits >= 3,
-          "unselected edit preserves selected cache proof");
+  require(unchanged.diagnostics.cache_hits == 0,
+          "unselected edit invalidates Whole select");
   fixture.bindings.inputs[0].snapshot =
       std::make_shared<const ps::InputSnapshot>(
           take(snapshots.import_value(raw(ps::ElementType::UInt8, {1, 1, 1}))));
@@ -401,8 +377,8 @@ void selected_cache(const std::string& profile) {
       "condition edit changes selected source");
   const auto support = take(changed.dependencies.source_support());
   require(support.at("input1") == take(ps::Footprint::all({3})) &&
-              (!support.count("input2") || support.at("input2").empty()),
-          "condition edit replaces retained true/false support");
+              support.at("input2") == take(ps::Footprint::all({3})),
+          "condition edit retains both complete branches");
   const auto reversed_source = raw(ps::ElementType::Int64, {1, 2, 3});
   const auto reversed = take(ps::Value::from_storage(
       reversed_source.descriptor(), reversed_source.region(), {16, {-8}},
@@ -419,8 +395,145 @@ void selected_cache(const std::string& profile) {
   require(ordered.bytes().size() == 3 && ordered.bytes().data()[0] == 1 &&
               ordered.bytes().data()[1] == 0 && ordered.bytes().data()[2] == 0,
           "negative and zero strides preserve exact input coordinates");
-  std::cout << "select cache: unselected edit reused, condition edit selects99 "
-               "and replaces support; strided comparison passed\n";
+  std::cout
+      << "select cache: unselected edit invalidated, condition edit selects99 "
+         "and replaces support; strided comparison passed\n";
+}
+void whole_select_layout(const std::string& profile) {
+  auto registry = ps::make_default_operation_registry();
+  std::vector<ps::Value> inputs;
+  std::vector<ps::Region> demands;
+  for (unsigned port = 0; port < 3; ++port) {
+    const unsigned width = port ? 8 : 1;
+    auto storage = take(ps::BufferAllocator{}.allocate(65 * width + 1));
+    for (unsigned i = 0; i < 65; ++i) {
+      if (!port) {
+        storage.data()[i + 1] = i % 3 == 0;
+      } else {
+        const double x = port == 1 ? i : 99;
+        std::memcpy(storage.data() + 1 + i * 8, &x, 8);
+      }
+    }
+    ps::StridedLayout layout{
+        port == 2 ? UINT64_C(1) : 1 + UINT64_C(64) * width,
+        {777, port == 2 ? 0 : -static_cast<std::int64_t>(width)}};
+    inputs.push_back(take(ps::Value::from_storage(
+        {port ? ps::ElementType::Float64 : ps::ElementType::UInt8, {1, 65}},
+        ps::Region::whole({1, 65}), layout, std::move(storage).freeze())));
+    demands.push_back(inputs.back().region());
+  }
+  const std::map<std::string, ps::ParameterValue> parameters;
+  ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
+                               {}, ps::Region::whole({1, 65}));
+  auto result = take(registry->invoke("numeric.select" + profile, call));
+  for (unsigned i = 0; i < 65; ++i) {
+    double expected = (64 - i) % 3 == 0 ? 64 - i : 99, actual = 0;
+    std::memcpy(&actual, result.bytes().data() + 8 * i, 8);
+    require(actual == expected,
+            "select mixed-width reversed/zero/unaligned singleton tail");
+  }
+}
+void whole_predicates(const std::string& profile) {
+  auto registry = ps::make_default_operation_registry();
+  for (const std::string operation :
+       {"equal", "not_equal", "less", "less_equal", "greater", "greater_equal",
+        "is_close"}) {
+    std::map<std::string, ps::ParameterValue> parameters;
+    if (operation == "is_close")
+      parameters = {{"atol", .25}, {"rtol", 0.0}};
+    for (bool reverse : {false, true}) {
+      std::vector<ps::Value> inputs;
+      std::vector<ps::Region> demands;
+      for (unsigned port = 0; port < 2; ++port) {
+        auto storage = take(ps::BufferAllocator{}.allocate(65 * 4 + 1));
+        for (unsigned i = 0; i < 65; ++i) {
+          const float value = port ? 32 : i;
+          std::memcpy(storage.data() + 1 + 4 * i, &value, 4);
+        }
+        ps::StridedLayout layout{reverse ? UINT64_C(257) : UINT64_C(5),
+                                 {777, reverse ? -4 : 4}};
+        if (!reverse)
+          layout.origin = {0, 1};
+        inputs.push_back(take(ps::Value::from_storage(
+            {ps::ElementType::Float32, {1, 65}}, ps::Region::whole({1, 65}),
+            layout, std::move(storage).freeze())));
+        demands.push_back(inputs.back().region());
+      }
+      ps::OperationInvocation call(inputs, demands, parameters,
+                                   ps::Backend::Cpu, {},
+                                   ps::Region::whole({1, 65}));
+      auto result =
+          take(registry->invoke("numeric." + operation + profile, call));
+      for (unsigned i = 0; i < 65; ++i) {
+        const unsigned x = reverse ? 64 - i : i;
+        const bool expected = operation == "less"            ? x < 32
+                              : operation == "less_equal"    ? x <= 32
+                              : operation == "greater"       ? x > 32
+                              : operation == "greater_equal" ? x >= 32
+                              : operation == "not_equal"     ? x != 32
+                                                             : x == 32;
+        require(result.bytes().data()[i] == expected,
+                "comparison Float32 four-lane tail/layout oracle");
+      }
+    }
+    Fixture fixture(registry, "numeric." + operation + profile,
+                    {raw(ps::ElementType::Float32, {0, 0, 0}),
+                     raw(ps::ElementType::Float32, {0, 0, 0})},
+                    parameters);
+    ps::GraphContext graph(fixture.document);
+    auto plan = take(ps::Compiler(registry).compile(graph));
+    ps::ExecutionContext context(registry);
+    auto snapshot = take(context.freeze(plan.plan, fixture.bindings));
+    auto empty = take(context.execute_fragments(
+        snapshot, {{"values", take(ps::Footprint::none({3}))}}));
+    require(empty.diagnostics.operation_timings.empty(),
+            "Empty comparison skips callback");
+    const auto sparse =
+        take(ps::Footprint::from_regions({3}, {ps::Region({{2, 1}})}));
+    auto result =
+        take(context.execute_fragments(snapshot, {{"values", sparse}}));
+    for (const auto* name : {"input0", "input1"}) {
+      require(take(result.dependencies.source_support()).at(name) ==
+                  take(ps::Footprint::all({3})),
+              "Whole comparison full-input support");
+      require(take(result.dependencies.potential_dirty(
+                       name, take(ps::Footprint::from_regions(
+                                 {3}, {ps::Region({{0, 1}})}))))
+                      .at("values") == sparse,
+              "comparison input gap dirties observed output");
+    }
+    for (unsigned port = 0; port < 2; ++port) {
+      auto source = std::make_shared<ps::RegionalSource>();
+      source->descriptor = fixture.document.inputs[port].descriptor;
+      source->read = [](const auto&, auto*, auto, const auto&, const auto&) {
+        return ps::Result<ps::Region>(ps::Status{ps::ErrorCode::OperationFailed,
+                                                 "required comparison source"});
+      };
+      auto failed_bindings = fixture.bindings;
+      failed_bindings.inputs[port].value = {};
+      failed_bindings.inputs[port].source = source;
+      auto failed = context.execute(plan.plan, failed_bindings);
+      require(!failed.ok() &&
+                  failed.status().message == "required comparison source",
+              "both Whole comparison producers required");
+      auto bad = raw(ps::ElementType::Float32, {0, 0, 0, 0x40000000});
+      auto typed = take(ps::Value::from_storage(
+          {ps::ElementType::Float32, {1, 1, 4}}, ps::Region::whole({1, 1, 4}),
+          {0, {16, 16, 4}}, bad.storage(),
+          {take(ps::encode_semantic(ps::rgba_semantics()))}));
+      auto generic = take(ps::Value::from_storage(
+          typed.descriptor(), typed.region(), typed.layout(), bad.storage()));
+      std::vector<ps::Value> inputs{generic, generic};
+      inputs[port] = typed;
+      std::vector<ps::Region> demands{typed.region(), typed.region()};
+      ps::OperationInvocation call(inputs, demands, parameters,
+                                   ps::Backend::Cpu, {}, typed.region());
+      require(!registry->invoke("numeric." + operation + profile, call).ok(),
+              "typed comparison input cannot hide invalid alpha");
+    }
+  }
+  std::cout << "seven Whole comparisons: support/dirty/Empty, both-port errors "
+               "and 65-lane layouts passed\n";
 }
 void oracle(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
@@ -459,6 +572,8 @@ int main(int argc, char** argv) {
       copy_types_and_typed_closure(profile);
       composition_and_resources(profile);
       selected_cache(profile);
+      whole_predicates(profile);
+      whole_select_layout(profile);
     }
     return 0;
   } catch (const std::exception& error) {

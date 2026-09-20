@@ -717,22 +717,25 @@ python3 examples/numeric_workflow/comparison_oracle.py \
 Use `_accelerated_apple_silicon` on Apple Silicon or
 `_accelerated_x86_64` on x86-64. An unsupported host reports
 `BackendUnavailable`. The example expects
-`NUM-07: six predicates; select=[10,2,30] ... passed`, followed by selected
-branch support `{0,2}` and `{1}`, and confirms the `MAX/-MAX` `is_close` result
-is 0 without floating overflow. It separately checks that an invalid
-condition byte 2 fails only atom coordinate 1, while errors from unselected
-branches are not read.
+`NUM-07: six predicates; select=[10,2,30] ... passed`. All 24 formal keys
+use Whole input/output execution. Comparisons and exact-rational `is_close`
+return UInt8; select copies the selected branch bits without quieting sNaN.
+The `MAX/-MAX` `is_close` result remains 0 without floating overflow.
 
-`comparison_oracle.py` decodes raw IEEE values and uses `Fraction` for the
-independent relation and tolerance oracle. The 3760-case set passed on 2026-09-14 under local AppleClang 21 strict/Apple
-and Ubuntu WSL Clang 18 strict/x86, and the installed public consumer passed.
-The composed `less -> select` workflow returns `[1,2,2]`; changing its condition
-and branch bindings updates the exact support and selected values. Other checks
-cover sNaN floating-environment preservation, typed validation, negative/zero
-strides, work/state limits and cancellation cleanup. Select diagnostics
-describe `scalar-condition`, `bit-choice` and an ISA `scratch-store`; they do
-not claim four independent samples per SIMD operation or a performance gain.
-These are manual targets with no CTest or integration-test registration.
+All inputs are collected and typed-validated for nonempty requests. Select's
+unselected branch failures are visible; source/typed failures may precede invalid
+condition checking. Byte 2 anywhere fails the Whole invocation with Run scope.
+Any input edit invalidates all observed outputs. Empty invokes no callback.
+Output memory is complete even for sparse consumers; per-value counters are N/A.
+
+`comparison_oracle.py` uses raw IEEE relations and Fraction tolerance arithmetic.
+The current strict/Apple Whole runs pass 3,760 cases per profile. Manual checks
+cover selected raw bits, source/typed failure priority, full support/dirty,
+cache changes, 65-lane tails and unaligned/origin/singleton/reversed layouts,
+caller fenv, work/output/scratch budgets and cancellation cleanup. The composed
+`less -> select` still returns `[1,2,2]`. Historical WSL/installed-consumer results
+were for the pre-Whole implementation. See [NUM-07 measurements](../../docs/built-in_ops/01-numeric/comparison-whole.md).
+These are manual targets with no CTest or integration registration.
 
 ## Prefix scans and integral images: NUM-13
 

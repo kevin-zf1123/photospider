@@ -68,7 +68,8 @@ inline void layouts(const ps::WorkflowNode& node, unsigned ports) {
 // collect. A managed scope supplies the same work/capacity ledger as a worker
 // callback.
 inline void resources(const ps::WorkflowNode& node,
-                      const std::vector<ps::Value>& inputs) {
+                      const std::vector<ps::Value>& inputs,
+                      std::uint64_t output_bytes = 0) {
   auto registry = ps::make_default_operation_registry();
   std::vector<ps::OperationMetadata> metadata;
   std::vector<ps::Region> demands;
@@ -80,10 +81,9 @@ inline void resources(const ps::WorkflowNode& node,
       take(registry->resolve_traits(node.operation, metadata, node.parameters));
   require(traits.outputs[0].region_rule == ps::OperationRegionRule::Whole &&
               traits.outputs[0].dependency_version == 0 &&
-              traits.outputs[0].continuation_bytes == 0 &&
-              traits.workspace_bytes > 0,
+              traits.outputs[0].continuation_bytes == 0,
           "formal profile has one Whole callback and admitted workspace");
-  for (unsigned mode = 0; mode < 3; ++mode) {
+  for (unsigned mode = 0; mode < (traits.workspace_bytes ? 3U : 2U); ++mode) {
     ps::ResourceLimits limits;
     if (mode == 0)
       limits.maximum_work = 1024;
@@ -91,7 +91,8 @@ inline void resources(const ps::WorkflowNode& node,
       limits.capacity[ps::ResourceKind::Payload] = 8;
     if (mode == 2)
       limits.capacity[ps::ResourceKind::Payload] =
-          inputs[0].bytes().size() + traits.workspace_bytes - 1;
+          (output_bytes ? output_bytes : inputs[0].bytes().size()) +
+          traits.workspace_bytes - 1;
     ps::ResourceBudget budget(limits);
     {
       ps::ResourceAllocationScope scope(budget);
