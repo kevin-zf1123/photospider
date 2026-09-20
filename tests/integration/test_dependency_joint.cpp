@@ -265,13 +265,20 @@ int cancellation_and_limits() {
   query = requests();
   for (auto& member : query)
     member.limits.maximum_work = 2;
-  auto limited = registry.start_joint("test.joint", query);
+  auto start_limited = registry.start_joint("test.joint", query);
+  PS_CHECK(!start_limited.ok() &&
+           start_limited.status().code == ErrorCode::ResourceExhausted);
+  // Construction admits observation metadata before polling. Cap the remaining
+  // poll fuel independently so this case still tests member failure delivery.
+  auto limited = registry.start_joint("test.joint", requests());
   PS_CHECK(limited.ok());
-  auto result = limited.value()->poll();
-  PS_CHECK(result.ok());
+  const auto preparation_work = limited.value()->consumed_work();
+  auto result = limited.value()->poll(BufferAllocator{}, 0);
+  PS_CHECK(result.ok() && result.value().size() == 2);
   for (const auto& event : result.value())
-    PS_CHECK(!event.outcome.ok());
-  PS_CHECK(limited.value()->consumed_work() == 2);
+    PS_CHECK(!event.outcome.ok() &&
+             event.outcome.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(limited.value()->consumed_work() == preparation_work);
   return 0;
 }
 int reentrant_calls() {

@@ -429,7 +429,10 @@ int main(int argc, char** argv) {
     run(17, 64, 3);
     run(17, 64, 4);
     run(17, 64, 5);
-    run(17, 64, 6);
+    // Retain the first Run's owned results while executing the next snapshot.
+    // Admit both metadata sets; the single-Run fixtures retain their 64 KiB
+    // cap.
+    run(17, 64, 6, true, 10000000, 131072);
     run(17, 16);
     run(17, 64, 0, true, 10);
     run(17, 64, 0, true, 10000000, 1024);
