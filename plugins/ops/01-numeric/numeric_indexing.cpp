@@ -72,7 +72,7 @@ Status report_index(const DependencyPhase& phase, SequenceProfile profile,
   const auto length =
       std::snprintf(report.implementation.data(), report.implementation.size(),
                     "photospider.indexing/1;%s;%s", operation,
-                    numeric_ops::array_implementation(profile, view));
+                    numeric_ops::indexing_implementation(profile, view));
   if (length < 0 ||
       static_cast<std::size_t>(length) >= report.implementation.size())
     return Status{ErrorCode::OperationFailed,

@@ -553,6 +553,10 @@ installed public consumer and focused compiler/dependency/fragments/resources
 units passed. Diagnostics retain `evaluated=5, copied=4` after the fifth value
 fails; a copy-report WorkLimit stops before the next block is copied. The shared
 static-piece mapping and aggregate math received independent scoped reviews.
+Indexing diagnostics use their own family/algorithm identity plus the selected
+copy path, host, floating-point build flags and complete Clang version string.
+The complete longest report, including vendor version metadata and its trailing
+NUL, is checked against the 256-byte field at compilation.
 These targets have no CTest or integration-test registration; no performance
 result is claimed.
 
