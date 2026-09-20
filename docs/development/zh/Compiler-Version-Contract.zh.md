@@ -264,3 +264,11 @@ demand 语义；先前的 opaque facet 处理不构成兼容契约。持久 samp
 现有 disk-cache facet allowlist 内；携带资源的结果也跳过可选 sample-only cache。
 Plan 与内存 result cache 没有跨构建反序列化入口。CRV-06 实现完成与其
 Proposed 规范被接受仍是独立状态。
+
+## Package 0.17.0：prepared Whole 执行
+
+0.17.0 修改 OperationInvocation 与 OperationOutputSpecialization 的公开 C++
+布局，消费方必须重新构建，不能复用 0.16 二进制。OperationTraits 15 支持 prepared
+CPU Whole callback、静态 specialization 输入投影和 CPU Whole Atomic tuple。C
+operation ABI 保持 9，C 结构及入口未修改。投影及 tuple 已进入既有规范身份，
+未新增序列化字段或 prepared 指针身份；document 与 framing 版本不变。

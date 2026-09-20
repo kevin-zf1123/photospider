@@ -267,3 +267,19 @@ handle、读取关联和终态错误均按成员隔离；宿主拒绝重复、�
 跨成员 handle。共享 work 服务只计费一次共同计算，错误具有粘性。
 Singleton 入口仍必需；RequestRecord 不参与联合执行。Provider ABI 保持 1。
 调度、资源、缓存和数值契约见 ADR 0021 与多输出算子指南。
+
+## Whole callback 的静态准备
+
+CPU Whole callback 可以复用不可变静态 preparation。执行器通过
+`OperationInvocation::prepared` 传递 plan 持有的 owner；registry 核验定义、完整
+metadata 和参数原始位后，再进行 callback 验证并向规范化调用提供 owner。直接调用
+未提供 handle 时准备一次。prepared state 不包含运行期输入字节。
+
+`OperationOutputSpecialization::input_indices` 可依据静态 metadata/参数收窄 CPU
+Whole 输出的注册输入投影。缺省保留注册投影，空 vector 不读取任何 payload；重复、
+越界或扩大注册投影均拒绝。完整 metadata 始终必要，投影复用既有 traits/digest 字段。
+CPU Whole Atomic 输出可保留 generic trailing-axis tuple 身份；GPU、image tuple
+及其他非法组合仍被拒绝。
+
+callback wrapper 向另一 registry 转发 invocation 时必须清除 `prepared`，
+让目标 registry 准备自身定义。转发外部 handle 返回 `Stale`，seal 不可转移。

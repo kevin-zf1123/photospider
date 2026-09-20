@@ -138,7 +138,9 @@ void sharing(const std::shared_ptr<ps::OperationRegistry>& base) {
                                  ps::ErrorCode::OperationFailed,
                                  "native gate timeout"));
                          }
-                         return base->invoke("image.exposure_gain", call);
+                         auto forwarded = call;
+                         forwarded.prepared.reset();
+                         return base->invoke("image.exposure_gain", forwarded);
                        }})
                   .ok(),
               "gated registry");
@@ -230,25 +232,31 @@ void whole_fallback(const std::shared_ptr<ps::OperationRegistry>& base) {
                            return ps::Result<ps::Value>(ps::Status::failure(
                                ps::ErrorCode::BackendUnavailable,
                                "intentional native fallback"));
-                         return base->invoke("image.exposure_gain", call);
+                         auto forwarded = call;
+                         forwarded.prepared.reset();
+                         return base->invoke("image.exposure_gain", forwarded);
                        }})
                   .ok(),
               "fallback registration");
   auto whole = base->find_traits("image.opacity").take_value();
   whole.outputs[0].region_rule = ps::OperationRegionRule::Whole;
-  s3::require(
-      registry
-          ->register_operation({"test.whole", whole,
-                                [base](const ps::OperationInvocation& call) {
-                                  return base->invoke("image.opacity", call);
-                                }})
-          .ok(),
-      "whole registration");
+  s3::require(registry
+                  ->register_operation(
+                      {"test.whole", whole,
+                       [base](const ps::OperationInvocation& call) {
+                         auto forwarded = call;
+                         forwarded.prepared.reset();
+                         return base->invoke("image.opacity", forwarded);
+                       }})
+                  .ok(),
+              "whole registration");
   s3::require(registry
                   ->register_operation(
                       {"test.final", gain,
                        [base](const ps::OperationInvocation& call) {
-                         return base->invoke("image.exposure_gain", call);
+                         auto forwarded = call;
+                         forwarded.prepared.reset();
+                         return base->invoke("image.exposure_gain", forwarded);
                        }})
                   .ok(),
               "final registration");

@@ -317,3 +317,13 @@ ColorArray itself is outside the existing disk-cache facet allowlist, and
 resource-bearing results also bypass optional sample-only caches. Plans and
 in-memory result caches have no cross-build deserialization path. Implementation
 of CRV-06 and acceptance of its Proposed specification remain separate states.
+
+## Package 0.17.0: prepared Whole execution
+
+Package 0.17.0 changes the public C++ layouts of OperationInvocation and
+OperationOutputSpecialization. Rebuild C++ consumers; 0.16 binaries are not
+compatible. OperationTraits version 15 admits prepared CPU Whole callbacks,
+static specialized input projections and CPU Whole Atomic tuples. The C
+operation ABI remains 9: no C structure or entry point changes. Existing
+projection/tuple fields already enter canonical identities; no prepared pointer
+or new serialization field is added. Document and framing versions are unchanged.

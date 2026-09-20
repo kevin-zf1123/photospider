@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderNumericWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.16 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.17 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_numeric_sequences sequences.cpp)
 target_link_libraries(photospider_numeric_sequences PRIVATE Photospider::kernel)

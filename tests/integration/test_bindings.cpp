@@ -593,7 +593,10 @@ int schemas_halo_and_snapshots() {
                           changed.notify_all();
                           changed.wait(lock, [&] { return release; });
                         }
-                        return defaults->invoke("image.exposure_gain", call);
+                        auto forwarded = call;
+                        forwarded.prepared.reset();
+                        return defaults->invoke("image.exposure_gain",
+                                                forwarded);
                       }})
                  .ok());
     PS_CHECK(operations
@@ -601,7 +604,9 @@ int schemas_halo_and_snapshots() {
                      {"image.opacity",
                       defaults->find_traits("image.opacity").value(),
                       [&](const OperationInvocation& call) {
-                        return defaults->invoke("image.opacity", call);
+                        auto forwarded = call;
+                        forwarded.prepared.reset();
+                        return defaults->invoke("image.opacity", forwarded);
                       }})
                  .ok());
     operations->freeze();

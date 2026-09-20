@@ -2998,6 +2998,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         frame.backend, active_token(), frame.outputs.boxes()[0],
                         allocator};
                     call.output_index = step.output_index;
+                    call.prepared = step.prepared;
                     call.resources = resources;
                     call.input_indices = std::move(input_indices);
                     for (const auto& input : step.inputs)
@@ -4706,6 +4707,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                regional_ ? step.output_demand : Region{},
                                callback_allocator};
       call.output_index = step.output_index;
+      call.prepared = step.prepared;
+      for (const auto& input : step.inputs) {
+        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+          const auto& source = plan_->steps().at(producer->step_index);
+          call.input_metadata.push_back(
+              {source.output_descriptor,
+               source.output_facets,
+               {},
+               source.traits.outputs[0].atomic_trailing_axes});
+        } else {
+          const auto& source = plan_->input_declarations().at(
+              std::get<PlanWorkflowInput>(input).declaration_index);
+          call.input_metadata.push_back({source.descriptor, source.facets});
+        }
+      }
       call.resources = resources_;
       if (native_device_ && backend == Backend::Gpu) {
         native.emplace(native_device_, cancellation_);

@@ -321,3 +321,16 @@ Session 在回调前将每个声明 piece 与 Q 求交，分别保留 descriptor
 geometry 容量包含 vector 扩容及构造重叠。资源不足不会扩大 Q 或请求未命中源端口。
 动态 regional 算子保留有界显式行：gather 记录观察到的索引位置，scatter 记录全局
 索引扫描和每个输出的实际贡献者。
+
+## Whole callback 的静态准备
+
+CPU Whole callback 可以复用不可变静态 preparation。执行器通过
+`OperationInvocation::prepared` 传递 plan 持有的 owner；registry 核验定义、完整
+metadata 和参数原始位后，再进行 callback 验证并向规范化调用提供 owner。直接调用
+未提供 handle 时准备一次。prepared state 不包含运行期输入字节。
+
+`OperationOutputSpecialization::input_indices` 可依据静态 metadata/参数收窄 CPU
+Whole 输出的注册输入投影。缺省保留注册投影，空 vector 不读取任何 payload；重复、
+越界或扩大注册投影均拒绝。完整 metadata 始终必要，投影复用既有 traits/digest 字段。
+CPU Whole Atomic 输出可保留 generic trailing-axis tuple 身份；GPU、image tuple
+及其他非法组合仍被拒绝。

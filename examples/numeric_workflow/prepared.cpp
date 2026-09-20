@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstring>
+#include <future>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -242,6 +243,150 @@ void direct_joint(const std::shared_ptr<Counts>& counts) {
   require(session->poll().ok() && counts->prepared == before + 1,
           "direct joint prepares once");
 }
+void whole_preparation() {
+  auto counts = std::make_shared<Counts>();
+  auto operations = std::make_shared<ps::OperationRegistry>();
+  auto whole = definition(counts);
+  whole.key = "manual.whole_prepared";
+  whole.traits.joint_contract = 0;
+  whole.traits.joint_continuation_bytes = 0;
+  whole.start_dependency = {};
+  whole.start_joint = {};
+  for (auto& output : whole.traits.outputs) {
+    output.region_rule = ps::OperationRegionRule::Whole;
+    output.dependency_version = 0;
+    output.continuation_bytes = 0;
+    output.maximum_dependency_stages = 0;
+    output.failure_delivery = ps::FailureDelivery::RequestFailureOnly;
+    output.requires_dense_output = true;
+  }
+  auto prepare = whole.prepare_static;
+  whole.prepare_static = [prepare](const auto& inputs, const auto& parameters) {
+    auto result = prepare(inputs, parameters);
+    if (!result.ok())
+      return result;
+    auto prepared = result.take_value();
+    const auto mask = std::get<double>(parameters.at("mask"));
+    for (auto& output : prepared.outputs) {
+      output.input_indices = std::vector<std::uint32_t>{};
+      if (mask == 1)
+        output.input_indices = std::vector<std::uint32_t>{0};
+      if (mask == 2)
+        output.input_indices = std::vector<std::uint32_t>{0, 0};
+      if (mask == 3)
+        output.input_indices = std::vector<std::uint32_t>{1};
+    }
+    return ps::Result<ps::OperationPreparation>(std::move(prepared));
+  };
+  whole.callback = [counts](const ps::OperationInvocation& call) {
+    ++counts->started;
+    require(call.prepared && call.prepared->state(),
+            "Whole owns prepared program");
+    const auto* program = static_cast<const Program*>(call.prepared->state());
+    const auto mask = std::get<double>(call.parameters.at("mask"));
+    require(call.inputs.size() == (mask == 1 ? 1 : 0),
+            "static projection reaches callback");
+    const ps::ValueDescriptor descriptor{ps::ElementType::Float64,
+                                         {call.output_index == 1 ? 3U : 5U}};
+    auto writer = take(ps::MutableValue::allocate(
+        descriptor, call.output_region, call.allocator));
+    for (std::uint64_t i = 0; i < take(call.output_region.element_count()); ++i)
+      std::memcpy(writer.data() + 8 * i, &program->value, 8);
+    return std::move(writer).publish();
+  };
+  auto narrow = whole;
+  narrow.key = "manual.whole_narrow";
+  for (auto& output : narrow.traits.outputs)
+    output.input_indices = std::vector<std::uint32_t>{};
+  require(operations->register_operation(std::move(narrow)).ok(),
+          "register empty input template");
+  require(operations->register_operation(std::move(whole)).ok() &&
+              operations->freeze().ok(),
+          "register Whole prepared tuple");
+  auto scalar = ps::Value::from_float64(1);
+  ps::WorkflowDocument document;
+  document.inputs = {
+      {1, "input", scalar.descriptor(), scalar.region(), scalar.layout(), {}}};
+  document.nodes = {{1,
+                     "manual.whole_prepared",
+                     {ps::WorkflowInputReference{1}},
+                     {{"mask", 0.0}}}};
+  document.outputs = {{"values", 1, "values"}, {"axis", 1, "axis"}};
+  ps::GraphContext graph(document);
+  auto compiled = take(ps::Compiler(operations).compile(graph));
+  require(counts->prepared == 1, "Whole compile prepares once");
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.result_cache_bytes = 0;
+  config.managed_resources = ps::ResourceLimits{};
+  ps::ExecutionContext context(operations, config);
+  ps::ExecutionBindings bindings;
+  bindings.inputs = {{"input", scalar}};
+  auto snapshot = take(context.freeze(compiled.plan, bindings));
+  for (unsigned repeat = 0; repeat < 2; ++repeat) {
+    auto result = take(context.execute_fragments(
+        snapshot, {{"axis", take(ps::Footprint::from_regions(
+                                {3}, {ps::Region({{1, 1}})}))}}));
+    double value = 0;
+    require(result.values.at("axis").read({1}, &value, 8).ok() && value == 7,
+            "Whole tuple projection");
+  }
+  require(counts->prepared == 1 && counts->started == 2,
+          "Whole executions reuse compile owner");
+  auto source = std::make_shared<ps::RegionalSource>();
+  source->descriptor = scalar.descriptor();
+  source->read = [](const auto&, auto*, auto, const auto&, const auto&) {
+    return ps::Result<ps::Region>(
+        ps::Status{ps::ErrorCode::OperationFailed, "excluded source"});
+  };
+  bindings.inputs[0].value = {};
+  bindings.inputs[0].source = source;
+  require(context.execute(compiled.plan, bindings).ok(),
+          "Whole empty projection suppresses source I/O");
+  const std::vector<ps::Value> inputs{scalar};
+  const std::vector<ps::Region> demands{scalar.region()};
+  auto parameters = document.nodes[0].parameters;
+  auto broadened = parameters;
+  broadened["mask"] = 1.0;
+  require(!operations
+               ->prepare_operation("manual.whole_narrow",
+                                   {{scalar.descriptor(), {}}}, broadened)
+               .ok(),
+          "specializer cannot broaden registered empty projection");
+  ps::OperationInvocation call(inputs, demands, parameters);
+  call.prepared = compiled.plan.steps()[0].prepared;
+  require(operations->invoke("manual.whole_prepared", call).ok(),
+          "Whole direct preparation");
+  auto first_call = std::async(std::launch::async, [&] {
+    return operations->invoke("manual.whole_prepared", call);
+  });
+  auto second_call = std::async(std::launch::async, [&] {
+    return operations->invoke("manual.whole_prepared", call);
+  });
+  require(first_call.get().ok() && second_call.get().ok(),
+          "concurrent Whole preparation reuse");
+  require(operations->invoke("manual.whole_narrow", call).status().code ==
+              ps::ErrorCode::Stale,
+          "Whole key seal");
+  call.input_metadata = {{{ps::ElementType::Float32, {1}}, {}}};
+  require(!operations->invoke("manual.whole_prepared", call).ok(),
+          "Whole complete metadata mismatch rejected");
+  call.input_metadata.clear();
+  parameters["mask"] = -0.0;
+  require(operations->invoke("manual.whole_prepared", call).status().code ==
+              ps::ErrorCode::Stale,
+          "Whole exact parameter seal");
+  for (double mode : {2., 3.}) {
+    parameters["mask"] = mode;
+    require(!operations
+                 ->prepare_operation("manual.whole_prepared",
+                                     {{scalar.descriptor(), {}}}, parameters)
+                 .ok(),
+            "invalid specialized projections rejected");
+  }
+  std::cout << "Whole preparation: compile reuse, static projections, tuple, "
+               "direct seals passed\n";
+}
 void numeric_function_counters() {
   ps::NumericDiagnostics report;
   report.profile = ps::CpuNumericProfile::Strict;
@@ -279,6 +424,7 @@ int main() {
   try {
     auto counts = std::make_shared<Counts>();
     numeric_function_counters();
+    whole_preparation();
     compiler_and_direct(counts);
     seals_and_lifetime(counts);
     direct_joint(counts);

@@ -338,3 +338,23 @@ The singleton entry remains mandatory. RequestRecord is never joint.
 See [ADR 0021](../adr/0021-independent-node-results.md) and the
 [multi-output operator guide](Multi-Output-Operations.md) for scheduling,
 resource, cache and numerical contracts. Provider ABI remains 1.
+
+## Prepared Whole callbacks
+
+CPU Whole callbacks may use immutable static preparation. The executor passes
+`OperationInvocation::prepared` from the plan. The registry validates its
+definition, complete metadata and exact parameter bits before any callback
+validation, then lends the owning handle to the normalized invocation. Direct
+calls without a handle prepare once. No runtime bytes enter prepared state.
+
+`OperationOutputSpecialization::input_indices` may narrow a CPU Whole output's
+registered runtime projection from static metadata/parameters. Absent retains
+the registered projection; an empty vector reads no payload. Duplicate/out-of-
+range ports and broadening a registered projection reject. Complete metadata
+remains mandatory. Resolved projections use the existing trait/digest fields.
+CPU Whole Atomic outputs may retain generic trailing-axis tuple identity; GPU,
+image tuple and other invalid combinations remain rejected.
+
+A callback wrapper forwarding an invocation to a different registry must clear
+`prepared` and let that registry prepare its own definition. Forwarding the
+foreign handle correctly returns `Stale`; seals are not transferable.

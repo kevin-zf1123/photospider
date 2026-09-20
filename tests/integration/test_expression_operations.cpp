@@ -293,7 +293,9 @@ struct Fixture {
              } else {
                ++consumers;
              }
-             return base->invoke(name, call);
+             auto forwarded = call;
+             forwarded.prepared.reset();
+             return base->invoke(name, forwarded);
            }});
       if (!status.ok())
         throw std::runtime_error(status.message);

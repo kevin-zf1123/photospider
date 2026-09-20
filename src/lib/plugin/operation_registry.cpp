@@ -434,7 +434,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 14U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 15U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free ||
@@ -1021,7 +1021,14 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
            static_cast<bool>(definition.prepare_static)) ||
       (definition.specialize_metadata && definition.prepare_static) ||
       (definition.prepare_static &&
-       (!staged || !definition.traits.deterministic ||
+       ((!staged && (definition.traits.supports_gpu ||
+                     std::any_of(definition.traits.outputs.begin(),
+                                 definition.traits.outputs.end(),
+                                 [](const auto& output) {
+                                   return output.region_rule !=
+                                          OperationRegionRule::Whole;
+                                 }))) ||
+        !definition.traits.deterministic ||
         !definition.traits.side_effect_free)) ||
       (structured ? (!definition.start_result || definition.start_dependency ||
                      definition.callback)
@@ -1831,6 +1838,23 @@ OperationRegistry::prepare_operation(
         auto& output = traits.outputs[i];
         auto& specialization = specialized.value()[i];
         auto& metadata = specialization.metadata;
+        if (specialization.input_indices) {
+          if (output.region_rule != OperationRegionRule::Whole ||
+              output.dependency_version || traits.supports_gpu ||
+              output.result_schema)
+            return Answer(
+                Status{ErrorCode::InvalidArgument,
+                       "specialized input projection requires CPU Whole"});
+          if (output.input_indices)
+            for (auto port : *specialization.input_indices)
+              if (std::find(output.input_indices->begin(),
+                            output.input_indices->end(),
+                            port) == output.input_indices->end())
+                return Answer(Status{ErrorCode::InvalidArgument,
+                                     "specializer broadened input projection"});
+          output.input_indices = std::move(specialization.input_indices);
+        }
+
         if (output.result_schema || metadata.result_schema) {
           if (!output.result_schema || !metadata.result_schema ||
               output.dependency_version != 2 ||
@@ -2328,12 +2352,21 @@ Result<Value> OperationRegistry::invoke_current(
       complete_metadata[positions[i]] = {invocation.inputs[i].descriptor(),
                                          invocation.inputs[i].facets()};
   }
-  auto resolved_result =
-      resolve_traits(key, complete_metadata, invocation.parameters);
-  if (!resolved_result.ok())
-    return Result<Value>(resolved_result.status());
+  auto prepared = invocation.prepared;
+  if (prepared) {
+    auto valid = validate_prepared(*prepared, key, complete_metadata,
+                                   invocation.parameters);
+    if (!valid.ok())
+      return Result<Value>(valid);
+  } else {
+    auto result =
+        prepare_operation(key, complete_metadata, invocation.parameters);
+    if (!result.ok())
+      return Result<Value>(result.status());
+    prepared = result.take_value();
+  }
   auto selected =
-      select_operation_output(resolved_result.value(), invocation.output_index);
+      select_operation_output(prepared->traits(), invocation.output_index);
   if (!selected.ok())
     return Result<Value>(selected.status());
   auto resolved_shape = selected.take_value();
@@ -2423,6 +2456,7 @@ Result<Value> OperationRegistry::invoke_current(
     normalized.resources = admitted_resources.take_value();
     normalized.gpu = invocation.gpu;
     normalized.output_index = invocation.output_index;
+    normalized.prepared = std::move(prepared);
     normalized.input_indices = projected_positions;
     normalized.input_metadata = std::move(complete_metadata);
     if (normalized.output_region.rank() == 0)

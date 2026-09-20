@@ -425,3 +425,19 @@ includes vector capacity growth and construction overlap; resource exhaustion
 never widens Q or requests an unhit source port. Generic dynamic regional
 operations retain bounded explicit rows: gather records observed index positions,
 and scatter records its global index scan plus each output's actual contributors.
+
+## Prepared Whole callbacks
+
+CPU Whole callbacks may use immutable static preparation. The executor passes
+`OperationInvocation::prepared` from the plan. The registry validates its
+definition, complete metadata and exact parameter bits before any callback
+validation, then lends the owning handle to the normalized invocation. Direct
+calls without a handle prepare once. No runtime bytes enter prepared state.
+
+`OperationOutputSpecialization::input_indices` may narrow a CPU Whole output's
+registered runtime projection from static metadata/parameters. Absent retains
+the registered projection; an empty vector reads no payload. Duplicate/out-of-
+range ports and broadening a registered projection reject. Complete metadata
+remains mandatory. Resolved projections use the existing trait/digest fields.
+CPU Whole Atomic outputs may retain generic trailing-axis tuple identity; GPU,
+image tuple and other invalid combinations remain rejected.
