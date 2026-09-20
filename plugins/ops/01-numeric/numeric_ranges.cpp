@@ -1,17 +1,16 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "00-foundation/multi_output.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_ratio.hpp"
 #include "data/input_validation.hpp"
-#include "photospider/data/semantic.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -19,72 +18,37 @@ namespace {
 using numeric_ops::BinaryParts;
 using numeric_ops::SequenceProfile;
 enum class RangeKind { Clamp, Remap };
-struct RangeState final {
+struct RangeMath final {
   RangeKind kind;
   SequenceProfile profile;
-  bool ready = false;
   numeric_ops::RatioWorkspace ratio;
   std::array<std::uint64_t, 5> bits{};
   std::array<BinaryParts, 5> parts{};
   std::array<std::uint64_t, 4> left{}, right{};
   std::array<std::int64_t, 4> greater{}, less{};
-  RangeState(RangeKind operation, SequenceProfile selected)
+  RangeMath(RangeKind operation, SequenceProfile selected)
       : kind(operation), profile(selected), ratio(selected) {}
-  Status report(const DependencyPhase& phase) const {
-    NumericDiagnostics diagnostics;
-    diagnostics.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto* isa = profile == SequenceProfile::Strict         ? "scalar-u64"
-                      : profile == SequenceProfile::AppleSilicon ? "NEON-u64x2"
-                                                                 : "AVX2-u64x4";
-    const auto length = std::snprintf(
-        diagnostics.implementation.data(), diagnostics.implementation.size(),
-        "photospider.range/2;%s;%s%s",
-        kind == RangeKind::Clamp ? "bounds-bitselect" : "exact-rational-round",
-        isa, numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= diagnostics.implementation.size())
-      return Status{ErrorCode::OperationFailed,
-                    "numeric implementation identity too long"};
-    diagnostics.evaluated_values = 1;
-    return phase.report_numeric(diagnostics);
+  Result<std::uint64_t> invalid(std::size_t port) const {
+    return Result<std::uint64_t>(
+        Status{ErrorCode::InvalidArgument,
+               "InvalidBounds: port=" + std::to_string(port) +
+                   " bits=" + std::to_string(bits[port]),
+               FailureReason::InvalidDomain,
+               {FailureOrigin::Domain, FailureScope::Run}});
   }
-  Result<std::uint64_t> invalid(
-      const DependencyPhase& phase, std::size_t port,
-      const std::vector<std::uint64_t>& coordinate) const {
-    Status status{ErrorCode::InvalidArgument,
-                  "InvalidBounds: port=" + std::to_string(port) +
-                      " bits=" + std::to_string(bits[port]),
-                  FailureReason::InvalidDomain,
-                  {FailureOrigin::Domain, FailureScope::Atom}};
-    (void)phase;
-    AtomKey atom;
-    atom.rank = static_cast<std::uint8_t>(coordinate.size());
-    std::copy(coordinate.begin(), coordinate.end(), atom.coordinate.begin());
-    status.detail.atom = atom;
-    return Result<std::uint64_t>(status);
-  }
-  Result<std::uint64_t> evaluate(const DependencyPhase& phase,
-                                 const std::vector<std::uint64_t>& coordinate) {
+  Result<std::uint64_t> evaluate(
+      ElementType type, const std::function<Status(std::uint64_t)>& consume) {
     using Answer = Result<std::uint64_t>;
     const auto count = kind == RangeKind::Clamp ? 3U : 5U;
-    auto status = phase.consume_work(128);
+    auto status = consume(128);
     if (!status.ok())
       return Answer(status);
-    const auto type = phase.query.output.descriptor.element_type;
     const bool narrow = type == ElementType::Float32;
     const bool floating = narrow || type == ElementType::Float64;
-    const auto width = Value::element_size(type);
-    for (std::uint32_t port = 0; port < count; ++port) {
-      status = phase.read(port, coordinate, &bits[port], width);
-      if (!status.ok())
-        return Answer(status);
-      if (floating)
+    if (floating) {
+      for (unsigned port = 0; port < count; ++port)
         parts[port] = BinaryParts::decode(bits[port], narrow);
     }
-    status = report(phase);
-    if (!status.ok())
-      return Answer(status);
     const auto key = [&](std::uint32_t port) {
       return floating                     ? parts[port].order_key()
              : type == ElementType::Int64 ? bits[port] ^ (UINT64_C(1) << 63)
@@ -97,11 +61,11 @@ struct RangeState final {
     std::uint64_t output = 0;
     if (kind == RangeKind::Clamp) {
       if (floating && parts[1].nan)
-        return invalid(phase, 1, coordinate);
+        return invalid(1);
       if (floating && parts[2].nan)
-        return invalid(phase, 2, coordinate);
+        return invalid(2);
       if (greater[2])
-        return invalid(phase, 1, coordinate);
+        return invalid(1);
       output = floating && parts[0].nan
                    ? bits[0] | (UINT64_C(1) << (narrow ? 22 : 51))
                : less[0]    ? bits[1]
@@ -110,9 +74,9 @@ struct RangeState final {
     } else {
       for (unsigned port = 1; port < count; ++port)
         if (parts[port].nan || parts[port].infinite)
-          return invalid(phase, port, coordinate);
+          return invalid(port);
       if (!less[2])
-        return invalid(phase, 1, coordinate);
+        return invalid(1);
       if (parts[0].nan) {
         output = bits[0] | (UINT64_C(1) << (narrow ? 22 : 51));
       } else if (key(3) == key(4)) {
@@ -126,7 +90,7 @@ struct RangeState final {
         output = (static_cast<std::uint64_t>(negative) << (narrow ? 31 : 63)) |
                  (narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000));
       } else {
-        status = phase.consume_work(2048);
+        status = consume(2048);
         if (!status.ok())
           return Answer(status);
         // Form a strictly positive denominator in units 2^-1074.
@@ -142,7 +106,7 @@ struct RangeState final {
         ratio.product_term(parts[0], parts[4]);
         ratio.product_term(parts[0], parts[3], true);
         ratio.product_term(parts[1], parts[4], true);
-        auto rounded = ratio.round(narrow, phase.consume_work, -1074, true);
+        auto rounded = ratio.round(narrow, consume, -1074, true);
         if (!rounded.ok())
           return Answer(rounded.status());
         output = rounded.take_value();
@@ -150,57 +114,109 @@ struct RangeState final {
     }
     return Answer(output);
   }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    if (!ready) {
-      ready = true;
-      return Answer(DependencyNeedBatch{{}, {}, true});
-    }
-    numeric_ops::ArrayPublication publication(
-        phase.query.outputs.boxes().size(),
-        phase.query.output.descriptor.shape.size());
-    ResourceVector<Value> outputs;
-    outputs.reserve(phase.query.outputs.boxes().size());
-    const auto width =
-        Value::element_size(phase.query.output.descriptor.element_type);
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(phase.query.output.descriptor,
-                                              box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto writer = allocated.take_value();
-      auto selected = Footprint::from_regions(
-          phase.query.output.descriptor.shape, {box}, phase.sets);
-      if (!selected.ok())
-        return Answer(selected.status());
-      std::uint64_t offset = 0;
-      auto status = selected.value().visit(
-          [&](const auto& coordinate) {
-            auto value = evaluate(phase, coordinate);
-            if (!value.ok())
-              return value.status();
-            const auto bits = value.value();
-            std::memcpy(writer.data() + offset, &bits, width);
-            offset += width;
-            return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!status.ok())
-        return Answer(status);
-      auto value = std::move(writer).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      outputs.push_back(retained.take_value());
-    }
-    auto result =
-        publication.finish(phase.query.output.descriptor, phase.query.outputs,
-                           outputs.data(), outputs.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
-  }
 };
+Result<Value> execute_range(const OperationInvocation& call, RangeKind kind,
+                            SequenceProfile profile) {
+  using Answer = Result<Value>;
+  const auto* budget = resource_internal::metadata_budget();
+  const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t work) {
+    if (call.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({work}) : Status::success();
+  };
+  auto status = consume(1);
+  if (!status.ok())
+    return Answer(status);
+  const auto& descriptor = call.inputs[0].descriptor();
+  const auto& shape = descriptor.shape;
+  const auto width = Value::element_size(descriptor.element_type);
+  auto allocated =
+      MutableValue::allocate(descriptor, call.output_region, call.allocator);
+  if (!allocated.ok())
+    return Answer(allocated.status());
+  auto output = allocated.take_value();
+  auto storage = call.allocator.allocate(sizeof(RangeMath));
+  if (!storage.ok())
+    return Answer(storage.status());
+  auto scratch = storage.take_value();
+  static_assert(alignof(RangeMath) <= alignof(std::max_align_t));
+  std::unique_ptr<RangeMath, void (*)(RangeMath*)> math(
+      new (scratch.data()) RangeMath(kind, profile),
+      [](RangeMath* value) { value->~RangeMath(); });
+  std::vector<std::uint64_t> coordinate(shape.size(), 0);
+  std::array<const std::uint8_t*, 5> packed{};
+  for (std::size_t port = 0; port < call.inputs.size(); ++port) {
+    const auto& input = call.inputs[port];
+    std::uint64_t stride = width;
+    bool dense = true;
+    for (std::size_t axis = shape.size(); axis; --axis) {
+      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
+                                     static_cast<std::int64_t>(stride))
+        dense = false;
+      stride *= shape[axis - 1];
+    }
+    if (dense) {
+      auto address = input.byte_address(coordinate);
+      if (!address.ok())
+        return Answer(address.status());
+      packed[port] = input.bytes().data() + address.value();
+    }
+  }
+  const auto count = call.output_region.element_count().value();
+  for (std::uint64_t i = 0; i < count; ++i) {
+    status = consume(call.inputs.size() * shape.size() + 1);
+    if (!status.ok())
+      return Answer(status);
+    for (std::size_t port = 0; port < call.inputs.size(); ++port) {
+      const auto& input = call.inputs[port];
+      const auto* data = packed[port];
+      if (data) {
+        data += i * width;
+      } else {
+        auto address = input.byte_address(coordinate);
+        if (!address.ok())
+          return Answer(address.status());
+        data = input.bytes().data() + address.value();
+      }
+      math->bits[port] = 0;
+      if (width == 8)
+        std::memcpy(&math->bits[port], data, 8);
+      else if (width == 4)
+        std::memcpy(&math->bits[port], data, 4);
+      else
+        math->bits[port] = *data;
+    }
+    auto result = math->evaluate(descriptor.element_type, consume);
+    if (!result.ok()) {
+      auto failure = result.status();
+      if (failure.detail.origin == FailureOrigin::Domain) {
+        failure.message += " coordinate=[";
+        for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
+          if (axis)
+            failure.message += ',';
+          failure.message += std::to_string(coordinate[axis]);
+        }
+        failure.message += ']';
+      }
+      return Answer(failure);
+    }
+    const auto bits = result.value();
+    auto* destination = output.data() + i * width;
+    if (width == 8)
+      std::memcpy(destination, &bits, 8);
+    else if (width == 4)
+      std::memcpy(destination, &bits, 4);
+    else
+      *destination = static_cast<std::uint8_t>(bits);
+    for (std::size_t axis = shape.size(); axis; --axis) {
+      if (++coordinate[axis - 1] < shape[axis - 1])
+        break;
+      coordinate[axis - 1] = 0;
+    }
+  }
+  status = consume(1);
+  return status.ok() ? std::move(output).publish() : Answer(status);
+}
 OperationDefinition range_operation(const std::string& key, RangeKind kind,
                                     SequenceProfile profile) {
   OperationDefinition operation;
@@ -216,63 +232,41 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
   output.key = "values";
   output.shape_rule = OperationShapeRule::MatchAllInputs;
   output.output_dtype_rule = OperationDtypeRule::Input;
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(RangeState);
-  output.maximum_dependency_stages = 2;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
-  operation.validate_dependency = [profile](const auto& inputs, const auto&) {
-    for (const auto& input : inputs)
-      if (input.descriptor.element_type != inputs[0].descriptor.element_type)
-        return Status{ErrorCode::TypeMismatch,
-                      "range operand dtypes must match",
-                      FailureReason::None,
-                      {FailureOrigin::Schema, FailureScope::Unspecified}};
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(RangeMath);
+  operation.specialize_metadata = [profile](const auto& inputs, const auto&)
+      -> Result<std::vector<OperationOutputSpecialization>> {
+    using Answer = Result<std::vector<OperationOutputSpecialization>>;
+    const auto mismatch = [](const char* message) {
+      return Answer(Status{ErrorCode::TypeMismatch,
+                           message,
+                           FailureReason::None,
+                           {FailureOrigin::Schema, FailureScope::Unspecified}});
+    };
+    const auto& first = inputs[0].descriptor;
+    if (first.shape.empty() || first.shape.size() > 8)
+      return mismatch("range requires rank 1..8");
     std::uint64_t count = 1;
-    for (auto extent : inputs[0].descriptor.shape) {
+    for (auto extent : first.shape) {
       if (!extent || extent > (UINT64_C(1) << 40) / count)
-        return Status{ErrorCode::TypeMismatch,
-                      "range input exceeds 2^40 elements",
-                      FailureReason::None,
-                      {FailureOrigin::Schema, FailureScope::Unspecified}};
+        return mismatch("range input exceeds 2^40 elements");
       count *= extent;
     }
-    return numeric_ops::sequence_profile_available(profile);
-  };
-  operation.specialize_metadata =
-      [](const auto& inputs,
-         const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
     for (const auto& input : inputs)
-      if (input.descriptor.shape != inputs[0].descriptor.shape ||
-          input.descriptor.element_type != inputs[0].descriptor.element_type)
-        return Result<std::vector<OperationOutputSpecialization>>(
-            Status{ErrorCode::TypeMismatch,
-                   "range operands require identical shape and dtype"});
+      if (input.descriptor.shape != first.shape ||
+          input.descriptor.element_type != first.element_type)
+        return mismatch("range operands require identical shape and dtype");
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.descriptor = inputs[0].descriptor;
-    std::vector<DependencyMappedNeed> maps;
-    for (std::uint32_t port = 0; port < inputs.size(); ++port) {
-      DependencyMappedNeed data;
-      data.port = port;
-      data.roles = 1;
-      for (std::size_t axis = 0; axis < inputs[0].descriptor.shape.size();
-           ++axis)
-        data.axes.push_back({static_cast<std::int32_t>(axis), {}});
-      auto validation = input_internal::validation_map(data, inputs[port]);
-      maps.push_back(std::move(data));
-      maps.push_back(std::move(validation));
-    }
-    auto all = Footprint::all(inputs[0].descriptor.shape);
-    if (!all.ok())
-      return Result<std::vector<OperationOutputSpecialization>>(all.status());
-    result.static_dependency_pieces =
-        std::vector<DependencyMapPiece>{{all.take_value(), std::move(maps)}};
-    return Result<std::vector<OperationOutputSpecialization>>(
+    result.metadata.descriptor = first;
+    return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_dependency = [kind, profile](const auto&,
-                                               const auto& allocator) {
-    return DependencyContinuation::make<RangeState>(allocator, kind, profile);
+  operation.callback = [kind, profile](const OperationInvocation& call) {
+    return execute_range(call, kind, profile);
   };
   return operation;
 }

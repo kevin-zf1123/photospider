@@ -478,16 +478,22 @@ python3 examples/numeric_workflow/range_oracle.py \
 Use `_accelerated_apple_silicon` on Apple Silicon or `_accelerated_x86_64` on
 x86-64. The composition expects
 `remap=[0,127.5,255,510]` followed by
-`clamp=[0,127.5,255,255]`. The workflow also checks per-atom `InvalidBounds`,
-exact sparse support and dirty mapping, required reads of all five remap
-operands, upstream endpoint failure, WorkLimit and mid-refinement cancellation
-cleanup. `range_oracle.py` uses raw IEEE decoding and exact rational arithmetic;
-local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86 each passed
-2826 cases on 2026-09-14. The installed consumer also passed. Other checks cover
-typed validation, dynamic-bound cache changes, caller floating flags,
-negative/zero/unaligned strides and packed global ROI origins.
-These are manual targets without CTest or
-integration-test registration, and no performance result is claimed.
+`clamp=[0,127.5,255,255]`. Both formal profile families use synchronous Whole
+execution: all inputs are collected and validated for any nonempty request,
+including bounds outside the consumer projection. Any input edit invalidates
+all observed outputs. InvalidBounds preserves port, bits and global coordinate,
+with Run scope and no Atom key. Empty skips payload and callback.
+
+The workflow checks Whole errors/support/dirty, required five-port reads even
+at endpoints, typed validation, warm-cache bound changes, caller fenv,
+negative/zero/unaligned strides, shifted origins, singleton axes, 65-element
+Float32 tails and global consumer projection. Complete output plus input
+collections and scratch consume memory even for sparse requests. Work/payload/
+scratch failure and cancellation after arithmetic starts release unpublished
+storage. Per-value numeric diagnostics are N/A. The independent Fraction oracle
+passes 2,826 strict and Apple cases on the current Whole path.
+See [NUM-06 measurements](../../docs/built-in_ops/01-numeric/range-whole.md).
+These are manual targets without CTest or integration registration.
 
 ## Interpolation: NUM-08
 
