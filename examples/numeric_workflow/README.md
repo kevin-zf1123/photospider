@@ -275,12 +275,15 @@ with `dtype="int64"`. The authoring default is Float64, except two Int64 arange
 inputs default to Int64. Integer/floating kinds cannot be mixed implicitly.
 
 Named outputs are `values[count]` and `axis[3]`; axis uses Float64 for floating
-sequences and Int64 for integer sequences. Outputs have empty facets. Values
-have exact per-index dependencies. The complete axis tuple is one observation,
-including when the caller selects one component. Unselected endpoints are not
-read, and count=1 ignores the second input entirely. Arithmetic failures affect
-only the requested observation. Diagnostic records expose actual profile,
-implementation/compiler identity, evaluated values and fallback counters.
+sequences and Int64 for integer sequences. Both selected outputs execute Whole,
+collecting all active scalars and materializing the full output before consumer
+projection. count=1 excludes the second input; count>1 requires it even for an
+endpoint request. An overflow anywhere fails that values request with Run scope.
+Axis retains its independent tuple identity and does not evaluate values.
+Any active input edit invalidates the full selected output. Partial values retain
+count*sizeof(dtype) owned bytes, plus bounded scratch. Empty reads no payload.
+Whole numeric per-atom counters are unavailable.
+[Whole validation and timing](../../docs/built-in_ops/01-numeric/sequences-whole.md).
 
 From the repository root, using Clang:
 
@@ -300,7 +303,7 @@ Expected results include `linspace(0,1,5)` values `[0,.25,.5,.75,1]`, axis
 `[0,1,.25]`, and Int64 `arange(3,-2,4)` values `[3,1,-1,-3]`, axis `[3,-3,-2]`.
 The executable checks exact bytes, extreme cancellation, direct Float32
 rounding, signed zeros, unused failing producers, independent axis overflow,
-static errors, tuple certificates, cancellation, cache dependencies, bounded
+static errors, tuple projection, in-arithmetic cancellation, cache dependencies, bounded
 resource failures, strided input and result-owner lifetime. It also checks
 restoration of the caller's floating environment. `sequence_oracle.py` computes
 rational formulas and IEEE rounding independently and checks 960 workflow cases.

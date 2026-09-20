@@ -99,8 +99,8 @@ Reconstruct the conceptual grid from both endpoints and N using the formula
 above. Axis retains the original widened endpoints even for Float32 values.
 
 Only actually read inputs must be finite. Every published numeric component must
-be finite. A step whose Float64 rounding overflows fails axis only. A requested
-value whose chosen output rounding overflows fails that value only. There is no
+be finite. A step whose Float64 rounding overflows fails axis only. Any value whose chosen output rounding overflows fails the complete values
+request, including when that value is outside the projected Region. There is no
 NaN/Inf preservation or clipping mode. Subnormals and gradual underflow to signed
 zero are allowed; restore the caller's floating-point environment.
 
@@ -109,51 +109,33 @@ For an interior exact zero, return -0 only when both endpoints are -0; otherwise
 return +0. A nonzero exact result rounding to zero retains its sign. Thus a
 constant -0 interval remains a sequence of -0 values, while axis.step is +0.
 
-## Demand, mapping and invalidation
+## Whole demand, failures and invalidation
 
-| Observation | Data and validation payloads | Not read |
-| --- | --- | --- |
-| N=1 values[0] or axis | Start only | End |
-| N>=2 values[0] | Start only | End and derived step |
-| N>=2 values[N-1] | End only | Start and derived step |
-| N>=2 interior values[i] | Start and end | Axis result and rounded step |
-| N>=2 axis | Start and end, plus derived-step validation | Any values output |
-| Empty | None | All runtime inputs |
+All formal profile keys use a synchronous Whole callback for the selected
+output. Nonempty values requests compute all N values; nonempty axis requests
+compute its complete three-component Atomic tuple. The executor projects the
+owned output to the requested global Region afterwards. Values and axis remain
+independent output identities. An axis-only request does not generate values.
 
-The input schema is validated statically, including unused edges, without
-reading their payloads or evaluating upstream producers. Finite validation
-follows the table; there is no global end/step check for an endpoint-only values
-request. Invalid unused inputs cannot fail an independent requested observation.
-For example, values[0] succeeds with finite start even if the end producer fails;
-for N=2, values can both succeed while the Float64 axis step overflows.
+For N=1, both outputs read start only. Static specialization excludes the other
+port from runtime demand, typed payload validation and invalidation. Its schema
+still validates at compile time. For N>=2, both scalars are collected and
+validated even for an endpoint-only request. A failed other producer or an
+unrepresentable unrequested value therefore fails the selected Whole request.
+An axis failure does not certify a separately requested values failure.
+Empty requests perform no payload reads or callback work.
 
-Values use per-index Dependency execution, with global indices preserved for
-nonzero and disjoint requests. Axis is a separately evaluated Whole 3-element
-tuple; a nonempty axis request can materialize all 24 bytes. Optional joint work
-can share actual common reads without expanding any member's validation domain.
-Ordinary execute remains fail-fast for requested errors; supported atom APIs can
-retain independent outcomes. Failure of a requested axis does not certify failure
-of a separately requested values observation.
+Each active input change invalidates all observations of its selected output;
+projection restricts returned dirty coverage to the consumer's requested Region.
+Input views may have legal offsets, unaligned storage and signed/zero strides.
+Outputs are generic packed immutable owners with empty facets. Values own N*b
+bytes and axis owns 24 bytes, including when the consumer requests one element.
+The public output descriptors, keys and tuple observation identity are unchanged.
+Owners survive invocation/context destruction and release at the final owner.
 
-Changing start invalidates values[0], interior values and axis; changing end
-invalidates the last value, interior values and axis. For N=1, end changes
-invalidate nothing. Each output descriptor depends only on static count/dtype;
-axis has fixed descriptor Float64 `[3]`. Returned values are generic packed
-owned fragments at their actual global Region/storage origin, with element-size
-stride and no implicit zero filling. Axis is packed at origin zero. Both have
-empty facets and no physical-unit or ObjectId-pairing promise.
-
-Inputs accept legal immutable `[1]` views with offset, signed/zero stride or
-unaligned storage. Use existing generic port/recognized-facet validation for
-actually supplied metadata/data; drop input facets on output. Published buffers
-retain allocator ownership beyond the invocation/context lifetime. Release
-unpublished work on failure/cancellation and published bytes at the final owner.
-
-Cache identity includes operation/profile version, count, dtype and exact
-witnessed input metadata/bits. Preserve transitive evidence rather than treating
-equal output numbers as proof of unchanged dependencies. Profile-separated keys
-remain separate even though these three implementations produce equal bits.
-Cache-off must not change semantics or active output ownership.
+Profile/count/dtype, complete static metadata and witnessed active inputs enter
+cache identity. Cache-off preserves arithmetic and ownership. Whole callbacks
+have no per-atom numeric diagnostics; report those counters as unavailable.
 
 ## Algorithms and resources
 
@@ -169,17 +151,14 @@ fast correctly rounded cases with strict fallback for unresolved rounding.
 Every result must match strict bits. No output recurrence, SIMD tail overread,
 approximate division or reassociation is permitted to change that result.
 Platform-specific names on unsupported platforms return BackendUnavailable;
-do not silently select another operator. Report actual platform/profile and
-fallback work through the same host-owned diagnostics requirement as NUM-01.
+do not silently select another operator. Profile keys remain explicit; per-atom fallback diagnostics are unavailable
+on the Whole path.
 
-For M requested values, payload is M*b bytes (b=4/8), plus 24 bytes for requested
-axis. At the count bound, full values use 4/8 MiB. Each active observation needs
-at most two widened scalar inputs plus an index and exact-rounding scratch.
-Binary64 endpoint exponents and N<=2^20 bound exact integer sizes; charge actual
-temporary capacities and primitive/limb work, including old/new growth overlap.
-No O(N) intermediate coordinate array is needed for an ROI. Under bounded operand
-sizes, work is O(M) plus optional constant axis work; concrete limb and allocation
-costs must be reported by the chosen implementation.
+For a nonempty values request, payload is N*b bytes (b=4/8), plus
+constant exact-arithmetic workspace. Axis separately uses 24 bytes and the same
+bounded workspace. At the count bound, values use 4/8 MiB. Work is O(N) for
+values and O(1) for axis, including partial consumer requests. Charge input,
+output and scratch capacity before allocation. No coordinate array is needed.
 
 Use existing allocator/admission/work/stage services and host workers. Poll
 cancellation before input work, between admitted sample batches, within long
@@ -196,8 +175,8 @@ shape/dtype returns TypeMismatch. Nonfinite actually read scalars fail the
 request with OperationFailed/InvalidDomain; output or step rounding overflow
 uses OperationFailed/ArithmeticOverflow. Preserve current upstream identity,
 cancellation/stale status and ResourceExhausted reasons. Numeric failures identify
-the requested output and global value index (or axis step), without widening a
-late failure to revoke prior independent observations.
+the selected output and global value index (or axis step). Numeric failures
+carry Domain origin and Run scope; no partial values are published.
 
 | Test | Independent expected result |
 | --- | --- |
@@ -207,12 +186,12 @@ late failure to revoke prior independent observations.
 | L04 | start=1, end=nextafter(1,+inf), N=3 allows the rounded duplicate `[1,1,end]` |
 | L05 | start=`0x1p0`, end=`0x1.0000020000001p0`, N=3: middle Float32 is `0x1.000002p0`; Float64-then-Float32 incorrectly gives 1 |
 | L06 | Opposite maximum Float64 endpoints, N=3: middle is zero and step finite; N=2 values remain valid while requested axis overflows |
-| L07 | Endpoint-only request ignores the opposite failed input; interior request observes both; axis is independent |
-| L08 | Float32 output overflow affects only requested unrepresentable values; zero-step underflow and repeated output values are accepted |
+| L07 | For N>=2 endpoint-only requests require both inputs; axis remains independent |
+| L08 | Float32 output overflow anywhere fails the selected values request; zero-step underflow and repeated output values are accepted |
 | L09 | Mixed input dtypes, dynamic endpoint changes in one plan, invalid static limits and legal strided views |
 | L10 | Nonzero/disjoint requests, joint on/off, caller rounding mode, batches and SIMD widths match strict bits |
 | L11 | Exact dirty witnesses, warm/cache-off behavior, cancellation, small-ROI versus full-array budgets and final-owner release |
-| L12 | Three supported CPU profiles match exact rational rounding; incompatible-platform failure and actual fallback diagnostics |
+| L12 | Three supported CPU profiles match exact rational rounding; incompatible-platform failure and Whole counters unavailable |
 
 The target public fixture is a WorkflowDocument with two scalar input bindings,
 one selected linspace key, explicit count/dtype, and named values/axis outputs.
@@ -249,3 +228,5 @@ implementation record.
 - [NUM-01 expression generator](NUM-01_sample_expression.md).
 - [Per-operation template](../../00-foundation/spec-template.md).
 - [Shared execution contracts](../../00-foundation/contracts.md).
+
+Whole migration validation and timing: [sequences Whole](../sequences-whole.md).

@@ -2,161 +2,27 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "00-foundation/multi_output.hpp"
 #include "01-numeric/exact_sequence.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "data/input_validation.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
-
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::ExactSequence;
 using numeric_ops::SequenceProfile;
-
 enum class Sequence { Linspace, Arange };
-
-struct SequenceState final {
-  Sequence kind;
+struct SequenceMath {
   SequenceProfile profile;
-  bool ready = false;
   ExactSequence first, second;
   std::array<std::uint64_t, 68> products{};
-
-  SequenceState(Sequence operation, SequenceProfile selected)
-      : kind(operation), profile(selected) {}
-
-  Status report(const DependencyPhase& phase, std::size_t size) const {
-    NumericDiagnostics report;
-    report.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const char* identity = numeric_ops::sequence_implementation();
-    const auto length = std::strlen(identity);
-    std::memcpy(report.implementation.data(), identity, length + 1);
-    report.evaluated_values =
-        size / Value::element_size(phase.query.output.descriptor.element_type);
-    if (!phase.report_numeric)
-      return Status{ErrorCode::BackendUnavailable,
-                    "numeric diagnostics service unavailable"};
-    return phase.report_numeric(report);
-  }
-
-  Result<DependencyPoll> fail(const DependencyPhase& phase,
-                              FailureReason reason, const char* message) const {
-    auto key = dependency_atom_key(phase.query);
-    Status status{ErrorCode::OperationFailed,
-                  message,
-                  reason,
-                  {FailureOrigin::Domain, FailureScope::Atom}};
-    if (key.ok())
-      status.detail.atom = key.take_value();
-    return Result<DependencyPoll>(std::move(status));
-  }
-
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    const auto count = static_cast<std::uint32_t>(
-        std::get<std::int64_t>(phase.query.parameters.at("count")));
-    const auto coordinate = multi_output::coordinate(phase)[0];
-    const bool axis = phase.query.output_index == 1;
-    const auto index = axis ? count - 1 : coordinate;
-    const bool start_needed =
-        axis || kind == Sequence::Arange || index == 0 || index + 1 < count;
-    const bool other_needed = count > 1 && (axis || index > 0);
-    if (!ready) {
-      std::vector<DependencyNeed> needs;
-      for (std::uint32_t port = 0; port < 2; ++port) {
-        if (!(port == 0 ? start_needed : other_needed))
-          continue;
-        auto samples =
-            Footprint::from_regions({1}, {Region::whole({1})}, phase.sets);
-        if (!samples.ok())
-          return Result<DependencyPoll>(samples.status());
-        needs.push_back({port, 5, samples.take_value(), {}});
-      }
-      ready = true;
-      return multi_output::need(phase, std::move(needs));
-    }
-    auto charged = phase.consume_work(axis ? 24576 : 8192);
-    if (!charged.ok())
-      return Result<DependencyPoll>(charged);
-    if (phase.query.cancellation.cancelled())
-      return Result<DependencyPoll>(Status{ErrorCode::Cancelled, {}});
-    const auto dtype = phase.query.output.descriptor.element_type;
-    if (dtype == ElementType::Int64)
-      return integer(phase, index, axis, other_needed);
-    input_internal::Float32Environment environment;
-    if (!environment.active())
-      return Result<DependencyPoll>(Status{ErrorCode::BackendUnavailable,
-                                           "numeric environment unavailable"});
-    double start = 0, other = 0;
-    for (std::uint32_t port = 0; port < 2; ++port) {
-      if (!(port == 0 ? start_needed : other_needed))
-        continue;
-      double value = 0;
-      Status read;
-      if (phase.query.inputs[port].descriptor.element_type ==
-          ElementType::Float32) {
-        float narrow = 0;
-        read = phase.read(port, {0}, &narrow, 4);
-        value = narrow;
-      } else {
-        read = phase.read(port, {0}, &value, 8);
-      }
-      if (!read.ok())
-        return Result<DependencyPoll>(read);
-      if (!std::isfinite(value))
-        return fail(phase, FailureReason::InvalidDomain,
-                    port ? "nonfinite end/step" : "nonfinite start");
-      (port == 0 ? start : other) = value;
-    }
-    std::uint64_t bits = 0;
-    const bool binary32 = dtype == ElementType::Float32;
-    auto reported = report(phase, axis ? 24 : binary32 ? 4 : 8);
-    if (!reported.ok())
-      return Result<DependencyPoll>(reported);
-    if (axis) {
-      std::array<std::uint64_t, 3> tuple{};
-      tuple[0] = rounded(start, 0, 1, 0, 1, false);
-      if (count == 1) {
-        tuple[1] = tuple[0];
-      } else if (kind == Sequence::Linspace) {
-        const auto step = rounded(other, start, 1, 1, count - 1, false, true);
-        if (overflow(step, false))
-          return fail(phase, FailureReason::ArithmeticOverflow,
-                      "axis step overflow");
-        tuple[1] = rounded(other, 0, 1, 0, 1, false);
-        tuple[2] = step;
-      } else {
-        const auto last = rounded(start, other, 1, count - 1, 1, false);
-        if (overflow(last, false))
-          return fail(phase, FailureReason::ArithmeticOverflow,
-                      "axis last overflow");
-        tuple[1] = last;
-        tuple[2] = rounded(other, 0, 1, 0, 1, false);
-      }
-      return multi_output::finish(phase, tuple.data(), sizeof(tuple));
-    } else if (kind == Sequence::Linspace && count > 1 && index > 0 &&
-               index + 1 < count) {
-      bits =
-          rounded(start, other, count - 1 - index, index, count - 1, binary32);
-    } else if (kind == Sequence::Arange && index > 0) {
-      bits = rounded(start, other, 1, index, 1, binary32);
-    } else {
-      bits = rounded(start_needed ? start : other, 0, 1, 0, 1, binary32);
-    }
-    if (overflow(bits, binary32))
-      return fail(phase, FailureReason::ArithmeticOverflow,
-                  "sequence value overflow");
-    if (binary32) {
-      const auto narrow = static_cast<std::uint32_t>(bits);
-      return multi_output::finish(phase, &narrow, 4);
-    }
-    return multi_output::finish(phase, &bits, 8);
-  }
-
+  explicit SequenceMath(SequenceProfile selected) : profile(selected) {}
   std::uint64_t rounded(double a, double b, std::uint32_t wa, std::uint32_t wb,
                         std::uint32_t divisor, bool binary32,
                         bool subtract = false) {
@@ -177,46 +43,147 @@ struct SequenceState final {
                     : (bits & UINT64_C(0x7ff0000000000000)) ==
                           UINT64_C(0x7ff0000000000000);
   }
-
-  Result<DependencyPoll> integer(const DependencyPhase& phase,
-                                 std::uint64_t index, bool axis,
-                                 bool other_needed) {
-    std::int64_t start = 0, step = 0;
-    auto read = phase.read(0, {0}, &start, 8);
-    if (!read.ok())
-      return Result<DependencyPoll>(read);
-    if (other_needed) {
-      read = phase.read(1, {0}, &step, 8);
-      if (!read.ok())
-        return Result<DependencyPoll>(read);
-    }
-    auto reported = report(phase, axis ? 24 : 8);
-    if (!reported.ok())
-      return Result<DependencyPoll>(reported);
-    first.set_integer(start);
-    second.set_integer(step);
-    numeric_ops::sequence_multiply(&second, static_cast<std::uint32_t>(index),
-                                   profile, products.data());
-    first.add(second);
-    const auto magnitude = static_cast<std::uint64_t>(first.words[0]) |
-                           (static_cast<std::uint64_t>(first.words[1]) << 32);
-    bool fits = magnitude <= (first.negative ? UINT64_C(1) << 63 : INT64_MAX);
-    for (unsigned i = 2; i < first.words.size(); ++i)
-      fits = fits && first.words[i] == 0;
-    if (!fits)
-      return fail(phase, FailureReason::ArithmeticOverflow,
-                  axis ? "axis last overflow" : "integer sequence overflow");
-    const auto bits = first.negative ? UINT64_C(0) - magnitude : magnitude;
-    std::int64_t output = 0;
-    std::memcpy(&output, &bits, 8);
-    if (axis) {
-      const std::array<std::int64_t, 3> tuple{start, output, step};
-      return multi_output::finish(phase, tuple.data(), sizeof(tuple));
-    }
-    return multi_output::finish(phase, &output, 8);
-  }
 };
-
+Result<Value> execute_sequence(const OperationInvocation& call, Sequence kind,
+                               SequenceProfile profile) {
+  using Answer = Result<Value>;
+  const auto* budget = resource_internal::metadata_budget();
+  const auto consume = [&](std::uint64_t work) {
+    if (call.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({work}) : Status::success();
+  };
+  const auto failure = [](FailureReason reason, const std::string& message) {
+    return Answer(Status{ErrorCode::OperationFailed,
+                         message,
+                         reason,
+                         {FailureOrigin::Domain, FailureScope::Run}});
+  };
+  auto status = consume(1);
+  if (!status.ok())
+    return Answer(status);
+  const auto count = static_cast<std::uint32_t>(
+      std::get<std::int64_t>(call.parameters.at("count")));
+  const auto& dtype = std::get<std::string>(call.parameters.at("dtype"));
+  const bool integer = dtype == "int64", axis = call.output_index == 1;
+  const auto type = integer                      ? ElementType::Int64
+                    : axis || dtype == "float64" ? ElementType::Float64
+                                                 : ElementType::Float32;
+  ValueDescriptor descriptor{type, {axis ? 3U : count}};
+  auto allocated =
+      MutableValue::allocate(descriptor, call.output_region, call.allocator);
+  if (!allocated.ok())
+    return Answer(allocated.status());
+  auto output = allocated.take_value();
+  auto storage = call.allocator.allocate(sizeof(SequenceMath));
+  if (!storage.ok())
+    return Answer(storage.status());
+  auto scratch = storage.take_value();
+  std::unique_ptr<SequenceMath, void (*)(SequenceMath*)> math(
+      new (scratch.data()) SequenceMath(profile),
+      [](SequenceMath* p) { p->~SequenceMath(); });
+  input_internal::Float32Environment environment;
+  if (!integer && !environment.active())
+    return Answer(Status{ErrorCode::BackendUnavailable,
+                         "numeric environment unavailable"});
+  std::array<std::uint64_t, 2> words{};
+  double start = 0, other = 0;
+  for (unsigned port = 0; port < (count == 1 ? 1U : 2U); ++port) {
+    const auto& value = call.inputs[port];
+    auto address = value.byte_address({0});
+    if (!address.ok())
+      return Answer(address.status());
+    const auto width = Value::element_size(value.descriptor().element_type);
+    std::memcpy(&words[port], value.bytes().data() + address.value(), width);
+    if (!integer) {
+      double number = 0;
+      if (width == 4) {
+        float small = 0;
+        std::memcpy(&small, &words[port], 4);
+        number = small;
+      } else
+        std::memcpy(&number, &words[port], 8);
+      if (!std::isfinite(number))
+        return failure(FailureReason::InvalidDomain,
+                       port ? "nonfinite end/step" : "nonfinite start");
+      (port ? other : start) = number;
+    }
+  }
+  const auto width = Value::element_size(type);
+  for (std::uint32_t i = 0; i < (axis ? 1U : count); ++i) {
+    status = consume(axis ? 24576 : 8192);
+    if (!status.ok())
+      return Answer(status);
+    const auto index = axis ? count - 1 : i;
+    std::array<std::uint64_t, 3> result{};
+    if (integer) {
+      std::int64_t base = 0, step = 0;
+      std::memcpy(&base, &words[0], 8);
+      std::memcpy(&step, &words[1], 8);
+      math->first.set_integer(base);
+      math->second.set_integer(step);
+      numeric_ops::sequence_multiply(&math->second, index, profile,
+                                     math->products.data());
+      math->first.add(math->second);
+      const auto magnitude =
+          static_cast<std::uint64_t>(math->first.words[0]) |
+          (static_cast<std::uint64_t>(math->first.words[1]) << 32);
+      bool fits =
+          magnitude <= (math->first.negative ? UINT64_C(1) << 63 : INT64_MAX);
+      for (unsigned j = 2; j < math->first.words.size(); ++j)
+        fits &= math->first.words[j] == 0;
+      if (!fits)
+        return failure(
+            FailureReason::ArithmeticOverflow,
+            "integer sequence overflow index=" + std::to_string(index));
+      result[0] = math->first.negative ? UINT64_C(0) - magnitude : magnitude;
+      if (axis)
+        result = {words[0], result[0], words[1]};
+    } else if (axis) {
+      result[0] = math->rounded(start, 0, 1, 0, 1, false);
+      result[1] = result[0];
+      if (count > 1 && kind == Sequence::Linspace) {
+        result[1] = math->rounded(other, 0, 1, 0, 1, false);
+        result[2] = math->rounded(other, start, 1, 1, count - 1, false, true);
+        if (SequenceMath::overflow(result[2], false))
+          return failure(FailureReason::ArithmeticOverflow,
+                         "axis step overflow");
+      } else if (count > 1) {
+        result[1] = math->rounded(start, other, 1, count - 1, 1, false);
+        result[2] = math->rounded(other, 0, 1, 0, 1, false);
+        if (SequenceMath::overflow(result[1], false))
+          return failure(FailureReason::ArithmeticOverflow,
+                         "axis last overflow");
+      }
+    } else {
+      const bool narrow = type == ElementType::Float32;
+      if (kind == Sequence::Linspace && count > 1 && index > 0 &&
+          index + 1 < count)
+        result[0] = math->rounded(start, other, count - 1 - index, index,
+                                  count - 1, narrow);
+      else if (kind == Sequence::Arange && index > 0)
+        result[0] = math->rounded(start, other, 1, index, 1, narrow);
+      else
+        result[0] = math->rounded(
+            kind == Sequence::Linspace && count > 1 && index + 1 == count
+                ? other
+                : start,
+            0, 1, 0, 1, narrow);
+      if (SequenceMath::overflow(result[0], narrow))
+        return failure(
+            FailureReason::ArithmeticOverflow,
+            "sequence value overflow index=" + std::to_string(index));
+    }
+    if (axis)
+      std::memcpy(output.data(), result.data(), 24);
+    else if (width == 8)
+      std::memcpy(output.data() + i * 8, result.data(), 8);
+    else
+      std::memcpy(output.data() + i * 4, result.data(), 4);
+  }
+  status = consume(1);
+  return status.ok() ? std::move(output).publish() : Answer(status);
+}
 OperationDefinition sequence(const std::string& key, Sequence kind,
                              SequenceProfile profile) {
   OperationDefinition operation;
@@ -237,10 +204,10 @@ OperationDefinition sequence(const std::string& key, Sequence kind,
   values.output_axes = {{OperationExtentSource::Parameter, 1, "count"}};
   values.output_dtype_rule = OperationDtypeRule::Parameter;
   values.output_dtype_parameter = "dtype";
-  values.region_rule = OperationRegionRule::Dependency;
-  values.dependency_version = 1;
-  values.continuation_bytes = sizeof(SequenceState);
-  values.maximum_dependency_stages = 2;
+  values.region_rule = OperationRegionRule::Whole;
+  values.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(SequenceMath);
+  traits.requires_metadata_specialization = true;
   traits.outputs.push_back(values);
   auto& axis = traits.outputs[1];
   axis.key = "axis";
@@ -252,32 +219,51 @@ OperationDefinition sequence(const std::string& key, Sequence kind,
                                ? OperationDtypeRule::WidenNumericInput
                                : OperationDtypeRule::Declared;
   axis.output_dtype_parameter.clear();
-  operation.validate_dependency = [kind, profile](const auto& inputs,
-                                                  const auto& parameters) {
+  operation.specialize_metadata = [kind, profile](const auto& inputs,
+                                                  const auto& parameters)
+      -> Result<std::vector<OperationOutputSpecialization>> {
+    using Answer = Result<std::vector<OperationOutputSpecialization>>;
     const auto& dtype = std::get<std::string>(parameters.at("dtype"));
     const bool integer = kind == Sequence::Arange && dtype == "int64";
     if (!integer && dtype != "float32" && dtype != "float64")
-      return Status{
-          dtype == "uint8" || dtype == "int64" ? ErrorCode::TypeMismatch
-                                               : ErrorCode::InvalidArgument,
-          "sequence dtype must be float32/float64, or int64 for arange",
-          FailureReason::None,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
+      return Answer(Status{dtype == "uint8" || dtype == "int64"
+                               ? ErrorCode::TypeMismatch
+                               : ErrorCode::InvalidArgument,
+                           "invalid sequence dtype",
+                           FailureReason::None,
+                           {FailureOrigin::Schema, FailureScope::Unspecified}});
     for (const auto& input : inputs)
       if (input.descriptor.shape != std::vector<std::uint64_t>{1} ||
           (integer ? input.descriptor.element_type != ElementType::Int64
-                   : (input.descriptor.element_type != ElementType::Float32 &&
-                      input.descriptor.element_type != ElementType::Float64)))
-        return Status{ErrorCode::TypeMismatch,
-                      "sequence requires matching numeric-kind scalars",
-                      FailureReason::None,
-                      {FailureOrigin::Schema, FailureScope::Unspecified}};
-    return numeric_ops::sequence_profile_available(profile);
+                   : input.descriptor.element_type != ElementType::Float32 &&
+                         input.descriptor.element_type != ElementType::Float64))
+        return Answer(
+            Status{ErrorCode::TypeMismatch,
+                   "sequence requires matching numeric-kind scalars",
+                   FailureReason::None,
+                   {FailureOrigin::Schema, FailureScope::Unspecified}});
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    const auto count = static_cast<std::uint64_t>(
+        std::get<std::int64_t>(parameters.at("count")));
+    std::vector<OperationOutputSpecialization> result(2);
+    result[0].metadata.descriptor = {integer ? ElementType::Int64
+                                     : dtype == "float32"
+                                         ? ElementType::Float32
+                                         : ElementType::Float64,
+                                     {count}};
+    result[1].metadata.descriptor = {
+        integer ? ElementType::Int64 : ElementType::Float64,
+        {3}};
+    result[1].metadata.atomic_trailing_axes = 1;
+    for (auto& output : result)
+      output.input_indices = count == 1 ? std::vector<std::uint32_t>{0}
+                                        : std::vector<std::uint32_t>{0, 1};
+    return Answer(std::move(result));
   };
-  operation.start_dependency = [kind, profile](const auto&,
-                                               const auto& allocator) {
-    return DependencyContinuation::make<SequenceState>(allocator, kind,
-                                                       profile);
+  operation.callback = [kind, profile](const OperationInvocation& call) {
+    return execute_sequence(call, kind, profile);
   };
   return operation;
 }

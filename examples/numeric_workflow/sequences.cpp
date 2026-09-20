@@ -2,6 +2,7 @@
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -165,8 +167,9 @@ void static_errors() {
           "missing count must be rejected");
   Fixture overflow("numeric.arange_strict", integer(INT64_MAX), integer(1), 2,
                    "int64");
-  exact<std::int64_t>(take(overflow.run("values", 0, true)).values.at("values"),
-                      {INT64_MAX});
+  require(overflow.run("values", 0, true).status().reason ==
+              ps::FailureReason::ArithmeticOverflow,
+          "unrequested integer overflow fails Whole");
   require(overflow.run("values", 1, true).status().reason ==
               ps::FailureReason::ArithmeticOverflow,
           "requested integer overflow must fail");
@@ -187,7 +190,7 @@ void static_errors() {
 }
 
 void controls_and_ownership() {
-  Fixture fixture("numeric.arange_strict", number(0), number(.5), 1048576,
+  Fixture fixture("numeric.arange_strict", number(0), number(.5), 256,
                   "float64");
   fixture.document.outputs = {{"values", 1, "values"}};
   ps::GraphContext graph(fixture.document);
@@ -213,31 +216,39 @@ void controls_and_ownership() {
     auto demand = take(execution.open_demand(compiled.plan, fixture.bindings));
     const ps::DemandQuery query{
         {"values",
-         take(ps::Footprint::from_regions({1048576}, {ps::Region({{0, 1}})}))}};
+         take(ps::Footprint::from_regions({256}, {ps::Region({{0, 1}})}))}};
     auto result = take(demand.request(query));
     retained = result.values.at("values").fragments().at(0);
-    exact<double>(retained, {0});
+    double first = 1;
+    std::memcpy(&first, retained.bytes().data(), 8);
+    require(first == 0, "first value");
     auto warm = take(demand.request(query));
     require(warm.diagnostics.cache_hits >= 1, "warm exact numeric cache");
     fixture.bindings.inputs[1].snapshot =
-        std::make_shared<const ps::InputSnapshot>(take(snapshots.import_value(
-            number(std::numeric_limits<double>::infinity()))));
+        std::make_shared<const ps::InputSnapshot>(
+            take(snapshots.import_value(number(1.0))));
     require(demand.replace_bindings(fixture.bindings).ok(),
             "replace unused sequence binding");
     auto unchanged = take(demand.request(query));
-    require(unchanged.diagnostics.cache_hits >= 1,
-            "unused input changes must preserve exact cache proof");
-    exact<double>(unchanged.values.at("values").fragments().at(0), {0});
+    require(
+        unchanged.diagnostics.cache_hits == 0,
+        "active step edit invalidates Whole even for index-zero projection");
+    double projected = 1;
+    require(unchanged.values.at("values").read({0}, &projected, 8).ok() &&
+                projected == 0,
+            "Whole projected value");
     ps::CancellationSource cancelled;
     cancelled.cancel();
     auto stopped =
         execution.execute(compiled.plan, fixture.bindings, cancelled.token());
     require(!stopped.ok() && stopped.status().code == ps::ErrorCode::Cancelled,
             "pre-cancelled sequence");
-    require(root->statistics().peak[ps::ResourceKind::Payload] <= 4096,
-            "one-index request must fit small capacity despite large count");
+    require(root->statistics().peak[ps::ResourceKind::Payload] >= 2048,
+            "one-index request accounts full output capacity");
   }
-  exact<double>(retained, {0});
+  double first = 1;
+  std::memcpy(&first, retained.bytes().data(), 8);
+  require(first == 0, "escaped Whole owner");
   require(root->statistics().live[ps::ResourceKind::Payload] >= 8,
           "result retains its admitted owner");
   retained = {};
@@ -284,10 +295,10 @@ void controls_and_ownership() {
       {"count", std::int64_t{3}},
       {"dtype", std::string("float64")}};
   ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
-                               {}, ps::Region({{1, 1}}));
+                               {}, ps::Region::whole({3}));
   exact<double>(take(fixture.registry->invoke(
                     std::string("numeric.linspace") + profile_suffix, call)),
-                {3});
+                {2, 3, 4});
   auto authored = take(ps::numeric::arange_node(
       2, {ps::WorkflowInputReference{1}, {ps::ElementType::Int64, {1}}},
       {ps::WorkflowInputReference{2}, {ps::ElementType::Int64, {1}}}, 4));
@@ -303,37 +314,89 @@ void controls_and_ownership() {
                "lifetime, fenv, strided inputs, authoring defaults: passed\n";
 }
 
+void whole_budgets() {
+  Fixture fixture("numeric.linspace_strict", number(0), number(1), 16384,
+                  "float64");
+  std::vector<ps::Value> inputs{number(0), number(1)};
+  std::vector<ps::Region> demands(2, ps::Region::whole({1}));
+  const auto& node = fixture.document.nodes[0];
+  auto traits = take(fixture.registry->resolve_traits(
+      node.operation,
+      {{inputs[0].descriptor(), {}}, {inputs[1].descriptor(), {}}},
+      node.parameters));
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    ps::ResourceLimits limits;
+    if (mode == 0)
+      limits.maximum_work = 10000;
+    if (mode == 1)
+      limits.capacity[ps::ResourceKind::Payload] = 65536;
+    if (mode == 2)
+      limits.capacity[ps::ResourceKind::Payload] =
+          16384 * 8 + traits.workspace_bytes - 1;
+    ps::ResourceBudget budget(limits);
+    {
+      ps::ResourceAllocationScope scope(budget);
+      ps::OperationInvocation call(
+          inputs, demands, node.parameters, ps::Backend::Cpu, {},
+          ps::Region::whole({16384}), budget.allocator());
+      auto result = fixture.registry->invoke(node.operation, call);
+      require(
+          !result.ok() &&
+              result.status().code == ps::ErrorCode::ResourceExhausted,
+          "Whole sequence rejects insufficient work/output/scratch capacity");
+    }
+    require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
+            "sequence failure releases unpublished output/scratch");
+  }
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  ps::CancellationSource cancellation;
+  std::atomic<bool> ready{false}, done{false};
+  std::thread watcher([&] {
+    ready.store(true);
+    while (!done.load() && budget.statistics().issued.work < 100000)
+      std::this_thread::yield();
+    if (!done.load())
+      cancellation.cancel();
+  });
+  while (!ready.load())
+    std::this_thread::yield();
+  ps::Status status;
+  try {
+    ps::ResourceAllocationScope scope(budget);
+    ps::OperationInvocation call(
+        inputs, demands, node.parameters, ps::Backend::Cpu,
+        cancellation.token(), ps::Region::whole({16384}), budget.allocator());
+    status = fixture.registry->invoke(node.operation, call).status();
+  } catch (...) {
+    done.store(true);
+    watcher.join();
+    throw;
+  }
+  done.store(true);
+  watcher.join();
+  require(status.code == ps::ErrorCode::Cancelled &&
+              budget.statistics().issued.work >= 100000 &&
+              budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "cancel admitted sequence arithmetic and release full storage");
+}
+
 void sequences() {
   Fixture line("numeric.linspace_strict", number(0), number(1), 5, "float64");
   auto result = take(line.run());
-  ps::NumericDiagnostics numeric;
-  for (const auto& timing : result.diagnostics.operation_timings)
-    require(ps::merge_numeric_diagnostics(&numeric, timing.numeric).ok(),
-            "numeric diagnostic merge");
-  const auto expected_profile =
-      std::string(profile_suffix) == "_strict" ? ps::CpuNumericProfile::Strict
-      : std::string(profile_suffix) == "_accelerated_apple_silicon"
-          ? ps::CpuNumericProfile::AppleSiliconNeon
-          : ps::CpuNumericProfile::X86Avx2;
-  require(numeric.profile == expected_profile &&
-              numeric.evaluated_values == 8 && numeric.strict_fallbacks == 0,
-          "actual numeric profile/counts must be reported by execution");
-  std::cout << "profile=" << profile_suffix
-            << " implementation=" << numeric.implementation.data()
-            << " values=" << numeric.evaluated_values
-            << " strict_fallbacks=" << numeric.strict_fallbacks << '\n';
+  std::cout << "profile=" << profile_suffix << " Whole numeric counters=N/A\n";
   exact<double>(result.values.at("values"), {0, .25, .5, .75, 1});
   exact<double>(result.values.at("axis"), {0, 1, .25});
-  auto certificate = take(result.dependencies.certificate({1, 1}));
-  require(certificate.rows().size() == 1 &&
-              certificate.coverage().shape() == std::vector<std::uint64_t>{1},
-          "axis must have one complete-tuple certificate");
+  auto traits = take(line.registry->resolve_traits(
+      line.document.nodes[0].operation,
+      {{number(0).descriptor(), {}}, {number(1).descriptor(), {}}},
+      line.document.nodes[0].parameters));
+  require(traits.outputs[1].atomic_trailing_axes == 1 &&
+              traits.outputs[1].region_rule == ps::OperationRegionRule::Whole,
+          "axis keeps tuple observation identity with Whole execution");
   Fixture partial_axis("numeric.linspace_strict", number(0), number(1), 5,
                        "float64");
   auto partial = take(partial_axis.run("axis", 1, true));
   exact<double>(partial.values.at("axis"), {1});
-  require(take(partial.dependencies.certificate({1, 1})).rows().size() == 1,
-          "partial axis must preserve tuple observation identity");
   auto changed = take(ps::Footprint::all({1}));
   auto dirty = take(partial.dependencies.potential_dirty("other", changed));
   require(dirty.at("axis") ==
@@ -345,8 +408,8 @@ void sequences() {
   ps::OperationInvocation direct(direct_inputs, direct_demands, parameters,
                                  ps::Backend::Cpu, {}, ps::Region({{1, 1}}));
   direct.output_index = 1;
-  exact<double>(take(line.registry->invoke("numeric.linspace_strict", direct)),
-                {1});
+  require(!line.registry->invoke(line.document.nodes[0].operation, direct).ok(),
+          "direct Whole axis rejects ROI");
   ps::OperationMetadata grouped{{ps::ElementType::Float64, {2, 3, 4}},
                                 {},
                                 {},
@@ -377,9 +440,8 @@ void sequences() {
     exact<double>(only.values.at("axis"), {-0.0, -0.0, 0.0});
     require(singleton.other_reads == 0, "singleton scheduled its unused input");
     Fixture endpoint(key, number(7), number(0), 5, "float64", true);
-    exact<double>(take(endpoint.run("values", 0, true)).values.at("values"),
-                  {7});
-    require(endpoint.other_reads == 0, "index zero scheduled unused input");
+    require(!endpoint.run("values", 0, true).ok() && endpoint.other_reads > 0,
+            "non-singleton Whole values require end/step even at index zero");
     Fixture zeros(key, number(-0.0), number(-0.0), 3, "float64");
     exact<double>(take(zeros.run("values")).values.at("values"),
                   {-0.0, -0.0, -0.0});
@@ -460,6 +522,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     sequences();
+    whole_budgets();
     static_errors();
     controls_and_ownership();
     return 0;
