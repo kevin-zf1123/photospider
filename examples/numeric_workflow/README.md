@@ -786,23 +786,150 @@ python3 examples/numeric_workflow/matrix_oracle.py \
 ```
 
 The editable workflow in `matrix.cpp` checks
-`[[1,2],[-1,0]] * [2,3] + [4,5] -> [12,3]`. A sparse output-component request
-reads each selected complete vector, the selected matrix row and its bias;
-shared row/bias transport is deduplicated. Typed Validation remains separate.
-The manual checks exercise result lifetime, cache on/off, exact support/dirty,
-negative strides on all three ports, fenv modes/flags, invalid metadata,
-cancellation and WorkLimit cleanup, and required upstream failure after NaN.
-The independent Fraction/raw-bit oracle includes 2..4 rectangular transforms,
-batches, product overflow/underflow cancellation, rounding midpoints, infinity,
-signed zero and vector-before-matrix-before-bias NaN priority.
+`[[1,2],[-1,0]] * [2,3] + [4,5] -> [12,3]`. Nonempty requests validate all three
+inputs and compute the complete dense output through one Whole callback.
+Partial consumers project that result; any input change invalidates the entire
+observed output. Empty requests skip the callback. Full output storage must fit
+the resource budget.
 
-Use `apple` or `x86` on the corresponding named CPU profile. This manual target
+Manual checks cover result lifetime, cache on/off, Whole support/dirty, direct
+negative/zero strides, unaligned offsets and nonzero logical origins, caller
+fenv modes/flags, metadata and typed validation, WorkLimit/payload exhaustion,
+mid-callback cancellation/release, and required upstream failure after NaN.
+Use `apple` or `x86` for the corresponding named CPU profile. This manual target
 is excluded from the default build and has no CTest/integration registration.
 
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,110
-independent oracle cases per profile and the manual matrix checks. Installed
-strict/Apple consumers, the focused compiler unit and scoped reviews passed.
-WSL measurements support numerical correctness only.
+### Apple Accelerate and SME comparison
+
+The Apple Float32 implementation offers three retained candidates with the same
+unique-RN32 certificate and raw-word exact fallback. Float64 continues to use
+exact arithmetic. The default is Accelerate; select direct SME or the scalar
+control without changing the workflow's `apple` profile:
+
+```sh
+# Reuse the existing build and its compiler; SME was validated with Clang 21.
+cmake -S . -B build/numeric -DPHOTOSPIDER_ENABLE_ACCELERATE=ON \
+  -DPHOTOSPIDER_ENABLE_MATRIX_SME=ON -DPHOTOSPIDER_MATRIX_BACKEND=SME
+cmake --build build/numeric --target photospider_numeric_matrix \
+  photospider_numeric_matrix_kernel_benchmark -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple
+python3 examples/numeric_workflow/matrix_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple
+
+# Public execution: profile benchmark N Cin Cout dtype [cancellation]
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix \
+  apple benchmark 256 4 4 float32
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix \
+  apple benchmark 256 4 4 float32 cancellation
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix \
+  apple benchmark 256 4 4 float64
+
+# Internal arithmetic, separate from public workflow latency; needs BUILD_TESTING.
+# Runs all compiled/available candidates irrespective of the selected backend.
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix_kernel_benchmark
+```
+
+Repeat configuration/build/public commands with
+`-DPHOTOSPIDER_MATRIX_BACKEND=ACCELERATE` or `SCALAR` for matched comparisons.
+Both optional implementations remain compiled when their enable flags are ON.
+SME defaults OFF and requires an Apple arm64 compiler with SME FP64 ACLE support.
+Runtime SME/F64F64 absence selects scalar. Accelerate requires macOS 15+ for
+controlled BLAS threading; older systems use scalar. Metal is independent.
+Accelerate's private implementation may itself use SME; the direct SME candidate
+is an explicitly authored FP64 outer-product kernel.
+
+Public timing emits `dtype,N,Cin,Cout,median_us,max_us,computed,invocations,Whole`.
+The Whole interface has no per-value numerical fallback counters; they are
+unavailable, not measured zeros.
+It uses one worker, cache off, one warmup and seven measured executions (three
+for more than 1,048,576 vectors); compile,
+freeze and exact output checks are excluded. Ordinary inputs are dyadic affine
+transforms with varying vectors. The `cancellation` fixture uses
+`[2^120,1,-2^120,0]`, unit matrix rows and zero bias, with exact output one and
+full exact replay. The internal target measures candidate generation (including
+SME transposition) plus certification and separately measures `ExactDot`.
+It excludes dependency discovery, input reads and publication.
+
+The independent oracle has 1,182 Fraction/raw-bit cases, including all nine
+channel combinations and 63/64/65/129-vector requests. See
+[NUM-14](../../docs/built-in_ops/01-numeric/op_specs/NUM-14_matrix_transform.md)
+for the exact certificate and external-library memory accounting boundaries.
+
+### Matrix measurements on Apple M5
+
+Measured 2026-09-21 on Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3,
+RelWithDebInfo, Metal off, one CPU worker, cache off. The public workload is
+Float32 `[128,128,4]` with a shared `[4,4]` matrix and `[4]` bias. All 65,536
+output components are checked against an analytic dyadic fixture outside timing.
+
+```sh
+# Shape [128,128,4], default ResourceLimits; one warmup, seven measured runs.
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple grid 128
+# Shape [4096,4096,4], 1 GiB host limit; one warmup, three measured runs.
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple grid 4096
+```
+
+The Whole result below is the median of three round medians with rotated backend
+order, each using one warmup and seven measured executions. The retained previous
+dependency implementation was rerun for each backend with one warmup and three
+measurements. Compile/freeze and result checking are excluded from both timings.
+
+| Float32 4->4 candidate | Previous dependency path (ms) | Whole (ms) | Speedup |
+| --- | ---: | ---: | ---: |
+| Scalar + certificate | 1127.47 | 4.010 | 281x |
+| Accelerate + certificate | 1140.14 | 3.961 | 288x |
+| Direct SME + certificate | 1161.23 | 4.300 | 270x |
+
+Whole round-median ranges were scalar 3.891–4.088 ms, Accelerate 3.847–4.055 ms,
+and SME 4.167–4.363 ms. Scalar and Accelerate overlap; SME is slightly slower on
+this four-channel workload. The large gain comes from the Whole execution change.
+Both hardware candidates remain available, with Accelerate selected by default.
+
+Managed Metadata peak fell from 1,802,510,184 to 2,944 bytes. This is ledger
+metadata, not total memory or RSS. The old path required a 4 GiB Metadata limit;
+Whole used a 128 MiB limit and also passed the default-budget `grid` command.
+Each Whole run reports one callback and 65,536 computed elements.
+
+Separate 10-second Instruments Time Profiler recordings found Whole input
+`ValueFragments::collect` accounts for 59.02% (Accelerate) / 53.31% (SME) of
+execution CPU samples. The current Whole adapter still copies complete inputs
+through per-coordinate visit/read/address checks. Matrix invocation and its
+validation account for 39.23% / 45.20%; other execution accounts for the rest.
+Within those invocation samples, interval rounding (`nextafter` and its stub)
+accounts for 17.04% / 21.77% of total execution samples; candidate generation
+accounts for roughly 2.5% / 2.1%. These inner percentages are nested and must not
+be added. The traces directly contain DGEMM and the authored SME kernel.
+Input materialization is the next measured optimization target.
+
+The subsequently requested `[4096,4096,4]` workload also completed with all
+67,108,864 outputs checked. One warmup and three timed executions per candidate:
+
+| Candidate | Median (ms) | Measured range (ms) | Maximum RSS (MiB) |
+| --- | ---: | ---: | ---: |
+| Scalar | 4278.90 | 4245.43–4293.47 | 778.20 |
+| Accelerate | 4237.71 | 4214.06–5256.59 | 778.09 |
+| Direct SME | 4731.52 | 4715.69–4771.17 | 778.11 |
+
+Managed Payload peak was 536,882,424 bytes, with Metadata still 2,944 bytes.
+The large workload needs increased host capacity and a larger finite collection
+visit-work allowance: the `grid 4096` command sets Host to 1 GiB and scales the
+visit limit with component count. It retains the default Metadata limit.
+The old regional 4096 workload was not rerun, so no speedup over that path is
+claimed at this size. Accelerate and Scalar differ by about 1% here; the sample
+count and observed variability do not establish a stable advantage.
+
+A separate 15-second Accelerate recording at 4096 found input collection 59.82%,
+NUM-14 callback 40.06%, and other execution 0.12% of 12,586 execution samples.
+Certification alone was 26.63% of total samples and candidate generation 2.34%
+(nested inside the callback). The maintained public `grid 4096` command also
+passed independently, measuring 4.021 s median under its 1 GiB Host budget.
+
+Current native validation: strict and all three Apple candidate selections pass
+1,182 independent oracle cases and the Whole public/direct fixtures. Four focused
+CTests (numeric operations, dependency sampling, resources, compiler), formatting,
+lint and installed static Apple consumer pass. Independent implementation review
+has no unresolved blocker/required finding. This does not establish behavior on
+other CPUs, older macOS versions or other SME vector lengths.
 
 ## Discrete derivatives and cumulative integration: NUM-15
 

@@ -15,6 +15,31 @@ include(CMakePackageConfigHelpers)
 include(CTest)
 include(GNUInstallDirs)
 
+option(PHOTOSPIDER_ENABLE_ACCELERATE "Enable Apple Accelerate matrix candidates" ${APPLE})
+if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)
+  find_library(PHOTOSPIDER_ACCELERATE_FRAMEWORK Accelerate REQUIRED)
+endif()
+
+option(PHOTOSPIDER_ENABLE_MATRIX_SME "Build the optional Apple SME FP64 matrix candidate" OFF)
+set(PHOTOSPIDER_MATRIX_BACKEND "ACCELERATE" CACHE STRING "Apple Float32 matrix candidate: SCALAR, ACCELERATE, SME")
+set_property(CACHE PHOTOSPIDER_MATRIX_BACKEND PROPERTY STRINGS SCALAR ACCELERATE SME)
+if(NOT PHOTOSPIDER_MATRIX_BACKEND MATCHES "^(SCALAR|ACCELERATE|SME)$")
+  message(FATAL_ERROR "Unknown PHOTOSPIDER_MATRIX_BACKEND")
+endif()
+if(PHOTOSPIDER_MATRIX_BACKEND STREQUAL "SME" AND NOT PHOTOSPIDER_ENABLE_MATRIX_SME)
+  message(FATAL_ERROR "SME matrix backend requires PHOTOSPIDER_ENABLE_MATRIX_SME=ON")
+endif()
+if(PHOTOSPIDER_ENABLE_MATRIX_SME)
+  if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "SME matrix candidate requires an Apple arm64 build")
+  endif()
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=armv8-a+sme+sme-f64f64" PHOTOSPIDER_COMPILER_HAS_SME_F64)
+  if(NOT PHOTOSPIDER_COMPILER_HAS_SME_F64)
+    message(FATAL_ERROR "Compiler does not support SME FP64 ACLE")
+  endif()
+endif()
+
 option(PHOTOSPIDER_ENABLE_METAL "Build the optional Apple Silicon Metal backend" ${APPLE})
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   enable_language(OBJCXX)
@@ -121,6 +146,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/numeric_unary.cpp
   plugins/ops/01-numeric/numeric_calculus.cpp
   plugins/ops/01-numeric/numeric_matrix.cpp
+  plugins/ops/01-numeric/accelerated_matrix_apple.cpp
   plugins/ops/01-numeric/numeric_scans.cpp
   plugins/ops/01-numeric/numeric_reductions.cpp
   plugins/ops/01-numeric/numeric_ordering.cpp
@@ -273,6 +299,21 @@ elseif(MSVC)
     src/lib/plugin/layer_operation.cpp
     src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
 endif()
+# Keep optional ISA flags/definitions local; all other kernel code retains the
+# ordinary host target and can perform runtime admission without SME opcodes.
+set_property(SOURCE plugins/ops/01-numeric/numeric_matrix.cpp APPEND PROPERTY
+  COMPILE_DEFINITIONS "PHOTOSPIDER_MATRIX_BACKEND_${PHOTOSPIDER_MATRIX_BACKEND}=1")
+if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)
+  set_property(SOURCE plugins/ops/01-numeric/accelerated_matrix_apple.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS PHOTOSPIDER_HAS_ACCELERATE=1)
+endif()
+if(PHOTOSPIDER_ENABLE_MATRIX_SME)
+  list(APPEND PHOTOSPIDER_KERNEL_SOURCES plugins/ops/01-numeric/accelerated_matrix_sme.cpp)
+  set_source_files_properties(plugins/ops/01-numeric/accelerated_matrix_sme.cpp PROPERTIES
+    COMPILE_OPTIONS "-march=armv8-a+sme+sme-f64f64;-fno-fast-math;-frounding-math;-ffp-contract=off")
+  set_property(SOURCE plugins/ops/01-numeric/accelerated_matrix_apple.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS PHOTOSPIDER_HAS_MATRIX_SME=1)
+endif()
 include(cmake/NumericMath.cmake)
 
 # Disposable disk entries are compatible only with this maintained implementation.
@@ -292,7 +333,7 @@ list(APPEND _cache_identity_inputs ${_numeric_math_identity_inputs}
 list(SORT _cache_identity_inputs)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _cache_config)
-set(_cache_identity "${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE}")
+set(_cache_identity "matrix-backend=${PHOTOSPIDER_MATRIX_BACKEND};sme=${PHOTOSPIDER_ENABLE_MATRIX_SME};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE};accelerate=${PHOTOSPIDER_ENABLE_ACCELERATE}")
 foreach(_cache_input IN LISTS _cache_identity_inputs)
   file(SHA256 "${_cache_input}" _cache_source_hash)
   file(RELATIVE_PATH _cache_relative "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_input}")
@@ -351,6 +392,9 @@ function(photospider_configure_kernel_target target)
     target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_INPAINT_OPENCV)
     target_include_directories(${target} SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(${target} PRIVATE opencv_core opencv_photo)
+  endif()
+  if(APPLE AND PHOTOSPIDER_ENABLE_ACCELERATE)
+    target_link_libraries(${target} PRIVATE "-framework Accelerate")
   endif()
   if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
     target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_METAL)

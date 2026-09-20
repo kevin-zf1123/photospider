@@ -56,6 +56,19 @@ def cases():
                     for kind in range(20):
                         raw = lambda: rng.choice(pool) if kind < 8 else rng.getrandbits(width)
                         yield dtype, cout, shape, [raw() for _ in range(count)], [raw() for _ in range(cin*cout)], [raw() for _ in range(cout)]
+        # Ordinary mantissas exercise the certified blocks and all nine shapes,
+        # while adjacent block lengths change BLAS dimensions and tail kernels.
+        for cin in (2, 3, 4):
+            for cout in (2, 3, 4):
+                for rows in (63, 64, 65, 129):
+                    raw = lambda: ((bias + rng.randrange(-3, 4)) << fraction) | rng.getrandbits(fraction)
+                    x = [raw() for _ in range(rows * cin)]
+                    matrix = [raw() for _ in range(cin * cout)]
+                    offsets = [raw() for _ in range(cout)]
+                    # One lane forces cancellation and one keeps a source NaN.
+                    x[cin:2*cin] = [one] * cin
+                    x[2*cin] = infinity | 0x42
+                    yield dtype, cout, (rows, cin), x, matrix, offsets
         epsilon_half = (bias-fraction-1) << fraction
         fixed = [([maximum, maximum], [maximum, sign|maximum], one),
                  ([one+1, one], [one-2, sign|one], 0),

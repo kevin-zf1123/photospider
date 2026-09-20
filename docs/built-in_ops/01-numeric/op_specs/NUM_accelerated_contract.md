@@ -147,7 +147,8 @@ admitted ranges are listed above. Wider legal inputs remain supported by strict.
 | Prefix/integration | Exact accumulation and at most 64 source samples per read window; every output retains its own prefix certificate. Dense association metadata can remain quadratic. Integral-image rectangles are still accumulated independently. |
 | Curves, LUT1D and inverse | Accelerated curve candidates require uniquely rounded Float32 enclosures to preserve monotonicity; Float64 uses exact formulas. Exact cross products reduce collinear PCHIP stencils to linear formulas. Float32 inverse uses bracketed refinement, then strict fallback. General nonlinear Float64 inverse retains exact lattice refinement. |
 | Uniform lowpass | Accounted per-continuation coefficient-enclosure reuse, bounded full convolution/normalization and strict fallback. Fragment and per-observation certificate work remains. |
-| Other families | Shared arithmetic improvements apply where called. Nonuniform lowpass retains strict directed integration; matrix/LUT3D/parametric formulas retain exact construction; mix retains staged per-observation source selection. No private worker pool or general reduction/2D-scan rewrite is implemented. |
+| Matrix | Whole callback with complete input/output and fixed block64 workspace; Apple Float32 selectable Accelerate DGEMM/direct SME FP64/scalar candidates, unique-RN32 certification and exact replay. Float64 retains exact arithmetic; all three candidate implementations are retained for comparison. See NUM-14 for configuration and resource boundaries. |
+| Other families | Shared arithmetic improvements apply where called. Nonuniform lowpass retains strict directed integration; LUT3D/parametric formulas retain exact construction; mix retains staged per-observation source selection. No private worker pool or general reduction/2D-scan rewrite is implemented. |
 
 ### Measured workload scope
 

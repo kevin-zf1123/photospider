@@ -68,30 +68,31 @@ Final floating overflow is the correctly signed infinity, a successful result.
 Fixed NaN patterns and floating-environment restoration follow
 [NUM-04](NUM-04_unary_contract.md).
 
-## Per-component demand and invalidation
+## Whole demand and invalidation
 
-For requested vector instances and output components r, read each complete input
-vector, only the matrix rows corresponding to requested components, and the
-corresponding bias elements. Deduplicate shared row/bias reads. Zero coefficients
-do not remove vector dependencies: 0*Inf remains an observable invalid product.
-Other vector instances, matrix rows and bias components have no Data demand.
-Add recognized typed Validation closure separately. Empty Q reads nothing.
+This operator uses the existing synchronous `Whole` execution path for all
+profiles. Every nonempty request requires all three complete inputs, including
+recognized typed validation, and computes one complete dense output. Sparse or
+partial consumers receive a projection of that output. Empty requests read
+nothing and do not invoke the callback. Direct invocation requires Whole input
+and output Regions.
 
-Vector component changes invalidate all output components for that vector instance;
-selected matrix-row or bias changes invalidate that output component across all
-instances. Retain Data/Validation and metadata witnesses. The output shape and
-dtype are static; partial component requests do not imply reading unrelated
-matrix rows merely to form a dense temporary matrix. Return owned packed output
-fragments with correct global logical and storage origins.
+Any change to vectors, matrix or bias invalidates all observed output samples
+through the generic Whole dependency mapping. There are no per-component Need
+rows, custom dependency certificates or matrix-specific partial failure atoms.
+Zero coefficients do not remove input requirements. A failed invocation
+publishes no partial output. Published storage owns its lifetime independently
+of the execution context.
 
 ## Algorithms, resources and errors
 
 Use a bounded exact dot accumulator or certified equivalent for at most four
 products plus bias, with one final rounding. SIMD/FMA implementations require
 proof of this result, rather than substituting a different sequential rounding
-order. Work is O(number of requested components * Cin), plus exact arithmetic;
-account vector/matrix/bias owners, selected-row metadata, accumulators, output
-bytes and scratch. Output does not require the full vector batch allocation.
+order. Work is O(number of vector instances * Cout * Cin), plus exact arithmetic.
+Account full input owners/materialization, full dense output, and one fixed
+callback workspace containing the block buffers and exact accumulator. Full
+output storage must fit the budget, even for a small nonempty consumer request.
 
 Read arbitrary valid immutable source strides/offsets. Use host workers/budgets,
 check cancellation per processing block and arithmetic refinement, and release
@@ -113,11 +114,10 @@ are the oracle. Include rectangular 2->4 and 4->3 transforms, multiple batches,
 identity and singular matrices, cancellation after huge products, subnormals,
 all NaN priorities, 0*Inf, infinity cancellation and signed-zero terms.
 
-Source-read logs for only output component r must show the full selected vector,
-matrix[r,:], bias[r] and no other numeric rows. Test matrix/bias sharing,
-strides, typed-validation closure, invalidation, low budgets, cancellation and
-owner lifetime through public WorkflowDocument execution when implemented.
-The implementation evidence below records checks actually run.
+A partial component request must show Whole support on all input ports and
+whole-observation invalidation for changes anywhere in those inputs. Check
+Empty, arbitrary direct-input strides/offsets, typed validation, metadata errors,
+low budgets, cancellation and owner lifetime through public execution.
 
 ## Implementation and executable acceptance
 
@@ -129,20 +129,72 @@ bits. No product is independently rounded. Source NaN classification precedes
 generated invalid products; all required inputs and Validation have already
 arrived before numeric evaluation.
 
-One regional Need associates each requested output with its complete vector,
-selected matrix row and bias. Transport unions deduplicate overlapping vectors
-and shared rows/bias; source/result metadata and actual retained payload are
-charged. The result is packed only over requested rectangles. This does not
-promise sharing across separate executions or a once-per-Run transition.
+One Whole callback caches the small matrix and bias, traverses all vectors in
+blocks of at most 64, and publishes one owned dense Value. No shared kernel API
+or ABI change is required. The manual `photospider_numeric_matrix` executable
+and `matrix_oracle.py` are in
+[the numeric workflow example](../../../../examples/numeric_workflow/README.md).
+Specification status remains Proposed independently of implementation evidence.
 
-The manual `photospider_numeric_matrix` executable and `matrix_oracle.py` live
-in [the numeric workflow example](../../../../examples/numeric_workflow/README.md).
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,110
-independent Fraction/raw-bit cases per profile on 2026-09-19, plus editable
-public fixtures, cache on/off, sparse support/dirty and deduplicated row/bias
-transport, typed/Empty inputs, metadata errors, all-port negative strides,
-fenv modes/flags, exact-work WorkLimit/cancellation and release checks, and
-required upstream failure after vector NaN. Installed strict/Apple consumers,
-the focused compiler unit, formatting/lint and scoped math/entry reviews passed.
-No integration test or CTest registration is added. Specification status
-remains Proposed independently of this implementation evidence.
+## Apple matrix candidate backends
+
+The Apple profile reuses the complete matrix and bias within the Whole callback
+and reads each vector once. Blocks contain at most 64 vectors, including a tail;
+arbitrary valid direct-input strides and offsets are supported.
+
+For Float32, finite operands are promoted exactly to binary64. Candidate
+backends are selected at build time without changing the public operation key:
+
+| `PHOTOSPIDER_MATRIX_BACKEND` | Candidate calculation |
+| --- | --- |
+| `ACCELERATE` (default) | Row-major `cblas_dgemm(X, M^T)` plus bias; LP64 dimensions bounded by 64. Requires `PHOTOSPIDER_ENABLE_ACCELERATE=ON`, macOS 15+ and successful single-thread admission; otherwise uses the scalar candidate. |
+| `SME` | Direct FP64 `FMOPA` using private ZA and local streaming mode. Requires `PHOTOSPIDER_ENABLE_MATRIX_SME=ON`; runtime admission checks both SME and SME_F64F64, otherwise uses scalar. |
+| `SCALAR` | Fixed-order binary64 multiply/add candidate, with the same certificate. |
+
+Every candidate is independently checked against an outward binary64 enclosure
+of the exact dot plus bias. Finite Float32 products are exact in binary64;
+only interval additions need outward expansion. The candidate is published only
+when both interval endpoints round to the same normal Float32 bits as the
+candidate. Uncertain rounding, zero, extreme ranges and original nonfinite
+operands use `ExactDot` with the original raw words. Thus all three backends
+retain exact Float32 results across channel subsets, block tails and Regions.
+Float64 retains `ExactDot`; its inputs and outputs are never narrowed.
+
+`MatrixBlock` owns 8,640 bytes of fixed buffers inside the admitted callback
+workspace, alongside the exact accumulator. All profiles use this workspace.
+Packing, candidate and certificate work is precharged against the active managed
+resource scope; exact replay charges its own arithmetic work. Cancellation is
+checked around each block and during exact arithmetic. Resource/cancellation
+failures return directly and release unpublished output and scratch.
+
+Whole execution reports actual callback invocations and computed elements.
+Per-value numeric fallback/copy counters from DependencySession are unavailable
+on this path and must not be reported as measured zeros. Backend switches and
+optional feature configuration participate in cache build identity.
+
+Accelerate uses thread-local single-thread mode and restores the previous mode;
+caller floating state is scoped across packing, calculation and certification.
+The framework's private allocations have not been proven to have a fixed upper
+bound or to use the host allocator. Managed scratch accounting here covers the
+operation-owned buffers, not all private system-library allocation. Direct SME
+uses caller-owned buffers and architectural register state, without a BLAS
+call or private worker pool. Accelerate may itself choose SME internally; this
+comparison does not identify its private instruction dispatch.
+
+SME compilation is restricted to its own source with
+`-march=armv8-a+sme+sme-f64f64`; enabling the full Armv9 baseline would also
+permit non-streaming SVE, which current Apple SME systems do not expose.
+The wrapper and runtime capability checks retain the ordinary host target.
+See [Apple's SME platform notes](https://github.com/apple-oss-distributions/xnu/blob/main/doc/arm/sme.md)
+and [Arm ACLE streaming/ZA rules](https://arm-software.github.io/acle/main/acle.html).
+The implementation preserves `-fno-fast-math -frounding-math -ffp-contract=off`.
+
+The workflow README provides backend selection, public end-to-end timing and
+candidate-plus-certificate timing commands. Timing excludes compilation/freeze
+and checks every public output against an analytic dyadic fixture. A separate
+cancellation-heavy fixture forces exact replay. Performance claims are limited
+to the stated dimensions, dtype, backend and hardware.
+
+Current Whole validation and measured performance are recorded in the workflow
+README. Results apply to native M5/Clang 21; historical regional or x86 results
+do not establish the changed Whole behavior on other platforms.
