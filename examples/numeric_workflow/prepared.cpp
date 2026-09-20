@@ -388,12 +388,29 @@ void whole_preparation() {
                "direct seals passed\n";
 }
 struct SplitOwner {
+  bool shared;
+  explicit SplitOwner(bool one = false) : shared(one) {}
   ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase& phase) {
     std::vector<ps::Value> parts;
+    std::shared_ptr<const ps::CpuStorage> owner;
+    if (shared) {
+      auto buffer = take(phase.allocator.allocate(32));
+      for (unsigned i = 0; i < 4; ++i) {
+        double value = i;
+        std::memcpy(buffer.data() + 8 * i, &value, 8);
+      }
+      owner = std::move(buffer).freeze();
+    }
     for (const auto& box : phase.query.outputs.boxes()) {
       const auto range = box.dimensions()[0];
       for (std::uint64_t i = range.offset; i < range.offset + range.extent;
            ++i) {
+        if (shared) {
+          parts.push_back(take(ps::Value::from_storage(
+              phase.query.output.descriptor, ps::Region({{i, 1}}),
+              {8 * i, {0}, {i}}, owner)));
+          continue;
+        }
         auto writer = take(
             ps::MutableValue::allocate(phase.query.output.descriptor,
                                        ps::Region({{i, 1}}), phase.allocator));
@@ -456,6 +473,13 @@ void whole_views() {
   split.start_dependency = [](const auto&, const auto& allocator) {
     return ps::DependencyContinuation::make<SplitOwner>(allocator);
   };
+  auto shared_split = split;
+  shared_split.key = "manual.shared_split";
+  shared_split.start_dependency = [](const auto&, const auto& allocator) {
+    return ps::DependencyContinuation::make<SplitOwner>(allocator, true);
+  };
+  require(operations->register_operation(std::move(shared_split)).ok(),
+          "register compatible split owner");
   const std::uint64_t extent = UINT64_C(1) << 30;
   ps::OperationDefinition huge;
   huge.key = "manual.huge_view";
@@ -523,6 +547,15 @@ void whole_views() {
   require(std::memcmp(collected.values.at("values").bytes().data(), expected,
                       32) == 0,
           "Auto collection preserves complete values");
+  document.nodes[0].operation = "manual.shared_split";
+  document.nodes[1].operation = "manual.whole_view";
+  ps::GraphContext shared_graph(document);
+  auto shared_plan = take(ps::Compiler(operations).compile(shared_graph));
+  auto shared_result = take(context.execute(shared_plan.plan));
+  require(std::memcmp(shared_result.values.at("values").bytes().data(),
+                      expected, 32) == 0,
+          "Whole View coalesces compatible same-owner fragment maps without "
+          "copying");
   auto external_storage = take(ps::BufferAllocator{}.allocate(32));
   std::memcpy(external_storage.data(), expected, 32);
   auto external = take(ps::Value::from_storage(

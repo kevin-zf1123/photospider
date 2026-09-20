@@ -9,7 +9,7 @@
 #include "photospider/core/numeric_diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Per-request-rectangle immutable view or packed-copy policy. */
+/** @brief Complete-output immutable view or packed-copy policy. */
 enum class TransformLayout { Auto, View, Dense };
 namespace layout_detail {
 inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
@@ -67,12 +67,16 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * Compiler checks equal positive element counts <=2^40, rank 1..8 and source
  * dtype. Output values preserves UInt8/Int64/Float32/Float64 bits, with empty
  * facets. No payload is accessed by this pure, concurrent-safe helper.
- * Auto uses a single-owner affine view per requested rectangle when possible,
- * otherwise packs that rectangle; View reports InvalidArgument/ViewUnavailable
- * when that representation is impossible. Dense always copies. Views retain
- * immutable source owners; results survive context destruction. Exact mapped
- * Data and required typed Validation remain distinct. Capacity/work/cancel
- * failures never trigger an auto approximation or hide an upstream failure.
+ * Every nonempty demand reads and validates the complete active input, then
+ * publishes the complete output before projection. Any active input edit
+ * invalidates the complete output; upstream/typed/domain failures are Run-wide.
+ * Auto uses one affine owner for the complete output or allocates a full packed
+ * copy. View reports Domain/Run InvalidArgument/ViewUnavailable if the complete
+ * input/output cannot use one affine owner. Compatible same-owner fragments
+ * may join; multiple owners require Auto/Dense collection. Views retain their
+ * immutable source storage/resources after context destruction. Dense owns
+ * N*dtype_size output bytes, including for a sparse downstream request.
+ * Resource/cancellation failures never trigger Auto fallback.
  * Returns owned node metadata; malformed authoring arguments return
  * InvalidArgument/InvalidDomain/Schema, allocation may throw bad_alloc.
  */
@@ -98,11 +102,14 @@ inline Result<WorkflowNode> transpose_node(
 }
 /** @brief Authors a dynamic slice with static positive per-axis counts.
  * starts and steps must be Int64[rank]. For nonempty demand the operation
- * validates the full slice endpoints using widened integer arithmetic before
- * source reads. Starts are absolute nonnegative indices; used steps are
- * nonzero. Counts of one ignore their step entirely. Empty demand reads no
- * controls or data. Invalid controls report InvalidArgument/InvalidDomain and
- * InvalidSlice with axis/values. Layout/lifetime rules match reshape_node.
+ * collects active inputs, then validates full slice endpoints using widened
+ * integer arithmetic. Starts are absolute nonnegative indices; used steps are
+ * nonzero. Counts of one ignore their step numerically; the whole step port is
+ * excluded only when all counts are one. Otherwise all step entries are
+ * collected and validated, so even an unused entry can cause an upstream
+ * failure. Empty reads no controls or data. Invalid controls report
+ * InvalidArgument/InvalidDomain and InvalidSlice with axis/values.
+ * Layout/lifetime rules match reshape_node.
  */
 inline Result<WorkflowNode> slice_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput starts,

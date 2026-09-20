@@ -445,9 +445,9 @@ image tuple and other invalid combinations remain rejected.
 ### CPU Whole input views
 
 Package 0.18 / OperationTraits16 extends CPU Whole view publication. A view
-output prefers one original Value covering each complete input demand, retaining
-its strides, storage and resources. If no covering Value exists, Auto may
-collect; `requires_input_views=true` instead returns Domain/Run
+output preserves one affine owner covering each complete input demand, retaining
+its strides, storage and resources. Compatible fragments of that same owner may
+be joined after an address-map proof. If no such view exists, Auto may collect; `requires_input_views=true` instead returns Domain/Run
 InvalidArgument/InvalidDomain with ViewUnavailable before callback. It requires
 CPU Whole `preserve_output_views`, excludes GPU/joint/Result and participates
 in compiled identity. Typed validation still covers all active input samples.

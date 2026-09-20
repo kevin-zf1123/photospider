@@ -29,6 +29,7 @@
 #include "core/stored_failure.hpp"
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "data/whole_input_view.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -2983,14 +2984,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                       const auto& box = frame.parts[port].boxes().at(0);
                       std::optional<Value> original;
                       if (step.traits.outputs[0].preserve_output_views) {
-                        for (const auto& fragment :
-                             frame.ready[port].fragments()) {
-                          auto view = fragment.view(box);
-                          if (view.ok()) {
-                            original = view.take_value();
-                            break;
-                          }
-                        }
+                        auto retained = input_internal::whole_input_view(
+                            frame.ready[port], limits);
+                        if (!retained.ok())
+                          return Result<Value>(retained.status());
+                        original = retained.take_value();
                         if (!original &&
                             step.traits.outputs[0].requires_input_views)
                           return Result<Value>(Status{

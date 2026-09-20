@@ -318,12 +318,13 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * New payload is admitted on actual allocation, bounded by requested bytes
    * unless maximum_output_payload_bytes replaces that bound. Borrowed owners
    * remain charged independently. CPU Whole or staged non-joint execution only.
-   * Whole prefers an original covering input view, collecting only when needed.
+   * Whole prefers a covering affine input owner, collecting only when needed.
    * This permits auto view/copy choices without dense precharge.
    */
   bool preserve_output_views = false;
-  /** @brief CPU Whole requires one original covering Value per active input.
-   * Requires preserve_output_views. If an input needs collection across owner
+  /** @brief CPU Whole requires one affine backing owner per active input.
+   * Requires preserve_output_views. Compatible same-owner fragments may form
+   * one view. If an input needs collection across owner
    * fragments, execution returns InvalidArgument/InvalidDomain ViewUnavailable
    * before callback. Direct calls already supply one Value per input. This
    * property is part of compiled identity; it does not limit typed validation.

@@ -50,41 +50,29 @@ require both starts[j] and last[j] within input axis bounds. Monotonic stepping
 then proves the entire axis valid. Invalid parameters fail the observation even
 when the actual requested output subset would have valid source coordinates.
 
-## Single-sample axes and staged support
+## Single-sample axes and Whole input support
 
-If counts[j]=1, do not read steps[j] at all and do not require it to be nonzero.
-Validate starts[j] only; the effective mapping on that axis is constant. This
-is an explicit exception to the step rule. For nonempty Q, starts has Control
-support all rank entries, and steps has Control support only axes with count>1.
-Retain these control witnesses and validate the whole slice before dependent
-source Data reads. Input metadata/dtype constraints remain compile-time checks.
-
-After controls are valid, Data support is the exact mapped set S(Q). Nonunit
-steps may produce disconnected input coordinates; do not replace them with a
-bounding box or read gaps. Typed source Validation closure is tracked separately.
-Empty Q reads neither control vector nor source Data. Changing any read control
-invalidates and replans the whole output mapping; changing an ignored step has
-no effect. Map changed source Data back using exact divisibility and index bounds
-on each axis, then add retained validation invalidation.
+A singleton count ignores that axis's step numerically. If all counts are one,
+static projection excludes the complete step port, including a failing producer;
+metadata is still checked. Otherwise Whole collects all steps, starts and source
+before callback. An unused step entry can then cause an upstream/typed failure.
+Source gaps and unselected coordinates are included in full-input preparation.
+Empty reads nothing. Any active input edit invalidates the complete output;
+control/domain/typed/upstream failures are Run-wide. Endpoint validation still
+uses widened arithmetic and covers the full slice.
 
 ## Layout, resources and errors
 
-Required static String layout is auto/view/dense with constructor default auto;
-direct nodes specify it. Inherit [reshape's per-request-rectangle layout policy](NUM-09A_reshape.md):
-one rectangle must fit one owner/offset/stride representation for view; auto
-otherwise copies, and explicit view reports ViewUnavailable. View byte strides
-are source_stride[j]*steps[j] for count>1, and zero for singleton output axes.
-Compute addresses and strides with checked widened arithmetic; a stride not
-representable by Value's layout is not a valid view. Dense copying can still
-succeed when the logical source coordinates are valid. No negative writable
-alias or fabricated cross-owner view is published.
-
-Inherit reshape's source-owner retention, exact-set/fragment mapping, immutable
-output, cache, host budget, cancellation and final release requirements. Mapping
-cost is O(M*r), with O(r) control validation plus actual sparse-support metadata.
-Step sizes do not authorize allocating their bounding interval. Account all
-control/source owners, run/index metadata and output/scratch bytes; fail
-ResourceExhausted if exact support cannot be represented within the budget.
+Required String layout is auto/view/dense, default auto in the helper. Inherit
+[reshape's complete-output policy](NUM-09A_reshape.md). View requires one affine
+input and output owner; same-owner compatible fragments may join, while multiple
+owners fail View and may be collected for Auto/Dense. Slice strides equal
+source_stride[j]*steps[j] for count>1, and zero for singleton outputs. Widened
+stride overflow makes a view unavailable; Dense can still copy valid logical
+coordinates. Auto never hides upstream/validation/resource/cancellation errors.
+Dense allocates N*dtype_size output bytes and may collect all source/control
+payloads even for sparse demand; fixed state and O(rank) controls are admitted.
+Mapping costs O(N*rank), with cancellation/work checks per element and publication.
 
 Invalid counts/rank/type/layout is a compile/preflight error. Invalid dynamic
 starts/used steps or any full-domain endpoint outside the source axis fails with
@@ -99,28 +87,11 @@ Conceptual fixture: input=[0,1,2,3,4,5], starts=[4], steps=[-2], counts="3"
 yields [4,2,0]. Independent exact integer coordinate mapping and raw-bit reads
 are the oracle. Verify a partial output request still rejects a full slice that
 would run out of bounds. For counts="1", prove steps is never requested even if
-its upstream would fail; source read is exactly starts. Include multi-axis mixed
+its upstream would fail; numerical selection is starts while Whole reads the source. Include multi-axis mixed
 positive/negative steps, signed-zero/sNaN data, dynamic control changes, singleton
 axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads.
 
-The current nine `array.*` keys include the three explicit slice profiles.
-`slice_node` in `photospider/numeric/layouts.hpp` emits static `counts` and
-dynamic Int64[rank] `starts`/`steps`; `counts[j]==1` omits `steps[j]` from both
-validation and dependency reads. Control dependencies use exact roles and
-Data support contains only requested mapped points, with no bounding gap.
-View strides are source stride times step, with zero stride on singleton axes;
-`auto` falls back to packed output when a requested rectangle is not affine.
-
-On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed the public manual examples and 636 independent integer/raw-bit
-oracle cases per profile. The installed public consumer passed. Coverage includes
-exact support/dirty mapping, whole versus regional layout policy, unaligned and
-negative/zero strides, shared versus independent owners, ignored singleton steps,
-full slice endpoint validation, typed Validation closures, schema/Empty behavior,
-work/cancellation/capacity failures, fenv and escaped Value lifetime. Focused
-compiler/dependency/fragments/resources units and independent scoped review passed.
-Layout operations are `cacheable=false` because the content cache does not witness
-physical owner/stride partitions. Managed metadata and its remaining host-container
-boundaries are documented in [Managed Resources](../../../kernel-architecture/Managed-Resources.md).
-The manual target is not registered in integration tests. Specification status
-remains Proposed; no performance claim follows from correctness checks.
+All formal profiles use Whole. Current workflow, independent numerical/physical
+layout oracles and resource/performance results are recorded in
+[NUM-09 Whole execution](../layouts-whole.md). Earlier regional validation does
+not establish current Whole behavior.

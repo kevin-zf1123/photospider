@@ -560,22 +560,15 @@ suffixes. On an unsupported host the selected accelerated profile returns
 `slice: [4,2,0], exact support/dirty, full-domain validation and ignored
 singleton step passed`.
 
-The example demonstrates that direct bindings are whole dense values, while a
-public transpose node can create the physically strided intermediate used to
-test per-request view proof, `auto` fallback and explicit `ViewUnavailable`.
-Slice uses dynamic Int64[rank] `starts` and `steps`; a singleton `counts` axis
-does not read its step. `layout_oracle.py` checks integer flatten/unflatten and
-raw bit preservation across reshape, transpose and slice. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed 636 oracle cases per profile and the public examples. The
-installed consumer passed. Additional checks cover unaligned/negative/zero
-strides, shared and independent owners, typed Validation, schema/Empty,
-WorkLimit/cancellation, dense capacity admission and final publication-owner
-release. A constant view composed with transpose returns a 64x64 array of 7
-while retaining an 8-byte payload under a 4096-byte execution budget. The
-three layout operations are `cacheable=false` because the current content cache
-does not witness physical owner/stride partitions; pure and active-run sharing
-remain independent. These are manual targets without CTest or
-integration-test registration, and no performance result is claimed.
+All nine formal keys use CPU Whole. Any nonempty demand reads active inputs and
+publishes the complete output before projection. View requires one complete
+affine owner; compatible same-owner fragments may join. Multiple owners fail
+View, while Auto/Dense may collect. Dense requires full output memory. Singleton
+slice axes ignore their step numerically; the entire step port is excluded only
+when all counts are one. The manual checks raw bits, complete affine address
+maps, invalid controls/typed data, owner lifetime, cancellation and budgets.
+See [NUM-09 Whole execution](../../docs/built-in_ops/01-numeric/layouts-whole.md)
+for current commands, validation, performance and older-platform boundaries.
 
 ## Indexing and scatter: NUM-10
 

@@ -287,8 +287,8 @@ callback wrapper 向另一 registry 转发 invocation 时必须清除 `prepared`
 ### CPU Whole 输入视图
 
 package0.18 / OperationTraits16 扩展 CPU Whole 视图发布。视图输出优先保留
-覆盖完整输入需求的原始 Value、strides、storage 和 resources；不存在单个
-覆盖 Value 时，Auto 可以 collect，`requires_input_views=true` 则在 callback
+覆盖完整输入需求的单个仿射 owner、strides、storage 和 resources；同一 owner
+的兼容 fragments 通过地址映射证明后可以合并。不存在这种视图时，Auto 可以 collect，`requires_input_views=true` 则在 callback
 之前返回 Domain/Run 的 InvalidArgument/InvalidDomain、ViewUnavailable。
 该字段要求 CPU Whole 的 `preserve_output_views`，排除 GPU/joint/Result，
 并参与编译身份。typed 验证仍覆盖全部有效输入。普通和 structured 执行桥接
