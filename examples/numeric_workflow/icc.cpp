@@ -255,6 +255,15 @@ void propagation() {
             "equal-content fragments share canonical profile allocation");
   auto dense =
       take(fragments.collect(ps::Region::whole({2, 4}), ps::BufferAllocator{}));
+  auto packed = take(ps::ValueFragments::create(
+      descriptor, {facet}, take(ps::Footprint::all({2, 4})), {dense}));
+  auto recollected = take(packed.collect(dense.region(), root.allocator()));
+  require(recollected.facets().size() == 1 &&
+              recollected.facets()[0].payload == facet.payload &&
+              recollected.storage() != dense.storage() &&
+              take(recollected.resources().icc_profile(profile.identity()))
+                      .storage() == profile.storage(),
+          "packed collect copies payload and retains typed ICC owner");
   ps::InputSnapshotStore store;
   auto snapshot = take(store.import_value(dense));
   auto patched = take(store.patch(snapshot, b));

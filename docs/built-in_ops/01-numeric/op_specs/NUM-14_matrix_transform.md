@@ -151,14 +151,23 @@ backends are selected at build time without changing the public operation key:
 | `SME` | Direct FP64 `FMOPA` using private ZA and local streaming mode. Requires `PHOTOSPIDER_ENABLE_MATRIX_SME=ON`; runtime admission checks both SME and SME_F64F64, otherwise uses scalar. |
 | `SCALAR` | Fixed-order binary64 multiply/add candidate, with the same certificate. |
 
-Every candidate is independently checked against an outward binary64 enclosure
-of the exact dot plus bias. Finite Float32 products are exact in binary64;
-only interval additions need outward expansion. The candidate is published only
-when both interval endpoints round to the same normal Float32 bits as the
-candidate. Uncertain rounding, zero, extreme ranges and original nonfinite
-operands use `ExactDot` with the original raw words. Thus all three backends
-retain exact Float32 results across channel subsets, block tails and Regions.
-Float64 retains `ExactDot`; its inputs and outputs are never narrowed.
+Every candidate is independently checked against a binary64 enclosure of the
+exact dot plus bias. Finite Float32 products are exact in binary64. A separate
+rounded sum `s` and rounded absolute-term sum `A` give endpoints
+`RN64(s - A*2^-50)` and `RN64(s + A*2^-50)`. With `u=2^-53` and
+`gamma=4u/(1-4u)`, the exact-sum error is bounded by `gamma*S`, where
+`S=abs(bias)+sum(abs(products))`, and `A >= (1-gamma)*S`. The radius `8u*A`
+also covers endpoint rounding because
+`8u*(1-gamma) > gamma + u*(1+gamma)*(1+8u)`. All intermediates are far from
+binary64 overflow/underflow for finite Float32 inputs. This matrix-specific
+proof does not change the general interval arithmetic used by other operators.
+
+The candidate is published only when both endpoints convert to the same normal
+Float32 bits as the candidate. The existing real-range admission is retained.
+Uncertain rounding, zero, extreme ranges and original nonfinite operands use
+`ExactDot` with original raw words. Thus all three backends retain exact
+Float32 results across channel subsets, block tails and Regions. Float64
+retains `ExactDot`; its inputs and outputs are never narrowed.
 
 `MatrixBlock` owns 8,640 bytes of fixed buffers inside the admitted callback
 workspace, alongside the exact accumulator. All profiles use this workspace.

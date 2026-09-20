@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -44,23 +46,40 @@ inline void scalar_matrix_candidates(MatrixBlock* block, unsigned rows,
       block->y[r * output_components + o] = value + block->offsets[o];
     }
 }
-// Finite binary32 products are exactly representable in binary64. Outward
-// additions independently enclose the real dot+bias, without assuming BLAS's
-// accumulation order. Unique normal RN32 output gives partition-independent
-// bits, including when a different block falls back to ExactDot.
+// Finite binary32 products are exact in binary64. For <=4 additions, let
+// u=2^-53, gamma=4u/(1-4u), T=b+sum(p), S=abs(b)+sum(abs(p)). The independent
+// rounded sums satisfy abs(sum-T)<=gamma*S and (1-gamma)*S<=magnitude<=
+// (1+gamma)*S. radius=8u*magnitude is exact. Endpoint rounding adds at most
+// u*(1+gamma)*(1+8u)*S; 8u*(1-gamma) exceeds this plus gamma. Thus even the
+// rounded endpoints enclose T, without nextafter or assumptions about BLAS.
+// Nonzero sums are multiples of 2^-298; radius/endpoints are multiples of
+// 2^-348, and S<2^259, so none of these operations approach binary64 range
+// limits. This proof is specific to finite Float32 sources and the scoped
+// nearest/gradual environment, not a replacement for general FastInterval.
 inline std::optional<std::uint64_t> certify_matrix_float32(
     const MatrixBlock& block, unsigned row, unsigned channel,
     unsigned input_components, unsigned output_components) {
-  auto enclosure = FastInterval::point(block.offsets[channel]);
+  double sum = block.offsets[channel];
+  double magnitude = std::abs(sum);
   for (unsigned j = 0; j < input_components; ++j) {
     const double product = block.x[row * input_components + j] *
                            block.coefficients[channel * input_components + j];
-    enclosure = enclosure + FastInterval::point(product);
+    sum += product;
+    magnitude += std::abs(product);
   }
+  const double radius = magnitude * 0x1p-50;
+  const double low = sum - radius, high = sum + radius;
+  // Retain the normal finite real-range admission; endpoints that straddle
+  // zero or a rounding boundary cannot agree below and use raw-word ExactDot.
+  if (std::min(std::abs(low), std::abs(high)) < 0x1p-126 ||
+      std::max(std::abs(low), std::abs(high)) > 0x1.fffffep127)
+    return {};
   const auto candidate =
-      enclosure.accepted(block.y[row * output_components + channel], true);
-  if (!candidate || numeric_bits(enclosure.low, true) != *candidate ||
-      numeric_bits(enclosure.high, true) != *candidate)
+      numeric_bits(block.y[row * output_components + channel], true);
+  const auto exponent = candidate & UINT64_C(0x7f800000);
+  if (!exponent || exponent == UINT64_C(0x7f800000) ||
+      numeric_bits(low, true) != candidate ||
+      numeric_bits(high, true) != candidate)
     return {};
   return candidate;
 }

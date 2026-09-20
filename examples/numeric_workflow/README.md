@@ -850,17 +850,19 @@ full exact replay. The internal target measures candidate generation (including
 SME transposition) plus certification and separately measures `ExactDot`.
 It excludes dependency discovery, input reads and publication.
 
-The independent oracle has 1,182 Fraction/raw-bit cases, including all nine
-channel combinations and 63/64/65/129-vector requests. See
+The independent oracle has 1,598 Fraction/raw-bit cases, including all nine
+channel combinations, 63/64/65/129-vector requests, perturbed rounding midpoints
+and finite wide-exponent cancellation. A focused CTest also injects wrong, NaN
+and infinite candidates directly into the certificate. See
 [NUM-14](../../docs/built-in_ops/01-numeric/op_specs/NUM-14_matrix_transform.md)
 for the exact certificate and external-library memory accounting boundaries.
 
 ### Matrix measurements on Apple M5
 
 Measured 2026-09-21 on Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3,
-RelWithDebInfo, Metal off, one CPU worker, cache off. The public workload is
-Float32 `[128,128,4]` with a shared `[4,4]` matrix and `[4]` bias. All 65,536
-output components are checked against an analytic dyadic fixture outside timing.
+RelWithDebInfo, Metal off, one CPU worker, cache off. Workloads are Float32
+`[side,side,4]` with shared `[4,4]` matrix and `[4]` bias. Every output is checked
+against an analytic dyadic fixture outside the public execution timer.
 
 ```sh
 # Shape [128,128,4], default ResourceLimits; one warmup, seven measured runs.
@@ -869,67 +871,57 @@ build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple grid 12
 build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple grid 4096
 ```
 
-The Whole result below is the median of three round medians with rotated backend
-order, each using one warmup and seven measured executions. The retained previous
-dependency implementation was rerun for each backend with one warmup and three
-measurements. Compile/freeze and result checking are excluded from both timings.
+The current implementation combines Whole execution, bounded bulk input
+collection and a matrix-specific `8u*A` exact-rounding certificate. The
+128-square result is the median of three round medians in rotated backend
+order; each round uses one warmup and seven measured executions. The 4096-square
+result uses one warmup and three measurements per backend. Compile/freeze,
+input generation and output verification are excluded.
 
-| Float32 4->4 candidate | Previous dependency path (ms) | Whole (ms) | Speedup |
+| Candidate | 128x128x4 (ms) | 4096x4096x4 (ms) | 4096 measured range (ms) |
 | --- | ---: | ---: | ---: |
-| Scalar + certificate | 1127.47 | 4.010 | 281x |
-| Accelerate + certificate | 1140.14 | 3.961 | 288x |
-| Direct SME + certificate | 1161.23 | 4.300 | 270x |
+| Scalar + certificate | 0.705 | 654.921 | 647.193–660.019 |
+| Accelerate + certificate | 0.710 | 610.740 | 599.157–624.316 |
+| Direct SME + certificate | 0.916 | 808.603 | 781.615–817.676 |
 
-Whole round-median ranges were scalar 3.891–4.088 ms, Accelerate 3.847–4.055 ms,
-and SME 4.167–4.363 ms. Scalar and Accelerate overlap; SME is slightly slower on
-this four-channel workload. The large gain comes from the Whole execution change.
+The previous Whole implementation (`31d6a3d0`) measured Accelerate 3.961 ms and
+4237.71 ms respectively, so this follow-up improves it by about 5.6x and 6.9x.
+The original per-output dependency path measured 1140.14 ms at 128-square;
+removing its dependency overhead accounted for most of the earlier gain.
+No old dependency 4096 measurement is claimed. Scalar and Accelerate are close
+at 128-square; this limited native comparison is not a universal backend ranking.
 Both hardware candidates remain available, with Accelerate selected by default.
 
-Managed Metadata peak fell from 1,802,510,184 to 2,944 bytes. This is ledger
-metadata, not total memory or RSS. The old path required a 4 GiB Metadata limit;
-Whole used a 128 MiB limit and also passed the default-budget `grid` command.
-Each Whole run reports one callback and 65,536 computed elements.
+`ValueFragments::collect` now batches a packed single-fragment rectangle into
+64 KiB copies, preserving authorization, fresh allocator-owned output, typed
+facets/resources, logical-sample work limits and cancellation. General strided
+or multi-fragment inputs retain checked sample collection. NUM-14 independently
+bounds its rounded sum by `8u*A`, including endpoint rounding, instead of calling
+`nextafter` repeatedly; uncertain results still use exact raw-word replay.
 
-Separate 10-second Instruments Time Profiler recordings found Whole input
-`ValueFragments::collect` accounts for 59.02% (Accelerate) / 53.31% (SME) of
-execution CPU samples. The current Whole adapter still copies complete inputs
-through per-coordinate visit/read/address checks. Matrix invocation and its
-validation account for 39.23% / 45.20%; other execution accounts for the rest.
-Within those invocation samples, interval rounding (`nextafter` and its stub)
-accounts for 17.04% / 21.77% of total execution samples; candidate generation
-accounts for roughly 2.5% / 2.1%. These inner percentages are nested and must not
-be added. The traces directly contain DGEMM and the authored SME kernel.
-Input materialization is the next measured optimization target.
+Managed Metadata peak is 2,944 bytes at both sizes. Large-case Payload peak
+remains 536,882,424 bytes because collection still owns a fresh copy; no memory
+saving from owner reuse is claimed. The large command sets Host to 1 GiB and
+scales the finite collection visit-work limit with component count, retaining
+the default Metadata limit. Default Host capacity is only 256 MiB.
 
-The subsequently requested `[4096,4096,4]` workload also completed with all
-67,108,864 outputs checked. One warmup and three timed executions per candidate:
+A separate 15-second Instruments recording at 4096-square yielded 11,197
+execution CPU samples: input collection appeared in 0.43%, compared with 59.82%
+before this follow-up. The matrix callback appeared in 85.47%; its certificate
+in 23.77% and candidate generation in 15.50%. These call-stack percentages are
+nested, not additive. No execution sample contained `nextafter` or the old
+DependencyCertificate path. Generic `memmove` remained a 27.15% leaf hotspot;
+its exact call-site split needs disassembly or targeted instrumentation before
+selecting another optimization. Timings above come from unprofiled runs.
 
-| Candidate | Median (ms) | Measured range (ms) | Maximum RSS (MiB) |
-| --- | ---: | ---: | ---: |
-| Scalar | 4278.90 | 4245.43–4293.47 | 778.20 |
-| Accelerate | 4237.71 | 4214.06–5256.59 | 778.09 |
-| Direct SME | 4731.52 | 4715.69–4771.17 | 778.11 |
-
-Managed Payload peak was 536,882,424 bytes, with Metadata still 2,944 bytes.
-The large workload needs increased host capacity and a larger finite collection
-visit-work allowance: the `grid 4096` command sets Host to 1 GiB and scales the
-visit limit with component count. It retains the default Metadata limit.
-The old regional 4096 workload was not rerun, so no speedup over that path is
-claimed at this size. Accelerate and Scalar differ by about 1% here; the sample
-count and observed variability do not establish a stable advantage.
-
-A separate 15-second Accelerate recording at 4096 found input collection 59.82%,
-NUM-14 callback 40.06%, and other execution 0.12% of 12,586 execution samples.
-Certification alone was 26.63% of total samples and candidate generation 2.34%
-(nested inside the callback). The maintained public `grid 4096` command also
-passed independently, measuring 4.021 s median under its 1 GiB Host budget.
-
-Current native validation: strict and all three Apple candidate selections pass
-1,182 independent oracle cases and the Whole public/direct fixtures. Four focused
-CTests (numeric operations, dependency sampling, resources, compiler), formatting,
-lint and installed static Apple consumer pass. Independent implementation review
-has no unresolved blocker/required finding. This does not establish behavior on
-other CPUs, older macOS versions or other SME vector lengths.
+Current native validation: strict and all three Apple selections pass 1,598
+independent oracle cases and public/direct Whole fixtures. Seven focused CTests
+(value fragments, matrix certificate, numeric operations, dependency sampling,
+execution demand, resources, compiler), ICC typed/resource propagation,
+formatting/lint and an installed static Apple consumer pass. Independent
+implementation and rounding-proof review has no unresolved blocker/required
+finding. Results do not establish other CPUs, older macOS or other SME vector
+lengths; the new error bound applies only to finite Float32 sources.
 
 ## Discrete derivatives and cumulative integration: NUM-15
 

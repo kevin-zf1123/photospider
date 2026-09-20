@@ -85,6 +85,34 @@ def cases():
         for x,row,b in fixed:
             yield dtype, 2, (2,), x, row+row, [b,b]
 
+    # Finite FP32 adversaries for the matrix-specific rounding certificate.
+    # Midpoints plus/minus the smallest exact product must never be accepted
+    # on an approximate double sum alone, including binade/range boundaries.
+    one, half, sign = 0x3f800000, 0x3f000000, 0x80000000
+    for exponent in (1, 2, 23, 24, 126, 127, 128, 230, 253, 254):
+        e = exponent - 127
+        ulp = ieee_round(Fraction(2) ** (e - 23), 32, False)
+        for mantissa in (0, 1, 0x7ffffe, 0x7fffff):
+            for negative in (0, sign):
+                base = (exponent << 23) | mantissa | negative
+                x = [base, ulp | negative, 1, 0]
+                for perturbation in (1, 1 | sign):
+                    row = [one, half, perturbation, 0]
+                    yield 3, 2, (4,), x, row + row, [0, 0]
+    # Cover wide finite exponent mixtures separately from NaN priority cases.
+    for case in range(256):
+        cin, cout = 2 + case % 3, 2 + (case // 3) % 3
+        finite = lambda: (rng.randrange(2) << 31) | (rng.randrange(255) << 23) | rng.getrandbits(23)
+        x = [finite() for _ in range(8 * cin)]
+        matrix = [finite() for _ in range(cin * cout)]
+        bias = [finite() for _ in range(cout)]
+        if case % 2:
+            for row in range(8):
+                x[row * cin + 1] = x[row * cin]
+            for out in range(cout):
+                matrix[out * cin + 1] = matrix[out * cin] ^ sign
+        yield 3, cout, (8, cin), x, matrix, bias
+
 
 def main():
     rows = list(cases())
