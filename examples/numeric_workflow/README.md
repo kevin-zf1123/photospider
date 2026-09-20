@@ -512,20 +512,23 @@ python3 examples/numeric_workflow/interpolation_oracle.py \
 Use `_accelerated_apple_silicon` on Apple Silicon or `_accelerated_x86_64` on
 x86-64. The workflow expects
 `smoothstep=[0,0,.15625,.5,.84375,1,1]` and
-`mix=[10,10,11.5625,15,18.4375,20,20]`, and checks staged factor control,
-selected branch Data and typed-validation closure. It also checks exact sparse
-support, factor-cache branch replacement, invalid-factor/edge atom isolation,
-layout and ROI behavior, empty demand, sNaN caller fenv preservation, WorkLimit
-and cancellation cleanup. `interpolation_oracle.py` uses raw IEEE decoding,
-`Fraction` and direct destination rounding.
+`mix=[10,10,11.5625,15,18.4375,20,20]`. Both families now use synchronous
+Whole execution. Nonempty requests collect and typed-validate all three inputs,
+including unselected mix endpoints, then allocate complete packed output for
+consumer projection. Input collection/typed failure may precede invalid factor
+checking. Invalid factors or edges anywhere fail with Run scope and no Atom key;
+Empty invokes no callback. Mix endpoint raw copies and smoothstep edge/NaN
+priority remain unchanged. All input edits invalidate all observed outputs.
 
-Local strict and Apple profile runs passed 5244 oracle cases per profile and
-the complete manual workflow. Ubuntu WSL Clang strict/x86 passed the same
-5244 cases per profile and manual checks; the installed consumer passed locally. The smoothstep implementation uses a bounded 104-limb
-(6656-bit) exact cubic workspace with scalar `u128` multiplication and
-NEON/AVX2 comparison helpers. Diagnostics describe the selected profile and
-implementation; no performance result is claimed. This executable is a manual
-target without CTest or integration-test registration.
+The manual workflow checks eager source/typed failure, full support/dirty,
+unselected endpoint cache invalidation, layouts/unaligned origins/65-element
+tails, Empty, sNaN/fenv, and work/output/scratch/cancellation cleanup. Current
+strict/Apple Whole runs pass 5,244 independent IEEE/Fraction oracle cases per
+profile. Exact cubic/linear arithmetic and profile-specific comparison facilities
+remain unchanged. Per-value diagnostics are N/A. Historical WSL/installed-consumer
+checks were pre-Whole. See [NUM-08 measurements](../../docs/built-in_ops/01-numeric/interpolation-whole.md)
+for current execution, budgets and performance. The manual target has no CTest
+or integration registration.
 
 ## Layout transforms: NUM-09
 
