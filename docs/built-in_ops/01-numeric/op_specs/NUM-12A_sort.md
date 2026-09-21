@@ -47,61 +47,36 @@ floating conversion. The three CPU profiles produce identical output bits.
 
 Input rank is 1..8 with positive extents and logical element count <=2^40.
 Both output shapes are inferred statically; original axis indices therefore fit
-Int64. Only axis is a static numeric parameter. All output storage is dense per
-requested rectangle; there is no view/dense parameter.
+Int64. Only axis is a static numeric parameter. Each selected output owns complete dense storage; there is no view/dense parameter.
 
 ## Multi-output demand and invalidation
 
-For each output request, project requested coordinates onto all non-axis axes.
-For every selected line, read the entire input axis as exact Data support,
-including when only one sorted position or only indices is requested. Other
-lines have no Data demand. Add recognized typed-input Validation closure
-separately. Empty requests read no samples. No early NaN or singleton shortcut
-changes this full-line support contract.
-
-Values and indices can be requested independently or jointly. Share one stable
-ordering for a given line/input version; compute the union of required input
-lines without allocating or publishing an unrequested output. Internal original
-indices needed by stable sorting are scratch, not a forced public indices result.
-
-The implementation batches requested positions within each output evaluation.
-An accounted continuation retains the most recently sorted line permutation;
-positions on that line reuse it regardless of result-cache capacity. Different
-outputs have independent continuations and may sort the same line separately.
-There is no once-per-Run evaluation promise. Each observation retains its
-complete source-line Data/Validation witness.
-For values at sorted coordinate k, copy the source value at the corresponding
-stable original index. No additional source outside the full line is needed.
-
-Any source value change can alter the whole line order, so invalidate that line
-in both outputs; retained typed-validation changes invalidate their observations.
-Cache identity includes axis/profile, dtype/shape, original logical order and
-source/validation witnesses. Correctness and output bits do not depend on sort
-chunk sizes, worker order or whether the other output was requested earlier.
+Any nonempty demand reads and validates the complete source, including all lines
+and indices-only requests. Every source edit invalidates all recorded output
+observations; source/typed/resource failures affect the Run. Empty reads nothing.
+Each selected public output executes an independent Whole callback and allocates
+only that complete output. Both callbacks may sort the same lines independently.
+A single callback builds one permutation per line and reuses it for all positions.
+No cross-output or changed-q permutation block cache is promised. Public keys,
+output identities, stable ties and raw-value rules are unchanged.
 
 ## Algorithms, resources and errors
 
-A reference implementation uses stable comparison sorting or total keys
-(numeric/NaN class, original index) with O(L log L) work and O(L) bounded scratch
-per active line of length L. A proven partial-order selection may reduce work
-for sparse sorted positions while keeping exactly the same complete stable order
-and full-line support. No approximation of ranks is permitted.
+Iterative heapsort sorts (numerical key, original axis index). Keys are classified
+once per line and comparisons reuse them. For length L, permutation and keys
+require16*L element bytes plus ResourceAllocator headers/alignment/Entries,
+charged as metadata; keys die after sorting and permutation after outputting the
+line. Fixed comparison/exact state is admitted as payload workspace. The old
+16-times-input-payload workspace bound and staged publication are removed.
+Dense output and full source collection are additional allocations. Work is
+O(total_input*log L), with checked reads/ordering and bounded cancellation.
+No rounded rank, disk spill or private cache is introduced.
 
-Account raw values, original-index/permutation buffers, comparison scratch,
-retained source owners/windows, dependency metadata and only requested output
-payloads. Process bounded active lines under host work/capacity/stage limits;
-large lines may fail ResourceExhausted, without silently spilling to unaccounted
-disk storage or dropping stability. Poll cancellation during ingestion, sorting
-passes/comparison blocks and before publication. Read legal immutable arbitrary
-strides/offsets; publish packed owned fragments with correct global origins.
-No writable source alias or unrequested output cells are exposed.
-
-Compile/preflight rejects dtype/rank/shape/axis violations. Generic NaN/Inf data
-sorts successfully. Runtime upstream/typed/resource/cancellation failures retain
-existing categories. Failed observations publish no partial output; published
-owners survive context destruction. Independent completed observations follow
-the runtime's normal terminal rules. Apply the usual cache-off and owner-release
-contract without forcing either complete logical output into memory.
+Malformed dtype/rank/shape/axis remains a schema failure. Generic NaN/Inf sorts
+successfully, arbitrary legal input strides are supported, and output preserves
+raw bits. Failed Whole attempts release unpublished output, state and metadata;
+returned output survives context destruction. Sparse requests require the same
+complete selected output storage and may regress in time/memory.
 
 ## Acceptance and implementation status
 
@@ -114,7 +89,7 @@ Test each output alone and joint equality, partial sorted positions, unrequested
 lines with failing upstream values, all-NaN lines, singleton lines, repeated
 integers above 2^53, reverse/zero input strides, multi-axis shapes, source-read
 logs, full-line dirty propagation, sorting scratch limits, cancellation and
-result lifetime. The current three profile keys use the public ordering workflow
-and exact stable ordering implementation. The
-[numeric workflow README](../../../../examples/numeric_workflow/README.md)
-records the manual evidence. Proposed status is unchanged.
+result lifetime. The formal keys use Whole. Current public workflow, independent
+oracle and separate public/core performance evidence are in
+[NUM-12 Whole execution](../ordering-whole.md). Older regional WSL/installed
+records predate Whole and do not establish current platform acceptance.

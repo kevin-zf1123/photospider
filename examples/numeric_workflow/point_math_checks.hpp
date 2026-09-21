@@ -69,7 +69,8 @@ inline void layouts(const ps::WorkflowNode& node, unsigned ports) {
 // callback.
 inline void resources(const ps::WorkflowNode& node,
                       const std::vector<ps::Value>& inputs,
-                      std::uint64_t output_bytes = 0) {
+                      std::uint64_t output_bytes = 0,
+                      std::uint32_t output_index = 0) {
   auto registry = ps::make_default_operation_registry();
   std::vector<ps::OperationMetadata> metadata;
   std::vector<ps::Region> demands;
@@ -79,13 +80,14 @@ inline void resources(const ps::WorkflowNode& node,
   }
   auto traits =
       take(registry->resolve_traits(node.operation, metadata, node.parameters));
-  require(traits.outputs[0].region_rule == ps::OperationRegionRule::Whole &&
-              traits.outputs[0].dependency_version == 0 &&
-              traits.outputs[0].continuation_bytes == 0,
+  require(traits.outputs[output_index].region_rule ==
+                  ps::OperationRegionRule::Whole &&
+              traits.outputs[output_index].dependency_version == 0 &&
+              traits.outputs[output_index].continuation_bytes == 0,
           "formal profile has one Whole callback and admitted workspace");
   const auto output_region =
-      traits.outputs[0].shape_rule == ps::OperationShapeRule::Fixed
-          ? ps::Region::whole(traits.outputs[0].fixed_output_shape)
+      traits.outputs[output_index].shape_rule == ps::OperationShapeRule::Fixed
+          ? ps::Region::whole(traits.outputs[output_index].fixed_output_shape)
           : inputs[0].region();
   for (unsigned mode = 0; mode < (traits.workspace_bytes ? 3U : 2U); ++mode) {
     ps::ResourceLimits limits;
@@ -103,6 +105,7 @@ inline void resources(const ps::WorkflowNode& node,
       ps::OperationInvocation call(inputs, demands, node.parameters,
                                    ps::Backend::Cpu, {}, output_region,
                                    budget.allocator());
+      call.output_index = output_index;
       auto result = registry->invoke(node.operation, call);
       require(!result.ok() &&
                   result.status().code == ps::ErrorCode::ResourceExhausted,
@@ -129,6 +132,7 @@ inline void resources(const ps::WorkflowNode& node,
     ps::OperationInvocation call(inputs, demands, node.parameters,
                                  ps::Backend::Cpu, cancellation.token(),
                                  output_region, budget.allocator());
+    call.output_index = output_index;
     outcome = registry->invoke(node.operation, call).status();
   } catch (...) {
     done.store(true);

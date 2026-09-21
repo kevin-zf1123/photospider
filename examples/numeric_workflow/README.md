@@ -612,56 +612,24 @@ for independent validation, full-memory implications and timing evidence.
 
 ## Ordering and quantile: NUM-12
 
-`photospider_numeric_ordering` exercises the six `array.sort_*` and
-`numeric.quantile_*` keys through `photospider/numeric/ordering.hpp` and the
-public `WorkflowDocument` workflow. Build and run the manual target with
-Clang:
+All six formal sort/quantile profile keys use Whole. A selected sort output owns
+its complete values or indices array; the other output is not allocated. Both
+read all source lines. Per-line keys/permutation use16*L metadata element bytes
+plus allocator overhead; exact quantile keeps axis extent1 and excludes q when
+axis length is1. For longer axes, source failures can precede q validation.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_ordering -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_ordering strict
-python3 examples/numeric_workflow/ordering_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_ordering strict
+cmake --build build/clang21-numeric --target photospider_numeric_ordering -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
+python3 examples/numeric_workflow/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
 ```
 
-The executable accepts `strict`, `apple` and `x86` profile arguments. The basic
-fixture expects sort `[3,1,1,2]` to produce values `[1,1,2,3]` and stable indices
-`[1,2,3,0]`; quantile `[0,10,20,30]` at `q=.25` produces `7.5`. Sorting uses
-iterative heapsort on `(numeric key, original index)`, preserving stable ties
-with an 8N-byte permutation and 8-byte zero-stride incoming state. Quantile uses exact UInt128
-rank selection and 4352-bit arithmetic for one final destination rounding.
-Partial output still requires the selected source line.
-
-`sort_node` exposes `values` and Int64 `indices`; `quantile_node` keeps the
-reduced axis at extent one and defaults to Float64. Both take an explicit axis
-and profile. The complete dtype, NaN, dependency and error contracts are beside
-the public helpers and in the category's two operator specifications.
-
-The example enables `ExecutionContextConfig::result_cache_bytes=65536` and
-sets an explicit `ExecutionOptions::maximum_dependency_cache_work` budget.
-These settings permit the host to reuse the immutable permutation between
-values and indices while each keeps its own current source evidence. The
-`share_blocks_across_outputs` trait is an opt-in for operation authors; ordinary
-workflow authors use the registered sort helper. Cache-off, exhausted proof work
-and insufficient retention capacity recompute without changing output bits.
-The cache saves sorting work; a hit still checks current source bytes and copies
-an 8N-byte state. There is no once-per-Run or performance guarantee.
-`block_contracts()` demonstrates the new contract entirely through public
-registry/session services, including differing Data/Control certificates.
-
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18.1.3 strict/AVX2 passed
-2072 independent stable-order/Fraction cases per profile, including 4097-element
-lines exercising the high remainder word. The public manual checks independent
-and combined outputs, a 128-element line with differing output dtypes, sparse
-support/dirty mapping, cache-off/proof exhaustion, q/source replacement, skipped
-and required failures, typed closure, Empty, negative strides, fenv flags,
-work/cancellation cleanup and failed-attempt counters. The shared-block probe
-checks scope opt-in, independent Data/Control certificates and changed input
-coordinates/bits. Installed 0.14 consumers passed and an old 0.13 request was
-rejected. Focused compiler/dependency/resources units and scoped implementation,
-arithmetic and block-identity reviews passed. This manual target is excluded
-from the default build and has no CTest/integration-test registration. WSL runs
-establish numerical correctness only; no performance result is claimed.
+Select `apple`/`x86` for available accelerated profiles. Sort[3,1,1,2] yields
+values[1,1,2,3], indices[1,2,3,0]; quantile([0,10,20,30],q=.25)=7.5.
+See [NUM-12 Whole execution](../../docs/built-in_ops/01-numeric/ordering-whole.md)
+for stable/raw-bit oracle, failure/budget validation and performance. The generic
+public block-contract probe remains a separate example; these formal Whole
+operators no longer use staged block sharing.
 
 ## Exact comparisons and select: NUM-07
 
