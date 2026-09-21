@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -188,14 +189,13 @@ void sparse_and_step(ps::CpuNumericProfile profile) {
   require(answer.values.at("values").read({1}, &bits, 8).ok() &&
               bits == 0x4000000000000000,
           "unused center NaN ignored");
-  auto stencil = take(ps::Footprint::from_regions(
-      {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
-  require(take(answer.dependencies.source_support()).at("input0") == stencil,
-          "two-point exact stencil");
+  require(
+      take(answer.dependencies.source_support()).at("input0") ==
+          take(ps::Footprint::all({3})),
+      "Whole derivative reads full samples while numerically excluding center");
   require(take(answer.dependencies.potential_dirty("input0", center))
-              .at("values")
-              .empty(),
-          "center outside derivative dependencies");
+                  .at("values") == center,
+          "Whole center edit invalidates recorded output");
   require(take(answer.dependencies.potential_dirty(
                    "input1", take(ps::Footprint::all({1}))))
                   .at("values") == center,
@@ -206,93 +206,86 @@ void sparse_and_step(ps::CpuNumericProfile profile) {
        array(Type::Float64, {1}, {0}),
        array(Type::Float64, {1}, {0x7ff0000000000042})});
   auto zero = take(ps::Footprint::from_regions({3}, {ps::Region({{0, 1}})}));
+  auto failed = integral.run({{"values", zero}});
+  require(!failed.ok() &&
+              failed.status().message.find("InvalidSampleStep") !=
+                  std::string::npos &&
+              failed.status().detail.scope == ps::FailureScope::Run,
+          "invalid step fails even initial-only projection for N>1");
+  integral.bindings.inputs[1].value =
+      array(Type::Float64, {1}, {0x3ff0000000000000});
   auto raw = take(integral.run({{"values", zero}}));
   require(raw.values.at("values").read({0}, &bits, 8).ok() &&
               bits == 0x7ff0000000000042,
-          "initial raw sNaN at zero");
-  auto support = take(raw.dependencies.source_support());
-  require((support.find("input0") == support.end() ||
-           support.at("input0").empty()) &&
-              (support.find("input1") == support.end() ||
-               support.at("input1").empty()) &&
-              support.at("input2") == take(ps::Footprint::all({1})),
-          "initial-only support");
-  ps::GraphContext graph(integral.document);
-  auto plan = take(ps::Compiler(integral.registry).compile(graph));
-  ps::ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.managed_resources = ps::ResourceLimits{};
-  ps::ExecutionContext context(integral.registry, config);
-  auto atoms =
-      take(context.execute_atoms(plan.plan, integral.bindings,
-                                 {{"values", take(ps::Footprint::all({3}))}}));
-  unsigned good = 0, bad = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++good;
-      require(atom.key.coordinate[0] == 0, "only zero ignores step");
-    } else {
-      ++bad;
-      const auto& failure = atom.outcome.status();
-      require(atom.key.coordinate[0] > 0 &&
-                  failure.code == ps::ErrorCode::InvalidArgument &&
-                  failure.reason == ps::FailureReason::InvalidDomain &&
-                  failure.detail.origin == ps::FailureOrigin::Domain &&
-                  failure.detail.scope == ps::FailureScope::Atom &&
-                  failure.detail.atom == atom.key &&
-                  failure.message.find("InvalidSampleStep: port=1 bits=0") !=
-                      std::string::npos,
-              "step atom attribution");
-    }
-  }
-  require(good == 1 && bad == 2, "output-zero isolated from invalid step");
-  std::cout << "sparse stencil/dirty, center NaN exclusion, raw initial-only "
-               "boundary and invalid-step Atom isolation passed\n";
+          "output zero preserves raw initial sNaN after full preparation");
+  require(take(raw.dependencies.source_support()).at("input0") ==
+              take(ps::Footprint::all({3})),
+          "initial projection retains full source support");
+  std::cout << "Whole support/dirty, center NaN arithmetic exclusion, raw "
+               "initial and Run step failure passed\n";
 }
 void failure_order(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry(false);
   std::array<unsigned, 2> calls{};
-  for (unsigned kind = 0; kind < 2; ++kind) {
+  for (unsigned kind = 0; kind < 3; ++kind) {
     ps::OperationDefinition failure;
-    failure.key = kind ? "manual.calculus_step" : "manual.calculus_samples";
+    failure.key = kind == 0   ? "manual.calculus_samples"
+                  : kind == 1 ? "manual.calculus_step"
+                              : "manual.calculus_single";
     failure.traits.input_count = 0;
     failure.traits.input_schema.clear();
-    failure.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-    failure.traits.outputs[0].fixed_output_shape = {kind ? 1U : 3U};
-    failure.traits.outputs[0].output_element_type = Type::Float64;
+    auto& output = failure.traits.outputs[0];
+    output.shape_rule = ps::OperationShapeRule::Fixed;
+    output.fixed_output_shape = {kind == 0 ? 3U : 1U};
+    output.output_element_type = Type::Float64;
     failure.callback = [&, kind](const auto&) {
-      ++calls[kind];
+      ++calls[kind == 1 ? 1 : 0];
       return ps::Result<ps::Value>(ps::Status{
           ps::ErrorCode::OperationFailed,
-          kind ? "required step producer" : "required samples producer"});
+          kind == 1 ? "required step producer" : "required samples producer"});
     };
     require(registry->register_operation(std::move(failure)).ok(),
-            "failure source registration");
+            "register calculus failed producers");
   }
-  require(registry->freeze().ok(), "failure registry freeze");
-  Fixture initial_only(
-      authored(true, profile),
-      {array(Type::Float64, {3}, {0, 0, 0}), array(Type::Float64, {1}, {0}),
-       array(Type::Float64, {1}, {0x8000000000000000})});
-  initial_only.registry = registry;
-  initial_only.document.inputs.erase(initial_only.document.inputs.begin(),
-                                     initial_only.document.inputs.begin() + 2);
-  initial_only.bindings.inputs.erase(initial_only.bindings.inputs.begin(),
-                                     initial_only.bindings.inputs.begin() + 2);
-  initial_only.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "value"};
-  initial_only.document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{3, "value"};
-  initial_only.document.nodes.push_back({2, "manual.calculus_samples", {}, {}});
-  initial_only.document.nodes.push_back({3, "manual.calculus_step", {}, {}});
-  auto zero =
-      take(initial_only.run({{"values", take(ps::Footprint::from_regions(
-                                            {3}, {ps::Region({{0, 1}})}))}}));
-  std::uint64_t bits = 0;
-  require(zero.values.at("values").read({0}, &bits, 8).ok() &&
-              bits == 0x8000000000000000 &&
-              calls == std::array<unsigned, 2>{0, 0},
-          "zero skips failing sample/step producers");
-  for (bool integral : {false, true}) {
+  require(registry->freeze().ok(), "freeze calculus failure registry");
+  for (bool singleton : {true, false}) {
+    auto count = singleton ? 1U : 3U;
+    Fixture fixture(
+        authored(true, profile),
+        {array(Type::Float64, {count}, std::vector<std::uint64_t>(count)),
+         array(Type::Float64, {1}, {0}),
+         array(Type::Float64, {1}, {0xfff0000000000042})});
+    fixture.registry = registry;
+    fixture.document.inputs.erase(fixture.document.inputs.begin(),
+                                  fixture.document.inputs.begin() + 2);
+    fixture.bindings.inputs.erase(fixture.bindings.inputs.begin(),
+                                  fixture.bindings.inputs.begin() + 2);
+    fixture.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "value"};
+    fixture.document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{3, "value"};
+    fixture.document.nodes.push_back(
+        {2,
+         singleton ? "manual.calculus_single" : "manual.calculus_samples",
+         {},
+         {}});
+    fixture.document.nodes.push_back({3, "manual.calculus_step", {}, {}});
+    calls = {};
+    auto result = fixture.run(
+        {{"values",
+          take(ps::Footprint::from_regions({count}, {ps::Region({{0, 1}})}))}});
+    if (singleton) {
+      auto answer = take(std::move(result));
+      std::uint64_t bits = 0;
+      require(answer.values.at("values").read({0}, &bits, 8).ok() &&
+                  bits == 0xfff0000000000042 &&
+                  calls == std::array<unsigned, 2>{0, 0},
+              "N1 excludes failed samples/step and copies raw initial");
+    } else {
+      require(!result.ok() && calls[0] > 0,
+              "N>1 zero projection still reads complete samples");
+    }
+  }
+  for (bool integral : {false, true})
     for (bool valid : {false, true}) {
       std::vector<ps::Value> inputs{
           array(Type::Float64, {3}, {0, 0, 0}),
@@ -306,21 +299,16 @@ void failure_order(ps::CpuNumericProfile profile) {
       fixture.bindings.inputs.erase(fixture.bindings.inputs.begin());
       fixture.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "value"};
       fixture.document.nodes.push_back({2, "manual.calculus_samples", {}, {}});
-      const auto prior = calls[0];
-      auto answer = fixture.run(
-          {{"values",
-            take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}))}});
-      require(!answer.ok(), "required failure");
-      require(valid ? answer.status().message == "required samples producer" &&
-                          calls[0] == prior + 1
-                    : answer.status().message.find("InvalidSampleStep") !=
-                              std::string::npos &&
-                          calls[0] == prior,
-              "step before samples, initial NaN still reads samples");
+      const auto previous = calls[0];
+      auto result = fixture.run({{"values", take(ps::Footprint::all({3}))}});
+      require(!result.ok() &&
+                  result.status().message == "required samples producer" &&
+                  calls[0] == previous + 1,
+              "Whole source error precedes step callback validation and "
+              "initial NaN");
     }
-  }
-  std::cout << "zero skips failing producers; invalid step precedes samples; "
-               "valid step retains upstream failure after initial NaN\n";
+  std::cout << "singleton projection and Whole eager-source failure priority "
+               "passed\n";
 }
 
 void strides_and_resources(ps::CpuNumericProfile profile) {
@@ -378,66 +366,30 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
     for (const auto& value : inputs)
       request.inputs.push_back({value.descriptor(), {}});
     request.snapshot_identity = "calculus-resource";
-    request.outputs = take(ps::Footprint::none({3}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty calculus no reads");
-    request.outputs =
-        take(ps::Footprint::from_regions({3}, {ps::Region({{2, 1}})}));
-    for (bool cancel : {false, true}) {
-      ps::ResourceBudget resources(ps::ResourceLimits{});
-      ps::CancellationSource cancellation;
-      request.cancellation = cancellation.token();
-      bool armed = false, interrupted = false;
-      std::shared_ptr<ps::DependencySession> session;
-      session = take(registry->start_dependency(
-          node.operation, request, resources.allocator(),
-          [&](std::uint64_t amount) {
-            if (armed && amount == (integral ? 512U : 1024U) &&
-                session->numeric_diagnostics().evaluated_values == 1) {
-              interrupted = true;
-              if (cancel)
-                cancellation.cancel();
-              else
-                return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                  "calculus arithmetic work",
-                                  ps::FailureReason::WorkLimit};
-            }
-            return ps::Status::success();
-          }));
-      for (unsigned stage = 0; stage < 2; ++stage) {
-        require(session->poll().ok(), "calculus Need before interrupt");
-        std::vector<ps::Footprint> wanted;
-        for (const auto& input : request.inputs)
-          wanted.push_back(take(ps::Footprint::none(input.descriptor.shape)));
-        for (const auto& need : take(session->pending_reads()))
-          wanted[need.port] = take(wanted[need.port].unite(need.samples));
-        std::vector<ps::ValueFragments> supplied;
-        for (unsigned port = 0; port < inputs.size(); ++port) {
-          auto all = take(ps::ValueFragments::create(
-              inputs[port].descriptor(), {},
-              take(ps::Footprint::all(inputs[port].descriptor().shape)),
-              {inputs[port]}));
-          supplied.push_back(take(all.restrict(wanted[port])));
-        }
-        require(session->supply(supplied, request.snapshot_identity).ok(),
-                "calculus supply");
-      }
-      armed = true;
-      auto failed = session->poll();
-      require(interrupted && !failed.ok() &&
-                  failed.status().code ==
-                      (cancel ? ps::ErrorCode::Cancelled
-                              : ps::ErrorCode::ResourceExhausted),
-              "calculus arithmetic interrupt");
-      require(session->numeric_diagnostics().evaluated_values == 1 &&
-                  session->numeric_diagnostics().copied_elements == 0,
-              "calculus failed attempt counters");
-      session.reset();
-      require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-              "calculus resource release");
+    Fixture empty(node,
+                  {samples, array(Type::Float64, {1}, {0xbff0000000000000})});
+    if (integral) {
+      empty = Fixture(node,
+                      {samples, array(Type::Float64, {1}, {0xbff0000000000000}),
+                       array(Type::Float64, {1}, {0})});
     }
+    require(empty.run({{"values", take(ps::Footprint::none({3}))}}).ok(),
+            "Empty calculus skips inputs");
+    ps::CancellationSource stopped;
+    stopped.cancel();
+    ps::OperationInvocation cancelled(inputs, regions, node.parameters,
+                                      ps::Backend::Cpu, stopped.token(),
+                                      ps::Region::whole({3}));
+    require(registry->invoke(node.operation, cancelled).status().code ==
+                ps::ErrorCode::Cancelled,
+            "calculus pre-cancelled");
+    auto large = array(Type::Float64, {16384},
+                       std::vector<std::uint64_t>(16384, 0x3ff0000000000000));
+    std::vector<ps::Value> large_inputs{
+        large, array(Type::Float64, {1}, {0x3ff0000000000000})};
+    if (integral)
+      large_inputs.push_back(array(Type::Float64, {1}, {0}));
+    point_math_checks::resources(node, large_inputs);
     request.cancellation = {};
     for (unsigned kind = 0; kind < 3; ++kind) {
       auto bad = request;
@@ -447,11 +399,63 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
         bad.inputs[1].descriptor.element_type = Type::Float32;
       if (kind == 2)
         bad.inputs[1].descriptor.shape = {2};
-      auto result = registry->start_dependency(node.operation, bad);
+      auto result =
+          registry->resolve_traits(node.operation, bad.inputs, bad.parameters);
       require(
           !result.ok() && result.status().code == ps::ErrorCode::TypeMismatch,
           "calculus schema");
     }
+  }
+  for (bool integral : {false, true})
+    for (bool zero : {false, true}) {
+      auto node = authored(integral, profile);
+      const double raw[] = {0, 1, 2};
+      auto samples = take(ps::BufferAllocator{}.allocate(25));
+      std::memcpy(samples.data() + 1, raw, 24);
+      auto source = take(ps::Value::from_storage(
+          {Type::Float64, {3}}, ps::Region::whole({3}), {17, {zero ? 0 : -8}},
+          std::move(samples).freeze()));
+      auto control = take(ps::BufferAllocator{}.allocate(9));
+      const double one = 1;
+      std::memcpy(control.data() + 1, &one, 8);
+      auto step = take(ps::Value::from_storage({Type::Float64, {1}},
+                                               ps::Region::whole({1}), {1, {0}},
+                                               std::move(control).freeze()));
+      std::vector<ps::Value> inputs{source, step};
+      if (integral)
+        inputs.push_back(array(Type::Float64, {1}, {0}));
+      std::vector<ps::Region> regions;
+      for (const auto& value : inputs)
+        regions.push_back(value.region());
+      ps::OperationInvocation call(inputs, regions, node.parameters);
+      auto result = take(registry->invoke(node.operation, call));
+      for (unsigned i = 0; i < 3; ++i) {
+        double actual = 0;
+        std::memcpy(&actual, result.bytes().data() + 8 * i, 8);
+        const double expected = integral ? (zero     ? 2 * i
+                                            : i == 0 ? 0
+                                            : i == 1 ? 1.5
+                                                     : 2)
+                                         : (zero ? 0 : -1);
+        require(actual == expected,
+                "unaligned negative/zero source and control layout");
+      }
+    }
+  const auto facet = take(ps::encode_semantic(ps::rgba_semantics()));
+  for (bool integral : {false, true}) {
+    const auto raw = array(Type::Float32, {3}, {0, 0, 0});
+    auto bad = take(ps::Value::from_storage(
+        raw.descriptor(), raw.region(), raw.layout(), raw.storage(), {facet}));
+    std::vector<ps::Value> inputs{bad, array(Type::Float32, {1}, {0x3f800000})};
+    if (integral)
+      inputs.push_back(array(Type::Float32, {1}, {0}));
+    std::vector<ps::Region> regions;
+    for (const auto& input : inputs)
+      regions.push_back(input.region());
+    auto node = authored(integral, profile);
+    ps::OperationInvocation call(inputs, regions, node.parameters);
+    require(!registry->invoke(node.operation, call).ok(),
+            "incompatible recognized typed metadata rejects rank-one calculus");
   }
   std::cout << "negative source/control strides and fenv, Empty/schema, "
                "arithmetic WorkLimit/cancellation and payload release passed\n";
@@ -479,61 +483,18 @@ void streaming(ps::CpuNumericProfile profile) {
       {4096}, {ps::Region({{64, 1}}), ps::Region({{129, 1}}),
                ps::Region({{4095, 1}})}));
   require(take(result.dependencies.potential_dirty("input0", changed))
-                  .at("values") == positive,
+                  .at("values") == demand,
           "inclusive integral suffix dirty");
   require(take(result.dependencies.potential_dirty(
                    "input1", take(ps::Footprint::all({1}))))
-                  .at("values") == positive,
+                  .at("values") == demand,
           "step only positive outputs");
   require(take(result.dependencies.potential_dirty(
                    "input2", take(ps::Footprint::all({1}))))
                   .at("values") == demand,
           "initial all outputs");
-  ps::DependencyRequest request;
-  for (const auto& binding : fixture.bindings.inputs)
-    request.inputs.push_back({binding.value.descriptor(), {}});
-  request.snapshot_identity = "integral-streaming";
-  request.outputs = demand;
-  request.limits.maximum_work = 128 * 1024 * 1024;
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(fixture.registry->start_dependency(
-      fixture.document.nodes[0].operation, request, resources.allocator()));
-  std::uint64_t next = 0, windows = 0;
-  while (true) {
-    auto progress = take(session->poll());
-    if (std::holds_alternative<ps::DependencyResult>(progress))
-      break;
-    std::vector<ps::Footprint> wanted;
-    for (const auto& input : request.inputs)
-      wanted.push_back(take(ps::Footprint::none(input.descriptor.shape)));
-    for (const auto& need : take(session->pending_reads())) {
-      wanted[need.port] = take(wanted[need.port].unite(need.samples));
-      if (need.port == 0 && (need.roles & 1)) {
-        require(need.samples.boxes().size() == 1 &&
-                    need.samples.boxes()[0].dimensions()[0].offset == next,
-                "integral ordered windows");
-        const auto count = take(need.samples.element_count());
-        require(count <= 64, "bounded integral window");
-        next += count;
-        ++windows;
-      }
-    }
-    std::vector<ps::ValueFragments> supplied;
-    for (unsigned port = 0; port < request.inputs.size(); ++port) {
-      const auto& input = fixture.bindings.inputs[port].value;
-      auto all = take(ps::ValueFragments::create(
-          input.descriptor(), {},
-          take(ps::Footprint::all(input.descriptor().shape)), {input}));
-      supplied.push_back(take(all.restrict(wanted[port])));
-    }
-    require(session->supply(supplied, request.snapshot_identity).ok(),
-            "integral window supply");
-  }
-  require(next == 4096 && windows == 64 &&
-              session->numeric_diagnostics().evaluated_values == 4096,
-          "integral scans source once");
-  std::cout << "4096 inputs, four sparse integral outputs, 64 bounded windows "
-               "and exact sample/step/initial dirty passed\n";
+  std::cout << "4096 inputs and complete integral output, sparse projection "
+               "and Whole dirty passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) {

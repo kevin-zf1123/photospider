@@ -10,11 +10,13 @@ from sequence_oracle import ieee_round
 
 
 def reference(integral, dtype, samples, index, step, initial):
-    if integral and not index:
+    if integral and len(samples) == 1:
         return initial
     h = number(step, dtype)
     if h is None or h in (0, math.inf, -math.inf):
         return 'step'
+    if integral and not index:
+        return initial
     fraction, _, width = format_info(dtype)
     sign = 1 << (width-1)
     infinity = ((1 << (width-fraction-1))-1) << fraction
