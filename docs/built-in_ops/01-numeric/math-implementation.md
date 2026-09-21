@@ -776,52 +776,98 @@ all-shape/platform claim. No new primitive or numerical standard was introduced.
 
 ## CRV-05 dynamic-axis LUT1D
 
-`UniformAxis` validates finite start/end/step, singleton raw endpoint/+0 rules,
-RN64 derived step, and every rounded endpoint-weighted coordinate in table order.
-It retains an admitted ResourceVector of 8L bytes; no table value is needed for
-that validation. The four-poll LUT continuation reads shared axis, then exactly
-requested query coordinates, then selected table singleton/pairs and publishes
-all requested packed fragments. Descending lookup compares reversed numerical
-order keys; before exact linear evaluation it reverses both coordinates and
-values to meet ExactCurve's positive-denominator precondition. This is the
-same mathematical negative-denominator formula. Direct hits/clamps/singletons
-convert only the selected entry; other paths preserve both endpoint witnesses
-and apply the whole-formula zero rule. The shared ExactCurve certified Float32
-path retains correctly rounded results and reports fallback where available.
-ExactCurve clears its borrowed work callback on every
-return/exception; native CRV-01 five groups and 2484 Fraction cases regressed
-successfully after that lifetime-only change.
+`UniformAxis` reconstructs each RN64 endpoint-weighted knot, verifies exact step,
+strict ordering and singleton raw endpoints/+0. Scalar/channel lookup preserves
+one-entry selections and exact whole-formula linear interpolation. Descending
+pairs reorder both x/y to satisfy ExactCurve's positive-denominator internal
+representation. Channel queries are classified independently.
 
-Query Control remains per scalar; recognized Image Validation closes channels
-separately. Channel tables do not share a query/index merely because a row prefix
-matches. Numeric errors carry complete global scalar Atom coordinates up to rank
-8. Full axis is revalidated per admitted continuation, with no persistent shared
-grid cache. Work is O(L+M log L) plus exact sampling/interpolation and association
-work. The default direct session work budget can be exhausted by a small grid;
-public fixtures explicitly allow 32 Gi session/64 Gi Run work units. At L=1048576,
-8 MiB of admitted grid capacity fits the default Metadata budget for a tiny Q.
-Per-stage certificate reservation is 4096+16384*M bytes, so output payload alone
-does not bound large dense requests. All output/point/grid/exact scratch and
-publication owners use host admission; resource failure never skips axis checks.
+Every nonempty request uses one CPU Whole callback over complete input, table
+and axis Values, including recognized typed validation and upstream failures.
+Validate the complete reconstructed axis first, then every finite/domain query
+before table arithmetic. Compute every output element/channel and publish one
+immutable dense owner with the complete input shape. Sparse demand restricts
+returned coverage, not computation or full output memory. Empty reads no payload;
+all static metadata checks still apply.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed 1416 independent Fraction grid/linear cases per
-profile and six manual groups. The oracle independently reconstructs RN64 knots
-and exact signed-denominator interpolation, then applies integer IEEE rounding.
-Coverage includes mixed dtypes, both orders/all domain modes/singletons, extreme
-cancellation, mismatched/overflowed/underflowed steps, collapsed coordinates,
-subnormal queries, direct and mixed/extrapolated zero signs, rank-eight queries
-and selected versus remote invalid entries. The manual path checks exact source
-support/dirty, channel Atom isolation, cache changes to all three inputs, all-port
-negative/unaligned/zero strides and fenv, typed Image closure, source failure
-ordering, axis-loop and arithmetic/second-box cancellation, work/state/stage
-admission and unpublished Payload retirement. It executes a complete maximum-L
-grid using one scalar-backed public constant table and a sparse 2^39-channel
-constant composition. All six baking constructors feed their consumer, with
-explicit discrete expected values and rejection of repeated-grid axes.
-Installed 0.15 consumers, focused compiler unit, ClangFormat 21/cpplint and
-independent math/entry/oracle reviews passed. No new CTest/integration entry or
-performance claim was added; WSL results establish correctness only.
+Mathematical table selection is unchanged: knot/clamp/singleton converts one
+entry; interpolation/extrapolation uses its adjacent pair, independently per
+channel. Generic entries outside all evaluated stencils receive no additional
+finite scan. Typed validation and upstream collection cover the complete table.
+Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
+Any input/table/axis edit invalidates recorded output demand. Cache identity
+retains all input versions, profile, metadata and parameters. There is no
+per-channel Atom success isolation. Output dtype, shape and empty facets remain
+unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
+legal. The complete immutable owner survives context destruction.
+
+For M total input elements, work is O(L+M log L) plus exact arithmetic, full
+input collection and typed validation. Singleton lookup is constant time per
+query. The callback retains a host-accounted Float64 grid of 8*L element bytes
+(up to 8 MiB) plus allocator/metadata overhead, fixed exact workspace and O(rank)
+coordinate state. It retains no per-output certificates, rows or lookup table.
+Output costs dtype_bytes*M, regardless of requested coverage. Complete table
+collection costs its full L (or L*C) logical payload when a dense collect is
+needed; retained source owners are accounted separately.
+
+The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
+floating environment covers axis reconstruction and curve evaluation; unresolved
+accelerated bounds still use the same exact fallback. Work/cancellation is checked
+in axis generation, input reads, lookup and exact arithmetic, and before publishing.
+Resource failure never authorizes skipping axis validation or weaker arithmetic.
+Unpublished output/workspace is released; no partial success is published.
+Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
+resource, stale, backend and cancellation failures retain their categories.
+Whole does not expose per-value fallback counters; report those as unavailable.
+
+Native strict/Apple each pass six public workflow groups and 1416 independent
+Fraction grid/linear cases, covering complete output semantics, mixed dtypes,
+Float32/64 fenv/layouts, typed input, cache/source failures and active arithmetic/
+axis cancellation. The maximum L=1048576 grid retains an 8 MiB numeric index and
+uses 16 MiB payload admission for full table collect. Giant channel output is
+verified to reject an insufficient budget. All six public baking-to-LUT chains
+verify their separate approximation and axis constraints. Other CPUs were not
+rerun for this migration.
+
+
+Native Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug, package 0.18.0
+sampling uses L=17, 512 query rows, C=1 for scalar or C=4 for channels, dense
+input/table and Float64 axis=[0,16,1]. Table[j,c]=j+c and query[i,c]=
+((i+c)%64)/4+1/8; an independent identity-line check verifies query+c outside
+timing. Strict uses Float64 input/table/output; Apple uses Float32. One worker,
+cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata and dependency state,
+2^40 dependency/Run work, default unlimited managed work; one warm invocation
+precedes seven measured samples. The comparison adapter uses CRV-05 source at
+3d35f5eb with the same kernel. Public timing excludes compile/freeze and includes
+execution, collect, metering and result assembly. Core is the current prepared
+complete-Value callback with allocation/lookup/arithmetic/publication but no
+scheduler, collection or managed work metering. Times are median [min,max] ms.
+
+| Variant | Profile/dtype | Public before | Public Whole | Numeric callback core |
+| --- | --- | ---: | ---: | ---: |
+| scalar | strict/Float64 | 10.060 [9.604,13.724] | 2.654 [2.619,2.774] | 2.427 [2.403,2.468] |
+| scalar | apple/Float32 | 7.306 [7.211,7.412] | 0.145 [0.141,0.163] | 0.079 [0.075,0.087] |
+| channels | strict/Float64 | 45.436 [44.719,48.061] | 10.491 [10.373,10.585] | 9.777 [9.671,10.225] |
+| channels | apple/Float32 | 35.210 [33.301,35.548] | 0.449 [0.440,0.484] | 0.299 [0.290,0.307] |
+
+Context-reported peak Metadata changes from 19,951,808/83,804,528 bytes
+(scalar/channels) to 3,208 bytes; the comparison needs more than the default
+16 MiB Metadata cap. Full input collect increases channel Apple payload from
+295,176 to 303,624 bytes. These statistics exclude unmanaged memory/RSS.
+The 12-second Apple channel Time Profiler trace retains 11,765 execution-stack
+samples: ExactCurve::evaluate is inclusive in 29.23%, nextafter in 11.49%,
+ResourceBudget in 17.44%, UniformAxis::validate in 0.13%, and collect in 1.06%.
+No per-value fesetenv frame is sampled after guard reuse. Inclusive categories
+overlap. Exclusive samples also identify strided address calculation and mutex
+work, rather than dependency-description construction, among the remaining costs.
+The mathematical exact/interval bounds are unchanged; no NUM-14 certificate is
+used. This is evidence for the stated native workload, not all-shape speedups.
+
+Raw driver/build commands, ranges, trace/XML and summaries remain in ignored
+`build/crv-whole/lut1d-*`, including `lut1d-times.csv` and
+`lut1d-profile-summary.txt`. Current focused numeric/compiler tests, ClangFormat21,
+cpplint and scoped code/spec review passed.
+
 
 ## CRV-06 ColorArray and color ramps
 

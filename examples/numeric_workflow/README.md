@@ -1376,26 +1376,32 @@ python3 examples/numeric_workflow/lut1d_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_lut1d strict
 ```
 
-Use `apple` or `x86` only on the corresponding CPU. Every nonempty request first
-validates the entire endpoint-weighted RN64 grid and the exact derived step,
-then requested queries, then only selected table singleton/pairs. The supplied
-step is never repeatedly accumulated. L=1 requires bit-identical endpoints and
-+0 step; every query remains required. Equal/collapsed grids can be produced by
-an interpolation bake but are rejected by this consumer. Invalid axis/query
-requests read no table values. Axis validation work remains global even for an
-endpoint request. Current profiles round the complete line once and agree
-bitwise, including descending pairs and finite results across huge cancellation.
+Use `apple` or `x86` only on the corresponding CPU. Whole collects complete
+input/table/axis with typed validation, validates the full endpoint-weighted
+RN64 grid and exact step, then all queries before table arithmetic. It computes
+and owns the complete output even for sparse demand. The step is not accumulated.
+L=1 requires bit-identical endpoints and +0 step; every query is validated.
+Equal/collapsed grids from an interpolation bake remain invalid to this consumer.
 
-Six public manual groups cover analytic/domain cases, exact read/dirty support,
-invalid axes/zero signs, all-port strides and fenv, typed Image query closure,
-cache/Atom/upstream ordering, axis/arithmetic cancellation and resource/owner
-release, all six baking chains, a full 1048576-point grid and sparse 2^39
-channels. `Fixture::run` supplies explicit work budgets. Grid storage is 8L bytes;
-exact scratch and per-cell certificates are separately admitted. Large dense
-requests may exhaust metadata/association budgets. Results remain readable after
-the helper's context is destroyed. The executable stays outside default builds,
-CTest and integration tests; WSL Clang verifies correctness only. See the
+Math knot/clamp/singleton selects one table entry; other queries use a pair.
+Generic entries outside every evaluated stencil are not additionally finite-
+checked, while complete typed/upstream failures still apply. Numeric errors have
+Run scope and any input edit invalidates recorded output demand. Descending
+pairs, singleton/domain/zero rules, mixed dtypes and the numerical contract are
+unchanged. A caller-preserving floating environment covers the whole callback.
+
+Six public groups cover analytic values, complete support/dirty/Run errors,
+Float32/64 direct layout/fenv, typed Image validation, cache/upstream, active
+axis/arithmetic cancellation, work/output/workspace admission, post-context
+owners and all six baking chains. A full L=1048576 grid uses a 16 MiB payload
+cap for complete table collection plus its 8 MiB separately-accounted grid index.
+A 2^39-channel sparse request rejects insufficient complete-output capacity.
+The independent Fraction oracle evaluates all output cells before selecting
+observed values. Current native strict/Apple each pass 1416 cases.
+Whole fallback counters are unavailable. The target remains excluded from default
+builds and CTest; native public/core sampling and Instruments limits are in the
 [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-05-dynamic-axis-lut1d).
+
 
 ## Scalar coordinate shapers
 

@@ -24,6 +24,8 @@ def rn(v, dtype=3, negative=False):
 def reference(channels,dtype,policy,shape,l,c,coords,ports):
     if not coords:
         return ''
+    observed=coords
+    coords=list(itertools.product(*(range(n) for n in shape)))
     rawaxis=ports[2][1]; a,b,step=[number(v,3) for v in rawaxis]
     if not all(finite(v) for v in (a,b,step)):
         return 'domain'
@@ -73,7 +75,8 @@ def reference(channels,dtype,policy,shape,l,c,coords,ports):
             x0,x1=[grid[j] for j in selected]
             exact=((x1-q)*y[0]+(q-x0)*y[1])/(x1-x0)
             out.append(rn(exact,dtype,not exact and not any(y) and all(neg)))
-        return ''.join(f'{v:x} ' for v in out)
+        mapped=dict(zip(coords,out))
+        return ''.join(f'{mapped[at]:x} ' for at in observed)
     except OverflowError:
         return 'overflow'
 

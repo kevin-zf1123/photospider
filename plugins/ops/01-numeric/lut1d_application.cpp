@@ -1,21 +1,21 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_bezier.hpp"
 #include "01-numeric/exact_curve.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/uniform_axis.hpp"
 #include "data/input_validation.hpp"
-#include "photospider/data/semantic.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -23,186 +23,83 @@ namespace {
 using numeric_ops::BinaryParts;
 using numeric_ops::SequenceProfile;
 struct LutPoint {
-  std::array<std::uint64_t, 8> at{};
-  std::uint64_t fragment = 0, offset = 0, query = 0;
+  std::uint64_t query = 0;
   unsigned first = 0, count = 0;
 };
 struct LutState final {
   SequenceProfile profile;
   bool channels;
-  unsigned policy, stage = 0;
+  unsigned policy;
+  const OperationInvocation& call;
+  const ResourceBudget* budget;
+  std::function<Status(std::uint64_t)> consume;
+  std::vector<std::uint64_t> at, table_at;
   numeric_ops::UniformAxis axis;
   numeric_ops::ExactCurve arithmetic;
-  ResourceVector<LutPoint> points;
-  ResourceVector<MutableValue> outputs;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
   std::array<std::uint64_t, 4> x{}, y{}, replicas{};
-  LutState(SequenceProfile selected, bool multi, unsigned domain)
+  LutState(SequenceProfile selected, bool multi,
+           const OperationInvocation& invocation)
       : profile(selected),
         channels(multi),
-        policy(domain),
+        policy(std::get<std::string>(
+                   invocation.parameters.at("out_of_domain")) == "reject"
+                   ? 0U
+               : std::get<std::string>(
+                     invocation.parameters.at("out_of_domain")) == "clamp"
+                   ? 1U
+                   : 2U),
+        call(invocation),
+        budget(resource_internal::metadata_budget()),
+        consume([this](auto amount) { return work(amount); }),
+        at(invocation.inputs[0].descriptor().shape.size(), 0),
+        table_at(multi ? 2 : 1, 0),
         axis(selected),
         arithmetic(selected) {}
-  std::vector<std::uint64_t> coordinate(const DependencyPhase& phase,
-                                        const LutPoint& point) const {
-    return {point.at.begin(),
-            point.at.begin() + phase.query.output.descriptor.shape.size()};
+  Status work(std::uint64_t amount) const {
+    if (call.cancellation.cancelled())
+      return {ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({amount}) : Status::success();
   }
-  Status failure(const DependencyPhase& phase, const LutPoint& point,
-                 const std::string& message,
+  void advance() {
+    const auto& shape = call.inputs[0].descriptor().shape;
+    for (auto i = at.size(); i; --i) {
+      if (++at[i - 1] < shape[i - 1])
+        break;
+      at[i - 1] = 0;
+    }
+  }
+  Status failure(const std::string& message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
     Status result{ErrorCode::OperationFailed,
                   message,
                   reason,
-                  {FailureOrigin::Domain, FailureScope::Atom}};
-    AtomKey atom;
-    atom.output_index = phase.query.output_index;
-    atom.rank = phase.query.output.descriptor.shape.size();
-    atom.coordinate = point.at;
-    result.detail.atom = atom;
+                  {FailureOrigin::Domain, FailureScope::Run}};
     return result;
   }
-  Result<std::uint64_t> read(const DependencyPhase& phase, unsigned port,
-                             const std::vector<std::uint64_t>& at,
-                             const LutPoint& point) {
-    auto work =
-        phase.consume_work(phase.inputs[port].fragments().size() + at.size());
-    if (!work.ok())
-      return Result<std::uint64_t>(work);
+  Result<std::uint64_t> read(unsigned port,
+                             const std::vector<std::uint64_t>& coordinate) {
+    auto charged = work(coordinate.size() + 1);
+    if (!charged.ok())
+      return Result<std::uint64_t>(charged);
+    const auto& input = call.inputs[port];
     std::uint64_t bits = 0;
-    const bool narrow = phase.query.inputs[port].descriptor.element_type ==
-                        ElementType::Float32;
-    auto status = phase.read(port, at, &bits, narrow ? 4 : 8);
-    if (!status.ok())
-      return Result<std::uint64_t>(status);
+    const bool narrow = input.descriptor().element_type == ElementType::Float32;
+    auto address = input.byte_address(coordinate);
+    if (!address.ok())
+      return Result<std::uint64_t>(address.status());
+    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
     auto value = BinaryParts::decode(bits, narrow);
     if (value.nan || value.infinite) {
       std::string message =
           "nonfinite LUT1D port=" + std::to_string(port) + " coordinate=";
-      for (auto index : at)
+      for (auto index : coordinate)
         message += std::to_string(index) + ",";
-      return Result<std::uint64_t>(failure(phase, point, message));
+      return Result<std::uint64_t>(failure(message));
     }
     return Result<std::uint64_t>(numeric_ops::ExactBezier::widen(bits, narrow));
   }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied, bool fallback = false) const {
-    NumericDiagnostics result;
-    result.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        result.implementation.data(), result.implementation.size(),
-        "photospider.lut1d/2;certified-linear;%s%s",
-        profile == SequenceProfile::Strict         ? "scalar-u64"
-        : profile == SequenceProfile::AppleSilicon ? "NEON-u64x2"
-                                                   : "AVX2-u64x4",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= result.implementation.size())
-      return {ErrorCode::Internal, "LUT1D diagnostic identity"};
-    result.evaluated_values = evaluated;
-    result.copied_elements = copied;
-    if (fallback && profile != SequenceProfile::Strict) {
-      result.strict_fallbacks = 1;
-      result.fallback_reasons[static_cast<unsigned>(
-          NumericFallbackReason::RoundingUnresolved)] = 1;
-    }
-    return phase.report_numeric(result);
-  }
-  Status initialize(const DependencyPhase& phase) {
-    const auto count = phase.query.outputs.element_count().value();
-    if (count > phase.sets.maximum_boxes)
-      return {ErrorCode::ResourceExhausted, "LUT1D association capacity",
-              FailureReason::CapacityLimit};
-    auto work = phase.consume_work(count + 1);
-    if (!work.ok())
-      return work;
-    const auto rank = phase.query.output.descriptor.shape.size();
-    points.reserve(count);
-    outputs.reserve(phase.query.outputs.boxes().size());
-    publication = std::make_unique<numeric_ops::ArrayPublication>(
-        phase.query.outputs.boxes().size(), rank);
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(phase.query.output.descriptor,
-                                              box, phase.allocator);
-      if (!allocated.ok())
-        return allocated.status();
-      auto selected = Footprint::from_regions(
-          phase.query.output.descriptor.shape, {box}, phase.sets);
-      if (!selected.ok())
-        return selected.status();
-      std::uint64_t offset = 0;
-      auto status = selected.value().visit(
-          [&](const auto& at) {
-            auto charged = phase.consume_work(rank);
-            if (!charged.ok())
-              return charged;
-            LutPoint point;
-            std::copy(at.begin(), at.end(), point.at.begin());
-            point.fragment = outputs.size();
-            point.offset = offset++;
-            points.push_back(point);
-            return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!status.ok())
-        return status;
-      outputs.push_back(allocated.take_value());
-    }
-    return Status::success();
-  }
-  Status declare(const DependencyPhase& phase, unsigned port, unsigned role,
-                 std::vector<RegionDimension> dimensions,
-                 std::vector<DependencyNeed>* needs) {
-    const auto& input = phase.query.inputs[port];
-    auto data = Footprint::from_regions(input.descriptor.shape,
-                                        {Region(dimensions)}, phase.sets);
-    if (!data.ok())
-      return data.status();
-    auto closure = input_internal::validation_closure(
-        input, data.value(), phase.sets, phase.consume_work);
-    if (!closure.ok())
-      return closure.status();
-    auto validation = closure.take_value();
-    needs->push_back(
-        {port, static_cast<std::uint8_t>(role), data.take_value(), {}});
-    needs->push_back({port, 4, std::move(validation), {}});
-    return Status::success();
-  }
-  Result<DependencyPoll> need(const DependencyPhase& phase, unsigned port) {
-    using Answer = Result<DependencyPoll>;
-    request_capacity =
-        dependency_internal::metadata_owner(4096 + points.size() * 16384);
-    std::vector<AtomCertificate> certificates;
-    certificates.reserve(points.size());
-    for (const auto& point : points) {
-      auto charged = phase.consume_work(16);
-      if (!charged.ok())
-        return Answer(charged);
-      std::vector<RegionDimension> dimensions;
-      if (port == 2) {
-        dimensions = {{0, 3}};
-      } else if (port == 0) {
-        for (auto at : coordinate(phase, point))
-          dimensions.push_back({at, 1});
-      } else {
-        dimensions = {{point.first, point.count}};
-        if (channels)
-          dimensions.push_back(
-              {point.at[phase.query.output.descriptor.shape.size() - 1], 1});
-      }
-      std::vector<DependencyNeed> needs;
-      auto status = declare(phase, port, port == 1 ? 1 : 2,
-                            std::move(dimensions), &needs);
-      if (!status.ok())
-        return Answer(status);
-      certificates.push_back({coordinate(phase, point), std::move(needs)});
-    }
-    return Answer(DependencyNeedBatch{std::move(certificates)});
-  }
-  Status classify(const DependencyPhase& phase, LutPoint* point) {
-    auto value = read(phase, 0, coordinate(phase, *point), *point);
+  Status classify(LutPoint* point) {
+    auto value = read(0, at);
     if (!value.ok())
       return value.status();
     point->query = value.value();
@@ -210,7 +107,7 @@ struct LutState final {
     const auto size = static_cast<unsigned>(axis.knots.size());
     unsigned lo = 0, hi = size;
     while (lo < hi) {
-      auto work = phase.consume_work(1);
+      auto work = consume(1);
       if (!work.ok())
         return work;
       const auto mid = lo + (hi - lo) / 2;
@@ -224,7 +121,7 @@ struct LutState final {
       point->count = 1;
     } else if (!lo || lo == size) {
       if (!policy)
-        return failure(phase, *point, "LUT1D query outside axis domain");
+        return failure("LUT1D query outside axis domain");
       if (policy == 1 || size == 1) {
         point->first = lo ? size - 1 : 0;
         point->count = 1;
@@ -238,112 +135,100 @@ struct LutState final {
     }
     return Status::success();
   }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(65536);
-    request_capacity.reset();
-    if (!stage) {
-      auto status = initialize(phase);
+  Result<Value> execute() {
+    using Answer = Result<Value>;
+    std::array<std::uint64_t, 3> axis_values{};
+    for (unsigned j = 0; j < 3; ++j) {
+      auto value = read(2, {j});
+      if (!value.ok())
+        return Answer(value.status());
+      axis_values[j] = value.value();
+    }
+    input_internal::Float32Environment environment;
+    axis.sampling.environment_established = environment.active();
+    auto status = axis.validate(axis_values,
+                                call.inputs[1].descriptor().shape[0], consume);
+    if (!status.ok())
+      return Answer(status.code == ErrorCode::OperationFailed
+                        ? failure(status.message, status.reason)
+                        : status);
+    const auto total = call.inputs[0].region().element_count().value();
+    // Preserve complete query rejection before table arithmetic without point
+    // records.
+    for (std::uint64_t i = 0; i < total; ++i, advance()) {
+      auto query = read(0, at);
+      if (!query.ok())
+        return Answer(query.status());
+      auto key = axis.key(query.value());
+      if (!policy && (key < axis.key(axis.knots.front()) ||
+                      key > axis.key(axis.knots.back())))
+        return Answer(failure("LUT1D query outside axis domain"));
+    }
+    const auto& resolved = call.prepared->traits().outputs[0];
+    auto allocated = MutableValue::allocate(
+        {resolved.output_element_type, resolved.fixed_output_shape},
+        call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
+    const bool narrow = resolved.output_element_type == ElementType::Float32;
+    const auto width = narrow ? 4U : 8U;
+    for (std::uint64_t i = 0; i < total; ++i, advance()) {
+      LutPoint point;
+      status = classify(&point);
       if (!status.ok())
         return Answer(status);
-      stage = 1;
-      return need(phase, 2);
-    }
-    if (stage == 1) {
-      std::array<std::uint64_t, 3> values{};
-      for (unsigned j = 0; j < 3; ++j) {
-        auto value = read(phase, 2, {j}, points.front());
-        if (!value.ok())
-          return Answer(value.status());
-        values[j] = value.value();
-      }
-      auto status = axis.validate(
-          values,
-          static_cast<unsigned>(phase.query.inputs[1].descriptor.shape[0]),
-          phase.consume_work);
-      if (!status.ok()) {
-        if (status.code == ErrorCode::OperationFailed)
-          return Answer(
-              failure(phase, points.front(), status.message, status.reason));
-        return Answer(status);
-      }
-      stage = 2;
-      return need(phase, 0);
-    }
-    if (stage == 2) {
-      for (auto& point : points) {
-        auto status = classify(phase, &point);
-        if (!status.ok())
-          return Answer(status);
-      }
-      stage = 3;
-      return need(phase, 1);
-    }
-    const bool narrow =
-        phase.query.output.descriptor.element_type == ElementType::Float32;
-    const auto width = narrow ? 4U : 8U;
-    for (const auto& point : points) {
+      if (channels)
+        table_at[1] = at.back();
       for (unsigned j = 0; j < point.count; ++j) {
-        std::vector<std::uint64_t> at{point.first + j};
-        if (channels)
-          at.push_back(
-              point.at[phase.query.output.descriptor.shape.size() - 1]);
-        auto value = read(phase, 1, at, point);
+        table_at[0] = point.first + j;
+        auto value = read(1, table_at);
         if (!value.ok())
           return Answer(value.status());
         x[j] = axis.knots[point.first + j];
         y[j] = value.value();
       }
-      // ExactCurve's rational denominator is positive; reorder both members
-      // of a descending pair before evaluating the unchanged mathematical line.
+      // The exact linear evaluator requires a positive denominator.
       if (point.count == 2 && axis.descending) {
         std::swap(x[0], x[1]);
         std::swap(y[0], y[1]);
       }
-      const bool known_fallback =
-          !narrow && point.count > 1 && profile != SequenceProfile::Strict;
-      auto status = report(phase, 1, 0, known_fallback);
-      if (!status.ok())
-        return Answer(status);
       auto value = arithmetic.evaluate(
           false, 2, 0, point.count, 0, point.count == 1 ? 0 : -1, point.query,
-          x, y, narrow, phase.consume_work, [&] {
-            return known_fallback ? Status::success()
-                                  : report(phase, 0, 0, true);
-          });
+          x, y, narrow, consume, {}, environment.active());
       if (!value.ok())
         return Answer(value.status());
       if (BinaryParts::decode(value.value(), narrow).infinite)
-        return Answer(failure(phase, point, "LUT1D output conversion overflow",
+        return Answer(failure("LUT1D output conversion overflow",
                               FailureReason::ArithmeticOverflow));
-      status = report(phase, 0, 1);
-      if (!status.ok())
-        return Answer(status);
       numeric_ops::select_words(replicas.data(), value.value(), value.value(),
                                 1, profile);
-      std::memcpy(outputs[point.fragment].data() + point.offset * width,
-                  replicas.data(), width);
+      std::memcpy(output.data() + i * width, replicas.data(), width);
     }
-    ResourceVector<Value> values;
-    values.reserve(outputs.size());
-    for (auto& output : outputs) {
-      auto work = phase.consume_work(1);
-      if (!work.ok())
-        return Answer(work);
-      auto value = std::move(output).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication->retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    auto result =
-        publication->finish(phase.query.output.descriptor, phase.query.outputs,
-                            values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
   }
 };
+Result<Value> execute_lut(const OperationInvocation& call, bool channels,
+                          SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    auto allocated = call.allocator.allocate(sizeof(LutState));
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto buffer = allocated.take_value();
+    std::unique_ptr<LutState, void (*)(LutState*)> state(
+        new (buffer.data()) LutState(profile, channels, call),
+        [](auto* value) { value->~LutState(); });
+    return state->execute();
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
+
 OperationDefinition lut_operation(const std::string& key, bool channels,
                                   SequenceProfile profile) {
   OperationDefinition operation;
@@ -360,12 +245,9 @@ OperationDefinition lut_operation(const std::string& key, bool channels,
                              {"out_of_domain", OperationParameterType::String}};
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.regional_atomic = true;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
-  output.continuation_bytes = sizeof(LutState);
-  output.maximum_dependency_stages = 4;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(LutState);
   operation.specialize_metadata = [channels, profile](const auto& inputs,
                                                       const auto& parameters) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -402,18 +284,11 @@ OperationDefinition lut_operation(const std::string& key, bool channels,
     OperationOutputSpecialization resolved;
     resolved.metadata.descriptor = {
         dtype == "float32" ? ElementType::Float32 : ElementType::Float64, in};
-    resolved.regional_atomic = true;
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  operation.start_dependency = [channels, profile](const auto& query,
-                                                   const auto& allocator) {
-    const auto& policy =
-        std::get<std::string>(query.parameters.at("out_of_domain"));
-    return DependencyContinuation::make<LutState>(allocator, profile, channels,
-                                                  policy == "reject"  ? 0U
-                                                  : policy == "clamp" ? 1U
-                                                                      : 2U);
+  operation.callback = [channels, profile](const OperationInvocation& call) {
+    return execute_lut(call, channels, profile);
   };
   return operation;
 }

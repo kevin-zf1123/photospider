@@ -247,21 +247,22 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * the default output dtype; Compiler validates the actual graph edges.
  * Helpers are pure/concurrent-safe and own metadata; allocation may throw
  * bad_alloc. Invalid authoring parameters fail InvalidArgument/InvalidDomain.
- * Runtime validates the full endpoint-weighted RN64 grid and axis step before
- * input queries, then reads only selected singleton/pair table entries and
- * typed Validation. Singleton axes require bit-identical endpoints and +0 step.
- * Every query is read even for constant tables; invalid axes/queries/demanded
- * entries fail OperationFailed/InvalidDomain at the dependent Atom. Actual
- * destination overflow fails ArithmeticOverflow; host/typed/upstream errors
- * retain their identity. Descending axes and all CurveDomain policies work.
- * Exact selection preserves zero sign. Strict rounds complete linear formulas
- * once, with -0 exact zero only for two -0 endpoints. Accelerated follows
- * CpuNumericProfile's final FP32 bound and preserves caller fenv. Owned packed
- * fragments survive context teardown. Empty reads nothing. Global axis work,
- * exact scratch, optional grid and per-request certificates are bounded by host
- * budgets. Cache witnesses retain complete axis, selected input and local table
- * coordinates. No approximation quality bound relative to the table's
- * generating function is inferred.
+ * Runtime collects all three inputs, validates the complete endpoint-weighted
+ * RN64 grid, then all queries before table arithmetic. Whole computes and owns
+ * the complete output even for sparse demand. Math knot/clamp/singleton selects
+ * one table entry; other paths select two. Generic entries outside all
+ * evaluated stencils are numerically unused; complete typed/source validation
+ * still applies. Singleton axes require bit-identical endpoints and +0 step.
+ * Every query is validated even for constant tables. Numeric domain/overflow
+ * failures have Run scope; typed/upstream/resource/cancellation failures
+ * preserve their identities. Descending axes and all CurveDomain policies
+ * retain their formulas. Exact selection preserves zero sign; exact linear zero
+ * is -0 only for two -0 ends. Strict rounds once; accelerated retains
+ * CpuNumericProfile's final FP32 bound. Caller fenv is preserved. Whole owners
+ * survive context teardown; any active input edit invalidates output demand.
+ * Empty reads nothing. Grid, exact scratch, collected inputs and complete
+ * output consume host budgets. No approximation guarantee relative to the
+ * table's generating function is inferred.
  */
 /** @brief Applies one scalar table to every requested input element. */
 inline Result<WorkflowNode> apply_lut1d_node(
