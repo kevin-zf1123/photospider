@@ -15,6 +15,15 @@ implementation_updated: 2026-09-21
 
 # NUM: specification and execution baseline
 
+The 2026-09-22 [FMT shared metadata target](../../02-format-color/op_specs/FMT_common_contract.md)
+selects a future revision of metadata consumption/propagation: ordinary numeric
+operations do not validate color merely because a description is attached, and
+raw outputs retain applicable descriptions without inherited sample-validity
+guarantees. Explicit overrides are local to a consuming invocation. This is a
+pending shared-contract migration; the implemented facet-clearing and typed
+validation behavior documented below remains current until migrated. Numerical
+formulas, rounding and strict/accelerated precision are unchanged by that target.
+
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
 [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its

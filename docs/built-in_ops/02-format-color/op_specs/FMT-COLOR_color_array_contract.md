@@ -13,6 +13,18 @@ repository_commit: 6617c78c
 
 # FMT-COLOR: generic color-array description
 
+## Selected category target and current implementation
+
+The 2026-09-22 [FMT shared specification](FMT_common_contract.md) selects generic
+tensors/tensor collections with composable metadata and consumer-declared
+semantic validation, including raw computation and explicit call-local override.
+It supersedes the Image/Layer coexistence direction for the future category
+target. The codec, shape restrictions and automatic validation described below
+remain current implementation facts pending migration. Reuse their color-science
+definitions where applicable; metadata presence alone will no longer impose a
+complete-color validation obligation on ordinary numeric consumers. This note
+does not change existing v1 bytes or claim that migration has been implemented.
+
 ## Confirmed need and scope
 
 The maintainer selected a generic color-array description so color ramp outputs

@@ -10,6 +10,13 @@
 
 ## 算子目录
 
+2026-09-22 的分类级澄清见 [FMT 公共规格](op_specs/FMT_common_contract.md)。
+已确认完整覆盖 FMT-01～FMT-18 并补齐缺口；目标采用通用张量／张量集合与可组合
+metadata，移除 Image/Layer 特殊语义类型。算子按实际消费的语义校验，支持显式
+raw／调用级 override；raw 保留适用描述但不继承样本有效性保证。
+该文件区分已确认结论、当前实现与待决问题；
+逐算子端口和算法留到后续逐项澄清，尚未扩展当前运行时支持面。
+
 CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contract.md)的配套澄清：
 支持 Float32/Float64、rank 2～8、最后一轴为颜色通道，携带模型及适用的色域、白点、reference 和 transfer。
 该扩展保持 Proposed，不改变当前 typed Image/Layer 的实现契约。
