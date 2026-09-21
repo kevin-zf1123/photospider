@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06D1: color_ramp_cielch
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Interface and purpose
 
@@ -41,7 +50,8 @@ and no alpha; output metadata records the selected floating hue unit.
 
 All original-hue interpolation, C=0 hue retention, correct final
 rounding and unit-conversion rules are normative from CRV-06D.
-All three CPU versions are bitwise identical. No GPU variant is specified.
+Strict is correctly rounded; accelerated finite arithmetic follows the shared
+FP32-scaled final-result bound. No GPU variant is specified.
 Exact hit/clamp directly converts the original hue; no source hue is discarded
 because chroma is zero. A mismatched platform is not silently redirected.
 

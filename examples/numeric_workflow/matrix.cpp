@@ -2,6 +2,9 @@
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -9,9 +12,11 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -138,6 +143,115 @@ void oracle(ps::CpuNumericProfile profile) {
     std::cout << '\n';
   }
 }
+// Public workflow timing: compilation/freeze and result checking are excluded.
+void benchmark(ps::CpuNumericProfile profile, unsigned n, unsigned cin,
+               unsigned cout, bool narrow, bool cancellation = false,
+               unsigned side = 0) {
+  require(n && cin >= 2 && cin <= 4 && cout >= 2 && cout <= 4,
+          "benchmark dimensions");
+  const auto dtype =
+      narrow ? ps::ElementType::Float32 : ps::ElementType::Float64;
+  const auto bits = [narrow](double value) {
+    std::uint64_t word = 0;
+    if (narrow) {
+      const float f = static_cast<float>(value);
+      std::memcpy(&word, &f, 4);
+    } else {
+      std::memcpy(&word, &value, 8);
+    }
+    return word;
+  };
+  std::vector<std::uint64_t> x, m, b, expected;
+  for (unsigned i = 0; i < n; ++i) {
+    for (unsigned j = 0; j < cin; ++j)
+      x.push_back(bits((i % 31 + j + 1) / 32.));
+    for (unsigned o = 0; o < cout; ++o) {
+      double y = (o + 1) / 16.;
+      for (unsigned j = 0; j < cin; ++j)
+        y += (i % 31 + j + 1) / 32. * (o + j + 1) / 8.;
+      expected.push_back(bits(y));
+    }
+  }
+  for (unsigned o = 0; o < cout; ++o) {
+    b.push_back(bits((o + 1) / 16.));
+    for (unsigned j = 0; j < cin; ++j)
+      m.push_back(bits((o + j + 1) / 8.));
+  }
+  if (cancellation) {
+    require(cin == 4, "cancellation benchmark requires Cin=4");
+    for (unsigned i = 0; i < n; ++i) {
+      x[i * cin] = bits(0x1p120);
+      x[i * cin + 1] = bits(1);
+      x[i * cin + 2] = bits(-0x1p120);
+      x[i * cin + 3] = bits(0);
+    }
+    std::fill(m.begin(), m.end(), bits(1));
+    std::fill(b.begin(), b.end(), bits(0));
+    std::fill(expected.begin(), expected.end(), bits(1));
+  }
+  const std::vector<std::uint64_t> input_shape =
+      side ? std::vector<std::uint64_t>{side, side, cin}
+           : std::vector<std::uint64_t>{n, cin};
+  auto output_shape = input_shape;
+  output_shape.back() = cout;
+  Fixture fixture(authored(profile),
+                  {array(dtype, input_shape, x), array(dtype, {cout, cin}, m),
+                   array(dtype, {cout}, b)});
+  ps::GraphContext graph(fixture.document);
+  auto plan = take(ps::Compiler(fixture.registry).compile(graph));
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.maximum_live_bytes = UINT64_C(1) << 30;
+  config.result_cache_bytes = 0;
+  config.managed_resources = ps::ResourceLimits{};
+  // Large Whole outputs require more than the default 256 MiB host capacity.
+  // Keep metadata at its default bound; only payload-related capacity grows.
+  if (n > 1024 * 1024)
+    config.managed_resources->capacity[ps::ResourceKind::Host] = UINT64_C(1)
+                                                                 << 30;
+  ps::ExecutionContext context(fixture.registry, config);
+  auto frozen = take(context.freeze(plan.plan, fixture.bindings));
+  const auto all = take(ps::Footprint::all(output_shape));
+  ps::ExecutionOptions options;
+  options.maximum_dependency_cache_work = 0;
+  std::vector<double> times;
+  options.dependencies.sets.maximum_work =
+      std::max(options.dependencies.sets.maximum_work,
+               UINT64_C(4) * n * std::max(cin, cout));
+  const unsigned repetitions = n > 1024 * 1024 ? 4 : 8;
+  std::uint64_t computed = 0, invocations = 0;
+  for (unsigned repeat = 0; repeat < repetitions; ++repeat) {
+    const auto start = std::chrono::steady_clock::now();
+    auto result =
+        take(context.execute_fragments(frozen, {{"values", all}}, {}, options));
+    const auto elapsed = std::chrono::duration<double, std::micro>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+    if (repeat)
+      times.push_back(elapsed);
+    for (unsigned i = 0; i < n; ++i)
+      for (unsigned o = 0; o < cout; ++o) {
+        std::uint64_t actual = 0;
+        require(result.values.at("values")
+                        .read(side ? std::vector<std::uint64_t>{i / side,
+                                                                i % side, o}
+                                   : std::vector<std::uint64_t>{i, o},
+                              &actual, narrow ? 4 : 8)
+                        .ok() &&
+                    actual == expected[i * cout + o],
+                "benchmark analytic bits");
+      }
+    for (const auto& timing : result.diagnostics.operation_timings)
+      if (timing.computed_elements) {
+        computed = timing.computed_elements;
+        invocations = timing.invocation_count;
+      }
+  }
+  std::sort(times.begin(), times.end());
+  std::cout << (narrow ? "Float32" : "Float64") << ',' << n << ',' << cin << ','
+            << cout << ',' << times[times.size() / 2] << ',' << times.back()
+            << ',' << computed << ',' << invocations << ",Whole\n";
+}
 void examples(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   const auto x = array(Type::Float64, {2, 2},
@@ -179,106 +293,287 @@ void examples(ps::CpuNumericProfile profile) {
   auto support = take(result.dependencies.source_support());
   require(support.at("input0") == take(ps::Footprint::all({2, 2})),
           "complete selected vectors");
-  require(support.at("input1") == take(ps::Footprint::from_regions(
-                                      {2, 2}, {ps::Region({{1, 1}, {0, 2}})})),
-          "only selected matrix row");
-  require(support.at("input2") ==
-              take(ps::Footprint::from_regions({2}, {ps::Region({{1, 1}})})),
-          "only selected bias");
-  auto other =
-      take(ps::Footprint::from_regions({2, 2}, {ps::Region({{0, 1}, {0, 2}})}));
-  require(take(result.dependencies.potential_dirty("input1", other))
-              .at("values")
-              .empty(),
-          "other matrix row unchanged output");
+  require(support.at("input1") == take(ps::Footprint::all({2, 2})) &&
+              support.at("input2") == take(ps::Footprint::all({2})),
+          "Whole matrix and bias support");
   auto changed =
-      take(ps::Footprint::from_regions({2, 2}, {ps::Region({{1, 1}, {0, 1}})}));
-  require(take(result.dependencies.potential_dirty("input0", changed))
-                  .at("values") == take(ps::Footprint::from_regions(
-                                       {2, 2}, {ps::Region({{1, 1}, {1, 1}})})),
-          "vector dirty instance only");
-  std::cout << "matrix [[1,2],[-1,0]] * [2,3] + [4,5] -> [12,3]; "
-               "cache/fenv/lifetime and selected-row dependencies passed\n";
-  auto registry = fixture.registry;
-  ps::DependencyRequest request;
-  request.parameters = fixture.document.nodes[0].parameters;
-  request.inputs = {{x.descriptor(), {}},
-                    {m.descriptor(), {}},
-                    {b.descriptor(), {}}};
-  request.outputs = selected;
-  request.snapshot_identity = "matrix-sharing";
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(registry->start_dependency(
-      fixture.document.nodes[0].operation, request, resources.allocator()));
-  require(session->poll().ok(), "matrix Need");
-  std::array<std::uint64_t, 3> counts{};
-  for (const auto& need : take(session->pending_reads()))
-    if (need.roles & 1)
-      counts[need.port] += take(need.samples.element_count());
-  require(counts == std::array<std::uint64_t, 3>{4, 2, 1},
-          "deduplicated shared row/bias");
+      take(ps::Footprint::from_regions({2, 2}, {ps::Region({{0, 1}, {0, 1}})}));
+  for (const auto* input : {"input0", "input1"})
+    require(take(result.dependencies.potential_dirty(input, changed))
+                    .at("values") == selected,
+            "Whole change dirties all observed outputs");
+  require(result.diagnostics.operation_timings.size() == 1 &&
+              result.diagnostics.operation_timings[0].computed_elements == 4 &&
+              result.diagnostics.operation_timings[0].invocation_count == 1,
+          "partial consumer invokes one complete Whole callback");
+  std::cout
+      << "affine fixture, cache/fenv/lifetime, Whole support/dirty passed\n";
 }
-void boundaries(ps::CpuNumericProfile profile) {
+
+void block_consistency(ps::CpuNumericProfile profile) {
+  using Type = ps::ElementType;
+  std::vector<std::uint64_t> words(65 * 3);
+  for (unsigned i = 0; i < words.size(); ++i)
+    words[i] = 0x3f000001 + i * 19;
+  words[17 * 3] = 0x7f800042;
+  const auto x = array(Type::Float32, {5, 13, 3}, words);
+  const auto m =
+      array(Type::Float32, {4, 3},
+            {0x3f800003, 0x3f000002, 0x3e800001, 0x7f800099, 0, 0, 0x3f800000,
+             0xbf800000, 0, 0x3e000001, 0x3f400003, 0x3f000001});
+  const auto b = array(Type::Float32, {4}, {0x3e000003, 0, 0, 0x3e800001});
+  Fixture fixture(authored(profile), {x, m, b});
+  Fixture reference(authored(ps::CpuNumericProfile::Strict), {x, m, b});
+  const auto all = take(ps::Footprint::all({5, 13, 4}));
+  const auto expected = take(reference.run({{"values", all}}, false));
+  fenv_t saved;
+  require(fegetenv(&saved) == 0, "save blocked environment");
+  for (auto mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                feraiseexcept(FE_DIVBYZERO) == 0,
+            "set blocked environment");
+    for (bool cache : {false, true}) {
+      const auto whole = take(fixture.run({{"values", all}}, cache));
+      require(
+          all.visit(
+                 [&](const auto& at) {
+                   std::uint32_t want = 0, actual = 0;
+                   require(
+                       expected.values.at("values").read(at, &want, 4).ok() &&
+                           whole.values.at("values")
+                               .read(at, &actual, 4)
+                               .ok() &&
+                           want == actual,
+                       "blocked exact bits");
+                   return ps::Status::success();
+                 },
+                 4096)
+              .ok(),
+          "blocked whole");
+    }
+    require(fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
+            "blocked caller fenv restored");
+  }
+  require(fesetenv(&saved) == 0, "restore blocked environment");
+  // Sparse consumers project the complete Whole result.
+  const auto selected = take(ps::Footprint::from_regions(
+      {5, 13, 4}, {ps::Region({{1, 2}, {2, 7}, {2, 2}}),
+                   ps::Region({{4, 1}, {8, 5}, {2, 2}})}));
+  const auto result = take(fixture.run({{"values", selected}}, false));
+  require(
+      selected
+          .visit(
+              [&](const auto& at) {
+                std::uint32_t want = 0, actual = 0;
+                require(
+                    expected.values.at("values").read(at, &want, 4).ok() &&
+                        result.values.at("values").read(at, &actual, 4).ok() &&
+                        want == actual,
+                    "blocked sparse partition bits");
+                return ps::Status::success();
+              },
+              4096)
+          .ok(),
+      "blocked sparse visit");
+  const auto support = take(result.dependencies.source_support());
+  require(support.at("input1") == take(ps::Footprint::all({4, 3})),
+          "sparse consumers retain Whole matrix support");
+  // Broadcast vector and reversed matrix/bias layouts use the same read path.
+  const auto broadcast = take(ps::Value::from_storage(
+      x.descriptor(), x.region(), {0, {0, 0, 0}}, x.storage()));
+  const auto reversed_m = take(ps::Value::from_storage(
+      m.descriptor(), m.region(), {44, {-12, -4}}, m.storage()));
+  const auto reversed_b = take(ps::Value::from_storage(
+      b.descriptor(), b.region(), {12, {-4}}, b.storage()));
+  const std::vector<ps::Value> strided_inputs{broadcast, reversed_m,
+                                              reversed_b};
+  const std::vector<ps::Region> strided_regions{x.region(), m.region(),
+                                                b.region()};
+  const auto strided_node = authored(profile);
+  ps::OperationInvocation invocation(strided_inputs, strided_regions,
+                                     strided_node.parameters, ps::Backend::Cpu,
+                                     {}, ps::Region::whole({5, 13, 4}));
+  const auto sr =
+      take(fixture.registry->invoke(authored(profile).operation, invocation));
+  const auto se = take(fixture.registry->invoke(
+      authored(ps::CpuNumericProfile::Strict).operation, invocation));
+  require(sr.bytes().size() == se.bytes().size() &&
+              std::memcmp(sr.bytes().data(), se.bytes().data(),
+                          sr.bytes().size()) == 0,
+          "blocked zero/negative stride bits");
+  auto padded = take(ps::BufferAllocator{}.allocate(x.bytes().size() + 1));
+  std::memcpy(padded.data() + 1, x.bytes().data(), x.bytes().size());
+  auto storage = std::move(padded).freeze();
+  for (bool shifted_origin : {false, true}) {
+    auto layout = x.layout();
+    layout.byte_offset = shifted_origin ? 13 : 1;
+    if (shifted_origin)
+      layout.origin = {0, 1, 0};
+    auto unaligned = take(
+        ps::Value::from_storage(x.descriptor(), x.region(), layout, storage));
+    const std::vector<ps::Value> direct_inputs{unaligned, m, b};
+    ps::OperationInvocation direct(direct_inputs, strided_regions,
+                                   strided_node.parameters, ps::Backend::Cpu,
+                                   {}, ps::Region::whole({5, 13, 4}));
+    auto actual =
+        take(fixture.registry->invoke(strided_node.operation, direct));
+    require(
+        all.visit(
+               [&](const auto& at) {
+                 std::uint32_t want = 0, bits = 0;
+                 require(expected.values.at("values").read(at, &want, 4).ok(),
+                         "expected read");
+                 std::memcpy(
+                     &bits,
+                     actual.bytes().data() + take(actual.byte_address(at)), 4);
+                 require(want == bits, "unaligned packed offset/origin bits");
+                 return ps::Status::success();
+               },
+               4096)
+            .ok(),
+        "direct shifted Whole result");
+  }
+  std::cout << "Float32 block/tail, sparse rank-3 partitions, source NaN, "
+               "zero/negative strides and caller fenv passed\n";
+}
+void whole_contract(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry();
-  auto node = authored(profile);
-  ps::DependencyRequest request;
-  request.inputs = {{{Type::Float32, {1, 1, 4}},
-                     {take(ps::encode_semantic(ps::rgba_semantics()))}},
-                    {{Type::Float32, {2, 4}}, {}},
-                    {{Type::Float32, {2}}, {}}};
-  request.outputs = take(ps::Footprint::none({1, 1, 2}));
-  request.snapshot_identity = "matrix-typed";
-  auto empty = take(registry->start_dependency(node.operation, request));
-  require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-              empty->poll_count() == 0,
-          "empty matrix no polls");
-  request.outputs = take(ps::Footprint::from_regions(
-      {1, 1, 2}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto typed = take(registry->start_dependency(node.operation, request,
-                                               resources.allocator()));
-  require(typed->poll().ok(), "typed matrix need");
-  std::array<unsigned, 3> data{}, validation{};
-  for (const auto& need : take(typed->pending_reads())) {
-    if (need.roles & 1)
-      data[need.port] += take(need.samples.element_count());
-    if (need.roles & 4)
-      validation[need.port] += take(need.samples.element_count());
-  }
-  require(data == std::array<unsigned, 3>{4, 4, 1} && validation == data,
-          "typed vector closure separate");
-  typed.reset();
-  ps::CancellationSource cancellation;
-  request.cancellation = cancellation.token();
-  auto cancelled = take(registry->start_dependency(node.operation, request,
-                                                   resources.allocator()));
-  require(cancelled->poll().ok(), "matrix before cancel");
-  cancellation.cancel();
-  require(cancelled->poll().status().code == ps::ErrorCode::Cancelled,
-          "matrix cancel");
-  cancelled.reset();
-  require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-          "matrix release");
-  request.cancellation = {};
+  const auto node = authored(profile);
+  std::vector<ps::OperationMetadata> metadata{{{Type::Float32, {1, 1, 4}}, {}},
+                                              {{Type::Float32, {2, 4}}, {}},
+                                              {{Type::Float32, {2}}, {}}};
+  const auto traits =
+      take(registry->resolve_traits(node.operation, metadata, node.parameters));
+  require(traits.outputs[0].region_rule == ps::OperationRegionRule::Whole &&
+              traits.outputs[0].dependency_version == 0,
+          "matrix Whole registration");
   for (unsigned kind = 0; kind < 4; ++kind) {
-    auto bad = request;
+    auto bad = metadata;
     if (kind == 0)
-      bad.inputs[1].descriptor.element_type = Type::Float64;
+      bad[1].descriptor.element_type = Type::Float64;
     if (kind == 1)
-      bad.inputs[0].descriptor.shape = {1, 1, 5};
+      bad[0].descriptor.shape = {1, 1, 5};
     if (kind == 2)
-      bad.inputs[2].descriptor.shape = {3};
+      bad[2].descriptor.shape = {3};
     if (kind == 3)
-      bad.inputs[0].descriptor.shape = {UINT64_C(1) << 40, 4};
-    auto answer = registry->start_dependency(node.operation, bad);
+      bad[0].descriptor.shape = {UINT64_C(1) << 40, 4};
+    auto answer =
+        registry->resolve_traits(node.operation, bad, node.parameters);
     require(!answer.ok() &&
                 answer.status().code == ps::ErrorCode::TypeMismatch &&
                 answer.status().detail.origin == ps::FailureOrigin::Schema,
-            "matrix shape/dtype preflight");
+            "matrix metadata rejects invalid dtype/shape/count");
   }
-  std::cout << "typed/Empty, cancellation/release and dtype/shape/count schema "
-               "passed\n";
+  const std::vector<ps::Value> inputs{
+      array(Type::Float32, {1, 1, 4}, {0, 0, 0, 0}),
+      array(Type::Float32, {2, 4}, std::vector<std::uint64_t>(8, 0)),
+      array(Type::Float32, {2}, {0, 0})};
+  Fixture fixture(node, inputs);
+  auto empty =
+      take(fixture.run({{"values", take(ps::Footprint::none({1, 1, 2}))}}));
+  require(empty.diagnostics.operation_timings.empty(),
+          "Empty skips Whole callback");
+  const std::vector<ps::Region> regions{inputs[0].region(), inputs[1].region(),
+                                        inputs[2].region()};
+  ps::OperationInvocation partial(inputs, regions, node.parameters,
+                                  ps::Backend::Cpu, {},
+                                  ps::Region({{0, 1}, {0, 1}, {1, 1}}));
+  require(!registry->invoke(node.operation, partial).ok(),
+          "direct ROI rejected");
+  for (bool narrow : {false, true}) {
+    const auto type = narrow ? Type::Float32 : Type::Float64;
+    const std::uint64_t one =
+        narrow ? 0x3f800000 : UINT64_C(0x3ff0000000000000);
+    const std::vector<ps::Value> values{
+        array(type, {2, 2}, {one, one, one, one}),
+        array(type, {2, 2}, {one, one, one, one}), array(type, {2}, {0, 0})};
+    const std::vector<ps::Region> demands{
+        values[0].region(), values[1].region(), values[2].region()};
+    for (bool payload : {false, true}) {
+      ps::ResourceLimits limits;
+      if (payload)
+        limits.capacity[ps::ResourceKind::Payload] = 8;
+      else
+        limits.maximum_work = narrow ? 8 : 1000;
+      ps::ResourceBudget budget(limits);
+      {
+        ps::ResourceAllocationScope scope(budget);
+        ps::OperationInvocation call(
+            values, demands, node.parameters, ps::Backend::Cpu, {},
+            ps::Region::whole({2, 2}), budget.allocator());
+        auto answer = registry->invoke(node.operation, call);
+        require(!answer.ok() &&
+                    answer.status().code == ps::ErrorCode::ResourceExhausted,
+                "Whole resource failure");
+      }
+      require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
+              "Whole failed output and scratch released");
+    }
+  }
+  ps::CancellationSource cancelled;
+  cancelled.cancel();
+  ps::OperationInvocation call(inputs, regions, node.parameters,
+                               ps::Backend::Cpu, cancelled.token(),
+                               ps::Region::whole({1, 1, 2}));
+  require(registry->invoke(node.operation, call).status().code ==
+              ps::ErrorCode::Cancelled,
+          "Whole cancellation");
+  // Invalid typed source payload must fail validation, even if generic numeric
+  // NaNs would have a successful result.
+  for (bool invalid : {false, true}) {
+    auto typed_inputs = inputs;
+    auto raw = array(Type::Float32, {1, 1, 4},
+                     {invalid ? UINT64_C(0x7fc00042) : 0, 0, 0, 0x3f800000});
+    typed_inputs[0] = take(ps::Value::from_storage(
+        raw.descriptor(), raw.region(), raw.layout(), raw.storage(),
+        {take(ps::encode_semantic(ps::rgba_semantics()))}));
+    ps::OperationInvocation typed(typed_inputs, regions, node.parameters,
+                                  ps::Backend::Cpu, {},
+                                  ps::Region::whole({1, 1, 2}));
+    const auto answer = registry->invoke(node.operation, typed);
+    require(answer.ok() != invalid, "Whole typed validation");
+  }
+  // Synchronize cancellation to admitted callback work, without sleep timing.
+  const std::vector<ps::Value> large{
+      array(Type::Float32, {16384, 4},
+            std::vector<std::uint64_t>(65536, 0x3f800000)),
+      array(Type::Float32, {4, 4}, std::vector<std::uint64_t>(16, 0x3f800000)),
+      array(Type::Float32, {4}, {0, 0, 0, 0})};
+  const std::vector<ps::Region> demands{large[0].region(), large[1].region(),
+                                        large[2].region()};
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  ps::CancellationSource cancellation;
+  std::atomic<bool> ready{false}, finished{false};
+  std::thread watcher([&] {
+    ready.store(true);
+    while (!finished.load() && budget.statistics().issued.work < 22)
+      std::this_thread::yield();
+    if (!finished.load())
+      cancellation.cancel();
+  });
+  while (!ready.load())
+    std::this_thread::yield();
+  ps::Status outcome;
+  try {
+    ps::ResourceAllocationScope scope(budget);
+    ps::OperationInvocation running(
+        large, demands, node.parameters, ps::Backend::Cpu, cancellation.token(),
+        ps::Region::whole({16384, 4}), budget.allocator());
+    outcome = registry->invoke(node.operation, running).status();
+  } catch (...) {
+    finished.store(true);
+    watcher.join();
+    throw;
+  }
+  finished.store(true);
+  watcher.join();
+  require(outcome.code == ps::ErrorCode::Cancelled &&
+              budget.statistics().issued.work >= 22 &&
+              budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "mid-callback cancellation releases Whole payload");
+  std::cout << "Whole/Empty, schema, direct ROI, work/payload failure and "
+               "cancellation passed\n";
 }
 
 void strides_and_failures(ps::CpuNumericProfile profile) {
@@ -317,55 +612,6 @@ void strides_and_failures(ps::CpuNumericProfile profile) {
             "matrix fenv flags preserved");
   }
   require(fesetenv(&saved) == 0, "restore matrix environment");
-  ps::DependencyRequest request;
-  request.inputs = {{x.descriptor(), {}},
-                    {m.descriptor(), {}},
-                    {b.descriptor(), {}}};
-  request.outputs = take(ps::Footprint::all({2}));
-  request.snapshot_identity = "matrix-arithmetic-interruption";
-  std::vector<ps::ValueFragments> supplied;
-  for (const auto& value : std::vector<ps::Value>{x, m, b})
-    supplied.push_back(take(ps::ValueFragments::create(
-        value.descriptor(), {},
-        take(ps::Footprint::all(value.descriptor().shape)), {value})));
-  for (bool cancel : {false, true}) {
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    std::shared_ptr<ps::DependencySession> session;
-    bool armed = false, interrupted = false;
-    session = take(registry->start_dependency(
-        node.operation, request, resources.allocator(),
-        [&](std::uint64_t amount) {
-          if (armed && amount == 512 &&
-              session->numeric_diagnostics().evaluated_values == 1) {
-            interrupted = true;
-            if (cancel)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "matrix exact arithmetic work",
-                                ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    require(session->poll().ok() &&
-                session->supply(supplied, request.snapshot_identity).ok(),
-            "matrix supplied all inputs");
-    armed = true;
-    auto answer = session->poll();
-    require(
-        interrupted && !answer.ok() &&
-            answer.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-        "matrix interrupted exact work");
-    require(session->numeric_diagnostics().evaluated_values == 1 &&
-                session->numeric_diagnostics().copied_elements == 0,
-            "matrix failed attempt diagnostics");
-    session.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "failed matrix payload released");
-  }
   auto failed_registry = ps::make_default_operation_registry(false);
   unsigned calls = 0;
   ps::OperationDefinition failure;
@@ -395,8 +641,8 @@ void strides_and_failures(ps::CpuNumericProfile profile) {
               answer.status().message == "required matrix producer" &&
               calls == 1,
           "vector NaN cannot suppress matrix source failure");
-  std::cout << "negative strides on all ports, fenv flags, arithmetic "
-               "WorkLimit/cancel cleanup and required source failure after NaN "
+  std::cout << "negative strides on all ports, fenv flags and required source "
+               "failure after NaN "
                "passed\n";
 }
 }  // namespace
@@ -409,11 +655,22 @@ int main(int argc, char** argv) {
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon
                              : ps::CpuNumericProfile::X86Avx2;
-    if (argc > 2 && std::string(argv[2]) == "oracle") {
+    if (argc > 2 && std::string(argv[2]) == "grid") {
+      const auto side = argc > 3 ? std::stoul(argv[3]) : 128;
+      require(side > 0 && side <= 4096, "grid benchmark side must be 1..4096");
+      benchmark(profile, side * side, 4, 4, true, false, side);
+    } else if (argc > 2 && std::string(argv[2]) == "benchmark") {
+      benchmark(profile, argc > 3 ? std::stoul(argv[3]) : 256,
+                argc > 4 ? std::stoul(argv[4]) : 4,
+                argc > 5 ? std::stoul(argv[5]) : 4,
+                argc <= 6 || std::string(argv[6]) == "float32",
+                argc > 7 && std::string(argv[7]) == "cancellation");
+    } else if (argc > 2 && std::string(argv[2]) == "oracle") {
       oracle(profile);
     } else {
+      whole_contract(profile);
       examples(profile);
-      boundaries(profile);
+      block_consistency(profile);
       strides_and_failures(profile);
     }
     return 0;

@@ -3,16 +3,16 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "00-foundation/multi_output.hpp"
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
 #include "data/input_validation.hpp"
-#include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -30,15 +30,14 @@ enum class Comparison {
   GreaterEqual,
   IsClose
 };
-struct ComparisonState final {
+struct ComparisonMath final {
   Comparison kind;
   SequenceProfile profile;
-  bool ready = false;
   PredicateInteger difference, temporary, threshold, product;
   std::array<std::uint64_t, 4> left{}, right{};
   std::array<std::int64_t, 4> greater{}, less{};
   std::array<bool, 4> unordered{};
-  ComparisonState(Comparison operation, SequenceProfile selected)
+  ComparisonMath(Comparison operation, SequenceProfile selected)
       : kind(operation), profile(selected) {}
   bool close(std::uint64_t a, std::uint64_t b, bool narrow,
              const std::map<std::string, ParameterValue>& parameters) {
@@ -77,133 +76,149 @@ struct ComparisonState final {
     }
     return true;
   }
-  Status report(const DependencyPhase& phase, std::uint64_t count) {
-    NumericDiagnostics diagnostics;
-    diagnostics.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto* identity = numeric_ops::comparison_implementation(profile);
-    std::memcpy(diagnostics.implementation.data(), identity,
-                std::strlen(identity) + 1);
-    diagnostics.evaluated_values = count;
-    return phase.report_numeric(diagnostics);
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    if (!ready) {
-      ready = true;
-      return Answer(DependencyNeedBatch{{}, {}, true});
+  void evaluate(ElementType type, unsigned count,
+                const std::map<std::string, ParameterValue>& parameters,
+                std::uint8_t* output) {
+    if (kind == Comparison::IsClose) {
+      for (unsigned i = 0; i < count; ++i)
+        output[i] =
+            close(left[i], right[i], type == ElementType::Float32, parameters);
+      return;
     }
-    const auto type = phase.query.inputs[0].descriptor.element_type;
-    const auto width = Value::element_size(type);
     const bool floating =
         type == ElementType::Float32 || type == ElementType::Float64;
-    ResourceVector<Value> fragments;
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(phase.query.output.descriptor,
-                                              box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto output = allocated.take_value();
-      auto subset = Footprint::from_regions(phase.query.output.descriptor.shape,
-                                            {box}, phase.sets);
-      if (!subset.ok())
-        return Answer(subset.status());
-      std::size_t buffered = 0;
-      std::uint64_t offset = 0;
-      const auto flush = [&]() -> Status {
-        auto status = phase.consume_work(
-            buffered * (kind == Comparison::IsClose ? 1024 : 16));
-        if (!status.ok())
-          return status;
-        if (kind == Comparison::IsClose) {
-          for (std::size_t i = 0; i < buffered; ++i)
-            output.data()[offset + i] =
-                close(left[i], right[i], type == ElementType::Float32,
-                      phase.query.parameters);
-        } else {
-          numeric_ops::compare_keys(left.data(), right.data(), greater.data(),
-                                    less.data(), profile);
-          for (std::size_t i = 0; i < buffered; ++i) {
-            bool result = false;
-            switch (kind) {
-              case Comparison::Equal:
-                result = !greater[i] && !less[i];
-                break;
-              case Comparison::NotEqual:
-                result = greater[i] || less[i];
-                break;
-              case Comparison::Less:
-                result = less[i];
-                break;
-              case Comparison::LessEqual:
-                result = !greater[i];
-                break;
-              case Comparison::Greater:
-                result = greater[i];
-                break;
-              case Comparison::GreaterEqual:
-                result = !less[i];
-                break;
-              case Comparison::IsClose:
-                break;
-            }
-            output.data()[offset + i] =
-                unordered[i] ? kind == Comparison::NotEqual : result;
-          }
-        }
-        status = report(phase, buffered);
-        offset += buffered;
-        buffered = 0;
-        return status;
-      };
-      auto status = subset.value().visit(
-          [&](const auto& coordinate) {
-            std::uint64_t a = 0, b = 0;
-            auto read = phase.read(0, coordinate, &a, width);
-            if (!read.ok())
-              return read;
-            read = phase.read(1, coordinate, &b, width);
-            if (!read.ok())
-              return read;
-            unordered[buffered] = false;
-            if (kind != Comparison::IsClose) {
-              if (floating) {
-                const auto x =
-                    BinaryParts::decode(a, type == ElementType::Float32);
-                const auto y =
-                    BinaryParts::decode(b, type == ElementType::Float32);
-                unordered[buffered] = x.nan || y.nan;
-                a = x.order_key();
-                b = y.order_key();
-              } else if (type == ElementType::Int64) {
-                a ^= UINT64_C(1) << 63;
-                b ^= UINT64_C(1) << 63;
-              }
-            }
-            left[buffered] = a;
-            right[buffered] = b;
-            ++buffered;
-            return buffered == 4 ? flush() : Status::success();
-          },
-          subset.value().element_count().value(), phase.query.cancellation);
-      if (!status.ok())
-        return Answer(status);
-      if (buffered) {
-        status = flush();
-        if (!status.ok())
-          return Answer(status);
+    for (unsigned i = 0; i < count; ++i) {
+      unordered[i] = false;
+      if (floating) {
+        const auto x =
+            BinaryParts::decode(left[i], type == ElementType::Float32);
+        const auto y =
+            BinaryParts::decode(right[i], type == ElementType::Float32);
+        unordered[i] = x.nan || y.nan;
+        left[i] = x.order_key();
+        right[i] = y.order_key();
+      } else if (type == ElementType::Int64) {
+        left[i] ^= UINT64_C(1) << 63;
+        right[i] ^= UINT64_C(1) << 63;
       }
-      auto value = std::move(output).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      fragments.push_back(value.take_value());
     }
-    auto result = ValueFragments::create_view(
-        phase.query.output.descriptor, {}, phase.query.outputs,
-        fragments.data(), fragments.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    numeric_ops::compare_keys(left.data(), right.data(), greater.data(),
+                              less.data(), profile);
+    for (unsigned i = 0; i < count; ++i) {
+      bool result = false;
+      switch (kind) {
+        case Comparison::Equal:
+          result = !greater[i] && !less[i];
+          break;
+        case Comparison::NotEqual:
+          result = greater[i] || less[i];
+          break;
+        case Comparison::Less:
+          result = less[i];
+          break;
+        case Comparison::LessEqual:
+          result = !greater[i];
+          break;
+        case Comparison::Greater:
+          result = greater[i];
+          break;
+        case Comparison::GreaterEqual:
+          result = !less[i];
+          break;
+        case Comparison::IsClose:
+          break;
+      }
+      output[i] = unordered[i] ? kind == Comparison::NotEqual : result;
+    }
   }
 };
+Result<Value> execute_comparison(const OperationInvocation& call,
+                                 Comparison kind, SequenceProfile profile) {
+  using Answer = Result<Value>;
+  const auto* budget = resource_internal::metadata_budget();
+  const auto consume = [&](std::uint64_t work) {
+    if (call.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({work}) : Status::success();
+  };
+  auto status = consume(1);
+  if (!status.ok())
+    return Answer(status);
+  const auto type = call.inputs[0].descriptor().element_type;
+  const auto width = Value::element_size(type);
+  const auto& shape = call.inputs[0].descriptor().shape;
+  auto allocated = MutableValue::allocate({ElementType::UInt8, shape},
+                                          call.output_region, call.allocator);
+  if (!allocated.ok())
+    return Answer(allocated.status());
+  auto output = allocated.take_value();
+  auto storage = call.allocator.allocate(sizeof(ComparisonMath));
+  if (!storage.ok())
+    return Answer(storage.status());
+  auto scratch = storage.take_value();
+  static_assert(alignof(ComparisonMath) <= alignof(std::max_align_t));
+  std::unique_ptr<ComparisonMath, void (*)(ComparisonMath*)> math(
+      new (scratch.data()) ComparisonMath(kind, profile),
+      [](ComparisonMath* value) { value->~ComparisonMath(); });
+  std::vector<std::uint64_t> coordinate(shape.size(), 0);
+  std::array<const std::uint8_t*, 2> packed{};
+  for (unsigned port = 0; port < 2; ++port) {
+    const auto& input = call.inputs[port];
+    std::uint64_t stride = width;
+    bool dense = true;
+    for (std::size_t axis = shape.size(); axis; --axis) {
+      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
+                                     static_cast<std::int64_t>(stride))
+        dense = false;
+      stride *= shape[axis - 1];
+    }
+    if (dense) {
+      auto address = input.byte_address(coordinate);
+      if (!address.ok())
+        return Answer(address.status());
+      packed[port] = input.bytes().data() + address.value();
+    }
+  }
+  const auto count = call.output_region.element_count().value();
+  for (std::uint64_t begin = 0; begin < count; begin += 4) {
+    const auto lanes =
+        static_cast<unsigned>(std::min<std::uint64_t>(4, count - begin));
+    status = consume(
+        lanes * (2 * shape.size() + (kind == Comparison::IsClose ? 1024 : 16)));
+    if (!status.ok())
+      return Answer(status);
+    for (unsigned lane = 0; lane < lanes; ++lane) {
+      for (unsigned port = 0; port < 2; ++port) {
+        const auto& input = call.inputs[port];
+        const auto* data = packed[port];
+        if (data) {
+          data += (begin + lane) * width;
+        } else {
+          auto address = input.byte_address(coordinate);
+          if (!address.ok())
+            return Answer(address.status());
+          data = input.bytes().data() + address.value();
+        }
+        auto& bits = port ? math->right[lane] : math->left[lane];
+        bits = 0;
+        if (width == 8)
+          std::memcpy(&bits, data, 8);
+        else if (width == 4)
+          std::memcpy(&bits, data, 4);
+        else
+          bits = *data;
+      }
+      for (std::size_t axis = shape.size(); axis; --axis) {
+        if (++coordinate[axis - 1] < shape[axis - 1])
+          break;
+        coordinate[axis - 1] = 0;
+      }
+    }
+    math->evaluate(type, lanes, call.parameters, output.data() + begin);
+  }
+  status = consume(1);
+  return status.ok() ? std::move(output).publish() : Answer(status);
+}
 OperationDefinition comparison(const std::string& key, Comparison kind,
                                SequenceProfile profile) {
   OperationDefinition operation;
@@ -222,10 +237,9 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
   output.key = "values";
   output.output_element_type = ElementType::UInt8;
   output.shape_rule = OperationShapeRule::MatchAllInputs;
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(ComparisonState);
-  output.maximum_dependency_stages = 2;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(ComparisonMath);
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -263,93 +277,107 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
       return Answer(available);
     OperationOutputSpecialization result;
     result.metadata.descriptor = {ElementType::UInt8, first.shape};
-    std::vector<DependencyMappedNeed> maps;
-    for (std::uint32_t port = 0; port < 2; ++port) {
-      DependencyMappedNeed data;
-      data.port = port;
-      data.roles = 1;
-      for (std::size_t axis = 0; axis < first.shape.size(); ++axis)
-        data.axes.push_back({static_cast<std::int32_t>(axis), {}});
-      auto validation = input_internal::validation_map(data, inputs[port]);
-      maps.push_back(std::move(data));
-      maps.push_back(std::move(validation));
-    }
-    result.static_dependency_pieces = std::vector<DependencyMapPiece>{
-        {Footprint::all(result.metadata.descriptor.shape).take_value(),
-         std::move(maps)}};
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_dependency = [kind, profile](const auto&,
-                                               const auto& allocator) {
-    return DependencyContinuation::make<ComparisonState>(allocator, kind,
-                                                         profile);
+  operation.callback = [kind, profile](const OperationInvocation& call) {
+    return execute_comparison(call, kind, profile);
   };
   return operation;
 }
-struct SelectState final {
-  SequenceProfile profile;
-  std::uint8_t stage = 0, condition = 0;
-  std::array<std::uint64_t, 4> selected{};
-  explicit SelectState(SequenceProfile selected_profile)
-      : profile(selected_profile) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    const auto coordinate = multi_output::coordinate(phase);
-    if (stage == 0) {
-      ++stage;
-      return multi_output::need(phase, {{0, 6, phase.query.outputs, {}}});
+std::uint64_t selection_word(std::uint8_t condition, std::uint64_t when_true,
+                             std::uint64_t when_false) {
+  return condition ? when_true : when_false;
+}
+Result<Value> execute_selection(const OperationInvocation& call) {
+  using Answer = Result<Value>;
+  const auto* budget = resource_internal::metadata_budget();
+  const auto consume = [&](std::uint64_t work) {
+    if (call.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({work}) : Status::success();
+  };
+  auto status = consume(1);
+  if (!status.ok())
+    return Answer(status);
+  const auto& descriptor = call.inputs[1].descriptor();
+  const auto& shape = descriptor.shape;
+  const auto width = Value::element_size(descriptor.element_type);
+  auto allocated =
+      MutableValue::allocate(descriptor, call.output_region, call.allocator);
+  if (!allocated.ok())
+    return Answer(allocated.status());
+  auto output = allocated.take_value();
+  std::vector<std::uint64_t> coordinate(shape.size(), 0);
+  std::array<const std::uint8_t*, 3> packed{};
+  for (unsigned port = 0; port < 3; ++port) {
+    const auto& input = call.inputs[port];
+    const auto source_width = port ? width : 1;
+    std::uint64_t stride = source_width;
+    bool dense = true;
+    for (std::size_t axis = shape.size(); axis; --axis) {
+      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
+                                     static_cast<std::int64_t>(stride))
+        dense = false;
+      stride *= shape[axis - 1];
     }
-    if (stage == 1) {
-      auto read = phase.read(0, coordinate, &condition, 1);
-      if (!read.ok())
-        return Answer(read);
-      if (condition > 1) {
-        const auto key = dependency_atom_key(phase.query);
-        Status status{
-            ErrorCode::InvalidArgument,
-            "InvalidCondition: port=0 byte=" + std::to_string(condition),
-            FailureReason::InvalidDomain,
-            {FailureOrigin::Domain, FailureScope::Atom}};
-        if (key.ok())
-          status.detail.atom = key.value();
-        return Answer(status);
-      }
-      ++stage;
-      const std::uint32_t port = condition ? 1 : 2;
-      auto closure = input_internal::validation_closure(
-          phase.query.inputs[port], phase.query.outputs, phase.sets,
-          phase.consume_work);
-      if (!closure.ok())
-        return Answer(closure.status());
-      auto validation = closure.take_value();
-      return multi_output::need(phase, {{port, 1, phase.query.outputs, {}},
-                                        {port, 4, std::move(validation), {}}});
+    if (dense) {
+      auto address = input.byte_address(coordinate);
+      if (!address.ok())
+        return Answer(address.status());
+      packed[port] = input.bytes().data() + address.value();
     }
-    const auto width =
-        Value::element_size(phase.query.output.descriptor.element_type);
-    auto status = phase.consume_work(32 + width);
-    if (!status.ok())
-      return Answer(status);
-    std::uint64_t bits = 0;
-    status = phase.read(condition ? 1 : 2, coordinate, &bits, width);
-    if (!status.ok())
-      return Answer(status);
-    numeric_ops::select_words(selected.data(), condition ? bits : 0,
-                              condition ? 0 : bits, condition, profile);
-    NumericDiagnostics diagnostics;
-    diagnostics.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto* identity = numeric_ops::selection_implementation(profile);
-    std::memcpy(diagnostics.implementation.data(), identity,
-                std::strlen(identity) + 1);
-    diagnostics.evaluated_values = 1;
-    status = phase.report_numeric(diagnostics);
-    if (!status.ok())
-      return Answer(status);
-    return multi_output::finish(phase, selected.data(), width);
   }
-};
+  const auto count = call.output_region.element_count().value();
+  for (std::uint64_t i = 0; i < count; ++i) {
+    status = consume(32 + width + 3 * shape.size());
+    if (!status.ok())
+      return Answer(status);
+    std::array<std::uint64_t, 3> bits{};
+    for (unsigned port = 0; port < 3; ++port) {
+      const auto& input = call.inputs[port];
+      const auto source_width = port ? width : 1;
+      const auto* data = packed[port];
+      if (data) {
+        data += i * source_width;
+      } else {
+        auto address = input.byte_address(coordinate);
+        if (!address.ok())
+          return Answer(address.status());
+        data = input.bytes().data() + address.value();
+      }
+      if (source_width == 8)
+        std::memcpy(&bits[port], data, 8);
+      else if (source_width == 4)
+        std::memcpy(&bits[port], data, 4);
+      else
+        bits[port] = *data;
+    }
+    if (bits[0] > 1)
+      return Answer(
+          Status{ErrorCode::InvalidArgument,
+                 "InvalidCondition: port=0 byte=" + std::to_string(bits[0]) +
+                     " linear_index=" + std::to_string(i),
+                 FailureReason::InvalidDomain,
+                 {FailureOrigin::Domain, FailureScope::Run}});
+    const auto selected =
+        selection_word(static_cast<std::uint8_t>(bits[0]), bits[1], bits[2]);
+    auto* destination = output.data() + i * width;
+    if (width == 8)
+      std::memcpy(destination, &selected, 8);
+    else if (width == 4)
+      std::memcpy(destination, &selected, 4);
+    else
+      *destination = static_cast<std::uint8_t>(selected);
+    for (std::size_t axis = shape.size(); axis; --axis) {
+      if (++coordinate[axis - 1] < shape[axis - 1])
+        break;
+      coordinate[axis - 1] = 0;
+    }
+  }
+  status = consume(1);
+  return status.ok() ? std::move(output).publish() : Answer(status);
+}
 OperationDefinition selection(const std::string& key, SequenceProfile profile) {
   OperationDefinition operation;
   operation.key = key;
@@ -363,31 +391,41 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
   output.shape_rule = OperationShapeRule::MatchAllInputs;
   output.output_dtype_rule = OperationDtypeRule::Input;
   output.output_dtype_input = 1;
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(SelectState);
-  output.maximum_dependency_stages = 3;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
-  operation.validate_dependency = [profile](const auto& inputs, const auto&) {
-    if (inputs[1].descriptor.element_type != inputs[2].descriptor.element_type)
-      return Status{ErrorCode::TypeMismatch,
-                    "select branch dtypes must match",
-                    FailureReason::None,
-                    {FailureOrigin::Schema, FailureScope::Unspecified}};
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.requires_metadata_specialization = true;
+  operation.specialize_metadata = [profile](const auto& inputs, const auto&)
+      -> Result<std::vector<OperationOutputSpecialization>> {
+    using Answer = Result<std::vector<OperationOutputSpecialization>>;
+    const auto mismatch = [](const char* message) {
+      return Answer(Status{ErrorCode::TypeMismatch,
+                           message,
+                           FailureReason::None,
+                           {FailureOrigin::Schema, FailureScope::Unspecified}});
+    };
+    const auto& shape = inputs[0].descriptor.shape;
+    if (shape.empty() || shape.size() > 8)
+      return mismatch("select requires rank 1..8");
+    if (inputs[1].descriptor.element_type !=
+            inputs[2].descriptor.element_type ||
+        inputs[1].descriptor.shape != shape ||
+        inputs[2].descriptor.shape != shape)
+      return mismatch("select branch dtypes and all shapes must match");
     std::uint64_t count = 1;
-    for (auto extent : inputs[0].descriptor.shape) {
+    for (auto extent : shape) {
       if (!extent || extent > (UINT64_C(1) << 40) / count)
-        return Status{ErrorCode::TypeMismatch,
-                      "select input exceeds 2^40 elements",
-                      FailureReason::None,
-                      {FailureOrigin::Schema, FailureScope::Unspecified}};
+        return mismatch("select input exceeds 2^40 elements");
       count *= extent;
     }
-    return numeric_ops::sequence_profile_available(profile);
+    auto available = numeric_ops::sequence_profile_available(profile);
+    if (!available.ok())
+      return Answer(available);
+    OperationOutputSpecialization result;
+    result.metadata.descriptor = inputs[1].descriptor;
+    return Answer(
+        std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_dependency = [profile](const auto&, const auto& allocator) {
-    return DependencyContinuation::make<SelectState>(allocator, profile);
-  };
+  operation.callback = execute_selection;
   return operation;
 }
 }  // namespace

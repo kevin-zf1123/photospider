@@ -44,6 +44,8 @@ def cases():
                 yield operation,2,dtype,n%(1<<64),d%(1<<64)
 
 
+from accuracy_oracle import accepted
+
 def main():
     rows = list(cases())
     encoded,wanted = [],[]
@@ -56,7 +58,7 @@ def main():
     answers = result.stdout.splitlines()
     assert len(answers) == len(rows),(len(answers),len(rows),result.stderr)
     for index,(actual,expected) in enumerate(zip(answers,wanted)):
-        assert actual == expected,(index,rows[index],actual,expected)
+        assert accepted(actual, expected, rows[index][2], sys.argv[2] if len(sys.argv)>2 else "strict"),(index,rows[index],actual,expected)
     with MPFR(128) as oracle:
         version = oracle.version
     print(f'{len(rows)} independent exact/MPFR-{version} unary cases passed ({sys.argv[2] if len(sys.argv)>2 else "strict"})')

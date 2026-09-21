@@ -7,12 +7,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-11: nonuniform low-pass family
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM execution baseline](NUM_common_contract.md) for specification/
 registration status, CPU target identity, floating environment, diagnostic provenance,
@@ -22,9 +31,8 @@ caller floating environment is preserved. This is limited inheritance: the ports
 output kinds/facets, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
-Where a 4-ULP final bound is stated, it means at most four adjacent
-representable steps in the output dtype from the correctly rounded strict result,
-measured by monotone IEEE bit-pattern distance for nonzero finite values.
+A stated four-ULP final bound uses the shared FP32-scaled contract for both
+Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
 
 

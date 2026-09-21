@@ -35,10 +35,7 @@ struct InverseState {
   std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
   std::unique_ptr<numeric_ops::ArrayPublication> publication;
   InverseState(bool cubic, bool clipped, SequenceProfile selected)
-      : pchip(cubic),
-        clamp(clipped),
-        profile(selected),
-        arithmetic(cubic ? SequenceProfile::Strict : selected) {}
+      : pchip(cubic), clamp(clipped), profile(selected), arithmetic(selected) {}
   Status failure(const DependencyPhase& phase, const InversePoint& point,
                  unsigned port, std::uint64_t index, const char* message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
@@ -92,7 +89,7 @@ struct InverseState {
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         result.implementation.data(), result.implementation.size(),
-        "photospider.inverse/1;%s;%s",
+        "photospider.inverse/2;%s;%s",
         pchip ? "pchip-exact-lattice" : "linear-exact-rational",
         numeric_ops::numeric_build_identity());
     if (length < 0 ||
@@ -103,7 +100,7 @@ struct InverseState {
     if (fallback && profile != SequenceProfile::Strict) {
       result.strict_fallbacks = 1;
       result.fallback_reasons[static_cast<unsigned>(
-          NumericFallbackReason::FunctionUnsupported)] = 1;
+          NumericFallbackReason::RoundingUnresolved)] = 1;
     }
     return phase.report_numeric(result);
   }
@@ -273,13 +270,17 @@ struct InverseState {
         x[i] = a.value();
         y[i] = b.value();
       }
-      auto status =
-          report(phase, 1, 0, pchip && xs.size() > 2 && point.selected < 0);
+      const bool known_fallback =
+          !narrow && point.selected < 0 && profile != SequenceProfile::Strict;
+      auto status = report(phase, 1, 0, known_fallback);
       if (!status.ok())
         return Answer(status);
       auto computed = arithmetic.inverse(
           pchip, xs.size(), point.first, point.count, point.segment,
-          point.selected, point.query, x, y, narrow, phase.consume_work);
+          point.selected, point.query, x, y, narrow, phase.consume_work, [&] {
+            return known_fallback ? Status::success()
+                                  : report(phase, 0, 0, true);
+          });
       if (!computed.ok())
         return Answer(computed.status());
       const auto bits = computed.value();

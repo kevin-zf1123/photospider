@@ -10,12 +10,21 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-08A: linear_shaper
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Interface and formula
 
@@ -30,7 +39,7 @@ This named authoring template expands remap_range and explicit broadcast/constan
 Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
 zero signs, NaN quieting/payloads, infinity/domain extensions and overflow as
 successful IEEE results. Bound validation always precedes source special values.
-All profiles are bitwise identical.
+Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 These operations do not modify a color description or implement tone mapping.
 
 ## Execution and failures

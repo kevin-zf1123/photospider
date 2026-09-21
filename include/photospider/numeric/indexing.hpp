@@ -34,12 +34,17 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
 }  // namespace indexing_detail
 /** @brief Authors ordered concatenation of 2..256 same-dtype, same-rank arrays.
  * Compiler checks non-axis extents and the checked axis sum/count <=2^40.
- * View retains immutable source owners in separate fragments; Dense packs each
- * requested rectangle. Only hit ports have Data/typed Validation support.
- * Inputs are ordered input_0..input_(K-1); output is values with empty facets.
- * Helpers access no payload and return owned node metadata. Invalid arguments
- * return InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc.
- * Calls are pure and concurrent-safe. All profiles preserve raw element bits.
+ * Whole reads and validates every input for any nonempty demand. View requires
+ * one complete affine owner across all ports; incompatible/multiple owners
+ * return Domain/Run ViewUnavailable. Dense collects and owns the complete
+ * output. All active input edits invalidate all output observations; unselected
+ * input failures can fail the Run. Empty reads nothing. Views retain source
+ * resources. Content caching is disabled because physical viewability is not
+ * witnessed. Inputs are ordered input_0..input_(K-1); output is values with
+ * empty facets. Helpers access no payload and return owned node metadata.
+ * Invalid arguments return InvalidArgument/InvalidDomain/Schema; allocation may
+ * throw bad_alloc. Calls are pure and concurrent-safe. All profiles preserve
+ * raw element bits.
  */
 inline Result<WorkflowNode> concatenate_node(
     std::uint64_t id, std::vector<WorkflowInput> inputs, std::uint32_t axis,
@@ -62,11 +67,12 @@ inline Result<WorkflowNode> concatenate_node(
   return Result<WorkflowNode>(std::move(authored));
 }
 /** @brief Authors dense single-axis gather with dynamic Int64[M] indices.
- * Source and result share dtype/rank; result axis length is M. Only indices at
- * requested axis positions are read/validated. Repeated indices retain exact
- * shared source dependencies. Invalid observed index returns IndexOutOfBounds
- * as InvalidArgument/InvalidDomain; no clipping, casts or implicit broadcasts.
- * Ownership, errors and concurrency follow concatenate_node; output is values.
+ * Source and result share dtype/rank; result axis length is M. Whole reads and
+ * validates all source/indices, then owns complete packed output before
+ * projection. Repeated indices preserve output order. Any invalid index returns
+ * IndexOutOfBounds as InvalidArgument/InvalidDomain; no clipping, casts or
+ * implicit broadcasts. Ownership, errors and concurrency follow
+ * concatenate_node; output is values.
  */
 inline Result<WorkflowNode> gather_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput indices,
@@ -76,13 +82,16 @@ inline Result<WorkflowNode> gather_node(
 }
 /** @brief Scatter rules with base, Int64[M] indices and matching updates.
  * Output values preserves base shape/dtype and has empty facets. Every nonempty
- * request validates all indices before reading base/updates. Replacement reads
- * only the last matching update; aggregates include base then increasing j.
- * No-hit paths preserve base bits including sNaN. Sum rounds the exact total
- * once; integer final overflow fails with ArithmeticOverflow. Minimum/maximum
- * propagate the first NaN and use signed-zero numerical order. Outputs are
- * immutable owned dense rectangles and outlive the context. Source/resource/
- * cancellation failures retain their categories; no partial result is returned.
+ * request reads and validates full base/indices/updates before callback.
+ * Numerical replacement selects the last matching update; aggregates include
+ * base then increasing j. Unselected upstream/typed failures can fail Whole
+ * preparation. No-hit paths preserve base bits including sNaN. Sum rounds the
+ * exact total once; integer final overflow fails with ArithmeticOverflow.
+ * Minimum/maximum propagate the first NaN and use signed-zero numerical order.
+ * Outputs are immutable complete dense arrays and outlive the context. Final
+ * overflow is Domain/Run, and any active input edit invalidates the complete
+ * output. Source/resource/ cancellation failures retain their categories; no
+ * partial result is returned.
  */
 inline Result<WorkflowNode> scatter_replace_node(
     std::uint64_t id, WorkflowInput base, WorkflowInput indices,

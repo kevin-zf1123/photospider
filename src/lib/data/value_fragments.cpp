@@ -62,6 +62,30 @@ void append_coalesced(std::vector<Value>* fragments, Value value) {
   }
   fragments->push_back(std::move(value));
 }
+// A checked Value can be copied as one logical run only when the requested
+// rectangle is packed in forward row-major order. Singleton strides do not
+// affect addressing. MutableValue has already checked the total byte product.
+const std::uint8_t* packed_region_data(const Value& value, const Region& region,
+                                       std::size_t width, std::size_t bytes) {
+  std::size_t stride = width;
+  std::vector<std::uint64_t> first(region.rank());
+  for (std::size_t axis = region.rank(); axis-- > 0;) {
+    const auto wanted = region.dimensions()[axis];
+    const auto available = value.region().dimensions()[axis];
+    if (wanted.offset < available.offset ||
+        wanted.offset + wanted.extent > available.offset + available.extent ||
+        (wanted.extent > 1 && value.layout().byte_strides[axis] !=
+                                  static_cast<std::int64_t>(stride)))
+      return nullptr;
+    first[axis] = wanted.offset;
+    stride *= wanted.extent;
+  }
+  const auto address = value.byte_address(first);
+  if (!address.ok() || address.value() > value.bytes().size() ||
+      bytes > value.bytes().size() - address.value())
+    return nullptr;
+  return value.bytes().data() + address.value();
+}
 Status invalid(const char* message) {
   return Status::failure(ErrorCode::InvalidArgument, message);
 }
@@ -262,6 +286,34 @@ Result<Value> ValueFragments::collect(const Region& region,
   auto output = allocation.take_value();
   auto* destination = output.data();
   const auto width = Value::element_size(descriptor_.element_type);
+  // Preserve allocation provenance and logical-sample work limits. A single
+  // packed fragment needs no per-sample coordinate/authorization lookup after
+  // the full rectangle has passed the coverage checks above.
+  const auto* packed =
+      fragments_.size() == 1
+          ? packed_region_data(fragments_[0], region, width, output.size())
+          : nullptr;
+  if (packed) {
+    if (limits.cancellation.cancelled())
+      return Result<Value>(Status::failure(ErrorCode::Cancelled,
+                                           "fragment collection cancelled"));
+    if (output.size() / width > limits.maximum_work)
+      return Result<Value>(Status::failure(ErrorCode::ResourceExhausted,
+                                           "footprint visit limit"));
+    constexpr std::size_t kCopyBytes = 64 * 1024;
+    for (std::size_t offset = 0; offset < output.size();) {
+      if (limits.cancellation.cancelled())
+        return Result<Value>(Status::failure(ErrorCode::Cancelled,
+                                             "fragment collection cancelled"));
+      const auto bytes = std::min(kCopyBytes, output.size() - offset);
+      std::memcpy(destination + offset, packed + offset, bytes);
+      offset += bytes;
+    }
+    if (limits.cancellation.cancelled())
+      return Result<Value>(Status::failure(ErrorCode::Cancelled,
+                                           "fragment collection cancelled"));
+    return std::move(output).publish(facets_, resources_);
+  }
   auto status = query.value().visit(
       [&](const auto& coordinate) {
         auto copied = read(coordinate, destination, width);

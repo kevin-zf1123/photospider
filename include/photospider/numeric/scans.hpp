@@ -10,20 +10,22 @@
 namespace ps::numeric {
 /** @brief Authors exact boundary prefix sums on one static axis.
  * Input rank is 1..8; output extends axis by one. Input and output counts must
- * be <=2^40. Output values has empty facets. Boundary zero is +0 and reads no
- * source Data. Each other result sums [0,k) exactly and converts once, using
- * reduce_sum's same-domain dtype, source NaN priority, infinity and zero rules.
- * input_type selects the default Int64/Float64 destination; the compiler checks
- * the actual source domain. Invalid arguments fail with InvalidArgument /
- * InvalidDomain / Schema; incompatible shapes/domains fail TypeMismatch.
- * Requested integer overflow is OperationFailed / ArithmeticOverflow / Atom;
- * execute_atoms retains independent successful observations. Typed Validation,
- * upstream, resource and cancellation failures retain their own categories.
- * Helpers return owned metadata, are pure/concurrent-safe and may throw
- * bad_alloc. Runtime results own immutable storage after context retirement.
- * Regional execution scans each requested line through its largest boundary
- * once, in bounded windows. Separate executions/execute_atoms observations can
- * repeat work; there is no persistent checkpoint or once-per-Run guarantee.
+ * be <=2^40. Output values has empty facets. Boundary zero is +0. Whole reads
+ * and validates the complete input for any nonempty demand, including a zero
+ * boundary projection; Empty reads nothing. Each other result sums [0,k)
+ * exactly and converts once, using reduce_sum's same-domain dtype, source NaN
+ * priority, infinity and zero rules. input_type selects the default
+ * Int64/Float64 destination; the compiler checks the actual source domain.
+ * Invalid arguments fail with InvalidArgument / InvalidDomain / Schema;
+ * incompatible shapes/domains fail TypeMismatch. Any complete-output integer
+ * overflow is Domain/Run OperationFailed / ArithmeticOverflow, including
+ * unrequested output positions. Typed Validation, upstream, resource and
+ * cancellation failures retain their own categories. Helpers return owned
+ * metadata, are pure/concurrent-safe and may throw bad_alloc. Runtime results
+ * own immutable storage after context retirement. Whole computes complete dense
+ * output with fixed exact state; full input collection and output payload are
+ * required even for sparse demand. Any input edit invalidates all recorded
+ * observations. No persistent checkpoint is kept.
  */
 inline Result<WorkflowNode> prefix_sum_node(
     std::uint64_t id, WorkflowInput input, std::uint64_t axis,
@@ -42,9 +44,10 @@ inline Result<WorkflowNode> prefix_sum_node(
 /** @brief Authors exact anchored rectangular sums on two distinct axes.
  * axes is normalized to increasing order, rank is 2..8, and each selected
  * extent increases by one. Other coordinates are independent batches. Either
- * zero boundary returns +0 without Data. Reads cover only requested rectangles
- * plus separate typed Validation. Rectangles are streamed independently in
- * original row-major order with accounted repeated work. Arithmetic, dtype,
+ * zero boundary returns +0 after Whole input preparation. Exact row prefixes
+ * merge with compact exact column carries before final rounding. Columns use
+ * metadata proportional to the higher-numbered selected axis extent, reset per
+ * plane. NaN priority follows original row-major order. Arithmetic, dtype,
  * ownership, error and concurrency rules match prefix_sum_node. Floating
  * four-corner subtraction of rounded results is not an exact rectangle oracle.
  */

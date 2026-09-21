@@ -34,22 +34,25 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
 /** @brief Shared contract of the independently named binary node helpers.
  * Inputs must match dtype and positive rank-1..8 shape, with count <=2^40;
  * output values preserves both with empty facets. There is no implicit cast or
- * broadcast. Both sources retain exact requested Data and typed Validation,
- * including special results such as NaN^0. Shape/dtype errors fail
- * TypeMismatch/Schema; integer overflow is OperationFailed/ArithmeticOverflow
- * for the requested Atom. IEEE nonfinite results succeed. Source, work,
- * capacity and cancellation failures retain their categories.
- * Helpers own metadata and are pure/concurrent-safe; allocation may throw
- * bad_alloc. Invalid id/profile fails InvalidArgument/InvalidDomain/Schema.
- * Runtime results own immutable packed storage beyond context life. Cache
- * witnesses retain both inputs and their exact bits, including NaN payloads.
- * Arithmetic is RN-even with gradual underflow and unchanged caller fenv.
- * Ordinary pow/angle values use directed refinement through 4096 fractional
- * bits; unresolved rounding fails ResourceExhausted. Accelerated profiles
- * report FunctionUnsupported strict fallback for ordinary transcendental
- * values; special/algebraic cases are exact. Named profiles require their CPU.
- * See examples/numeric_workflow for editable workflows and explicit math
- * budgets.
+ * broadcast. Nonempty requests collect and validate both full inputs, including
+ * NaN^0, then compute a full packed output for consumer projection. Empty skips
+ * payload and callback. Any input change invalidates all observed outputs.
+ * Shape/dtype errors fail TypeMismatch/Schema; integer overflow anywhere fails
+ * the invocation with OperationFailed/ArithmeticOverflow/Run and no Atom key.
+ * IEEE nonfinite results succeed. Source/work/capacity/cancellation failures
+ * retain their categories. Budget includes both full input collections,
+ * complete output and fixed scratch, even for sparse requests. Helpers own
+ * metadata and are pure/concurrent-safe; allocation may throw bad_alloc.
+ * Invalid id/profile fails InvalidArgument/InvalidDomain/Schema. Runtime
+ * results own immutable packed storage beyond context life. Cache witnesses
+ * retain both inputs and their exact bits, including NaN payloads. Strict
+ * arithmetic is RN-even with gradual underflow and unchanged fenv. Strict
+ * pow/angle refinement has a 4096-bit ceiling; unresolved rounding fails
+ * ResourceExhausted. Accelerated floating arithmetic follows
+ * CpuNumericProfile's final FP32 bound and uses strict fallback when it
+ * cannot certify a result. Integer, special and selected algebraic results
+ * remain exact. Named profiles require their CPU target. See
+ * examples/numeric_workflow for editable workflows and explicit math budgets.
  */
 /** @brief Exact a+b; UInt8/Int64/Float32/64, checked integer range.
  * @note Uses the shared binary execution/ownership/error contract above.

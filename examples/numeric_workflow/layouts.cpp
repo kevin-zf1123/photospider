@@ -2,6 +2,7 @@
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -14,6 +15,7 @@
 
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -71,6 +73,7 @@ struct Fixture {
     config.cpu_workers = 1;
     config.maximum_live_bytes = capacity;
     config.managed_resources = ps::ResourceLimits{};
+    config.managed_resources->maximum_work = work;
     ps::ExecutionContext execution(registry, config);
     auto frozen = execution.freeze(plan.value().plan, bindings);
     if (!frozen.ok())
@@ -98,18 +101,12 @@ void reshape(ps::CpuNumericProfile profile) {
                     value == 2 * i + j,
                 "reshape logical sequence");
       }
-    std::uint64_t viewed = 0, copied = 0;
-    for (const auto& timing : result.diagnostics.operation_timings) {
-      viewed += timing.numeric.view_elements;
-      copied += timing.numeric.copied_elements;
-    }
-    require(layout == ps::numeric::TransformLayout::Dense
-                ? copied == 6 && viewed == 0
-                : viewed == 6 && copied == 0,
-            "actual reshape representation counters");
+    require(result.diagnostics.operation_timings.size() == 1,
+            "Whole layout callback once; numeric counters unavailable");
   }
   // Direct bindings are dense. A public transpose node creates the physically
-  // strided intermediate whose per-rectangle viewability reshape must inspect.
+  // strided intermediate whose complete-output viewability reshape must
+  // inspect.
   const auto backing = array({3, 2}, {0, 3, 1, 4, 2, 5});
   Fixture unavailable(take(ps::numeric::reshape_node(
                           2, ps::WorkflowNodeOutput{1, "values"}, {3, 2},
@@ -127,9 +124,10 @@ void reshape(ps::CpuNumericProfile profile) {
       "reshape cannot manufacture tiny views for a non-affine rectangle");
   const auto one_row =
       take(ps::Footprint::from_regions({3, 2}, {ps::Region({{0, 1}, {0, 2}})}));
-  auto regional = take(unavailable.run(one_row));
-  require(regional.values.at("values").fragments().size() == 1,
-          "a smaller request can be one affine view");
+  auto regional = unavailable.run(one_row);
+  require(!regional.ok() && regional.status().message.find("ViewUnavailable") !=
+                                std::string::npos,
+          "partial request still requires complete affine output");
   unavailable.document.nodes[1].parameters["layout"] = std::string("auto");
   auto fallback = take(unavailable.run(take(ps::Footprint::all({3, 2}))));
   for (unsigned i = 0; i < 3; ++i)
@@ -139,8 +137,8 @@ void reshape(ps::CpuNumericProfile profile) {
                   value == 2 * i + j,
               "auto packs the non-affine rectangle");
     }
-  std::cout << "reshape: [2,3]->[3,2] raw logical order; per-rectangle "
-               "view/auto/dense and counters passed\n";
+  std::cout << "reshape: [2,3]->[3,2] raw logical order; complete-output "
+               "view/auto/dense passed\n";
 }
 void transpose(ps::CpuNumericProfile profile) {
   std::vector<std::int64_t> values;
@@ -181,22 +179,14 @@ void slice(ps::CpuNumericProfile profile) {
             "reverse stride slice values");
   }
   const auto support = take(result.dependencies.source_support());
-  const auto source_points = take(ps::Footprint::from_regions(
-      {6}, {ps::Region({{0, 1}}), ps::Region({{2, 1}}), ps::Region({{4, 1}})}));
-  require(support.at("input0") == source_points,
-          "nonunit slice never authorizes gaps");
-  require(take(result.dependencies.potential_dirty(
-                   "input0", take(ps::Footprint::from_regions(
-                                 {6}, {ps::Region({{1, 1}})}))))
-              .at("values")
-              .empty(),
-          "unread source gap stays clean");
-  require(take(result.dependencies.potential_dirty(
-                   "input0", take(ps::Footprint::from_regions(
-                                 {6}, {ps::Region({{2, 1}})}))))
-                  .at("values") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})})),
-          "slice inverse dirty selects one output");
+  require(support.at("input0") == take(ps::Footprint::all({6})),
+          "Whole slice reads complete source");
+  for (std::uint64_t changed : {1, 2})
+    require(take(result.dependencies.potential_dirty(
+                     "input0", take(ps::Footprint::from_regions(
+                                   {6}, {ps::Region({{changed, 1}})}))))
+                    .at("values") == take(ps::Footprint::all({3})),
+            "any source edit invalidates complete slice");
   auto one = take(fixture.run(
       take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}))));
   require(
@@ -237,6 +227,33 @@ void slice(ps::CpuNumericProfile profile) {
   std::cout << "slice: [4,2,0], exact support/dirty, full-domain validation "
                "and ignored singleton step passed\n";
 }
+struct LayoutFragments {
+  bool shared;
+  explicit LayoutFragments(bool value) : shared(value) {}
+  ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase& phase) {
+    std::vector<ps::Value> parts;
+    auto storage = take(shared ? phase.allocator.allocate(33)
+                               : ps::BufferAllocator{}.allocate(1));
+    const std::int64_t values[] = {0, 1, 2, 3};
+    if (shared)
+      std::memcpy(storage.data() + 1, values, 32);
+    auto owner = std::move(storage).freeze();
+    for (std::uint64_t row = 0; row < 2; ++row) {
+      auto chosen = owner;
+      if (!shared) {
+        auto buffer = take(phase.allocator.allocate(16));
+        std::memcpy(buffer.data(), values + 2, 16);
+        chosen = std::move(buffer).freeze();
+      }
+      parts.push_back(take(ps::Value::from_storage(
+          phase.query.output.descriptor, ps::Region({{row, 1}, {0, 2}}),
+          {shared ? 1 + row * 16 : 0, {0, 8}, {row, 0}}, chosen)));
+    }
+    return ps::Result<ps::DependencyPoll>(take(
+        ps::ValueFragments::create(phase.query.output.descriptor, {},
+                                   phase.query.outputs, std::move(parts))));
+  }
+};
 void physical_layouts(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
   auto buffer = take(ps::BufferAllocator{}.allocate(49));
@@ -270,53 +287,57 @@ void physical_layouts(ps::CpuNumericProfile profile) {
               "public invoke retains actual source owner for a view");
     }
   }
+  // Compatible same-owner and multiple-owner fragment cases are exercised
+  // through the public graph below, so the Whole collection boundary is real.
   for (bool shared : {true, false}) {
+    auto operations = ps::make_default_operation_registry(false);
+    ps::OperationDefinition split;
+    split.key = "manual.layout_split";
+    split.traits.input_count = 0;
+    split.traits.input_schema.clear();
+    auto& output = split.traits.outputs[0];
+    output.region_rule = ps::OperationRegionRule::Dependency;
+    output.dependency_version = 1;
+    output.regional_atomic = true;
+    output.preserve_output_views = true;
+    output.shape_rule = ps::OperationShapeRule::Fixed;
+    output.fixed_output_shape = {2, 2};
+    output.output_element_type = ps::ElementType::Int64;
+    output.maximum_output_payload_bytes = shared ? 33 : 32;
+    output.continuation_bytes = sizeof(LayoutFragments);
+    output.maximum_dependency_stages = 1;
+    split.start_dependency = [shared](const auto&, const auto& allocator) {
+      return ps::DependencyContinuation::make<LayoutFragments>(allocator,
+                                                               shared);
+    };
+    require(operations->register_operation(std::move(split)).ok() &&
+                operations->freeze().ok(),
+            "register layout fragments");
     for (auto layout : {ps::numeric::TransformLayout::View,
                         ps::numeric::TransformLayout::Auto,
                         ps::numeric::TransformLayout::Dense}) {
-      auto node = take(ps::numeric::reshape_node(
-          1, ps::WorkflowInputReference{1}, {4}, layout, profile));
-      ps::DependencyRequest request;
-      request.inputs = {{{ps::ElementType::Int64, {2, 2}}, {}}};
-      request.parameters = node.parameters;
-      request.outputs = take(ps::Footprint::all({4}));
-      request.snapshot_identity = "layout-fragments";
-      auto session = take(registry->start_dependency(node.operation, request));
-      require(session->poll().ok(), "fragmented reshape initial need");
-      std::vector<ps::Value> pieces;
-      for (std::uint64_t row = 0; row < 2; ++row) {
-        auto storage = shared ? owner : array({2}, {2, 3}).storage();
-        pieces.push_back(take(ps::Value::from_storage(
-            request.inputs[0].descriptor, ps::Region({{row, 1}, {0, 2}}),
-            {shared ? 1 + 16 * row : 0, {0, 8}, {row, 0}}, storage)));
-      }
-      auto supplied = take(
-          ps::ValueFragments::create(request.inputs[0].descriptor, {},
-                                     take(ps::Footprint::all({2, 2})), pieces));
-      require(supplied.fragments().size() == 2,
-              "same-owner fixture must preserve two distinct address maps");
-      require(session->supply({supplied}, request.snapshot_identity).ok(),
-              "fragmented reshape supply");
-      auto done = session->poll();
+      Fixture fixture(
+          take(ps::numeric::reshape_node(2, ps::WorkflowNodeOutput{1, "value"},
+                                         {4}, layout, profile)),
+          {});
+      fixture.registry = operations;
+      fixture.document.nodes.insert(fixture.document.nodes.begin(),
+                                    {1, "manual.layout_split", {}, {}});
+      auto result = fixture.run(take(ps::Footprint::all({4})));
       if (!shared && layout == ps::numeric::TransformLayout::View) {
-        require(
-            done.status().message.find("ViewUnavailable") != std::string::npos,
-            "one requested rectangle cannot borrow multiple owners");
+        require(!result.ok() && result.status().message.find(
+                                    "ViewUnavailable") != std::string::npos,
+                result.ok() ? "unexpected multi-owner View success"
+                            : result.status().message.c_str());
       } else {
-        auto answer = take(std::move(done));
-        const auto& result = std::get<ps::DependencyResult>(answer).value;
-        require(result.fragments().size() == 1,
-                "one requested rectangle produces one view or dense copy");
+        auto ready = take(std::move(result));
         for (std::uint64_t i = 0; i < 4; ++i) {
-          std::int64_t value = -1;
+          std::int64_t value = 0;
           require(
-              result.read({i}, &value, 8).ok() &&
+              ready.values.at("values").read({i}, &value, 8).ok() &&
                   value == static_cast<std::int64_t>(shared ? i : 2 + i % 2),
-              "multi-fragment logical order");
+              "Whole physical fragment order");
         }
-        require(!shared || layout == ps::numeric::TransformLayout::Dense ||
-                    result.fragments()[0].storage() == owner,
-                "joint affine proof preserves same owner");
       }
     }
   }
@@ -343,22 +364,17 @@ void boundaries(ps::CpuNumericProfile profile) {
               stopped.status().reason == ps::FailureReason::WorkLimit,
           "layout work exhaustion is not an auto fallback");
   auto registry = fixture.registry;
-  ps::DependencyRequest request;
-  request.inputs = {{fixture.bindings.inputs[0].value.descriptor(), {}}};
-  request.parameters = reshape.parameters;
-  request.outputs = take(ps::Footprint::none({3, 2}));
-  request.snapshot_identity = "layout-boundaries";
-  auto empty = take(registry->start_dependency(reshape.operation, request));
-  require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-              empty->poll_count() == 0,
-          "Empty does not start arithmetic or source reads");
-  request.outputs = take(ps::Footprint::all({3, 2}));
+  require(fixture.run(take(ps::Footprint::none({3, 2}))).ok(),
+          "Empty skips Whole callback");
+  std::vector<ps::Value> inputs{fixture.bindings.inputs[0].value};
+  std::vector<ps::Region> demands{inputs[0].region()};
   ps::CancellationSource cancellation;
-  request.cancellation = cancellation.token();
-  auto cancelled = take(registry->start_dependency(reshape.operation, request));
   cancellation.cancel();
-  require(cancelled->poll().status().code == ps::ErrorCode::Cancelled,
-          "cancel before layout poll");
+  ps::OperationInvocation call(inputs, demands, reshape.parameters,
+                               ps::Backend::Cpu, cancellation.token());
+  require(registry->invoke(reshape.operation, call).status().code ==
+              ps::ErrorCode::Cancelled,
+          "pre-cancelled Whole layout");
   Fixture large(take(ps::numeric::transpose_node(
                     2, ps::WorkflowNodeOutput{1, "values"}, {1, 0},
                     ps::numeric::TransformLayout::Auto, profile)),
@@ -395,49 +411,23 @@ void typed_and_lifetime(ps::CpuNumericProfile profile) {
                   1, ps::WorkflowInputReference{1},
                   ps::WorkflowInputReference{2}, ps::WorkflowInputReference{3},
                   {1, 1, 1}, ps::numeric::TransformLayout::View, profile));
-    ps::DependencyRequest request;
-    request.inputs = {{{ps::ElementType::Float32, {1, 1, 4}}, {facet}}};
-    request.parameters = node.parameters;
-    request.snapshot_identity = "layout-typed";
-    request.outputs =
-        kind == 0
-            ? take(ps::Footprint::from_regions({4}, {ps::Region({{0, 1}})}))
-        : kind == 1 ? take(ps::Footprint::from_regions(
-                          {4, 1, 1}, {ps::Region({{0, 1}, {0, 1}, {0, 1}})}))
-                    : take(ps::Footprint::all({1, 1, 1}));
+    const float rgba[] = {1, 0, 0, 2};
+    auto bytes = take(ps::BufferAllocator{}.allocate(16));
+    std::memcpy(bytes.data(), rgba, 16);
+    auto invalid = take(ps::Value::from_storage(
+        {ps::ElementType::Float32, {1, 1, 4}}, ps::Region::whole({1, 1, 4}),
+        {0, {16, 16, 4}}, std::move(bytes).freeze(), {facet}));
+    std::vector<ps::Value> inputs{invalid};
     if (kind == 2) {
-      request.inputs.push_back({{ps::ElementType::Int64, {3}}, {}});
-      request.inputs.push_back({{ps::ElementType::Int64, {3}}, {}});
+      inputs.push_back(array({3}, {0, 0, 0}));
+      inputs.push_back(array({3}, {0, 0, 0}));
     }
-    auto session = take(registry->start_dependency(node.operation, request));
-    require(session->poll().ok(), "typed layout initial need");
-    if (kind == 2) {
-      auto controls = array({3}, {0, 0, 0});
-      auto none = take(
-          ps::ValueFragments::create(request.inputs[0].descriptor, {facet},
-                                     take(ps::Footprint::none({1, 1, 4})), {}));
-      auto starts = take(ps::ValueFragments::create(
-          controls.descriptor(), {}, take(ps::Footprint::all({3})),
-          {controls}));
-      auto unused = take(ps::ValueFragments::create(
-          controls.descriptor(), {}, take(ps::Footprint::none({3})), {}));
-      require(session->supply({none, starts, unused}, request.snapshot_identity)
-                  .ok(),
-              "typed singleton slice control stage ignores every step");
-      require(session->poll().ok(), "typed slice source stage");
-    }
-    bool data = false, validation = false;
-    for (const auto& need : take(session->pending_reads())) {
-      if (need.port != 0)
-        continue;
-      if (need.roles == 1)
-        data = take(need.samples.element_count()) == 1;
-      if (need.roles == 4)
-        validation = take(need.samples.element_count()) == 4;
-    }
-    require(
-        data && validation,
-        "each layout has one data sample and complete typed-pixel validation");
+    std::vector<ps::Region> demands;
+    for (const auto& value : inputs)
+      demands.push_back(value.region());
+    ps::OperationInvocation call(inputs, demands, node.parameters);
+    require(!registry->invoke(node.operation, call).ok(),
+            "Whole layouts retain complete typed pixel validation");
   }
   Fixture fixture(take(ps::numeric::reshape_node(
                       1, ps::WorkflowInputReference{1}, {3, 2},
@@ -458,8 +448,7 @@ void typed_and_lifetime(ps::CpuNumericProfile profile) {
         frozen, {{"values", take(ps::Footprint::all({3, 2}))}}));
     held = result.values.at("values").fragments()[0];
   }
-  require(root->statistics().live[ps::ResourceKind::Metadata] > 0,
-          "ordinary returned Value retains publication metadata after context");
+
   std::int64_t value = -1;
   std::memcpy(&value, held.bytes().data() + take(held.byte_address({2, 1})), 8);
   require(value == 5, "returned view survives result/context destruction");
@@ -469,6 +458,139 @@ void typed_and_lifetime(ps::CpuNumericProfile profile) {
           "final publication owner releases all admitted metadata and payload");
   std::cout << "all layout typed-validation closures and escaped Value "
                "publication lifetime passed\n";
+}
+void affine_oracle(ps::CpuNumericProfile profile) {
+  auto registry = ps::make_default_operation_registry();
+  std::uint64_t cases = 0;
+  for (const std::vector<std::uint64_t>& shape :
+       {std::vector<std::uint64_t>{2, 3}, {1, 2, 3}, {2, 2, 3}}) {
+    std::uint64_t count = 1, combinations = 1;
+    for (auto extent : shape) {
+      count *= extent;
+      combinations *= 7;
+    }
+    const std::int64_t options[] = {-48, -24, -8, 0, 8, 24, 48};
+    for (std::uint64_t trial = 0; trial < combinations; ++trial) {
+      auto digits = trial;
+      std::vector<std::int64_t> strides(shape.size());
+      std::int64_t low = 0, high = 0;
+      for (std::size_t j = 0; j < shape.size(); ++j) {
+        strides[j] = options[digits % 7];
+        digits /= 7;
+        const auto end = static_cast<std::int64_t>(shape[j] - 1) * strides[j];
+        low += std::min<std::int64_t>(0, end);
+        high += std::max<std::int64_t>(0, end);
+      }
+      auto buffer = take(ps::BufferAllocator{}.allocate(high - low + 9));
+      for (std::uint64_t i = 0;
+           i <= static_cast<std::uint64_t>((high - low) / 8); ++i) {
+        const std::int64_t bits = 1000 + i;
+        std::memcpy(buffer.data() + 1 + 8 * i, &bits, 8);
+      }
+      auto input = take(ps::Value::from_storage(
+          {ps::ElementType::Int64, shape}, ps::Region::whole(shape),
+          {static_cast<std::uint64_t>(1 - low), strides},
+          std::move(buffer).freeze()));
+      // Independent finite enumeration of physical addresses; no chunk rules.
+      std::vector<std::int64_t> addresses(count);
+      for (std::uint64_t i = 0; i < count; ++i) {
+        auto index = i;
+        addresses[i] = 1 - low;
+        for (std::size_t j = shape.size(); j; --j) {
+          addresses[i] +=
+              static_cast<std::int64_t>(index % shape[j - 1]) * strides[j - 1];
+          index /= shape[j - 1];
+        }
+      }
+      for (const std::vector<std::uint64_t>& target :
+           {std::vector<std::uint64_t>{count},
+            {count / 2, 2},
+            {1, count},
+            {2, count / 2}}) {
+        std::vector<std::int64_t> inferred(target.size(), 0);
+        std::uint64_t suffix = 1;
+        for (std::size_t j = target.size(); j; --j) {
+          if (target[j - 1] > 1)
+            inferred[j - 1] = addresses[suffix] - addresses[0];
+          suffix *= target[j - 1];
+        }
+        bool affine = true;
+        for (std::uint64_t i = 0; i < count; ++i) {
+          auto index = i;
+          auto expected = addresses[0];
+          for (std::size_t j = target.size(); j; --j) {
+            expected += static_cast<std::int64_t>(index % target[j - 1]) *
+                        inferred[j - 1];
+            index /= target[j - 1];
+          }
+          affine &= expected == addresses[i];
+        }
+        for (auto mode : {ps::numeric::TransformLayout::View,
+                          ps::numeric::TransformLayout::Auto,
+                          ps::numeric::TransformLayout::Dense}) {
+          auto node = take(ps::numeric::reshape_node(
+              1, ps::WorkflowInputReference{1}, target, mode, profile));
+          const std::vector<ps::Value> inputs{input};
+          const std::vector<ps::Region> demands{input.region()};
+          ps::OperationInvocation call(inputs, demands, node.parameters);
+          auto result = registry->invoke(node.operation, call);
+          require(result.ok() ==
+                      (affine || mode != ps::numeric::TransformLayout::View),
+                  "independent complete affine address oracle");
+          if (!result.ok())
+            continue;
+          require((result.value().storage() == input.storage()) ==
+                      (affine && mode != ps::numeric::TransformLayout::Dense),
+                  "affine mode retains exact owner");
+          for (std::uint64_t i = 0; i < count; ++i) {
+            std::vector<std::uint64_t> at(target.size());
+            auto index = i;
+            for (std::size_t j = target.size(); j; --j) {
+              at[j - 1] = index % target[j - 1];
+              index /= target[j - 1];
+            }
+            std::int64_t actual = 0, expected = 0;
+            std::memcpy(&expected, input.bytes().data() + addresses[i], 8);
+            std::memcpy(&actual,
+                        result.value().bytes().data() +
+                            take(result.value().byte_address(at)),
+                        8);
+            require(actual == expected,
+                    "independent strided reshape raw bytes");
+          }
+          ++cases;
+        }
+      }
+    }
+  }
+  std::cout << "finite-address affine oracle: " << cases
+            << " successful layouts plus expected View rejections passed\n";
+}
+void active_layout_budgets(ps::CpuNumericProfile profile) {
+  std::vector<std::int64_t> values(16384);
+  for (unsigned i = 0; i < values.size(); ++i)
+    values[i] = i;
+  const auto input = array({16384}, values);
+  for (unsigned kind = 0; kind < 3; ++kind) {
+    auto node =
+        kind == 0 ? take(ps::numeric::reshape_node(
+                        1, ps::WorkflowInputReference{1}, {16384},
+                        ps::numeric::TransformLayout::Dense, profile))
+        : kind == 1
+            ? take(ps::numeric::transpose_node(
+                  1, ps::WorkflowInputReference{1}, {0},
+                  ps::numeric::TransformLayout::Dense, profile))
+            : take(ps::numeric::slice_node(
+                  1, ps::WorkflowInputReference{1},
+                  ps::WorkflowInputReference{2}, ps::WorkflowInputReference{3},
+                  {16384}, ps::numeric::TransformLayout::Dense, profile));
+    std::vector<ps::Value> inputs{input};
+    if (kind == 2) {
+      inputs.push_back(array({1}, {0}));
+      inputs.push_back(array({1}, {1}));
+    }
+    point_math_checks::resources(node, inputs);
+  }
 }
 void floating_environment(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
@@ -639,6 +761,8 @@ int main(int argc, char** argv) {
       transpose(profile);
       slice(profile);
       physical_layouts(profile);
+      affine_oracle(profile);
+      active_layout_budgets(profile);
       boundaries(profile);
       typed_and_lifetime(profile);
       floating_environment(profile);

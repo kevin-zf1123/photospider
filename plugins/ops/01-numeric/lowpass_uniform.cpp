@@ -47,6 +47,9 @@ struct UniformState {
   SequenceProfile profile;
   numeric_ops::UniformLowpassMath arithmetic;
   ResourceVector<std::uint64_t> samples;
+  ResourceVector<numeric_ops::FastInterval> coefficients;
+  numeric_ops::FastInterval normalizer;
+  bool coefficients_attempted = false, coefficients_ready = false;
   std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
   bool requested = false;
   UniformState(LowpassParameters p, unsigned dimension, unsigned count,
@@ -77,23 +80,23 @@ struct UniformState {
                : reduced;
   }
   Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied) const {
+                std::uint64_t copied, bool fallback = false) const {
     NumericDiagnostics result;
     result.profile =
         static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
     const auto length = std::snprintf(
         result.implementation.data(), result.implementation.size(),
-        "photospider.lowpass-uniform/1;certified-whole-sum;%s",
+        "photospider.lowpass-uniform/2;cached-bounds-4ulp32;%s",
         numeric_ops::numeric_build_identity());
     if (length < 0 ||
         static_cast<std::size_t>(length) >= result.implementation.size())
       return {ErrorCode::Internal, "lowpass diagnostic identity"};
     result.evaluated_values = evaluated;
     result.copied_elements = copied;
-    if (evaluated && profile != SequenceProfile::Strict) {
-      result.strict_fallbacks = evaluated;
+    if (fallback && profile != SequenceProfile::Strict) {
+      result.strict_fallbacks = 1;
       result.fallback_reasons[static_cast<unsigned>(
-          NumericFallbackReason::FunctionUnsupported)] = evaluated;
+          NumericFallbackReason::RoundingUnresolved)] = 1;
     }
     return phase.report_numeric(result);
   }
@@ -152,6 +155,16 @@ struct UniformState {
     request_capacity.reset();
     auto construction = dependency_internal::metadata_owner(65536);
     samples.resize(2 * radius + 1);
+    if (profile != SequenceProfile::Strict && !coefficients_attempted) {
+      coefficients.resize(radius + 1);
+      auto prepared =
+          arithmetic.prepare(parameters, radius, coefficients.data(),
+                             &normalizer, phase.consume_work);
+      if (!prepared.ok())
+        return Answer(prepared.status());
+      coefficients_ready = prepared.value();
+      coefficients_attempted = true;
+    }
     numeric_ops::ArrayPublication publication(
         phase.query.outputs.boxes().size(), rank);
     ResourceVector<Value> fragments;
@@ -194,10 +207,28 @@ struct UniformState {
             auto charged = report(phase, 1, 0);
             if (!charged.ok())
               return charged;
-            auto value = arithmetic.evaluate(parameters, radius, samples.data(),
-                                             narrow, phase.consume_work);
+            std::optional<std::uint64_t> fast;
+            if (coefficients_ready) {
+              charged = phase.consume_work((radius + 1) * 32);
+              if (!charged.ok())
+                return charged;
+              fast = arithmetic.fast(parameters, radius, samples.data(), narrow,
+                                     coefficients.data(), normalizer);
+            }
+            if (!fast && profile != SequenceProfile::Strict) {
+              charged = report(phase, 0, 0, true);
+              if (!charged.ok())
+                return charged;
+            }
+            auto value =
+                fast ? Result<std::uint64_t>(*fast)
+                     : arithmetic.evaluate(parameters, radius, samples.data(),
+                                           narrow, phase.consume_work);
             if (!value.ok())
               return value.status();
+            charged = phase.consume_work(1);
+            if (!charged.ok())
+              return charged;
             auto bits = value.value();
             std::memcpy(writer.data() + written * width, &bits, width);
             ++written;

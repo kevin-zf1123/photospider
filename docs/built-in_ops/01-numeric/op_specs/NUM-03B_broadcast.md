@@ -19,6 +19,12 @@ repository_commit: current working tree
 
 # NUM-03B: broadcast
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -75,63 +81,35 @@ Any additional required validation region must be declared and retained in the
 witness. Opaque facets are not interpreted as a new image/array type and are
 not copied onto the reshaped generic output.
 
-## Demand and dirty mapping
+## Whole demand, dirty mapping and representation
 
-For a requested output set Q, Data support is the exact set of mapped coordinates
-`{s(o) | o in Q}`. Deduplicate repeated source samples. For rectangular Q, each
-input axis maps its output interval or collapses to `[0,1)` for a singleton.
-For disjoint requests, use the exact union rather than reading the bounding gap.
-Source typed-validation closure is a separate additional dependency, including
-full image channels when the applicable current semantic validator requires it.
-Empty Q requests no input payload; schema/parameter checks still occur.
+Every nonempty request reads and validates the complete input, then publishes
+the complete selected representation before projection. Any source change
+invalidates all output observations; returned dirty coverage is restricted to
+the consumer's actual Region. Empty reads no payload. Parameters and complete
+input metadata still validate before execution. Full typed validation may fail
+because of data outside the mapped coordinates of a partial consumer request.
 
-A changed input region R invalidates the output coordinates whose mapped s lies
-in R, plus observations whose retained validation support intersects R. For a
-non-singleton mapped axis, translate the input interval to that output axis;
-for a broadcast/unmapped output axis, extend across its entire target extent.
-This gives a Cartesian replication of changed source support. A changed typed
-validation sample can invalidate related outputs even if its byte is not the
-copied Data sample. Preserve upstream transitive witnesses and layout/metadata
-identity rather than assuming equal output bytes establish freshness.
+View requires one original Value covering the full input demand. Mapped
+non-singleton axes retain its byte strides; expanded singleton/unmapped axes
+have zero stride. Source offset, unaligned and negative/zero strides remain
+valid. The output retains the source owner with no new payload, and does not
+expand a zero-stride source before the callback. If no covering input Value
+exists, explicit View returns InvalidArgument/InvalidDomain ViewUnavailable with
+Domain/Run scope before the callback. It does not synthesize a multi-owner output.
 
-## View and dense storage
-
-Both layouts support regional demand. The view path requests only the source
-fragments needed by Q and its validation obligations; view does not authorize
-whole-input computation. For each published output fragment, preserve an owning
-reference to its source backing. Non-singleton mapped output axes inherit the
-corresponding source byte stride; expanded singleton and unmapped axes use zero
-stride. Map the output storage origin back to its validated source address to
-set byte offset, including negative strides and nonzero origins.
-
-If disjoint source coverage has different owners, publish corresponding owned
-output fragments rather than fabricating one contiguous buffer. Output coverage
-is the requested global Q; no implicit missing/zero-filled cells or writable
-aliases are exposed. The implementation may share owners across repeated output
-regions, but must retain the exact source and validation witness for each result.
-
-Dense mode packs only requested output elements in logical row-major order,
-reading through arbitrary valid source strides and repeating source bits where
-needed. Copy from exact deduplicated source support; do not read another source
-sample merely to fill a SIMD tail. Neither mode assumes the input backing byte
-length equals its logical element product.
-
-View adds layout/fragment metadata and can add zero output payload bytes, but
-it retains actual source owners, which may be much larger than the requested
-logical fragment. This is not a zero-retained-memory guarantee. Dense mode owns
-its copied output, with upstream retention still governed by execution/cache
-requirements. Both output owners can outlive the context; final-owner release
-and unpublished failure cleanup follow the host contract.
+Dense may collect multiple input owners, then packs all target elements in
+row-major order. Partial consumers still retain full output capacity. Neither
+mode changes raw bits, dtype or generic output identity. Outputs have empty
+facets; retained upstream/resource owners remain accounted. Published owners
+survive context destruction, and failure/cancellation releases unpublished work.
 
 ## Work, resources and numerical profiles
 
-For M requested outputs, U distinct required source elements and rank r<=8,
-dense copying costs O(M*r) coordinate work with O(M*b) output payload; optimized
-loops may reduce coordinate overhead. View costs region/set mapping and owner
-metadata, not a dense fill of all replicated elements. Charge actual fragment
-decomposition and typed validation work. Fragment count may grow for disjoint
-or tiled inputs; it is bounded by the existing set/metadata/stage limits, with
-ResourceExhausted rather than widening unauthorized source support.
+For N total outputs and rank r<=8, dense copying uses O(N*r) coordinate work
+and N*b output bytes. View uses O(r) layout work and retains actual source
+backing, independently of the target logical count. Complete input collection
+and typed validation are additional work. A valid view does not reserve N*b.
 
 All three keys preserve identical logical element bits. Permuted/view strides
 follow the same selected layout contract; no approximate math, NaN conversion
@@ -165,10 +143,10 @@ ResourceExhausted code/reason/scope. Generic floating NaN/Inf is not an error.
 | B03 | Input `[1,3]` -> `[4,3]` succeeds; `[2,3]` -> `[4,3]` under the same map fails without tiling |
 | B04 | Duplicate map, map length/range errors, rank shrink, empty/invalid shapes and product limits reject before data reads |
 | B05 | Four dtypes, arbitrary NaN payloads, infinities, signed zeros and integer extrema match bitwise across view/dense and platform profiles |
-| B06 | Negative/zero source strides, offset origin, unaligned storage and several source owners produce valid regional views |
-| B07 | Nonzero/disjoint Q reads exact mapped support without bounding gaps; typed input additionally reads required validation closure |
-| B08 | A changed source element invalidates every replicated output location and required typed-validation dependents, but not unrelated output locations |
-| B09 | Empty request reads nothing; warm/cache-off, cancellation and failed allocation/work/stage paths retain correct witnesses and release unpublished owners |
+| B06 | Negative/zero source strides, offset origin, unaligned storage retain a single source owner; multiple owners reject View |
+| B07 | Nonzero/disjoint Q still requires complete input and typed validation |
+| B08 | Any changed source element invalidates all selected output observations |
+| B09 | Empty request reads nothing; warm/cache-off, cancellation and failed allocation/work paths retain correct witnesses and release unpublished owners |
 | B10 | View retains source bytes after original/context destruction; final owner releases them; dense has correct independent packed payload |
 | B11 | Large view versus insufficient dense budget, fragmented source/set budget exhaustion, and unsupported accelerated-platform behavior |
 
@@ -197,6 +175,7 @@ structured consumer reading the giant view through an 8-byte result view.
 with explicit rows over 64 queries, 8 dirty subsets and 3 roles, including
 large replication and bounded materialization.
 
+The following dated implementation/acceptance record predates Whole.
 Manual acceptance on 2026-09-14 passed local AppleClang 21 strict/Apple profiles
 and Ubuntu WSL Clang 18 strict/x86 profiles, plus an installed public consumer.
 It includes negative-stride unaligned permutation, independent owners, image Data
@@ -214,3 +193,5 @@ does not change the Proposed status of this specification.
 - [NUM-03 category](../core.md).
 - [NUM-03A constant](NUM-03A_constant.md).
 - [Existing shape/region traits](../../../../include/photospider/plugin/operation_registry.hpp).
+
+Current Whole validation and timing: [array Whole](../arrays-whole.md).

@@ -36,9 +36,12 @@ validation remains a correctness boundary.
 
 ## Build
 
-The dependency-neutral kernel requires CMake 3.21+, a C++17 compiler, and
-Threads. It has no mandatory media, serialization, cryptographic, or GPU SDK
-dependency.
+Building the kernel requires CMake 3.21+, C99 and C++17 compilers, Threads, and
+the pinned SLEEF 3.9.0 source. Before configuring, follow the
+[SLEEF preparation instructions](third_party/SLEEF.md) to download it into
+`third_party/sleef/`. This ignored directory is not included in the repository;
+CMake does not download dependencies. There is no mandatory media, serialization,
+cryptographic, or GPU SDK dependency.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON

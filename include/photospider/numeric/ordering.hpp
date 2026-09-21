@@ -39,10 +39,15 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * 2^40 logical values. Both generic outputs retain its shape; values retains
  * source dtype/bits, indices is Int64 with original axis positions. NaNs sort
  * last, signed zeros compare equal, all ties retain original axis order.
- * Requested sorted positions depend on complete source lines plus typed
- * Validation. The unrequested public output is not allocated. Helpers return
- * owned node metadata and may be called concurrently. Invalid helper arguments
- * return InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc.
+ * Any nonempty demand reads/validates the complete source and computes the
+ * complete selected output. Any source edit invalidates all recorded output
+ * observations; failures affect the Run. Empty reads nothing. Each output has
+ * an independent Whole callback; the unrequested public output is not
+ * allocated. Per-line key/permutation scratch has16*L element bytes plus
+ * allocator overhead charged as metadata. Full output and collected input add
+ * payload storage. Helpers return owned node metadata and may be called
+ * concurrently. Invalid helper arguments return
+ * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc.
  * Compiler validates the actual axis/rank/type. Runtime resource/upstream/typed
  * and cancellation failures retain their categories; no partial failed output
  * is published. Returned immutable owners can outlive ExecutionContext.
@@ -54,15 +59,16 @@ inline Result<WorkflowNode> sort_node(
                                profile);
 }
 /** @brief Authors one exact quantile per source axis line, keeping its
- * extent 1. q is an independent Float32/64 [1] array. For N>=2 it is read first
- * as Control and must be finite in [0,1], else InvalidArgument/InvalidDomain
- * with InvalidQuantileProbability at the output observation. For N=1 it is
+ * extent 1. q is an independent Float32/64 [1] array. For N>=2 Whole collects
+ * source and q before callback. q must be finite in [0,1], else Domain/Run
+ * InvalidArgument/InvalidDomain with InvalidQuantileProbability. Source failure
+ * may precede q validation. For N=1 it is
  * unread. Stable order, exact h=(N-1)*q and exact linear interpolation precede
  * one Float32/64 rounding (default Float64); integers never convert
  * prematurely. The first source-line NaN in original order wins and is quieted
  * with the reduction payload mapping. Source lines are fully read even for
- * endpoint q. values has empty facets. Ownership, helper errors, resource and
- * typed Validation rules follow sort_node.
+ * endpoint q, including unrequested lines. values has empty facets. Ownership,
+ * helper errors, resource and typed Validation rules follow sort_node.
  */
 inline Result<WorkflowNode> quantile_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput q, std::int64_t axis,

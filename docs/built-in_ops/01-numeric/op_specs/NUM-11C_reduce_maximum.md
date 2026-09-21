@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-11C: reduce_maximum
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -49,9 +58,6 @@ independent exact grouping and integer/rational/bit-selection oracles. Cover
 singleton groups, non-leading/multiple axes, NaN payload order/conversion,
 signed-zero groups, infinity combinations, subnormals and source dtype extrema.
 
-The current three profile keys use `reduce_maximum_node` from
-`photospider/numeric/reductions.hpp`. They select exact maxima, propagate the
-first logical NaN and apply mixed-zero `+0` behavior. The public fixture checks
-the `[2,3]` axes-`1` result `[[3],[6]]`, multi-axis groups and bit preservation.
-The shared reduction contract records the complete strict/Apple/WSL and
-installed-consumer evidence. Proposed status is unchanged.
+The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.

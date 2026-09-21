@@ -6,10 +6,10 @@
 #include <functional>
 #include <utility>
 
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Canonical keys preserve equality of signed zeros and place every NaN after
@@ -23,21 +23,19 @@ inline std::uint64_t stable_order_key(std::uint64_t bits, ElementType type) {
   const auto value = BinaryParts::decode(bits, type == ElementType::Float32);
   return value.nan ? UINT64_MAX : value.order_key();
 }
-// Fixed comparison scratch belongs to a host continuation. Iterative heapsort
-// retains only an allocator-owned Int64 permutation (8*N bytes), no recursive
-// stack or raw-value copy. Comparisons read the already supplied immutable
-// line. Tuple (numerical key, original index) is unique, so ascending tuple
-// order is exactly the specified stable numerical order, including zero and NaN
-// ties.
+// Fixed comparison scratch belongs to the Whole callback workspace. Iterative
+// heapsort retains a metadata-ledger-owned permutation and classified keys
+// (16*N element bytes plus allocator overhead), without recursive stack or raw
+// value copies. Tuple (numerical key, original index) gives stable order. Keys
+// are read once; comparisons avoid repeated strided input address calculations.
 struct StableOrderWorkspace final {
   std::array<std::uint64_t, 4> left{}, right{};
   std::array<std::int64_t, 4> greater{}, less{};
-  Result<Value> build(
+  Result<ResourceVector<std::uint64_t>> build(
       std::uint64_t count, ElementType type, SequenceProfile profile,
-      const BufferAllocator& allocator,
       const std::function<Status(std::uint64_t)>& consume,
       const std::function<Status(std::uint64_t, std::uint64_t*)>& read) {
-    using Answer = Result<Value>;
+    using Answer = Result<ResourceVector<std::uint64_t>>;
     auto status = consume(count + 16);
     if (!status.ok())
       return Answer(status);
@@ -45,40 +43,28 @@ struct StableOrderWorkspace final {
       return Answer(Status{ErrorCode::ResourceExhausted,
                            "stable order capacity",
                            FailureReason::CapacityLimit});
-    ArrayPublication publication(1, 1);
-    auto allocation = MutableValue::allocate({ElementType::Int64, {count}},
-                                             Region::whole({count}), allocator);
-    if (!allocation.ok())
-      return Answer(allocation.status());
-    auto output = allocation.take_value();
+    ResourceVector<std::uint64_t> output(count), keys(count);
     for (std::uint64_t i = 0; i < count; ++i) {
       status = consume(1);
       if (!status.ok())
         return Answer(status);
-      std::memcpy(output.data() + i * 8, &i, 8);
+      output[i] = i;
+      std::uint64_t bits = 0;
+      status = read(i, &bits);
+      if (!status.ok())
+        return Answer(status);
+      keys[i] = stable_order_key(bits, type);
     }
-    const auto at = [&](std::uint64_t i) {
-      std::uint64_t index = 0;
-      std::memcpy(&index, output.data() + i * 8, 8);
-      return index;
-    };
+    const auto at = [&](std::uint64_t i) { return output[i]; };
     const auto swap = [&](std::uint64_t a, std::uint64_t b) {
-      const auto x = at(a), y = at(b);
-      std::memcpy(output.data() + a * 8, &y, 8);
-      std::memcpy(output.data() + b * 8, &x, 8);
+      std::swap(output[a], output[b]);
     };
     const auto before = [&](std::uint64_t a, std::uint64_t b) -> Result<bool> {
       auto work = consume(16);
       if (!work.ok())
         return Result<bool>(work);
-      std::uint64_t x = 0, y = 0;
-      work = read(a, &x);
-      if (work.ok())
-        work = read(b, &y);
-      if (!work.ok())
-        return Result<bool>(work);
-      left.fill(stable_order_key(x, type));
-      right.fill(stable_order_key(y, type));
+      left.fill(keys[a]);
+      right.fill(keys[b]);
       compare_keys(left.data(), right.data(), greater.data(), less.data(),
                    profile);
       return Result<bool>(less[0] || (!greater[0] && a < b));
@@ -117,9 +103,7 @@ struct StableOrderWorkspace final {
       if (!status.ok())
         return Answer(status);
     }
-    auto value = std::move(output).publish();
-    return value.ok() ? publication.retain(value.take_value())
-                      : Answer(value.status());
+    return Answer(std::move(output));
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06I: color_ramp_xyz
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Model and purpose
 
@@ -52,8 +61,7 @@ Generic colors may be interpreted by this explicit declaration; an attached
 color description must match. Output retains white and scale exactly.
 
 For each component, use the exact stop-derived w and return
-RN_dtype((1-w)*c0+w*c1), rounding the complete formula once. All three CPU
-versions are bitwise identical. Direct hit/clamp/K=1 correctly converts the
+RN_dtype((1-w)*c0+w*c1), rounding the complete formula once. Strict is correctly rounded; accelerated follows the shared FP32-scaled bound. Direct hit/clamp/K=1 correctly converts the
 selected row. Direct/identical-row zero signs are preserved, genuine mixed exact
 zero is +0 and nonzero underflow retains sign. All demanded and output components
 must be finite; no spurious intermediate overflow may reject a representable result.

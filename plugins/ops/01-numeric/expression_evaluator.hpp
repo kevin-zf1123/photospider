@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 
+#include "01-numeric/accelerated_expression.hpp"
 #include "01-numeric/certified_math.hpp"
 #include "01-numeric/exact_elementary.hpp"
 #include "01-numeric/expression_program.hpp"
@@ -36,12 +37,15 @@ inline Status expression_failure(std::uint64_t index, bool have_x,
                 {FailureOrigin::Domain, FailureScope::Atom, atom}};
 }
 struct ExpressionEvaluator final {
+  AcceleratedExpression accelerated;
   ExactElementary elementary;
   CertifiedMath mathematics;
   SequenceProfile profile;
   std::array<std::uint64_t, 256> values{};
   explicit ExpressionEvaluator(SequenceProfile selected)
-      : elementary(selected), mathematics(selected), profile(selected) {}
+      : elementary(selected),
+        mathematics(SequenceProfile::Strict),
+        profile(selected) {}
   Result<std::uint64_t> evaluate(
       const ExpressionProgram& program, std::uint64_t x,
       const std::array<std::uint64_t, 256>& coefficients, std::uint64_t sample,

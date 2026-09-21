@@ -425,3 +425,41 @@ includes vector capacity growth and construction overlap; resource exhaustion
 never widens Q or requests an unhit source port. Generic dynamic regional
 operations retain bounded explicit rows: gather records observed index positions,
 and scatter records its global index scan plus each output's actual contributors.
+
+## Prepared Whole callbacks
+
+CPU Whole callbacks may use immutable static preparation. The executor passes
+`OperationInvocation::prepared` from the plan. The registry validates its
+definition, complete metadata and exact parameter bits before any callback
+validation, then lends the owning handle to the normalized invocation. Direct
+calls without a handle prepare once. No runtime bytes enter prepared state.
+
+`OperationOutputSpecialization::input_indices` may narrow a CPU Whole output's
+registered runtime projection from static metadata/parameters. Absent retains
+the registered projection; an empty vector reads no payload. Duplicate/out-of-
+range ports and broadening a registered projection reject. Complete metadata
+remains mandatory. Resolved projections use the existing trait/digest fields.
+CPU Whole Atomic outputs may retain generic trailing-axis tuple identity; GPU,
+image tuple and other invalid combinations remain rejected.
+
+### CPU Whole input views
+
+Package 0.18 / OperationTraits16 extends CPU Whole view publication. A view
+output preserves one affine owner covering each complete input demand, retaining
+its strides, storage and resources. Compatible fragments of that same owner may
+be joined after an address-map proof. If no such view exists, Auto may collect; `requires_input_views=true` instead returns Domain/Run
+InvalidArgument/InvalidDomain with ViewUnavailable before callback. It requires
+CPU Whole `preserve_output_views`, excludes GPU/joint/Result and participates
+in compiled identity. Typed validation still covers all active input samples.
+The ordinary and structured execution bridges follow the same rule.
+
+Explicit output payload bounds and on-demand view allocation apply to Whole.
+Borrowed input owners remain charged independently; callback allocation is
+limited to declared output payload plus workspace, with sticky failure. Returned
+new backing storage must also fit the output bound. Direct calls already supply
+one Value per input and preserve that physical representation.
+
+This changes C++ trait/specialization layout, requiring an installed-consumer
+rebuild and rejecting package0.17 consumers. Canonical framing14, document2,
+C operation ABI9 and provider ABI1 are unchanged; traits16 changes semantic
+identity. No daemon ownership or persistent format is introduced.

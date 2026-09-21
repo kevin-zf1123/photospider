@@ -113,7 +113,9 @@ struct Fixture {
                                     [this, key = std::string(name)](
                                         const OperationInvocation& call) {
                                       ++consumers;
-                                      return this->base->invoke(key, call);
+                                      auto forwarded = call;
+                                      forwarded.prepared.reset();
+                                      return this->base->invoke(key, forwarded);
                                     }})
               .ok(),
           "consumer registration");
@@ -377,8 +379,10 @@ int metadata_rejection(const std::shared_ptr<OperationRegistry>& base) {
     PS_CHECK(registry
                  ->register_operation({"image.exposure_gain", gain,
                                        [base](const OperationInvocation& call) {
+                                         auto forwarded = call;
+                                         forwarded.prepared.reset();
                                          return base->invoke(
-                                             "image.exposure_gain", call);
+                                             "image.exposure_gain", forwarded);
                                        }})
                  .ok());
     PS_CHECK(registry->freeze().ok());

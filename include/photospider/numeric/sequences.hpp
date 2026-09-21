@@ -28,6 +28,15 @@ inline SequenceInput sequence_input(const WorkflowInputDeclaration& input) {
  * kind. count is 1..1048576. Returns InvalidArgument for invalid parameters or
  * TypeMismatch for unsupported descriptors. Strings/metadata may allocate.
  * Outputs are named values and axis; changes to count/dtype require recompile.
+ * Nonempty execution collects all active scalar inputs and computes the
+ * complete selected output before projection. count=1 excludes other; otherwise
+ * both inputs are required even for endpoint-only requests. Numeric failure is
+ * Run scoped for that output; values and axis remain independent. Any active
+ * input edit invalidates the complete output. Values own count*sizeof(dtype)
+ * bytes, axis owns 24 bytes, plus bounded exact-arithmetic workspace. Empty
+ * reads no payload. Results retain their allocator owner; cancellation/failure
+ * releases unpublished storage. Whole calls do not emit per-atom numeric
+ * counters.
  */
 inline Result<WorkflowNode> sequence_node(std::uint64_t id, SequenceInput start,
                                           SequenceInput other,

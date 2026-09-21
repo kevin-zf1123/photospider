@@ -13,6 +13,7 @@ from elementary_oracle import reference as elementary
 from comparison_oracle import number
 from sequence_oracle import ieee_round
 from math_oracle_support import MPFR
+from accuracy_oracle import accepted
 
 SIGN = 1 << 63
 INF = 0x7ff0000000000000
@@ -105,7 +106,7 @@ def reference(row):
             return end
         return rounded(((count-1-i)*a+i*b)/(count-1))
     result = []
-    for i in selected:
+    for i in range(count):
         x = coordinate(i)
         for neighbor in (i-1, i+1):
             if 0 <= neighbor < count and number(x, 3) == number(coordinate(neighbor), 3):
@@ -114,7 +115,7 @@ def reference(row):
         if dtype == 4:
             value = rounded(number(value, 3), 32, bool(value & SIGN))
         result.append(value)
-    return result, axis
+    return [result[i] for i in selected], axis
 
 
 def cases():
@@ -186,7 +187,12 @@ def main():
         if expected.startswith('error'):
             assert got.startswith(expected+' '), (i, rows[i], got, expected)
         else:
-            assert got.strip() == expected.strip(), (i, rows[i], got, expected)
+            got_values, got_axis = got.split('|')
+            expected_values, expected_axis = expected.split('|')
+            assert got_axis.strip() == expected_axis.strip(), (i, rows[i], got, expected)
+            a, b = got_values.split(), expected_values.split()
+            assert len(a) == len(b), (i, rows[i], got, expected)
+            assert all(accepted(u, v, rows[i][2], profile) for u, v in zip(a, b)), (i, rows[i], got, expected)
     with MPFR(128) as oracle:
         version = oracle.version
     print(f'{len(rows)} independent coordinate/stepwise Fraction/MPFR-{version} expression cases passed ({profile})')

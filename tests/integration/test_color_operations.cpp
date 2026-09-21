@@ -98,7 +98,9 @@ Result<ExecutionResult> producer_run(const std::string& key, const Value& input,
   auto status = registry->register_operation(
       {key, base->find_traits(key).take_value(),
        [base, key](const OperationInvocation& call) {
-         return base->invoke(key, call);
+         auto forwarded = call;
+         forwarded.prepared.reset();
+         return base->invoke(key, forwarded);
        }});
   if (!status.ok())
     return Result<ExecutionResult>(status);
@@ -133,8 +135,10 @@ int merge_arity() {
                ->register_operation({"channel.merge", traits,
                                      [&](const OperationInvocation& call) {
                                        ++callbacks;
+                                       auto forwarded = call;
+                                       forwarded.prepared.reset();
                                        return base->invoke("channel.merge",
-                                                           call);
+                                                           forwarded);
                                      }})
                .ok());
   PS_CHECK(registry->freeze().ok());

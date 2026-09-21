@@ -5,7 +5,121 @@
 #include "photospider/data/value_fragments.hpp"
 #include "support/test_support.hpp"
 
+namespace {
+int packed_collection() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  for (const auto type : {ElementType::UInt8, ElementType::Int64,
+                          ElementType::Float32, ElementType::Float64}) {
+    const auto width = Value::element_size(type);
+    const ValueDescriptor descriptor{type, {300, 1, 150}};
+    const Region region({{10, 257}, {0, 1}, {9, 129}});
+    const auto count = 257 * 129;
+    std::vector<std::uint8_t> bytes(3 + count * width + 5);
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+      bytes[i] = static_cast<std::uint8_t>(i * 37 + 11);
+    auto source = Value::create(descriptor, region,
+                                {3 + 129 * width,
+                                 {static_cast<std::int64_t>(129 * width), -999,
+                                  static_cast<std::int64_t>(width)},
+                                 {11, 0, 9}},
+                                bytes)
+                      .take_value();
+    auto fragments =
+        ValueFragments::create(
+            descriptor, {},
+            Footprint::from_regions(descriptor.shape, {region}).take_value(),
+            {source})
+            .take_value();
+    auto allocator = BufferAllocator{}.limited(count * width);
+    auto output = fragments.collect(region, allocator);
+    PS_CHECK(output.ok() && output.value().region().rank() == region.rank());
+    for (std::size_t axis = 0; axis < region.rank(); ++axis) {
+      PS_CHECK(output.value().region().dimensions()[axis].offset ==
+               region.dimensions()[axis].offset);
+      PS_CHECK(output.value().region().dimensions()[axis].extent ==
+               region.dimensions()[axis].extent);
+    }
+    PS_CHECK(output.value().storage() != source.storage() &&
+             allocator.owns_allocation(*output.value().storage()));
+    PS_CHECK(output.value().copy_bytes() ==
+             std::vector<std::uint8_t>(bytes.begin() + 3,
+                                       bytes.begin() + 3 + count * width));
+    PS_CHECK(output.value().layout().origin ==
+             std::vector<std::uint64_t>({10, 0, 9}));
+    const Region middle({{12, 3}, {0, 1}, {9, 129}});
+    auto subset = fragments.collect(middle, BufferAllocator{});
+    PS_CHECK(subset.ok() && subset.value().copy_bytes() ==
+                                std::vector<std::uint8_t>(
+                                    bytes.begin() + 3 + 2 * 129 * width,
+                                    bytes.begin() + 3 + 5 * 129 * width));
+    // Logical work limits apply even when copies are batched.
+    FootprintLimits work;
+    work.maximum_work = count - 1;
+    PS_CHECK(fragments.collect(region, BufferAllocator{}, work).status().code ==
+             ErrorCode::ResourceExhausted);
+    work.maximum_work = count;
+    PS_CHECK(fragments.collect(region, BufferAllocator{}, work).ok());
+    PS_CHECK(
+        fragments.collect(region, BufferAllocator{}.limited(count * width - 1))
+            .status()
+            .code == ErrorCode::ResourceExhausted);
+    // Cancellation after payload reservation must release the unpublished copy.
+    CancellationSource cancellation;
+    bool released = false;
+    BufferAllocator cancel_on_allocate([&](std::uint64_t) {
+      cancellation.cancel();
+      return Result<std::shared_ptr<void>>(
+          std::shared_ptr<void>(new int(0), [&](void* p) {
+            delete static_cast<int*>(p);
+            released = true;
+          }));
+    });
+    FootprintLimits limits;
+    limits.cancellation = cancellation.token();
+    PS_CHECK(
+        fragments.collect(region, cancel_on_allocate, limits).status().code ==
+        ErrorCode::Cancelled);
+    PS_CHECK(released);
+    // Packed collection cannot expand the authorization carried by a fragment.
+    auto narrow =
+        fragments
+            .restrict(Footprint::from_regions(descriptor.shape, {middle})
+                          .take_value())
+            .take_value();
+    PS_CHECK(narrow.collect(region, BufferAllocator{}).status().code ==
+             ErrorCode::NotFound);
+    source = Value{};
+    fragments = ValueFragments{};
+    narrow = ValueFragments{};
+    PS_CHECK(output.value().copy_bytes()[0] == bytes[3]);
+  }
+  // Padded/reversed rows and broadcast elements keep their logical order.
+  const ValueDescriptor d{ElementType::UInt8, {2, 3}};
+  for (const auto& layout :
+       std::vector<StridedLayout>{{1, {4, 1}}, {7, {-4, -1}}, {2, {0, 0}}}) {
+    auto v = Value::create(d, Region::whole(d.shape), layout,
+                           {0, 1, 2, 3, 4, 5, 6, 7, 8})
+                 .take_value();
+    auto f =
+        ValueFragments::create(d, {}, Footprint::all(d.shape).take_value(), {v})
+            .take_value();
+    const auto collected =
+        f.collect(v.region(), BufferAllocator{}).take_value();
+    std::vector<std::uint8_t> expected;
+    for (std::uint64_t row = 0; row < 2; ++row)
+      for (std::uint64_t col = 0; col < 3; ++col)
+        expected.push_back(v.bytes().data()[layout.byte_offset +
+                                            static_cast<std::int64_t>(row) *
+                                                layout.byte_strides[0] +
+                                            static_cast<std::int64_t>(col) *
+                                                layout.byte_strides[1]]);
+    PS_CHECK(collected.copy_bytes() == expected);
+  }
+  return 0;
+}
+}  // namespace
 int main() {
+  PS_CHECK(packed_collection() == 0);
   using namespace ps;  // NOLINT(build/namespaces)
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
@@ -111,6 +225,10 @@ int main() {
       {value.view(Region({{0, 2}})).take_value(), reversed_tail});
   PS_CHECK(mixed.ok() && mixed.value().fragments().size() == 2);
   PS_CHECK(mixed.value().read({2}, &last, 1).ok() && last == 4);
+  PS_CHECK(mixed.value()
+               .collect(value.region(), BufferAllocator{})
+               .value()
+               .copy_bytes() == std::vector<std::uint8_t>({1, 2, 4, 3}));
   // A reversed contiguous mapping may coalesce without changing its samples.
   auto reverse = Value::from_storage(value.descriptor(), value.region(),
                                      {3, {-1}, {0}}, value.storage())

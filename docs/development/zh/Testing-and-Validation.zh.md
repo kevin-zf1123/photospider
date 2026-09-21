@@ -3,6 +3,13 @@
 本文定义 breaking scope reset 后维护中的 repository validation。Test 验证长期软件
 行为，不验证迁移完成或 provenance。
 
+## 构建前置依赖
+
+配置检出的仓库或源码归档前，使用[文档中的命令](../../../third_party/SLEEF.md)
+将固定版本的 SLEEF 3.9.0 源码下载到 `third_party/sleef/`。该目录由 Git 忽略，
+离线构建也需要提前提供。CI 在配置前单独检出同一个上游提交；CMake 不执行下载。
+使用已安装 Photospider 包的下游无需准备这项源码依赖。
+
 ## 开发循环
 
 实现期间使用 scoped formatting/lint、affected target 与 focused test。仅在明确请求 release 验证时，Source 与

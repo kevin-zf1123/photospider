@@ -1,12 +1,17 @@
 #include "photospider/numeric/arrays.hpp"
 
+#include <fenv.h>  // NOLINT(build/c++11)
+
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -399,7 +404,7 @@ void array_boundaries(const std::string& profile) {
   ps::CancellationSource cancel;
   unsigned output_allocations = 0;
   ps::BufferAllocator allocator([&](std::uint64_t size) {
-    if (size == 24 && ++output_allocations == 2)
+    if (size == 24 && ++output_allocations == 1)
       cancel.cancel();
     return ps::Result<std::shared_ptr<void>>(std::make_shared<int>(0));
   });
@@ -407,32 +412,9 @@ void array_boundaries(const std::string& profile) {
                                      ps::Backend::Cpu, cancel.token(), {},
                                      allocator);
   auto cancelled = registry->invoke(node.operation, invocation);
-  require(output_allocations == 2 &&
+  require(output_allocations == 1 &&
               cancelled.status().code == ps::ErrorCode::Cancelled,
-          "cancellation during direct dense collector allocation");
-  for (const auto& operation :
-       {std::string("numeric.constant"), std::string("numeric.broadcast")}) {
-    ps::DependencyRequest request;
-    request.inputs = {{value.descriptor(), {}}};
-    request.parameters = node.parameters;
-    request.parameters["layout"] = std::string("view");
-    if (operation == "numeric.constant")
-      request.parameters.erase("axis_map");
-    request.outputs = take(ps::Footprint::all({3}));
-    request.snapshot_identity = "array-stage-limit";
-    request.limits.maximum_stages = 1;
-    auto session =
-        take(registry->start_dependency(operation + profile, request));
-    require(session->poll().ok(), "first array stage");
-    auto supplied = take(ps::ValueFragments::create(
-        value.descriptor(), {}, take(ps::Footprint::all({1})), {value}));
-    require(session->supply({supplied}, request.snapshot_identity).ok(),
-            "array stage supply");
-    auto terminal = session->poll();
-    require(terminal.status().code == ps::ErrorCode::ResourceExhausted &&
-                terminal.status().reason == ps::FailureReason::StageLimit,
-            "array StageLimit attribution");
-  }
+          "cancellation after Whole dense output allocation");
   for (std::uint64_t bits = 0; bits < 256; ++bits) {
     const auto byte = scalar(ps::ElementType::UInt8, bits);
     const std::vector<ps::Value> bytes{byte};
@@ -478,81 +460,99 @@ void array_boundaries(const std::string& profile) {
                   "negative unaligned permutation oracle");
         }
   }
-  std::cout << "array boundaries: cancellation, StageLimit, 256 UInt8 values, "
+  std::cout << "array boundaries: cancellation, 256 UInt8 values, "
                "negative unaligned permutation passed\n";
 }
+struct ArraySplitSource {
+  unsigned* calls;
+  explicit ArraySplitSource(unsigned* counter) : calls(counter) {}
+  ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase& phase) {
+    ++*calls;
+    std::vector<ps::Value> parts;
+    for (std::uint64_t i = 0; i < 2; ++i) {
+      auto writer = take(
+          ps::MutableValue::allocate(phase.query.output.descriptor,
+                                     ps::Region({{i, 1}}), phase.allocator));
+      const std::int64_t value = 10 + i;
+      std::memcpy(writer.data(), &value, 8);
+      parts.push_back(take(std::move(writer).publish()));
+    }
+    return ps::Result<ps::DependencyPoll>(take(
+        ps::ValueFragments::create(phase.query.output.descriptor, {},
+                                   phase.query.outputs, std::move(parts))));
+  }
+};
 void staged_array_support(const std::string& profile) {
-  auto registry = ps::make_default_operation_registry();
+  auto registry = ps::make_default_operation_registry(false);
   const auto facet = take(ps::encode_semantic(ps::rgba_semantics()));
-  ps::DependencyRequest image;
-  image.inputs = {{{ps::ElementType::Float32, {1, 1, 4}}, {facet}}};
-  image.parameters = {{"shape", std::string("1,1,4")},
-                      {"axis_map", std::string("0,1,2")},
-                      {"layout", std::string("view")}};
-  image.outputs = take(ps::Footprint::from_regions(
-      {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {0, 1}})}));
-  image.snapshot_identity = "image-closure";
-  auto session =
-      take(registry->start_dependency("numeric.broadcast" + profile, image));
-  require(session->poll().ok(), "typed broadcast need");
-  auto needs = take(session->pending_reads());
-  bool data = false, validation = false;
-  for (const auto& need : needs) {
-    if (need.roles == 1)
-      data = take(need.samples.element_count()) == 1;
-    if (need.roles == 4)
-      validation = take(need.samples.element_count()) == 4;
-  }
-  require(data && validation,
-          "image Data singleton and complete-pixel Validation are distinct");
   const float rgba[] = {1, 2, 3, 2};
-  auto bytes = take(ps::BufferAllocator{}.allocate(16));
-  std::memcpy(bytes.data(), rgba, 16);
+  auto buffer = take(ps::BufferAllocator{}.allocate(16));
+  std::memcpy(buffer.data(), rgba, 16);
   auto invalid = take(ps::Value::from_storage(
-      image.inputs[0].descriptor, ps::Region::whole({1, 1, 4}),
-      {0, {16, 16, 4}}, std::move(bytes).freeze(), {facet}));
-  auto supplied = take(ps::ValueFragments::create(
-      invalid.descriptor(), {facet}, take(ps::Footprint::all({1, 1, 4})),
-      {invalid}));
-  require(!session->supply({supplied}, image.snapshot_identity).ok(),
-          "invalid unselected alpha must retain semantic rejection");
-  ps::DependencyRequest request;
-  request.inputs = {{{ps::ElementType::Int64, {2}}, {}}};
-  request.parameters = {{"shape", std::string("3,2")},
-                        {"axis_map", std::string("1")},
-                        {"layout", std::string("view")}};
-  request.outputs = take(ps::Footprint::all({3, 2}));
-  request.snapshot_identity = "two-owners";
-  auto split =
-      take(registry->start_dependency("numeric.broadcast" + profile, request));
-  require(split->poll().ok(), "multi-owner broadcast need");
-  std::vector<ps::Value> parts;
-  for (std::uint64_t i = 0; i < 2; ++i) {
-    auto backing = scalar(ps::ElementType::Int64, 10 + i);
-    parts.push_back(take(ps::Value::from_storage(
-        request.inputs[0].descriptor, ps::Region({{i, 1}}), {0, {8}, {i}},
-        backing.storage())));
-  }
-  auto fragmented = take(ps::ValueFragments::create(
-      request.inputs[0].descriptor, {}, take(ps::Footprint::all({2})), parts));
-  require(split->supply({fragmented}, request.snapshot_identity).ok(),
-          "multi-owner supply");
-  auto finished = take(split->poll());
-  const auto& result = std::get<ps::DependencyResult>(finished).value;
-  require(result.fragments().size() == 2 && take(result.retained_bytes()) == 16,
-          "broadcast preserves independently owned source fragments");
-  std::int64_t last = 0;
-  require(result.read({2, 1}, &last, 8).ok() && last == 11,
-          "multi-owner final coordinate");
-  request.outputs = take(ps::Footprint::none({3, 2}));
-  auto empty =
-      take(registry->start_dependency("numeric.broadcast" + profile, request));
-  auto no_input = take(empty->poll());
-  require(std::holds_alternative<ps::DependencyResult>(no_input) &&
-              empty->poll_count() == 0,
-          "empty broadcast never polls operator or requests input");
-  std::cout << "typed validation closure, invalid unselected alpha, "
-               "independent owners and Empty passed\n";
+      {ps::ElementType::Float32, {1, 1, 4}}, ps::Region::whole({1, 1, 4}),
+      {0, {16, 16, 4}}, std::move(buffer).freeze(), {facet}));
+  const std::vector<ps::Value> inputs{invalid};
+  const std::vector<ps::Region> demands{invalid.region()};
+  const std::map<std::string, ps::ParameterValue> parameters{
+      {"shape", std::string("1,1,4")},
+      {"axis_map", std::string("0,1,2")},
+      {"layout", std::string("view")}};
+  ps::OperationInvocation call(inputs, demands, parameters);
+  require(
+      !registry->invoke("numeric.broadcast" + profile, call).ok(),
+      "Whole broadcast validates complete typed input including invalid alpha");
+  unsigned calls = 0;
+  ps::OperationDefinition split;
+  split.key = "manual.array_split";
+  split.traits.input_count = 0;
+  split.traits.input_schema.clear();
+  auto& output = split.traits.outputs[0];
+  output.shape_rule = ps::OperationShapeRule::Fixed;
+  output.fixed_output_shape = {2};
+  output.output_element_type = ps::ElementType::Int64;
+  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.dependency_version = 1;
+  output.regional_atomic = true;
+  output.preserve_output_views = true;
+  output.continuation_bytes = sizeof(ArraySplitSource);
+  output.maximum_dependency_stages = 1;
+  split.start_dependency = [&](const auto&, const auto& allocator) {
+    return ps::DependencyContinuation::make<ArraySplitSource>(allocator,
+                                                              &calls);
+  };
+  require(registry->register_operation(std::move(split)).ok() &&
+              registry->freeze().ok(),
+          "split source registration");
+  ps::WorkflowDocument document;
+  auto broadcast = take(ps::numeric::broadcast_node(
+      2, ps::WorkflowNodeOutput{1, "value"}, {3, 2}, {1}));
+  broadcast.operation = "numeric.broadcast" + profile;
+  document.nodes = {{1, "manual.array_split", {}, {}}, broadcast};
+  document.outputs = {{"values", 2, "values"}};
+  ps::GraphContext graph(document);
+  auto plan = take(ps::Compiler(registry).compile(graph));
+  ps::ExecutionContext context(registry);
+  auto failed = context.execute(plan.plan);
+  require(!failed.ok() && failed.status().message.find("ViewUnavailable") !=
+                              std::string::npos,
+          "Whole broadcast View rejects multi-owner input");
+  auto snapshot = take(context.freeze(plan.plan));
+  const auto before = calls;
+  require(context.execute_fragments(
+                     snapshot, {{"values", take(ps::Footprint::none({3, 2}))}})
+                  .ok() &&
+              calls == before,
+          "Empty broadcast never executes source");
+  document.nodes[1].parameters["layout"] = std::string("dense");
+  ps::GraphContext dense_graph(document);
+  auto dense_plan = take(ps::Compiler(registry).compile(dense_graph));
+  auto dense = take(context.execute(dense_plan.plan));
+  const std::int64_t expected[] = {10, 11, 10, 11, 10, 11};
+  require(
+      std::memcmp(dense.values.at("values").bytes().data(), expected, 48) == 0,
+      "Dense broadcast collects multiple owners");
+  std::cout << "Whole typed validation, multi-owner View failure/Dense collect "
+               "and Empty passed\n";
 }
 void array_bitpatterns(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
@@ -642,8 +642,8 @@ void broadcast_cache() {
   require(demand.replace_bindings(bindings).ok(),
           "replace unobserved broadcast sample");
   auto unchanged = take(demand.request(query));
-  require(unchanged.diagnostics.cache_hits > 0,
-          "mapped cache proof excludes unobserved sample");
+  require(unchanged.diagnostics.cache_hits == 0,
+          "Whole broadcast invalidates on any active source edit");
   std::int64_t actual = 0;
   require(unchanged.values.at("values").read({1, 0}, &actual, 8).ok() &&
               actual == 10,
@@ -658,8 +658,75 @@ void broadcast_cache() {
   require(
       updated.values.at("values").read({1, 0}, &actual, 8).ok() && actual == 99,
       "observed source edit invalidates replicated cache entries");
-  std::cout << "broadcast cache: warm hit, unobserved edit reuse, observed "
+  std::cout << "broadcast cache: warm hit, Whole edit invalidation, observed "
                "edit=99 passed\n";
+}
+void whole_array_budgets(const std::string& profile) {
+  auto registry = ps::make_default_operation_registry();
+  const auto value = scalar(ps::ElementType::Int64, 7);
+  std::vector<ps::Value> inputs{value};
+  std::vector<ps::Region> demands{value.region()};
+  const std::uint64_t count = 1048576;
+  for (const char* operation : {"constant", "broadcast"}) {
+    std::map<std::string, ps::ParameterValue> parameters{
+        {"shape", std::to_string(count)},
+        {"layout", std::string("dense")}};
+    if (std::string(operation) == "broadcast")
+      parameters["axis_map"] = std::string("0");
+    const auto key = "numeric." + std::string(operation) + profile;
+    for (bool work : {false, true}) {
+      ps::ResourceLimits limits;
+      if (work)
+        limits.maximum_work = 4096;
+      else
+        limits.capacity[ps::ResourceKind::Payload] = 1024;
+      ps::ResourceBudget budget(limits);
+      {
+        ps::ResourceAllocationScope scope(budget);
+        ps::OperationInvocation call(
+            inputs, demands, parameters, ps::Backend::Cpu, {},
+            ps::Region::whole({count}), budget.allocator());
+        auto result = registry->invoke(key, call);
+        require(!result.ok() &&
+                    result.status().code == ps::ErrorCode::ResourceExhausted,
+                "Whole array output/work budget rejection");
+      }
+      require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
+              "array failure releases full output");
+    }
+    ps::ResourceBudget budget(ps::ResourceLimits{});
+    ps::CancellationSource cancellation;
+    std::atomic<bool> ready{false}, done{false};
+    std::thread watcher([&] {
+      ready.store(true);
+      while (!done.load() && budget.statistics().issued.work < 100000)
+        std::this_thread::yield();
+      if (!done.load())
+        cancellation.cancel();
+    });
+    while (!ready.load())
+      std::this_thread::yield();
+    ps::Status status;
+    try {
+      ps::ResourceAllocationScope scope(budget);
+      ps::OperationInvocation call(
+          inputs, demands, parameters, ps::Backend::Cpu, cancellation.token(),
+          ps::Region::whole({count}), budget.allocator());
+      status = registry->invoke(key, call).status();
+    } catch (...) {
+      done.store(true);
+      watcher.join();
+      throw;
+    }
+    done.store(true);
+    watcher.join();
+    require(status.code == ps::ErrorCode::Cancelled &&
+                budget.statistics().issued.work >= 100000 &&
+                budget.statistics().live[ps::ResourceKind::Payload] == 0,
+            "cancel active Whole array copying and release output");
+  }
+  std::cout << "Whole arrays: full output/work admission and cancellation "
+               "during copying passed\n";
 }
 void array_schema_and_capacity(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
@@ -970,8 +1037,8 @@ void broadcast_examples(const std::string& profile, bool large) {
           "broadcast full support must deduplicate to three samples");
   auto dirty = take(result.dependencies.potential_dirty(
       "input", take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}))));
-  require(take(dirty.at("values").element_count()) == (large ? shape[0] : 8),
-          "broadcast dirty replication must remain exact");
+  require(take(dirty.at("values").element_count()) == take(all.element_count()),
+          "Whole broadcast dirty covers all output observations");
   auto ordinary = take(execution.execute(compiled.plan, bindings));
   require(ordinary.values.at("values").bytes().size() == sizeof(values),
           "ordinary broadcast must preserve view");
@@ -981,28 +1048,19 @@ void broadcast_examples(const std::string& profile, bool large) {
                 ps::Region({{1, 1}, {2, 1}, {3, 1}})}));
     auto selected =
         take(execution.execute_fragments(frozen, {{"values", sparse}}));
-    const auto expected = take(ps::Footprint::from_regions(
-        {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
     require(
-        take(selected.dependencies.source_support()).at("input") == expected,
-        "broadcast sparse source support must preserve gap");
+        take(selected.dependencies.source_support()).at("input") ==
+            take(ps::Footprint::all({3})),
+        "Whole broadcast sparse request still retains complete input support");
     document.nodes[0].parameters["layout"] = std::string("dense");
     ps::GraphContext dense_graph(document);
     auto dense_plan = take(ps::Compiler(registry).compile(dense_graph));
     auto dense = take(execution.execute(dense_plan.plan, bindings));
     require(dense.values.at("values").bytes().size() == 24 * 8,
             "dense broadcast packed size");
-    bool identified = false;
-    for (const auto& timing : dense.diagnostics.operation_timings) {
-      const auto* identity = timing.numeric.implementation.data();
-      const char* expected_path =
-          profile == "_accelerated_apple_silicon" ? "NEON-copy32"
-          : profile == "_accelerated_x86_64"      ? "AVX2-copy32"
-                                                  : "memcpy32";
-      identified |= std::strstr(identity, expected_path) != nullptr;
-    }
-    require(identified,
-            "dense array diagnostic identifies actual ISA block path");
+    require(dense.diagnostics.operation_timings.size() == 1,
+            "dense Whole broadcast uses one callback; numeric counters "
+            "unavailable");
     for (std::uint64_t i = 0; i < 24; ++i) {
       std::int64_t sample = 0;
       std::memcpy(&sample, dense.values.at("values").bytes().data() + i * 8, 8);
@@ -1021,7 +1079,19 @@ int main(int argc, char** argv) {
     structured_views();
     array_boundaries(profile);
     staged_array_support(profile);
-    array_bitpatterns(profile);
+    fenv_t saved;
+    require(fegetenv(&saved) == 0, "save array fenv");
+    for (int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+      require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                  feraiseexcept(FE_DIVBYZERO) == 0,
+              "set array fenv");
+      array_bitpatterns(profile);
+      require(
+          fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
+          "bitcopy preserves fenv");
+    }
+    require(fesetenv(&saved) == 0, "restore array fenv");
+    whole_array_budgets(profile);
     broadcast_cache();
     array_schema_and_capacity(profile);
     array_owner_and_payload_cache();

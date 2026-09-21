@@ -29,6 +29,7 @@
 #include "core/stored_failure.hpp"
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
+#include "data/whole_input_view.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -2981,8 +2982,26 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         continue;
                       input_indices.push_back(static_cast<std::uint32_t>(port));
                       const auto& box = frame.parts[port].boxes().at(0);
-                      auto dense =
-                          frame.ready[port].collect(box, allocator, limits);
+                      std::optional<Value> original;
+                      if (step.traits.outputs[0].preserve_output_views) {
+                        auto retained = input_internal::whole_input_view(
+                            frame.ready[port], limits);
+                        if (!retained.ok())
+                          return Result<Value>(retained.status());
+                        original = retained.take_value();
+                        if (!original &&
+                            step.traits.outputs[0].requires_input_views)
+                          return Result<Value>(Status{
+                              ErrorCode::InvalidArgument,
+                              "ViewUnavailable: Whole input requires multiple "
+                              "fragments",
+                              FailureReason::InvalidDomain,
+                              {FailureOrigin::Domain, FailureScope::Run}});
+                      }
+                      auto dense = original
+                                       ? Result<Value>(std::move(*original))
+                                       : frame.ready[port].collect(
+                                             box, allocator, limits);
                       if (!dense.ok())
                         return Result<Value>(dense.status());
                       if (native) {
@@ -2998,6 +3017,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         frame.backend, active_token(), frame.outputs.boxes()[0],
                         allocator};
                     call.output_index = step.output_index;
+                    call.prepared = step.prepared;
                     call.resources = resources;
                     call.input_indices = std::move(input_indices);
                     for (const auto& input : step.inputs)
@@ -3029,9 +3049,16 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     callback_us = duration_us(callback_started);
                     if (!computed.ok())
                       return computed;
-                    if (!call.allocator.owns(*computed.value().storage()))
-                      return transfer_value(computed.value(), call.allocator,
-                                            true);
+                    if (!call.allocator.owns(*computed.value().storage())) {
+                      const auto storage = computed.value().storage();
+                      const bool borrowed = std::any_of(
+                          inputs.begin(), inputs.end(), [&](const auto& input) {
+                            return input.storage() == storage;
+                          });
+                      if (!borrowed)
+                        return transfer_value(computed.value(), call.allocator,
+                                              true);
+                    }
                     return computed;
                   },
                   pump, budget->resources().get());
@@ -4706,6 +4733,21 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                                regional_ ? step.output_demand : Region{},
                                callback_allocator};
       call.output_index = step.output_index;
+      call.prepared = step.prepared;
+      for (const auto& input : step.inputs) {
+        if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+          const auto& source = plan_->steps().at(producer->step_index);
+          call.input_metadata.push_back(
+              {source.output_descriptor,
+               source.output_facets,
+               {},
+               source.traits.outputs[0].atomic_trailing_axes});
+        } else {
+          const auto& source = plan_->input_declarations().at(
+              std::get<PlanWorkflowInput>(input).declaration_index);
+          call.input_metadata.push_back({source.descriptor, source.facets});
+        }
+      }
       call.resources = resources_;
       if (native_device_ && backend == Backend::Gpu) {
         native.emplace(native_device_, cancellation_);

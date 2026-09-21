@@ -8,12 +8,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06G: HSL ramps
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 The explicit color description identifies the underlying RGB primaries, white
 and transfer. Defaults are sRGB primaries, D65 and standard piecewise sRGB
@@ -49,7 +58,8 @@ primaries/white/transfer, hue unit and S/L scales. Described input must match.
 Hue is the original unnormalized angle. Interpolate H=(1-w)*H0+w*H1 with the
 same exact w as S=(1-w)*S0+w*S1 and L=(1-w)*L0+w*L1. Apply any selected hue unit
 conversion as part of the exact formula and correctly round only the final
-components. All three versions are bitwise identical. S=0 or any other achromatic
+components. Strict is correctly rounded; accelerated finite arithmetic follows the shared
+FP32-scaled final-result bound. S=0 or any other achromatic
 configuration never discards hue. No modulo reduction or periodic endpoint
 substitution occurs. No HSL-to-RGB or transfer evaluation is needed for this ramp.
 

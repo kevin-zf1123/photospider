@@ -37,6 +37,8 @@ def reference(operation, dtype, bits):
     return f"{result:x}"
 
 
+from accuracy_oracle import accepted
+
 def main():
     rng = random.Random(606)
     rows, expected = [], []
@@ -94,7 +96,7 @@ def main():
     actual = output.stdout.splitlines()
     if len(actual) != len(expected): raise AssertionError((len(actual),len(expected),output.stderr))
     for row,want,got in zip(rows,expected,actual):
-        if got != want: raise AssertionError((row.strip(),want,got))
+        if not accepted(got, want, int(row.split()[1]), "strict" if (len(sys.argv)<3 or sys.argv[2] in ("strict","_strict")) else "accelerated"): raise AssertionError((row.strip(),want,got))
     print(f"independent exact range/Fraction oracle: {len(expected)} cases passed")
 
 

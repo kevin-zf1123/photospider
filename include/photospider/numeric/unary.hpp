@@ -58,20 +58,25 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * may throw bad_alloc. Invalid id/profile/dtype parameters fail InvalidArgument
  * /InvalidDomain/Schema. Runtime input rank is 1..8 with positive extents and
  * count <=2^40. Output values preserves shape with empty facets. Ordinary unary
- * operations preserve dtype; support is stated per helper. Data demand is the
- * exact requested set; recognized typed Validation is retained separately.
- * Shape/dtype errors fail TypeMismatch/Schema. Integer overflow and invalid
- * rational denominators are attributed to the requested Atom. IEEE nonfinite
- * results succeed; source, typed, work, capacity and cancellation failures keep
- * their categories. Results own immutable packed storage beyond context life.
- * Math is RN-even with gradual underflow and unchanged caller fenv. Simple
- * operations are exact; transcendental ordinary values use directed bounds up
- * to 4096 fractional bits and fail ResourceExhausted if rounding is unresolved.
- * Accelerated transcendental profiles currently use an explicit strict fallback
- * for ordinary values, recorded as FunctionUnsupported; exact special/algebraic
- * paths retain bitwise equivalence. Named profiles require their CPU target.
- * The accompanying numeric_workflow example shows explicit math work/state
- * budgets, public execution, oracle commands and checkable expected results.
+ * operations preserve dtype; support is stated per helper. Every nonempty
+ * request collects and validates complete inputs and computes one complete
+ * packed output; the executor projects requested coordinates. Empty skips
+ * payload and callback. Any input change invalidates all observed outputs.
+ * Integer overflow or invalid rational denominators anywhere fail the
+ * invocation with Run scope, no Atom key. Shape/dtype errors fail
+ * TypeMismatch/Schema. IEEE nonfinite results succeed; typed, source, work,
+ * capacity and cancellation failures keep their categories. Full input
+ * collections, full output and fixed scratch consume the budget even for sparse
+ * requests. Results own immutable storage beyond context lifetime. Strict math
+ * is RN-even with gradual underflow and unchanged caller fenv. Directed
+ * refinement has a 4096-bit ceiling and can fail ResourceExhausted. Accelerated
+ * arithmetic follows CpuNumericProfile's final FP32 error bound; bounded
+ * binary64 SIMD kernels handle admitted ordinary ranges, with strict fallback
+ * for unresolved cases. Special/algebraic paths remain exact. Per-value numeric
+ * counters are unavailable (N/A) for Whole callbacks. Named profiles require
+ * their CPU target. The accompanying numeric_workflow example shows explicit
+ * math work/state budgets, public execution, oracle commands and checkable
+ * expected results.
  */
 /** @brief Absolute value; UInt8/Int64/Float32/64, Int64 minimum overflows.
  * @note Uses the shared unary helper execution/ownership/error contract above.
@@ -221,8 +226,8 @@ inline Result<WorkflowNode> sincpi_node(
 }
 /** @brief Authors sinpi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Atom. Both
- * inputs retain Data/Validation dependencies. Output dtype is explicit/default
+ * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
+ * complete inputs are collected and validated. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.
@@ -236,8 +241,8 @@ inline Result<WorkflowNode> sinpi_rational_node(
 }
 /** @brief Authors cospi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Atom. Both
- * inputs retain Data/Validation dependencies. Output dtype is explicit/default
+ * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
+ * complete inputs are collected and validated. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.
@@ -251,8 +256,8 @@ inline Result<WorkflowNode> cospi_rational_node(
 }
 /** @brief Authors tanpi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Atom. Both
- * inputs retain Data/Validation dependencies. Output dtype is explicit/default
+ * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
+ * complete inputs are collected and validated. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.
@@ -266,8 +271,8 @@ inline Result<WorkflowNode> tanpi_rational_node(
 }
 /** @brief Authors sincpi of the exact Int64 numerator/denominator ratio.
  * Inputs have identical shape. Positive denominator is required even at zero
- * numerator; invalid denominator is InvalidArgument/InvalidDomain/Atom. Both
- * inputs retain Data/Validation dependencies. Output dtype is explicit/default
+ * numerator; invalid denominator is InvalidArgument/InvalidDomain/Run. Both
+ * complete inputs are collected and validated. Output dtype is explicit/default
  * Float64. Exact common-angle and pole/zero rules are documented in NUM-04S..V;
  * the complete quotient is used for sincpi, including its unreduced magnitude.
  * Other execution/ownership/resource rules match the shared unary contract.

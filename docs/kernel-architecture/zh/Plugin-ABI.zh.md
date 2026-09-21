@@ -267,3 +267,37 @@ handle、读取关联和终态错误均按成员隔离；宿主拒绝重复、�
 跨成员 handle。共享 work 服务只计费一次共同计算，错误具有粘性。
 Singleton 入口仍必需；RequestRecord 不参与联合执行。Provider ABI 保持 1。
 调度、资源、缓存和数值契约见 ADR 0021 与多输出算子指南。
+
+## Whole callback 的静态准备
+
+CPU Whole callback 可以复用不可变静态 preparation。执行器通过
+`OperationInvocation::prepared` 传递 plan 持有的 owner；registry 核验定义、完整
+metadata 和参数原始位后，再进行 callback 验证并向规范化调用提供 owner。直接调用
+未提供 handle 时准备一次。prepared state 不包含运行期输入字节。
+
+`OperationOutputSpecialization::input_indices` 可依据静态 metadata/参数收窄 CPU
+Whole 输出的注册输入投影。缺省保留注册投影，空 vector 不读取任何 payload；重复、
+越界或扩大注册投影均拒绝。完整 metadata 始终必要，投影复用既有 traits/digest 字段。
+CPU Whole Atomic 输出可保留 generic trailing-axis tuple 身份；GPU、image tuple
+及其他非法组合仍被拒绝。
+
+callback wrapper 向另一 registry 转发 invocation 时必须清除 `prepared`，
+让目标 registry 准备自身定义。转发外部 handle 返回 `Stale`，seal 不可转移。
+
+### CPU Whole 输入视图
+
+package0.18 / OperationTraits16 扩展 CPU Whole 视图发布。视图输出优先保留
+覆盖完整输入需求的单个仿射 owner、strides、storage 和 resources；同一 owner
+的兼容 fragments 通过地址映射证明后可以合并。不存在这种视图时，Auto 可以 collect，`requires_input_views=true` 则在 callback
+之前返回 Domain/Run 的 InvalidArgument/InvalidDomain、ViewUnavailable。
+该字段要求 CPU Whole 的 `preserve_output_views`，排除 GPU/joint/Result，
+并参与编译身份。typed 验证仍覆盖全部有效输入。普通和 structured 执行桥接
+遵循同一规则。
+
+Whole 支持显式输出 payload 上界和按实际分配计费。借用输入 owner 独立计费；
+callback allocator 限制为输出上界加 workspace，分配失败保持 sticky；新返回
+backing 也必须满足输出上界。直接调用已经逐输入提供单个 Value。
+
+C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。
+canonical framing14、document2、C operation ABI9 和 provider ABI1 不变；
+traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。

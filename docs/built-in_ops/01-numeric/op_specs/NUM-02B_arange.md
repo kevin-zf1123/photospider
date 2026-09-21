@@ -14,11 +14,20 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 repository_branch: ops-impl
 repository_commit: 30478d33
 ---
 
 # NUM-02B: arange
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -31,7 +40,8 @@ terminating a floating-point loop at an end value.
 The selected output support includes Int64 as well as Float32/Float64 sequences.
 Integer mode computes exactly without a Float64 intermediate, including integers
 whose magnitude exceeds 2^53. The three independent strict/CPU-accelerated keys
-follow the common NUM rule and must give identical result bits.
+follow the common NUM rule: integer values and axis metadata stay exact;
+floating values in accelerated profiles obey the shared final FP32 bound.
 
 The selected outputs are `values[N]` and `axis=[start,last,step]`. Axis dtype is
 Int64 for an Int64 sequence and Float64 for Float32/Float64 sequences. The axis
@@ -92,40 +102,33 @@ an exact zero result, use -0 only if start and step are both -0; otherwise use
 +0. Nonzero exact values rounding to zero retain their sign. Singleton axis
 uses a positive zero in its third component.
 
-## Independent demand, failures and dirty mapping
+## Whole demand, failures and invalidation
 
-| Observation | Data/validation payloads | Not requested |
-| --- | --- | --- |
-| values[0], any N | Start only | Step and axis |
-| values[i], i>0 | Start and step | Other indices and axis last |
-| axis, N=1 | Start only | Step |
-| axis, N>=2 | Start and step; exact last validation | Values output |
-| Empty | None | All runtime inputs |
+All formal profile keys use a synchronous Whole callback for the selected
+output. Nonempty values requests compute all N values; nonempty axis requests
+compute its complete three-component Atomic tuple. The executor projects the
+owned output to the requested global Region afterwards. Values and axis remain
+independent output identities. An axis-only request does not generate values.
 
-An overflow at a later index does not fail an earlier requested index. Overflow
-of axis last affects a requested axis only. Likewise an invalid unused step
-cannot fail values[0]. Static descriptors and mode matching still validate
-the declared step edge even when its payload is undemanded.
+For N=1, both outputs read start only. Static specialization excludes the other
+port from runtime demand, typed payload validation and invalidation. Its schema
+still validates at compile time. For N>=2, both scalars are collected and
+validated even for an endpoint-only request. A failed other producer or an
+unrepresentable unrequested value therefore fails the selected Whole request.
+An axis failure does not certify a separately requested values failure.
+Empty requests perform no payload reads or callback work.
 
-Values use per-index Dependency execution. Axis is an independent Whole tuple
-of three components (24 bytes for either axis dtype). A full-array execution
-fails if a requested member fails; the host's supported atom API can retain
-independent outcomes. Optional joint execution must not add reads or union
-validation obligations between independent members.
+Each active input change invalidates all observations of its selected output;
+projection restricts returned dirty coverage to the consumer's requested Region.
+Input views may have legal offsets, unaligned storage and signed/zero strides.
+Outputs are generic packed immutable owners with empty facets. Values own N*b
+bytes and axis owns 24 bytes, including when the consumer requests one element.
+The public output descriptors, keys and tuple observation identity are unchanged.
+Owners survive invocation/context destruction and release at the final owner.
 
-Changing start invalidates all values and axis; changing step invalidates only
-indices >0 and axis when N>=2. For N=1 it invalidates neither output. Output
-descriptors are statically known from count/dtype; axis dtype is Int64 only
-for Int64 output, and Float64 otherwise. Preserve transitive input support in
-cache records even when changed inputs coincidentally produce the same numbers.
-
-Inputs accept legal immutable `[1]` views including offsets, unaligned reads
-and signed/zero strides. Use generic Value-port and recognized facet validation,
-without inheriting color/physical-unit interpretation. Publish generic packed
-owned values fragments at their actual global indices/Regions and packed axis
-at origin zero, both with empty facets. No implicit zero fill or mutable alias
-is exposed. Returned owners may outlive the context; release unpublished work
-on failure/cancellation and published storage at its final owner.
+Profile/count/dtype, complete static metadata and witnessed active inputs enter
+cache identity. Cache-off preserves arithmetic and ownership. Whole callbacks
+have no per-atom numeric diagnostics; report those counters as unavailable.
 
 ## Algorithm, numerical versions and budgets
 
@@ -137,24 +140,21 @@ Int64 overflow must never be used as a computational shortcut.
 Floating reference evaluation uses exact dyadic arithmetic followed by one
 destination rounding. Correctly rounded Float64 fma with exactly represented
 index may implement Float64 results; Float32 from Float64 inputs still needs
-direct-rounding protection. SIMD/parallel implementations operate on requested
-global indices and must not evaluate tail indices outside the request. No
-speculative prefix overflow rejects a later exact in-range value.
+direct-rounding protection. SIMD implementations operate on all N global indices without tail overread.
+The complete values output must be representable before projection.
 
-The three keys produce identical bits and semantic failures. Use strict fallback
-when an accelerated rounding path cannot establish equality. Unsupported CPU
+The three keys preserve identical semantic failures and exact integer/axis
+results. Use strict fallback when a floating accelerated path cannot establish
+the shared final FP32 bound or strict-reference failure classification. Unsupported CPU
 platform keys return BackendUnavailable, without silent operator substitution.
-Report actual platform/profile and fallback counts through host-owned execution
-diagnostics as required for NUM-02A/NUM-01. Resource, upstream and cancellation
+Keep explicit profile keys; Whole per-atom counters are unavailable. Resource, upstream and cancellation
 failures are not recoverable numerical fallback events.
 
-For M demanded values, payload is M*b bytes, where b=8 for Int64/Float64 and
-b=4 for Float32; requested axis adds 24 bytes. The maximum full array therefore
-uses 8 MiB or 4 MiB. Per active observation, store at most two scalar inputs,
-an index and exact arithmetic/rounding scratch. Integer work is O(1) per value;
-bounded Float64 exponent ranges/count bound exact-dyadic scratch sizes, with
-actual limb work and temporary capacity charged. No O(N) temporary sequence
-is needed for an ROI, and no mandatory disk backing is required.
+For nonempty values, payload is N*b bytes (b=8 for Int64/Float64,
+b=4 for Float32); axis independently uses 24 bytes. Maximum values therefore
+use 8 MiB or 4 MiB even for a one-index consumer. Constant bounded exact-dyadic
+scratch is admitted separately. Values work is O(N), axis work is O(1), with
+primitive limb work charged. No intermediate sequence or disk backing is used.
 
 Use existing host allocation/admission/work/stage limits and worker scheduling.
 Reserve before allocation and charge old/new temporary overlap. Poll cancellation
@@ -169,10 +169,9 @@ Malformed/missing count/dtype parameters use InvalidArgument. Invalid scalar
 shape, unsupported input/output dtype or mixed integer/float mode uses TypeMismatch.
 Nonfinite read floats use OperationFailed/InvalidDomain. Exact integer range
 failure or nonfinite rounded float output/axis last uses OperationFailed /
-ArithmeticOverflow on the actual requested observation. Preserve the upstream
+ArithmeticOverflow with Domain origin and Run scope for the selected output. Preserve the upstream
 source, cancellation/stale statuses and ResourceExhausted reason/scope. Include
-global sample index or axis-last identity; do not invent an earlier failure
-at an unrequested index.
+global failing sample index or axis-last identity; no partial values publish.
 
 | Test | Independent expected behavior |
 | --- | --- |
@@ -181,18 +180,17 @@ at an unrequested index.
 | A03 | N=1 ignores a failing step producer and returns `[start]`, `[start,start,0]` |
 | A04 | Int64 start=2^53+1,step=1,N=3 -> exact `[9007199254740993,9007199254740994,9007199254740995]`, with exact Int64 axis |
 | A05 | start=INT64_MIN,step=INT64_MAX,i=2 -> INT64_MAX-1 despite an overflowing Int64 product |
-| A06 | start=INT64_MAX,step=1,N=2: values[0] succeeds; values[1] and requested axis overflow independently |
+| A06 | start=INT64_MAX,step=1,N=2: any values request fails; axis also overflows independently |
 | A07 | start=-DBL_MAX,step=DBL_MAX,N=3 produces `[-DBL_MAX,0,DBL_MAX]` without intermediate multiplication overflow |
 | A08 | Float32 direct rounding, signed zeros, subnormals, allowed repeated floats, final-output overflow and restored rounding environment |
 | A09 | Wrong modes/shapes/count, mixed integer/float rejection, dynamic bindings and strided scalar views |
-| A10 | Regional/disjoint and full results match at requested indices; values[0] ignores step; axis independence, joint and SIMD-tail legality |
+| A10 | Regional/disjoint and full results match at requested indices; N>=2 values[0] still requires step; axis independence, joint and SIMD-tail legality |
 | A11 | Exact dirty support, warm/cache-off behavior, cancellation, budget failures and output owners surviving context destruction |
-| A12 | Three CPU profiles match the same integer/dyadic oracle and expose actual fallback/platform diagnostics |
+| A12 | Three CPU profiles match the same integer/dyadic oracle and retain explicit platform keys; Whole counters unavailable |
 
 The required target public workflow declares start/step bindings, creates the
 chosen arange node with explicit count/dtype, and names values/axis outputs.
-Compile once, rerun with changed inputs, then request early and overflowing
-indices independently. Inspect exact Int64 bytes and output read witnesses.
+Compile once, rerun with changed inputs, then request early indices and verify that later overflow fails Whole. Inspect exact Int64 bytes and output read witnesses.
 Use exact integer/dyadic reference values, never a floating oracle for Int64.
 Implementation delivery supplies actual target/build/run commands and observed
 outputs.
@@ -202,7 +200,7 @@ outputs.
 All three arange profiles are registered in `numeric_sequences.cpp`, with
 bounded exact integer/dyadic formulas and scalar, NEON or AVX2 limb arithmetic.
 C++ metadata inference preserves Int64 axis for integer inputs and Float64 axis
-for floating inputs. Values are per-index observations; axis is one tuple.
+for floating inputs. Values retain sample identities; axis retains one tuple, both execute Whole.
 The public `numeric/sequences.hpp` helpers supply the documented authoring defaults.
 
 The manual [numeric workflow](../../../../examples/numeric_workflow/README.md)
@@ -218,3 +216,5 @@ remains separate from this implementation record.
 - [NUM-02 category](../core.md).
 - [NUM-02A linspace](NUM-02A_linspace.md).
 - [Per-operation template](../../00-foundation/spec-template.md).
+
+Whole migration validation and timing: [sequences Whole](../sequences-whole.md).

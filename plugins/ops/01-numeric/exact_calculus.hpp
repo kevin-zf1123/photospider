@@ -62,7 +62,7 @@ struct ExactCalculus final {
       ratio.denominator = ratio.shifted;
     }
     ratio.negative = ratio.negative != h.negative;
-    return ratio.round(narrow, consume, 0);
+    return ratio.round(narrow, consume, 0, true);
   }
   // With N<=2^40, the weighted sum 2*sum-first-last has <=2139 bits
   // in 2^-1074 units. Its product with step plus aligned initial fits within
@@ -115,7 +115,7 @@ struct ExactCalculus final {
     ratio.add_term(offset.negative);
     ratio.denominator.words.fill(0);
     ratio.denominator.words[0] = 1;
-    return ratio.round(narrow, consume, -2149);
+    return ratio.round(narrow, consume, -2149, true);
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

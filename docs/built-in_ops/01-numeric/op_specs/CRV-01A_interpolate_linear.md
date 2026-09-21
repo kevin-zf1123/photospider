@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-01A: interpolate_linear
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for registration, descriptor
 inference, platform availability, floating environment, resource accounting,
@@ -104,8 +113,7 @@ endpoint difference, product or sum defines the reference value. Intermediate
 floating overflow does not invalidate a mathematically representable result.
 
 Apple Silicon CPU and x86-64 CPU accelerated versions obey the same whole-formula
-correct-rounding requirement and are bitwise equivalent to strict. No four-ULP
-allowance applies. Their platform names remain separate operation keys.
+strict reference formula, with the shared FP32-scaled final-result allowance. Their platform names remain separate operation keys.
 Exact knot hits and clamped endpoints correctly convert the selected y directly
 to output dtype, retaining its signed zero. No interpolation arithmetic or other
 y values are required on that path.
@@ -242,7 +250,9 @@ irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
   and x=[0,1], y=[-MAX,MAX], query=[0.5] -> [+0], for Float64 MAX.
 - Float32 direct-rounding midpoint/neighbor cases from an independent exact
   rational oracle, both destination dtypes, subnormals and restored nondefault
-  host rounding state. All three versions compare exact result bits.
+  host rounding state. Strict compares exact result bits; accelerated compares
+  final results against the shared FP32 bound. Exact selections and special
+  values still compare bits.
 - Exact knots and clamp read one y only; remote nonfinite y does not fail them.
   An interpolated/extrapolated query reads both endpoints. A bad remote x fails
   every requested observation retaining global topology; a bad unrequested query
@@ -273,8 +283,11 @@ separate-x/y, explicit-query interface. The maintained target workflow and curre
 
 `plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
 keys. The public `photospider/numeric/curves.hpp` constructor is
-`interpolate_linear_node`. All profiles currently use exact rational evaluation and one
-final destination rounding. Global x validation, requested query rows and the
+`interpolate_linear_node`. Strict and Float64 outputs use exact rational evaluation and one final
+destination rounding. Accelerated Float32 evaluation accepts only enclosures
+whose endpoints round to the same Float32 result, preserving monotonicity;
+unresolved cases use exact fallback. Exact cross products identify collinear
+PCHIP stencils and reduce them to the linear formula. Global x validation, requested query rows and the
 local y stencil follow the demand contract above.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)

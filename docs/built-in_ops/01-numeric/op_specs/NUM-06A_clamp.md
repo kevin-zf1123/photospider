@@ -18,6 +18,12 @@ repository_commit: current working tree
 
 # NUM-06A: clamp
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -29,13 +35,13 @@ broadcast to the array shape. There are no implicit casts or broadcasting,
 and no static numeric limit parameters.
 
 The three independently named CPU versions follow the common bitwise-equivalent
-basic-operation rule. Read all three operands at each requested coordinate;
-unrequested coordinates are not evaluated. Shape is rank 1..8 with positive
+basic-operation rule. Read and validate all three complete operands for every nonempty request.
+Empty requests read no payload and invoke no callback. Shape is rank 1..8 with positive
 extents. Inherit [binary execution conventions](NUM-05_binary_contract.md),
-extending exact Q Data support and validation/invalidation to all three ports.
+extending Whole Data support and validation/invalidation to all three ports.
 
-At every requested coordinate, validate lower<=upper. Equal limits and infinite
-floating limits are allowed. A NaN limit or lower>upper fails that observation;
+At every logical coordinate, validate lower<=upper. Equal limits and infinite
+floating limits are allowed. A NaN limit or lower>upper fails the complete invocation;
 an input NaN does not hide invalid bounds. With valid bounds, an input NaN
 preserves payload/sign and is quieted under the common policy.
 
@@ -50,11 +56,14 @@ No selected integer or finite floating value is converted or rounded.
 Unsupported dtypes or mismatched shapes fail compile/preflight. Invalid dynamic
 bounds fail evaluation with InvalidArgument and FailureReason::InvalidDomain and diagnostic tag InvalidBounds, reporting
 the global coordinate and offending bound port/value bits. Validate all three
-input dependencies; an unrequested invalid bound has no effect. A failed
-observation publishes no partial output, under the inherited terminal rules.
+full-input dependencies; an invalid bound outside the consumer projection also
+fails the invocation. Failures have Run scope and no Atom key. No partial output
+is published, under the inherited terminal rules.
 
-Work is O(requested elements); output bytes are requested elements times dtype
-size plus actual fragment overhead. Bound validation adds no Whole-array pass.
+Work is O(full logical elements); output bytes are full logical elements times
+dtype size, even for sparse consumers. All input collections coexist with the
+complete output and fixed arithmetic workspace. Any input edit invalidates all
+observed output coordinates.
 Temporary state is bounded per processing chunk; account actual source owners,
 output/scratch and validation closure under the host budgets. Preserve floating
 environment, check cancellation at least every 64 elements, and release
@@ -73,15 +82,26 @@ defined by the shared execution contract.
 
 The three versioned keys use closed matching-shape/input-dtype inference and
 pure metadata validation for their three inputs. The implementation reads
-`input`, `lower` and `upper` arrays, validates bounds per requested atom, preserves selected bits and
+`input`, `lower` and `upper` arrays, validates bounds across the complete input, preserves selected bits and
 reports `InvalidBounds` with coordinate and bound information. It uses raw
 IEEE/integer order keys and shared scalar/NEON/AVX2 comparison facilities.
 The public composition example is in `examples/numeric_workflow/ranges.cpp`.
 
-Local strict and Apple profile runs passed the broadcast-to-remap-to-clamp
-composition, invalid-bound atom isolation, sparse support, upstream endpoint
-dependency, work-limit and cancellation-cleanup checks. Ubuntu WSL Clang 18
-strict/x86 and the installed public consumer also passed on 2026-09-14. Additional checks cover
+Historical pre-Whole local strict/Apple runs passed the broadcast composition,
+Atom-isolated invalid bounds, sparse support, upstream endpoint dependencies,
+work limits and cancellation cleanup. Ubuntu WSL Clang 18
+strict/x86 and the installed consumer passed that pre-Whole implementation on
+2026-09-14; these are not validations of the current Whole path. Additional checks cover
 recognized typed validation, bound cache edits, arbitrary strides, global ROI
 origins and schema failures. This does not change the Proposed status of
 this specification.
+
+## Whole validation
+
+The maintained synchronous callback uses no dependency maps or continuation.
+Per-value numeric counters are N/A. The numerical comparison and rational engine
+are unchanged; Scalar/NEON/AVX2 profile rules remain as specified. The local
+strict/Apple Whole validation passed 2,826 independent Fraction/bit cases per
+profile, public composition and error/layout/typed/cache/resource checks.
+See [NUM-06 Whole measurements](../range-whole.md) for commands, memory costs,
+public/core timings and profiler scope. This does not change Proposed status.

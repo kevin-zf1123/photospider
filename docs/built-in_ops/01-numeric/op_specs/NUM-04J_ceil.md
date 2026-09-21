@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-04J: ceil
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -27,7 +36,7 @@ stored in the original floating dtype. UInt8 and Int64 are exact identity.
 Shape and dtype are preserved; there are no operation parameters or implicit
 conversion to an integer output array. Inherit the
 [NUM-04 common contract](NUM-04_unary_contract.md) for the input/values interface,
-regional/typed-validation support, output facets, resources and lifetime.
+Whole/typed-validation support, output facets, resources and lifetime.
 
 ## Exact semantics
 
@@ -48,7 +57,7 @@ No arithmetic overflow or ULP tolerance is needed for this operation.
 
 Work is O(M), element scratch O(1) and output payload M*b, plus common mapping
 and typed-validation costs. SIMD must preserve zero signs and NaN quieting and
-must not evaluate outside requested coverage. Inherited sticky failure,
+evaluate the full logical input for every nonempty request. Inherited sticky failure,
 cancellation, cache-off and final-owner rules apply.
 
 Analytic public fixture: [-1.5,-0.25,-0,+0,1.5] -> [-1,-0,-0,+0,2].
@@ -65,13 +74,13 @@ This specification alone does not claim a product test run.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
 and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration

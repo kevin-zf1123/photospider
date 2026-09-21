@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-04: shared unary contract
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -30,9 +39,9 @@ All remain Proposed until their completed specifications are accepted.
 | --- | --- | --- |
 | [NUM-04A abs](NUM-04A_abs.md) | All four | Bitwise strict equivalence |
 | [NUM-04B neg](NUM-04B_neg.md) | Int64, Float32/64 | Bitwise strict equivalence |
-| [NUM-04C sqrt](NUM-04C_sqrt.md) | Float32/64 | Correct rounding, bitwise strict equivalence |
-| [NUM-04D exp](NUM-04D_exp.md) | Float32/64 | <=4 output-dtype ULP for nonzero finite results |
-| [NUM-04E ln](NUM-04E_ln.md) | Float32/64 | <=4 output-dtype ULP for nonzero finite results |
+| [NUM-04C sqrt](NUM-04C_sqrt.md) | Float32/64 | Strict correct rounding; accelerated final FP32-scaled bound |
+| [NUM-04D exp](NUM-04D_exp.md) | Float32/64 | <=4 FP32-scaled ULP for nonzero finite results |
+| [NUM-04E ln](NUM-04E_ln.md) | Float32/64 | <=4 FP32-scaled ULP for nonzero finite results |
 | [NUM-04F sin](NUM-04F_sin.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04G cos](NUM-04G_cos.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04H tan](NUM-04H_tan.md) | Float32/64 | <=4 ULP plus exact named landmarks |
@@ -40,7 +49,7 @@ All remain Proposed until their completed specifications are accepted.
 | [NUM-04J ceil](NUM-04J_ceil.md) | All four | Bitwise strict equivalence |
 | [NUM-04K round](NUM-04K_round.md) | All four | Bitwise strict equivalence, ties-to-even |
 | [NUM-04L sign](NUM-04L_sign.md) | All four | Bitwise strict equivalence |
-| [NUM-04M reciprocal](NUM-04M_reciprocal.md) | Float32/64 | Correct rounding, bitwise strict equivalence |
+| [NUM-04M reciprocal](NUM-04M_reciprocal.md) | Float32/64 | Strict correct rounding; accelerated final FP32-scaled bound |
 | [NUM-04N sinpi](NUM-04N_sinpi.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04O cospi](NUM-04O_cospi.md) | Float32/64 | <=4 ULP plus exact named landmarks |
 | [NUM-04P tanpi](NUM-04P_tanpi.md) | Float32/64 | <=4 ULP plus exact named landmarks |
@@ -83,24 +92,19 @@ facets are empty. Input facets retain existing metadata and actually observed
 typed-semantic validation; an invalid typed NaN does not become valid just
 because generic numeric NaNs are allowed by the arithmetic profile.
 
-For requested output Q, Data support is the identical input-coordinate set Q.
-Recognized input semantics may add required validation support, such as full
-image channels. Declare that closure separately, retain it and do not silently
-read a bounding gap for disjoint Q. Empty Q reads no input data. Unrequested
-numeric exceptions do not run and have no effect on other observations.
+Every nonempty request uses synchronous Whole execution. Data support and typed
+validation cover each complete input, including gaps outside the consumer's
+projection. Empty requests read no payload and invoke no callback. Any changed
+input coordinate invalidates all observed output coordinates. Metadata inference
+still depends only on metadata and the static profile.
 
-Use regional dependency execution wherever necessary to express this exact
-support and typed validation. Changed input Data invalidates the corresponding
-output coordinates; changed validation inputs invalidate the observations that
-retained them. No blanket Whole validation pass is added. Output descriptors
-depend on input metadata and static numeric profile, not runtime numeric values.
-
-Read legal immutable strided/offset/unaligned inputs at logical coordinates.
-Publish packed owned output fragments covering requested global coordinates,
-with correct Region/storage origins and element-size strides. Do not expose
-writable aliases or implicit zero-filled gaps. Published owners may outlive
-the context; release unpublished work on failure and published bytes at the
-final owner. SIMD tails cannot read unrequested input coordinates.
+Integer overflow and invalid rational denominators fail the complete invocation
+with Run scope and no Atom key, including when outside the consumer projection.
+No partial output is published. Already terminal results retain their lifetime.
+Read legal immutable strided/offset/unaligned inputs, including zero/negative
+strides and shifted origins. Allocate one complete packed owned output and let
+the executor project it onto requested global coordinates. Owners may outlive
+the context; release unpublished output and scratch on every failure.
 
 ## Rounding, versions and resources
 
@@ -119,15 +123,13 @@ IEEE classifications, signed-zero rules and NaN payload handling remain exact
 even if finite numeric results permit a tolerance. Platform-specific keys on
 unsupported hosts return BackendUnavailable, without silent key replacement.
 
-For M requested elements and destination size b, output payload is M*b; requested
-input fragments, validation closure and O(rank) coordinate state are additionally
-accounted. Simple transforms cost O(M); the particular spec must account for
-nonconstant math work or exact-rounding refinement. No full logical array
-allocation is required for a small request. Use host workers, allocator,
-admission/work/stage limits and actual capacity accounting, including temporary
-growth overlap. Bound scalar/SIMD batches and poll cancellation before reads,
-at least every 64 simple elements, within long math/refinement work and before
-publication. Resource failures are sticky, not reasons to return a weaker value.
+For N full logical elements and destination size b, output capacity is N*b,
+even for a one-element consumer. Full collected input owners and one fixed
+arithmetic workspace are additional live capacity. Account output, scratch and
+all refinement work through the worker allocator/resource scope. Managed limits
+are capacity accounting, not an RSS guarantee. Simple transforms cost O(N).
+Poll cancellation before reads, within long refinement and before publication.
+Sparse requests may therefore use substantially more memory and work.
 
 Cache identities include operation/profile version, input metadata and exact
 observed bits, including NaN payload/sign. Required validation and upstream
@@ -167,16 +169,21 @@ floating pi-multiple functions remain separate. Reduced common-angle denominator
 ## Maintained implementation and validation
 
 The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
-special-value cases use explicit integer/IEEE-field, rational or algebraic-root
-handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
-accelerated profiles report `FunctionUnsupported` strict fallback for those
-results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
-pointwise, with separately retained typed validation and Atom-scoped errors.
+and exposed through `photospider/numeric/unary.hpp`. Bit-level special cases
+precede controlled hardware elementary arithmetic. Strict transcendental results
+use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
+SLEEF binary64 kernels and conservative final-error checks within the
+[admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
+Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
+Rejected candidates use strict evaluation . Unresolved
+strict rounding may return `ResourceExhausted`. Nonempty requests use Whole execution with full-input typed validation,
+complete packed output allocation and Run-scoped arithmetic errors. Empty requests
+read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
+on this callback path; numerical fallback behavior is unchanged.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
 and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration

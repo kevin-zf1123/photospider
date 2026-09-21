@@ -10,12 +10,21 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-11C: resample_linear_multi
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Interface and expansion
 
@@ -27,7 +36,8 @@ are inherited. C=1 retains its second dimension; channels have no implicit color
 
 Static profile is strict/apple_silicon/x86_64, default strict. dtype and
 out_of_domain are the corresponding interpolation parameters/defaults.
-Samples are whole-formula correctly rounded and bitwise equal on all profiles.
+Strict samples are whole-formula correctly rounded; accelerated samples obey
+the shared final FP32 bound, retaining exact selected samples and endpoints.
 Domain extrapolation has precisely the selected source interpolator's meaning.
 No filtering, implicit uniform sampling or periodic extension is performed.
 

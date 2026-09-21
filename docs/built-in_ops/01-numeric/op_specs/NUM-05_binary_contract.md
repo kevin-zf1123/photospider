@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-05: shared binary contract
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -35,7 +44,7 @@ Proposed; specification acceptance is independent of implementation status.
 | [NUM-05D divide](NUM-05D_divide.md) | Float32/64 | Bitwise strict equivalence |
 | [NUM-05E minimum](NUM-05E_minimum.md) | All four | Bitwise strict equivalence |
 | [NUM-05F maximum](NUM-05F_maximum.md) | All four | Bitwise strict equivalence |
-| [NUM-05G pow](NUM-05G_pow.md) | Float32/64 | <=4 output-dtype ULP; exact special classification |
+| [NUM-05G pow](NUM-05G_pow.md) | Float32/64 | <=4 FP32-scaled ULP; exact special classification |
 | [NUM-05H atan2](NUM-05H_atan2.md) | Float32/64 | <=4 ULP; exact special directions |
 | [NUM-05I atan2pi](NUM-05I_atan2pi.md) | Float32/64 | <=4 ULP; exact special directions |
 
@@ -58,7 +67,7 @@ Confirmed operator-specific decisions:
 
 - Add/subtract/multiply support all four dtypes and preserve dtype. Floating
   results are correctly rounded to that dtype; integer exact results outside
-  UInt8/Int64 fail the current requested observation, without wrap, saturation
+  UInt8/Int64 fail the complete invocation, without wrap, saturation
   or implicit promotion.
 - Divide supports Float32/Float64 only, preserving dtype. Integer conversion is
   explicit; there is no implicit integer quotient mode.
@@ -77,33 +86,28 @@ file, and output facets are empty. No implicit broadcast, cast or unit inference
 occurs. Compile/preflight rejects unsupported dtype, mismatched shape or unknown
 static parameters before reading numeric inputs.
 
-For requested coordinates Q, both inputs have exact Data support Q. Empty Q
-reads neither input. Typed input semantics add their required validation closure
-separately; IEEE-like numeric propagation does not bypass recognized typed-value
-validation. Disjoint requests do not read gaps, and SIMD tails do not read outside
-support. Each changed source element invalidates its corresponding output;
-changes in retained validation support invalidate affected observations.
+Every nonempty request collects and validates both complete inputs and computes
+one complete packed owned output through a synchronous Whole callback. Empty Q
+reads neither input and invokes no callback. Any changed source coordinate
+invalidates all observed output coordinates. Special numerical identities retain
+both input obligations. Typed validation covers complete inputs before arithmetic.
 
-Read arbitrary legal immutable strides/offsets, including zero and negative
-strides and unaligned elements. Return owned packed fragments with correct global
-Region/storage origins; never publish writable aliases or unrequested gaps.
-Failure publishes no partial result for the failed observation. Independently
-completed observations retain the runtime's ordinary terminal status/lifetime.
-An integer overflow at an unrequested coordinate does not fail another request.
+Read arbitrary legal immutable strides/offsets, including zero/negative strides,
+unaligned elements and shifted origins. The executor projects the complete output
+to the consumer's global coordinates. Integer overflow anywhere, including outside
+Q, fails the complete invocation with Run scope and no Atom key. Failure releases
+all unpublished output and scratch; already terminal observations keep their owners.
 
-Inherit [NUM-04 execution conventions](NUM-04_unary_contract.md) for floating
-environment restoration, gradual underflow, NaN bits, cache identity, backend
-availability, ownership, cancellation and resource accounting. Simple arithmetic
-uses round-to-nearest/ties-to-even and has bitwise equivalent CPU profiles. Work
-is O(requested elements) for basic operations; charge actual temporary/output
-capacity and check cancellation at least every 64 scalar elements and before
-publication. Refinement for mathematical functions adds explicitly budgeted work.
-Do not allocate a whole array merely to serve a partial request.
+Inherit [NUM-04 execution conventions](NUM-04_unary_contract.md) for fenv,
+rounding, ownership and cancellation. Capacity includes both full input collections,
+N*b complete output bytes and one fixed arithmetic workspace. Work is O(N) for
+simple operations plus explicitly charged refinement. Sparse requests may cost
+more work and memory. Numeric per-value/fallback counters are N/A on this path.
 
 Acceptance uses independent exact integer/rational or high-precision mathematical
 oracles, not the implementation helper. Exercise all supported dtypes, signed
 zeros, subnormals, extrema, NaN payload priority, valid strided inputs, disjoint
-requests, typed validation, overflow isolation and resource/cancellation cleanup.
+requests, typed validation, Whole overflow failure and resource/cancellation cleanup.
 A conceptual WorkflowDocument fixture binds both arrays, compiles a selected key,
 and reads requested values through ExecutionContext. Implementation delivery
 provides actual runnable public fixtures and results as documented below.
@@ -125,11 +129,14 @@ None of those legacy names establishes the newly proposed versioned contracts.
 
 All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
-The shared adapter retains both inputs as exact pointwise Data and separately
-retains typed validation, including when a numeric identity determines a result.
-Exact elementary operations use bounded integer/ratio arithmetic; ordinary
-power and angle results use the certified directed backend and report accelerated
-strict fallback. See [math implementation](../math-implementation.md) for
+The shared Whole adapter retains and validates both complete inputs, including
+when a numeric identity determines a result.
+Floating elementary operations use controlled correctly rounded hardware
+arithmetic after exact special-value classification, with exact fallback; integer
+operations retain checked exact arithmetic. Accelerated ordinary positive-base
+power and angle results use SLEEF binary64 enclosures within the shared admitted
+ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
+candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)

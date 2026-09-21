@@ -293,7 +293,13 @@ void resources(ps::CpuNumericProfile profile) {
           node.operation, request, budget.allocator(),
           [&](std::uint64_t amount) {
             if (armed && session->numeric_diagnostics().evaluated_values == 1 &&
-                ((!continuous && amount == 192) ||
+                ((!continuous &&
+                  (amount == 192 ||
+                   amount == static_cast<std::uint64_t>(
+                                 (std::get<std::int64_t>(
+                                      node.parameters.at("radius")) +
+                                  1) *
+                                 32))) ||
                  (continuous && amount == 1 && ++scale_checks == 3))) {
               interrupted = true;
               if (cancel)

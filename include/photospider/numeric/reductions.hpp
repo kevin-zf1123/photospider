@@ -73,13 +73,16 @@ inline Result<WorkflowNode> with_dtype(Result<WorkflowNode> result,
  * parameter. The compiler validates actual source/destination domains. Explicit
  * output_type may select UInt8/Int64 for integer inputs or Float32/64 for
  * floats. Source terms sum exactly with only final range checking or IEEE
- * RN-even. No group outside requested output is read; typed Validation is
- * retained. All helpers are pure/concurrent-safe and return owned node
- * metadata. Invalid authoring arguments return
- * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc. Runtime
- * source/resource/cancellation errors are preserved; integer final overflow is
- * OperationFailed/ArithmeticOverflow at its output. Results retain immutable
- * owned backing after the execution context retires.
+ * RN-even. Whole reads/validates every input group for nonempty demand and
+ * computes complete dense output before projection; Empty reads nothing.
+ * Any source edit invalidates all output observations. All helpers are
+ * pure/concurrent-safe and return owned node metadata. Invalid authoring
+ * arguments return InvalidArgument/InvalidDomain/Schema; allocation may throw
+ * bad_alloc. Runtime source/resource/cancellation errors are preserved; integer
+ * final overflow is Domain/Run OperationFailed/ArithmeticOverflow at its
+ * output, including an unrequested group. Whole may own a full packed input
+ * plus complete output and fixed exact state. Results retain immutable owned
+ * backing after the execution context retires.
  */
 inline Result<WorkflowNode> reduce_sum_node(
     std::uint64_t id, WorkflowInput input, std::vector<std::uint64_t> axes,
@@ -127,7 +130,8 @@ inline Result<WorkflowNode> reduce_mean_node(
       dtype);
 }
 /** @brief Metadata-only exact Int64 group count; no numeric input is read.
- * Output may be an immutable zero-stride view. Input-byte changes do not
+ * Whole excludes the runtime input port and owns one8-byte zero-stride complete
+ * output. Input-byte changes do not
  * invalidate counts; shape and axes remain descriptor dependencies.
  */
 inline Result<WorkflowNode> reduce_count_node(

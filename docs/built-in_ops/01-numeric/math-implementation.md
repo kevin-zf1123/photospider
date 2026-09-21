@@ -6,13 +6,21 @@ operator specifications retain their Proposed status. Numerical correctness is
 the selected discrete mathematical result, including raw special-value rules;
 it is not a claim that every input succeeds under every resource budget.
 
+Current measurements and coverage limits are in the
+[accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation);
+reproduction commands are in the [workflow README](../../../examples/numeric_workflow/README.md).
+Historical delivery measurements below
+retain their original dates and do not describe current timings.
+
 ## Exact elementary paths
 
 `exact_elementary.hpp` performs integer transforms in signed 128-bit scratch,
 checking the final UInt8/Int64 range before publication. Float sign, NaN and
 integral rounding operations use unsigned IEEE fields. Addition/subtraction,
-multiplication and division use the existing 4352-bit dyadic/ratio accumulator;
-sqrt uses exact squared-midpoint comparisons. No Float32 NaN passes through a
+multiplication, division and sqrt use correctly rounded hardware arithmetic
+in a saved/restored nearest-even floating environment after bit-level special
+classification. The existing 4352-bit dyadic/ratio and squared-midpoint paths
+remain fallbacks when that environment cannot be established. No Float32 NaN passes through a
 Float64 conversion. Simple floating operations and named algebraic paths are
 bitwise identical across the three profiles.
 
@@ -108,18 +116,40 @@ successful resolution for all possible Float64/rational inputs.
 
 ## CPU profiles and diagnostics
 
-No approximate transcendental backend is selected. Ordinary transcendental
-requests on either accelerated profile enter the strict scalar interval engine
-and report one `FunctionUnsupported` strict fallback. Special values and exact
-algebraic landmarks do not report a fallback. The profile still performs its
-explicit ISA publication path; exact elementary/root work uses its corresponding
-limb comparison path. These implementation facts imply no speedup guarantee.
+The private SLEEF 3.9.0 binary64 u10 kernels, compiled from the
+[builder-supplied source](../../../third_party/SLEEF.md), provide explicit
+AdvSIMD and AVX2/FMA implementations for ordinary exp, ln, sin, cos, tan, pow and
+atan2. Float64 inputs are never narrowed. `accelerated_math.hpp` admits bounded
+ordinary argument ranges, expands kernel results to conservative binary64
+intervals and checks the final output against the shared FP32 budget. Domain,
+classification, zero, FP32 subnormal range and wider results use strict fallback.
+Pi/rational-pi kernels reduce the original dyadic/Int64 ratio with exact integer
+quadrants before conversion, then enclose small-angle SLEEF sin/cos. Sinc uses the
+same complete numerator/denominator enclosure, retaining the full original
+argument; ordinary sinc admits |x|<=1. Exact landmarks precede approximation.
+Atan2pi divides the enclosed atan2 by an enclosed pi. Uncertain poles, tiny or
+out-of-range final values retain directed strict evaluation. Fast-math remains disabled. The private adapter isolates explicit FMA
+use, ISA dispatch and hidden symbols; static/shared consumers need no SLEEF target.
 
-Diagnostics identify `photospider.math/1`, the operation, exact or interval
-algorithm, compiler/OS/build identity and actual selected profile. Evaluations
+NUM-01 evaluates four samples together in a fixed node-by-lane continuation.
+Coordinates, coefficients and requested coverage retain their existing rules.
+Outward intervals cover each strict RN64 expression step. Only a final certified
+result is published; uncertain lanes replay the entire strict expression,
+including domain/failure classification. The same kernel handles vector tails.
+`2*x+1` and ordinary exp can therefore avoid both per-sample continuation work
+and multiprecision math. Cancellation and all continuation storage are accounted.
+
+Dependency-path diagnostics identify the numerical implementation, compiler/OS/build identity
+and actual selected profile. The build identity includes the pinned SLEEF sources
+and integration module, preventing old/new accelerated cache identity reuse. Evaluations
 are admitted before arithmetic; copied values are counted before their fixed
 publication store. Both counts and an already attempted fallback survive a later
 resource or cancellation failure. Cache hits add no fabricated arithmetic work.
+
+NUM-04/05 now use Whole callbacks. Their arithmetic and fallback rules are
+unchanged, but per-value diagnostics described above are unavailable (N/A).
+The older timing and regional acceptance tables below describe their recorded
+revisions; see [current Whole measurements](point-math-whole.md).
 
 ## Independent reference and execution
 
@@ -250,10 +280,12 @@ The three `numeric.sample_expression_*` keys use the same bounded immutable
 postorder program. Parsing is iterative: 4096 ASCII source bytes, 256 nodes,
 height 32 and bytewise canonical free names. Decimal literals use exact integer
 conversion, including digits beyond binary64 precision; constants pi/e use
-fixed correctly rounded binary64 bits. Every primitive rounds to binary64 in
+fixed correctly rounded binary64 bits. In the strict evaluator, every primitive rounds to binary64 in
 specified left-to-right postorder. Final Float32 conversion is a separate
 rounding boundary. NUM-02 exact endpoint interpolation supplies coordinates;
-NUM-04/05 exact elementary and certified interval mathematics supply primitives.
+NUM-04/05 exact elementary and certified interval mathematics supply strict
+primitives. Accelerated evaluation uses the final reference-enclosure check
+described under CPU profiles and replays rejected samples through strict.
 No compiler reassociation, host libm or floating environment defines the result.
 
 Decimal scratch uses 256 limbs (16384 bits): a 4096-digit significand needs
@@ -261,7 +293,7 @@ at most 13607 bits, and the supported decimal-exponent branch has at most
 14680 denominator bits. Larger exponents are classified as overflow or rounded
 zero only after accounting for all source digits. Division alignment and final
 midpoint comparison fit the remaining capacity. Runtime exact/math workspace
-is part of the admitted continuation; work and cancellation checks occur in
+is part of the admitted Whole workspace; work and cancellation checks occur in
 AST evaluation and inside long arithmetic/refinement. Bounded unresolved
 transcendental refinement returns ResourceExhausted.
 
@@ -269,22 +301,23 @@ Pure static preparation owns the program across compiler stages, outputs and
 dynamic runs. Sealed handles validate registry/definition identity, all static
 input metadata and exact parameter bits, including signed zeros and NaNs.
 Direct preflight prepares once per call, or reuses an explicit matching handle;
-a joint request prepares once for compatible members. Static plan/program
+Whole execution receives and reuses the sealed plan owner. Static plan/program
 allocations use ordinary host storage outside runtime managed scratch. They
 have source/program size bounds, but no separately enforced preparation budget
-or global preparation cache. Session retirement destroys the continuation
-before its program; the program is destroyed before the definition/library
-lease. Package 0.15 requires a C++ rebuild; traits/framing 14 and C ABI 9 remain.
+or global preparation cache. The synchronous callback borrows the AST while
+holding its preparation owner. Package 0.17/traits15 requires a C++ rebuild;
+canonical framing14 and C ABI9 remain.
 
-At most 16 inputs use compact static mappings and two regional polls: acquire
-the shared scalars, then evaluate only the requested coordinates. Larger
-coefficient sets use staged reads of at most 16 ports. Their exact per-Atom
-certificates can require a larger box budget; the 24-coefficient fixture uses
-512. Axis-only execution does not allocate the expression evaluator, read
-coefficients or check adjacent value coordinates. Count=1 never reads end.
-An ordinary failed batch publishes no partial Value; `execute_atoms` retains
-independent successes. Coordinator metadata-admission failure now returns
-ResourceExhausted and retires unpublished state rather than escaping bad_alloc.
+All nonempty values requests execute Whole with static active-input projection,
+no per-index stages or dependency certificates. The selected output materializes
+all N values before consumer projection; any numerical failure is Run scoped.
+Axis-only skips coefficients, AST evaluation and adjacent-coordinate validation;
+its actual scratch omits the evaluator, while common workspace admission reserves
+the maximum values state. Count=1 excludes end. Whole numeric counters are
+unavailable. Current migration checks and timing are in
+[expression Whole](expression-whole.md).
+
+The following dated results describe the pre-Whole implementation.
 
 On 2026-09-19, native Apple M5 / Clang 21 strict and Apple (MPFR 4.2.2), and
 Intel Core i9-12900 Ubuntu WSL / Clang 18.1.3 strict and AVX2 (MPFR 4.2.1),
@@ -350,11 +383,17 @@ storage are outside that field.
 ## CRV-01 exact interpolation
 
 Four primitives (linear/PCHIP, single/multiple functions) provide twelve profile
-keys. All use exact integer rational formulas followed by one direct RN-even
-conversion. Strict, Apple and AVX2 currently agree bitwise, including PCHIP;
-no approximate slope or per-batch clipping is used. Integer comparisons and
-publication select scalar, NEON or AVX2 paths and diagnostics identify the path.
-No strict fallback is needed for this exact implementation.
+keys. Strict and Float64 output evaluation use exact integer rational formulas
+followed by one direct RN-even conversion. Accelerated Float32 outputs first try
+hardware interval evaluation of the complete linear/PCHIP formula. Both endpoints
+must round to the same Float32 result, as well as satisfy the shared quality gate.
+This stronger condition preserves cross-query monotonicity when mixed with strict
+fallback. A mere 4 ULP32 bound is insufficient: neighboring binary64 queries can
+otherwise produce a one-ULP64 reversal. Selected knots/clamps remain exact.
+Unresolved cases report strict fallback; no requested-batch repair is applied.
+Exact cross products detect a collinear complete local stencil and reduce its
+PCHIP formula to the existing linear rational formula. Rounded slope equality
+is insufficient and is never used for this decision.
 
 Finite binary64 values are integers in units 2^-1074. Differences need fewer
 than 2099 bits; PCHIP slope numerator/denominator magnitudes are below 2^6300.
@@ -596,8 +635,9 @@ order keys; before exact linear evaluation it reverses both coordinates and
 values to meet ExactCurve's positive-denominator precondition. This is the
 same mathematical negative-denominator formula. Direct hits/clamps/singletons
 convert only the selected entry; other paths preserve both endpoint witnesses
-and apply the whole-formula zero rule. Profile-specific integer helpers retain
-identical results. ExactCurve now clears its borrowed work callback on every
+and apply the whole-formula zero rule. The shared ExactCurve certified Float32
+path retains correctly rounded results and reports fallback where available.
+ExactCurve clears its borrowed work callback on every
 return/exception; native CRV-01 five groups and 2484 Fraction cases regressed
 successfully after that lifetime-only change.
 
@@ -923,16 +963,20 @@ It retains at most 16K bytes of promoted global inputs and requested-output stat
 no allocation scales with unrequested N. All x/y changes invalidate every dependent
 observation, while query changes are pointwise. Dynamic topology errors and
 requested finite/overflow failures carry the dependent Atom; host/source failures
-retain their categories. Current accelerated cubic queries explicitly report
-FunctionUnsupported strict fallback; linear, K=2 and selected paths are exact
-without that fallback. This yields a monotone mapping independent of partitions.
+retain their categories. Accelerated Float32 inverse queries use bracketed
+hardware interval bisection, publishing only when both bracket endpoints round
+to the same Float32 output. Float64, ambiguous comparisons and unresolved rounds
+use the exact inverse; actual fallback is reported. Exact collinear stencils
+bypass lattice search, while noncollinear refinement retains scalar wide-integer
+comparison. The internal profile is scoped and restored on all exits. This yields
+the same monotone mapping independent of request partitions.
 
 The [public inverse workflow](../../../examples/numeric_workflow/README.md#inverse-curves)
-contains four manual groups and a 404-case independent Fraction reference that
+contains four manual groups and a 407-case independent Fraction reference that
 bisects real x with normalized Hermite evaluation. Native Clang21 Strict/Apple
 and WSL Clang18 Strict/AVX2 passed both, and the installed 0.16 consumer passed
 all four groups on both native profiles. The shared
-forward interpolation and LUT1D regressions passed 2484 and 1416 cases respectively
+forward interpolation and LUT1D regressions passed 2487 and 1416 cases respectively
 on both native profiles. The focused compiler unit passed. No integration test
 was registered or run for this feature.
 
@@ -943,6 +987,14 @@ The four resampling helpers append existing CRV-01 interpolation and independent
 special bits; only sample demand adds curve validation. Exports remain caller
 controlled and IDs reserve declared/referenced nodes. No new interpolation
 primitive, implicit filtering or sample-rate inference is introduced.
+
+Accelerated uniform lowpass builds certified coefficient enclosures once per
+continuation at 128 fractional bits, retaining them in a resource-accounted vector.
+The hardware convolution propagates coefficient, product, sum and normalization
+error to the final FP32 gate. Exact zero taps, constant shortcuts, special values
+and source demand remain governed by the original discrete reference. Unresolved
+coefficients or outputs use the original strict convolution. Nonuniform lowpass
+continues to use the directed integration path below.
 
 Uniform tap support is exact before coefficient evaluation. A 128-bit product
 represents `2*cutoff*j` as a dyadic; integer phases are sinc zeros and the integer
@@ -1013,7 +1065,7 @@ heap limbs or cached rounded weights. Global series can be expensive or fail on
 high frequencies/large beta/support-to-sigma ratios; unresolved zero/near-midpoint
 cases return ResourceExhausted rather than guessing a sign or publishing a fixed
 quadrature approximation. No arbitrary one-sided interval is declared negative
-zero. Current accelerated keys report FunctionUnsupported strict fallback.
+zero. Nonuniform accelerated keys still report FunctionUnsupported strict fallback.
 Every scale scan, partition piece, coefficient/refinement and limb operation has
 work/cancellation checks. No integration tests or external math dependency enter
 the product. MPFR/Fraction are independent manual references only.
@@ -1022,3 +1074,20 @@ Public examples, exact fixtures, response checks and runtime commands are in
 [resampling](../../../examples/numeric_workflow/README.md#signal-resampling),
 [uniform lowpass](../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [nonuniform lowpass](../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
+
+## Shared rounding and regional execution
+
+Dyadic final ratios detect power-of-two denominators and extract rounding bits
+directly, with guard/sticky ties-even handling. General final ratios may opt in
+to a normalized conservative hardware quotient and final FP32 acceptance; control
+predicates, expression intermediates and certification endpoints never opt in.
+Small-divisor interval operations visit active limbs. Interval multiplication
+shares floor/ceiling products and uses two endpoint products for positive ranges.
+All strict outputs retain their original bits.
+
+Range operations and smoothstep publish requested regions in a single continuation.
+Sort projects requested boxes onto unique logical lines, reuses one permutation
+per line and output, and writes dense offsets without changing stable order or
+source witnesses. Prefix and cumulative integral scans request up to 64 source
+samples per stage, while each published observation retains only its actual
+prefix support. No private thread pool is used.

@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-13B: integral_image
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -41,53 +50,48 @@ or correct rounding. Static dtype is explicit in direct nodes.
 Inherit [prefix_sum's arithmetic and failure rules](NUM-13A_prefix_sum.md), using
 rectangle contributors rather than line contributors. If either selected output
 boundary is zero, the rectangle is empty: return integer zero or floating +0
-without source Data reads. Nonempty rectangle NaN priority follows original
+while Whole still prepares the full input. Nonempty rectangle NaN priority follows original
 logical row-major coordinates, independent of which selected axis is processed
 first. Preserve the shared payload conversion and mixed-infinity/zero rules.
 
-Only requested rectangle results are rounded or range-checked. Internal exact
-partial sums may exceed the destination range without failing an unrequested
-result. Do not treat already rounded integral_image outputs as exact reusable
-arithmetic state. All three CPU profiles are bitwise equivalent.
-
-For Q, source Data support is the exact union of its anchored rectangles, keeping
-all batch coordinates separate. Disjoint requested corners can produce an L-shaped
-union; reading the missing bounding-box corner is not authorized. Add recognized
-typed-input Validation closure separately. Empty Q or only zero-boundary requests
-read no source Data. A source change at (i,j) affects output boundaries with
-o[a]>i and o[b]>j in the same batch, plus retained validation dependencies.
+All complete-output rectangles are converted/range-checked; any integer overflow
+fails Domain/Run, including outside the consumer projection. Internal exact sums
+can exceed the destination range. Rounded integral outputs never become exact
+carry. Strict remains reproducible; accelerated floating results retain their
+own shared bound. Empty demand reads nothing; nonempty zero-boundary requests
+still read and validate all source cells. Any source edit invalidates all recorded
+observations, including projections at zero boundaries.
 
 ## Algorithms, resources and errors
 
-Use bounded exact row/column scan state or another proved exact rectangle-sum
-algorithm. If using two passes, keep their internal accumulators exact rather
-than rounding an intermediate table. Irregular request unions must retain their
-exact read restriction; a convenient dense bounding pass cannot read gaps.
-Account scanned source cells, repeated work if chosen, exact accumulator widths,
-active row/column state, source owners/windows, frontier/checkpoint metadata,
-output fragments and scratch. Output bytes cover requested coordinates only.
+For each independent plane, visit the lower-numbered selected axis as outer rows
+and the higher-numbered axis as inner columns. The current row's exact prefix
+is added to the saved exact prefix rectangle for all previous rows at that column.
+These disjoint contributions cover precisely the desired rectangle. Save exact
+magnitude/sign, first-NaN, both infinity flags and all-negative-zero flag before
+any destructive final conversion. Earlier rows have NaN priority over the current
+row; within each row preserve source logical order. Reset all columns per plane.
 
-Host-account every state/checkpoint and key it by source/metadata/axes/dtype and
-validation witnesses. No full integral table is implicitly required for a tiny
-request. Work/capacity/stage limits may reject expensive support/state with
-ResourceExhausted; do not broaden reads or approximate sums to evade them.
-Check cancellation during scan blocks and extended arithmetic, preserving the
-prefix contract's publication, cache-off, lifetime and release rules.
+This takes O(full_input_count) exact updates/conversions with one fixed pair of
+full workspaces and one compact carry per inner-axis column. Column element
+capacity is560*W bytes on the recorded arm64 build, plus ResourceAllocator
+header/alignment/Entries, charged as metadata. Full input collection and complete
+dense output are additional payload. W is the higher-numbered selected axis's
+extent; it is not chosen by physical stride or assumed to be the shorter axis.
+No repeated rectangle scan, per-output descriptors or persistent table is retained.
+Work/cancellation checks cover resets, reads, merges, conversions and publication.
 
-Compile/preflight rejects invalid axes/rank/dtype, overflowed +1 shape arithmetic
-and input/output counts above 2^40. Requested integer final overflow uses
-OperationFailed/ArithmeticOverflow with output coordinate. Floating exceptional
-results are numeric outcomes; upstream/typed/resource/cancellation failures keep
-their existing categories. Failed observations publish no partial result.
+Schema/output caps remain compile/preflight errors. Whole failures release output,
+state and columns; floating exceptional results follow exact sum rules. Budget
+failure never changes arithmetic precision. Final output owners outlive context.
 
 ## Acceptance and implementation status
 
 Conceptual fixture: input=[[1,2],[3,4]], axes="0,1" yields
 [[0,0,0],[0,1,3],[0,4,10]]. Use independent exact rectangle summation as the
-oracle. Test zero boundaries with no source reads, non-leading integral axes,
-independent batches, disjoint corners with an L-shaped source union, cancellation
-that makes a requested final sum representable despite overflowing unrequested
-partials, NaN priority across axes and all inherited dtype/stride/resource cases.
+oracle. Test zero boundaries with full source validation, non-leading integral axes,
+independent batches, disjoint corners with an L-shaped source union, Run failure
+when an unrequested integer rectangle overflows despite representable later results, NaN priority across axes and all inherited dtype/stride/resource cases.
 
 Four-corner rectangle queries on rounded floating outputs may introduce their
 own rounding/cancellation error; this operator guarantees each prefix result,
@@ -97,33 +101,7 @@ runs and lifetime/invalidation checks; the implementation evidence below records
 
 ## Implementation and executable acceptance
 
-Six suffixed keys are registered through `numeric_scans.cpp`; public authoring
-helpers live in `photospider/numeric/scans.hpp`. Each operation retains an exact
-accumulator and a separate conversion snapshot, preserving original source
-NaN/Inf/zero classification. Empty boundaries emit positive zero without Data.
-Windows transport at most 64 numeric source values; typed Validation closure
-is accounted separately and can require additional channel values.
-
-Regional prefix requests group outputs by line and increasing boundary, scanning
-only through each line's largest requested boundary. Integral rectangles are
-streamed independently in original row-major order; repeated arithmetic is
-charged. Separate executions and `execute_atoms` observations can recompute
-source values. No persistent checkpoint or integral table is retained.
-
-The output plan and complete per-observation association rows are host-accounted.
-Each Need stage processes all requested rows; dense prefix boundary requests
-can therefore require quadratic association work even though source terms are
-scanned once. Work/capacity/stage limits reject excessive requests explicitly.
-This is not a whole-execution linear-time or once-per-Run guarantee.
-
-The manual `photospider_numeric_scans` target and `scan_oracle.py` are described
-in [the workflow example](../../../../examples/numeric_workflow/README.md).
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 runs passed
-2,280 independent Fraction/raw-bit cases per profile on 2026-09-19, plus
-public workflow fixtures, sparse/L-shaped support,
-integer Atom isolation, typed/Empty/zero boundaries, negative strides, fenv,
-output-cap checks, sorting work/cancellation cleanup, and 4,096 source values
-through 65 windows with four sparse results and at most 16 KiB payload. The
-installed strict/Apple consumers, focused compiler unit, formatting/lint and
-independent math/entry reviews passed. No integration test or CTest
-registration is added; specification status remains Proposed.
+All formal profiles use the exact Whole algorithm above. Current public workflow,
+Fraction rectangle oracle, cross-plane/NaN/layout/resource checks and measured
+public/core performance are in [NUM-13 Whole execution](../scans-whole.md).
+Older regional WSL/installed acceptance is historical.

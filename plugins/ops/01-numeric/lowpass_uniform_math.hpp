@@ -4,6 +4,7 @@
 #include <functional>
 #include <optional>
 
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/lowpass_kernel.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -32,6 +33,82 @@ inline int uniform_tap_sign(const LowpassParameters& p, unsigned radius,
 struct UniformLowpassMath {
   DirectedLowpassKernel kernel;
   using Frame = DirectedInterval::Frame;
+  Result<bool> prepare(const LowpassParameters& parameters, unsigned radius,
+                       FastInterval* coefficients, FastInterval* normalizer,
+                       const std::function<Status(std::uint64_t)>& consume) {
+    auto& m = kernel.functions.math;
+    m.consume = &consume;
+    struct End {
+      DirectedInterval& m;
+      ~End() {
+        m.consume = nullptr;
+        m.used = 0;
+      }
+    } end{m};
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Result<bool>(false);
+    try {
+      m.precision = 128;
+      *normalizer = FastInterval::point(0);
+      for (unsigned j = 0; j <= radius; ++j) {
+        coefficients[j] = FastInterval::point(0);
+        if (!uniform_tap_sign(parameters, radius, j))
+          continue;
+        Frame frame(m);
+        auto u = m.interval(), coefficient = m.interval();
+        m.integer(u, j);
+        m.divide_small(u, u, radius);
+        kernel.coefficient(coefficient, u, parameters);
+        coefficients[j] = {
+            numeric_down(numeric_double(m.rounded(coefficient.low, false))),
+            numeric_up(numeric_double(m.rounded(coefficient.high, false)))};
+        if (!coefficients[j].finite())
+          return Result<bool>(false);
+        *normalizer =
+            *normalizer + coefficients[j] * FastInterval::point(j ? 2 : 1);
+      }
+      return Result<bool>(normalizer->finite() && normalizer->low > 0);
+    } catch (const DirectedInterval::Unresolved&) {
+      return Result<bool>(false);
+    } catch (const Status& status) {
+      return Result<bool>(status);
+    }
+  }
+  static std::optional<std::uint64_t> fast(const LowpassParameters& parameters,
+                                           unsigned radius,
+                                           const std::uint64_t* samples,
+                                           bool narrow,
+                                           const FastInterval* coefficients,
+                                           FastInterval normalizer) {
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return {};
+    FastInterval numerator = FastInterval::point(0);
+    double candidate = 0, divisor = 0;
+    bool constant = true;
+    for (unsigned j = 0; j <= radius; ++j) {
+      if (!uniform_tap_sign(parameters, radius, j))
+        continue;
+      const double weight = coefficients[j].low +
+                            (coefficients[j].high - coefficients[j].low) * .5;
+      divisor += weight * (j ? 2 : 1);
+      for (unsigned side = 0; side < (j ? 2U : 1U); ++side) {
+        const auto bits = samples[side ? radius - j : radius + j];
+        const double value = numeric_double(bits, narrow);
+        if (!std::isfinite(value))
+          return {};
+        constant = constant && bits == samples[radius];
+        candidate += weight * value;
+        numerator = numerator + coefficients[j] * FastInterval::point(value);
+      }
+    }
+    if (constant) {
+      const double value = numeric_double(samples[radius], narrow);
+      return FastInterval::point(value).accepted(value, narrow);
+    }
+    return (numerator / normalizer).accepted(candidate / divisor, narrow);
+  }
   Result<std::uint64_t> evaluate(
       const LowpassParameters& parameters, unsigned radius,
       const std::uint64_t* samples, bool narrow,

@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/directed_functions.hpp"
 #include "01-numeric/exact_root.hpp"
 #include "01-numeric/numeric_nan.hpp"
@@ -33,10 +34,13 @@ enum class CertifiedKind {
   SincpiRational
 };
 struct CertifiedMath final {
+  SequenceProfile profile;
   DirectedFunctions functions;
   RatioWorkspace algebraic;
   explicit CertifiedMath(SequenceProfile profile)
-      : functions(SequenceProfile::Strict), algebraic(profile) {}
+      : profile(profile),
+        functions(SequenceProfile::Strict),
+        algebraic(profile) {}
   using Interval = DirectedInterval::Interval;
   using Frame = DirectedInterval::Frame;
   static bool pi_function(CertifiedKind kind) {
@@ -308,6 +312,101 @@ struct CertifiedMath final {
     functions.orient(s, c, sine_result, cosine_result, quadrant & 3,
                      input.negative);
   }
+  std::optional<std::uint64_t> accelerated_reduced(
+      CertifiedKind kind, const BinaryParts& input, std::uint64_t raw,
+      std::uint64_t other, std::uint64_t numerator, std::uint64_t denominator,
+      bool narrow) {
+    input_internal::Float32Environment environment;
+    if (!environment.active() || !accelerated_math_available())
+      return {};
+    const auto pi = FastInterval{numeric_down(0x1.921fb54442d18p1),
+                                 numeric_up(0x1.921fb54442d18p1)};
+    const auto integer = [](std::uint64_t value) {
+      const auto rounded = static_cast<double>(value);
+      return FastInterval{numeric_down(rounded), numeric_up(rounded)};
+    };
+    const auto kernel = [](unsigned operation, double value) {
+      double result = 0, unused = 0;
+      photospider_sleef_evaluate(operation, &value, &unused, &result, 1);
+      return accelerated_math_enclosure(result);
+    };
+    if (kind == CertifiedKind::Atan2pi) {
+      const auto a = numeric_double(raw, narrow),
+                 b = numeric_double(other, narrow);
+      if (!accelerated_math_domain(11, a, b))
+        return {};
+      double result = 0;
+      photospider_sleef_evaluate(11, &a, &b, &result, 1);
+      auto bound = accelerated_math_enclosure(result) / pi;
+      return bound.accepted(result / 0x1.921fb54442d18p1, narrow);
+    }
+    FastInterval reduced, original;
+    unsigned quadrant = 0;
+    const bool normalized = pi_function(kind);
+    if (rational(kind)) {
+      // Reduce in integers before any floating conversion, including Int64 min.
+      const auto period = static_cast<unsigned __int128>(denominator) * 2;
+      const auto remainder = static_cast<unsigned __int128>(numerator) % period;
+      quadrant = static_cast<unsigned>(
+          (4 * remainder + denominator) /
+          (2 * static_cast<unsigned __int128>(denominator)));
+      const auto signed_top = static_cast<__int128>(2 * remainder) -
+                              static_cast<__int128>(quadrant) * denominator;
+      const bool negative = signed_top < 0;
+      const auto magnitude =
+          static_cast<std::uint64_t>(negative ? -signed_top : signed_top);
+      reduced =
+          integer(magnitude) / (integer(denominator) * FastInterval::point(2));
+      if (negative)
+        reduced = -reduced;
+      original = integer(numerator) / integer(denominator);
+    } else {
+      const double absolute = std::abs(numeric_double(raw, narrow));
+      original = FastInterval::point(absolute);
+      if (normalized) {
+        const auto fraction = static_cast<unsigned>(-input.exponent);
+        const auto remainder =
+            fraction >= 63
+                ? input.significand
+                : input.significand & ((UINT64_C(1) << (fraction + 1)) - 1);
+        if (fraction < 64)
+          quadrant = static_cast<unsigned>(
+              (static_cast<unsigned __int128>(remainder) * 4 +
+               (UINT64_C(1) << fraction)) >>
+              (fraction + 1));
+        // Binary significands and the power-of-two scaling are exact here.
+        reduced = FastInterval::point(std::ldexp(static_cast<double>(remainder),
+                                                 input.exponent)) -
+                  FastInterval::point(quadrant * .5);
+      } else {
+        if (kind != CertifiedKind::Sinc || absolute > 1)
+          return {};
+        reduced = original;
+      }
+    }
+    auto angle = normalized ? reduced * pi : reduced;
+    if (!angle.finite() || angle.low < -1 || angle.high > 1)
+      return {};
+    const auto sl = kernel(2, angle.low), sh = kernel(2, angle.high);
+    const auto cl = kernel(3, angle.low), ch = kernel(3, angle.high);
+    FastInterval s{sl.low, sh.high};
+    FastInterval c{std::min(cl.low, ch.low), std::max(cl.high, ch.high)};
+    if (angle.low <= 0 && angle.high >= 0)
+      c.high = 1;
+    quadrant &= 3;
+    const auto sine_value = (quadrant & 1) ? c : s;
+    const auto cosine_value = (quadrant & 1) ? s : c;
+    s = ((quadrant >= 2) != input.negative) ? -sine_value : sine_value;
+    c = (quadrant == 1 || quadrant == 2) ? -cosine_value : cosine_value;
+    auto result = sine(kind) ? s : cosine(kind) ? c : s / c;
+    if (cardinal(kind)) {
+      if (input.negative)
+        original = -original;
+      result = s / (normalized ? original * pi : original);
+    }
+    return result.accepted(result.low + (result.high - result.low) * .5,
+                           narrow);
+  }
   Result<std::uint64_t> evaluate(
       CertifiedKind kind, ElementType dtype, std::uint64_t a, std::uint64_t b,
       const std::function<Status(std::uint64_t)>& work,
@@ -442,6 +541,19 @@ struct CertifiedMath final {
             }
           }
         }
+      }
+      if (profile != SequenceProfile::Strict && !is_rational) {
+        auto fast = accelerated_math(static_cast<unsigned>(kind), a, b, narrow);
+        if (fast)
+          return Answer(*fast);
+      }
+      if (profile != SequenceProfile::Strict &&
+          (pi_function(kind) || kind == CertifiedKind::Sinc ||
+           kind == CertifiedKind::Atan2pi)) {
+        auto fast =
+            accelerated_reduced(kind, x, a, b, numerator, denominator, narrow);
+        if (fast)
+          return Answer(*fast);
       }
       auto fallback = strict_fallback();
       if (!fallback.ok())

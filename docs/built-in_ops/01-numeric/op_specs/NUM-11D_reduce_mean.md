@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-11D: reduce_mean
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -27,7 +36,7 @@ Reduce input groups selected by required static axes. Inherit the
 positive rank-1..8 shapes, size cap, fixed keepdims=true, generic output facets,
 full selected-group support, strided reads, NaN priority/payload conversion,
 invalidation, returned mapping, resources, errors and lifetime. Input supports
-UInt8, Int64, Float32 and Float64. All three CPU profiles are bitwise equivalent.
+UInt8, Int64, Float32 and Float64. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 
 ## Type and numeric semantics
 
@@ -60,10 +69,6 @@ inputs first would incorrectly yield 2^53. For Float64 [MAX,MAX],
 mean is MAX despite an overflowing naive floating sum. Test both destinations
 and the shared deterministic NaN payload narrowing/expansion.
 
-The current three profile keys use `reduce_mean_node` from
-`photospider/numeric/reductions.hpp`. Integer sources remain exact through the
-sum/count calculation and convert only at final Float32/Float64 rounding. The
-public fixture checks the `[2,3]` axes-`1` result `[[2],[5]]` and large-integer
-no-premature-conversion cases. The shared reduction contract records the
-complete strict/Apple/WSL and installed-consumer evidence. Proposed status is
-unchanged.
+The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.

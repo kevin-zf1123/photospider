@@ -250,13 +250,14 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * entries fail OperationFailed/InvalidDomain at the dependent Atom. Actual
  * destination overflow fails ArithmeticOverflow; host/typed/upstream errors
  * retain their identity. Descending axes and all CurveDomain policies work.
- * Exact selection preserves zero sign; complete linear formulas round once,
- * with -0 exact zero only for two -0 endpoints. All profiles agree bitwise and
- * preserve caller fenv. Owned packed fragments survive context teardown.
- * Empty reads nothing. Global axis work, exact scratch, optional grid and
- * per-request certificates are bounded by host budgets. Cache witnesses retain
- * complete axis, selected input and local table coordinates. No approximation
- * quality bound relative to the table's generating function is inferred.
+ * Exact selection preserves zero sign. Strict rounds complete linear formulas
+ * once, with -0 exact zero only for two -0 endpoints. Accelerated follows
+ * CpuNumericProfile's final FP32 bound and preserves caller fenv. Owned packed
+ * fragments survive context teardown. Empty reads nothing. Global axis work,
+ * exact scratch, optional grid and per-request certificates are bounded by host
+ * budgets. Cache witnesses retain complete axis, selected input and local table
+ * coordinates. No approximation quality bound relative to the table's
+ * generating function is inferred.
  */
 /** @brief Applies one scalar table to every requested input element. */
 inline Result<WorkflowNode> apply_lut1d_node(

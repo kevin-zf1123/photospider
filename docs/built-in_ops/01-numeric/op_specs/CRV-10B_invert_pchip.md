@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-10B: invert_pchip
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Invert the mathematical PCHIP curve defined by x/y, before
 its forward output rounding. Do not invert a rounded lookup or construct a new
@@ -59,10 +68,11 @@ current validation evidence.
 
 The public helper is `invert_pchip_node` from
 [`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp).
-Strict uses the exact polynomial/lattice path; accelerated cubic non-knot
-queries use the strict scalar fallback, with exact knot/clamp and K=2 paths
-handled directly. See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
+Strict and general Float64 output use the exact polynomial/lattice path.
+Accelerated Float32 output tries a bracketed solver with uniquely rounded
+output, then strict scalar fallback when unresolved. Exact collinear stencils
+use linear inversion; knot/clamp and K=2 paths remain direct. See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
 for the public fixture, command and shared validation evidence. Native Clang21
-Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 404
+Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 407
 independent Fraction cases per profile. Installed0.16 consumers passed both
 native profiles; WSL is used for numerical correctness only.

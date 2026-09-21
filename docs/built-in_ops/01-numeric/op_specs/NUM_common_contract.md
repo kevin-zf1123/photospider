@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM: specification and execution baseline
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 This contract is explicitly inherited by the NUM-01..NUM-15 and CRV-02 files
 in this directory, including their family contracts. An individual operation's
@@ -25,9 +34,11 @@ it does not change the maintainer's selected formulas or dependency exceptions.
 
 Front matter separates specification status, document maturity and implementation
 status. D1_draft identifies a draft of the D1 mathematical scope; it is neither
-Accepted nor an implementation gate. repository_branch/repository_commit record
-the source-inspection baseline, not a claim that the new draft files existed in
-that commit. Shared contracts register no operation; the primitive specifications and
+Accepted nor an implementation gate. The repository_branch/repository_commit fields retain the original
+source-inspection provenance, including historical working-tree labels. The implementation fields identify the
+maintained branch, its pre-change base and the latest verification date; the base
+commit does not contain the subsequent changes. Current implementation facts are
+versioned together with code in this commit. Shared contracts register no operation; the primitive specifications and
 [implementation table](../implementation.md) record the maintained runtime and
 its validation. Existing unsuffixed implementations are only the explicitly
 linked legacy subsets.
@@ -43,9 +54,10 @@ BackendUnavailable. Selection and diagnostics must record the concrete library,
 revision, build options, OS/architecture and ISA path. Using Clang alone selects
 none of these mathematical guarantees or library dependencies.
 
-Each spec's explicit numerical quality remains authoritative: raw copies preserve
-bits; correctly rounded formulas round at their declared boundaries; only the
-listed approximate functions receive their specified ULP allowance. Finite
+The [accelerated contract](NUM_accelerated_contract.md) defines final FP32-scaled
+accuracy for floating arithmetic throughout NUM and CRV. Copies, predicates,
+indices and selected endpoints remain exact. Strict formulas retain their
+specified rounding boundaries. Finite
 rounding defaults to nearest/ties-to-even with gradual underflow. Preserve the
 caller's floating environment, including prior flags, without global changes.
 When an approximate path needs strict fallback, record actual per-node fallback
@@ -159,11 +171,11 @@ large shape within the operation's limits, dtype, requested region, backend and
 hardware, worker count, cache state, repetition count, median/tail elapsed time,
 output/scratch/retained managed peaks and quality/fallback results. Scans/reducers
 also report actual source elements processed; sparse reads report their support
-size. Hardware throughput thresholds and speedups are not yet measured or
-promised. Implementation delivery supplies measured results and accounting
-exclusions instead of treating asymptotic complexity as a benchmark. The
+size. The [current implementation and measurements](NUM_accelerated_contract.md#current-implementation)
+record measured workload speedups and remaining bottlenecks; they are not
+throughput guarantees for every legal input. Accounting exclusions are explicit. The
 [native category driver](../../../../examples/numeric_workflow/README.md#native-category-timing-and-accounting)
-records the remaining 18 clusters; expression, unary/binary, interpolation,
+covers 18 representative clusters plus extended and legacy workloads; expression, unary/binary, interpolation,
 function sampling and inverse/lowpass measurements are linked from the same
 workflow README. Each measurement declares its representative operation and
 shape; it is not a complete parameter or platform matrix.

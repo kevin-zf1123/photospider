@@ -71,6 +71,12 @@ def main():
                 minus_zero = bool((a & b) >> 63)
             for width in (32, 64):
                 expected = ieee_round(exact, width, minus_zero)
+                # Whole affine sequences fail if either extreme endpoint
+                # overflows the destination, even outside the projection.
+                last = x if count == 1 else y if kind == "linspace" else x + (count-1)*y
+                if ieee_round(x,width,False) is None or ieee_round(last,width,False) is None:
+                    expected = None
+
                 cases.append((f"{kind} float{width} {a:x} {b:x} {count} {index}", expected))
     run = subprocess.run([sys.argv[1], "--oracle", *sys.argv[2:]], input="\n".join(row for row, _ in cases) + "\n",
                          text=True, capture_output=True, check=True)

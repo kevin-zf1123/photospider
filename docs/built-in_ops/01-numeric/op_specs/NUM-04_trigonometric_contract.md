@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-04: shared trigonometric contract
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -62,7 +71,7 @@ NaN -> quiet payload/sign-preserving NaN. These are successful numeric results.
 
 Strict returns the correctly rounded mathematical sin/cos/tan of the selected
 exact argument, directly in output dtype. Accelerated nonzero finite values
-are within four output-dtype representable steps of strict; NaN/Inf/zero
+are within four FP32-scaled representable steps of strict; NaN/Inf/zero
 classification and sign, and the named landmark paths, match strict exactly.
 For finite normal/subnormal neighbors the ULP allowance applies normally.
 
@@ -75,7 +84,7 @@ All precision growth, reduction work and fallback is host-accounted; exhaustion
 is ResourceExhausted rather than an inaccurate result or a silent range limit.
 
 The common ROI, typed-validation, owner/cache, cancellation and diagnostic
-requirements apply. Work is per requested sample plus actual reduction/refinement
+requirements apply. Work is per full-input sample plus actual reduction/refinement
 cost, with actual temporary capacities charged. Platform-specific keys do not
 execute on incompatible platforms. No GPU/Metal or private worker pool is added.
 
@@ -92,7 +101,7 @@ For pi multiples, test positive/negative large integers, half/quarter-integers
 and neighboring representable values. Check that radian pi rounded to dtype is
 not silently treated as the exact pi-multiple input 1. Validate actual strict
 fallback for unsupported fast argument ranges and common public execution,
-regional demand and lifetime/resource cases. Implementation evidence is recorded
+Whole demand and lifetime/resource cases. Implementation evidence is recorded
 separately below; Proposed specification status does not imply missing runtime keys.
 
 
@@ -123,16 +132,21 @@ mutable upstream links describe candidate evidence, not a frozen dependency.
 ## Maintained implementation and validation
 
 The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. Exact elementary and
-special-value cases use explicit integer/IEEE-field, rational or algebraic-root
-handling. Ordinary transcendental results use directed Q128..Q4096 enclosures;
-accelerated profiles report `FunctionUnsupported` strict fallback for those
-results. Unresolved rounding may return `ResourceExhausted`. Data is precisely
-pointwise, with separately retained typed validation and Atom-scoped errors.
+and exposed through `photospider/numeric/unary.hpp`. Bit-level special cases
+precede controlled hardware elementary arithmetic. Strict transcendental results
+use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
+SLEEF binary64 kernels and conservative final-error checks within the
+[admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
+Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
+Rejected candidates use strict evaluation . Unresolved
+strict rounding may return `ResourceExhausted`. Nonempty requests use Whole execution with full-input typed validation,
+complete packed output allocation and Run-scoped arithmetic errors. Empty requests
+read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
+on this callback path; numerical fallback behavior is unchanged.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
 and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration
