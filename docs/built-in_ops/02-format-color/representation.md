@@ -14,6 +14,10 @@
 已确认完整覆盖 FMT-01～FMT-18 并补齐缺口；目标采用通用张量／张量集合与可组合
 metadata，移除 Image/Layer 特殊语义类型。算子按实际消费的语义校验，支持显式
 raw／调用级 override；raw 保留适用描述但不继承样本有效性保证。
+后续[内核存储规格](../../kernel-specs/Tensor-Storage-and-Region-Access.md)进一步要求
+图像全部 planar、DAG 统一 tile 尺寸、边缘保留有效行并将行宽补齐到 tile 宽度、
+下一 tile 起点强制页对齐，以及整图连续虚拟地址和
+显式按页提供 backing。颜色组与独立 alpha 平面可以位于同一张量。
 该文件区分已确认结论、当前实现与待决问题；
 逐算子端口和算法留到后续逐项澄清，尚未扩展当前运行时支持面。
 

@@ -25,6 +25,12 @@ definitions where applicable; metadata presence alone will no longer impose a
 complete-color validation obligation on ordinary numeric consumers. This note
 does not change existing v1 bytes or claim that migration has been implemented.
 
+The subsequent [kernel storage target](../../../kernel-specs/Tensor-Storage-and-Region-Access.md)
+requires planar images in one full-image virtual range with explicit page backing.
+The new metadata target may group non-RGB color and an independent alpha plane
+within one tensor, including Lab plus alpha. The RGB-only alpha restriction below
+still describes the current v1 codec; it is not the selected future group model.
+
 ## Confirmed need and scope
 
 The maintainer selected a generic color-array description so color ramp outputs

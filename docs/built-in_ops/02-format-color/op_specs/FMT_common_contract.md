@@ -146,8 +146,9 @@ Inspected at the commit recorded above:
 The maintainer confirmed the category decisions on 2026-09-22 and then selected
 unified tensors/tensor collections plus composable metadata, removing Image/Layer
 as special semantic types from the target. That decision supersedes the initial
-ColorArray-plus-Image/Layer-adapters direction. All shared policy questions raised
-here are resolved; operator-local and migration details remain below.
+ColorArray-plus-Image/Layer-adapters direction. The later planar/virtual-storage
+decisions are specified in the shared kernel contract linked below; operator-local
+and migration details remain explicit.
 Confirmation does not imply implementation completion.
 
 | ID | Shared decision | Selected contract | Status |
@@ -156,14 +157,33 @@ Confirmation does not imply implementation completion.
 | C02 | Primary representation | Generic tensors/tensor collections with composable metadata; remove special Image/Layer semantic types from the target. Migrate existing interfaces explicitly. | Confirmed 2026-09-22; supersedes initial C02 |
 | C03 | Default source metadata authority | Attached description is authoritative without explicit override; untagged inputs need an explicit interpretation through assign or call-local override; ordinary source assertions must match. | Confirmed, refined by C09 |
 | C04 | Conversion stage boundaries | Explicit transfer, basis/white, model, rendering and quantization stages; no implicit clipping or appearance rendering, and no new unified automatic converter in this scope. | Confirmed 2026-09-22 |
-| C05 | Alpha across models | Independent alpha sidecar for non-RGB colors, with explicit split/join; retain current RGB association contract. | Confirmed 2026-09-22 |
+| C05 | Alpha across models | Alpha has independent semantics but may share a tensor with a color group, including L*,a*,b*,Alpha. Separate alpha tensors also remain representable; non-RGB alpha is not forced into another tensor. | Revised and confirmed 2026-09-22 |
 | C06 | Numeric storage scope | UInt8/UInt16/Int8/Int16/Float32/Float64 plus existing Int64; native missing widths are implementation dependencies, separate from floating color computation. | Confirmed 2026-09-22 |
 | C07 | External-engine conformance | Define versioned ICC/OCIO adapter contracts separately from native mathematical primitives; individual precision/determinism guarantees remain to be established. | Confirmed 2026-09-22 |
 | C08 | Raw output metadata | Retain applicable descriptions without inherited validity guarantees; remove or rebuild inapplicable descriptions. | Confirmed 2026-09-22 |
 | C09 | Call-local source override | Explicitly override interpretation for one call, validating its effective description; leave the source and other consumers unchanged. | Confirmed 2026-09-22 |
 | C10 | Validation trigger | Validate semantics actually consumed by an operation; ordinary numeric arithmetic does not automatically consume color metadata. | Confirmed 2026-09-22 |
+| C11 | Image storage | Mandatory planar and one DAG-wide tile geometry. Interior payloads are tight full blocks; edge tiles retain valid rows and pad their width to Tw. Every next tile starts page-aligned, with gaps distinct from row padding. | Revised and confirmed 2026-09-22 |
+| C12 | Virtual image backing | Reserve one full-image continuous virtual range; explicitly prepare page backing before operator access, retain produced pages until final owner retirement and fail on budget exhaustion. | Confirmed 2026-09-22 |
 
 ### Representation and source authority
+
+The subsequent storage clarification requires every image to use planar storage.
+Interleaved image imports must undergo an explicit layout conversion; planar is
+a requirement, not merely an allocation preference. Generic raw tensors retain
+their independent layout capabilities. This image storage requirement is enforced
+by the relevant metadata consumers and physical layout contract, without
+restoring a special Image/Layer carrier type. Assign/override cannot change actual
+address maps or satisfy a required storage conversion by relabeling bytes.
+
+The [kernel tensor-storage specification](../../../kernel-specs/Tensor-Storage-and-Region-Access.md)
+owns address mapping, tile lookup, page provisioning, access windows and ownership.
+It requires one DAG-wide tile size, row-contiguous planar samples, valid edge rows
+padded to the tile width, page-aligned tile starts, and a full-image continuous virtual range with backing supplied
+by page. Operators do not choose their own tile geometry. Produced pages remain
+until final owner retirement; budget exhaustion fails without automatic eviction,
+replay or temporary-file paging. FMT operations consume this contract rather than
+independently defining physical layout. Its Chinese reader version is linked there.
 
 The target carrier is a generic tensor or explicitly related tensor collection.
 Storage dtype, shape, strides, bounds and owners remain structural facts. Color
@@ -254,14 +274,19 @@ operations with observable effects. A reference label alone never requests
 exposure or scene-to-display rendering. No generic converter silently inserts
 these decisions in this scope.
 
-Non-RGB color arrays carry alpha separately. For an RGBA to Lab to RGBA workflow,
-restore straight RGB when required, split color and alpha, convert only color,
-then join alpha and explicitly associate if requested. The alpha path retains
-its coverage meaning and is not passed through transfer or color-model formulas.
-Correspondence between color samples and sidecar alpha must be preserved and
-checked by the eventual split/join specs. Hidden colors at zero alpha and tiny
-alpha arithmetic remain FMT-04/05 questions. This decision defines no premultiplied
-Lab/CMYK coordinates and introduces no implicit Layer emission handling.
+Non-RGB color and alpha have independent semantics and may occupy different
+planes of the same tensor. For example, [L*,a*,b*,Alpha] describes a Lab color
+group plus an independent alpha plane; alpha is not a Lab coordinate. Separate
+alpha tensors and explicit split/join remain possible but are not required merely
+because the model is non-RGB. This supersedes the earlier mandatory sidecar rule.
+
+For an RGBA to Lab to RGBA workflow, restore straight RGB when required, convert
+the declared color group and carry alpha unchanged through its declared path,
+then explicitly associate RGB if requested. Alpha does not pass through transfer
+or color-model formulas. Operations declare which groups/planes they consume and
+produce, including the correspondence for alpha. Hidden colors at zero alpha and
+tiny alpha arithmetic remain FMT-04/05 questions. This defines no premultiplied
+Lab/CMYK coordinates or implicit Layer emission handling.
 
 ### Computation and storage encoding
 
