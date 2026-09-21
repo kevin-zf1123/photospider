@@ -12,9 +12,10 @@ namespace ps::numeric {
  * Inputs share Float32/64 dtype: vectors [...,Cin], matrix [Cout,Cin], bias
  * [Cout], with Cin/Cout in 2..4 and vector rank 1..8. Input/output counts are
  * <=2^40. Output values [...,Cout] has empty facets. There are no parameters,
- * casts or implicit broadcast; singular matrices are valid. Only requested
- * instances, complete input vectors, selected matrix rows and bias components
- * have Data demand; typed Validation closure is separate.
+ * casts or implicit broadcast; singular matrices are valid. Nonempty requests
+ * use Whole execution: validate all inputs and compute the complete output.
+ * Partial consumers project that result; any input change invalidates all
+ * observed outputs. Empty requests skip computation.
  * Source NaN priority is vector components, selected matrix row, then bias.
  * Otherwise zero*infinity or opposite infinities produce positive qNaN. Finite
  * exact zero is negative only when every product and bias is negative zero.
@@ -22,8 +23,8 @@ namespace ps::numeric {
  * cancellation errors retain their categories. Overflow to infinity succeeds.
  * The helper is pure/concurrent-safe, returns owned node metadata, may throw
  * bad_alloc, and rejects invalid id/profile with InvalidArgument/Schema.
- * Published runtime storage survives context retirement; shared source rows
- * are deduplicated within a regional request, without a once-per-Run promise.
+ * Published runtime storage survives context retirement. Full output storage
+ * and fixed callback scratch must fit the host resource budget.
  */
 inline Result<WorkflowNode> matrix_transform_node(
     std::uint64_t id, WorkflowInput vectors, WorkflowInput matrix,

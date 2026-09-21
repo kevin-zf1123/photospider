@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderNumericWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.16 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.18 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_numeric_sequences sequences.cpp)
 target_link_libraries(photospider_numeric_sequences PRIVATE Photospider::kernel)
@@ -140,3 +140,29 @@ target_compile_features(photospider_numeric_signal_benchmark PRIVATE cxx_std_17)
 add_executable(photospider_numeric_category_benchmark EXCLUDE_FROM_ALL category_benchmark.cpp)
 target_link_libraries(photospider_numeric_category_benchmark PRIVATE Photospider::kernel)
 target_compile_features(photospider_numeric_category_benchmark PRIVATE cxx_std_17)
+
+add_executable(photospider_numeric_inventory EXCLUDE_FROM_ALL inventory.cpp)
+target_link_libraries(photospider_numeric_inventory PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_inventory PRIVATE cxx_std_17)
+
+# Internal kernel layer; installed-package workflows use the public targets above.
+if(EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/certified_math.hpp")
+  add_executable(photospider_numeric_math_benchmark EXCLUDE_FROM_ALL math_benchmark.cpp)
+  target_include_directories(photospider_numeric_math_benchmark PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/ops" "${CMAKE_SOURCE_DIR}/src/lib")
+  target_link_libraries(photospider_numeric_math_benchmark PRIVATE Photospider::kernel)
+  target_compile_features(photospider_numeric_math_benchmark PRIVATE cxx_std_17)
+  target_compile_options(photospider_numeric_math_benchmark PRIVATE -fno-fast-math -ffp-contract=off)
+endif()
+
+# Internal arithmetic comparison, including explicitly enabled SME. The test
+# kernel exposes private helpers even when the installed library is shared.
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/accelerated_matrix.hpp")
+  add_executable(photospider_numeric_matrix_kernel_benchmark EXCLUDE_FROM_ALL matrix_kernel_benchmark.cpp)
+  target_include_directories(photospider_numeric_matrix_kernel_benchmark PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/ops" "${CMAKE_SOURCE_DIR}/src/lib")
+  target_link_libraries(photospider_numeric_matrix_kernel_benchmark PRIVATE photospider_test_kernel)
+  target_compile_features(photospider_numeric_matrix_kernel_benchmark PRIVATE cxx_std_17)
+  target_compile_options(photospider_numeric_matrix_kernel_benchmark PRIVATE
+    -fno-fast-math -frounding-math -ffp-contract=off)
+endif()

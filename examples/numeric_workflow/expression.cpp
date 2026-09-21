@@ -3,7 +3,9 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -13,6 +15,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -206,18 +209,19 @@ void bindings_errors_and_cache(ps::CpuNumericProfile profile) {
   Fixture logarithm(
       node("ln(x)", 3, profile),
       {array(Type::Float64, {1}, {0}), array(Type::Float64, {1}, {raw(1)})});
-  auto positive =
-      take(logarithm.run({{"values", take(ps::Footprint::from_regions(
-                                         {3}, {ps::Region({{1, 2}})}))}}));
-  std::uint64_t bits = 0;
-  require(positive.values.at("values").read({2}, &bits, 8).ok() && bits == 0,
-          "ln positive ROI");
+  auto positive = logarithm.run(
+      {{"values",
+        take(ps::Footprint::from_regions({3}, {ps::Region({{1, 2}})}))}});
+  require(
+      !positive.ok() && positive.status().detail.scope == ps::FailureScope::Run,
+      "unrequested ln(0) fails Whole values");
   require(logarithm.run({{"axis", axis}}).ok(), "axis skips ln domain failure");
   auto bad = logarithm.run({{"values", take(ps::Footprint::from_regions(
                                            {3}, {ps::Region({{0, 1}})}))}});
   require(!bad.ok() &&
               bad.status().reason == ps::FailureReason::InvalidDomain &&
-              bad.status().detail.atom->coordinate[0] == 0 &&
+              bad.status().detail.scope == ps::FailureScope::Run &&
+              !bad.status().detail.atom &&
               bad.status().message.find("x=0 span=[0,5)") != std::string::npos,
           "ln domain exact sample/x/span");
   const std::vector<std::pair<std::string, ps::FailureReason>> failures{
@@ -253,46 +257,27 @@ void bindings_errors_and_cache(ps::CpuNumericProfile profile) {
   std::cout << "mixed named bindings, one-plan replacement/cache/dirty, ROI ln "
                "and first numeric failure spans passed\n";
 }
-ps::DependencyResult direct(const ps::WorkflowNode& authored,
-                            const std::vector<ps::Value>& inputs,
-                            const ps::Footprint& output,
-                            std::uint32_t selected = 0,
-                            std::uint64_t maximum_boxes = 65536,
-                            unsigned* polls = nullptr) {
+struct DirectResult {
+  ps::ValueFragments value;
+};
+DirectResult direct(const ps::WorkflowNode& authored,
+                    const std::vector<ps::Value>& inputs,
+                    const ps::Footprint& output, std::uint32_t selected = 0) {
   auto operations = ps::make_default_operation_registry();
-  ps::DependencyRequest request;
-  request.parameters = authored.parameters;
-  request.outputs = output;
-  request.output_index = selected;
-  request.snapshot_identity = "expression-direct";
-  request.limits.maximum_work = 512 * 1024 * 1024;
-  request.limits.sets.maximum_boxes = maximum_boxes;
+  std::vector<ps::Region> demands;
   for (const auto& value : inputs)
-    request.inputs.push_back({value.descriptor(), value.facets()});
+    demands.push_back(value.region());
   ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(operations->start_dependency(authored.operation, request,
-                                                   resources.allocator()));
-  for (;;) {
-    auto next = take(session->poll());
-    if (auto* result = std::get_if<ps::DependencyResult>(&next)) {
-      if (polls)
-        *polls = session->poll_count();
-      return std::move(*result);
-    }
-    std::vector<ps::Footprint> needed(inputs.size(),
-                                      take(ps::Footprint::none({1})));
-    for (const auto& need : take(session->pending_reads()))
-      needed[need.port] = take(needed[need.port].unite(need.samples));
-    std::vector<ps::ValueFragments> supplied;
-    for (unsigned port = 0; port < inputs.size(); ++port) {
-      auto full = take(ps::ValueFragments::create(
-          inputs[port].descriptor(), inputs[port].facets(),
-          take(ps::Footprint::all({1})), {inputs[port]}));
-      supplied.push_back(take(full.restrict(needed[port])));
-    }
-    require(session->supply(supplied, request.snapshot_identity).ok(),
-            "expression bounded staged supply");
-  }
+  ps::ResourceAllocationScope scope(resources);
+  ps::OperationInvocation call(
+      inputs, demands, authored.parameters, ps::Backend::Cpu, {},
+      ps::Region::whole(output.shape()), resources.allocator());
+  call.output_index = selected;
+  auto value = take(operations->invoke(authored.operation, call));
+  auto fragments = take(ps::ValueFragments::create(
+      value.descriptor(), {},
+      take(ps::Footprint::all(value.descriptor().shape)), {value}));
+  return {take(fragments.restrict(output))};
 }
 void stages_layouts_and_diagnostics(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
@@ -309,12 +294,11 @@ void stages_layouts_and_diagnostics(ps::CpuNumericProfile profile) {
     coefficients[name] = ps::WorkflowInputReference{i + 3};
     inputs.push_back(array(Type::Float64, {1}, {raw(1)}));
   }
-  unsigned polls = 0;
   auto result =
       direct(node(expression, 1, profile, Type::Float64, coefficients), inputs,
-             single, 0, 512, &polls);
+             single);
   check(result.value, {raw(24)});
-  require(polls == 3, "bounded 16-scalar stages; singleton end skipped");
+
   fenv_t saved;
   require(fegetenv(&saved) == 0, "save expression fenv");
   for (const std::string source :
@@ -347,27 +331,8 @@ void stages_layouts_and_diagnostics(ps::CpuNumericProfile profile) {
     }
     require(fesetenv(&saved) == 0, "restore expression fenv");
   }
-  auto math = direct(node("sin(x)+exp(x)+sqrt(x)", 1, profile),
-                     {array(Type::Float32, {1}, {0x3e800000}),
-                      array(Type::Float64, {1}, {raw(1)})},
-                     single);
-  require(math.numeric.strict_math_calls == 3 &&
-              math.numeric.strict_fallbacks ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 2U),
-          "strict math calls and actual fallbacks");
-  const auto reason =
-      static_cast<unsigned>(ps::NumericFallbackReason::FunctionUnsupported);
-  require(math.numeric.function_fallbacks[static_cast<unsigned>(
-              ps::NumericMathFunction::Sin)][reason] ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 1U) &&
-              math.numeric.function_fallbacks[static_cast<unsigned>(
-                  ps::NumericMathFunction::Exp)][reason] ==
-                  (profile == ps::CpuNumericProfile::Strict ? 0U : 1U) &&
-              math.numeric.function_fallbacks[static_cast<unsigned>(
-                  ps::NumericMathFunction::Sqrt)][reason] == 0,
-          "per-function fallback reasons");
-  std::cout << "bounded scalar stages, unaligned signed-stride/fenv and strict "
-               "math/function fallback diagnostics passed\n";
+  std::cout << "Whole 24 coefficients, unaligned signed-stride/fenv passed; "
+               "numeric counters=N/A\n";
 }
 
 void schema_and_producer_obligations(ps::CpuNumericProfile profile) {
@@ -387,7 +352,8 @@ void schema_and_producer_obligations(ps::CpuNumericProfile profile) {
     request.parameters = fixture.document.nodes[0].parameters;
     request.outputs = take(ps::Footprint::none({1}));
     request.snapshot_identity = "invalid-expression";
-    auto direct = operations->start_dependency(valid.operation, request);
+    auto direct = operations->prepare_operation(valid.operation, request.inputs,
+                                                request.parameters);
     require(!compiled.ok() && !direct.ok() &&
                 compiled.status().code == direct.status().code &&
                 direct.status().detail.origin == ps::FailureOrigin::Schema,
@@ -403,7 +369,8 @@ void schema_and_producer_obligations(ps::CpuNumericProfile profile) {
                           {"dtype", std::string("float64")}};
     request.outputs = take(ps::Footprint::none({1}));
     request.snapshot_identity = "invalid-names";
-    auto rejected = operations->start_dependency(valid.operation, request);
+    auto rejected = operations->prepare_operation(
+        valid.operation, request.inputs, request.parameters);
     require(!rejected.ok() &&
                 rejected.status().detail.origin == ps::FailureOrigin::Schema,
             "canonical exact coefficient list");
@@ -420,7 +387,8 @@ void schema_and_producer_obligations(ps::CpuNumericProfile profile) {
     request.parameters = valid.parameters;
     request.outputs = take(ps::Footprint::none({1}));
     request.snapshot_identity = "bad-scalar";
-    auto rejected = operations->start_dependency(valid.operation, request);
+    auto rejected = operations->prepare_operation(
+        valid.operation, request.inputs, request.parameters);
     require(
         !rejected.ok() && rejected.status().code == ps::ErrorCode::TypeMismatch,
         "invalid scalar descriptors even Empty");
@@ -480,247 +448,163 @@ void schema_and_producer_obligations(ps::CpuNumericProfile profile) {
               required.status().message == "required expression producer" &&
               calls == 2,
           "algebraic cancellation retains coefficient source");
-  // A constant expression still validates its interval, without Data endpoints.
-  ps::DependencyRequest request;
-  request.inputs = {{{Type::Float64, {1}}, {}}, {{Type::Float64, {1}}, {}}};
-  request.parameters = node("3", 2, profile).parameters;
-  request.outputs =
-      take(ps::Footprint::from_regions({2}, {ps::Region({{0, 1}})}));
-  request.snapshot_identity = "constant-validation";
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(operations->start_dependency(valid.operation, request,
-                                                   resources.allocator()));
-  require(session->poll().ok(), "constant interval Need");
-  auto needs = take(session->pending_reads());
-  unsigned validation = 0;
-  for (const auto& need : needs) {
-    require(!(need.roles & 1), "constant endpoints have no Data");
-    if (need.roles & 4)
-      ++validation;
-  }
-  require(validation == 2, "constant endpoint Validation only");
-  std::cout << "grammar/name/schema direct parity, N=1 end and axis "
-               "coefficient source isolation, constant Validation passed\n";
+  Fixture constant(node("3", 2, profile),
+                   {array(Type::Float64, {1}, {raw(1)}),
+                    array(Type::Float64, {1}, {raw(1)})});
+  auto invalid_interval =
+      constant.run({{"values", take(ps::Footprint::all({2}))}});
+  require(!invalid_interval.ok() && invalid_interval.status().reason ==
+                                        ps::FailureReason::InvalidDomain,
+          "constant expression still validates complete interval");
+  std::cout << "grammar/name/schema parity, singleton end, axis coefficient "
+               "isolation and constant interval validation passed\n";
 }
+
 void budgets_and_cancellation(ps::CpuNumericProfile profile) {
-  using Type = ps::ElementType;
-  auto operations = ps::make_default_operation_registry();
-  const auto authored = node("sin(x)+1", 1, profile);
-  ps::DependencyRequest request;
-  request.parameters = authored.parameters;
-  request.inputs = {{{Type::Float64, {1}}, {}}, {{Type::Float64, {1}}, {}}};
-  request.outputs = take(ps::Footprint::all({1}));
-  request.snapshot_identity = "expression-interrupt";
-  request.limits.maximum_work = 512 * 1024 * 1024;
-  auto source = array(Type::Float64, {1}, {raw(1)});
-  const std::vector<ps::ValueFragments> supplied{
-      take(ps::ValueFragments::create(source.descriptor(), {}, request.outputs,
-                                      {source})),
-      take(ps::ValueFragments::create(source.descriptor(), {},
-                                      take(ps::Footprint::none({1})), {}))};
-  for (bool cancel : {false, true}) {
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    bool armed = false, interrupted = false;
-    std::uint64_t charged = 0;
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(operations->start_dependency(
-        authored.operation, request, resources.allocator(),
-        [&](std::uint64_t work) {
-          if (armed && session->numeric_diagnostics().strict_math_calls == 1 &&
-              (charged += work) > 100000) {
-            interrupted = true;
-            if (cancel)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "expression math work",
-                                ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    require(session->poll().ok() &&
-                session->supply(supplied, request.snapshot_identity).ok(),
-            "expression interrupt after supply");
-    armed = true;
-    auto result = session->poll();
-    require(
-        interrupted && !result.ok() &&
-            result.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-        "interior math cancellation/work failure");
-    require(session->numeric_diagnostics().strict_math_calls == 1 &&
-                session->numeric_diagnostics().copied_elements == 0 &&
-                session->numeric_diagnostics().strict_fallbacks ==
-                    (profile == ps::CpuNumericProfile::Strict ? 0U : 1U),
-            "failed expression math/fallback attempts retained");
-    session.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "expression continuation/output release");
-  }
-  request.cancellation = {};
-  request.limits.maximum_stages = 1;
-  auto stage = take(operations->start_dependency(authored.operation, request));
-  require(stage->poll().ok() &&
-              stage->supply(supplied, request.snapshot_identity).ok(),
-          "stage-limit supply");
-  auto exhausted = stage->poll();
-  require(!exhausted.ok() &&
-              exhausted.status().code == ps::ErrorCode::ResourceExhausted,
-          "bounded stages reject");
-  request.limits.maximum_stages = 4096;
-  request.limits.maximum_state_bytes = 1024;
-  require(!operations->start_dependency(authored.operation, request).ok(),
-          "expression fixed arena admission");
-  Fixture fixture(
-      node("2*x+1", 4096, profile),
-      {array(Type::Float64, {1}, {0}), array(Type::Float64, {1}, {raw(1)})});
-  ps::GraphContext graph(fixture.document);
-  auto plan = take(ps::Compiler(operations).compile(graph));
-  ps::ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.maximum_live_bytes = 240000;
-  config.managed_resources = ps::ResourceLimits{};
-  ps::ExecutionContext context(operations, config);
-  auto frozen = take(context.freeze(plan.plan, fixture.bindings));
-  ps::ExecutionOptions options;
-  options.maximum_dependency_work = 512 * 1024 * 1024;
-  options.dependencies.maximum_work = 512 * 1024 * 1024;
-  options.maximum_dependency_cache_work = 0;
-  auto roi = context.execute_fragments(
-      frozen,
-      {{"values",
-        take(ps::Footprint::from_regions({4096}, {ps::Region({{2, 1}})}))}},
-      {}, options);
-  require(roi.ok(), "small expression ROI fits controlled budget");
-  roi = ps::Result<ps::DemandResult>(ps::Status{ps::ErrorCode::Cancelled, {}});
-  auto full = context.execute_fragments(
-      frozen, {{"values", take(ps::Footprint::all({4096}))}}, {}, options);
-  require(!full.ok() && full.status().code == ps::ErrorCode::ResourceExhausted,
-          "full expression exceeds same budget");
-  std::cout << "expression inner-math work/cancel, stage/capacity/release and "
-               "small-ROI/full budget boundary passed\n";
-}
-
-void metadata_failure_recovery(ps::CpuNumericProfile profile) {
-  using Type = ps::ElementType;
-  std::map<std::string, ps::WorkflowInput> coefficients;
-  std::string source = "2*x+1";
-  std::vector<ps::Value> inputs{array(Type::Float64, {1}, {0}),
-                                array(Type::Float64, {1}, {raw(1)})};
-  for (unsigned i = 0; i < 15; ++i) {
-    auto name = "a" + std::to_string(i + 10);
-    source += '+' + name;
-    coefficients[name] = ps::WorkflowInputReference{i + 3};
-    inputs.push_back(array(Type::Float64, {1}, {0}));
-  }
-  Fixture fixture(node(source, 1024, profile, Type::Float64, coefficients),
-                  inputs);
-  ps::GraphContext graph(fixture.document);
-  auto plan = take(ps::Compiler(fixture.registry).compile(graph));
-  ps::ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.maximum_live_bytes = 4 * 1024 * 1024;
-  config.managed_resources = ps::ResourceLimits{};
-  config.managed_resources->capacity[ps::ResourceKind::Metadata] = 512 * 1024;
-  ps::ExecutionContext context(fixture.registry, config);
-  auto frozen = take(context.freeze(plan.plan, fixture.bindings));
-  ps::ExecutionOptions options;
-  options.maximum_dependency_work = 512 * 1024 * 1024;
-  options.dependencies.maximum_work = 512 * 1024 * 1024;
-  options.maximum_dependency_cache_work = 0;
-  ps::DemandQuery roi{{"values", take(ps::Footprint::from_regions(
-                                     {1024}, {ps::Region({{2, 1}})}))}};
-  require(context.execute_fragments(frozen, roi, {}, options).ok(),
-          "metadata-limited ROI succeeds");
-  // Deliberately uses >16 inputs so certificate aggregation follows the staged
-  // Atomic path; coordinator allocation failure must remain a Result status.
-  auto full = context.execute_fragments(
-      frozen, {{"values", take(ps::Footprint::all({1024}))}}, {}, options);
-  require(!full.ok() && full.status().code == ps::ErrorCode::ResourceExhausted,
-          "metadata exhaustion returns status, never bad_alloc");
-  require(context.execute_fragments(frozen, roi, {}, options).ok(),
-          "metadata failure retires owners/flights and permits retry");
-  Fixture logarithm(
-      node("ln(x)", 3, profile),
-      {array(Type::Float64, {1}, {0}), array(Type::Float64, {1}, {raw(1)})});
-  ps::GraphContext log_graph(logarithm.document);
-  auto log_plan = take(ps::Compiler(logarithm.registry).compile(log_graph));
-  ps::ExecutionContextConfig atom_config;
-  atom_config.cpu_workers = 1;
-  atom_config.managed_resources = ps::ResourceLimits{};
-  ps::ExecutionContext atoms_context(logarithm.registry, atom_config);
-  auto atoms = take(atoms_context.execute_atoms(
-      log_plan.plan, logarithm.bindings,
-      {{"values", take(ps::Footprint::all({3}))}}, {}, options));
-  unsigned good = 0, bad = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++good;
-    } else {
-      ++bad;
-      require(atom.key.coordinate[0] == 0 &&
-                  atom.outcome.status().detail.atom == atom.key,
-              "regional numeric failure has exact Atom");
+  Fixture fixture(node("2*x+1", 16384, profile),
+                  {ps::Value::from_float64(0), ps::Value::from_float64(1)});
+  std::vector<ps::Value> inputs{ps::Value::from_float64(0),
+                                ps::Value::from_float64(1)};
+  std::vector<ps::Region> demands(2, ps::Region::whole({1}));
+  const auto& node = fixture.document.nodes[0];
+  auto traits = take(fixture.registry->resolve_traits(
+      node.operation,
+      {{inputs[0].descriptor(), {}}, {inputs[1].descriptor(), {}}},
+      node.parameters));
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    ps::ResourceLimits limits;
+    if (mode == 0)
+      limits.maximum_work = 10000;
+    if (mode == 1)
+      limits.capacity[ps::ResourceKind::Payload] = 65536;
+    if (mode == 2)
+      limits.capacity[ps::ResourceKind::Payload] =
+          16384 * 8 + traits.workspace_bytes - 1;
+    ps::ResourceBudget budget(limits);
+    {
+      ps::ResourceAllocationScope scope(budget);
+      ps::OperationInvocation call(
+          inputs, demands, node.parameters, ps::Backend::Cpu, {},
+          ps::Region::whole({16384}), budget.allocator());
+      auto result = fixture.registry->invoke(node.operation, call);
+      require(
+          !result.ok() &&
+              result.status().code == ps::ErrorCode::ResourceExhausted,
+          "Whole expression rejects insufficient work/output/scratch capacity");
     }
+    require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
+            "expression failure releases unpublished output/scratch");
   }
-  require(good == 2 && bad == 1, "regional maps retain isolated Atom outcomes");
-  std::cout << "controlled Metadata exhaustion returns status, same-context "
-               "recovery and regional Atom isolation passed\n";
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  ps::CancellationSource cancellation;
+  std::atomic<bool> ready{false}, done{false};
+  std::thread watcher([&] {
+    ready.store(true);
+    while (!done.load() && budget.statistics().issued.work < 100000)
+      std::this_thread::yield();
+    if (!done.load())
+      cancellation.cancel();
+  });
+  while (!ready.load())
+    std::this_thread::yield();
+  ps::Status status;
+  try {
+    ps::ResourceAllocationScope scope(budget);
+    ps::OperationInvocation call(
+        inputs, demands, node.parameters, ps::Backend::Cpu,
+        cancellation.token(), ps::Region::whole({16384}), budget.allocator());
+    status = fixture.registry->invoke(node.operation, call).status();
+  } catch (...) {
+    done.store(true);
+    watcher.join();
+    throw;
+  }
+  done.store(true);
+  watcher.join();
+  require(status.code == ps::ErrorCode::Cancelled &&
+              budget.statistics().issued.work >= 100000 &&
+              budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "cancel admitted expression arithmetic and release full storage");
 }
 
-void regional_failure_release(ps::CpuNumericProfile profile) {
-  using Type = ps::ElementType;
+void whole_failure_release(ps::CpuNumericProfile profile) {
   auto operations = ps::make_default_operation_registry();
-  for (bool cancel : {false, true}) {
-    auto authored = node(cancel ? "sin(x)" : "ln(.6-x)", 6, profile);
-    ps::DependencyRequest request;
-    request.parameters = authored.parameters;
-    request.inputs = {{{Type::Float64, {1}}, {}}, {{Type::Float64, {1}}, {}}};
-    request.outputs = take(ps::Footprint::from_regions(
-        {6}, {ps::Region({{0, 2}}), ps::Region({{3, 1}})}));
-    request.snapshot_identity = "expression-cross-box";
-    request.limits.maximum_work = 512 * 1024 * 1024;
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(operations->start_dependency(
-        authored.operation, request, resources.allocator(), [&](std::uint64_t) {
-          if (cancel && session &&
-              session->numeric_diagnostics().copied_elements == 2)
-            cancellation.cancel();
-          return ps::Status::success();
-        }));
-    require(session->poll().ok(), "regional cross-box Need");
-    std::vector<ps::ValueFragments> supplied;
-    for (auto bits : {UINT64_C(0), raw(1)}) {
-      auto value = array(Type::Float64, {1}, {bits});
-      supplied.push_back(take(ps::ValueFragments::create(
-          value.descriptor(), {}, take(ps::Footprint::all({1})), {value})));
-    }
-    require(session->supply(supplied, request.snapshot_identity).ok(),
-            "regional cross-box supply");
-    auto result = session->poll();
-    require(!result.ok() && session->numeric_diagnostics().copied_elements == 2,
-            "cross-box failure publishes no complete result");
-    if (cancel)
-      require(result.status().code == ps::ErrorCode::Cancelled,
-              "cancel after first box");
-    else
-      require(result.status().reason == ps::FailureReason::InvalidDomain &&
-                  result.status().detail.atom->coordinate[0] == 3,
-              "second-box numeric error has global index");
-    session.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "all cross-box partial owners retired");
-  }
-  std::cout << "regional second-box numeric failure/cancel retires every "
-               "unpublished owner\n";
-}
+  std::vector<ps::Value> inputs{ps::Value::from_float64(0),
+                                ps::Value::from_float64(1)};
+  std::vector<ps::Region> demands(2, ps::Region::whole({1}));
+  auto authored = node("ln(.6-x)", 6, profile);
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  fenv_t saved;
+  require(fegetenv(&saved) == 0 && fesetround(FE_DOWNWARD) == 0 &&
+              feclearexcept(FE_ALL_EXCEPT) == 0 &&
+              feraiseexcept(FE_DIVBYZERO) == 0,
+          "set failure-path fenv");
 
-void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
+  {
+    ps::ResourceAllocationScope scope(budget);
+    ps::OperationInvocation call(inputs, demands, authored.parameters,
+                                 ps::Backend::Cpu, {}, ps::Region::whole({6}),
+                                 budget.allocator());
+    auto result = operations->invoke(authored.operation, call);
+    require(!result.ok() &&
+                result.status().detail.scope == ps::FailureScope::Run &&
+                !result.status().detail.atom &&
+                result.status().message.find("sample=3") != std::string::npos,
+            "later numeric error retains sample/span with Whole Run scope");
+  }
+  require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "Whole expression failure releases partial buffer and scratch");
+  require(fegetround() == FE_DOWNWARD &&
+              fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
+          "Whole numeric failure restores floating environment");
+  require(fesetenv(&saved) == 0, "restore failure-path fenv");
+  ps::CancellationSource stopped;
+  stopped.cancel();
+  ps::OperationInvocation cancelled(inputs, demands, authored.parameters,
+                                    ps::Backend::Cpu, stopped.token(),
+                                    ps::Region::whole({6}));
+  require(operations->invoke(authored.operation, cancelled).status().code ==
+              ps::ErrorCode::Cancelled,
+          "pre-cancelled Whole expression");
+  authored = node("2*x+1", 6, profile);
+  check(direct(authored, inputs, take(ps::Footprint::all({6}))).value,
+        {raw(1), raw(1.4), raw(1.8), raw(2.2), raw(2.6), raw(3)});
+  std::cout << "Whole failure retires unpublished owners and permits retry\n";
+}
+void batch_consistency(ps::CpuNumericProfile profile) {
+  using Type = ps::ElementType;
+  for (const std::string source :
+       {"exp(x)", "sin(x)+cos(x)*exp(x)", "x^0.3", "ln(1+x)-x"}) {
+    Fixture fixture(
+        node(source, 17, profile),
+        {array(Type::Float64, {1}, {0}), array(Type::Float64, {1}, {raw(1)})});
+    auto whole =
+        take(fixture.run({{"values", take(ps::Footprint::all({17}))}}, false));
+    for (std::uint64_t width : {1, 2, 3, 4, 5, 7})
+      for (std::uint64_t first = 0; first < 17; first += width) {
+        const auto count = std::min(width, 17 - first);
+        auto query = take(
+            ps::Footprint::from_regions({17}, {ps::Region({{first, count}})}));
+        auto partial = take(fixture.run({{"values", query}}, false));
+        for (std::uint64_t j = first; j < first + count; ++j) {
+          std::uint64_t a = 0, b = 0;
+          require(whole.values.at("values").read({j}, &a, 8).ok() &&
+                      partial.values.at("values").read({j}, &b, 8).ok() &&
+                      a == b,
+                  "fixed-profile SIMD lane/tail/partition identity");
+        }
+      }
+  }
+  std::cout << "four nonlinear expressions preserve bits across whole/ROI and "
+               "six SIMD tail partitions\n";
+}
+double number(std::uint64_t bits) {
+  double result = 0;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
+               bool quick = false, bool wide = false) {
   using Type = ps::ElementType;
   // Independently generated exact-coordinate / stepwise Fraction+MPFR 4.2.2
   // checkpoint bits. Seven positions per declared full-domain size.
@@ -754,6 +638,15 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             UINT64_C(0x4005bf0a8b145769)}},
       }},
   }};
+  const std::array<std::array<std::uint64_t, 7>, 2> wide_expected{
+      {{{UINT64_C(0xc02e000000000000), UINT64_C(0xc02dffbfffbfffc0),
+         UINT64_C(0xc01bffdfffdfffe0), UINT64_C(0x3ff0010001000100),
+         UINT64_C(0x4022003000300030), UINT64_C(0x4030ffdfffdfffe0),
+         UINT64_C(0x4031000000000000)}},
+       {{UINT64_C(0x3f35fc21041027ad), UINT64_C(0x3f35fd80d27e8d3f),
+         UINT64_C(0x3f92c1a0be592fbd), UINT64_C(0x3ff00080028009d5),
+         UINT64_C(0x404b4dd7cddeb2d8), UINT64_C(0x40a74875e8cf664f),
+         UINT64_C(0x40a749ea7d470c6e)}}}};
   std::cout << "expression,profile,N,M,dtype,region,workers,cache,repetitions,"
                "session_work_limit,run_work_limit,median_us,max_us,peak_"
                "payload_bytes,invocations,evaluated,strict_math_calls,"
@@ -763,11 +656,13 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
   for (unsigned function = 0; function < sources.size(); ++function) {
     for (unsigned shape = 0; shape < sizes.size(); ++shape) {
       const auto size = sizes[shape];
+      if ((quick || wide) && size != 65536)
+        continue;
       const std::array<std::uint64_t, 7> indices{
           0, 1, size / 4, size / 2, 3 * size / 4, size - 2, size - 1};
       Fixture fixture(node(sources[function], size, profile),
-                      {array(Type::Float64, {1}, {0}),
-                       array(Type::Float64, {1}, {raw(1)})});
+                      {array(Type::Float64, {1}, {raw(wide ? -8 : 0)}),
+                       array(Type::Float64, {1}, {raw(wide ? 8 : 1)})});
       ps::GraphContext graph(fixture.document);
       auto plan = take(ps::Compiler(fixture.registry).compile(graph));
       ps::ExecutionContextConfig config;
@@ -790,13 +685,15 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
         std::vector<std::int64_t> times;
         std::uint64_t peak = 0, invocations = 0, evaluated = 0, calls = 0,
                       fallbacks = 0;
-        for (unsigned repeat = 0; repeat < 3; ++repeat) {
+        for (unsigned repeat = 0; repeat < 8; ++repeat) {
           const auto start = std::chrono::steady_clock::now();
           auto result = take(context.execute_fragments(
               frozen, {{"values", samples}}, {}, options));
-          times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
-                              std::chrono::steady_clock::now() - start)
-                              .count());
+          if (repeat)
+            times.push_back(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count());
           peak = std::max(peak, result.diagnostics.peak_live_bytes);
           invocations = evaluated = calls = fallbacks = 0;
           for (const auto& timing : result.diagnostics.operation_timings) {
@@ -805,14 +702,9 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             calls += timing.numeric.strict_math_calls;
             fallbacks += timing.numeric.strict_fallbacks;
           }
-          require(invocations == 2 && evaluated == count &&
-                      calls == (function ? count : 0),
-                  "benchmark shares one Need/Evaluate session across Q");
-          require(
-              fallbacks == (function && profile != ps::CpuNumericProfile::Strict
-                                ? (whole ? count - 1 : count)
-                                : 0),
-              "benchmark actual transcendental fallbacks");
+          require(invocations == 1 && evaluated == 0 && calls == 0 &&
+                      fallbacks == 0,
+                  "Whole callback once; numeric counters unavailable");
           auto support = take(result.dependencies.source_support());
           require(support.size() == 2 &&
                       take(support.at("input0").element_count()) == 1 &&
@@ -822,21 +714,27 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                ++checkpoint) {
             if (!samples.contains({indices[checkpoint]}))
               continue;
+            const auto reference = wide ? wide_expected[function][checkpoint]
+                                        : expected[function][shape][checkpoint];
             std::uint64_t value = 0;
-            require(result.values.at("values")
-                            .read({indices[checkpoint]}, &value, 8)
-                            .ok() &&
-                        value == expected[function][shape][checkpoint],
-                    "benchmark independent checkpoint bits");
+            require(
+                result.values.at("values")
+                        .read({indices[checkpoint]}, &value, 8)
+                        .ok() &&
+                    (value == reference ||
+                     (profile != ps::CpuNumericProfile::Strict &&
+                      std::abs(number(value) - number(reference)) <=
+                          std::ldexp(1.0, std::ilogb(number(reference)) - 21))),
+                "benchmark independent checkpoint bits");
           }
         }
         std::sort(times.begin(), times.end());
         std::cout << sources[function] << ',' << selected << ',' << size << ','
                   << count << ",Float64,"
-                  << (whole ? "Whole" : "three-point-ROI") << ",1,off,3,"
+                  << (whole ? "Whole" : "three-point-ROI") << ",1,off,7,"
                   << options.dependencies.maximum_work << ','
-                  << options.maximum_dependency_work << ',' << times[1] << ','
-                  << times[2] << ',' << peak << ',' << invocations << ','
+                  << options.maximum_dependency_work << ',' << times[3] << ','
+                  << times[6] << ',' << peak << ',' << invocations << ','
                   << evaluated << ',' << calls << ',' << fallbacks << ",2\n"
                   << std::flush;
       }
@@ -926,16 +824,19 @@ int main(int argc, char** argv) {
                        : ps::CpuNumericProfile::X86Avx2;
     if (argc > 2 && std::string(argv[2]) == "oracle") {
       oracle(profile);
-    } else if (argc > 2 && std::string(argv[2]) == "benchmark") {
-      benchmark(profile, selected);
+    } else if (argc > 2 && (std::string(argv[2]) == "benchmark" ||
+                            std::string(argv[2]) == "benchmark_quick" ||
+                            std::string(argv[2]) == "benchmark_wide")) {
+      benchmark(profile, selected, std::string(argv[2]) == "benchmark_quick",
+                std::string(argv[2]) == "benchmark_wide");
     } else {
       examples(profile);
+      batch_consistency(profile);
       bindings_errors_and_cache(profile);
       stages_layouts_and_diagnostics(profile);
       schema_and_producer_obligations(profile);
       budgets_and_cancellation(profile);
-      metadata_failure_recovery(profile);
-      regional_failure_release(profile);
+      whole_failure_release(profile);
     }
     return 0;
   } catch (const std::exception& error) {

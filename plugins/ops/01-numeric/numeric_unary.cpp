@@ -29,7 +29,7 @@ Status register_numeric_unary(OperationRegistry* registry) {
       auto status =
           registry->register_operation(point_math_operation<ExactElementary>(
               std::string("numeric.") + entry.first + profile.first,
-              entry.first, entry.second, profile.second, 1, mask));
+              entry.second, profile.second, 1, mask));
       if (!status.ok())
         return status;
     }
@@ -52,8 +52,8 @@ Status register_numeric_unary(OperationRegistry* registry) {
       auto status =
           registry->register_operation(point_math_operation<CertifiedMath>(
               std::string("numeric.") + entry.first + profile.first,
-              entry.first, entry.second, profile.second, rational ? 2 : 1,
-              rational ? 2 : 12, rational));
+              entry.second, profile.second, rational ? 2 : 1, rational ? 2 : 12,
+              rational));
       if (!status.ok())
         return status;
     }

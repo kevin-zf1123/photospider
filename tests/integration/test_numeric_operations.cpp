@@ -73,7 +73,9 @@ Result<ExecutionResult> run(const std::string& operation,
        [base, operation, calls](const OperationInvocation& call) {
          if (calls)
            ++*calls;
-         return base->invoke(operation, call);
+         auto forwarded = call;
+         forwarded.prepared.reset();
+         return base->invoke(operation, forwarded);
        }});
   if (!registered.ok())
     return Result<ExecutionResult>(registered);

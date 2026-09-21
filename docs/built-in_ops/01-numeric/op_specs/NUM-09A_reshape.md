@@ -18,6 +18,12 @@ repository_commit: current working tree
 
 # NUM-09A: reshape
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -44,63 +50,38 @@ Let input shape be I and target shape O. For an output coordinate o, define
     k = sum_j o[j] * product_{m>j} O[m]
     s[j] = floor(k / product_{m>j} I[m]) mod I[j]
 
-Read input exactly at s. This is a bijection on the full logical element domain.
-Use checked integer indexing and shape products, never floating point. For
-requested Q, Data support is the exact mapped set S(Q); reshaping a rectangle
-can require multiple input rectangles or runs. Add recognized typed-input
-Validation closure separately. Empty Q reads nothing. No source bounding gap,
-Whole input evaluation or implicit missing value is introduced by this operator.
-
-Inverse flatten/unflatten maps changed input Data to output invalidation exactly;
-retained typed-validation witnesses add their required invalidation. Shape/layout,
-dtype and witnessed source metadata/data belong to cache identity. Region and
-storage origins always use global logical coordinates, independent of byte offset.
+The mapping defines numerical selection; execution uses CPU Whole for all formal
+profile keys. Every nonempty request collects and validates the complete active
+input and computes the complete output before projection. Empty reads nothing.
+Every active source edit invalidates the complete output, and any source, typed,
+resource or domain failure affects the Run. Output key/shape/dtype and tuple
+identity are unchanged; legacy unsuffixed keys are separate implementations.
 
 ## Layout decision and lifetime
 
-Use the executor's normalized requested rectangles as the units of layout
-decision. For each such rectangle, a view requires one input backing owner,
-one valid byte offset and one stride vector that represent all mapped elements
-in that rectangle. Validate address bounds with signed strides. Negative and
-zero strides are legal when the full address mapping satisfies this condition.
-Do not subdivide the rectangle solely to manufacture a collection of tiny views.
+View requires one affine owner for the complete input and complete output.
+Compatible fragments of the same owner may be joined after proving their address
+maps. Multiple owners fail Domain/Run InvalidArgument/InvalidDomain with
+ViewUnavailable. Auto may collect multiple owners and falls back to one complete
+packed output when reshape is not affine. Dense always copies the complete
+output. A sparse request cannot make a globally non-affine View succeed.
+Negative/zero strides and singleton axes remain legal. Reshape proves maximal
+contiguous source chunks and target axis boundaries without enumerating pixels.
 
-- view: if the condition holds, publish an immutable owning view; otherwise
-  fail the requested observation with InvalidArgument and diagnostic ViewUnavailable.
-- auto: use that view when possible; otherwise copy the rectangle into owned
-  packed row-major storage. Different requested rectangles may choose differently.
-- dense: always copy the requested rectangle into owned packed row-major storage.
-
-A small regional request can be viewable even when the whole output is not;
-viewability concerns the actual requested rectangle and available source storage.
-This does not change logical values. Auto fallback must not erase upstream,
-validation, resource or cancellation failures. It reacts only to an unrepresentable
-view mapping. Report actual view/copied elements through host diagnostics without
-adding output ports. Output descriptors remain static, independent of the choice.
-
-Retain all actual source owners referenced by views; a tiny view may retain a
-large allocation. Copied outputs own new bytes, with upstream retention governed
-by execution/cache requirements. Values remain valid after context destruction
-until final-owner release. Never expose writable aliases, fabricate contiguous
-storage across owners or authorize unrequested source coordinates.
+Views retain input storage/resources until final release, including oversized
+source backings. New dense output owns N*dtype_size bytes, even for partial
+demand. No writable alias or cross-owner address map is fabricated. Auto only
+handles unavailable views; it never hides validation, budget or cancellation errors.
 
 ## Resources and errors
 
-Coordinate mapping costs O(M*r) for M requested elements and r<=8, or less with
-proved run/coalescing logic. Account exact source-set decomposition, temporary
-index/run metadata, owner retention and output fragments. Dense output payload
-is M*dtype_size; view adds metadata and retained owners without a dense payload.
-Reserve actual capacities before allocation. Do not reserve the full logical
-array for a partial request. Excessive mapping complexity or metadata capacity
-fails ResourceExhausted rather than widening source reads.
-
-Check cancellation before source reads, between mapping blocks, at least every
-4096 copied elements and before publication. Failed observations publish no
-partial output; release unpublished state and preserve prior terminal observations.
-Malformed shape/layout, product mismatch, invalid rank/extents and index overflow
-fail compile/preflight; physical view availability is checked when source layout
-is available. Dtype/schema, upstream, typed-validation and resource errors retain
-the host's existing categories.
+View mapping is O(rank) after input preparation; Dense is O(N*rank) with a fixed
+state and bounded coordinate vectors (rank<=8). Same-owner fragment joining is
+bounded by fragment count and rank and consumes host work. Collecting inputs may
+own their complete packed payloads. The fixed state and complete output capacity
+are admitted; cancellation/work checks occur per copied element and before
+publication. No partial failed output is published. Malformed schema remains a
+compile/preflight error. Layout availability is evaluated at Run time.
 
 ## Acceptance and current status
 
@@ -111,25 +92,8 @@ input, reversed axes, zero strides, unaligned offsets and owner-fragmented sourc
 Check whole versus regional logical equality and explicit view success/failure,
 auto fallback and dense results without comparing incidental physical addresses.
 
-The current nine `array.*` keys use per-node shape/permutation/count
-parameters and the public `reshape_node` helper in
-`photospider/numeric/layouts.hpp`. `TransformLayout::Auto` chooses a
-per-request-rectangle view when one affine owner can represent it and otherwise
-packs; `View` reports `ViewUnavailable`, while `Dense` always packs. Direct
-bindings remain whole dense values; a non-contiguous workflow input is produced
-by the public `transpose_node`, and direct `OperationRegistry::invoke` can
-exercise a strided `Value`.
-
-On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed the public manual examples and 636 independent integer/raw-bit
-oracle cases per profile. The installed public consumer passed. Coverage includes
-exact support/dirty mapping, whole versus regional layout policy, unaligned and
-negative/zero strides, shared versus independent owners, ignored singleton steps,
-full slice endpoint validation, typed Validation closures, schema/Empty behavior,
-work/cancellation/capacity failures, fenv and escaped Value lifetime. Focused
-compiler/dependency/fragments/resources units and independent scoped review passed.
-Layout operations are `cacheable=false` because the content cache does not witness
-physical owner/stride partitions. Managed metadata and its remaining host-container
-boundaries are documented in [Managed Resources](../../../kernel-architecture/Managed-Resources.md).
-The manual target is not registered in integration tests. Specification status
-remains Proposed; no performance claim follows from correctness checks.
+All nine formal profile keys use Whole. Layout operations remain cacheable=false
+because content caches cannot witness physical owner/stride partitions. Current
+workflow, independent oracle, resource validation and measured performance are in
+[NUM-09 Whole execution](../layouts-whole.md). Earlier 2026-09-14 regional
+strict/Apple/WSL checks predate this implementation and are not Whole acceptance.

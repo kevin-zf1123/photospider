@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-04N: sinpi
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -41,7 +50,7 @@ parameters, implicit casts or rounded-pi multiplication in the definition.
 | NaN | Quiet input NaN preserving payload/sign |
 
 Strict rounds the exact mathematical function directly to output dtype.
-Accelerated finite nonzero results allow at most four output-dtype ULP;
+Accelerated finite nonzero results allow at most four FP32-scaled ULP;
 classification, zero signs and named landmarks match strict exactly. All
 finite inputs are supported, including large integers and subnormal inputs.
 The shared contract defines exact quarter-angle rounding and zero conventions.
@@ -59,7 +68,7 @@ high-precision oracle for ordinary arguments and midpoint-sensitive cases.
 
 Apply shared disjoint demand, typed-validation closure, invalidation, ownership,
 cache, cancellation and resource checks. Verify unsupported accelerated ranges
-actually use strict fallback and report it. Float32 LLVM libc is a candidate
+actually use strict fallback. Float32 LLVM libc is a candidate
 as documented in the shared contract; it supplies no implicit Float64 coverage.
 The maintained public run command and current validation boundary are documented below;
 local timing is recorded in the implementation notes.
@@ -67,13 +76,13 @@ local timing is recorded in the implementation notes.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses exact pointwise Data,
-separate typed validation and Atom-scoped failures. Its numerical path follows
+exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.2)
+integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
 and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration

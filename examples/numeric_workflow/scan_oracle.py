@@ -1,5 +1,6 @@
 """Independent exact Fraction prefix/rectangle sums for NUM-13."""
 import itertools
+import functools
 import random
 import subprocess
 import sys
@@ -35,6 +36,18 @@ def cases():
                             out = [n+(i in axes) for i, n in enumerate(shape)]
                             for point in itertools.product(*(range(n) for n in out)):
                                 yield integral, source, destination, shape, axes, point, bits
+    # Complete rectangle reference covers carry across rows and separate planes.
+    for shape, axes in [((5, 7), (0, 1)), ((3, 2, 4), (0, 2))]:
+        count = 1
+        for extent in shape:
+            count *= extent
+        for source, pool in [(2, [0, 1, 2, (1 << 64)-1]),
+                             (3, [0x4340000000000000, 0x3ff0000000000000, 0xc340000000000000, 0x8000000000000000]),
+                             (3, [0x7fefffffffffffff, 0xffefffffffffffff, 0x7ff0000000000042, 0xfff0000000000013])]:
+            bits = [pool[i % len(pool)] for i in range(count)]
+            out = [n+(i in axes) for i, n in enumerate(shape)]
+            for point in itertools.product(*(range(n) for n in out)):
+                yield 1, source, source, shape, axes, point, bits
     for size in (63, 64, 65, 129):
         for source, maximum, negative in ((2, (1 << 63)-1, (1 << 64)-1),
                                            (3, 0x7fefffffffffffff, 0xffefffffffffffff)):
@@ -53,6 +66,15 @@ def expected(case):
     return reference_group('sum', source, destination, 0, terms) if terms else 0
 
 
+@functools.lru_cache(None)
+def whole_overflow(integral, source, destination, shape, axes, bits):
+    if source not in (1, 2):
+        return False
+    out = tuple(n + (i in axes) for i, n in enumerate(shape))
+    return any(expected((integral, source, destination, shape, axes, point, bits)) == 'overflow'
+               for point in itertools.product(*(range(n) for n in out)))
+
+
 def main():
     rows = list(cases())
     encoded = []
@@ -64,7 +86,8 @@ def main():
     answers = result.stdout.splitlines()
     assert len(answers) == len(rows), (len(answers), len(rows), result.stderr)
     for index, (case, actual) in enumerate(zip(rows, answers)):
-        wanted = expected(case)
+        integral, source, destination, shape, axes, point, bits = case
+        wanted = "overflow" if whole_overflow(integral, source, destination, shape, axes, tuple(bits)) else expected(case)
         assert actual == (wanted if isinstance(wanted, str) else f'{wanted:x}'), (index, case, wanted, actual)
     print(f'{len(rows)} independent exact scan cases passed ({sys.argv[2] if len(sys.argv)>2 else "strict"})')
 

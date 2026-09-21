@@ -176,6 +176,8 @@ def cases():
                 yield kernel,dtype,3,0,bits(param),bits(20),[bits(v,dtype) for v in (1,-3,5,-7,5,-3,1)]
 
 
+from accuracy_oracle import accepted_values
+
 def main():
     rows = list(cases())
     expected,lines = [],[]
@@ -188,7 +190,7 @@ def main():
     actual = result.stdout.splitlines()
     assert len(actual)==len(expected),(len(actual),len(expected),result.stderr)
     for i,(got,want) in enumerate(zip(actual,expected)):
-        assert got==want,(i,rows[i],got,want,result.stderr[:1000])
+        assert accepted_values(got,want,rows[i][1],profile),(i,rows[i],got,want,result.stderr[:1000])
     print(f'{len(rows)} independent directed MPFR uniform lowpass cases passed ({profile})')
 
 

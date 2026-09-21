@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 
@@ -45,7 +46,15 @@ struct InterpolationWorkspace final {
     if (!status.ok())
       return Result<std::uint64_t>(status);
     ratio.negative = false;
-    return ratio.round(narrow, consume, 0);
+    auto rounded = ratio.round(narrow, consume, 0, true);
+    if (rounded.ok()) {
+      const auto one =
+          narrow ? UINT64_C(0x3f800000) : UINT64_C(0x3ff0000000000000);
+      // The interior cubic is mathematically in [0,1]. Projection preserves
+      // its certified error and prevents alpha/range violations near upper.
+      return Result<std::uint64_t>(std::min(rounded.value(), one));
+    }
+    return rounded;
   }
   Result<std::uint64_t> mix(
       const BinaryParts& a, const BinaryParts& b, const BinaryParts& t,
@@ -61,7 +70,7 @@ struct InterpolationWorkspace final {
     ratio.product_term(t, a, true);
     if (!a.magnitude && !b.magnitude && a.negative && b.negative)
       return Result<std::uint64_t>(UINT64_C(1) << (narrow ? 31 : 63));
-    return ratio.round(narrow, consume);
+    return ratio.round(narrow, consume, -1074, true);
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

@@ -9,12 +9,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06D: color_ramp_cielch
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 This is the independently required CIELCh(ab) ramp, distinct from CIELAB,
 OKLab and OKLCh. The initial variant has three color channels and no alpha.
@@ -70,8 +79,8 @@ pi input it is (p/q)*pi. Interpolate those original mathematical angles linearly
 H=(1-w)*H0+w*H1. Output H for radian, or H/pi for pi_multiple. Never replace
 an endpoint by a coterminal angle. In particular 0 to 4*pi has midpoint 2*pi.
 
-All three CPU versions correctly round the complete formula directly to output
-dtype, ties-to-even, and are bitwise identical. When input and output hue units
+Strict correctly rounds the complete formula to output dtype, ties-to-even.
+Accelerated uses the shared FP32-scaled final-result bound. When input and output hue units
 match, cancel pi symbolically rather than performing an unnecessary rounded
 multiply/divide. Exact rational source hues must not first become rounded
 floating multipliers. Do not round weights, intermediate endpoint differences,

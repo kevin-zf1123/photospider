@@ -6,12 +6,21 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-01: interpolation family
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 This family records the completed clarification of four independent interfaces.
 Each selected operator has a separate primitive specification, rather than a
@@ -78,13 +87,16 @@ Source inspected at the front-matter commit:
 ## Maintained implementation and validation
 
 The four Proposed interfaces are implemented by twelve registered keys in `plugins/ops/01-numeric/curve_interpolation.cpp` and the public
-constructors in `photospider/numeric/curves.hpp`. Each profile uses exact rational
-curve arithmetic with 352 limbs (22,528 bits) and a 96-slot continuation arena;
-static arithmetic review bounds the maximum live formula slots at 49. Linear and PCHIP evaluate the complete
-formula once and round directly to the destination dtype. Strict, Apple NEON and
-x86 AVX2 profiles use scalar, NEON-u64x2 or AVX2-u64x4 integer comparison/store
-paths respectively; ordinary finite values do not use a fallback and all profiles
-are 0 ULP against the independent result.
+constructors in `photospider/numeric/curves.hpp`. Strict and Float64 outputs use
+exact rational whole-formula evaluation with 352 limbs (22,528 bits) and a
+96-slot continuation arena; the maximum live formula slots are bounded at 49.
+Accelerated Float32 evaluation propagates conservative intervals through the
+complete formula and publishes only when both endpoints round to the same
+Float32 value. This stronger condition preserves monotonicity across queries
+and strict fallbacks. Named knots/clamps remain exact. Exact cross products
+recognize a collinear complete local PCHIP stencil and use the equivalent linear
+formula. Rounded slope equality is not used. NEON/AVX2 integer comparison and
+publication helpers remain available; actual fallback dispatch is diagnosed.
 
 Regional execution performs four polls: it acquires and validates all x knots,
 reads and classifies deduplicated query rows, reads column-local y stencils, then
@@ -97,7 +109,7 @@ See [the numeric workflow README](../../../../examples/numeric_workflow/README.m
 and [math implementation](../math-implementation.md) for public commands and
 algorithm details. `implementation_status: implemented` records the current
 manual acceptance boundary while the specification remains Proposed. Local
-Clang 21 strict/Apple and Ubuntu WSL Clang 18.1.3 strict/AVX2 passed 2,484
+Clang 21 strict/Apple and Ubuntu WSL Clang 18.1.3 strict/AVX2 passed 2,487
 independent Fraction cases per profile. Public manual checks separately cover
 fixtures, sparse support/dirty and Atom behavior, lifetime, strides/fenv/resource/
 schema, cache/upstream, giant 2^39-column composition and typed-mask validation.

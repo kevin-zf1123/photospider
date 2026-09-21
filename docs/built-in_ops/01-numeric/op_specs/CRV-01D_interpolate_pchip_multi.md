@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-01D: interpolate_pchip_multi
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) and the explicitly named
 single-function contract below for all unchanged execution and acceptance rules.
@@ -140,8 +149,11 @@ Measured native workloads and their limits are recorded in the implementation no
 
 `plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
 keys. The public `photospider/numeric/curves.hpp` constructor is
-`interpolate_pchip_multi_node`. All profiles currently use exact rational evaluation and one
-final destination rounding. Global x validation, requested query rows and the
+`interpolate_pchip_multi_node`. Strict and Float64 outputs use exact rational evaluation and one final
+destination rounding. Accelerated Float32 evaluation accepts only enclosures
+whose endpoints round to the same Float32 result, preserving monotonicity;
+unresolved cases use exact fallback. Exact cross products identify collinear
+PCHIP stencils and reduce them to the linear formula. Global x validation, requested query rows and the
 local y stencil follow the demand contract above.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)

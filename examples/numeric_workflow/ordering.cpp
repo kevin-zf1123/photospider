@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -61,11 +62,11 @@ struct Fixture {
       document.outputs.push_back({"indices", node.id, "indices"});
     document.nodes = {std::move(node)};
   }
-  ps::Result<ps::DemandResult> run(const ps::DemandQuery& query,
-                                   bool cache = true,
-                                   std::uint64_t proof_work = UINT64_C(64) *
-                                                              1024 * 1024,
-                                   std::uint64_t cache_bytes = 65536) {
+  ps::Result<ps::DemandResult> run(
+      const ps::DemandQuery& query, bool cache = true,
+      std::uint64_t proof_work = UINT64_C(64) * 1024 * 1024,
+      std::uint64_t cache_bytes = 65536,
+      std::uint64_t work = UINT64_C(128) * 1024 * 1024) {
     ps::GraphContext graph(document);
     auto plan = ps::Compiler(registry).compile(graph);
     if (!plan.ok())
@@ -75,12 +76,13 @@ struct Fixture {
     config.maximum_live_bytes = 262144;
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
+    config.managed_resources->maximum_work = work;
     ps::ExecutionContext context(registry, config);
     auto snapshot = context.freeze(plan.value().plan, bindings);
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
     ps::ExecutionOptions options;
-    options.maximum_dependency_work = UINT64_C(128) * 1024 * 1024;
+    options.maximum_dependency_work = work;
     options.dependencies.maximum_work = UINT64_C(16) * 1024 * 1024;
     options.maximum_dependency_cache_work = cache ? proof_work : 0;
     return context.execute_fragments(snapshot.value(), query, {}, options);
@@ -187,9 +189,10 @@ void examples(ps::CpuNumericProfile profile) {
                   actual == indices[i],
               "sort indices stable ties");
     }
-    if (cache)
-      require(answer.diagnostics.block_cache_hits >= 4,
-              "cross-output permutation reuse");
+    std::uint64_t invocations = 0;
+    for (const auto& timing : answer.diagnostics.operation_timings)
+      invocations += timing.invocation_count;
+    require(invocations == 2, "one Whole callback per independent sort output");
   }
   Fixture quantile(
       take(ps::numeric::quantile_node(1, ps::WorkflowInputReference{1},
@@ -231,15 +234,12 @@ void sharing_and_sparse(ps::CpuNumericProfile profile) {
                   actual == 126 - 2 * (i / 2) + i % 2,
               "long stable indices");
     }
-    if (mode == 1)
-      require(answer.diagnostics.block_cache_hits == 255 &&
-                  answer.diagnostics.block_cache_misses == 1,
-              "one admitted permutation reused across 256 differing-dtype "
-              "observations");
-    else
-      require(answer.diagnostics.block_cache_hits == 0,
-              "disabled/exhausted/too-small cache recomputes equivalently");
-    require(take(answer.dependencies.source_support()).at("input0") == row,
+    std::uint64_t invocations = 0;
+    for (const auto& timing : answer.diagnostics.operation_timings)
+      invocations += timing.invocation_count;
+    require(invocations == 2, "one Whole callback per selected sort output");
+    require(take(answer.dependencies.source_support()).at("input0") ==
+                take(ps::Footprint::all({2, 128})),
             "selected full-line source support");
     const auto changed = take(
         ps::Footprint::from_regions({2, 128}, {ps::Region({{0, 1}, {10, 1}})}));
@@ -249,8 +249,8 @@ void sharing_and_sparse(ps::CpuNumericProfile profile) {
     const auto other = take(ps::Footprint::from_regions(
         {2, 128}, {ps::Region({{1, 1}, {0, 128}})}));
     dirty = take(answer.dependencies.potential_dirty("input0", other));
-    require(dirty.at("values").empty() && dirty.at("indices").empty(),
-            "unrequested line does not invalidate outputs");
+    require(dirty.at("values") == row && dirty.at("indices") == row,
+            "unrequested line invalidates all recorded Whole observations");
   }
   const auto selected = take(
       ps::Footprint::from_regions({2, 128}, {ps::Region({{0, 1}, {70, 1}})}));
@@ -259,12 +259,49 @@ void sharing_and_sparse(ps::CpuNumericProfile profile) {
     require(answer.values.size() == 1 &&
                 answer.values.at(name).coverage() == selected,
             "only requested named output position published");
-    require(take(answer.dependencies.source_support()).at("input0") == row,
+    require(take(answer.dependencies.source_support()).at("input0") ==
+                take(ps::Footprint::all({2, 128})),
             "partial sorted position still reads full line");
   }
-  std::cout << "128-element line: differing output dtypes share one "
-               "permutation; cache-off/proof exhaustion/retention refusal, "
+  std::cout << "128-element line: each output reuses its "
+               "permutation; cache capacities, "
                "sparse outputs and line dirty passed\n";
+}
+void nonlast_axis_lines(ps::CpuNumericProfile profile) {
+  std::vector<std::uint64_t> source(256);
+  for (std::uint64_t row = 0; row < 128; ++row) {
+    source[row * 2] = 127 - row;
+    source[row * 2 + 1] = 1127 - row;
+  }
+  Fixture fixture(take(ps::numeric::sort_node(1, ps::WorkflowInputReference{1},
+                                              0, profile)),
+                  {array(ps::ElementType::Int64, {128, 2}, source)}, true);
+  const auto all = take(ps::Footprint::all({128, 2}));
+  const auto sparse = take(ps::Footprint::from_regions(
+      {128, 2},
+      {ps::Region({{1, 31}, {0, 2}}), ps::Region({{65, 62}, {0, 2}})}));
+  for (const auto& q : {all, sparse}) {
+    // Two lines per output fit; rebuilding 128 times per line does not.
+    auto answer =
+        take(fixture.run({{"values", q}, {"indices", q}}, false, 0, 0, 500000));
+    require(
+        q.visit(
+             [&](const auto& at) {
+               std::uint64_t value = 0, index = 0;
+               require(answer.values.at("values").read(at, &value, 8).ok() &&
+                           value == at[0] + at[1] * 1000,
+                       "non-last-axis stable values");
+               require(answer.values.at("indices").read(at, &index, 8).ok() &&
+                           index == 127 - at[0],
+                       "non-last-axis original indices");
+               return ps::Status::success();
+             },
+             4096)
+            .ok(),
+        "non-last-axis result traversal");
+  }
+  std::cout << "non-last axis and disjoint boxes reuse each line within a "
+               "bounded work budget\n";
 }
 void probability_dependencies(ps::CpuNumericProfile profile) {
   unsigned calls = 0;
@@ -307,7 +344,8 @@ void probability_dependencies(ps::CpuNumericProfile profile) {
     fixture.document.nodes.push_back({2, "manual.quantile_failed", {}, {}});
     calls = 0;
     auto answer = fixture.run({{"values", take(ps::Footprint::all({2, 1}))}});
-    require(calls == 0, "unused q or invalid-q source producer never executes");
+    require(calls == (singleton ? 0 : 1),
+            "singleton skips q; other Whole inputs are eagerly read");
     if (singleton) {
       auto result = take(std::move(answer));
       const std::uint64_t expected[] = {UINT64_C(0x5f000000),
@@ -320,13 +358,8 @@ void probability_dependencies(ps::CpuNumericProfile profile) {
       }
     } else {
       require(!answer.ok() &&
-                  answer.status().code == ps::ErrorCode::InvalidArgument &&
-                  answer.status().reason == ps::FailureReason::InvalidDomain &&
-                  answer.status().detail.origin == ps::FailureOrigin::Domain &&
-                  answer.status().detail.scope == ps::FailureScope::Atom &&
-                  answer.status().message.find(
-                      "port=1 bits=0x7ff8000000000011") != std::string::npos,
-              "invalid q precedes source evaluation");
+                  answer.status().message == "required quantile producer",
+              "Whole source failure can precede invalid-q callback validation");
       fixture.bindings.inputs[1].value =
           array(ps::ElementType::Float64, {1}, {UINT64_C(0x3fe0000000000000)});
       answer = fixture.run({{"values", take(ps::Footprint::all({2, 1}))}});
@@ -335,7 +368,7 @@ void probability_dependencies(ps::CpuNumericProfile profile) {
               "valid q preserves source failure");
     }
   }
-  std::cout << "quantile: N=1 skips failing q, N>=2 rejects invalid q before "
+  std::cout << "quantile: N=1 skips failing q, N>=2 eagerly collects "
                "source and preserves required source failure passed\n";
 }
 
@@ -344,55 +377,35 @@ void failure_and_schema(ps::CpuNumericProfile profile) {
   auto node = take(
       ps::numeric::sort_node(1, ps::WorkflowInputReference{1}, 0, profile));
   auto source = array(ps::ElementType::Int64, {8}, {7, 6, 5, 4, 3, 2, 1, 0});
-  ps::DependencyRequest request;
-  request.inputs = {{source.descriptor(), {}}};
-  request.parameters = node.parameters;
-  request.outputs =
-      take(ps::Footprint::from_regions({8}, {ps::Region({{0, 1}})}));
-  request.snapshot_identity = "ordering-failure";
-  auto fragments = take(ps::ValueFragments::create(
-      source.descriptor(), {}, take(ps::Footprint::all({8})), {source}));
-  for (bool cancel : {false, true}) {
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    bool armed = false, interrupted = false;
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(registry->start_dependency(
-        node.operation, request, resources.allocator(),
-        [&](std::uint64_t amount) {
-          if (armed && amount == 16 &&
-              session->numeric_diagnostics().evaluated_values == 1) {
-            interrupted = true;
-            if (cancel)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "ordering comparison work",
-                                ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    require(session->poll().ok() &&
-                session->supply({fragments}, request.snapshot_identity).ok(),
-            "sort need and input supply");
-    armed = true;
-    auto result = session->poll();
-    require(
-        interrupted && !result.ok() &&
-            result.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-        "sort interrupted within attempted comparison");
-    if (!cancel)
-      require(result.status().reason == ps::FailureReason::WorkLimit,
-              "sort work classification");
-    require(session->numeric_diagnostics().evaluated_values == 1 &&
-                session->numeric_diagnostics().copied_elements == 0,
-            "failed sort preserves attempted evaluation without output copies");
-    session.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "failed sort scratch releases");
+  std::vector<std::uint64_t> descending(4096);
+  for (unsigned i = 0; i < 4096; ++i)
+    descending[i] = 4095 - i;
+  auto large = array(ps::ElementType::Int64, {4096}, descending);
+  point_math_checks::resources(node, {large}, 32768);
+  point_math_checks::resources(node, {large}, 32768, 1);
+  auto quantile = take(ps::numeric::quantile_node(
+      1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2}, 0,
+      ps::ElementType::Float64, profile));
+  auto half = array(ps::ElementType::Float64, {1}, {0x3fe0000000000000});
+  point_math_checks::resources(quantile, {large, half}, 8);
+  ps::ResourceLimits limits;
+  limits.capacity[ps::ResourceKind::Metadata] = 128;
+  ps::ResourceBudget budget(limits);
+  {
+    ps::ResourceAllocationScope scope(budget);
+    const std::vector<ps::Value> inputs{large};
+    const std::vector<ps::Region> demands{large.region()};
+    ps::OperationInvocation call(inputs, demands, node.parameters,
+                                 ps::Backend::Cpu, {}, large.region(),
+                                 budget.allocator());
+    auto result = registry->invoke(node.operation, call);
+    require(!result.ok() &&
+                result.status().code == ps::ErrorCode::ResourceExhausted,
+            "permutation metadata capacity rejected");
   }
+  require(budget.statistics().live[ps::ResourceKind::Metadata] == 0 &&
+              budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "sort metadata/state/output cleanup");
   Fixture invalid(
       take(ps::numeric::quantile_node(1, ps::WorkflowInputReference{1},
                                       ps::WorkflowInputReference{2}, 0,
@@ -405,10 +418,10 @@ void failure_and_schema(ps::CpuNumericProfile profile) {
               result.status().reason == ps::FailureReason::None &&
               result.status().detail.origin == ps::FailureOrigin::Schema,
           "q shape mismatch classification");
-  request.cancellation = {};
-  request.inputs = {{{ps::ElementType::UInt8, {(UINT64_C(1) << 40) + 1}}, {}}};
-  request.outputs = take(ps::Footprint::none({(UINT64_C(1) << 40) + 1}));
-  auto oversized = registry->start_dependency(node.operation, request);
+  auto oversized = registry->resolve_traits(
+      node.operation,
+      {{{ps::ElementType::UInt8, {(UINT64_C(1) << 40) + 1}}, {}}},
+      node.parameters);
   require(!oversized.ok() &&
               oversized.status().code == ps::ErrorCode::TypeMismatch &&
               oversized.status().reason == ps::FailureReason::None &&
@@ -429,33 +442,39 @@ void typed_layout_environment(ps::CpuNumericProfile profile) {
                                ps::ElementType::Float64, profile))
                          : take(ps::numeric::sort_node(
                                1, ps::WorkflowInputReference{1}, 1, profile));
-    ps::DependencyRequest request;
-    request.inputs = {{{ps::ElementType::Float32, {1, 1, 4}}, {facet}}};
+    const auto raw = array(ps::ElementType::Float32, {1, 1, 4},
+                           {0x3f800000, 0, 0, 0x40000000});
+    const auto bad = take(ps::Value::from_storage(
+        raw.descriptor(), raw.region(), raw.layout(), raw.storage(), {facet}));
+    std::vector<ps::Value> inputs{bad};
     if (quantile)
-      request.inputs.push_back({{ps::ElementType::Float64, {1}}, {}});
-    request.parameters = node.parameters;
-    request.output_index = kind == 1 ? 1 : 0;
-    request.snapshot_identity = "ordering-typed";
-    request.outputs = take(ps::Footprint::none({1, 1, 4}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty ordering has no source/control reads");
-    request.outputs = take(ps::Footprint::from_regions(
-        {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
-    auto session = take(registry->start_dependency(node.operation, request));
-    require(session->poll().ok(), "typed ordering need");
-    unsigned data = 0, validation = 0;
-    for (const auto& need : take(session->pending_reads())) {
-      if (need.port == 0 && (need.roles & 1))
-        data += take(need.samples.element_count());
-      if (need.port == 0 && (need.roles & 4))
-        validation += take(need.samples.element_count());
-      require(need.port == 0 || !(need.roles & 7),
-              "singleton quantile skips q control/data/validation");
-    }
-    require(data == 1 && validation == 4,
-            "typed line read and complete pixel validation remain separate");
+      inputs.push_back(
+          array(ps::ElementType::Float64, {1}, {0x7ff0000000000001}));
+    Fixture empty(node, inputs, !quantile);
+    require(empty
+                .run({{kind == 1 ? "indices" : "values",
+                       take(ps::Footprint::none({1, 1, 4}))}})
+                .ok(),
+            "Empty skips invalid typed input and q");
+    std::vector<ps::Region> demands;
+    for (const auto& value : inputs)
+      demands.push_back(value.region());
+    ps::OperationInvocation call(inputs, demands, node.parameters,
+                                 ps::Backend::Cpu, {},
+                                 ps::Region::whole({1, 1, 4}));
+    call.output_index = kind == 1 ? 1 : 0;
+    require(!registry->invoke(node.operation, call).ok(),
+            "both sort outputs and singleton quantile validate complete typed "
+            "input");
+    ps::CancellationSource cancellation;
+    cancellation.cancel();
+    ps::OperationInvocation stopped(inputs, demands, node.parameters,
+                                    ps::Backend::Cpu, cancellation.token(),
+                                    ps::Region::whole({1, 1, 4}));
+    stopped.output_index = call.output_index;
+    require(registry->invoke(node.operation, stopped).status().code ==
+                ps::ErrorCode::Cancelled,
+            "Whole ordering pre-cancelled");
   }
   const auto packed =
       array(ps::ElementType::Float32, {6},
@@ -708,15 +727,14 @@ void changed_probability_and_source(ps::CpuNumericProfile profile) {
   require(demand.replace_bindings(fixture.bindings).ok(), "replace q snapshot");
   auto changed = take(demand.request(query));
   std::uint64_t bits = 0;
-  require(
-      changed.values.at("values").read({0}, &bits, 8).ok() &&
-          bits == UINT64_C(0x4036800000000000) &&
-          changed.diagnostics.block_cache_hits == 1,
-      "changed q reuses current line order but recomputes exact quantile 22.5");
+  require(changed.values.at("values").read({0}, &bits, 8).ok() &&
+              bits == UINT64_C(0x4036800000000000) &&
+              changed.diagnostics.block_cache_hits == 0,
+          "changed q recomputes Whole exact quantile 22.5");
   auto qdirty = take(changed.dependencies.potential_dirty(
-      "input1", take(ps::Footprint::all({1})), 2));
+      "input1", take(ps::Footprint::all({1}))));
   require(qdirty.at("values") == query.at("values"),
-          "q Control witness invalidates quantile");
+          "q Whole input witness invalidates quantile");
   fixture.bindings.inputs[0].snapshot =
       std::make_shared<const ps::InputSnapshot>(take(snapshots.import_value(
           array(ps::ElementType::Int64, {4}, {30, 10, 20, 0}))));
@@ -725,7 +743,7 @@ void changed_probability_and_source(ps::CpuNumericProfile profile) {
   changed = take(demand.request(query));
   require(changed.values.at("values").read({0}, &bits, 8).ok() &&
               bits == UINT64_C(0x4036800000000000) &&
-              changed.diagnostics.block_cache_misses == 1 &&
+              changed.diagnostics.block_cache_misses == 0 &&
               changed.diagnostics.block_cache_hits == 0,
           "changed source invalidates old permutation even with identical "
           "sorted values");
@@ -751,7 +769,7 @@ void changed_probability_and_source(ps::CpuNumericProfile profile) {
     }
     ps::OperationInvocation invocation(inputs, regions, node.parameters,
                                        ps::Backend::Cpu, {},
-                                       ps::Region({{0, 1}, {0, 1}, {1, 1}}));
+                                       ps::Region::whole({1, 1, 4}));
     invocation.output_index = kind == 1 ? 1 : 0;
     const auto answer = fixture.registry->invoke(node.operation, invocation);
     require(!answer.ok() &&
@@ -778,6 +796,7 @@ int main(int argc, char** argv) {
     } else {
       examples(profile);
       sharing_and_sparse(profile);
+      nonlast_axis_lines(profile);
       probability_dependencies(profile);
       failure_and_schema(profile);
       typed_layout_environment(profile);

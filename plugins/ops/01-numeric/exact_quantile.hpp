@@ -102,7 +102,7 @@ struct ExactQuantile final {
       ratio.negative = endpoint(a, type);
       ratio.numerator = source;
       integer_coefficient(1, &ratio.denominator);
-      return ratio.round(narrow, consume, -1074);
+      return ratio.round(narrow, consume, -1074, true);
     }
     if (floating) {
       if (y.nan)
@@ -135,7 +135,7 @@ struct ExactQuantile final {
     if (!status.ok())
       return Answer(status);
     ratio.add_term(b_negative);
-    return ratio.round(narrow, consume, -1074);
+    return ratio.round(narrow, consume, -1074, true);
   }
 };
 }  // namespace ps::plugin_internal::numeric_ops

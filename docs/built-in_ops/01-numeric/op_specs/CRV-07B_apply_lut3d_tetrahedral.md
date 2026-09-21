@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-07B: apply_lut3d_tetrahedral
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 This independent primitive applies tetrahedral interpolation to a joint three-axis
 color lookup table. The [complete CRV-07 contract](CRV-07_apply_lut3d.md) is normative
@@ -45,7 +54,8 @@ is performed. Output carries the declared output color description.
 Use the fixed main-diagonal six-tetrahedra subdivision. Sort exact local coordinates descending, tie by axis 0,1,2, then use its four cumulative-axis vertices.
 Read only vertices with exact nonzero weights, at most 4 complete colors.
 Weights and complete weighted sums are exact before one final dtype rounding.
-All three CPU versions are bitwise identical. Single-vertex and all-negative-zero
+Strict is correctly rounded; accelerated finite arithmetic follows the shared
+FP32-scaled final-result bound. Single-vertex and all-negative-zero
 mixture rules follow CRV-07; zero-weight vertices never affect result or failure.
 
 ## Execution, resources and errors

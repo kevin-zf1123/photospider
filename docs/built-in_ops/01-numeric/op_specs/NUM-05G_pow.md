@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-05G: pow
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -59,9 +68,9 @@ thresholds must retain their exact parity.
 Strict correctly rounds the exact real power directly to output dtype. It is
 not defined by rounded exp(b*ln(a)) or sequential rounded multiplication.
 Finite overflow/underflow produces correctly signed infinity/subnormal/zero.
-Accelerated nonzero finite results permit at most four output-dtype ULP from
+Accelerated nonzero finite results permit at most four FP32-scaled ULP from
 strict; special-case outputs and NaN/Inf/zero classification/sign match strict
-exactly. Unsupported accuracy ranges use strict fallback with host diagnostics,
+exactly. Unsupported accuracy ranges use strict fallback (per-value Whole diagnostics are N/A),
 following [exp's quality/resource rules](NUM-04D_exp.md). Profile results do not
 vary with request batching, vector width or scheduling.
 
@@ -80,7 +89,7 @@ small bases, overflow/underflow boundaries and difficult rounding cases in both
 dtypes. Independently certify finite results by exact integer/rational cases or
 directed high-precision power; model special values and payloads separately.
 
-Test both upstream dependencies even for NaN^0 and 1^NaN; apply shared regional,
+Test both upstream dependencies even for NaN^0 and 1^NaN; apply shared Whole,
 resource, cancellation, typed validation and lifetime fixtures through the public
 entry point. The maintained versioned key and manual tests are recorded below.
 
@@ -88,11 +97,14 @@ entry point. The maintained versioned key and manual tests are recorded below.
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
-The shared adapter retains both inputs as exact pointwise Data and separately
-retains typed validation, including when a numeric identity determines a result.
-Exact elementary operations use bounded integer/ratio arithmetic; ordinary
-power and angle results use the certified directed backend and report accelerated
-strict fallback. See [math implementation](../math-implementation.md) for
+The shared Whole adapter retains and validates both complete inputs, including
+when a numeric identity determines a result.
+Floating elementary operations use controlled correctly rounded hardware
+arithmetic after exact special-value classification, with exact fallback; integer
+operations retain checked exact arithmetic. Accelerated ordinary positive-base
+power and angle results use SLEEF binary64 enclosures within the shared admitted
+ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
+candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)

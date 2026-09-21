@@ -3,18 +3,20 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_aggregate.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -58,174 +60,121 @@ std::uint32_t static_axis(
         numeric_ops::array_parameter_error("indexing axis outside rank")};
   return static_cast<std::uint32_t>(axis);
 }
-DependencyMappedNeed typed_map(DependencyMappedNeed data,
-                               const OperationMetadata& metadata) {
-  data = input_internal::validation_map(std::move(data), metadata);
-  return data;
-}
-Status report_index(const DependencyPhase& phase, SequenceProfile profile,
-                    const char* operation, std::uint64_t count, bool view,
-                    bool evaluated = true, bool formed = true) {
-  NumericDiagnostics report;
-  report.profile =
-      static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-  const auto length =
-      std::snprintf(report.implementation.data(), report.implementation.size(),
-                    "photospider.indexing/1;%s;%s", operation,
-                    numeric_ops::indexing_implementation(profile, view));
-  if (length < 0 ||
-      static_cast<std::size_t>(length) >= report.implementation.size())
-    return Status{ErrorCode::OperationFailed,
-                  "indexing diagnostics identity too long"};
-  report.evaluated_values = evaluated ? count : 0;
-  report.view_elements = formed && view ? count : 0;
-  report.copied_elements = formed && !view ? count : 0;
-  return phase.report_numeric(report);
-}
-struct ConcatenateState final {
-  SequenceProfile profile;
-  bool requested = false;
-  std::uint32_t axis = 0, ports = 0;
-  std::array<std::uint64_t, 257> prefixes{};
-  std::array<std::uint8_t, 32> block{};
-  ConcatenateState(SequenceProfile selected, const DependencyQuery& query)
-      : profile(selected),
-        axis(static_axis(query.parameters,
-                         query.output.descriptor.shape.size())),
-        ports(query.inputs.size()) {
-    for (std::uint32_t port = 0; port < ports; ++port)
-      prefixes[port + 1] =
-          prefixes[port] + query.inputs[port].descriptor.shape[axis];
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    try {
-      if (!requested) {
-        requested = true;
-        return Answer(DependencyNeedBatch{{}, {}, true});
-      }
-      const bool view =
-          std::get<std::string>(phase.query.parameters.at("layout")) == "view";
-      const auto& descriptor = phase.query.output.descriptor;
-      const auto rank = descriptor.shape.size();
-      const auto width = Value::element_size(descriptor.element_type);
-      std::uint64_t maximum_fragments = phase.query.outputs.boxes().size();
-      if (view) {
-        maximum_fragments = 0;
-        for (const auto& input : phase.inputs) {
-          checked(phase.consume_work(1));
-          const auto incoming = input.fragments().size();
-          const auto boxes = phase.query.outputs.boxes().size();
-          if (incoming > (phase.sets.maximum_boxes - maximum_fragments) / boxes)
-            return Answer(Status{ErrorCode::ResourceExhausted,
-                                 "concatenate fragment capacity",
-                                 FailureReason::CapacityLimit});
-          maximum_fragments += incoming * boxes;
+Result<Value> execute_concatenate(const OperationInvocation& call,
+                                  SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    const auto* budget = resource_internal::metadata_budget();
+    const auto work = [&](std::uint64_t amount) {
+      if (call.cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, {}};
+      return budget ? budget->consume({amount}) : Status::success();
+    };
+    const auto& first = call.inputs[0];
+    const auto& shape = call.prepared->traits().outputs[0].fixed_output_shape;
+    const ValueDescriptor descriptor{first.descriptor().element_type, shape};
+    const auto rank = shape.size(),
+               width = Value::element_size(descriptor.element_type);
+    const auto axis = static_axis(call.parameters, rank);
+    std::array<std::uint64_t, 257> prefixes{};
+    for (std::size_t p = 0; p < call.inputs.size(); ++p)
+      prefixes[p + 1] = prefixes[p] + call.inputs[p].descriptor().shape[axis];
+    checked(work(rank + call.inputs.size()));
+    std::vector<std::uint64_t> coordinate(rank, 0), source(rank, 0);
+    const bool view =
+        std::get<std::string>(call.parameters.at("layout")) == "view";
+    if (view) {
+      const auto unavailable = []() {
+        return Answer(Status{
+            ErrorCode::InvalidArgument,
+            "ViewUnavailable: complete concatenation is not one affine owner",
+            FailureReason::InvalidDomain,
+            {FailureOrigin::Domain, FailureScope::Run}});
+      };
+      const auto base = taken(first.byte_address(coordinate));
+      auto strides = first.layout().byte_strides;
+      bool axis_known = false;
+      for (const auto& input : call.inputs) {
+        if (input.storage() != first.storage())
+          return unavailable();
+        if (input.descriptor().shape[axis] > 1) {
+          if (axis_known && strides[axis] != input.layout().byte_strides[axis])
+            return unavailable();
+          strides[axis] = input.layout().byte_strides[axis];
+          axis_known = true;
         }
       }
-      numeric_ops::ArrayPublication publication(maximum_fragments, rank);
-      ResourceVector<Value> results;
-      results.reserve(maximum_fragments);
-      for (const auto& box : phase.query.outputs.boxes()) {
-        if (view) {
-          for (std::uint32_t port = 0; port < ports; ++port) {
-            checked(phase.consume_work(rank + 1));
-            const auto requested_axis = box.dimensions()[axis];
-            const auto begin = std::max(requested_axis.offset, prefixes[port]);
-            const auto end =
-                std::min(requested_axis.offset + requested_axis.extent,
-                         prefixes[port + 1]);
-            if (begin >= end)
-              continue;
-            auto wanted = box.dimensions();
-            wanted[axis] = {begin - prefixes[port], end - begin};
-            for (const auto& fragment : phase.inputs[port].fragments()) {
-              checked(phase.consume_work(rank + 1));
-              auto clipped = wanted;
-              bool hit = true;
-              for (std::size_t j = 0; j < rank; ++j) {
-                const auto source = fragment.region().dimensions()[j];
-                const auto low = std::max(clipped[j].offset, source.offset);
-                const auto high =
-                    std::min(clipped[j].offset + clipped[j].extent,
-                             source.offset + source.extent);
-                if (low >= high) {
-                  hit = false;
-                  break;
-                }
-                clipped[j] = {low, high - low};
-              }
-              if (!hit)
-                continue;
-              std::vector<std::uint64_t> origin;
-              for (const auto& dimension : clipped)
-                origin.push_back(dimension.offset);
-              const auto offset = taken(fragment.byte_address(origin));
-              origin[axis] += prefixes[port];
-              clipped[axis].offset += prefixes[port];
-              auto value = taken(Value::from_storage(
-                  descriptor, Region(std::move(clipped)),
-                  {offset, fragment.layout().byte_strides, std::move(origin)},
-                  fragment.storage()));
-              results.push_back(taken(publication.retain(std::move(value))));
-              checked(report_index(
-                  phase, profile, "concatenate",
-                  taken(results.back().region().element_count()), true));
-            }
-          }
-        } else {
-          auto output =
-              taken(MutableValue::allocate(descriptor, box, phase.allocator));
-          auto selected = taken(
-              Footprint::from_regions(descriptor.shape, {box}, phase.sets));
-          std::uint64_t offset = 0;
-          std::size_t buffered = 0;
-          checked(selected.visit(
-              [&](const auto& coordinate) {
-                checked(phase.consume_work(rank + 10));
-                const auto found = std::upper_bound(
-                    prefixes.begin(), prefixes.begin() + ports + 1,
-                    coordinate[axis]);
-                const auto port =
-                    static_cast<std::uint32_t>(found - prefixes.begin() - 1);
-                auto source = coordinate;
-                source[axis] -= prefixes[port];
-                checked(
-                    phase.read(port, source, block.data() + buffered, width));
-                checked(report_index(phase, profile, "concatenate", 1, false,
-                                     true, false));
-                buffered += width;
-                if (buffered == block.size()) {
-                  checked(report_index(phase, profile, "concatenate",
-                                       buffered / width, false, false, true));
-                  numeric_ops::array_copy_block(
-                      output.data() + offset, block.data(), buffered, profile);
-                  offset += buffered;
-                  buffered = 0;
-                }
-                return Status::success();
-              },
-              phase.sets.maximum_work, phase.query.cancellation));
-          if (buffered) {
-            checked(report_index(phase, profile, "concatenate",
-                                 buffered / width, false, false, true));
-            numeric_ops::array_copy_block(output.data() + offset, block.data(),
-                                          buffered, profile);
-          }
-          results.push_back(
-              taken(publication.retain(taken(std::move(output).publish()))));
-        }
+      if (!axis_known) {
+        const __int128 difference =
+            static_cast<__int128>(
+                taken(call.inputs[1].byte_address(coordinate))) -
+            base;
+        if (difference < INT64_MIN || difference > INT64_MAX)
+          return unavailable();
+        strides[axis] = static_cast<std::int64_t>(difference);
       }
-      if (phase.query.cancellation.cancelled())
-        return Answer(Status{ErrorCode::Cancelled, {}});
-      return Answer(taken(publication.finish(descriptor, phase.query.outputs,
-                                             results.data(), results.size(),
-                                             phase.sets)));
-    } catch (const IndexFailure& failure) {
-      return Answer(failure.status);
+      for (std::size_t p = 0; p < call.inputs.size(); ++p) {
+        checked(work(rank + 1));
+        const auto& input = call.inputs[p];
+        if (static_cast<__int128>(taken(input.byte_address(coordinate))) !=
+            static_cast<__int128>(base) +
+                static_cast<__int128>(prefixes[p]) * strides[axis])
+          return unavailable();
+        for (std::size_t j = 0; j < rank; ++j)
+          if (j != axis && shape[j] > 1 &&
+              input.layout().byte_strides[j] != strides[j])
+            return unavailable();
+      }
+      checked(work(1));
+      return Value::from_storage(descriptor, call.output_region,
+                                 {base, std::move(strides)}, first.storage(),
+                                 {}, call.resources);
     }
+    auto output = taken(
+        MutableValue::allocate(descriptor, call.output_region, call.allocator));
+    const auto count = taken(call.output_region.element_count());
+    std::array<std::uint8_t, 32> block{};
+    std::size_t buffered = 0;
+    std::uint64_t offset = 0;
+    for (std::uint64_t i = 0; i < count; ++i) {
+      checked(work(rank + 10));
+      const auto found = std::upper_bound(
+          prefixes.begin(), prefixes.begin() + call.inputs.size() + 1,
+          coordinate[axis]);
+      const auto port = static_cast<std::size_t>(found - prefixes.begin() - 1);
+      source = coordinate;
+      source[axis] -= prefixes[port];
+      const auto& input = call.inputs[port];
+      const auto address = taken(input.byte_address(source));
+      std::memcpy(block.data() + buffered, input.bytes().data() + address,
+                  width);
+      buffered += width;
+      if (buffered == block.size()) {
+        numeric_ops::array_copy_block(output.data() + offset, block.data(),
+                                      buffered, profile);
+        offset += buffered;
+        buffered = 0;
+      }
+      for (std::size_t j = rank; j; --j) {
+        if (++coordinate[j - 1] < shape[j - 1])
+          break;
+        coordinate[j - 1] = 0;
+      }
+    }
+    if (buffered)
+      numeric_ops::array_copy_block(output.data() + offset, block.data(),
+                                    buffered, profile);
+    checked(work(1));
+    return std::move(output).publish();
+  } catch (const IndexFailure& failure) {
+    return Answer(failure.status);
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
   }
-};
+}
 enum class IndexKind { Gather, Replace, Sum, Minimum, Maximum };
 struct IndexPair {
   std::uint64_t key = 0, position = 0;
@@ -233,42 +182,33 @@ struct IndexPair {
 struct IndexState final {
   IndexKind kind;
   SequenceProfile profile;
+  const OperationInvocation& call;
+  const std::function<Status(std::uint64_t)>& consume;
   std::uint32_t axis;
-  unsigned stage = 0;
   ResourceVector<IndexPair> plan, sorting;
+  std::vector<std::uint64_t> source_coordinate;
   std::array<std::uint64_t, 256> bins{};
-  std::array<std::uint8_t, 32> block{};
-  std::array<std::uint64_t, 4> replicas{};
   numeric_ops::ExactAggregate aggregate;
-  std::shared_ptr<const dependency_internal::MetadataOwner> construction;
   IndexState(IndexKind operation, SequenceProfile selected,
-             const DependencyQuery& query)
+             const OperationInvocation& invocation,
+             const std::function<Status(std::uint64_t)>& work)
       : kind(operation),
         profile(selected),
-        axis(static_axis(query.parameters,
-                         query.output.descriptor.shape.size())),
+        call(invocation),
+        consume(work),
+        axis(static_axis(call.parameters,
+                         call.inputs[0].descriptor().shape.size())),
+        source_coordinate(call.inputs[0].descriptor().shape.size(), 0),
         aggregate(selected,
                   operation == IndexKind::Minimum
                       ? numeric_ops::AggregateKind::Minimum
                   : operation == IndexKind::Maximum
                       ? numeric_ops::AggregateKind::Maximum
                       : numeric_ops::AggregateKind::Sum,
-                  query.output.descriptor.element_type) {}
-  const char* implementation() const {
-    return kind == IndexKind::Gather    ? "gather/replica-store"
-           : kind == IndexKind::Replace ? "scatter-replace/replica-store"
-           : kind == IndexKind::Sum     ? "scatter-exact-sum/replica-store"
-           : kind == IndexKind::Minimum ? "scatter-minimum/replica-store"
-                                        : "scatter-maximum/replica-store";
-  }
-  bool aggregation() const {
-    return kind == IndexKind::Sum || kind == IndexKind::Minimum ||
-           kind == IndexKind::Maximum;
-  }
-  std::pair<std::size_t, std::size_t> matches(const DependencyPhase& phase,
-                                              std::uint64_t key) const {
+                  call.inputs[0].descriptor().element_type) {}
+  std::pair<std::size_t, std::size_t> matches(std::uint64_t key) const {
     const auto levels = plan.empty() ? 0U : 64U - __builtin_clzll(plan.size());
-    checked(phase.consume_work(2 * (levels + 1)));
+    checked(consume(2 * (levels + 1)));
     const auto first = std::lower_bound(
         plan.begin(), plan.end(), key,
         [](const auto& item, auto target) { return item.key < target; });
@@ -278,95 +218,54 @@ struct IndexState final {
     return {static_cast<std::size_t>(first - plan.begin()),
             static_cast<std::size_t>(last - plan.begin())};
   }
-  Region point(const std::vector<std::uint64_t>& coordinate) const {
-    std::vector<RegionDimension> dimensions;
-    dimensions.reserve(coordinate.size());
-    for (auto value : coordinate)
-      dimensions.push_back({value, 1});
-    return Region(std::move(dimensions));
-  }
-  std::vector<std::uint64_t> offending(const DependencyPhase& phase,
-                                       std::uint64_t position) const {
-    for (const auto& box : phase.query.outputs.boxes()) {
-      if (kind == IndexKind::Gather &&
-          (position < box.dimensions()[axis].offset ||
-           position - box.dimensions()[axis].offset >=
-               box.dimensions()[axis].extent))
-        continue;
-      std::vector<std::uint64_t> result;
-      for (const auto& dimension : box.dimensions())
-        result.push_back(dimension.offset);
-      if (kind == IndexKind::Gather)
-        result[axis] = position;
-      return result;
-    }
-    throw IndexFailure{
-        Status{ErrorCode::Internal, "missing invalid index observation"}};
-  }
-  Status attributed(const DependencyPhase& phase, Status status,
+  Status attributed(Status status,
                     const std::vector<std::uint64_t>& coordinate) const {
     status.detail.origin = FailureOrigin::Domain;
-    status.detail.scope = FailureScope::Atom;
-    AtomKey atom;
-    atom.output_index = phase.query.output_index;
-    atom.rank = coordinate.size();
-    std::copy(coordinate.begin(), coordinate.end(), atom.coordinate.begin());
-    status.detail.atom = atom;
+    status.detail.scope = FailureScope::Run;
+    status.detail.atom = {};
+    status.message += " output=[";
+    for (auto index : coordinate)
+      status.message += std::to_string(index) + ",";
+    status.message += "]";
     return status;
   }
-  void validate_index(const DependencyPhase& phase, std::uint64_t position,
-                      std::int64_t value) const {
-    const auto extent = phase.query.inputs[0].descriptor.shape[axis];
-    if (value < 0 || static_cast<std::uint64_t>(value) >= extent)
-      throw IndexFailure{attributed(
-          phase,
-          Status{ErrorCode::InvalidArgument,
-                 "IndexOutOfBounds: position=" + std::to_string(position) +
-                     " index=" + std::to_string(value) +
-                     " extent=" + std::to_string(extent),
-                 FailureReason::InvalidDomain},
-          offending(phase, position))};
-  }
-  Footprint used_indices(const DependencyPhase& phase) const {
-    const auto& shape = phase.query.inputs[1].descriptor.shape;
-    if (kind != IndexKind::Gather)
-      return taken(Footprint::all(shape, phase.sets));
-    std::vector<Region> ranges;
-    ranges.reserve(phase.query.outputs.boxes().size());
-    for (const auto& box : phase.query.outputs.boxes()) {
-      checked(phase.consume_work(1));
-      ranges.emplace_back(std::vector<RegionDimension>{box.dimensions()[axis]});
-    }
-    return taken(Footprint::from_regions(shape, ranges, phase.sets));
-  }
-  void resolve_indices(const DependencyPhase& phase) {
-    const auto requested = used_indices(phase);
-    const auto count = taken(requested.element_count());
-    checked(phase.consume_work(count));
+  void resolve_indices() {
+    const auto& indices = call.inputs[1];
+    const auto count = indices.descriptor().shape[0];
+    const auto extent = call.inputs[0].descriptor().shape[axis];
+    checked(consume(count));
     plan.reserve(count);
-    checked(requested.visit(
-        [&](const auto& coordinate) {
-          std::int64_t value = 0;
-          checked(phase.read(1, coordinate, &value, 8));
-          validate_index(phase, coordinate[0], value);
-          plan.push_back(
-              kind == IndexKind::Gather
-                  ? IndexPair{coordinate[0], static_cast<std::uint64_t>(value)}
-                  : IndexPair{static_cast<std::uint64_t>(value),
-                              coordinate[0]});
-          return Status::success();
-        },
-        phase.sets.maximum_work, phase.query.cancellation));
+    for (std::uint64_t position = 0; position < count; ++position) {
+      if (position % 256 == 0)
+        checked(consume(std::min<std::uint64_t>(256, count - position)));
+      std::int64_t value = 0;
+      const auto address = taken(indices.byte_address({position}));
+      std::memcpy(&value, indices.bytes().data() + address, 8);
+      if (value < 0 || static_cast<std::uint64_t>(value) >= extent)
+        throw IndexFailure{
+            Status{ErrorCode::InvalidArgument,
+                   "IndexOutOfBounds: position=" + std::to_string(position) +
+                       " index=" + std::to_string(value) +
+                       " extent=" + std::to_string(extent),
+                   FailureReason::InvalidDomain,
+                   {FailureOrigin::Domain, FailureScope::Run}}};
+      plan.push_back(
+          kind == IndexKind::Gather
+              ? IndexPair{position, static_cast<std::uint64_t>(value)}
+              : IndexPair{static_cast<std::uint64_t>(value), position});
+    }
     if (kind == IndexKind::Gather)
       return;
-    // Stable LSD radix buckets retain increasing update j within each target.
-    // Eight bounded passes give O(M) index grouping, independent of duplicates.
     sorting.resize(plan.size());
+    // Stable radix order preserves increasing update j for every target.
+    // Admit <=256 items before each block; avoid a shared-ledger lock per item.
     for (unsigned byte = 0; byte < 8; ++byte) {
-      checked(phase.consume_work(bins.size()));
+      checked(consume(bins.size()));
       bins.fill(0);
-      for (const auto& item : plan) {
-        checked(phase.consume_work(1));
+      for (std::size_t i = 0; i < plan.size(); ++i) {
+        if (i % 256 == 0)
+          checked(consume(std::min<std::size_t>(256, plan.size() - i)));
+        const auto& item = plan[i];
         ++bins[(item.key >> (8 * byte)) & 255];
       }
       std::uint64_t prefix = 0;
@@ -375,212 +274,117 @@ struct IndexState final {
         bin = prefix;
         prefix += size;
       }
-      for (const auto& item : plan) {
-        checked(phase.consume_work(1));
+      for (std::size_t i = 0; i < plan.size(); ++i) {
+        if (i % 256 == 0)
+          checked(consume(std::min<std::size_t>(256, plan.size() - i)));
+        const auto& item = plan[i];
         sorting[bins[(item.key >> (8 * byte)) & 255]++] = item;
       }
       plan.swap(sorting);
     }
     ResourceVector<IndexPair>{}.swap(sorting);
   }
-  void declare(const DependencyPhase& phase, std::uint32_t port,
-               const std::vector<Region>& points,
-               std::vector<DependencyNeed>* needs) const {
-    if (points.empty())
-      return;
-    const auto& metadata = phase.query.inputs[port];
-    auto data = taken(
-        Footprint::from_regions(metadata.descriptor.shape, points, phase.sets));
-    auto validation = taken(input_internal::validation_closure(
-        metadata, data, phase.sets, phase.consume_work));
-    needs->push_back({port, 1, std::move(data), {}});
-    needs->push_back({port, 4, std::move(validation), {}});
-  }
-  DependencyNeedBatch need(const DependencyPhase& phase, bool controls) {
-    const auto rows_count = taken(phase.query.observations.element_count());
-    if (rows_count > phase.sets.maximum_boxes)
-      throw IndexFailure{Status{ErrorCode::ResourceExhausted,
-                                "index association capacity",
-                                FailureReason::CapacityLimit}};
-    std::uint64_t points_count = rows_count;
-    if (!controls && kind != IndexKind::Gather) {
-      points_count = 0;
-      checked(phase.query.observations.visit(
-          [&](const auto& coordinate) {
-            const auto range = matches(phase, coordinate[axis]);
-            const auto count = range.second - range.first;
-            const auto incoming =
-                count && kind == IndexKind::Replace ? 1 : 1 + count;
-            if (incoming > phase.sets.maximum_boxes - points_count)
-              return Status{ErrorCode::ResourceExhausted,
-                            "contributor association capacity",
-                            FailureReason::CapacityLimit};
-            points_count += incoming;
-            return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation));
-    }
-    dependency_internal::MetadataBytes capacity;
-    capacity.add(4096);
-    capacity.add(rows_count, sizeof(AtomCertificate) + 8 * 8);
-    capacity.add(points_count,
-                 1024 + phase.query.output.descriptor.shape.size() * 256);
-    construction = dependency_internal::metadata_owner(capacity.bytes);
-    std::vector<AtomCertificate> rows;
-    rows.reserve(rows_count);
-    Footprint all_indices;
-    if (controls && kind != IndexKind::Gather)
-      all_indices = used_indices(phase);
-    checked(phase.query.observations.visit(
-        [&](const auto& coordinate) {
-          checked(phase.consume_work(coordinate.size() + 1));
-          AtomCertificate row{coordinate, {}};
-          row.inputs.reserve(4);
-          if (controls) {
-            auto indices =
-                kind == IndexKind::Gather
-                    ? taken(Footprint::from_regions(
-                          phase.query.inputs[1].descriptor.shape,
-                          {Region({{coordinate[axis], 1}})}, phase.sets))
-                    : all_indices;
-            row.inputs.push_back({1, 6, std::move(indices), {}});
-          } else {
-            const auto range = matches(phase, coordinate[axis]);
-            std::vector<Region> source, updates;
-            if (kind == IndexKind::Gather) {
-              if (range.second != range.first + 1)
-                throw IndexFailure{
-                    Status{ErrorCode::Internal, "gather index plan hole"}};
-              auto mapped = coordinate;
-              mapped[axis] = plan[range.first].position;
-              source.push_back(point(mapped));
-            } else {
-              if (range.first == range.second || aggregation())
-                source.push_back(point(coordinate));
-              const auto begin =
-                  kind == IndexKind::Replace && range.first != range.second
-                      ? range.second - 1
-                      : range.first;
-              updates.reserve(range.second - begin);
-              for (auto j = begin; j < range.second; ++j) {
-                checked(phase.consume_work(coordinate.size() + 1));
-                auto mapped = coordinate;
-                mapped[axis] = plan[j].position;
-                updates.push_back(point(mapped));
-              }
-            }
-            declare(phase, 0, source, &row.inputs);
-            if (!updates.empty())
-              declare(phase, 2, updates, &row.inputs);
-          }
-          rows.push_back(std::move(row));
-          return Status::success();
-        },
-        phase.sets.maximum_work, phase.query.cancellation));
-    return DependencyNeedBatch{std::move(rows)};
-  }
-  std::uint64_t evaluate(const DependencyPhase& phase,
-                         const std::vector<std::uint64_t>& coordinate) {
+  std::uint64_t evaluate(const std::vector<std::uint64_t>& coordinate) {
     const auto width =
-        Value::element_size(phase.query.output.descriptor.element_type);
+        Value::element_size(call.inputs[0].descriptor().element_type);
     const auto read = [&](std::uint32_t port, const auto& sample) {
       std::uint64_t bits = 0;
-      checked(phase.read(port, sample, &bits, width));
+      const auto& value = call.inputs[port];
+      const auto address = taken(value.byte_address(sample));
+      std::memcpy(&bits, value.bytes().data() + address, width);
       return bits;
     };
-    const auto range = matches(phase, coordinate[axis]);
     if (kind == IndexKind::Gather) {
-      auto source = coordinate;
-      source[axis] = plan[range.first].position;
-      return read(0, source);
+      source_coordinate = coordinate;
+      source_coordinate[axis] = plan[coordinate[axis]].position;
+      return read(0, source_coordinate);
     }
+    const auto range = matches(coordinate[axis]);
     if (range.first == range.second)
       return read(0, coordinate);
     if (kind == IndexKind::Replace) {
-      auto source = coordinate;
-      source[axis] = plan[range.second - 1].position;
-      return read(2, source);
+      source_coordinate = coordinate;
+      source_coordinate[axis] = plan[range.second - 1].position;
+      return read(2, source_coordinate);
     }
     aggregate.reset();
-    checked(aggregate.add(read(0, coordinate), phase.consume_work));
+    checked(aggregate.add(read(0, coordinate), consume));
     for (auto j = range.first; j < range.second; ++j) {
-      auto source = coordinate;
-      source[axis] = plan[j].position;
-      checked(aggregate.add(read(2, source), phase.consume_work));
+      source_coordinate = coordinate;
+      source_coordinate[axis] = plan[j].position;
+      checked(aggregate.add(read(2, source_coordinate), consume));
     }
-    auto result = aggregate.finish(phase.consume_work);
+    auto result = aggregate.finish(consume);
     if (!result.ok() &&
         result.status().reason == FailureReason::ArithmeticOverflow)
-      throw IndexFailure{attributed(phase, result.status(), coordinate)};
+      throw IndexFailure{attributed(result.status(), coordinate)};
     return taken(std::move(result));
   }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    try {
-      if (!stage) {
-        ++stage;
-        return Answer(need(phase, true));
+  Result<Value> execute() {
+    resolve_indices();
+    auto descriptor = call.inputs[0].descriptor();
+    if (kind == IndexKind::Gather)
+      descriptor.shape[axis] = plan.size();
+    auto output = taken(
+        MutableValue::allocate(descriptor, call.output_region, call.allocator));
+    const auto width = Value::element_size(descriptor.element_type);
+    const auto count = taken(call.output_region.element_count());
+    std::vector<std::uint64_t> coordinate(descriptor.shape.size(), 0);
+    std::array<std::uint8_t, 32> block{};
+    std::array<std::uint64_t, 4> replicas{};
+    std::size_t buffered = 0;
+    std::uint64_t offset = 0;
+    for (std::uint64_t i = 0; i < count; ++i) {
+      checked(consume(coordinate.size() + 16));
+      const auto bits = evaluate(coordinate);
+      numeric_ops::select_words(replicas.data(), bits, bits, 1, profile);
+      std::memcpy(block.data() + buffered, replicas.data(), width);
+      buffered += width;
+      if (buffered == block.size()) {
+        numeric_ops::array_copy_block(output.data() + offset, block.data(),
+                                      buffered, profile);
+        offset += buffered;
+        buffered = 0;
       }
-      if (stage == 1) {
-        resolve_indices(phase);
-        ++stage;
-        return Answer(need(phase, false));
+      for (std::size_t axis = coordinate.size(); axis; --axis) {
+        if (++coordinate[axis - 1] < descriptor.shape[axis - 1])
+          break;
+        coordinate[axis - 1] = 0;
       }
-      construction.reset();
-      numeric_ops::ArrayPublication publication(
-          phase.query.outputs.boxes().size(),
-          phase.query.output.descriptor.shape.size());
-      ResourceVector<Value> results;
-      results.reserve(phase.query.outputs.boxes().size());
-      const auto& descriptor = phase.query.output.descriptor;
-      const auto width = Value::element_size(descriptor.element_type);
-      for (const auto& box : phase.query.outputs.boxes()) {
-        auto output =
-            taken(MutableValue::allocate(descriptor, box, phase.allocator));
-        auto selected =
-            taken(Footprint::from_regions(descriptor.shape, {box}, phase.sets));
-        std::uint64_t offset = 0;
-        std::size_t buffered = 0;
-        checked(selected.visit(
-            [&](const auto& coordinate) {
-              checked(phase.consume_work(coordinate.size() + 16));
-              checked(report_index(phase, profile, implementation(), 1, false,
-                                   true, false));
-              const auto bits = evaluate(phase, coordinate);
-              numeric_ops::select_words(replicas.data(), bits, bits, 1,
-                                        profile);
-              std::memcpy(block.data() + buffered, replicas.data(), width);
-              buffered += width;
-              if (buffered == block.size()) {
-                checked(report_index(phase, profile, implementation(),
-                                     buffered / width, false, false, true));
-                numeric_ops::array_copy_block(output.data() + offset,
-                                              block.data(), buffered, profile);
-                offset += buffered;
-                buffered = 0;
-              }
-              return Status::success();
-            },
-            phase.sets.maximum_work, phase.query.cancellation));
-        if (buffered) {
-          checked(report_index(phase, profile, implementation(),
-                               buffered / width, false, false, true));
-          numeric_ops::array_copy_block(output.data() + offset, block.data(),
-                                        buffered, profile);
-        }
-        results.push_back(
-            taken(publication.retain(taken(std::move(output).publish()))));
-      }
-      if (phase.query.cancellation.cancelled())
-        return Answer(Status{ErrorCode::Cancelled, {}});
-      return Answer(taken(publication.finish(descriptor, phase.query.outputs,
-                                             results.data(), results.size(),
-                                             phase.sets)));
-    } catch (const IndexFailure& failure) {
-      return Answer(failure.status);
     }
+    if (buffered)
+      numeric_ops::array_copy_block(output.data() + offset, block.data(),
+                                    buffered, profile);
+    checked(consume(1));
+    return std::move(output).publish();
   }
 };
+Result<Value> execute_index(const OperationInvocation& call, IndexKind kind,
+                            SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    const auto* budget = resource_internal::metadata_budget();
+    const std::function<Status(std::uint64_t)> consume =
+        [&](std::uint64_t work) {
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, {}};
+          return budget ? budget->consume({work}) : Status::success();
+        };
+    checked(consume(1));
+    auto allocated = taken(call.allocator.allocate(sizeof(IndexState)));
+    std::unique_ptr<IndexState, void (*)(IndexState*)> state(
+        new (allocated.data()) IndexState(kind, profile, call, consume),
+        [](IndexState* value) { value->~IndexState(); });
+    return state->execute();
+  } catch (const IndexFailure& error) {
+    return Answer(error.status);
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
 OperationDefinition index_operation(const std::string& key, IndexKind kind,
                                     SequenceProfile profile) {
   OperationDefinition operation;
@@ -597,11 +401,9 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
   output.key = "values";
   output.shape_rule = OperationShapeRule::Fixed;
   output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.regional_atomic = true;
-  output.continuation_bytes = sizeof(IndexState);
-  output.maximum_dependency_stages = 3;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(IndexState);
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -627,17 +429,14 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
           source.element_type,
           kind == IndexKind::Gather ? output_shape : source.shape};
       shape_valid(result.metadata.descriptor);
-      result.regional_atomic = true;
       return Answer(
           std::vector<OperationOutputSpecialization>{std::move(result)});
     } catch (const IndexFailure& failure) {
       return Answer(failure.status);
     }
   };
-  operation.start_dependency = [kind, profile](const auto& query,
-                                               const auto& allocator) {
-    return DependencyContinuation::make<IndexState>(allocator, kind, profile,
-                                                    query);
+  operation.callback = [kind, profile](const OperationInvocation& call) {
+    return execute_index(call, kind, profile);
   };
   return operation;
 }
@@ -646,6 +445,8 @@ OperationDefinition concatenate_operation(const std::string& key,
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
+  // Physical cross-input viewability is not witnessed by content cache keys.
+  traits.cacheable = false;
   traits.input_count = 0;
   traits.repeated_minimum = 2;
   traits.repeated_maximum = 256;
@@ -658,10 +459,7 @@ OperationDefinition concatenate_operation(const std::string& key,
   output.key = "values";
   output.shape_rule = OperationShapeRule::Fixed;
   output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(ConcatenateState);
-  output.maximum_dependency_stages = 2;
+  output.region_rule = OperationRegionRule::Whole;
   operation.specialize_metadata = [profile](const auto& inputs,
                                             const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -695,39 +493,17 @@ OperationDefinition concatenate_operation(const std::string& key,
       OperationOutputSpecialization result;
       result.metadata.descriptor = descriptor;
       result.preserve_output_views = layout == "view";
+      result.requires_input_views = layout == "view";
       if (layout == "view")
         result.maximum_output_payload_bytes = 0;
-      std::vector<DependencyMapPiece> pieces;
-      std::uint64_t prefix = 0;
-      for (std::uint32_t port = 0; port < inputs.size(); ++port) {
-        auto dimensions = Region::whole(descriptor.shape).dimensions();
-        dimensions[axis] = {prefix, inputs[port].descriptor.shape[axis]};
-        DependencyMappedNeed data;
-        data.port = port;
-        data.roles = 1;
-        for (std::size_t j = 0; j < descriptor.shape.size(); ++j)
-          data.axes.push_back(
-              {static_cast<std::int32_t>(j),
-               {},
-               j == axis ? -static_cast<std::int64_t>(prefix) : 0});
-        auto validation = typed_map(data, inputs[port]);
-        pieces.push_back(
-            {taken(Footprint::from_regions(descriptor.shape,
-                                           {Region(std::move(dimensions))})),
-             {std::move(data), std::move(validation)}});
-        prefix += inputs[port].descriptor.shape[axis];
-      }
-      result.static_dependency_pieces = std::move(pieces);
       return Answer(
           std::vector<OperationOutputSpecialization>{std::move(result)});
     } catch (const IndexFailure& failure) {
       return Answer(failure.status);
     }
   };
-  operation.start_dependency = [profile](const auto& query,
-                                         const auto& allocator) {
-    return DependencyContinuation::make<ConcatenateState>(allocator, profile,
-                                                          query);
+  operation.callback = [profile](const OperationInvocation& call) {
+    return execute_concatenate(call, profile);
   };
   return operation;
 }

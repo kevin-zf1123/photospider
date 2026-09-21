@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-01B: interpolate_pchip
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for status, registration,
 platforms, floating environment, resources, errors and public acceptance, with
@@ -69,7 +78,7 @@ nearest/ties-to-even rounding directly to output dtype. A curve formed from
 previously rounded slopes is not the strict mathematical reference.
 
 The independently named Apple Silicon and x86-64 CPU accelerated versions allow
-at most four output-dtype representable steps from the correctly rounded strict
+at most four FP32-scaled representable steps from the correctly rounded strict
 result. This final allowance includes slope, polynomial and extrapolation error.
 They must also retain the specified interval shape constraints and correctly
 rounded exact node hits. The numerical shape and fallback obligations are
@@ -153,9 +162,8 @@ An endpoint conversion that would overflow is used only as an extended bound,
 not as a reason to reject another finite requested value. Only actual output
 conversion/classification decides numerical overflow. At identical source/query
 values, strict and accelerated agree on success versus numerical failure and on
-zero classification/sign. Nonzero finite accelerated outputs must remain within
-four representable steps of the correctly rounded strict result, including
-subnormal neighborhoods. Exact knot and clamp conversions match strict bits.
+zero classification/sign. Accelerated outputs obey the shared final FP32-scaled bound, with strict
+evaluation for zero, FP32-subnormal-range or out-of-FP32-range references. Exact knot and clamp conversions match strict bits.
 
 If a fast path cannot guarantee quality, shape and special-value rules together,
 fall back to strict and report actual fallback counts/reasons. The combined
@@ -256,8 +264,11 @@ This explicit-query target remains Proposed; its maintained implementation is re
 
 `plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
 keys. The public `photospider/numeric/curves.hpp` constructor is
-`interpolate_pchip_node`. All profiles currently use exact rational evaluation and one
-final destination rounding. Global x validation, requested query rows and the
+`interpolate_pchip_node`. Strict and Float64 outputs use exact rational evaluation and one final
+destination rounding. Accelerated Float32 evaluation accepts only enclosures
+whose endpoints round to the same Float32 result, preserving monotonicity;
+unresolved cases use exact fallback. Exact cross products identify collinear
+PCHIP stencils and reduce them to the linear formula. Global x validation, requested query rows and the
 local y stencil follow the demand contract above.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)

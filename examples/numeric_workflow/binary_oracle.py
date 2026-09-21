@@ -59,6 +59,8 @@ def cases():
             yield 'pow', dtype, bits(a), bits(b)
 
 
+from accuracy_oracle import accepted
+
 def main():
     rows = list(cases())
     encoded, wanted = [], []
@@ -74,7 +76,7 @@ def main():
     answers = result.stdout.splitlines()
     assert len(answers) == len(rows), (len(answers), len(rows), result.stderr)
     for i, (actual, expected) in enumerate(zip(answers, wanted)):
-        assert actual == expected, (i, rows[i], actual, expected)
+        assert accepted(actual, expected, rows[i][1], profile), (i, rows[i], actual, expected)
     with MPFR(128) as oracle:
         version = oracle.version
     print(f'{len(rows)} independent integer/Fraction/MPFR-{version} binary cases passed ({profile})')

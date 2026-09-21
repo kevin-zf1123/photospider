@@ -13,6 +13,7 @@
 
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -115,7 +116,7 @@ void workflow(const std::string& profile) {
   std::cout << "NUM-08: broadcast -> smoothstep=[0,0,.15625,.5,.84375,1,1] -> "
                "mix=[10,10,11.5625,15,18.4375,20,20] passed\n";
 }
-void staged_support(const std::string& profile) {
+void whole_support(const std::string& profile) {
   Fixture fixture(
       "mix", profile,
       {doubles({10, 10, 10}), doubles({20, 20, 20}), doubles({0, .25, 1})});
@@ -146,10 +147,16 @@ void staged_support(const std::string& profile) {
   config.cpu_workers = 1;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext execution(fixture.registry, config);
-  take(execution.execute(plan.plan, fixture.bindings));
-  require(reads[0] == std::vector<std::uint64_t>({0, 1}) &&
-              reads[1] == std::vector<std::uint64_t>({1, 2}),
-          "overlapping exact branch source reads");
+  auto failed_source = execution.execute(plan.plan, fixture.bindings);
+  require(!failed_source.ok() &&
+              failed_source.status().message == "unselected endpoint source",
+          "Whole mix exposes unselected endpoint source errors");
+  fixture.bindings.inputs[2].value = doubles({0, 2, 1});
+  auto priority = execution.execute(plan.plan, fixture.bindings);
+  require(!priority.ok() &&
+              priority.status().message == "unselected endpoint source",
+          "collection error precedes invalid factor callback");
+  fixture.bindings.inputs[2].value = doubles({0, .25, 1});
   for (unsigned branch = 0; branch < 2; ++branch) {
     fixture.bindings.inputs[branch].source.reset();
     fixture.bindings.inputs[branch].value =
@@ -164,129 +171,50 @@ void staged_support(const std::string& profile) {
     double value = 0;
     require(result.values.at("values").read({i}, &value, 8).ok() &&
                 value == expected[i],
-            "staged mix fixture");
+            "Whole mix fixture");
   }
-  require(reads[0] == std::vector<std::uint64_t>({0, 1}) &&
-              reads[1] == std::vector<std::uint64_t>({1, 2}),
-          "overlapping exact branch source reads");
   const auto support = take(result.dependencies.source_support());
-  require(
-      support.at("input0") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{0, 2}})})) &&
-          support.at("input1") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{1, 2}})})) &&
-          support.at("input2") == take(ps::Footprint::all({3})),
-      "retained branches and factor support");
-  const auto first =
-      take(ps::Footprint::from_regions({3}, {ps::Region({{0, 1}})}));
-  require(take(result.dependencies.potential_dirty("input1", first))
-              .at("values")
-              .empty(),
-          "unselected branch dirty is empty");
-  require(
-      take(result.dependencies.potential_dirty("input2", first)).at("values") ==
-          first,
-      "factor dirty replans observed coordinate");
-  require(take(result.dependencies.potential_dirty("input2", first, 1))
-                  .at("values")
-                  .empty() &&
-              take(result.dependencies.potential_dirty("input2", first, 2))
-                      .at("values") == first &&
-              take(result.dependencies.potential_dirty("input2", first, 4))
-                      .at("values") == first,
-          "factor Control and Validation roles remain separate from Data");
+  for (const auto* name : {"input0", "input1", "input2"}) {
+    require(support.at(name) == take(ps::Footprint::all({3})),
+            "Whole mix full inputs");
+    auto first = take(ps::Footprint::from_regions({3}, {ps::Region({{0, 1}})}));
+    require(
+        take(result.dependencies.potential_dirty(name, first)).at("values") ==
+            take(ps::Footprint::all({3})),
+        "any mix input dirties all observed outputs");
+  }
   fixture.bindings.inputs[2].value = doubles({0, 2, 1});
-  auto atoms = take(
-      execution.execute_atoms(plan.plan, fixture.bindings,
-                              {{"values", take(ps::Footprint::all({3}))}}));
-  unsigned good = 0, bad = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++good;
-      continue;
-    }
-    ++bad;
-    const auto& error = atom.outcome.status();
-    require(atom.key.coordinate[0] == 1 &&
-                error.code == ps::ErrorCode::InvalidArgument &&
-                error.reason == ps::FailureReason::InvalidDomain &&
-                error.detail.origin == ps::FailureOrigin::Domain &&
-                error.detail.scope == ps::FailureScope::Atom &&
-                error.message.find("InvalidMixFactor: port=2 bits=") !=
-                    std::string::npos,
-            "invalid factor atom and bits");
-  }
-  require(good == 2 && bad == 1, "factor failure isolation");
-  std::cout << "mix: [10,12.5,20], overlapping branch reads, skipped failures, "
-               "factor dirty and InvalidMixFactor isolation passed\n";
+  frozen = take(execution.freeze(plan.plan, fixture.bindings));
+  auto failed = execution.execute_fragments(
+      frozen,
+      {{"values", take(ps::Footprint::from_regions(
+                      {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}))}});
+  require(!failed.ok() &&
+              failed.status().reason == ps::FailureReason::InvalidDomain &&
+              failed.status().detail.scope == ps::FailureScope::Run &&
+              !failed.status().detail.atom &&
+              failed.status().message.find("InvalidMixFactor: port=2 bits=") !=
+                  std::string::npos,
+          "invalid unprojected factor fails Whole");
+  auto empty = take(execution.execute_fragments(
+      frozen, {{"values", take(ps::Footprint::none({3}))}}));
+  require(empty.diagnostics.operation_timings.empty(),
+          "Empty mix skips invalid factor");
+  std::cout << "mix Whole: values [10,12.5,20], eager source errors and full "
+               "dirty/invalid factor passed\n";
 }
-void bounded_refinement(const std::string& profile, bool cancel,
+
+void bounded_refinement(const std::string& profile,
                         const std::string& operation) {
-  auto registry = ps::make_default_operation_registry();
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  ps::CancellationSource cancellation;
-  bool refining = false;
-  std::uint64_t issued = 0;
-  ps::DependencyRequest request;
-  request.inputs.assign(3, {{ps::ElementType::Float64, {1}}, {}});
-  request.outputs = take(ps::Footprint::all({1}));
-  request.snapshot_identity = "interpolation-refinement";
-  request.limits.maximum_work = cancel ? 1048576 : 4096;
-  request.cancellation = cancellation.token();
-  {
-    auto session = take(registry->start_dependency(
-        "numeric." + operation + profile, request, resources.allocator(),
-        [&](std::uint64_t work) {
-          if (refining) {
-            issued += work;
-            if (cancel && issued > 4000)
-              cancellation.cancel();
-          }
-          return ps::Status::success();
-        }));
-    require(session->poll(resources.allocator()).ok(), "smoothstep first Need");
-    const auto empty =
-        take(ps::ValueFragments::create({ps::ElementType::Float64, {1}}, {},
-                                        take(ps::Footprint::none({1})), {}));
-    const auto fragment = [&](double number) {
-      const auto value = ps::Value::from_float64(number);
-      return take(ps::ValueFragments::create(value.descriptor(), {},
-                                             request.outputs, {value}));
-    };
-    if (operation == "mix") {
-      require(
-          session
-              ->supply({empty, empty, fragment(.25)}, request.snapshot_identity)
-              .ok(),
-          "mix factor supply");
-      require(session->poll(resources.allocator()).ok(), "mix selected Need");
-      require(session
-                  ->supply({fragment(10), fragment(20), empty},
-                           request.snapshot_identity)
-                  .ok(),
-              "mix endpoint supply");
-    } else {
-      require(session
-                  ->supply({fragment(.25), fragment(0), fragment(1)},
-                           request.snapshot_identity)
-                  .ok(),
-              "smoothstep supply");
-    }
-    refining = true;
-    const auto result = session->poll(resources.allocator());
-    require(result.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-            "exact cubic cancellation/work failure");
-    if (!cancel)
-      require(result.status().reason == ps::FailureReason::WorkLimit,
-              "cubic work reason");
-    require(session->numeric_diagnostics().evaluated_values == 1,
-            "failed cubic attempt diagnostics");
+  std::vector<ps::Value> inputs;
+  for (double value : operation == "mix" ? std::vector<double>{10, 20, .25}
+                                         : std::vector<double>{.25, 0, 1}) {
+    inputs.push_back(doubles(std::vector<double>(16384, value)));
   }
-  require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-          "cubic failure releases managed scratch");
-  std::cout << operation << ": bounded exact refinement cancel=" << cancel
-            << " and cleanup passed\n";
+  point_math_checks::resources({1, "numeric." + operation + profile, {}, {}},
+                               inputs);
+  std::cout << operation
+            << ": Whole work/payload/scratch/cancel release passed\n";
 }
 void edges_and_sparse(const std::string& profile) {
   const auto nan = UINT64_C(0x7ff0000000000001);
@@ -300,32 +228,34 @@ void edges_and_sparse(const std::string& profile) {
   config.cpu_workers = 1;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext execution(fixture.registry, config);
-  auto atoms = take(
-      execution.execute_atoms(plan.plan, fixture.bindings,
-                              {{"values", take(ps::Footprint::all({3}))}}));
-  unsigned good = 0, bad = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++good;
-      continue;
-    }
-    ++bad;
-    const auto& error = atom.outcome.status();
-    require(atom.key.coordinate[0] == 1 &&
-                error.reason == ps::FailureReason::InvalidDomain &&
-                error.message.find("InvalidEdges: port=1 bits=") !=
-                    std::string::npos,
-            "invalid edges outrank input NaN");
-  }
-  require(good == 2 && bad == 1, "smoothstep invalid edges isolated");
   const auto sparse = take(ps::Footprint::from_regions(
       {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
   auto frozen = take(execution.freeze(plan.plan, fixture.bindings));
+  auto invalid = execution.execute_fragments(frozen, {{"values", sparse}});
+  require(!invalid.ok() &&
+              invalid.status().reason == ps::FailureReason::InvalidDomain &&
+              invalid.status().detail.scope == ps::FailureScope::Run &&
+              !invalid.status().detail.atom &&
+              invalid.status().message.find("InvalidEdges: port=1 bits=") !=
+                  std::string::npos,
+          "unprojected invalid edges outrank source NaN and fail Whole");
+  auto empty = take(execution.execute_fragments(
+      frozen, {{"values", take(ps::Footprint::none({3}))}}));
+  require(empty.diagnostics.operation_timings.empty(),
+          "Empty smoothstep skips invalid edges");
+  fixture.bindings.inputs[1].value = doubles({0, 0, 0});
+  frozen = take(execution.freeze(plan.plan, fixture.bindings));
   auto result = take(execution.execute_fragments(frozen, {{"values", sparse}}));
   const auto support = take(result.dependencies.source_support());
+  double projected = 0;
+  require(result.values.at("values").read({2}, &projected, 8).ok() &&
+              projected == 1,
+          "smoothstep sparse projection preserves global coordinate");
+
   for (unsigned port = 0; port < 3; ++port)
-    require(support.at("input" + std::to_string(port)) == sparse,
-            "smoothstep all-port support does not fill sparse gap");
+    require(support.at("input" + std::to_string(port)) ==
+                take(ps::Footprint::all({3})),
+            "smoothstep full support");
   auto source = std::make_shared<ps::RegionalSource>();
   source->descriptor = fixture.bindings.inputs[2].value.descriptor();
   unsigned reads = 0;
@@ -341,7 +271,7 @@ void edges_and_sparse(const std::string& profile) {
               failed.status().message.find("required smoothstep edge") !=
                   std::string::npos,
           "smoothstep endpoint retains upper-edge source failure");
-  std::cout << "smoothstep: InvalidEdges precedence, sparse all-port support "
+  std::cout << "smoothstep: InvalidEdges precedence, Whole all-port support "
                "and endpoint upstream failure passed\n";
 }
 void typed_and_cache(const std::string& profile) {
@@ -364,10 +294,9 @@ void typed_and_cache(const std::string& profile) {
     const std::vector<ps::Region> demands{
         inputs[0].region(), inputs[1].region(), inputs[2].region()};
     ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
-                                 {}, ps::Region({{0, 1}, {0, 1}, {0, 1}}));
-    require(factor ? registry->invoke("numeric.mix" + profile, call).ok()
-                   : !registry->invoke("numeric.mix" + profile, call).ok(),
-            "mix only selected typed branch validates alpha");
+                                 {}, ps::Region::whole({1, 1, 4}));
+    require(!registry->invoke("numeric.mix" + profile, call).ok(),
+            "Whole mix validates unselected typed branch too");
   }
   for (const auto& operation :
        {std::string("mix"), std::string("smoothstep")}) {
@@ -376,7 +305,7 @@ void typed_and_cache(const std::string& profile) {
     const std::vector<ps::Region> demands{
         inputs[0].region(), inputs[1].region(), inputs[2].region()};
     ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
-                                 {}, ps::Region({{0, 1}, {0, 1}, {0, 1}}));
+                                 {}, ps::Region::whole({1, 1, 4}));
     require(!registry->invoke("numeric." + operation + profile, call).ok(),
             "factor/edge requires typed alpha closure");
   }
@@ -399,6 +328,18 @@ void typed_and_cache(const std::string& profile) {
   take(demand.request(query));
   require(take(demand.request(query)).diagnostics.cache_hits > 0,
           "warm mix cache");
+  fixture.bindings.inputs[1].snapshot =
+      std::make_shared<const ps::InputSnapshot>(
+          take(snapshots.import_value(doubles({99}))));
+  require(demand.replace_bindings(fixture.bindings).ok(),
+          "replace unselected endpoint");
+  auto unselected = take(demand.request(query));
+  double unchanged = 0;
+  require(unselected.diagnostics.cache_hits == 0 &&
+              unselected.values.at("values").read({0}, &unchanged, 8).ok() &&
+              unchanged == 10,
+          "unselected endpoint edit invalidates Whole cache while value stays "
+          "selected");
   fixture.bindings.inputs[2].snapshot =
       std::make_shared<const ps::InputSnapshot>(
           take(snapshots.import_value(doubles({1}))));
@@ -406,16 +347,15 @@ void typed_and_cache(const std::string& profile) {
           "replace mix factor snapshot");
   auto changed = take(demand.request(query));
   double value = 0;
-  require(changed.values.at("values").read({0}, &value, 8).ok() && value == 20,
+  require(changed.values.at("values").read({0}, &value, 8).ok() && value == 99,
           "changed factor replans branch and output");
   const auto support = take(changed.dependencies.source_support());
-  require(
-      support.find("input0") == support.end() || support.at("input0").empty(),
-      "changed factor releases old branch support");
+  require(support.at("input0") == take(ps::Footprint::all({1})),
+          "changed factor retains old branch support too");
   require(support.at("input1") == take(ps::Footprint::all({1})),
           "changed factor retains newly selected support");
-  std::cout << "interpolation: selected/factor/edge typed closure and "
-               "factor-cache branch replacement passed\n";
+  std::cout << "interpolation: Whole branch/factor/edge validation and "
+               "factor-cache invalidation passed\n";
 }
 void layout_schema_environment(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
@@ -442,42 +382,34 @@ void layout_schema_environment(const std::string& profile) {
           "smoothstep negative/zero/unaligned strides");
   ps::OperationInvocation roi_call(values, demands, parameters,
                                    ps::Backend::Cpu, {}, ps::Region({{1, 1}}));
-  auto roi = take(registry->invoke("numeric.smoothstep" + profile, roi_call));
-  require(roi.bytes().size() == 8 &&
-              roi.layout().origin == std::vector<std::uint64_t>{1} &&
-              roi.region().dimensions()[0].offset == 1,
-          "interpolation packed global ROI");
+  require(!registry->invoke("numeric.smoothstep" + profile, roi_call).ok(),
+          "direct Whole rejects partial output");
   for (const auto& operation :
        {std::string("mix"), std::string("smoothstep")}) {
     ps::DependencyRequest request;
     request.inputs.assign(3, {{ps::ElementType::Float64, {1}}, {}});
     request.outputs = take(ps::Footprint::none({1}));
     request.snapshot_identity = "interpolation-empty";
-    auto empty = take(
-        registry->start_dependency("numeric." + operation + profile, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty has no reads");
     request.inputs[1].descriptor.element_type = ps::ElementType::Float32;
-    require(
-        registry->start_dependency("numeric." + operation + profile, request)
-                .status()
-                .code == ps::ErrorCode::TypeMismatch,
-        "unselected metadata still checked");
+    require(registry->resolve_traits("numeric." + operation + profile,
+                                     request.inputs, request.parameters)
+                    .status()
+                    .code == ps::ErrorCode::TypeMismatch,
+            "unselected metadata still checked");
     request.inputs[1] = request.inputs[0];
     request.inputs[1].descriptor.shape = {2};
-    require(
-        registry->start_dependency("numeric." + operation + profile, request)
-                .status()
-                .code == ps::ErrorCode::TypeMismatch,
-        "no implicit broadcast");
+    require(registry->resolve_traits("numeric." + operation + profile,
+                                     request.inputs, request.parameters)
+                    .status()
+                    .code == ps::ErrorCode::TypeMismatch,
+            "no implicit broadcast");
     request.inputs[1] = request.inputs[0];
     request.parameters = {{"edge0", 0.0}};
-    require(
-        registry->start_dependency("numeric." + operation + profile, request)
-                .status()
-                .code == ps::ErrorCode::InvalidArgument,
-        "no legacy static parameters");
+    require(registry->resolve_traits("numeric." + operation + profile,
+                                     request.inputs, request.parameters)
+                    .status()
+                    .code == ps::ErrorCode::InvalidArgument,
+            "no legacy static parameters");
   }
   struct Environment {
     fenv_t saved;
@@ -506,6 +438,53 @@ void layout_schema_environment(const std::string& profile) {
           "cubic integer arithmetic preserves fenv");
   std::cout << "interpolation: layouts/ROI, Empty/schema and sNaN/cubic caller "
                "fenv passed\n";
+}
+void whole_layouts(const std::string& profile) {
+  auto registry = ps::make_default_operation_registry();
+  for (const std::string operation : {"mix", "smoothstep"}) {
+    for (bool reverse : {false, true}) {
+      std::vector<ps::Value> inputs;
+      std::vector<ps::Region> demands;
+      for (unsigned port = 0; port < 3U; ++port) {
+        auto storage = take(ps::BufferAllocator{}.allocate(65 * 4 + 1));
+        for (unsigned i = 0; i < 65; ++i) {
+          const float x = operation == "mix" ? (port == 0   ? 0.f
+                                                : port == 1 ? 1.f
+                                                            : i / 64.f)
+                                             : (port == 0   ? i / 64.f
+                                                : port == 1 ? 0.f
+                                                            : 1.f);
+          std::memcpy(storage.data() + 1 + 4 * i, &x, 4);
+        }
+        ps::StridedLayout layout{reverse ? UINT64_C(257) : UINT64_C(5),
+                                 {777, reverse ? -4 : 4}};
+        if (!reverse)
+          layout.origin = {0, 1};
+        inputs.push_back(take(ps::Value::from_storage(
+            {ps::ElementType::Float32, {1, 65}}, ps::Region::whole({1, 65}),
+            layout, std::move(storage).freeze())));
+        demands.push_back(inputs.back().region());
+      }
+      const std::map<std::string, ps::ParameterValue> parameters;
+      ps::OperationInvocation call(inputs, demands, parameters,
+                                   ps::Backend::Cpu, {},
+                                   ps::Region::whole({1, 65}));
+      auto result =
+          take(registry->invoke("numeric." + operation + profile, call));
+      for (unsigned i = 0; i < 65; ++i) {
+        float expected = (reverse ? 64 - i : i) / 64.0f;
+        if (operation == "smoothstep")
+          expected = expected * expected * (3 - 2 * expected);
+        std::uint32_t actual = 0, want = 0;
+        std::memcpy(&want, &expected, 4);
+        std::memcpy(&actual,
+                    result.bytes().data() + take(result.byte_address({0, i})),
+                    4);
+        require(actual == want,
+                "interpolation all-port Float32 tail/origin/stride oracle");
+      }
+    }
+  }
 }
 void oracle(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
@@ -561,15 +540,15 @@ int main(int argc, char** argv) {
       oracle(profile);
     } else {
       workflow(profile);
-      staged_support(profile);
+      whole_support(profile);
       for (const auto& operation :
            {std::string("mix"), std::string("smoothstep")}) {
-        bounded_refinement(profile, false, operation);
-        bounded_refinement(profile, true, operation);
+        bounded_refinement(profile, operation);
       }
       edges_and_sparse(profile);
       typed_and_cache(profile);
       layout_schema_environment(profile);
+      whole_layouts(profile);
     }
     return 0;
   } catch (const std::exception& error) {

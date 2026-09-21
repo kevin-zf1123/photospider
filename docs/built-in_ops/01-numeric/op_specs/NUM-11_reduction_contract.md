@@ -8,9 +8,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-11: reductions
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -61,47 +70,36 @@ narrowing; it is independent of native cast behavior. A newly generated NaN is
 the fixed positive quiet pattern in the selected output dtype: Float32
 0x7fc00000 or Float64 0x7ff8000000000000.
 
-## Group demand, mapping and invalidation
+## Whole demand, mapping and invalidation
 
-Except reduce_count, each requested output coordinate requires its entire
-reduction group as exact Data support. Union those groups for requested Q;
-unrequested groups are not read or numerically validated. Add recognized typed
-Validation closure separately. Empty Q reads no samples. A numeric exceptional
-value does not permit short-circuiting required group dependencies or validation.
-Reduce_count instead uses its explicit metadata-only contract.
+Except reduce_count, each nonempty request reads and validates the complete
+input and computes every output group before projection. A source/typed failure
+or integer overflow in any group fails Domain/Run, including groups outside the
+consumer projection. Empty reads nothing. Any input edit invalidates every
+recorded output observation. Numerical group membership and row-major NaN
+priority remain unchanged. Reduce_count uses an empty static runtime-input
+projection and metadata-only semantics, while validating the complete schema.
 
-Map changed source coordinates to output by setting reduced-axis coordinates to
-zero and retaining nonreduced coordinates. Retain corresponding Data/Validation
-witnesses. Shape, dtype, normalized axes, output dtype/profile and any numeric
-parameters belong to inference/cache identity. Output descriptors are static.
-For value-reading reducers, publish owned packed fragments for requested output
-coverage, with correct global Region/storage origins; no implicit zero groups or
-whole-output allocation is required to serve a partial request.
+## Execution, ownership and errors
 
-## Bounded execution, ownership and errors
+Numeric reducers allocate complete dense output plus one fixed exact state,
+reset for each group. Whole input preparation may own a complete packed input;
+the former64-sample streaming memory guarantee no longer applies. There are no
+per-group dependency descriptors, numeric atom counters or intermediate windows.
+Work is proportional to full input count and exact arithmetic/refinement.
+Rank<=8 coordinate vectors are reused; state/output capacities and exact work
+are charged to host budgets. Cancellation is checked per input and during exact
+refinement and before publication. No partial failed output is published.
 
-Read valid immutable strides/offsets through logical coordinates, preserving
-original dtype bits for classification and exact arithmetic. Groups can be
-streamed through bounded blocks; do not retain an entire input group merely for
-a sum or moment. Work scales with actual requested group elements plus exact
-arithmetic/refinement and validation. Account active group accumulators, retained
-source owners/windows, dependency/set metadata, output fragments and scratch.
-Exact accumulator width depends on dtype exponent/significand range and group
-size; host-account every limb or fixed-width capacity. Precision or workspace
-limits cause ResourceExhausted rather than silently changing quality.
-
-Use host workers and cancellation, polling per group/block and at least every
-4096 processed values as well as during refinement. Group chunking, thread order
-and SIMD width cannot change logical output bits for exact profiles. Retain NaN
-priority by logical index rather than first thread completion. No unbudgeted
-private pools, Whole input copies or unordered floating atomic accumulation.
-Source execution may have its own transitive support; this reducer declares only
-the exact support it requires and does not suppress actually required upstream
-failures.
+Count computes only the shape/axes product, owns8 bytes, and exposes the complete
+keepdims output through zero strides even for huge logical arrays. No source
+payload is read or retained, and source-byte edits do not invalidate counts.
+Output backing/resources survive context destruction until their final release.
+Precision/budget failures never change numerical quality.
 
 Compile/preflight rejects malformed axes, unsupported type/shape, invalid static
 numeric parameters or descriptors beyond the array cap. Integer final overflow
-uses OperationFailed with FailureReason::ArithmeticOverflow and output coordinate.
+uses OperationFailed with FailureReason::ArithmeticOverflow, output coordinate and Domain/Run scope.
 Floating domain results follow individual numeric tables, not generic Status
 failure. Upstream/typed/resource/cancellation failures retain existing categories;
 a failed observation publishes no partial output. Published owners remain valid
@@ -109,32 +107,14 @@ after context destruction until final release, with cache-off equivalent behavio
 
 ## Shared acceptance and implementation distinction
 
-Use independent exact integer/rational or directed high-precision oracles, with
-explicit NaN bit mapping. Test whole versus nonzero/disjoint output requests,
-multiple axes, singleton groups, strided inputs, selected versus unrequested group
-failures, deterministic partitioning, source invalidation, low accumulator/index
-budgets, cancellation and output-owner lifetime. The current implementation
-registers 21 keys, with public constructors in
-`photospider/numeric/reductions.hpp`, the manual workflow in
-`examples/numeric_workflow/reductions.cpp`, and the independent oracle in
-`reduction_oracle.py`. Value-reading reducers stream groups through windows of
-at most 64 logical values, use one scalar observation group per requested output
-coordinate, and retain exact accumulator state in bounded host continuations.
-Diagnostics count admitted accumulator input attempts as `evaluated_values`;
-output observations are reported separately as `computed_elements`.
-`reduce_count` evaluates zero numeric inputs and can publish one 8-byte
-zero-stride owner for repeated counts.
-
-Local Clang 21 strict and Apple full manual workflows passed, including streamed
-4096-element groups under a 16 KiB live-payload limit, giant 2^40 count with an
-8-byte owner and zero producer calls, atom support/dirty/overflow isolation,
-typed validation, Empty, cancellation, ddof and strided-NaN cases. The strict
-and Apple installed consumers passed. Ubuntu WSL Clang 18.1.3
-strict/x86 full manual workflows passed, including the required third-window
-source failure after an earlier NaN. The updated oracle passed 4740 cases per
-profile, and the additional cross-window cases passed. Scoped implementation
-and arithmetic reviews closed all required findings. This does not change the
-Proposed status.
+The21 formal keys use Whole through public constructors in
+photospider/numeric/reductions.hpp. Numerical state retains exact accumulation,
+NaN conversion, ddof validation and final-rounding/root rules. Current public
+workflow, independent Fraction/midpoint-square oracle, layout/error/resource
+checks and separate public/core timing are in
+[NUM-11 Whole execution](../reductions-whole.md). Earlier regional
+strict/Apple/WSL/installed checks predate this implementation. Proposed status
+is unchanged.
 
 Existing numeric.mean and numeric.variance use
 [ordered reduction](../../../../plugins/ops/01-numeric/ordered_reduction.hpp):

@@ -3,14 +3,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <memory>
+#include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "00-foundation/multi_output.hpp"
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_quantile.hpp"
 #include "01-numeric/stable_order.hpp"
 #include "data/input_validation.hpp"
@@ -45,225 +47,185 @@ Result<std::uint32_t> ordering_axis(
         numeric_ops::array_parameter_error("ordering axis outside rank"));
   return Answer(static_cast<std::uint32_t>(axis));
 }
-Status report(const DependencyPhase& phase, SequenceProfile profile,
-              bool quantile, std::uint64_t evaluated,
-              std::uint64_t copied = 0) {
-  NumericDiagnostics result;
-  result.profile =
-      static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-  const auto length = std::snprintf(
-      result.implementation.data(), result.implementation.size(),
-      "photospider.ordering/1;%s;stable-tuple-heapsort;exact-rational%s",
-      quantile ? "quantile" : "sort", numeric_ops::numeric_build_identity());
-  if (length < 0 ||
-      static_cast<std::size_t>(length) >= result.implementation.size())
-    return Status{ErrorCode::OperationFailed, "ordering identity too long"};
-  result.evaluated_values = evaluated;
-  result.copied_elements = copied;
-  return phase.report_numeric(result);
-}
 struct OrderingState final {
-  bool quantile;
-  std::uint32_t axis, stage = 0;
-  SequenceProfile profile;
-  numeric_ops::QuantilePosition position;
   numeric_ops::StableOrderWorkspace ordering;
   numeric_ops::ExactQuantile arithmetic;
-  std::array<std::uint64_t, 4> replicas{};
-  OrderingState(bool probability, std::uint32_t selected_axis,
-                SequenceProfile selected)
-      : quantile(probability),
-        axis(selected_axis),
-        profile(selected),
-        arithmetic(selected) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(8192);
-    const auto& input = phase.query.inputs[0];
-    const auto count = input.descriptor.shape[axis];
-    const auto type = input.descriptor.element_type;
-    if (stage == 0 && quantile && count > 1) {
-      stage = 1;
-      auto scalar = Footprint::all({1}, phase.sets);
-      if (!scalar.ok())
-        return Answer(scalar.status());
-      return multi_output::need(phase, {{1, 6, scalar.take_value(), {}}});
-    }
-    if (stage == 1) {
-      std::uint64_t bits = 0;
-      auto status = phase.read(
-          1, {0}, &bits,
-          Value::element_size(phase.query.inputs[1].descriptor.element_type));
-      if (!status.ok())
-        return Answer(status);
-      auto resolved = numeric_ops::quantile_position(
-          bits, phase.query.inputs[1].descriptor.element_type, count);
-      if (!resolved.ok()) {
-        auto failure = resolved.status();
-        std::array<char, 128> message{};
-        std::snprintf(message.data(), message.size(),
-                      "InvalidQuantileProbability: port=1 bits=0x%016" PRIx64
-                      "; "
-                      "require finite q in [0,1]",
-                      bits);
-        failure.message = message.data();
-        failure.detail.scope = FailureScope::Atom;
-        auto atom = dependency_atom_key(phase.query);
-        if (!atom.ok())
-          return Answer(atom.status());
-        failure.detail.atom = atom.take_value();
-        return Answer(failure);
-      }
-      position = resolved.value();
-    }
-    if (stage < 2) {
-      stage = 2;
-      auto dimensions = phase.query.outputs.boxes()[0].dimensions();
-      dimensions[axis] = {0, count};
-      auto data = Footprint::from_regions(input.descriptor.shape,
-                                          {Region(dimensions)}, phase.sets);
-      if (!data.ok())
-        return Answer(data.status());
-      auto closure = input_internal::validation_closure(
-          input, data.value(), phase.sets, phase.consume_work);
-      if (!closure.ok())
-        return Answer(closure.status());
-      auto validation = closure.take_value();
-      return multi_output::need(phase, {{0, 1, data.take_value(), {}},
-                                        {0, 4, std::move(validation), {}}});
-    }
-    const auto at = multi_output::coordinate(phase);
-    std::uint64_t line = 0;
-    for (std::size_t j = 0; j < at.size(); ++j)
-      if (j != axis)
-        line = line * input.descriptor.shape[j] + at[j];
-    // The transition's explicit line id determines source coordinates. It
-    // never depends on the requested sorted position or selected public output.
-    std::vector<std::uint64_t> coordinate(at.size());
-    auto remainder = line;
-    for (std::size_t j = at.size(); j; --j)
-      if (j - 1 != axis) {
-        coordinate[j - 1] = remainder % input.descriptor.shape[j - 1];
-        remainder /= input.descriptor.shape[j - 1];
-      }
-    const auto read = [&](std::uint64_t index, std::uint64_t* bits) {
-      auto status = phase.consume_work(
-          (phase.inputs[0].fragments().size() + 1) * coordinate.size() + 1);
-      if (!status.ok())
-        return status;
-      coordinate[axis] = index;
-      *bits = 0;
-      return phase.read(0, coordinate, bits, Value::element_size(type));
-    };
-    numeric_ops::ArrayPublication state_metadata(1, 1);
-    auto zero = phase.allocator.allocate(8);
-    if (!zero.ok())
-      return Answer(zero.status());
-    auto storage = zero.take_value();
-    std::memset(storage.data(), 0, 8);
-    auto incoming = Value::from_storage({ElementType::Int64, {count}},
-                                        Region::whole({count}), {0, {0}},
-                                        std::move(storage).freeze());
-    if (!incoming.ok())
-      return Answer(incoming.status());
-    auto retained = state_metadata.retain(incoming.take_value());
-    if (!retained.ok())
-      return Answer(retained.status());
-    auto status = report(phase, profile, quantile, 1);
+  explicit OrderingState(SequenceProfile profile) : arithmetic(profile) {}
+};
+Result<Value> execute_ordering(const OperationInvocation& call, bool quantile,
+                               SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    const auto* budget = resource_internal::metadata_budget();
+    const std::function<Status(std::uint64_t)> work =
+        [&](std::uint64_t amount) {
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, {}};
+          return budget ? budget->consume({amount}) : Status::success();
+        };
+    auto status = work(1);
     if (!status.ok())
       return Answer(status);
-    auto permutation = phase.block(1, line, line + 1, 1, retained.value(), [&] {
-      return ordering.build(count, type, profile, phase.allocator,
-                            phase.consume_work, read);
-    });
-    if (!permutation.ok())
-      return Answer(permutation.status());
-    const auto index_at = [&](std::uint64_t rank) {
-      std::uint64_t index = 0;
-      std::memcpy(&index, permutation.value().bytes().data() + rank * 8, 8);
-      return index;
-    };
-    std::uint64_t bits = 0;
-    if (!quantile) {
-      const auto original = index_at(at[axis]);
-      if (phase.query.output_index == 1)
-        bits = original;
-      else
-        status = read(original, &bits);
-    } else {
-      // Stable ordering places NaNs last in original index order. Locate the
-      // first NaN before choosing endpoints, so endpoint q never omits one.
-      const bool floating =
-          type == ElementType::Float32 || type == ElementType::Float64;
-      std::uint64_t nan_begin = count;
-      if (floating) {
-        std::uint64_t low = 0, high = count;
-        while (low < high) {
-          const auto middle = low + (high - low) / 2;
-          std::uint64_t value = 0;
-          status = read(index_at(middle), &value);
-          if (!status.ok())
-            return Answer(status);
-          if (numeric_ops::BinaryParts::decode(value,
-                                               type == ElementType::Float32)
-                  .nan)
-            high = middle;
-          else
-            low = middle + 1;
+    const auto& input = call.inputs[0];
+    const auto& shape = input.descriptor().shape;
+    auto selected = ordering_axis(input.descriptor(), call.parameters);
+    if (!selected.ok())
+      return Answer(selected.status());
+    const auto axis = selected.value();
+    const auto count = shape[axis];
+    const auto type = input.descriptor().element_type;
+    auto output_shape = shape;
+    auto target = call.output_index == 1 ? ElementType::Int64 : type;
+    numeric_ops::QuantilePosition position;
+    if (quantile) {
+      output_shape[axis] = 1;
+      target = std::get<std::string>(call.parameters.at("dtype")) == "float32"
+                   ? ElementType::Float32
+                   : ElementType::Float64;
+      if (count > 1) {
+        const auto& probability = call.inputs[1];
+        auto at = probability.byte_address({0});
+        if (!at.ok())
+          return Answer(at.status());
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, probability.bytes().data() + at.value(),
+                    Value::element_size(probability.descriptor().element_type));
+        auto found = numeric_ops::quantile_position(
+            bits, probability.descriptor().element_type, count);
+        if (!found.ok()) {
+          auto failure = found.status();
+          std::array<char, 128> message{};
+          std::snprintf(message.data(), message.size(),
+                        "InvalidQuantileProbability: port=1 bits=0x%016" PRIx64
+                        "; require finite q in [0,1]",
+                        bits);
+          failure.message = message.data();
+          failure.detail.scope = FailureScope::Run;
+          return Answer(failure);
         }
-        nan_begin = low;
-      }
-      if (nan_begin < count) {
-        status = read(index_at(nan_begin), &bits);
-        if (status.ok())
-          bits = numeric_ops::converted_nan(
-              bits, type, phase.query.output.descriptor.element_type);
-      } else {
-        std::uint64_t a = 0, b = 0;
-        status = read(index_at(position.index), &a);
-        if (status.ok() && position.fractional())
-          status = read(index_at(position.index + 1), &b);
-        if (!status.ok())
-          return Answer(status);
-        auto calculated = arithmetic.finish(
-            a, b, type, phase.query.output.descriptor.element_type, position,
-            phase.consume_work);
-        if (!calculated.ok())
-          return Answer(calculated.status());
-        bits = calculated.value();
+        position = found.value();
       }
     }
-    if (!status.ok())
-      return Answer(status);
-    numeric_ops::ArrayPublication publication(1, at.size());
-    auto allocated =
-        MutableValue::allocate(phase.query.output.descriptor,
-                               phase.query.outputs.boxes()[0], phase.allocator);
+    auto scratch = call.allocator.allocate(sizeof(OrderingState));
+    if (!scratch.ok())
+      return Answer(scratch.status());
+    auto buffer = scratch.take_value();
+    std::unique_ptr<OrderingState, void (*)(OrderingState*)> state(
+        new (buffer.data()) OrderingState(profile),
+        [](OrderingState* item) { item->~OrderingState(); });
+    auto allocated = MutableValue::allocate({target, output_shape},
+                                            call.output_region, call.allocator);
     if (!allocated.ok())
       return Answer(allocated.status());
     auto output = allocated.take_value();
-    status = report(phase, profile, quantile, 0, 1);
-    if (!status.ok())
-      return Answer(status);
-    numeric_ops::select_words(replicas.data(), bits, bits, 1, profile);
-    std::memcpy(
-        output.data(), replicas.data(),
-        Value::element_size(phase.query.output.descriptor.element_type));
-    auto published = std::move(output).publish();
-    if (!published.ok())
-      return Answer(published.status());
-    auto result = publication.retain(published.take_value());
-    if (!result.ok())
-      return Answer(result.status());
-    if (phase.query.cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto fragments =
-        publication.finish(phase.query.output.descriptor, phase.query.outputs,
-                           &result.value(), 1, phase.sets);
-    return fragments.ok() ? Answer(fragments.take_value())
-                          : Answer(fragments.status());
+    std::vector<std::uint64_t> coordinate(shape.size(), 0),
+        source(shape.size(), 0);
+    std::uint64_t lines = 1;
+    for (std::size_t j = 0; j < shape.size(); ++j)
+      if (j != axis)
+        lines *= shape[j];
+    const auto read = [&](std::uint64_t index, std::uint64_t* bits) {
+      auto charged = work(shape.size() + 1);
+      if (!charged.ok())
+        return charged;
+      source = coordinate;
+      source[axis] = index;
+      auto at = input.byte_address(source);
+      if (!at.ok())
+        return at.status();
+      *bits = 0;
+      std::memcpy(bits, input.bytes().data() + at.value(),
+                  Value::element_size(type));
+      return Status::success();
+    };
+    for (std::uint64_t line = 0; line < lines; ++line) {
+      auto permutation =
+          state->ordering.build(count, type, profile, work, read);
+      if (!permutation.ok())
+        return Answer(permutation.status());
+      const auto& indices = permutation.value();
+      const auto store = [&](std::uint64_t bits) {
+        std::uint64_t offset = 0;
+        for (std::size_t j = 0; j < output_shape.size(); ++j)
+          offset = offset * output_shape[j] + coordinate[j];
+        std::array<std::uint64_t, 4> replicas{};
+        numeric_ops::select_words(replicas.data(), bits, bits, 1, profile);
+        std::memcpy(output.data() + offset * Value::element_size(target),
+                    replicas.data(), Value::element_size(target));
+        return work(1);
+      };
+      if (!quantile) {
+        for (std::uint64_t j = 0; j < count; ++j) {
+          coordinate[axis] = j;
+          std::uint64_t bits = indices[j];
+          if (call.output_index == 0) {
+            status = read(indices[j], &bits);
+            if (!status.ok())
+              return Answer(status);
+          }
+          status = store(bits);
+          if (!status.ok())
+            return Answer(status);
+        }
+      } else {
+        std::uint64_t nan_begin = count;
+        if (type == ElementType::Float32 || type == ElementType::Float64) {
+          std::uint64_t low = 0, high = count;
+          while (low < high) {
+            const auto middle = low + (high - low) / 2;
+            std::uint64_t bits = 0;
+            status = read(indices[middle], &bits);
+            if (!status.ok())
+              return Answer(status);
+            if (numeric_ops::BinaryParts::decode(bits,
+                                                 type == ElementType::Float32)
+                    .nan)
+              high = middle;
+            else
+              low = middle + 1;
+          }
+          nan_begin = low;
+        }
+        std::uint64_t bits = 0;
+        if (nan_begin < count) {
+          status = read(indices[nan_begin], &bits);
+          if (!status.ok())
+            return Answer(status);
+          bits = numeric_ops::converted_nan(bits, type, target);
+        } else {
+          std::uint64_t a = 0, b = 0;
+          status = read(indices[position.index], &a);
+          if (status.ok() && position.fractional())
+            status = read(indices[position.index + 1], &b);
+          if (!status.ok())
+            return Answer(status);
+          auto calculated =
+              state->arithmetic.finish(a, b, type, target, position, work);
+          if (!calculated.ok())
+            return Answer(calculated.status());
+          bits = calculated.value();
+        }
+        status = store(bits);
+        if (!status.ok())
+          return Answer(status);
+      }
+      coordinate[axis] = 0;
+      for (std::size_t j = shape.size(); j; --j)
+        if (j - 1 != axis) {
+          if (++coordinate[j - 1] < shape[j - 1])
+            break;
+          coordinate[j - 1] = 0;
+        }
+    }
+    status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
   }
-};
+}
 OperationDefinition ordering_operation(const std::string& key, bool quantile,
                                        SequenceProfile profile) {
   OperationDefinition operation;
@@ -276,8 +238,7 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     traits.input_schema[1].element_type_mask = 12;
   }
   traits.requires_metadata_specialization = true;
-  traits.share_blocks_across_outputs = true;
-  traits.workspace_input_multiplier = 16;
+  traits.workspace_bytes = sizeof(OrderingState);
   traits.parameter_schema = {{"axis", OperationParameterType::Int64}};
   if (quantile)
     traits.parameter_schema.push_back(
@@ -288,11 +249,8 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     output.key = j ? "indices" : "values";
     output.shape_rule = OperationShapeRule::Fixed;
     output.fixed_output_shape = {1};
-    output.region_rule = OperationRegionRule::Dependency;
-    output.dependency_version = 1;
-    output.continuation_bytes = sizeof(OrderingState);
-    output.maximum_dependency_stages = quantile ? 3 : 2;
-    output.failure_delivery = FailureDelivery::PerAtomOutcome;
+    output.region_rule = OperationRegionRule::Whole;
+    output.requires_dense_output = true;
   }
   operation.specialize_metadata = [quantile, profile](const auto& inputs,
                                                       const auto& parameters)
@@ -320,15 +278,12 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     results[0].metadata.descriptor = {type, shape};
     if (!quantile)
       results[1].metadata.descriptor = {ElementType::Int64, shape};
+    if (quantile && inputs[0].descriptor.shape[axis.value()] == 1)
+      results[0].input_indices = std::vector<std::uint32_t>{0};
     return Answer(std::move(results));
   };
-  operation.start_dependency = [quantile, profile](const auto& query,
-                                                   const auto& allocator) {
-    auto axis = ordering_axis(query.inputs[0].descriptor, query.parameters);
-    if (!axis.ok())
-      return Result<DependencyContinuation>(axis.status());
-    return DependencyContinuation::make<OrderingState>(allocator, quantile,
-                                                       axis.value(), profile);
+  operation.callback = [quantile, profile](const OperationInvocation& call) {
+    return execute_ordering(call, quantile, profile);
   };
   return operation;
 }

@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-10A: invert_linear
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Invert the mathematical piecewise linear curve defined by x/y, before
 its forward output rounding. Do not invert a rounded lookup or construct a new
@@ -32,7 +41,7 @@ Float32/Float64, static dtype default Float64. The other required static String
 parameter out_of_domain is reject/clamp, default reject. No extrapolated tail
 is inverted. Endpoints correctly convert corresponding x, preserving zero sign.
 
-Use the exact selected-segment linear inverse formula and correctly round once; every CPU version is bitwise identical.
+Use the exact selected-segment linear inverse formula and correctly round once; accelerated uses the shared FP32-scaled bound.
 Other mathematical exact zeros are +0 and nonzero underflow retains sign.
 Demanded queries and outputs are finite, with narrowing overflow failure.
 
@@ -59,9 +68,10 @@ current validation evidence.
 
 The public helper is `invert_linear_node` from
 [`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp).
-The exact rational path is bitwise identical across profiles.
+The exact rational fallback is bitwise identical across profiles; accelerated
+root brackets may return within the shared FP32-scaled bound.
 See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
 for the public fixture, command and shared validation evidence. Native Clang21
-Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 404
+Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 407
 independent Fraction cases per profile. Installed0.16 consumers passed both
 native profiles; WSL is used for numerical correctness only.

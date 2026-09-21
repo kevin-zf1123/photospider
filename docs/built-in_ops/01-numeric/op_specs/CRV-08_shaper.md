@@ -6,12 +6,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-08: scalar coordinate shapers
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM execution baseline](NUM_common_contract.md) for specification/
 registration status, CPU target identity, floating environment, diagnostic provenance,
@@ -21,9 +30,8 @@ caller floating environment is preserved. This is limited inheritance: the ports
 output kinds/facets, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
-Where a 4-ULP final bound is stated, it means at most four adjacent
-representable steps in the output dtype from the correctly rounded strict result,
-measured by monotone IEEE bit-pattern distance for nonzero finite values.
+A stated four-ULP final bound uses the shared FP32-scaled contract for both
+Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
 
 
@@ -69,9 +77,9 @@ curve-style finite-value failure. Invalid bounds still fail and take precedence
 over input NaN. Linear inverse maps signed infinities to like-signed infinities;
 the +0 negative-infinity extension belongs only to the log2 inverse.
 
-Linear templates inherit bitwise equality across three profiles. Log2 forward/
-inverse strict correctly round the whole formula; accelerated Apple Silicon and
-x86-64 versions allow at most 4 ULP on nonzero finite results while matching
+Linear and log2 forward/inverse strict correctly round their whole formulas.
+Accelerated Apple Silicon and x86-64 versions obey the shared final FP32 4 ULP
+contract, including its strict fallback range, while matching
 strict NaN/Inf/zero classification and signs. Exact source endpoints return
 0/1, and inverse t=0/1 returns lower/upper exactly, on every profile. Fall back
 to strict and report the fallback when the bound cannot be guaranteed; host

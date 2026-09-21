@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06A: color_ramp_rgb
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for registry/platform identity,
 floating environment, bounded execution and public acceptance. The new color-array
@@ -120,8 +129,9 @@ There is no prescribed intermediate Float64 rounding that defines the result.
 Input floats and static gamma denote their exact numerical values.
 
 The two independently named CPU accelerated versions permit a final error of
-at most four output-dtype representable steps per RGB component. Alpha is always
-correctly rounded, including in accelerated versions. Required special values,
+at most four FP32-scaled representable steps per final RGB or alpha component.
+Exact selected endpoints and zero-alpha cases retain exact semantics; ordinary
+alpha arithmetic must also preserve its [0,1] constraint. Required special values,
 alpha constraints and complete-color numerical success/failure must agree with
 strict. Fall back to strict and report actual fallback when those guarantees
 cannot be established; resource/cancellation failures remain explicit.
@@ -306,7 +316,7 @@ zero signs, negative/HDR components, transfer join neighbors, tiny-alpha
 AssociationUnderflow, valid all-zero underflow, invalid premultiplied sources,
 K=1, irregular stops and description mismatch.
 
-Test strict bits and accelerated final ULP separately from exact alpha, complete
+Test strict bits and accelerated final ULP separately from exact selections, complete
 color classification and fallback diagnostics. Public implementation fixtures
 must bind all inputs, construct the explicit descriptions/parameters, execute
 through Compiler/ExecutionContext and inspect the color facet and numerical

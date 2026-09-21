@@ -148,8 +148,14 @@ def cases():
                     yield pchip,0,output,0,3,3,3,xr,yr,qr,1
 
 
+from accuracy_oracle import accepted_values
+
 def main():
-    rows = list(cases())
+    q = bits(Fraction(float.fromhex('0x1.ff84b83a89299p-1')))
+    regression = [(1,0,3,0,3,3,3,[bits(0),bits(1),bits(2)],
+                   [bits(0),bits(1),bits(0)], query,1)
+                  for query in ([q,q+1],[q],[q+1])]
+    rows = regression + list(cases())
     encoded,wanted = [],[]
     for pchip,multi,out,policy,xt,yt,qt,x,y,q,c in rows:
         line = f'{pchip} {multi} {out} {policy} {len(x)} {len(q)} {c}'
@@ -162,7 +168,9 @@ def main():
     actual = result.stdout.splitlines()
     assert len(actual)==len(wanted),(len(actual),len(wanted),result.stderr)
     for i,(got,want) in enumerate(zip(actual,wanted)):
-        assert got==want,(i,rows[i],got,want,result.stderr[:1000])
+        if i < len(regression):
+            assert got == want, ('PCHIP monotonic mixed-path regression', got, want)
+        assert accepted_values(got,want,rows[i][2],selected),(i,rows[i],got,want,result.stderr[:1000])
     print(f'{len(rows)} independent Fraction linear/PCHIP cases passed ({selected})')
 
 

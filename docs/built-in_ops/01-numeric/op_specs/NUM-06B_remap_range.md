@@ -18,6 +18,12 @@ repository_commit: current working tree
 
 # NUM-06B: remap_range
 
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
+
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
@@ -35,10 +41,11 @@ increasing, decreasing or equal. Mathematical formula for finite inputs is
     target_lower + (input-source_lower) *
         (target_upper-target_lower) / (source_upper-source_lower)
 
-All five operands are read and validated for each requested coordinate. Inherit
-[binary execution conventions](NUM-05_binary_contract.md), extending exact Data
-support Q and validation/invalidation to all five ports. No unrequested bounds
-are checked. The common three independent CPU profiles apply.
+All five complete operands are read and validated for every nonempty request.
+Inherit [binary execution conventions](NUM-05_binary_contract.md), extending
+Whole support and invalidation to all five ports. Invalid bounds outside a
+consumer projection also fail the invocation with Run scope and no Atom key.
+Empty reads no payload and invokes no callback. The common three independent CPU profiles apply.
 
 ## Numerical and validation rules
 
@@ -50,7 +57,7 @@ preserved; map infinities according to the sign of the exact slope. A constant
 target interval maps non-NaN infinities to the target constant.
 
 For ordinary finite inputs, correctly round the entire exact rational formula
-directly to output dtype once. All three CPU profiles are bitwise equivalent;
+directly to output dtype once. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound;
 intermediate rounded subtraction/multiplication/division does not define the
 operation. Mathematical output overflow yields the correctly signed infinity
 as a successful numeric result; gradual underflow preserves the result sign.
@@ -76,21 +83,35 @@ and constant targets, exact endpoints, signed zeros, infinities and NaN payloads
 invalid bounds concurrent with input NaN, near-equal source bounds, output
 overflow/subnormals and representable results with overflowing naive differences.
 Use an independent exact rational oracle with direct Float32/Float64 rounding;
-verify all CPU profiles bitwise. Execute shared disjoint support, validation,
+verify strict bits and accelerated final FP32-scaled accuracy. Execute shared disjoint support, validation,
 invalidation, owner/cache, budget/cancellation and public entry-point cases when
-implemented. Output storage covers requested coordinates only, with all actual
-source and result capacities accounted under the shared contract.
+implemented. Output storage covers the complete logical array, then the executor projects
+the consumer coordinates. Account five full input collections, complete output
+and fixed scratch; sparse consumers may require substantially more memory/work.
 
 This remains distinct from `encode_range`. The three versioned keys are
 registered with closed matching-shape/input-dtype inference, pure metadata
 validation and five explicit dynamic inputs.
-Exact rational evaluation, endpoint precedence, invalid-bound diagnostics and
-the public broadcast-to-remap-to-clamp workflow are implemented. Local strict
-and Apple runs passed the 2826-case independent Fraction oracle, endpoint and
-invalid-bound cases, sparse support, resource and cancellation cleanup.
-Ubuntu WSL Clang 18 strict/x86 passed the same 2826-case oracle and public
-workflows on 2026-09-14; the installed public consumer passed. Direct invocation
+Exact rational numerator/denominator construction uses a bounded final hardware
+quotient in accelerated profiles only when its enclosure passes the final-error
+gate; unresolved cases use exact rounding. Whole execution,
+endpoint precedence, invalid-bound diagnostics and
+the public broadcast-to-remap-to-clamp workflow are implemented. Historical pre-Whole local strict/Apple runs passed the 2826-case Fraction
+oracle, endpoint/invalid-bound cases, sparse support and resource cleanup.
+Ubuntu WSL Clang 18 strict/x86 passed the same oracle and pre-Whole workflows
+on 2026-09-14; the installed consumer passed that earlier implementation.
+Neither is evidence for the current Whole execution path. Direct invocation
 also preserved caller floating flags while a negative nonzero exact result
 underflowed to negative zero. Independently reviewed adjacent-value rounding
 checks covered 4198-bit numerators and exact half-way boundaries. This does not
 change the Proposed status of this specification.
+
+## Whole validation
+
+The maintained synchronous callback uses no dependency maps or continuation.
+Per-value numeric counters are N/A. The numerical comparison and rational engine
+are unchanged; Scalar/NEON/AVX2 profile rules remain as specified. The local
+strict/Apple Whole validation passed 2,826 independent Fraction/bit cases per
+profile, public composition and error/layout/typed/cache/resource checks.
+See [NUM-06 Whole measurements](../range-whole.md) for commands, memory costs,
+public/core timings and profiler scope. This does not change Proposed status.

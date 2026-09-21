@@ -1,9 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
 
+#include "01-numeric/accelerated_curve.hpp"
 #include "01-numeric/exact_product.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -96,6 +98,22 @@ class ExactCurve final {
           slots_[a].negative != slots_[b].negative && !zero(out);
     }
     return out;
+  }
+  bool collinear(const std::array<unsigned, 3>& h,
+                 const std::array<unsigned, 3>& dy, unsigned count) {
+    // Equal exact secants make every selected PCHIP slope the same secant.
+    // Cross products retain information lost by rounded floating division.
+    for (unsigned i = 1; i + 1 < count; ++i) {
+      const auto saved = used_;
+      const auto a = multiply(dy[0], h[i]), b = multiply(dy[i], h[0]);
+      const bool equal =
+          status_.ok() && slots_[a].negative == slots_[b].negative &&
+          ratio_.compare(slots_[a].magnitude, slots_[b].magnitude) == 0;
+      used_ = saved;
+      if (!equal)
+        return false;
+    }
+    return true;
   }
   Rational slope(unsigned node, unsigned first, unsigned knots,
                  const std::array<unsigned, 3>& h,
@@ -221,7 +239,8 @@ class ExactCurve final {
       unsigned segment, int selected, std::uint64_t query,
       const std::array<std::uint64_t, 4>& x,
       const std::array<std::uint64_t, 4>& y, bool narrow,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const std::function<Status(std::uint64_t)>& consume,
+      const std::function<Status()>& strict_fallback = {}) {
     used_ = 0;
     status_ = Status::success();
     consume_ = &consume;
@@ -229,6 +248,39 @@ class ExactCurve final {
       const std::function<Status(std::uint64_t)>*& callback;
       ~End() { callback = nullptr; }
     } end{consume_};
+    if (selected < 0 && narrow && ratio_.profile != SequenceProfile::Strict) {
+      auto work = consume(512);
+      if (!work.ok())
+        return Result<std::uint64_t>(work);
+      input_internal::Float32Environment environment;
+      if (environment.active()) {
+        auto fast = accelerated_curve(pchip, knots, first, count, segment,
+                                      numeric_double(query), x, y);
+        if (fast) {
+          const auto j = segment - first;
+          double candidate = fast->value;
+          if (numeric_double(query) >= numeric_double(x[j]) &&
+              numeric_double(query) <= numeric_double(x[j + 1]))
+            candidate = std::clamp(
+                candidate,
+                std::min(numeric_double(y[j]), numeric_double(y[j + 1])),
+                std::max(numeric_double(y[j]), numeric_double(y[j + 1])));
+          // A per-value tolerance does not prove cross-query monotonicity.
+          // Publish only a uniquely rounded enclosure, so mixed fast/strict
+          // evaluation remains the same monotone mathematical mapping.
+          auto bits = fast->bound.accepted(candidate, narrow);
+          if (bits && numeric_bits(fast->bound.low, narrow) ==
+                          numeric_bits(fast->bound.high, narrow))
+            return Result<std::uint64_t>(numeric_bits(fast->bound.low, narrow));
+        }
+      }
+    }
+    if (selected < 0 && ratio_.profile != SequenceProfile::Strict &&
+        strict_fallback) {
+      auto status = strict_fallback();
+      if (!status.ok())
+        return Result<std::uint64_t>(status);
+    }
     if (selected >= 0) {
       const auto value = input(y[0]), one = integer(1);
       return finish(value, one, narrow, y[0] == (UINT64_C(1) << 63));
@@ -247,7 +299,7 @@ class ExactCurve final {
     const bool negative_zero =
         y[j] == (UINT64_C(1) << 63) && y[j + 1] == (UINT64_C(1) << 63);
     const auto d = add(q, xs[j], true), u = add(xs[j + 1], q, true);
-    if (!pchip || knots == 2)
+    if (!pchip || knots == 2 || collinear(h, dy, count))
       return finish(add(multiply(ys[j], u), multiply(ys[j + 1], d)), h[j],
                     narrow, negative_zero);
     if (sign(d) < 0 || sign(u) < 0) {
@@ -272,19 +324,73 @@ class ExactCurve final {
       unsigned segment, int selected, std::uint64_t query,
       const std::array<std::uint64_t, 4>& x,
       const std::array<std::uint64_t, 4>& y, bool narrow,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const std::function<Status(std::uint64_t)>& consume,
+      const std::function<Status()>& strict_fallback = {}) {
     using Answer = Result<std::uint64_t>;
     used_ = 0;
     status_ = Status::success();
     consume_ = &consume;
     struct End {
       const std::function<Status(std::uint64_t)>*& callback;
-      ~End() { callback = nullptr; }
-    } end{consume_};
+      SequenceProfile& profile;
+      SequenceProfile saved;
+      ~End() {
+        callback = nullptr;
+        profile = saved;
+      }
+    } end{consume_, ratio_.profile, ratio_.profile};
+    if (selected < 0 && narrow && ratio_.profile != SequenceProfile::Strict) {
+      input_internal::Float32Environment environment;
+      if (environment.active()) {
+        const auto j = segment - first;
+        double lower = numeric_double(x[j]), upper = numeric_double(x[j + 1]);
+        const double target = numeric_double(query);
+        const bool increasing = numeric_double(y[j + 1]) > numeric_double(y[j]);
+        for (unsigned iteration = 0; iteration < 64; ++iteration) {
+          auto work = consume(512);
+          if (!work.ok())
+            return Answer(work);
+          const double middle = lower + (upper - lower) * .5;
+          if (!std::isfinite(middle))
+            break;
+          auto bits = FastInterval{lower, upper}.accepted(middle, narrow);
+          if (bits &&
+              numeric_bits(lower, narrow) == numeric_bits(upper, narrow))
+            return Answer(numeric_bits(lower, narrow));
+          auto value = accelerated_curve(pchip, knots, first, count, segment,
+                                         middle, x, y);
+          if (!value)
+            break;
+          if (value->bound.high < target) {
+            if (increasing)
+              lower = middle;
+            else
+              upper = middle;
+          } else if (value->bound.low > target) {
+            if (increasing)
+              upper = middle;
+            else
+              lower = middle;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+    if (selected < 0 && ratio_.profile != SequenceProfile::Strict &&
+        strict_fallback) {
+      auto status = strict_fallback();
+      if (!status.ok())
+        return Result<std::uint64_t>(status);
+    }
     if (selected >= 0) {
       const auto value = input(x[0]), one = integer(1);
       return finish(value, one, narrow, x[0] == (UINT64_C(1) << 63));
     }
+    // Exact inverse refinement repeatedly compares wide integers. Preserve
+    // its scalar lexicographic path after a fast attempt cannot certify x.
+    if (pchip)
+      ratio_.profile = SequenceProfile::Strict;
     std::array<unsigned, 4> xs{}, ys{};
     for (unsigned i = 0; i < count; ++i) {
       xs[i] = input(x[i], 1075);
@@ -296,7 +402,7 @@ class ExactCurve final {
       h[i] = add(xs[i + 1], xs[i], true);
       dy[i] = add(ys[i + 1], ys[i], true);
     }
-    if (!pchip || knots == 2) {
+    if (!pchip || knots == 2 || collinear(h, dy, count)) {
       const auto lower = add(ys[j + 1], target, true),
                  upper = add(target, ys[j], true);
       const auto numerator =

@@ -264,3 +264,29 @@ demand 语义；先前的 opaque facet 处理不构成兼容契约。持久 samp
 现有 disk-cache facet allowlist 内；携带资源的结果也跳过可选 sample-only cache。
 Plan 与内存 result cache 没有跨构建反序列化入口。CRV-06 实现完成与其
 Proposed 规范被接受仍是独立状态。
+
+## Package 0.17.0：prepared Whole 执行
+
+0.17.0 修改 OperationInvocation 与 OperationOutputSpecialization 的公开 C++
+布局，消费方必须重新构建，不能复用 0.16 二进制。OperationTraits 15 支持 prepared
+CPU Whole callback、静态 specialization 输入投影和 CPU Whole Atomic tuple。C
+operation ABI 保持 9，C 结构及入口未修改。投影及 tuple 已进入既有规范身份，
+未新增序列化字段或 prepared 指针身份；document 与 framing 版本不变。
+
+### CPU Whole 输入视图
+
+package0.18 / OperationTraits16 扩展 CPU Whole 视图发布。视图输出优先保留
+覆盖完整输入需求的原始 Value、strides、storage 和 resources；不存在单个
+覆盖 Value 时，Auto 可以 collect，`requires_input_views=true` 则在 callback
+之前返回 Domain/Run 的 InvalidArgument/InvalidDomain、ViewUnavailable。
+该字段要求 CPU Whole 的 `preserve_output_views`，排除 GPU/joint/Result，
+并参与编译身份。typed 验证仍覆盖全部有效输入。普通和 structured 执行桥接
+遵循同一规则。
+
+Whole 支持显式输出 payload 上界和按实际分配计费。借用输入 owner 独立计费；
+callback allocator 限制为输出上界加 workspace，分配失败保持 sticky；新返回
+backing 也必须满足输出上界。直接调用已经逐输入提供单个 Value。
+
+C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。
+canonical framing14、document2、C operation ABI9 和 provider ABI1 不变；
+traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。

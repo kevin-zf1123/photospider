@@ -6,12 +6,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-07: three-dimensional LUT application
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM execution baseline](NUM_common_contract.md) for specification/
 registration status, CPU target identity, floating environment, diagnostic provenance,
@@ -91,8 +100,9 @@ hue normalization or nominal-range clipping occurs.
 ## Confirmed precision
 
 Both methods provide strict, accelerated_apple_silicon and accelerated_x86_64
-operation keys. All three versions correctly round the complete interpolation
-formula and are bitwise identical. Compute exact weights from the reconstructed
+operation keys. Strict correctly rounds the complete interpolation reference
+formula; accelerated final results use the shared FP32-scaled bound. The strict
+reference computes exact weights from the reconstructed
 Float64 grid coordinates and actual input values, then correctly round each
 whole weighted sum once at output dtype. Do not use rounded per-axis blends as
 the reference mathematical function.
@@ -200,7 +210,8 @@ rounded dtype conversion. Identity tables, affine transforms, grid vertices,
 faces/edges, split-plane ties, all six tetrahedra, all axis directions, unequal
 axis extents, mixed dtypes and each supported model/description pair are required.
 Use finite signed/HDR values and large opposite values to expose premature
-rounding/overflow. Every CPU version matches the method's strict result bitwise;
+rounding/overflow. Strict matches the method reference bitwise; accelerated uses the shared
+FP32-scaled final-result bound;
 trilinear and tetrahedral are not required to match each other.
 
 For axis rows [0,1,1] and a 2x2x2 table at binary vertices (r,g,b), store

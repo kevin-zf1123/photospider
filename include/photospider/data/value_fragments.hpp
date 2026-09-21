@@ -82,6 +82,9 @@ class PHOTOSPIDER_API ValueFragments final {
   /** @brief Collects a complete authorized rectangle into host-allocated bytes.
    * @note Missing coverage fails before allocation; no hole filling. Copies
    * samples in logical order and observes cancellation before publication.
+   * A packed rectangle from one fragment uses bounded bulk copies; general
+   * layouts use checked sample reads. Both retain logical-sample work limits,
+   * fresh allocator-owned storage, facets and resource owners.
    */
   Result<Value> collect(const Region& region, const BufferAllocator& allocator,
                         const FootprintLimits& limits = {}) const;

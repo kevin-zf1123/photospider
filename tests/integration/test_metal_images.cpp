@@ -69,7 +69,10 @@ void check_native_alignment(const std::shared_ptr<ps::OperationRegistry>& base,
       registry
           ->register_operation({"image.opacity", traits,
                                 [base](const ps::OperationInvocation& call) {
-                                  return base->invoke("image.opacity", call);
+                                  auto forwarded = call;
+                                  forwarded.prepared.reset();
+                                  return base->invoke("image.opacity",
+                                                      forwarded);
                                 }})
           .ok(),
       "opacity registration");

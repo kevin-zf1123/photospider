@@ -5,6 +5,48 @@ from the default build and have no CTest registration. The category's
 [implementation table](../../docs/built-in_ops/01-numeric/implementation.md)
 records the completed families and delivery validation.
 
+## Accelerated FP32 quality and performance
+
+The accelerated floating contract is a final-output bound of 4 FP32 ULP.
+Float64 outputs retain Float64 storage and are checked directly against the
+FP32-scaled absolute bound. Strict results, special values and discrete results
+remain exact; zero, FP32 subnormal range and wider references use strict.
+`accuracy_oracle.py` implements this independent acceptance rule without narrowing
+Float64 errors. Curve monotonicity additionally requires unique final rounding.
+See [the contract](../../docs/built-in_ops/01-numeric/op_specs/NUM_accelerated_contract.md)
+and [current implementation and measurements](../../docs/built-in_ops/01-numeric/op_specs/NUM_accelerated_contract.md#current-implementation).
+
+```sh
+cmake --build build/numeric --target photospider_numeric_expression photospider_numeric_unary photospider_numeric_binary photospider_numeric_category_benchmark photospider_numeric_inventory -j 6
+build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
+python3 examples/numeric_workflow/expression_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
+build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_quick
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple extended
+build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple legacy
+build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_wide
+python3 examples/numeric_workflow/cost_inventory.py build/numeric/examples/numeric_workflow/photospider_numeric_inventory
+```
+
+Use `x86` on AVX2/FMA hosts and `strict` for exact references. Benchmark drivers
+perform one warmup and seven measured runs, reporting median and maximum; plan
+compilation and input freeze are outside timing. Cache is disabled and one host
+worker is used. The expression quick benchmark retains N=65536 Whole and sparse
+queries. Its public checks include nonlinear Whole/ROI/tail equality and resource
+failure cleanup. The ordering workflow includes non-last-axis and disjoint-box
+line reuse under a fixed work budget. `extended` covers the remaining 49 modern
+basenames, and `legacy` covers 20 legacy value keys plus four individually timed
+Result callbacks within the bake workflow. Source-support counts are unique
+certified elements, not internal read-call counts. Callback times and whole
+execution times remain separately labeled.
+
+For the internal math layer only, build/run `photospider_numeric_math_benchmark
+apple`; this in-tree developer target uses private headers. The other benchmark
+and correctness workflows use the public API. `signal_benchmark apple invert`
+or `signal_benchmark apple lowpass_uniform_` filters a hotspot without changing
+its workload or timing protocol. Optional category argument 3 filters operation
+names within `basic`/`extended` modes.
+
 ## ColorArray facilities
 
 `photospider/data/color_array.hpp` supplies a separate `ColorArrayDescriptor`,
@@ -142,7 +184,8 @@ python3 examples/numeric_workflow/rgb_ramp_oracle.py \
 Use `apple` or `x86` only on the matching processor. Global stops are validated
 before queries; only selected complete color rows are read. Rational hue inputs
 keep original Int64 numerator/positive denominator until final rounding, with no
-angle wrapping. All non-RGB profiles promise the same correctly rounded bits.
+angle wrapping. Current non-RGB implementations return strict bits; accelerated arithmetic
+permits the shared final FP32-scaled bound.
 RGB profiles currently use exact algebraic/direct paths and certified whole
 transfer enclosures with profile-specific integer comparisons. They produce the
 strict bits, within the accelerated four-ULP contract; alpha and failure
@@ -232,12 +275,15 @@ with `dtype="int64"`. The authoring default is Float64, except two Int64 arange
 inputs default to Int64. Integer/floating kinds cannot be mixed implicitly.
 
 Named outputs are `values[count]` and `axis[3]`; axis uses Float64 for floating
-sequences and Int64 for integer sequences. Outputs have empty facets. Values
-have exact per-index dependencies. The complete axis tuple is one observation,
-including when the caller selects one component. Unselected endpoints are not
-read, and count=1 ignores the second input entirely. Arithmetic failures affect
-only the requested observation. Diagnostic records expose actual profile,
-implementation/compiler identity, evaluated values and fallback counters.
+sequences and Int64 for integer sequences. Both selected outputs execute Whole,
+collecting all active scalars and materializing the full output before consumer
+projection. count=1 excludes the second input; count>1 requires it even for an
+endpoint request. An overflow anywhere fails that values request with Run scope.
+Axis retains its independent tuple identity and does not evaluate values.
+Any active input edit invalidates the full selected output. Partial values retain
+count*sizeof(dtype) owned bytes, plus bounded scratch. Empty reads no payload.
+Whole numeric per-atom counters are unavailable.
+[Whole validation and timing](../../docs/built-in_ops/01-numeric/sequences-whole.md).
 
 From the repository root, using Clang:
 
@@ -257,7 +303,7 @@ Expected results include `linspace(0,1,5)` values `[0,.25,.5,.75,1]`, axis
 `[0,1,.25]`, and Int64 `arange(3,-2,4)` values `[3,1,-1,-3]`, axis `[3,-3,-2]`.
 The executable checks exact bytes, extreme cancellation, direct Float32
 rounding, signed zeros, unused failing producers, independent axis overflow,
-static errors, tuple certificates, cancellation, cache dependencies, bounded
+static errors, tuple projection, in-arithmetic cancellation, cache dependencies, bounded
 resource failures, strided input and result-owner lifetime. It also checks
 restoration of the caller's floating environment. `sequence_oracle.py` computes
 rational formulas and IEEE rounding independently and checks 960 workflow cases.
@@ -328,9 +374,9 @@ python3 examples/numeric_workflow/expression_oracle.py \
 Use `apple` or `x86` only on that CPU target. The oracle requires MPFR 4.2+
 through the library selection described under NUM-04. The example passes
 explicit work budgets to `execute_fragments`; complex expressions and large
-requests can exhaust a smaller budget. Ordinary accelerated transcendental
-operations currently use the strict certified backend and report per-function
-fallbacks. Unresolved bounded refinement returns ResourceExhausted.
+requests can exhaust a smaller budget. Accelerated expressions propagate strict RN64 reference enclosures across
+four-sample batches using admitted SLEEF binary64 kernels. Only rejected samples
+replay strict evaluation; Whole per-atom counters are unavailable. Unresolved bounded refinement returns ResourceExhausted.
 
 The public `OperationDefinition::prepare_static` facility parses immutable
 programs once per compiler node. Semantic nodes, optimized nodes and plan steps
@@ -339,27 +385,27 @@ Direct callers can pass an explicit matching prepared handle; absent a handle,
 preflight prepares once per call, including a compatible joint request. There
 is no global preparation cache. Static source/program storage uses ordinary
 host allocations outside runtime managed-scratch admission, with operation
-size bounds and no separately enforced preparation budget. Runtime continuations
-and mathematical scratch remain admitted and metered. Package 0.15 requires
-C++ consumers to rebuild; C operation ABI 9 is unchanged.
+size bounds and no separately enforced preparation budget. Runtime mathematical
+scratch is admitted and metered. Package 0.17/traits15 requires C++ consumers to
+rebuild; C operation ABI9 remains. Whole callbacks receive the owning prepared
+handle and reuse the compiled AST.
 
-`prepared.cpp` is the editable public registration/session example. It checks
-preparation counts, metadata/parameter-bit identity, foreign-handle rejection,
-program/definition lifetime and diagnostic merge behavior. `expression.cpp`
-also checks unused failing producers, shared-scalar reads, sparse/dirty/cache
-behavior, precise failure spans, strided inputs/fenv, isolated Atom failures,
-multi-box cancellation and controlled metadata-exhaustion recovery. Up to 16
-input ports use a two-poll regional path; larger coefficient sets use bounded
-16-port staged reads and may need a larger certificate-box budget, as shown
-by the 24-coefficient fixture. Only requested sample coordinates are evaluated.
+`prepared.cpp` checks preparation reuse, exact seals, static projections, tuple
+metadata, cross-registry rejection and owner lifetime. `expression.cpp` checks
+independent numerical results, count=1 end exclusion, axis coefficient exclusion,
+cache/dirty behavior, exact failure spans, strided inputs/fenv, Whole failure
+release, admitted arithmetic cancellation and output/scratch/work budgets.
+All active scalars are collected once and all N values are evaluated before
+projection. Any values failure has Run scope; positive-only `ln(x)` ROI fails
+if another coordinate in the domain is zero. Partial output owns count*4/8
+bytes plus scratch. Axis remains a separate three-component tuple.
 
 For native timing, run `photospider_numeric_expression strict benchmark` or
 `apple benchmark`. This takes several minutes: `exp(x)` over 1048576 points
 is evaluated three times. CSV records `2*x+1` and `exp(x)` at N=256, 65536,
 1048576 with Whole and three-point ROI, Float64, one worker, cache off, median
-and maximum elapsed microseconds, peak controlled payload, poll/evaluation/math
-counts and fallbacks. Compile/freeze precede timing; synchronous execution and
-result assembly are timed. Seven independent checkpoints and diagnostics are
+and maximum elapsed microseconds, peak controlled payload, invocations and unavailable per-atom numeric counters. Compile/freeze precede timing; synchronous execution and
+result assembly are timed. Seven independent checkpoints and callback count are
 checked. `scalar_support` counts unique input coordinates, not actual producer
 invocations. WSL supplies correctness checks only. Actual results and limits
 are in [the implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#num-01-expression-and-preparation).
@@ -383,8 +429,7 @@ build/numeric/examples/numeric_workflow/photospider_numeric_mappings
 
 The executable checks a `[1048576,1048576]` constant view backed by one 8-byte
 Int64 scalar, a `[3]` to `[2,3,4]` broadcast backed by three Int64 samples, a
-`[274877906944,3]` broadcast view with exact sparse support and dirty
-replication, dense packing, resource bounds, structured consumption and owner
+`[274877906944,3]` broadcast view with complete source support and Whole invalidation, dense packing, resource bounds, structured consumption and owner
 lifetime. Expected output includes `stored_bytes=8`, `last=7`, and
 `3 source samples, exact view/dirty/support passed`. The mappings executable
 compares compact mapped certificates to explicit rows and reports
@@ -406,16 +451,20 @@ The `arrays.cpp` `structured_views()` function is the runnable example: it
 registers `manual.structured_last`, composes it after the giant broadcast, and
 checks the named result is an 8-byte view with `last=7`. These executables are
 manual targets only; they have no CTest or integration-test registration. WSL
-runs use Clang for numerical correctness only. On 2026-09-14, local AppleClang 21
-strict/Apple and Ubuntu WSL Clang 18 strict/x86 runs passed, as did the local
-installed consumer. Additional checked outputs cover all UInt8 values, IEEE bit
-patterns, negative unaligned permutation, typed validation, separate owners,
-Empty, cancellation, StageLimit and exact cache updates. No performance claim is
-inferred from these runs.
+runs use Clang for numerical correctness only. The 2026-09-14 Apple/WSL and
+installed-consumer results describe the pre-Whole implementation. This migration
+was validated locally on strict and Apple profiles: UInt8/IEEE bits, negative
+unaligned permutation, full typed validation, multi-owner View rejection/Dense
+collect, Empty, active-copy cancellation, capacity/work limits and Whole cache
+invalidation. No new WSL result is claimed.
 
-Dense array implementations use 32-byte memcpy, NEON or AVX2 blocks and exact
-byte tails. Diagnostics identify `memcpy32`, `NEON-copy32` or `AVX2-copy32` plus
-build and host identity. View diagnostics identify scalar copy or owner retention.
+All six formal keys execute Whole. Constant View owns one scalar copy; broadcast
+View keeps one complete source owner and rejects multiple-owner inputs. Dense
+requests materialize the complete target before projection. Active source edits
+invalidate the whole output. Constant Dense grows a repeated prefix and copies
+at most 64 KiB between cancellation polls; broadcast keeps the Scalar/NEON/AVX2
+32-byte gather-copy blocks and exact tails. Whole numeric counters are N/A.
+[Current validation and timing](../../docs/built-in_ops/01-numeric/arrays-whole.md).
 `array_owner_and_payload_cache()` checks oversized source release, changed NaN
 payloads in a warm constant cache and final release of borrowed broadcast storage.
 
@@ -435,16 +484,22 @@ python3 examples/numeric_workflow/range_oracle.py \
 Use `_accelerated_apple_silicon` on Apple Silicon or `_accelerated_x86_64` on
 x86-64. The composition expects
 `remap=[0,127.5,255,510]` followed by
-`clamp=[0,127.5,255,255]`. The workflow also checks per-atom `InvalidBounds`,
-exact sparse support and dirty mapping, required reads of all five remap
-operands, upstream endpoint failure, WorkLimit and mid-refinement cancellation
-cleanup. `range_oracle.py` uses raw IEEE decoding and exact rational arithmetic;
-local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86 each passed
-2826 cases on 2026-09-14. The installed consumer also passed. Other checks cover
-typed validation, dynamic-bound cache changes, caller floating flags,
-negative/zero/unaligned strides and packed global ROI origins.
-These are manual targets without CTest or
-integration-test registration, and no performance result is claimed.
+`clamp=[0,127.5,255,255]`. Both formal profile families use synchronous Whole
+execution: all inputs are collected and validated for any nonempty request,
+including bounds outside the consumer projection. Any input edit invalidates
+all observed outputs. InvalidBounds preserves port, bits and global coordinate,
+with Run scope and no Atom key. Empty skips payload and callback.
+
+The workflow checks Whole errors/support/dirty, required five-port reads even
+at endpoints, typed validation, warm-cache bound changes, caller fenv,
+negative/zero/unaligned strides, shifted origins, singleton axes, 65-element
+Float32 tails and global consumer projection. Complete output plus input
+collections and scratch consume memory even for sparse requests. Work/payload/
+scratch failure and cancellation after arithmetic starts release unpublished
+storage. Per-value numeric diagnostics are N/A. The independent Fraction oracle
+passes 2,826 strict and Apple cases on the current Whole path.
+See [NUM-06 measurements](../../docs/built-in_ops/01-numeric/range-whole.md).
+These are manual targets without CTest or integration registration.
 
 ## Interpolation: NUM-08
 
@@ -463,20 +518,23 @@ python3 examples/numeric_workflow/interpolation_oracle.py \
 Use `_accelerated_apple_silicon` on Apple Silicon or `_accelerated_x86_64` on
 x86-64. The workflow expects
 `smoothstep=[0,0,.15625,.5,.84375,1,1]` and
-`mix=[10,10,11.5625,15,18.4375,20,20]`, and checks staged factor control,
-selected branch Data and typed-validation closure. It also checks exact sparse
-support, factor-cache branch replacement, invalid-factor/edge atom isolation,
-layout and ROI behavior, empty demand, sNaN caller fenv preservation, WorkLimit
-and cancellation cleanup. `interpolation_oracle.py` uses raw IEEE decoding,
-`Fraction` and direct destination rounding.
+`mix=[10,10,11.5625,15,18.4375,20,20]`. Both families now use synchronous
+Whole execution. Nonempty requests collect and typed-validate all three inputs,
+including unselected mix endpoints, then allocate complete packed output for
+consumer projection. Input collection/typed failure may precede invalid factor
+checking. Invalid factors or edges anywhere fail with Run scope and no Atom key;
+Empty invokes no callback. Mix endpoint raw copies and smoothstep edge/NaN
+priority remain unchanged. All input edits invalidate all observed outputs.
 
-Local strict and Apple profile runs passed 5242 oracle cases per profile and
-the complete manual workflow. Ubuntu WSL Clang strict/x86 passed the same
-5242 cases per profile and manual checks; the installed consumer passed locally. The smoothstep implementation uses a bounded 104-limb
-(6656-bit) exact cubic workspace with scalar `u128` multiplication and
-NEON/AVX2 comparison helpers. Diagnostics describe the selected profile and
-implementation; no performance result is claimed. This executable is a manual
-target without CTest or integration-test registration.
+The manual workflow checks eager source/typed failure, full support/dirty,
+unselected endpoint cache invalidation, layouts/unaligned origins/65-element
+tails, Empty, sNaN/fenv, and work/output/scratch/cancellation cleanup. Current
+strict/Apple Whole runs pass 5,244 independent IEEE/Fraction oracle cases per
+profile. Exact cubic/linear arithmetic and profile-specific comparison facilities
+remain unchanged. Per-value diagnostics are N/A. Historical WSL/installed-consumer
+checks were pre-Whole. See [NUM-08 measurements](../../docs/built-in_ops/01-numeric/interpolation-whole.md)
+for current execution, budgets and performance. The manual target has no CTest
+or integration registration.
 
 ## Layout transforms: NUM-09
 
@@ -502,154 +560,76 @@ suffixes. On an unsupported host the selected accelerated profile returns
 `slice: [4,2,0], exact support/dirty, full-domain validation and ignored
 singleton step passed`.
 
-The example demonstrates that direct bindings are whole dense values, while a
-public transpose node can create the physically strided intermediate used to
-test per-request view proof, `auto` fallback and explicit `ViewUnavailable`.
-Slice uses dynamic Int64[rank] `starts` and `steps`; a singleton `counts` axis
-does not read its step. `layout_oracle.py` checks integer flatten/unflatten and
-raw bit preservation across reshape, transpose and slice. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed 636 oracle cases per profile and the public examples. The
-installed consumer passed. Additional checks cover unaligned/negative/zero
-strides, shared and independent owners, typed Validation, schema/Empty,
-WorkLimit/cancellation, dense capacity admission and final publication-owner
-release. A constant view composed with transpose returns a 64x64 array of 7
-while retaining an 8-byte payload under a 4096-byte execution budget. The
-three layout operations are `cacheable=false` because the current content cache
-does not witness physical owner/stride partitions; pure and active-run sharing
-remain independent. These are manual targets without CTest or
-integration-test registration, and no performance result is claimed.
+All nine formal keys use CPU Whole. Any nonempty demand reads active inputs and
+publishes the complete output before projection. View requires one complete
+affine owner; compatible same-owner fragments may join. Multiple owners fail
+View, while Auto/Dense may collect. Dense requires full output memory. Singleton
+slice axes ignore their step numerically; the entire step port is excluded only
+when all counts are one. The manual checks raw bits, complete affine address
+maps, invalid controls/typed data, owner lifetime, cancellation and budgets.
+See [NUM-09 Whole execution](../../docs/built-in_ops/01-numeric/layouts-whole.md)
+for current commands, validation, performance and older-platform boundaries.
 
 ## Indexing and scatter: NUM-10
 
-`photospider_numeric_indexing` exercises the eighteen `array.*` keys through
-the public helpers in `photospider/numeric/indexing.hpp`: `concatenate_node`,
-`gather_node`, `scatter_replace_node`, `scatter_sum_node`,
-`scatter_minimum_node` and `scatter_maximum_node`. Build and run with Clang:
+All eighteen formal profile keys use Whole through the public helpers in
+`photospider/numeric/indexing.hpp`. Complete inputs are read/validated, including
+unselected concatenate ports and overwritten scatter values. Numerical selection
+and exact contributor order remain unchanged. Dense owns the complete output;
+concatenate View requires one compatible affine owner across every input.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_indexing -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_indexing strict
-python3 examples/numeric_workflow/index_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+cmake --build build/clang21-numeric --target photospider_numeric_indexing -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+python3 examples/numeric_workflow/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
 ```
 
-The executable accepts `strict`, `apple` and `x86`; these select the profile
-and are not operation-key suffixes. The basic fixtures include concatenate
-`[[1,2],[3,4]] + [[5],[6]] -> [[1,2,5],[3,4,6]]`, gather
-`[[10,11,12],[20,21,22]]` with indices `[2,0,2]` ->
-`[[12,10,12],[22,20,22]]`, scatter replace `[10,3,4]`, scatter sum
-`[10,25,34]`, scatter minimum `[10,2,4]`, and scatter maximum
-`[10,23,34]` for the documented duplicate-target fixtures.
-
-The manual workflow also checks exact disjoint support, static dependency piece
-translation, duplicate contributor grouping, global index validation, raw and
-quiet NaN behavior, signed zeros, negative/zero/unaligned strides, changed
-index cache witnesses, typed validation, diagnostics, fenv, WorkLimit, state
-limits and cancellation cleanup. `index_oracle.py` independently checks
-integer coordinate mapping, contributor selection and Fraction aggregate
-results. On 2026-09-14, local AppleClang 21 strict/Apple and Ubuntu WSL Clang 18
-strict/AVX2 passed all manual checks and 3858 oracle cases per profile. The
-installed public consumer and focused compiler/dependency/fragments/resources
-units passed. Diagnostics retain `evaluated=5, copied=4` after the fifth value
-fails; a copy-report WorkLimit stops before the next block is copied. The shared
-static-piece mapping and aggregate math received independent scoped reviews.
-Indexing diagnostics use their own family/algorithm identity plus the selected
-copy path, host, floating-point build flags and complete Clang version string.
-The complete longest report, including vendor version metadata and its trailing
-NUL, is checked against the 256-byte field at compilation.
-These targets have no CTest or integration-test registration; no performance
-result is claimed.
+Use `apple` or `x86` to select an available accelerated profile. Expected fixtures:
+concatenate `[[1,2,5],[3,4,6]]`, gather `[[12,10,12],[22,20,22]]`, scatter
+replace/sum/min/max `[10,3,4]`/`[10,25,34]`/`[10,2,4]`/`[10,23,34]`.
+See [NUM-10 Whole execution](../../docs/built-in_ops/01-numeric/indexing-whole.md)
+for independent oracle, resources, timing and profiling evidence. Earlier WSL
+regional validation is not current Whole validation.
 
 ## Reductions: NUM-11
 
-`photospider_numeric_reductions` exercises the 21 versioned keys through the
-public constructors in `photospider/numeric/reductions.hpp`: sum, minimum,
-maximum, mean, count, variance and standard deviation, each with strict,
-Apple and x86 profile selection. Build and run with Clang:
+The21 formal sum/minimum/maximum/mean/count/variance/std keys use Whole with
+exact group arithmetic. Numeric reducers read all input groups and own complete
+output; unrequested overflow is a Run failure. Count excludes source payload
+and still represents a huge keepdims output with8 bytes.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_reductions -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 examples/numeric_workflow/reduction_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_reductions strict
+cmake --build build/clang21-numeric --target photospider_numeric_reductions -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
+python3 examples/numeric_workflow/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
 ```
 
-The CLI profile arguments are `strict`, `apple` and `x86`; they select the
-profile and are not operation-key suffixes. The basic fixture reduces
-`[[1,2,3],[4,5,6]]` over axis `1` and expects sum `[[6],[15]]`, minimum
-`[[1],[4]]`, maximum `[[3],[6]]`, mean `[[2],[5]]`, count `[[3],[3]]`,
-variance `2/3` and standard deviation `sqrt(2/3)` in the selected output
-dtype. Axes remain as extent-one keepdims dimensions.
-
-The implementation streams value-reading groups through at most 64-value
-windows and uses fixed exact accumulator state. `evaluated_values` counts
-admitted accumulator input attempts; output observation counts are reported as
-`computed_elements`. `reduce_count` reads no numeric samples and can return a
-single 8-byte zero-stride owner for repeated counts. `reduction_oracle.py`
-checks exact Fraction moments, NaN payload conversion and midpoint-square root
-rounding. Local Clang 21 strict and Apple full manual workflows passed,
-including streamed 4096-element groups under a 16 KiB live-payload limit,
-giant 2^40 count with an 8-byte owner and zero producer calls, atom
-support/dirty/overflow isolation, typed validation, Empty, cancellation, ddof,
-strided-NaN and required third-window source-failure-after-NaN checks. Strict
-and Apple installed consumers passed. Ubuntu WSL Clang 18.1.3 strict/x86 full
-manual workflows and the updated 4740-case oracle per profile passed. Scoped
-implementation and arithmetic reviews closed all required findings. These are
-manual targets without CTest or integration-test registration, and no performance
-result is claimed.
+Use `apple` or `x86` for available accelerated profiles. On input[[1,2,3],[4,5,6]],
+axes1 gives sums[6,15], minima[1,4], maxima[3,6], means[2,5], counts[3,3],
+variance[2/3,2/3] and std[sqrt(2/3),sqrt(2/3)] with final destination rounding.
+See [NUM-11 Whole execution](../../docs/built-in_ops/01-numeric/reductions-whole.md)
+for independent validation, full-memory implications and timing evidence.
 
 ## Ordering and quantile: NUM-12
 
-`photospider_numeric_ordering` exercises the six `array.sort_*` and
-`numeric.quantile_*` keys through `photospider/numeric/ordering.hpp` and the
-public `WorkflowDocument` workflow. Build and run the manual target with
-Clang:
+All six formal sort/quantile profile keys use Whole. A selected sort output owns
+its complete values or indices array; the other output is not allocated. Both
+read all source lines. Per-line keys/permutation use16*L metadata element bytes
+plus allocator overhead; exact quantile keeps axis extent1 and excludes q when
+axis length is1. For longer axes, source failures can precede q validation.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_ordering -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_ordering strict
-python3 examples/numeric_workflow/ordering_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_ordering strict
+cmake --build build/clang21-numeric --target photospider_numeric_ordering -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
+python3 examples/numeric_workflow/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
 ```
 
-The executable accepts `strict`, `apple` and `x86` profile arguments. The basic
-fixture expects sort `[3,1,1,2]` to produce values `[1,1,2,3]` and stable indices
-`[1,2,3,0]`; quantile `[0,10,20,30]` at `q=.25` produces `7.5`. Sorting uses
-iterative heapsort on `(numeric key, original index)`, preserving stable ties
-with an 8N-byte permutation and 8-byte zero-stride incoming state. Quantile uses exact UInt128
-rank selection and 4352-bit arithmetic for one final destination rounding.
-Partial output still requires the selected source line.
-
-`sort_node` exposes `values` and Int64 `indices`; `quantile_node` keeps the
-reduced axis at extent one and defaults to Float64. Both take an explicit axis
-and profile. The complete dtype, NaN, dependency and error contracts are beside
-the public helpers and in the category's two operator specifications.
-
-The example enables `ExecutionContextConfig::result_cache_bytes=65536` and
-sets an explicit `ExecutionOptions::maximum_dependency_cache_work` budget.
-These settings permit the host to reuse the immutable permutation between
-values and indices while each keeps its own current source evidence. The
-`share_blocks_across_outputs` trait is an opt-in for operation authors; ordinary
-workflow authors use the registered sort helper. Cache-off, exhausted proof work
-and insufficient retention capacity recompute without changing output bits.
-The cache saves sorting work; a hit still checks current source bytes and copies
-an 8N-byte state. There is no once-per-Run or performance guarantee.
-`block_contracts()` demonstrates the new contract entirely through public
-registry/session services, including differing Data/Control certificates.
-
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18.1.3 strict/AVX2 passed
-2072 independent stable-order/Fraction cases per profile, including 4097-element
-lines exercising the high remainder word. The public manual checks independent
-and combined outputs, a 128-element line with differing output dtypes, sparse
-support/dirty mapping, cache-off/proof exhaustion, q/source replacement, skipped
-and required failures, typed closure, Empty, negative strides, fenv flags,
-work/cancellation cleanup and failed-attempt counters. The shared-block probe
-checks scope opt-in, independent Data/Control certificates and changed input
-coordinates/bits. Installed 0.14 consumers passed and an old 0.13 request was
-rejected. Focused compiler/dependency/resources units and scoped implementation,
-arithmetic and block-identity reviews passed. This manual target is excluded
-from the default build and has no CTest/integration-test registration. WSL runs
-establish numerical correctness only; no performance result is claimed.
+Select `apple`/`x86` for available accelerated profiles. Sort[3,1,1,2] yields
+values[1,1,2,3], indices[1,2,3,0]; quantile([0,10,20,30],q=.25)=7.5.
+See [NUM-12 Whole execution](../../docs/built-in_ops/01-numeric/ordering-whole.md)
+for stable/raw-bit oracle, failure/budget validation and performance. The generic
+public block-contract probe remains a separate example; these formal Whole
+operators no longer use staged block sharing.
 
 ## Exact comparisons and select: NUM-07
 
@@ -668,63 +648,43 @@ python3 examples/numeric_workflow/comparison_oracle.py \
 Use `_accelerated_apple_silicon` on Apple Silicon or
 `_accelerated_x86_64` on x86-64. An unsupported host reports
 `BackendUnavailable`. The example expects
-`NUM-07: six predicates; select=[10,2,30] ... passed`, followed by selected
-branch support `{0,2}` and `{1}`, and confirms the `MAX/-MAX` `is_close` result
-is 0 without floating overflow. It separately checks that an invalid
-condition byte 2 fails only atom coordinate 1, while errors from unselected
-branches are not read.
+`NUM-07: six predicates; select=[10,2,30] ... passed`. All 24 formal keys
+use Whole input/output execution. Comparisons and exact-rational `is_close`
+return UInt8; select copies the selected branch bits without quieting sNaN.
+The `MAX/-MAX` `is_close` result remains 0 without floating overflow.
 
-`comparison_oracle.py` decodes raw IEEE values and uses `Fraction` for the
-independent relation and tolerance oracle. The 3760-case set passed on 2026-09-14 under local AppleClang 21 strict/Apple
-and Ubuntu WSL Clang 18 strict/x86, and the installed public consumer passed.
-The composed `less -> select` workflow returns `[1,2,2]`; changing its condition
-and branch bindings updates the exact support and selected values. Other checks
-cover sNaN floating-environment preservation, typed validation, negative/zero
-strides, work/state limits and cancellation cleanup. Select diagnostics
-describe `scalar-condition`, `bit-choice` and an ISA `scratch-store`; they do
-not claim four independent samples per SIMD operation or a performance gain.
-These are manual targets with no CTest or integration-test registration.
+All inputs are collected and typed-validated for nonempty requests. Select's
+unselected branch failures are visible; source/typed failures may precede invalid
+condition checking. Byte 2 anywhere fails the Whole invocation with Run scope.
+Any input edit invalidates all observed outputs. Empty invokes no callback.
+Output memory is complete even for sparse consumers; per-value counters are N/A.
 
-## Prefix scans and integral images: NUM-13
+`comparison_oracle.py` uses raw IEEE relations and Fraction tolerance arithmetic.
+The current strict/Apple Whole runs pass 3,760 cases per profile. Manual checks
+cover selected raw bits, source/typed failure priority, full support/dirty,
+cache changes, 65-lane tails and unaligned/origin/singleton/reversed layouts,
+caller fenv, work/output/scratch budgets and cancellation cleanup. The composed
+`less -> select` still returns `[1,2,2]`. Historical WSL/installed-consumer results
+were for the pre-Whole implementation. See [NUM-07 measurements](../../docs/built-in_ops/01-numeric/comparison-whole.md).
+These are manual targets with no CTest or integration registration.
 
-`photospider_numeric_scans` exercises the six `numeric.prefix_sum_*` and
-`numeric.integral_image_*` keys through the public
-`photospider/numeric/scans.hpp` constructors `prefix_sum_node` and
-`integral_image_node`. Build and run a selected profile with Clang:
+## Prefix sums and integral image: NUM-13
+
+The six formal scan profiles use Whole. Prefix[1,2,3] produces[0,1,3,6];
+integral[[1,2],[3,4]] produces[[0,0,0],[0,1,3],[0,4,10]]. Exact carry survives
+floating output overflow/cancellation. Integral combines exact row prefixes and
+compact column carries; rounded outputs never become arithmetic state.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_scans -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_scans strict
-python3 examples/numeric_workflow/scan_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_scans strict
+cmake --build build/clang21-numeric --target photospider_numeric_scans -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
+python3 examples/numeric_workflow/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
 ```
 
-The executable accepts `strict`, `apple` and `x86` profile arguments. The
-basic output checks the prefix fixture `[1,2,3] -> [0,1,3,6]` and the integral
-fixture `[[1,2],[3,4]] -> [[0,0,0],[0,1,3],[0,4,10]]`. The public constructors
-can be placed in one `WorkflowDocument` with downstream numeric consumers;
-their inputs preserve the existing array dtype, shape and axis contracts.
-
-Each exact source sum is snapshotted before final conversion. Regional prefix
-work is grouped by line and increasing boundary, with at most 64 source
-elements per window; integral requests charge repeated rectangle work. A regional
-invocation scans a source line once, while separate observations submitted via
-`execute_atoms` may recompute it. There are no persistent scan checkpoints.
-The output plan and per-observation association rows are accounted. Every
-Need stage enumerates `Q`; dense same-line boundaries can require quadratic
-association work, although numeric source values are scanned once. Resource
-and stage limits may reject large requests. These details are implementation facts and
-do not add a once-per-Run or performance guarantee.
-
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed the
-manual fixtures and 2,280 independent exact oracle cases per profile. The
-manual target also checks sparse/L-shaped support, integer Atom isolation,
-typed/Empty/zero reads, output cap, negative strides/fenv flags, and sorting
-work/cancellation cleanup. A 4,096-value source is scanned once through 65
-windows for four sparse results within 16 KiB payload, with exact suffix dirty
-support. Installed strict/Apple consumers and the focused compiler unit passed. This target is excluded from the default build and has no
-CTest or integration-test registration; the current NUM-13 specifications
-remain Proposed.
+Use `apple`/`x86` for available accelerated profiles. Nonempty demand reads all
+inputs and owns all output, including zero-boundary projections; integer overflow
+anywhere fails the Run. See [NUM-13 Whole execution](../../docs/built-in_ops/01-numeric/scans-whole.md)
+for independent exact oracle, column memory, resource tests and performance.
 
 ## Exact affine matrix transforms: NUM-14
 
@@ -743,63 +703,161 @@ python3 examples/numeric_workflow/matrix_oracle.py \
 ```
 
 The editable workflow in `matrix.cpp` checks
-`[[1,2],[-1,0]] * [2,3] + [4,5] -> [12,3]`. A sparse output-component request
-reads each selected complete vector, the selected matrix row and its bias;
-shared row/bias transport is deduplicated. Typed Validation remains separate.
-The manual checks exercise result lifetime, cache on/off, exact support/dirty,
-negative strides on all three ports, fenv modes/flags, invalid metadata,
-cancellation and WorkLimit cleanup, and required upstream failure after NaN.
-The independent Fraction/raw-bit oracle includes 2..4 rectangular transforms,
-batches, product overflow/underflow cancellation, rounding midpoints, infinity,
-signed zero and vector-before-matrix-before-bias NaN priority.
+`[[1,2],[-1,0]] * [2,3] + [4,5] -> [12,3]`. Nonempty requests validate all three
+inputs and compute the complete dense output through one Whole callback.
+Partial consumers project that result; any input change invalidates the entire
+observed output. Empty requests skip the callback. Full output storage must fit
+the resource budget.
 
-Use `apple` or `x86` on the corresponding named CPU profile. This manual target
+Manual checks cover result lifetime, cache on/off, Whole support/dirty, direct
+negative/zero strides, unaligned offsets and nonzero logical origins, caller
+fenv modes/flags, metadata and typed validation, WorkLimit/payload exhaustion,
+mid-callback cancellation/release, and required upstream failure after NaN.
+Use `apple` or `x86` for the corresponding named CPU profile. This manual target
 is excluded from the default build and has no CTest/integration registration.
 
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,110
-independent oracle cases per profile and the manual matrix checks. Installed
-strict/Apple consumers, the focused compiler unit and scoped reviews passed.
-WSL measurements support numerical correctness only.
+### Apple Accelerate and SME comparison
+
+The Apple Float32 implementation offers three retained candidates with the same
+unique-RN32 certificate and raw-word exact fallback. Float64 continues to use
+exact arithmetic. The default is Accelerate; select direct SME or the scalar
+control without changing the workflow's `apple` profile:
+
+```sh
+# Reuse the existing build and its compiler; SME was validated with Clang 21.
+cmake -S . -B build/numeric -DPHOTOSPIDER_ENABLE_ACCELERATE=ON \
+  -DPHOTOSPIDER_ENABLE_MATRIX_SME=ON -DPHOTOSPIDER_MATRIX_BACKEND=SME
+cmake --build build/numeric --target photospider_numeric_matrix \
+  photospider_numeric_matrix_kernel_benchmark -j 8
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple
+python3 examples/numeric_workflow/matrix_oracle.py \
+  build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple
+
+# Public execution: profile benchmark N Cin Cout dtype [cancellation]
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix \
+  apple benchmark 256 4 4 float32
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix \
+  apple benchmark 256 4 4 float32 cancellation
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix \
+  apple benchmark 256 4 4 float64
+
+# Internal arithmetic, separate from public workflow latency; needs BUILD_TESTING.
+# Runs all compiled/available candidates irrespective of the selected backend.
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix_kernel_benchmark
+```
+
+Repeat configuration/build/public commands with
+`-DPHOTOSPIDER_MATRIX_BACKEND=ACCELERATE` or `SCALAR` for matched comparisons.
+Both optional implementations remain compiled when their enable flags are ON.
+SME defaults OFF and requires an Apple arm64 compiler with SME FP64 ACLE support.
+Runtime SME/F64F64 absence selects scalar. Accelerate requires macOS 15+ for
+controlled BLAS threading; older systems use scalar. Metal is independent.
+Accelerate's private implementation may itself use SME; the direct SME candidate
+is an explicitly authored FP64 outer-product kernel.
+
+Public timing emits `dtype,N,Cin,Cout,median_us,max_us,computed,invocations,Whole`.
+The Whole interface has no per-value numerical fallback counters; they are
+unavailable, not measured zeros.
+It uses one worker, cache off, one warmup and seven measured executions (three
+for more than 1,048,576 vectors); compile,
+freeze and exact output checks are excluded. Ordinary inputs are dyadic affine
+transforms with varying vectors. The `cancellation` fixture uses
+`[2^120,1,-2^120,0]`, unit matrix rows and zero bias, with exact output one and
+full exact replay. The internal target measures candidate generation (including
+SME transposition) plus certification and separately measures `ExactDot`.
+It excludes dependency discovery, input reads and publication.
+
+The independent oracle has 1,598 Fraction/raw-bit cases, including all nine
+channel combinations, 63/64/65/129-vector requests, perturbed rounding midpoints
+and finite wide-exponent cancellation. A focused CTest also injects wrong, NaN
+and infinite candidates directly into the certificate. See
+[NUM-14](../../docs/built-in_ops/01-numeric/op_specs/NUM-14_matrix_transform.md)
+for the exact certificate and external-library memory accounting boundaries.
+
+### Matrix measurements on Apple M5
+
+Measured 2026-09-21 on Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3,
+RelWithDebInfo, Metal off, one CPU worker, cache off. Workloads are Float32
+`[side,side,4]` with shared `[4,4]` matrix and `[4]` bias. Every output is checked
+against an analytic dyadic fixture outside the public execution timer.
+
+```sh
+# Shape [128,128,4], default ResourceLimits; one warmup, seven measured runs.
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple grid 128
+# Shape [4096,4096,4], 1 GiB host limit; one warmup, three measured runs.
+build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple grid 4096
+```
+
+The current implementation combines Whole execution, bounded bulk input
+collection and a matrix-specific `8u*A` exact-rounding certificate. The
+128-square result is the median of three round medians in rotated backend
+order; each round uses one warmup and seven measured executions. The 4096-square
+result uses one warmup and three measurements per backend. Compile/freeze,
+input generation and output verification are excluded.
+
+| Candidate | 128x128x4 (ms) | 4096x4096x4 (ms) | 4096 measured range (ms) |
+| --- | ---: | ---: | ---: |
+| Scalar + certificate | 0.705 | 654.921 | 647.193–660.019 |
+| Accelerate + certificate | 0.710 | 610.740 | 599.157–624.316 |
+| Direct SME + certificate | 0.916 | 808.603 | 781.615–817.676 |
+
+The previous Whole implementation (`31d6a3d0`) measured Accelerate 3.961 ms and
+4237.71 ms respectively, so this follow-up improves it by about 5.6x and 6.9x.
+The original per-output dependency path measured 1140.14 ms at 128-square;
+removing its dependency overhead accounted for most of the earlier gain.
+No old dependency 4096 measurement is claimed. Scalar and Accelerate are close
+at 128-square; this limited native comparison is not a universal backend ranking.
+Both hardware candidates remain available, with Accelerate selected by default.
+
+`ValueFragments::collect` now batches a packed single-fragment rectangle into
+64 KiB copies, preserving authorization, fresh allocator-owned output, typed
+facets/resources, logical-sample work limits and cancellation. General strided
+or multi-fragment inputs retain checked sample collection. NUM-14 independently
+bounds its rounded sum by `8u*A`, including endpoint rounding, instead of calling
+`nextafter` repeatedly; uncertain results still use exact raw-word replay.
+
+Managed Metadata peak is 2,944 bytes at both sizes. Large-case Payload peak
+remains 536,882,424 bytes because collection still owns a fresh copy; no memory
+saving from owner reuse is claimed. The large command sets Host to 1 GiB and
+scales the finite collection visit-work limit with component count, retaining
+the default Metadata limit. Default Host capacity is only 256 MiB.
+
+A separate 15-second Instruments recording at 4096-square yielded 11,197
+execution CPU samples: input collection appeared in 0.43%, compared with 59.82%
+before this follow-up. The matrix callback appeared in 85.47%; its certificate
+in 23.77% and candidate generation in 15.50%. These call-stack percentages are
+nested, not additive. No execution sample contained `nextafter` or the old
+DependencyCertificate path. Generic `memmove` remained a 27.15% leaf hotspot;
+its exact call-site split needs disassembly or targeted instrumentation before
+selecting another optimization. Timings above come from unprofiled runs.
+
+Current native validation: strict and all three Apple selections pass 1,598
+independent oracle cases and public/direct Whole fixtures. Seven focused CTests
+(value fragments, matrix certificate, numeric operations, dependency sampling,
+execution demand, resources, compiler), ICC typed/resource propagation,
+formatting/lint and an installed static Apple consumer pass. Independent
+implementation and rounding-proof review has no unresolved blocker/required
+finding. Results do not establish other CPUs, older macOS or other SME vector
+lengths; the new error bound applies only to finite Float32 sources.
 
 ## Discrete derivatives and cumulative integration: NUM-15
 
-`photospider/numeric/calculus.hpp` provides `derivative_1d_node(id, samples,
-step, profile)` and `integrate_1d_node(id, samples, step, initial, profile)`.
-All ports share Float32 or Float64 dtype. Samples are `[N]`, controls `[1]`, and
-output `values[N]` has empty facets. Derivatives require N>=2; integration N>=1.
-Both cap N at 2^40. Step must be finite/nonzero when it is needed; negative step
-is valid. Use explicit graph inputs with these constructors in a WorkflowDocument.
+The six formal calculus profiles use Whole through the public helpers in
+`photospider/numeric/calculus.hpp`. Derivative([0,1,4],step1)=[1,2,3];
+integrate([0,1,2],step1,initial0)=[0,.5,2]. Exact stencils/weighted prefixes,
+source NaN priority and raw initial at output0 are preserved.
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_calculus -j 8
-build/numeric/examples/numeric_workflow/photospider_numeric_calculus strict
-python3 examples/numeric_workflow/calculus_oracle.py \
-  build/numeric/examples/numeric_workflow/photospider_numeric_calculus strict
+cmake --build build/clang21-numeric --target photospider_numeric_calculus -j8
+build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
+python3 examples/numeric_workflow/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
 ```
 
-The executable checks derivative `[0,1,4]`, step `1` -> `[1,2,3]`, and cumulative
-integration `[0,1,2]`, step `1`, initial `0` -> `[0,0.5,2]`. Derivative endpoints
-are one-sided and interiors use a two-point central stencil; the center sample
-is not read for its own interior output. Integration output zero copies initial
-bits including sNaN/-0 without calling step or sample producers. Positive
-outputs validate step first and use an exact weighted prefix plus initial, with
-one final rounding. These formulas are discrete approximations to an underlying
-continuous function, not exact continuous differentiation/integration.
-
-Editable manual checks cover exact support/dirty, invalid-step Atom isolation,
-failing-producer order, all-port strides/fenv, Empty/schema, work/cancellation
-and release. A 4096-value constant signal is read once through 66 windows for
-four sparse integral outputs. Dense requested boundaries can incur quadratic
-association work; resource/stage limits are explicit. Separate calls and
-execute_atoms may repeat scans. There are no persistent checkpoints.
-
-The manual target is excluded from the default build and has no CTest or
-integration registration. Use `apple` or `x86` for the corresponding CPU profile.
-
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 1,810
-independent calculus cases per profile and the manual checks. Installed
-strict/Apple consumers, focused compiler unit and scoped reviews passed.
-WSL is used for numerical correctness, with no performance claim.
+Use `apple`/`x86` for available accelerated profiles. Any N>1 nonempty request
+reads all inputs and owns complete output; source failure may precede step
+validation. N=1 integrate reads only initial. See
+[NUM-15 Whole execution](../../docs/built-in_ops/01-numeric/calculus-whole.md)
+for exact oracle, layout/error/resource validation and public/core performance.
 
 ## Unary mathematics and exact rational pi: NUM-04
 
@@ -814,8 +872,8 @@ followed by output dtype (default Float64) and profile.
 All 66 keys have `values` output with empty facets. Generic arrays retain shape;
 use explicit broadcast/cast operators for adaptation. Most basic transforms
 support all four dtypes; neg excludes UInt8, while roots, reciprocals and
-transcendentals require Float32/64. Integer range failures affect the requested
-Atom. Rational denominators must be positive at every requested coordinate,
+transcendentals require Float32/64. Integer range failures affect the complete Whole invocation.
+Rational denominators must be positive at every logical coordinate,
 including zero numerators. Both rational sources remain dependencies.
 
 ```sh
@@ -844,18 +902,19 @@ Exact rational `p=[0,1,1]`, `q=[1,6,2]` gives sinpi `[0,0.5,1]` and tanpi
 exact supplied float; they never multiply it by a rounded pi first.
 
 The example sets one CPU worker, a 1 MiB controlled-payload limit, and explicit
-512 Mi work units per dependency session / 1024 Mi per Run for mathematical
-refinement. These are finite example budgets, not default or universal success
+512 Mi dependency work / 1024 Mi total execution work units. Callback arithmetic
+uses the worker ResourceBudget; direct budget/cancellation checks use an explicit
+ResourceAllocationScope. These are finite example budgets, not default or universal success
 guarantees. Exact elementary state is small; transcendental state includes a
 fixed 12288-bit limb arena and uses directed precision from 128 through 4096
-fractional bits. Unresolved rounding returns ResourceExhausted. Ordinary
-accelerated transcendental values currently use a reported strict fallback;
-exact special/algebraic paths remain bitwise identical without that fallback.
+fractional bits. Unresolved rounding returns ResourceExhausted. Ordinary accelerated transcendental values use SLEEF binary64 kernels and
+conservative final-error checks in the documented ranges. Rejected candidates
+use strict fallback; special/algebraic paths retain their exact rules.
 See [the mathematical implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md).
 
 Manual checks cover every function's negative strides and fenv modes/flags,
-precise sparse Data/dirty and typed validation, integer/denominator Atom errors,
-upstream failure, fallback counters, work/cancel/capacity cleanup, lifetime,
+full-input support/dirty and typed validation, Whole integer/denominator errors,
+upstream failure, work/cancel/capacity cleanup, lifetime,
 and warm-cache changes to NaN sign/payload. Use `apple` or `x86` only on that
 CPU target. No CTest or integration-test registration is added.
 
@@ -866,9 +925,9 @@ build/numeric/examples/numeric_workflow/photospider_numeric_unary strict benchma
 ```
 
 The CSV reports all functions at N=1 and N=256, Float64, Whole demand, one worker,
-cache off, three repetitions, median/max microseconds and peak controlled payload.
+cache off, seven repetitions, median/max microseconds and peak controlled payload.
 Compilation and freezing occur before timing; synchronous execution and result
-assembly are timed, and result bits/evaluation counts are checked. Ordinary
+assembly are timed, and result bits/computed element counts are checked. Ordinary
 rational timing uses p/q=1/7. Timing is not an accelerated speedup claim; WSL
 runs remain correctness-only.
 
@@ -899,18 +958,18 @@ with expected output `[6,8,10]`. `pow([2,-2,-2],[3,3,.5])` gives
 The corresponding radian angle fixture compares independently rounded pi bits.
 
 All sources are read and validated even for `NaN^0`, `1^NaN`, or NaN-selected
-minimum/maximum. Integer overflow fails only its requested Atom; floating domain
+minimum/maximum. Integer overflow anywhere fails the complete Whole invocation; floating domain
 errors/overflow produce the specified IEEE numeric result. Cache witnesses
 retain both operands even when a changed NaN leaves the result equal to one.
 Pow and angle functions use the NUM-04 bounded interval state and explicit
-work budgets shown in `Fixture::run`; ordinary accelerated transcendental
-results currently report a strict fallback. No universal refinement-success
+work budgets shown in `Fixture::run`; ordinary accelerated power/angle results use bounded SLEEF candidates,
+with strict fallback only when their final enclosure is rejected. No universal refinement-success
 or performance improvement is promised.
 
-The manual executable checks nine public fixtures and precise sparse support,
-UInt8/Int64 overflow isolation, both-port typed validation and failing producers,
+The manual executable checks nine public fixtures and full-input support,
+Whole UInt8/Int64 overflow, both-port typed validation and failing producers,
 independent/all-port negative strides, unaligned/zero-stride storage, caller
-floating environment, fallback/work/cancellation/capacity cleanup, escaped
+floating environment, work/cancellation/capacity cleanup, escaped
 lifetime and cache invalidation through a suppressed NaN. It has no new CTest
 or integration-test registration.
 
@@ -919,6 +978,15 @@ nine-function N=1/256 CSV timing workload. It uses a=2, b=.3, Float64, Whole,
 one worker, cache off and three checked repetitions. Compile/freeze precede the
 timed synchronous execution and result assembly. [Recorded measurements](../../docs/built-in_ops/01-numeric/math-implementation.md#num-05-validation-and-native-timing)
 include the actual validation platforms and resource boundaries.
+
+Nonempty requests collect and validate complete inputs, allocate a complete packed
+output plus one fixed arithmetic workspace, then project to the consumer. Any
+input change invalidates all observed outputs; errors outside the projection still
+fail the invocation with Run scope and no Atom key. Empty invokes no callback.
+Whole numeric fallback/evaluated counters are N/A. The unchanged arithmetic core
+retains exact special cases and each profile's own finite error contract.
+See [Whole migration measurements](../../docs/built-in_ops/01-numeric/point-math-whole.md)
+for old/new public timings, core timings, budgets and profiler evidence.
 
 ## Explicit-query curves: CRV-01
 
@@ -954,10 +1022,12 @@ python3 examples/numeric_workflow/curve_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_curves strict
 ```
 
-Use `apple` or `x86` only on the corresponding CPU. All profiles currently use
-exact rational whole-formula evaluation, including unrounded PCHIP slopes, and
-one final RN-even conversion. Their results agree bitwise; NEON/AVX2 supply
-integer comparison/publication helpers. Exact knot and clamp paths read one y
+Use `apple` or `x86` only on the corresponding CPU. Strict and Float64 outputs use exact rational whole-formula evaluation,
+including unrounded PCHIP slopes, and one final RN-even conversion. Accelerated
+Float32 candidates require uniquely rounded enclosures to preserve monotonicity;
+unresolved cases use exact fallback. Collinear PCHIP stencils use the equivalent
+linear formula after exact cross-product checks. NEON/AVX2 also supply integer
+comparison/publication helpers. Exact knot and clamp paths read one y
 and preserve its signed zero. Other exact zero results are -0 only when both
 selected segment endpoints are -0. Numeric input or actual output must be finite;
 there is no intermediate slope overflow rejection or output clipping.
@@ -1490,17 +1560,17 @@ exhausted solver returns ResourceExhausted without an approximate substitute.
 Four manual groups cover fixtures, global/local failures and dirty support,
 strides/floating environment, schema/Empty, cancellation/resource release,
 cache replacement, public composition, partition equivalence, typed/upstream
-failures and fallback diagnostics. `inverse_oracle.py` checks 404 independent
+failures and fallback diagnostics. `inverse_oracle.py` checks 407 independent
 Fraction cases using normalized Hermite formulas and rational root bisection,
 including both directions/dtypes, mixed input precision, zero endpoint slopes,
 normal/subnormal ties, narrow intervals, large scales and output overflow.
 These executables have no CTest or integration registration.
 
 Validated with native Clang21 Strict/Apple and Ubuntu WSL Clang18 Strict/AVX2:
-all four groups and all 404 oracle cases passed per profile. Installed package
+all four groups and all 407 oracle cases passed per profile. Installed package
 0.16 consumers passed both native profiles. WSL results establish numerical
 correctness, with no performance claim. The shared forward and LUT1D arithmetic
-regressions passed 2484 and 1416 cases per native profile.
+regressions passed 2487 and 1416 cases per native profile.
 
 ## Signal resampling
 

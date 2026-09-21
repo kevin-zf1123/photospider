@@ -12,12 +12,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-11E3: lowpass_uniform_blackman_sinc
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 ## Interface and kernel
 
@@ -64,7 +73,12 @@ zero-aliasing behavior.
 
 ## Maintained implementation and validation
 
-This primitive is registered in the five-kernel uniform low-pass family. Exact taps and certified whole-sum evaluation are used for uniform signals; accelerated keys currently use the strict fallback.
+This primitive is registered in the five-kernel uniform low-pass family.
+Exact tap support precedes numerical evaluation. Accelerated keys cache certified
+coefficient enclosures per continuation and propagate convolution/normalization
+error to the final output gate. Unresolved coefficients or outputs use strict
+whole-sum evaluation, with actual fallback diagnostics. Support and special-value
+shortcuts remain exact.
 Certified precision is bounded to 128..4096 bits; unresolved
 capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed the

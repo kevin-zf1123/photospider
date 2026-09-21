@@ -22,7 +22,7 @@ Status register_numeric_binary(OperationRegistry* registry) {
       auto status =
           registry->register_operation(point_math_operation<ExactElementary>(
               std::string("numeric.") + entry.first + profile.first,
-              entry.first, entry.second, profile.second, 2,
+              entry.second, profile.second, 2,
               entry.second == ElementaryKind::Divide ? 12U : 15U));
       if (!status.ok())
         return status;
@@ -34,7 +34,7 @@ Status register_numeric_binary(OperationRegistry* registry) {
       auto status =
           registry->register_operation(point_math_operation<CertifiedMath>(
               std::string("numeric.") + entry.first + profile.first,
-              entry.first, entry.second, profile.second, 2, 12U));
+              entry.second, profile.second, 2, 12U));
       if (!status.ok())
         return status;
     }

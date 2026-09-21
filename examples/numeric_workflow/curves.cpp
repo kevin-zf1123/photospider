@@ -460,7 +460,7 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       session = take(registry->start_dependency(
           node.operation, request, resources.allocator(),
           [&](std::uint64_t amount) {
-            if (armed && amount == 352 &&
+            if (armed && (amount == 352 || amount == 512) &&
                 session->numeric_diagnostics().evaluated_values == 1) {
               interrupted = true;
               if (cancel)

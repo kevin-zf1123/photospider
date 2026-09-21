@@ -71,7 +71,9 @@ void generator_gain() {
              ++producers;
            else
              ++consumers;
-           return base->invoke(name, call);
+           auto forwarded = call;
+           forwarded.prepared.reset();
+           return base->invoke(name, forwarded);
          }});
     require(status.ok(), status.message);
   }

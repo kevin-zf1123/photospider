@@ -1,14 +1,20 @@
 # 01-numeric implementation work
 
+The current FP32 quality contract, backend, measured results and limitations are
+maintained in the [accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation).
+The inventory driver checks every registered key; reproduction commands are in
+the [workflow README](../../../examples/numeric_workflow/README.md).
+Dated entries below record the original implementation deliveries and their
+validation; current per-operation behavior is maintained in `op_specs`.
+
 Scope: all NUM-01..15 and CRV-01..11 contracts in this directory, based on
 `ops@0c567b6d`, implemented on `ops-impl`. Primitive keys and authoring templates
 retain the distinctions in their individual specifications. Specification
 acceptance and implementation completion remain separate states.
 
 Manual executable acceptance is kept outside CTest and the integration-test
-inventory. Each completed functional cluster receives its own commit. A new
-independent agent performs the final comprehensive review after all items below
-are complete; required fixes precede the branch push.
+inventory. The table preserves the original delivery dates; it is not a current
+commit or publication plan.
 
 | Item | Status | Implementation / acceptance |
 | --- | --- | --- |

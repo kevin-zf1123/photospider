@@ -56,6 +56,19 @@ def cases():
                     for kind in range(20):
                         raw = lambda: rng.choice(pool) if kind < 8 else rng.getrandbits(width)
                         yield dtype, cout, shape, [raw() for _ in range(count)], [raw() for _ in range(cin*cout)], [raw() for _ in range(cout)]
+        # Ordinary mantissas exercise the certified blocks and all nine shapes,
+        # while adjacent block lengths change BLAS dimensions and tail kernels.
+        for cin in (2, 3, 4):
+            for cout in (2, 3, 4):
+                for rows in (63, 64, 65, 129):
+                    raw = lambda: ((bias + rng.randrange(-3, 4)) << fraction) | rng.getrandbits(fraction)
+                    x = [raw() for _ in range(rows * cin)]
+                    matrix = [raw() for _ in range(cin * cout)]
+                    offsets = [raw() for _ in range(cout)]
+                    # One lane forces cancellation and one keeps a source NaN.
+                    x[cin:2*cin] = [one] * cin
+                    x[2*cin] = infinity | 0x42
+                    yield dtype, cout, (rows, cin), x, matrix, offsets
         epsilon_half = (bias-fraction-1) << fraction
         fixed = [([maximum, maximum], [maximum, sign|maximum], one),
                  ([one+1, one], [one-2, sign|one], 0),
@@ -71,6 +84,34 @@ def cases():
                  ([infinity,one], [one,one], sign|infinity)]
         for x,row,b in fixed:
             yield dtype, 2, (2,), x, row+row, [b,b]
+
+    # Finite FP32 adversaries for the matrix-specific rounding certificate.
+    # Midpoints plus/minus the smallest exact product must never be accepted
+    # on an approximate double sum alone, including binade/range boundaries.
+    one, half, sign = 0x3f800000, 0x3f000000, 0x80000000
+    for exponent in (1, 2, 23, 24, 126, 127, 128, 230, 253, 254):
+        e = exponent - 127
+        ulp = ieee_round(Fraction(2) ** (e - 23), 32, False)
+        for mantissa in (0, 1, 0x7ffffe, 0x7fffff):
+            for negative in (0, sign):
+                base = (exponent << 23) | mantissa | negative
+                x = [base, ulp | negative, 1, 0]
+                for perturbation in (1, 1 | sign):
+                    row = [one, half, perturbation, 0]
+                    yield 3, 2, (4,), x, row + row, [0, 0]
+    # Cover wide finite exponent mixtures separately from NaN priority cases.
+    for case in range(256):
+        cin, cout = 2 + case % 3, 2 + (case // 3) % 3
+        finite = lambda: (rng.randrange(2) << 31) | (rng.randrange(255) << 23) | rng.getrandbits(23)
+        x = [finite() for _ in range(8 * cin)]
+        matrix = [finite() for _ in range(cin * cout)]
+        bias = [finite() for _ in range(cout)]
+        if case % 2:
+            for row in range(8):
+                x[row * cin + 1] = x[row * cin]
+            for out in range(cout):
+                matrix[out * cin + 1] = matrix[out * cin] ^ sign
+        yield 3, cout, (8, cin), x, matrix, bias
 
 
 def main():

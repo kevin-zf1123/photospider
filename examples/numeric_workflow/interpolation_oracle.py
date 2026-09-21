@@ -47,6 +47,8 @@ def reference(operation, dtype, bits):
     return f'{result:x}'
 
 
+from accuracy_oracle import accepted
+
 def main():
     rng = random.Random(808)
     rows, expected = [], []
@@ -89,13 +91,18 @@ def main():
         for x in [1,2,half-1,half,half+1,one-1]:
             add('smoothstep',dtype,[x,0,one])
             add('smoothstep',dtype,[x,sign|(inf-1),inf-1])
+    # Near a non-dyadic upper edge, a fast polynomial must retain [0,1].
+    import struct
+    for dtype, fmt, code in ((3, '>d', '>Q'), (4, '>f', '>I')):
+        edge = struct.unpack(code, struct.pack(fmt, 1.3))[0]
+        add('smoothstep', dtype, [edge-1, 0, edge])
     output=subprocess.run([sys.argv[1],sys.argv[2] if len(sys.argv)>2 else '_strict','oracle'],
                           input=''.join(rows),text=True,capture_output=True,check=True)
     actual=output.stdout.splitlines()
     if len(actual)!=len(expected):
         raise AssertionError((len(actual),len(expected),output.stderr))
     for row,want,got in zip(rows,expected,actual):
-        if want!=got:
+        if not accepted(got, want, int(row.split()[1]), "strict" if (len(sys.argv)<3 or sys.argv[2] in ("strict","_strict")) else "accelerated"):
             raise AssertionError((row.strip(),want,got))
     print(f'independent exact interpolation/Fraction oracle: {len(expected)} cases passed')
 

@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "accuracy.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
 
@@ -166,7 +167,7 @@ void fixtures(ps::CpuNumericProfile profile) {
         impulse.run({{"values", region({5}, {ps::Region({{2, 1}})})}}, false));
     std::uint64_t actual = 0;
     require(result.values.at("values").read({2}, &actual, 8).ok() &&
-                actual == expected[kernel],
+                numeric_accuracy(actual, expected[kernel], profile),
             "certified full-kernel impulse fixture");
     for (auto boundary : {ps::numeric::LowpassBoundary::Reflect,
                           ps::numeric::LowpassBoundary::Replicate,

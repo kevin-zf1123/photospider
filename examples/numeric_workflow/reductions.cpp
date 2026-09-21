@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -59,7 +60,7 @@ struct Fixture {
       return ps::Result<ps::DemandResult>(plan.status());
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
-    config.maximum_live_bytes = 65536;
+    config.maximum_live_bytes = 131072;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
     auto snapshot = context.freeze(plan.value().plan, bindings);
@@ -209,8 +210,8 @@ void streaming(ps::CpuNumericProfile profile) {
     source->read = [&](const ps::Region& region, std::uint8_t* data,
                        std::uint64_t bytes, const ps::BufferAllocator&,
                        const ps::CancellationToken&) {
-      require(bytes <= 512 && region.dimensions()[0].offset == next,
-              "bounded ordered source window");
+      require(bytes <= 65536 && region.dimensions()[0].offset == next,
+              "Whole packed input transport");
       ++reads;
       for (std::uint64_t i = 0; i < bytes / 8; ++i) {
         const std::int64_t value = (next + i) % 4;
@@ -224,7 +225,7 @@ void streaming(ps::CpuNumericProfile profile) {
     auto plan = take(ps::Compiler(fixture.registry).compile(graph));
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
-    config.maximum_live_bytes = 16384;
+    config.maximum_live_bytes = 131072;
     ps::ExecutionContext context(fixture.registry, config);
     ps::ExecutionOptions options;
     options.dependencies.maximum_work = 128 * 1024 * 1024;
@@ -239,12 +240,12 @@ void streaming(ps::CpuNumericProfile profile) {
         : operation == "mean"     ? UINT64_C(0x3ff8000000000000)
         : operation == "variance" ? UINT64_C(0x3ff4000000000000)
                                   : UINT64_C(0x3ff1e3779b97f4a8);
-    require(actual == expected && reads == 64 && next == 4096,
+    require(actual == expected && reads == 1 && next == 4096,
             "streamed exact reduction");
-    require(answer.diagnostics.peak_live_bytes <= 16384,
+    require(answer.diagnostics.peak_live_bytes <= 131072,
             "bounded live payload");
   }
-  std::cout << "4096-element streamed groups: 64 windows, payload <=16384 "
+  std::cout << "4096-element Whole groups: complete input, payload <=131072 "
                "bytes passed\n";
 }
 void metadata_count(ps::CpuNumericProfile profile) {
@@ -304,40 +305,26 @@ void atom_isolation(ps::CpuNumericProfile profile) {
   config.cpu_workers = 1;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(fixture.registry, config);
-  auto atoms = take(
-      context.execute_atoms(plan.plan, fixture.bindings,
-                            {{"values", take(ps::Footprint::all({2, 1}))}}));
-  unsigned good = 0, bad = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++good;
-      require(atom.key.coordinate[0] == 0, "successful group key");
-    } else {
-      ++bad;
-      const auto& error = atom.outcome.status();
-      require(atom.key.coordinate[0] == 1 &&
-                  error.reason == ps::FailureReason::ArithmeticOverflow &&
-                  error.detail.origin == ps::FailureOrigin::Domain &&
-                  error.detail.scope == ps::FailureScope::Atom,
-              "overflow isolated to requested group");
-    }
-  }
-  require(good == 1 && bad == 1, "independent reduction group outcomes");
-  auto first =
+  const auto first =
       take(ps::Footprint::from_regions({2, 1}, {ps::Region({{0, 1}, {0, 1}})}));
+  auto failed = fixture.run(first);
+  require(!failed.ok() &&
+              failed.status().reason == ps::FailureReason::ArithmeticOverflow &&
+              failed.status().detail.scope == ps::FailureScope::Run &&
+              !failed.status().detail.atom,
+          "unrequested group overflow fails complete Whole output");
+  fixture.bindings.inputs[0].value =
+      array(ps::ElementType::Int64, {2, 2}, {1, 2, 3, 4});
   auto answer = take(fixture.run(first));
-  auto expected =
-      take(ps::Footprint::from_regions({2, 2}, {ps::Region({{0, 1}, {0, 2}})}));
-  require(take(answer.dependencies.source_support()).at("input") == expected,
-          "selected reduction group support");
-  const auto untouched =
+  require(take(answer.dependencies.source_support()).at("input") ==
+              take(ps::Footprint::all({2, 2})),
+          "Whole reducer full source support");
+  const auto changed =
       take(ps::Footprint::from_regions({2, 2}, {ps::Region({{1, 1}, {0, 2}})}));
-  require(take(answer.dependencies.potential_dirty("input", untouched))
-              .at("values")
-              .empty(),
-          "unrequested group does not invalidate result");
-  std::cout
-      << "sparse group support/dirty and integer overflow isolation passed\n";
+  require(take(answer.dependencies.potential_dirty("input", changed))
+                  .at("values") == first,
+          "any group edit invalidates all recorded observations");
+  std::cout << "Whole group support/dirty and Run overflow passed\n";
 }
 
 void boundaries(ps::CpuNumericProfile profile) {
@@ -351,41 +338,38 @@ void boundaries(ps::CpuNumericProfile profile) {
                                  : ps::ElementType::Float64;
     auto node = authored(operation, ps::ElementType::Float32, destination, {1},
                          0, profile);
-    ps::DependencyRequest request;
-    request.inputs = {{{ps::ElementType::Float32, {1, 2, 4}}, {facet}}};
-    request.parameters = node.parameters;
-    request.snapshot_identity = "reduction-boundaries";
-    request.outputs = take(ps::Footprint::none({1, 1, 4}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty reduction reads nothing");
-    request.outputs = take(ps::Footprint::from_regions(
-        {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
-    auto session = take(registry->start_dependency(node.operation, request));
-    require(session->poll().ok(), "typed reduction first need");
-    unsigned data = 0, validation = 0;
-    for (const auto& need : take(session->pending_reads())) {
-      if (need.roles & 1)
-        data += take(need.samples.element_count());
-      if (need.roles & 4)
-        validation += take(need.samples.element_count());
+    auto raw =
+        array(ps::ElementType::Float32, {1, 2, 4},
+              {0x3f800000, 0, 0, 0x40000000, 0x3f800000, 0, 0, 0x3f800000});
+    auto bad = take(ps::Value::from_storage(
+        raw.descriptor(), raw.region(), raw.layout(), raw.storage(), {facet}));
+    Fixture fixture(node, bad);
+    require(fixture.run(take(ps::Footprint::none({1, 1, 4}))).ok(),
+            "Empty reads no typed input");
+    const std::vector<ps::Value> inputs{bad};
+    const std::vector<ps::Region> demands{bad.region()};
+    ps::OperationInvocation call(inputs, demands, node.parameters,
+                                 ps::Backend::Cpu, {},
+                                 ps::Region::whole({1, 1, 4}));
+    require(
+        registry->invoke(node.operation, call).ok() == (operation == "count"),
+        "Whole typed validation; count excludes all payload");
+    ps::CancellationSource cancelled;
+    cancelled.cancel();
+    ps::OperationInvocation stopped(inputs, demands, node.parameters,
+                                    ps::Backend::Cpu, cancelled.token(),
+                                    ps::Region::whole({1, 1, 4}));
+    require(registry->invoke(node.operation, stopped).status().code ==
+                ps::ErrorCode::Cancelled,
+            "pre-cancelled Whole reducer");
+    if (operation != "count") {
+      auto large = array(ps::ElementType::Float32, {16384},
+                         std::vector<std::uint64_t>(16384, 0x3f800000));
+      auto tested = authored(operation, ps::ElementType::Float32, destination,
+                             {0}, 0, profile);
+      point_math_checks::resources(tested, {large},
+                                   ps::Value::element_size(destination));
     }
-    require(operation == "count" ? !data && !validation
-                                 : data == 2 && validation == 8,
-            "typed closure kept separate from numeric source group");
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    auto cancelled = take(registry->start_dependency(node.operation, request,
-                                                     resources.allocator()));
-    require(cancelled->poll().ok(), "need before cancellation");
-    cancellation.cancel();
-    require(cancelled->poll().status().code == ps::ErrorCode::Cancelled,
-            "cancellation after need");
-    cancelled.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "cancelled accumulator releases payload");
   }
   for (auto ddof : {-1, 2}) {
     auto node = authored("variance", ps::ElementType::Int64,
@@ -420,6 +404,37 @@ void boundaries(ps::CpuNumericProfile profile) {
     require(actual == UINT64_C(0x7ff8000000000011),
             "NaN priority follows logical order across strided windows");
   }
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    const double data[] = {1, 2, 3, 4};
+    auto buffer = take(ps::BufferAllocator{}.allocate(33));
+    std::memcpy(buffer.data() + 1, data, 32);
+    auto input = take(ps::Value::from_storage(
+        {ps::ElementType::Float64, {2, 2}}, ps::Region::whole({2, 2}),
+        {mode == 1 ? 25U : 1U,
+         {mode == 1   ? -16
+          : mode == 2 ? 0
+                      : 16,
+          mode == 1   ? -8
+          : mode == 2 ? 0
+                      : 8}},
+        std::move(buffer).freeze()));
+    auto node = authored("sum", ps::ElementType::Float64,
+                         ps::ElementType::Float64, {1}, 0, profile);
+    const std::vector<ps::Value> inputs{input};
+    const std::vector<ps::Region> demands{input.region()};
+    ps::OperationInvocation call(inputs, demands, node.parameters);
+    auto result = take(registry->invoke(node.operation, call));
+    for (unsigned row = 0; row < 2; ++row) {
+      double actual = 0;
+      std::memcpy(&actual,
+                  result.bytes().data() + take(result.byte_address({row, 0})),
+                  8);
+      require(actual == (mode == 2   ? 2
+                         : mode == 1 ? 7 - 4 * row
+                                     : 3 + 4 * row),
+              "unaligned negative/zero-stride reduction groups");
+    }
+  }
   std::cout << "all seven reducers: typed closure, Empty, cancellation; ddof "
                "preflight and strided NaN priority passed\n";
 }
@@ -438,7 +453,7 @@ void tail_failure(ps::CpuNumericProfile profile) {
                        std::uint64_t bytes, const ps::BufferAllocator&,
                        const ps::CancellationToken&) {
       ++calls;
-      if (region.dimensions()[0].offset == 128)
+      if (region.dimensions()[0].offset + region.dimensions()[0].extent > 128)
         return ps::Result<ps::Region>(ps::Status{ps::ErrorCode::OperationFailed,
                                                  "required tail after NaN"});
       std::memset(data, 0, bytes);
@@ -453,7 +468,7 @@ void tail_failure(ps::CpuNumericProfile profile) {
     auto result = context.execute(plan.plan, fixture.bindings);
     require(!result.ok() &&
                 result.status().message == "required tail after NaN" &&
-                calls == 3,
+                calls == 1,
             "NaN must not suppress required later source failure");
   }
   std::cout

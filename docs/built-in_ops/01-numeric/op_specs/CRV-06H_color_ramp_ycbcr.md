@@ -13,12 +13,21 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-06H: color_ramp_ycbcr
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Directly interpolate the three Y',Cb,Cr components, retaining the same complete
 color description. The description specifies underlying RGB primaries, white,
@@ -67,8 +76,8 @@ alpha. Existing attached colors metadata must match. No matrix default silently
 fills a missing required description. The output retains that complete description.
 
 For each component c, interpolate RN_dtype((1-w)*c0+w*c1), using the exact
-stop-derived w and only one final rounding. All three CPU versions are bitwise
-identical. Hit/clamp/K=1 directly converts the selected row. Direct/identical-row
+stop-derived w and only one final rounding for strict. Accelerated results obey
+the shared final FP32 bound. Hit/clamp/K=1 directly converts the selected row. Direct/identical-row
 paths preserve signed zero; genuine interpolation exact zero is +0; nonzero
 underflow preserves sign. Demanded components and final results must be finite.
 

@@ -1,20 +1,20 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include "00-foundation/multi_output.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/expression_evaluator.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/numeric/expression.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -39,7 +39,6 @@ struct SampleProgram final {
   ExpressionProgram expression;
   std::uint32_t count;
   ElementType dtype;
-  bool regional;
 };
 struct EmptyEvaluator {
   explicit EmptyEvaluator(SequenceProfile) {}
@@ -50,56 +49,13 @@ struct SampleState final {
   SequenceProfile profile;
   std::conditional_t<Values, ExpressionEvaluator, EmptyEvaluator> evaluator;
   ExactSampling sampling;
-  std::array<std::uint64_t, 4> replicas{};
   std::array<std::uint64_t, Values ? 256 : 0> coefficients{};
   std::array<std::uint64_t, 2> endpoints{};
-  std::uint32_t pending_begin = 0, pending_end = 0;
   explicit SampleState(const SampleProgram* prepared, SequenceProfile selected)
       : program(prepared),
         profile(selected),
         evaluator(selected),
-        sampling(selected) {}
-  bool required(std::uint32_t port) const {
-    return port != 1 || program->count > 1;
-  }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied,
-                NumericMathFunction function = NumericMathFunction::Other,
-                bool fallback = false) const {
-    NumericDiagnostics diagnostics;
-    diagnostics.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        diagnostics.implementation.data(), diagnostics.implementation.size(),
-        "photospider.expression/1;RN64-postorder;Q128..4096;integer-ISA%s",
-        numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= diagnostics.implementation.size())
-      return Status{ErrorCode::Internal, "expression identity too long"};
-    diagnostics.evaluated_values = evaluated;
-    diagnostics.copied_elements = copied;
-    if (function != NumericMathFunction::Other) {
-      if (fallback) {
-        diagnostics.strict_fallbacks = 1;
-        const auto reason =
-            static_cast<unsigned>(NumericFallbackReason::FunctionUnsupported);
-        diagnostics.fallback_reasons[reason] = 1;
-        diagnostics
-            .function_fallbacks[static_cast<unsigned>(function)][reason] = 1;
-      } else {
-        diagnostics.strict_math_calls = 1;
-      }
-    }
-    return phase.report_numeric(diagnostics);
-  }
-  Status fail(const DependencyPhase& phase, std::uint64_t index,
-              FailureReason reason, const std::string& message) const {
-    auto status = expression_failure(index, false, 0, reason, message);
-    auto atom = dependency_atom_key(phase.query);
-    if (atom.ok())
-      status.detail.atom = atom.take_value();
-    return status;
-  }
+        sampling(selected, true) {}
   static std::uint64_t widened(std::uint64_t bits, bool narrow) {
     if (!narrow)
       return bits;
@@ -112,62 +68,33 @@ struct SampleState final {
            (static_cast<std::uint64_t>(value.exponent + top + 1023) << 52) |
            ((value.significand << (52 - top)) & UINT64_C(0xfffffffffffff));
   }
-  Result<std::uint64_t> rounded(std::uint64_t a, std::uint64_t b,
-                                std::uint32_t wa, std::uint32_t wb,
-                                std::uint32_t divisor, bool narrow,
-                                bool subtract, const DependencyPhase& phase) {
-    return sampling.weighted(a, b, wa, wb, divisor, narrow, subtract,
-                             phase.consume_work);
+  Result<std::uint64_t> rounded(
+      std::uint64_t a, std::uint64_t b, std::uint32_t wa, std::uint32_t wb,
+      std::uint32_t divisor, bool narrow, bool subtract,
+      const std::function<Status(std::uint64_t)>& consume) {
+    return sampling.weighted(a, b, wa, wb, divisor, narrow, subtract, consume);
   }
-  Result<std::uint64_t> coordinate(std::uint64_t index,
-                                   const DependencyPhase& phase) {
+  Result<std::uint64_t> coordinate(
+      std::uint64_t index,
+      const std::function<Status(std::uint64_t)>& consume) {
     return sampling.coordinate(static_cast<std::uint32_t>(index),
-                               program->count, endpoints, phase.consume_work);
+                               program->count, endpoints, consume);
   }
   static bool equal(std::uint64_t a, std::uint64_t b) {
     return a == b || ((a | b) & UINT64_C(0x7fffffffffffffff)) == 0;
   }
-  Result<DependencyPoll> publish(const DependencyPhase& phase,
-                                 const std::uint64_t* bits, std::size_t count) {
-    using Answer = Result<DependencyPoll>;
-    auto work = phase.consume_work(count);
-    if (!work.ok())
-      return Answer(work);
-    ArrayPublication publication(1, 1);
-    auto allocated =
-        MutableValue::allocate(phase.query.output.descriptor,
-                               phase.query.outputs.boxes()[0], phase.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto writer = allocated.take_value();
-    const auto width =
-        Value::element_size(phase.query.output.descriptor.element_type);
-    for (std::size_t i = 0; i < count; ++i) {
-      select_words(replicas.data(), bits[i], bits[i], 1, profile);
-      std::memcpy(writer.data() + i * width, replicas.data(), width);
-    }
-    auto value = std::move(writer).publish();
-    if (!value.ok())
-      return Answer(value.status());
-    auto retained = publication.retain(value.take_value());
-    if (!retained.ok())
-      return Answer(retained.status());
-    auto owned = retained.take_value();
-    auto result =
-        publication.finish(phase.query.output.descriptor, phase.query.outputs,
-                           &owned, 1, phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
-  }
-  Result<std::uint64_t> evaluate_sample(std::uint64_t index,
-                                        const DependencyPhase& phase) {
-    auto current = coordinate(index, phase);
+  Result<std::uint64_t> validated_coordinate(
+      std::uint64_t index,
+      const std::function<Status(std::uint64_t)>& consume) {
+    auto current = coordinate(index, consume);
     if (!current.ok())
       return Result<std::uint64_t>(current.status());
     for (int direction : {-1, 1}) {
       if ((direction < 0 && !index) ||
           (direction > 0 && index + 1 == program->count))
         continue;
-      auto adjacent = coordinate(direction < 0 ? index - 1 : index + 1, phase);
+      auto adjacent =
+          coordinate(direction < 0 ? index - 1 : index + 1, consume);
       if (!adjacent.ok())
         return Result<std::uint64_t>(adjacent.status());
       if (equal(current.value(), adjacent.value()))
@@ -175,18 +102,21 @@ struct SampleState final {
             index, true, current.value(), FailureReason::ArithmeticOverflow,
             "duplicate adjacent sampling coordinate"));
     }
-    auto reported = report(phase, 1, 0);
-    if (!reported.ok())
-      return Result<std::uint64_t>(reported);
+    return current;
+  }
+  Result<std::uint64_t> evaluate_sample(
+      std::uint64_t index,
+      const std::function<Status(std::uint64_t)>& consume) {
+    auto current = validated_coordinate(index, consume);
+    if (!current.ok())
+      return current;
     auto value = evaluator.evaluate(
-        program->expression, current.value(), coefficients, index,
-        phase.consume_work, [&](NumericMathFunction function, bool fallback) {
-          return report(phase, 0, 0, function, fallback);
-        });
+        program->expression, current.value(), coefficients, index, consume,
+        [](NumericMathFunction, bool) { return Status::success(); });
     if (!value.ok())
       return Result<std::uint64_t>(value.status());
     if (program->dtype == ElementType::Float32) {
-      value = rounded(value.value(), 0, 1, 0, 1, true, false, phase);
+      value = rounded(value.value(), 0, 1, 0, 1, true, false, consume);
       if (!value.ok())
         return Result<std::uint64_t>(value.status());
       if (BinaryParts::decode(value.value(), true).infinite) {
@@ -200,74 +130,32 @@ struct SampleState final {
     }
     return value;
   }
-  Result<DependencyPoll> publish_values(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    ArrayPublication publication(phase.query.outputs.boxes().size(), 1);
-    ResourceVector<Value> outputs;
-    outputs.reserve(phase.query.outputs.boxes().size());
-    const auto width = Value::element_size(program->dtype);
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(phase.query.output.descriptor,
-                                              box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto writer = allocated.take_value();
-      const auto range = box.dimensions()[0];
-      for (std::uint64_t local = 0; local < range.extent; ++local) {
-        auto value = evaluate_sample(range.offset + local, phase);
-        if (!value.ok())
-          return Answer(value.status());
-        auto reported = report(phase, 0, 1);
-        if (!reported.ok())
-          return Answer(reported);
-        select_words(replicas.data(), value.value(), value.value(), 1, profile);
-        std::memcpy(writer.data() + local * width, replicas.data(), width);
-      }
-      auto value = std::move(writer).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      outputs.push_back(retained.take_value());
-    }
-    auto result =
-        publication.finish(phase.query.output.descriptor, phase.query.outputs,
-                           outputs.data(), outputs.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    const auto index = multi_output::coordinate(phase)[0];
-    if constexpr (Values) {
-      if (program->regional && pending_end == 0) {
-        pending_end =
-            static_cast<std::uint32_t>(program->expression.names.size() + 2);
-        return Answer(DependencyNeedBatch{{}, {}, true});
-      }
-    }
-    // Consume only the previous bounded transport stage before requesting more.
-    for (auto port = pending_begin; port < pending_end; ++port) {
-      if (!required(port))
-        continue;
-      auto charged = phase.consume_work(128);
-      if (!charged.ok())
-        return Answer(charged);
-      const bool narrow = phase.query.inputs[port].descriptor.element_type ==
-                          ElementType::Float32;
+  Result<Value> execute(const OperationInvocation& call,
+                        const std::function<Status(std::uint64_t)>& consume) {
+    using Answer = Result<Value>;
+    for (std::size_t slot = 0; slot < call.inputs.size(); ++slot) {
+      auto status = consume(128);
+      if (!status.ok())
+        return Answer(status);
+      const auto port = call.input_indices[slot];
+      const auto& value = call.inputs[slot];
+      const bool narrow =
+          value.descriptor().element_type == ElementType::Float32;
+      auto address = value.byte_address({0});
+      if (!address.ok())
+        return Answer(address.status());
       std::uint64_t bits = 0;
-      auto read = phase.read(port, {0}, &bits, narrow ? 4 : 8);
-      if (!read.ok())
-        return Answer(read);
-      const auto value = BinaryParts::decode(bits, narrow);
-      if (value.nan || value.infinite) {
+      std::memcpy(&bits, value.bytes().data() + address.value(),
+                  narrow ? 4 : 8);
+      const auto decoded = BinaryParts::decode(bits, narrow);
+      if (decoded.nan || decoded.infinite) {
         const auto name = port == 0   ? "start"
                           : port == 1 ? "end"
                                       : program->expression.names[port - 2];
-        return Answer(fail(phase, index, FailureReason::InvalidDomain,
-                           "nonfinite input " + name +
-                               " port=" + std::to_string(port) +
-                               " bits=" + std::to_string(bits)));
+        return Answer(expression_failure(
+            0, false, 0, FailureReason::InvalidDomain,
+            "nonfinite input " + name + " port=" + std::to_string(port) +
+                " bits=" + std::to_string(bits)));
       }
       bits = widened(bits, narrow);
       if (port < 2)
@@ -275,74 +163,119 @@ struct SampleState final {
       else if constexpr (Values)
         coefficients[port - 2] = bits;
     }
-    const auto ports =
-        Values
-            ? static_cast<std::uint32_t>(program->expression.names.size() + 2)
-            : 2U;
-    pending_begin = pending_end;
-    if (pending_end < ports) {
-      auto construction = dependency_internal::metadata_owner(8192);
-      std::vector<DependencyNeed> needs;
-      const auto limit = std::min<std::uint64_t>(16, phase.sets.maximum_boxes);
-      if (!limit)
-        return Answer(Status{ErrorCode::ResourceExhausted,
-                             "expression scalar transport capacity",
-                             FailureReason::CapacityLimit});
-      while (pending_end < ports && needs.size() < limit) {
-        const auto port = pending_end++;
-        if (!required(port))
-          continue;
-        const bool data = !Values || port >= 2 ||
-                          (program->expression.uses_x &&
-                           (program->count == 1           ? port == 0
-                            : index == 0                  ? port == 0
-                            : index + 1 == program->count ? port == 1
-                                                          : true));
-        auto samples = Footprint::all({1}, phase.sets);
-        if (!samples.ok())
-          return Answer(samples.status());
-        needs.push_back({port,
-                         static_cast<std::uint32_t>(data ? 5 : 4),
-                         samples.take_value(),
-                         {}});
-      }
-      if (!needs.empty())
-        return multi_output::need(phase, std::move(needs));
-    }
     std::uint64_t step = 0;
     if (program->count > 1) {
       if (equal(endpoints[0], endpoints[1]))
-        return Answer(fail(phase, index, FailureReason::InvalidDomain,
-                           "equal sampling endpoints"));
+        return Answer(expression_failure(0, false, 0,
+                                         FailureReason::InvalidDomain,
+                                         "equal sampling endpoints"));
       auto calculated = rounded(endpoints[1], endpoints[0], 1, 1,
-                                program->count - 1, false, true, phase);
+                                program->count - 1, false, true, consume);
       if (!calculated.ok())
         return Answer(calculated.status());
       step = calculated.value();
       const auto parts = BinaryParts::decode(step, false);
       if (parts.infinite || !parts.magnitude)
-        return Answer(fail(phase, index, FailureReason::ArithmeticOverflow,
-                           "unrepresentable sampling step"));
+        return Answer(expression_failure(0, false, 0,
+                                         FailureReason::ArithmeticOverflow,
+                                         "unrepresentable sampling step"));
       const bool descending =
           BinaryParts::decode(endpoints[1], false).order_key() <
           BinaryParts::decode(endpoints[0], false).order_key();
       if (parts.negative != descending)
-        return Answer(fail(phase, index, FailureReason::InvalidDomain,
-                           "sampling step direction"));
+        return Answer(expression_failure(0, false, 0,
+                                         FailureReason::InvalidDomain,
+                                         "sampling step direction"));
     }
+    ValueDescriptor descriptor{Values ? program->dtype : ElementType::Float64,
+                               {Values ? program->count : 3U}};
+    auto allocated =
+        MutableValue::allocate(descriptor, call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto writer = allocated.take_value();
     if constexpr (!Values) {
       const std::array<std::uint64_t, 3> axis{
           endpoints[0], program->count == 1 ? endpoints[0] : endpoints[1],
           step};
-      auto reported = report(phase, 0, 3);
-      if (!reported.ok())
-        return Answer(reported);
-      return publish(phase, axis.data(), 3);
+      std::memcpy(writer.data(), axis.data(), 24);
     } else {
-      return publish_values(phase);
+      const auto width = Value::element_size(program->dtype);
+      for (std::uint64_t offset = 0; offset < program->count;) {
+        auto status = consume(1);
+        if (!status.ok())
+          return Answer(status);
+        const auto count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(4, program->count - offset));
+        std::array<std::uint64_t, 4> coordinates{}, results{};
+        std::array<bool, 4> accepted{};
+        if (profile != SequenceProfile::Strict) {
+          for (std::size_t lane = 0; lane < count; ++lane) {
+            auto coordinate = validated_coordinate(offset + lane, consume);
+            if (!coordinate.ok())
+              return Answer(coordinate.status());
+            coordinates[lane] = coordinate.value();
+          }
+          status = evaluator.accelerated.evaluate(
+              program->expression, coordinates.data(), coefficients, count,
+              program->dtype == ElementType::Float32, results.data(),
+              accepted.data(), consume, true);
+          if (!status.ok())
+            return Answer(status);
+        }
+        for (std::size_t lane = 0; lane < count; ++lane) {
+          if (!accepted[lane]) {
+            auto value = evaluate_sample(offset + lane, consume);
+            if (!value.ok())
+              return Answer(value.status());
+            results[lane] = value.value();
+          }
+          std::memcpy(writer.data() + (offset + lane) * width, &results[lane],
+                      width);
+        }
+        offset += count;
+      }
     }
+    auto status = consume(1);
+    return status.ok() ? std::move(writer).publish() : Answer(status);
   }
 };
+template <bool Values>
+Result<Value> execute_expression(const OperationInvocation& call,
+                                 SequenceProfile profile) {
+  using Answer = Result<Value>;
+  const auto* budget = resource_internal::metadata_budget();
+  const auto consume = [&](std::uint64_t work) {
+    if (call.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({work}) : Status::success();
+  };
+  auto status = consume(1);
+  if (!status.ok())
+    return Answer(status);
+  input_internal::Float32Environment environment;
+  if (!environment.active())
+    return Answer(Status{ErrorCode::BackendUnavailable,
+                         "numeric environment unavailable"});
+  auto allocated = call.allocator.allocate(sizeof(SampleState<Values>));
+  if (!allocated.ok())
+    return Answer(allocated.status());
+  auto storage = allocated.take_value();
+  const auto* program =
+      static_cast<const SampleProgram*>(call.prepared->state());
+  std::unique_ptr<SampleState<Values>, void (*)(SampleState<Values>*)> state(
+      new (storage.data()) SampleState<Values>(program, profile),
+      [](SampleState<Values>* value) { value->~SampleState<Values>(); });
+  auto result = state->execute(call, consume);
+  if (!result.ok() && result.status().detail.origin == FailureOrigin::Domain) {
+    auto failure = result.status();
+    failure.detail.scope = FailureScope::Run;
+    failure.detail.atom = {};
+    return Answer(std::move(failure));
+  }
+  return result;
+}
+
 OperationDefinition expression_operation(const std::string& key,
                                          SequenceProfile profile) {
   OperationDefinition operation;
@@ -365,14 +298,11 @@ OperationDefinition expression_operation(const std::string& key,
       {"dtype", OperationParameterType::String}};
   auto& values = traits.outputs[0];
   values.key = "values";
-  values.region_rule = OperationRegionRule::Dependency;
-  values.dependency_version = 1;
-  values.continuation_bytes = sizeof(SampleState<true>);
-  values.maximum_dependency_stages = 259;
-  values.failure_delivery = FailureDelivery::PerAtomOutcome;
+  values.region_rule = OperationRegionRule::Whole;
+  values.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(SampleState<true>);
   traits.outputs.push_back(values);
   traits.outputs[1].key = "axis";
-  traits.outputs[1].continuation_bytes = sizeof(SampleState<false>);
   operation.prepare_static =
       [profile](const auto& inputs,
                 const auto& parameters) -> Result<OperationPreparation> {
@@ -405,8 +335,7 @@ OperationDefinition expression_operation(const std::string& key,
         parsed.take_value(),
         static_cast<std::uint32_t>(
             std::get<std::int64_t>(parameters.at("count"))),
-        dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
-        inputs.size() <= 16});
+        dtype == "float32" ? ElementType::Float32 : ElementType::Float64});
     OperationPreparation prepared;
     prepared.outputs.resize(2);
     prepared.state = program;
@@ -414,62 +343,19 @@ OperationDefinition expression_operation(const std::string& key,
                                                {program->count}};
     prepared.outputs[1].metadata.descriptor = {ElementType::Float64, {3}};
     prepared.outputs[1].metadata.atomic_trailing_axes = 1;
-    if (program->regional) {
-      std::vector<DependencyMapPiece> pieces;
-      const auto append = [&](std::uint64_t offset,
-                              std::uint64_t extent) -> Status {
-        if (!extent)
-          return Status::success();
-        auto coverage = Footprint::from_regions({program->count},
-                                                {Region({{offset, extent}})});
-        if (!coverage.ok())
-          return coverage.status();
-        std::vector<DependencyMappedNeed> maps;
-        for (std::uint32_t port = 0; port < inputs.size(); ++port) {
-          if (port == 1 && program->count == 1)
-            continue;
-          const bool data =
-              port >= 2 || (program->expression.uses_x &&
-                            (program->count == 1            ? port == 0
-                             : offset == 0                  ? port == 0
-                             : offset + 1 == program->count ? port == 1
-                                                            : true));
-          DependencyMappedNeed map;
-          map.port = port;
-          map.roles = data ? 5 : 4;
-          map.axes = {{-1, {0, 1}}};
-          maps.push_back(std::move(map));
-        }
-        pieces.push_back({coverage.take_value(), std::move(maps)});
-        return Status::success();
-      };
-      auto status = append(0, 1);
-      if (!status.ok())
-        return Answer(status);
-      if (program->count > 2) {
-        status = append(1, program->count - 2);
-        if (!status.ok())
-          return Answer(status);
-      }
-      if (program->count > 1) {
-        status = append(program->count - 1, 1);
-        if (!status.ok())
-          return Answer(status);
-      }
-      prepared.outputs[0].static_dependency_pieces = std::move(pieces);
-    }
+    prepared.outputs[0].input_indices = std::vector<std::uint32_t>{};
+    for (std::uint32_t port = 0; port < inputs.size(); ++port)
+      if (port != 1 || program->count > 1)
+        prepared.outputs[0].input_indices->push_back(port);
+    prepared.outputs[1].input_indices = program->count == 1
+                                            ? std::vector<std::uint32_t>{0}
+                                            : std::vector<std::uint32_t>{0, 1};
 
     return Answer(std::move(prepared));
   };
-  operation.start_dependency = [profile](const auto& query,
-                                         const auto& allocator) {
-    const auto* program =
-        static_cast<const SampleProgram*>(query.prepared->state());
-    return query.output_index == 0
-               ? DependencyContinuation::make<SampleState<true>>(
-                     allocator, program, profile)
-               : DependencyContinuation::make<SampleState<false>>(
-                     allocator, program, profile);
+  operation.callback = [profile](const OperationInvocation& call) {
+    return call.output_index == 0 ? execute_expression<true>(call, profile)
+                                  : execute_expression<false>(call, profile);
   };
   return operation;
 }

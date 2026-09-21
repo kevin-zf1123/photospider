@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-12B: quantile
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -36,8 +45,7 @@ For a line of length N, let x[0..N-1] denote stable ascending numerical order.
 Compute h=(N-1)*q exactly, j=floor(h), and w=h-j exactly. If w=0, select x[j];
 otherwise interpolate (1-w)*x[j]+w*x[j+1]. This also covers q=1 without an
 out-of-range x[N] access. For finite samples, only the final selected/interpolated
-mathematical result is correctly rounded to output dtype. All three CPU profiles
-are bitwise equivalent. No rounded floating h or preliminary Int64-to-float
+mathematical result is correctly rounded to output dtype. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound. No rounded floating h or preliminary Int64-to-float
 conversion is permitted. There is no interpolation-method parameter.
 
 ## Exceptional values and zero signs
@@ -58,23 +66,17 @@ infinities elsewhere in the line do not by themselves force NaN.
 
 ## Control and source dependence
 
-For a nonempty output request with N>=2, first read q[0] as Control support and
-require its finite [0,1] range. A violation fails before source Data evaluation
-with InvalidArgument, FailureReason::InvalidDomain and diagnostic
-InvalidQuantileProbability. Negative zero is valid zero. Retain q validation and
-control witnesses; no input NaN can erase that failure.
+For N>=2, Whole collects and validates the complete source and q before callback.
+The callback requires finite q in [0,1]; invalid q returns Domain/Run
+InvalidArgument/InvalidDomain with InvalidQuantileProbability and raw q bits.
+Negative zero is valid. A failing source may now fail before invalid-q callback
+validation. No source NaN can erase a q error after successful preparation.
 
-For N=1, do not read q at all or apply its numeric range validation. Convert the
-single selected source value directly to output dtype, retaining signed zero and
-applying NaN quieting/payload mapping. Static q port dtype/shape checks remain.
-This is an explicit exception to the general q requirement.
-
-Each requested output coordinate needs its entire corresponding input axis line,
-even at endpoint q. Other source lines have no Data demand; typed Validation
-closure is tracked separately. Empty Q reads neither input nor q. Source changes
-invalidate the corresponding output line; q changes invalidate all relevant
-outputs when N>=2 and have no effect when N=1. Retain exact source/control and
-validation witnesses with axis/dtype/profile in cache identity.
+For N=1, static runtime projection excludes q entirely, including a failing
+producer, while metadata checks remain. Convert the sole source sample with
+signed-zero/NaN rules. Every nonempty request reads all active source lines and
+computes the complete keepdims output. Any active input change invalidates all
+recorded output observations; q bytes have no effect when N=1. Empty reads nothing.
 
 ## Algorithms, resources and publication
 
@@ -84,15 +86,12 @@ allowed if equivalent, with NaN priority and zero tie order preserved. There is
 no approximate quantile sketch or rank-error tolerance. Compute h/w and final
 interpolation with exact arithmetic or a certified correctly rounded equivalent.
 
-Budget all source owners/windows, selection/permutation state, q/control support,
-exact arithmetic limbs, output fragments and scratch. Use bounded active lines
-and host workers. A line too large for admitted work/capacity fails
-ResourceExhausted, without hidden disk storage, skipped samples or approximation.
-Check cancellation during ingestion, selection/sorting and arithmetic refinement.
-Publish owned packed requested output fragments with correct global origins;
-no full logical output is forced by a partial request. No partial failed result
-is published, and final owners remain valid after context destruction. Typed,
-upstream, resource and cancellation errors keep their existing Status categories.
+Use the same once-classified key/permutation algorithm and metadata accounting as
+[sort](NUM-12A_sort.md), plus fixed exact interpolation state. Each line is sorted
+once per Whole callback. Complete input and output payloads are retained/allocated,
+even for a sparse consumer projection. No permutation block cache or once-per-Run
+sharing promise remains. Sorting/refinement checks host work/cancellation; errors
+release all unpublished state. Source/typed failures retain their categories.
 
 ## Acceptance and implementation status
 
@@ -102,12 +101,11 @@ Int64 values above 2^53, signed-zero ties, selected/unselected infinities, NaNs
 anywhere in the source line, and both output dtypes. Use independent exact
 position/interpolation arithmetic and stable order statistics as the oracle.
 
-Prove full selected-line source reads and no unrequested-line reads. For N=1,
-q's upstream must not execute even if it would fail; for N>=2 invalid q must
-fail before source values are requested. Test disjoint outputs, dynamic q/source
+Prove complete source reads, including unrequested lines. For N=1,
+q's upstream must not execute even if it would fail; for N>=2 source failures may
+precede invalid-q callback validation. Test disjoint outputs, dynamic q/source
 invalidation, dtype/payload conversion, scratch exhaustion, cancellation,
 cache-off and output lifetime through the public WorkflowDocument execution.
-The current three profile keys use exact UInt128 rank selection and 4352-bit
-one-final-rounding interpolation. The
-[numeric workflow README](../../../../examples/numeric_workflow/README.md)
-records manual and independent oracle evidence.
+The formal keys execute Whole while retaining exact UInt128 rank and4352-bit
+one-final-rounding interpolation. See [NUM-12 Whole execution](../ordering-whole.md)
+for current workflow, validation and performance evidence.

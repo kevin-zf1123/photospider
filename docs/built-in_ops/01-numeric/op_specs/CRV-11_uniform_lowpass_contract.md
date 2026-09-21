@@ -7,12 +7,21 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # CRV-11: uniformly sampled low-pass family
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM execution baseline](NUM_common_contract.md) for specification/
 registration status, CPU target identity, floating environment, diagnostic provenance,
@@ -22,9 +31,8 @@ caller floating environment is preserved. This is limited inheritance: the ports
 output kinds/facets, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
-Where a 4-ULP final bound is stated, it means at most four adjacent
-representable steps in the output dtype from the correctly rounded strict result,
-measured by monotone IEEE bit-pattern distance for nonzero finite values.
+A stated four-ULP final bound uses the shared FP32-scaled contract for both
+Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
 
 
@@ -208,8 +216,11 @@ this implementation and do not claim SciPy floating-point parity.
 
 This shared contract covers five uniform kernels and 15 profile keys; it is not
 itself a registered operation. The public low-pass helpers and implementation use
-exact tap construction and certified whole sums; accelerated keys currently use
-the strict fallback. Certified precision is 128..4096 bits and
+exact tap support and certified whole sums. Accelerated keys cache 128-bit
+coefficient enclosures in accounted continuation storage, then bound the complete
+hardware convolution and normalization before final-error acceptance. Unresolved
+coefficients or outputs dispatch strict convolution. Certified strict precision
+is 128..4096 bits and
 may fail `ResourceExhausted`. See the [uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed
 the shared manual groups and 474 independent directed MPFR cases per profile.

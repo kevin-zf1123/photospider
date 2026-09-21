@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <optional>
 
+#include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/exact_root.hpp"
 #include "01-numeric/numeric_nan.hpp"
 #include "photospider/data/value.hpp"
@@ -37,7 +39,9 @@ struct ExactElementary final {
   }
   Result<std::uint64_t> evaluate(
       ElementaryKind kind, ElementType dtype, std::uint64_t a, std::uint64_t b,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const std::function<Status(std::uint64_t)>& consume,
+      const input_internal::Float32Environment* borrowed_environment =
+          nullptr) {
     using Answer = Result<std::uint64_t>;
     auto charged = consume(1024);
     if (!charged.ok())
@@ -187,6 +191,71 @@ struct ExactElementary final {
         return Answer(infinity | (negative ? sign : 0));
       if (y.infinite || !x.magnitude)
         return Answer(negative ? sign : 0);
+    }
+    // Single IEEE operations are correctly rounded by the hardware. Keep the
+    // bit-level special table above; the owning guard restores flags/controls.
+    // A Whole callback can lend its live RN-even/gradual-underflow guard.
+    // A borrowed guard must live on this thread throughout the call; callers
+    // must not alter fenv until its destruction restores the outer flags.
+    // Standalone callers retain a local guard and restore their own flags.
+    std::optional<input_internal::Float32Environment> environment;
+    if (!borrowed_environment)
+      environment.emplace();
+    if (borrowed_environment ? borrowed_environment->active()
+                             : environment->active()) {
+      const double left = numeric_double(a, narrow),
+                   right = numeric_double(b, narrow);
+      if (narrow) {
+        const float u = static_cast<float>(left), v = static_cast<float>(right);
+        float result = 0;
+        switch (kind) {
+          case ElementaryKind::Sqrt:
+            result = std::sqrt(u);
+            break;
+          case ElementaryKind::Reciprocal:
+            result = 1.0f / u;
+            break;
+          case ElementaryKind::Add:
+            result = u + v;
+            break;
+          case ElementaryKind::Subtract:
+            result = u - v;
+            break;
+          case ElementaryKind::Multiply:
+            result = u * v;
+            break;
+          case ElementaryKind::Divide:
+            result = u / v;
+            break;
+          default:
+            break;
+        }
+        return Answer(numeric_bits(result, true));
+      }
+      double result = 0;
+      switch (kind) {
+        case ElementaryKind::Sqrt:
+          result = std::sqrt(left);
+          break;
+        case ElementaryKind::Reciprocal:
+          result = 1.0 / left;
+          break;
+        case ElementaryKind::Add:
+          result = left + right;
+          break;
+        case ElementaryKind::Subtract:
+          result = left - right;
+          break;
+        case ElementaryKind::Multiply:
+          result = left * right;
+          break;
+        case ElementaryKind::Divide:
+          result = left / right;
+          break;
+        default:
+          break;
+      }
+      return Answer(numeric_bits(result));
     }
     ratio.numerator.words.fill(0);
     ratio.denominator.words.fill(0);

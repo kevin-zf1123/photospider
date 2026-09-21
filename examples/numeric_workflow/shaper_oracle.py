@@ -11,6 +11,7 @@ import sys
 from fractions import Fraction as F
 
 from comparison_oracle import number
+from accuracy_oracle import accepted
 from math_oracle_support import MPFR, multiply_bounds
 from range_oracle import reference as remap
 from sequence_oracle import ieee_round
@@ -155,7 +156,7 @@ def main():
     actual = result.stdout.splitlines()
     assert len(actual) == len(rows), (len(actual), len(rows), result.stderr)
     for row, wanted, got in zip(rows, expected, actual):
-        assert wanted == got, (row, wanted, got)
+        assert accepted(got, wanted, row[1], profile), (row, wanted, got)
     # Grouping is only oracle verification; the product sees the original
     # stream order and never sorts values to force monotonicity.
     groups = {}
@@ -170,7 +171,7 @@ def main():
         assert all(a[1] <= b[1] for a, b in zip(ordered, ordered[1:])), key
     with MPFR(128) as oracle:
         version = oracle.version
-    print(f'{len(rows)} Fraction/directed MPFR-{version} shaper cases, exact bits and monotonic groups PASS ({profile})')
+    print(f'{len(rows)} Fraction/directed MPFR-{version} shaper cases, strict bits/FP32 bound and monotonic groups PASS ({profile})')
 
 
 if __name__ == '__main__':

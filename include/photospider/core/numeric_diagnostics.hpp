@@ -6,7 +6,18 @@
 #include "photospider/core/status.hpp"
 
 namespace ps {
-/** @brief Actual CPU arithmetic path, separate from the CPU/GPU scheduler. */
+/** @brief Actual CPU arithmetic path, separate from the CPU/GPU scheduler.
+ * Strict preserves each operator's specified reference and rounding boundaries.
+ * Accelerated floating outputs permit at most four FP32 representable steps.
+ * Float64 inputs/outputs retain their dtype; their direct absolute error is
+ * bounded by 4*2^(floor(log2(abs(reference)))-23) in the normal FP32 range.
+ * Zero, FP32-subnormal-range and out-of-FP32-range references use strict.
+ * Special values, signed zero, integer/discrete results, copies and selected
+ * endpoints preserve their exact operator rules. Monotonicity and other
+ * operator invariants remain additional requirements; a per-value bound alone
+ * does not establish them. Final expression output, not each isolated math
+ * call, owns the numeric error budget. Caller floating state is preserved.
+ */
 enum class CpuNumericProfile : std::uint32_t {
   Unspecified = 0,
   Strict = 1,

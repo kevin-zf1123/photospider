@@ -14,9 +14,18 @@ document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # NUM-11F: reduce_variance
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -37,7 +46,7 @@ For finite inputs, let mu=sum(x)/N exactly. Compute
 
 as an exact mathematical rational, then correctly round V directly to output
 dtype. No rounded intermediate mean, square or partial sum defines the result.
-All three CPU profiles are bitwise equivalent. Integer sources participate
+Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound. Integer sources participate
 exactly without conversion to float. The exact numerator is nonnegative;
 clamping a negative approximate variance to zero is not an accuracy proof.
 
@@ -54,26 +63,23 @@ Invalid ddof (negative or N<=ddof) fails compile/preflight with InvalidArgument,
 FailureReason::InvalidDomain and diagnostic InvalidDegreesOfFreedom, before
 input sample evaluation. Unsupported dtype/axes and other metadata violations
 use the common errors. Generic nonfinite inputs are numeric outcomes, not Status
-failures; typed input validation remains required for selected groups.
+failures; typed input validation covers the complete active input.
 
 ## Algorithms, resources and acceptance
 
 Use exact moments or a certified equivalent with one final rounding. Account
 sum/sum-of-squares accumulators, exact products/division and all temporary limb
-capacity; do not allocate a full group to form deviations. Refinement that cannot
+capacity; the exact state does not allocate deviations; Whole input preparation collects the full input. Refinement that cannot
 resolve destination rounding within available work/memory returns ResourceExhausted.
-Apply shared block cancellation, exact group demand, owner/cache and publication
+Apply shared block cancellation, Whole input demand, owner/cache and publication
 requirements. Parallel merging must preserve exact moments and logical NaN order.
 
 Fixture: input=[1,2,3], axes="0", dtype="float64": ddof=0 yields
 [RN_Float64(2/3)], ddof=1 yields [1]. Use an independent exact rational oracle;
 include large common offsets with tiny differences, Int64 extrema, constant
 inputs, subnormals, all nonfinite patterns, NaN payload conversion, N=1 and
-invalid ddof. Source groups outside requested output must remain unobserved.
+invalid ddof. Source groups outside requested output are read and validated by Whole.
 
-The current three profile keys use `reduce_variance_node` from
-`photospider/numeric/reductions.hpp`. Exact moments retain fixed-width limb
-state and evaluate the unrounded rational variance before final destination
-rounding. The public fixture checks ddof, constant groups, large offsets and
-nonfinite handling. The shared reduction contract records the complete
-strict/Apple/WSL and installed-consumer evidence. Proposed status is unchanged.
+The formal keys execute Whole and preserve the numerical rules above. See
+[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
+validation and timing. Earlier regional platform records predate Whole.

@@ -80,7 +80,9 @@ Result<ExecutionResult> run(const Value& input, std::vector<WorkflowNode> nodes,
     status = registry->register_operation(
         {key, base->find_traits(key).take_value(),
          [base, name = std::string(key)](const OperationInvocation& call) {
-           return base->invoke(name, call);
+           auto forwarded = call;
+           forwarded.prepared.reset();
+           return base->invoke(name, forwarded);
          }});
     if (!status.ok())
       return Result<ExecutionResult>(status);

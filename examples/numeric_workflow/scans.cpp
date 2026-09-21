@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -191,52 +192,27 @@ void sparse(ps::CpuNumericProfile profile) {
                   array(Type::Int64, {3}, {0x7fffffffffffffff, 1, UINT64_MAX}));
   auto demand = take(ps::Footprint::from_regions(
       {4}, {ps::Region({{0, 1}}), ps::Region({{3, 1}})}));
-  auto result = take(fixture.run(demand));
-  check(result, demand, {0, 0x7fffffffffffffff}, Type::Int64);
-  auto support = take(result.dependencies.source_support()).at("input");
-  require(support == take(ps::Footprint::all({3})), "prefix support");
-  ps::GraphContext graph(fixture.document);
-  auto plan = take(ps::Compiler(fixture.registry).compile(graph));
-  ps::ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.managed_resources = ps::ResourceLimits{};
-  ps::ExecutionContext context(fixture.registry, config);
-  auto atoms =
-      take(context.execute_atoms(plan.plan, fixture.bindings,
-                                 {{"values", take(ps::Footprint::all({4}))}}));
-  unsigned good = 0, bad = 0;
-  for (const auto& atom : atoms.atoms) {
-    if (atom.outcome.ok()) {
-      ++good;
-      require(atom.key.coordinate[0] != 2, "valid prefix outcome");
-    } else {
-      ++bad;
-      require(atom.key.coordinate[0] == 2 &&
-                  atom.outcome.status().reason ==
-                      ps::FailureReason::ArithmeticOverflow &&
-                  atom.outcome.status().detail.scope == ps::FailureScope::Atom,
-              "overflow atom");
-    }
-  }
-  require(good == 3 && bad == 1, "prefix atom isolation");
+  auto result = fixture.run(demand);
+  require(!result.ok() &&
+              result.status().reason == ps::FailureReason::ArithmeticOverflow &&
+              result.status().detail.scope == ps::FailureScope::Run,
+          "unrequested intermediate prefix overflow fails Whole");
   Fixture rectangle(authored(true, Type::Int64, Type::Int64, {0, 1}, profile),
                     array(Type::Int64, {3, 3}, {1, 2, 3, 4, 5, 6, 7, 8, 9}));
   auto corners = take(ps::Footprint::from_regions(
       {4, 4}, {ps::Region({{1, 1}, {3, 1}}), ps::Region({{3, 1}, {1, 1}})}));
   auto answer = take(rectangle.run(corners));
   check(answer, corners, {6, 12}, Type::Int64);
-  auto wanted = take(ps::Footprint::from_regions(
-      {3, 3}, {ps::Region({{0, 1}, {0, 3}}), ps::Region({{0, 3}, {0, 1}})}));
-  require(take(answer.dependencies.source_support()).at("input") == wanted,
-          "exact L support");
+  require(take(answer.dependencies.source_support()).at("input") ==
+              take(ps::Footprint::all({3, 3})),
+          "Whole integral reads all source");
   auto missing =
       take(ps::Footprint::from_regions({3, 3}, {ps::Region({{1, 2}, {1, 2}})}));
   require(take(answer.dependencies.potential_dirty("input", missing))
-              .at("values")
-              .empty(),
-          "L missing corner dirty");
-  std::cout << "sparse prefix overflow isolation and exact L-shaped integral "
-               "dependencies passed\n";
+                  .at("values") == corners,
+          "unselected source invalidates all recorded integral observations");
+  std::cout
+      << "Whole prefix Run overflow and integral full input/dirty passed\n";
 }
 
 void boundaries(ps::CpuNumericProfile profile) {
@@ -248,51 +224,36 @@ void boundaries(ps::CpuNumericProfile profile) {
                          integral ? std::vector<std::uint64_t>{0, 1}
                                   : std::vector<std::uint64_t>{1},
                          profile);
-    ps::DependencyRequest request;
-    request.inputs = {{{Type::Float32, {1, 2, 4}}, {facet}}};
-    request.parameters = node.parameters;
-    request.snapshot_identity = "scan-boundaries";
+    const auto raw =
+        array(Type::Float32, {1, 2, 4},
+              {0x3f800000, 0, 0, 0x40000000, 0x3f800000, 0, 0, 0x3f800000});
+    const auto bad = take(ps::Value::from_storage(
+        raw.descriptor(), raw.region(), raw.layout(), raw.storage(), {facet}));
     const std::vector<std::uint64_t> shape =
         integral ? std::vector<std::uint64_t>{2, 3, 4}
                  : std::vector<std::uint64_t>{1, 3, 4};
-    request.outputs = take(ps::Footprint::none(shape));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty scan no polls");
-    request.outputs = take(ps::Footprint::from_regions(
-        shape, {ps::Region({{integral ? 1U : 0U, 1}, {0, 1}, {1, 1}})}));
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    auto zero = take(registry->start_dependency(node.operation, request,
-                                                resources.allocator()));
-    require(std::holds_alternative<ps::DependencyResult>(take(zero->poll())),
-            "zero boundary finishes without Need");
-    zero.reset();
-    request.outputs = take(ps::Footprint::from_regions(
-        shape, {ps::Region({{integral ? 1U : 0U, 1}, {2, 1}, {1, 1}})}));
-    auto session = take(registry->start_dependency(node.operation, request,
-                                                   resources.allocator()));
-    require(session->poll().ok(), "typed scan Need");
-    unsigned data = 0, validation = 0;
-    for (const auto& need : take(session->pending_reads())) {
-      if (need.roles & 1)
-        data += take(need.samples.element_count());
-      if (need.roles & 4)
-        validation += take(need.samples.element_count());
-    }
-    require(data == 2 && validation == 8, "scan typed validation separate");
-    session.reset();
+    Fixture fixture(node, bad);
+    require(fixture.run(take(ps::Footprint::none(shape))).ok(),
+            "Empty skips Whole typed input");
+    const std::vector<ps::Value> inputs{bad};
+    const std::vector<ps::Region> demands{bad.region()};
+    ps::OperationInvocation call(inputs, demands, node.parameters,
+                                 ps::Backend::Cpu, {},
+                                 ps::Region::whole(shape));
+    require(!registry->invoke(node.operation, call).ok(),
+            "Whole scans validate every typed input");
+    auto zero = take(ps::Footprint::from_regions(
+        shape, {ps::Region({{0, 1}, {0, 1}, {0, 1}})}));
+    require(!fixture.run(zero).ok(),
+            "zero boundary still requires valid Whole source");
     ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    auto cancelled = take(registry->start_dependency(node.operation, request,
-                                                     resources.allocator()));
-    require(cancelled->poll().ok(), "need before cancellation");
     cancellation.cancel();
-    require(cancelled->poll().status().code == ps::ErrorCode::Cancelled,
-            "cancel scan");
-    cancelled.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "scan payload released");
+    ps::OperationInvocation stopped(inputs, demands, node.parameters,
+                                    ps::Backend::Cpu, cancellation.token(),
+                                    ps::Region::whole(shape));
+    require(registry->invoke(node.operation, stopped).status().code ==
+                ps::ErrorCode::Cancelled,
+            "Whole scan pre-cancelled");
   }
   const auto packed =
       array(Type::Float32, {3}, {0x3f800000, 0x40000000, 0x40400000});
@@ -337,60 +298,76 @@ void boundaries(ps::CpuNumericProfile profile) {
     request.parameters = bad.parameters;
     request.snapshot_identity = "scan-over-cap";
     request.outputs = take(ps::Footprint::none({1}));
-    auto answer = registry->start_dependency(bad.operation, request);
+    auto answer = registry->resolve_traits(bad.operation, request.inputs,
+                                           request.parameters);
     require(!answer.ok() &&
                 answer.status().code == ps::ErrorCode::TypeMismatch &&
                 answer.status().detail.origin == ps::FailureOrigin::Schema,
             "output shape cap preflight");
+  }
+  for (bool zero : {false, true}) {
+    auto bytes = take(ps::BufferAllocator{}.allocate(33));
+    const double raw[] = {1, 2, 3, 4};
+    std::memcpy(bytes.data() + 1, raw, 32);
+    auto value = take(ps::Value::from_storage(
+        {Type::Float64, {2, 2}}, ps::Region::whole({2, 2}),
+        {zero ? 1U : 25U, {zero ? 0 : -16, zero ? 0 : -8}},
+        std::move(bytes).freeze()));
+    auto integral =
+        authored(true, Type::Float64, Type::Float64, {1, 0}, profile);
+    const std::vector<ps::Value> values{value};
+    const std::vector<ps::Region> regions{value.region()};
+    ps::OperationInvocation call(values, regions, integral.parameters);
+    auto result = take(registry->invoke(integral.operation, call));
+    const double expected[] = {0, 0, 0, 0, 4, 7, 0, 6, 10};
+    for (unsigned y = 0; y < 3; ++y)
+      for (unsigned x = 0; x < 3; ++x) {
+        double actual = 0;
+        std::memcpy(&actual,
+                    result.bytes().data() + take(result.byte_address({y, x})),
+                    8);
+        require(actual == (zero ? y * x : expected[y * 3 + x]),
+                "unaligned negative/zero integral layout");
+      }
   }
   std::cout << "typed closure, Empty/zero reads, cancellation/release, output "
                "cap and negative strides/fenv flags passed\n";
 }
 void sort_interruption(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
-  auto node = authored(false, ps::ElementType::Int64, ps::ElementType::Int64,
-                       {0}, profile);
-  for (bool cancel : {false, true}) {
-    ps::DependencyRequest request;
-    request.inputs = {{{ps::ElementType::Int64, {1024}}, {}}};
-    request.parameters = node.parameters;
-    request.outputs = take(ps::Footprint::all({1025}));
-    request.snapshot_identity = "scan-sort-interrupt";
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    ps::ResourceBudget resources(ps::ResourceLimits{});
-    bool armed = false, interrupted = false;
-    unsigned comparisons = 0;
-    auto session = take(registry->start_dependency(
-        node.operation, request, resources.allocator(),
-        [&](std::uint64_t amount) {
-          if (armed && amount == 2 && ++comparisons == 200) {
-            interrupted = true;
-            if (cancel)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "scan output sorting work",
-                                ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    armed = true;
-    auto answer = session->poll();
-    require(
-        interrupted && !answer.ok() &&
-            answer.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-        "output sort interruption");
-    require(session->numeric_diagnostics().evaluated_values == 0 &&
-                session->numeric_diagnostics().copied_elements == 0,
-            "sort failure before numeric publication");
-    session.reset();
-    require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-            "sort interrupted output release");
+  for (bool integral : {false, true}) {
+    auto node =
+        authored(integral, ps::ElementType::Int64, ps::ElementType::Int64,
+                 integral ? std::vector<std::uint64_t>{0, 1}
+                          : std::vector<std::uint64_t>{1},
+                 profile);
+    auto input = array(ps::ElementType::Int64, {64, 64},
+                       std::vector<std::uint64_t>(4096, 1));
+    point_math_checks::resources(node, {input},
+                                 (integral ? 65 * 65 : 64 * 65) * 8);
+    if (integral) {
+      ps::ResourceLimits limits;
+      limits.capacity[ps::ResourceKind::Metadata] = 128;
+      ps::ResourceBudget budget(limits);
+      {
+        ps::ResourceAllocationScope scope(budget);
+        const std::vector<ps::Value> inputs{input};
+        const std::vector<ps::Region> demands{input.region()};
+        ps::OperationInvocation call(
+            inputs, demands, node.parameters, ps::Backend::Cpu, {},
+            ps::Region::whole({65, 65}), budget.allocator());
+        auto answer = registry->invoke(node.operation, call);
+        require(!answer.ok() &&
+                    answer.status().code == ps::ErrorCode::ResourceExhausted,
+                "integral exact column metadata budget");
+      }
+      require(budget.statistics().live[ps::ResourceKind::Metadata] == 0 &&
+                  budget.statistics().live[ps::ResourceKind::Payload] == 0,
+              "integral metadata failure releases state/output");
+    }
   }
-  std::cout << "prefix output-plan sorting responds to work limit/cancellation "
-               "and releases payload\n";
+  std::cout << "Whole scans: work/output/scratch, exact column metadata and "
+               "active cancellation passed\n";
 }
 void streaming(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
@@ -401,7 +378,7 @@ void streaming(ps::CpuNumericProfile profile) {
   auto plan = take(ps::Compiler(fixture.registry).compile(graph));
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
-  config.maximum_live_bytes = 16384;
+  config.maximum_live_bytes = 131072;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(fixture.registry, config);
   auto demand = take(ps::Footprint::from_regions(
@@ -415,56 +392,14 @@ void streaming(ps::CpuNumericProfile profile) {
   auto result = take(
       context.execute_fragments(snapshot, {{"values", demand}}, {}, options));
   check(result, demand, {0, 64, 129, 4096}, Type::Int64);
-  require(result.diagnostics.peak_live_bytes <= 16384, "bounded scan payload");
-  ps::DependencyRequest request;
-  request.inputs = {{fixture.bindings.inputs[0].value.descriptor(), {}}};
-  request.parameters = fixture.document.nodes[0].parameters;
-  request.snapshot_identity = "scan-streaming";
-  request.limits.maximum_work = 128 * 1024 * 1024;
-  request.outputs = demand;
-  ps::ResourceBudget resources(ps::ResourceLimits{});
-  auto session = take(fixture.registry->start_dependency(
-      fixture.document.nodes[0].operation, request, resources.allocator()));
-  auto supplied = take(ps::ValueFragments::create(
-      request.inputs[0].descriptor, {}, take(ps::Footprint::all({4096})),
-      {fixture.bindings.inputs[0].value}));
-  std::uint64_t windows = 0, next = 0;
-  while (true) {
-    auto progress = take(session->poll());
-    if (std::holds_alternative<ps::DependencyResult>(progress))
-      break;
-    std::uint64_t terms = 0;
-    for (const auto& need : take(session->pending_reads()))
-      if (need.roles & 1) {
-        require(need.samples.boxes().size() == 1 &&
-                    need.samples.boxes()[0].dimensions()[0].offset == next,
-                "monotonic bounded scan window");
-        terms += take(need.samples.element_count());
-      }
-    require(terms > 0 && terms <= 64, "64-element windows");
-    auto window = take(
-        ps::Footprint::from_regions({4096}, {ps::Region({{next, terms}})}));
-    next += terms;
-    ++windows;
-    auto status = session->supply({take(supplied.restrict(window))},
-                                  request.snapshot_identity);
-    if (!status.ok())
-      throw std::runtime_error(status.message);
-  }
-  require(next == 4096 && windows == 65 &&
-              session->numeric_diagnostics().evaluated_values == 4096,
-          "one scan per line");
-  auto changed =
+  require(result.diagnostics.peak_live_bytes <= 131072, "bounded scan payload");
+  const auto changed =
       take(ps::Footprint::from_regions({4096}, {ps::Region({{64, 1}})}));
-  auto dirty =
-      take(result.dependencies.potential_dirty("input", changed)).at("values");
-  require(
-      dirty == take(ps::Footprint::from_regions(
-                   {4097}, {ps::Region({{129, 1}}), ps::Region({{4096, 1}})})),
-      "exact suffix dirty");
-  std::cout
-      << "4096 source terms scanned once through 65 windows, four sparse "
-         "outputs, cache off, <=16KiB payload; exact suffix dirty passed\n";
+  require(take(result.dependencies.potential_dirty("input", changed))
+                  .at("values") == demand,
+          "Whole edit invalidates all recorded prefixes including boundary");
+  std::cout << "4096 source terms scanned once, complete output, sparse "
+               "projection and Whole dirty passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) {

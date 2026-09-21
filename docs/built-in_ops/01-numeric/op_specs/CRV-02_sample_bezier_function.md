@@ -16,9 +16,18 @@ implementation_status: implemented
 verification_status: manual_public_workflows_and_independent_oracle
 repository_branch: ops-specs
 repository_commit: 30478d33
+implementation_branch: numeric-optimize
+implementation_base_commit: eb0e90c8
+implementation_updated: 2026-09-21
 ---
 
 # CRV-02: sample_bezier_function
+
+Numeric profile: strict retains the exact reference defined below. Floating
+arithmetic in accelerated profiles follows the shared
+[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
+range/fallback rules. Discrete results, copies, selected endpoints and special
+values remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
@@ -132,8 +141,9 @@ checked before either output can execute. Empty requests read no runtime data.
 The selected versions are strict, Apple Silicon CPU accelerated and x86-64 CPU
 accelerated, with the distinct proposed keys above. No unsuffixed dispatcher
 or compatibility alias is included in the target registration surface.
-The accelerated error bound is at most four representable steps (ULP distance)
-from the correctly rounded mathematical y reference in the selected output dtype.
+The accelerated error bound follows the shared final FP32 4 ULP contract
+relative to the correctly rounded mathematical y reference. Float64 outputs
+retain their dtype and use the FP32 absolute-error scale.
 The inverse solver's stopping condition must bound y error; an x residual alone
 does not establish this guarantee.
 
@@ -277,7 +287,9 @@ Accelerated solvers can use CPU vectorized polynomial evaluation and safeguarded
 root methods to propose candidates. A valid y enclosure must establish the
 final <=4-ULP condition, or the sample falls back to strict. If an enclosure
 includes several possible reference outputs, the candidate must be within four
-representable steps of every possible correctly rounded reference output.
+FP32 steps (or the corresponding Float64 absolute-error bound) of every
+possible correctly rounded reference output. A zero, FP32-subnormal-range or
+out-of-FP32-range reference requires strict evaluation.
 An x residual alone is especially insufficient near a stationary x derivative.
 Root approximation and polynomial roundoff share one final y error budget.
 
@@ -410,8 +422,9 @@ production root solver. Form the same RN64 absolute controls and sampled q,
 then establish the unique mathematical inverse and correctly rounded y.
 Known dyadic roots and algebraic cases complement hard-to-round tests; an
 oracle using only a fixed double-precision t approximation is insufficient.
-For strict, compare final bits. For accelerated, compare ordered finite-value
-ULP distance in the selected output dtype, with maximum four. Exact anchor and
+For strict, compare final bits. For accelerated Float32, compare ordered finite
+FP32 distance with maximum four; for Float64, compare the direct error against
+the shared FP32-scaled bound. Apply strict outside its admitted range. Exact anchor and
 clamp cases still compare bits. No global absolute epsilon replaces these tests.
 
 Rounding enclosures must resolve reference results before claiming oracle
