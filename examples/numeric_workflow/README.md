@@ -1303,23 +1303,31 @@ cmake --build build/numeric --target photospider_numeric_baking -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_baking strict
 ```
 
-Use `apple`/`x86` only on the corresponding CPU. Five manual groups cover
-48 generated-versus-explicit graph pairs per profile, analytic values, mixed
-endpoints and both output dtypes, values-only/axis-only/combined/ROI demand,
-read/dirty equivalence, cache binding changes, owner lifetime, source errors,
-pre-cancelled execution, work/payload limits, IDs and exports. A sparse multi
-PCHIP fixture requests two values from a million-row logical table under a
-1 MiB controlled-payload limit. The target remains outside CTest/integration.
+Use `apple`/`x86` only on the corresponding CPU. Six manual groups cover
+48 generated/explicit graph pairs per profile with independent analytic values,
+both dtypes, mixed endpoints, independent outputs, source/dirty equivalence,
+cache replacement, authoring IDs/exports, work/payload limits and active
+cancellation after work begins. Signed/unaligned/scalar-zero source views are
+imported through InputSnapshotStore, preserving their logical values; direct
+operator layout checks remain in the underlying source suites.
 
-Source semantics remain visible: N=1 ignores end; axis skips function controls;
-expression/Bezier N>1 reject equal endpoints, while interpolation keeps
-linspace's repeated coordinates. Interpolation values at index zero may ignore
-end, even when the axis would fail; values requests do not force axis execution.
-Dynamic bindings and ordinary cache witnesses control reevaluation. The later
-consumer applies its own axis validity rules and approximation: a linear LUT
-through [0,.25,1] returns .125 at x=.25, whereas continuous x^2 is .0625.
-The CRV-05 example below executes all six consumer chains and checks that
-discretization separately.
+All expanded formal outputs use Whole. Nonempty values computes and retains the
+complete table even for sparse demand. Interpolation also materializes the full
+Float64 query array (8*count bytes), plus count*C*dtype output bytes and source
+workspace. Any active input change dirties recorded values demand; full typed
+and upstream failures apply. Numeric failures retain source Run scope. A sparse
+million-row PCHIP fixture must reject a 1 MiB payload budget. It no longer claims
+successful sparse execution under that budget.
+
+N=1 ignores end; axis-only skips function controls. N>1 collects end even for a
+first-value request. Expression/Bezier reject equal endpoints while interpolation
+retains linspace's repeated coordinates. Source mathematical rules are unchanged.
+Baked values and axis remain independently exported generic Values. A later
+linear LUT through [0,.25,1] returns .125 at x=.25 although continuous x^2 is
+.0625. CRV-05 tests this separate discretization behavior. Current native results,
+public/callback-chain sampling and Instruments limits are in the
+[implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-04-public-lut1d-authoring).
+The target remains excluded from default builds and CTest.
 
 
 ## LUT1D application: CRV-05

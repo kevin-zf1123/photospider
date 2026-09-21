@@ -114,13 +114,17 @@ inline Result<BakedLut1d> interpolation(WorkflowDocument& document,
  * @note Construction reads no payload, freezes nothing and writes no files.
  * Runtime obeys expanded source contracts: output values[count] or [count,C]
  * and axis:Float64[3], independently demanded, immutable owners after context
- * teardown, source-specific finite/grid/domain/rounding rules and exact dirty
- * witnesses. N=1 ignores end payload. Interpolation uses Float64 linspace
- * queries regardless of table dtype. Source numerical, typed, upstream,
- * backend, resource, cancellation and stale failures retain their identities;
- * no private cache or table approximation guarantee is added. Unsupported
- * profiles fail at source compile/preflight. Use explicit host budgets for
- * runtime execution.
+ * teardown and source-specific finite/grid/domain/rounding rules. Nonempty
+ * values executes complete Whole source outputs, even for sparse demand.
+ * Interpolation materializes the full Float64 query array and full table.
+ * Active inputs retain complete typed/source validation; numeric failures have
+ * Run scope;
+ * their edits invalidate output demand. Axis-only skips function inputs. N=1
+ * ignores end payload; N>1 retains end even for first-value demand. Source
+ * numerical, typed, upstream, backend, resource, cancellation and stale
+ * failures retain their identities; no private cache or table approximation
+ * guarantee is added. Unsupported profiles fail at source compile/preflight.
+ * Use explicit host budgets for runtime execution.
  */
 /** @brief Bakes a bounded expression; derives coefficient names from source.
  * expression and coefficients follow sample_expression_node. Shared contract
@@ -207,7 +211,7 @@ inline Result<BakedLut1d> bake_lut1d_pchip(
                                      std::move(start), std::move(end), count,
                                      dtype, domain, profile, true, false);
 }
-/** @brief Bakes column-local linear interpolation after Float64 linspace.
+/** @brief Bakes multiple-function linear interpolation after Float64 linspace.
  * x/y and domain follow interpolate_linear_multi_node; default domain Reject.
  * Shared baking contract above applies; C=1 is retained for multi inputs.
  */
@@ -221,7 +225,7 @@ inline Result<BakedLut1d> bake_lut1d_linear_multi(
                                      std::move(start), std::move(end), count,
                                      dtype, domain, profile, false, true);
 }
-/** @brief Bakes column-local PCHIP interpolation after Float64 linspace.
+/** @brief Bakes multiple-function PCHIP interpolation after Float64 linspace.
  * x/y and domain follow interpolate_pchip_multi_node; default domain Reject.
  * Shared baking contract above applies; C=1 is retained for multi inputs.
  */

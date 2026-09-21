@@ -118,22 +118,25 @@ interpolation error relative to a continuous function.
 
 ## Demand, resources, errors and lifetime
 
-Compose the exact per-port Data/Control/Validation/Descriptor demand of the
-expanded graph. Axis-only queries do not read expression coefficients, Bezier
-controls or interpolation x/y. Interpolator values queries request only the
-needed linspace values; values failure does not redefine a separately requested
-axis as failed. No template-only Whole pass or joint-output dependency is added.
-Source-global x/topology checks remain required exactly where their own specs
-declare them. Dirty mapping is the ordinary composition of those witnesses.
+All expanded formal source outputs now use CPU Whole. A nonempty values request
+computes the complete baked table and retains its full output owner, even when
+only a few cells are returned. Interpolation bakes materialize the complete
+Float64 linspace query array (8*count bytes) before the complete interpolation
+output (count*C*dtype bytes). Account simultaneous source owners, query/table
+buffers and each source's fixed workspace through the same host resource root.
+There is no additional opaque bake primitive, cache, runtime function object or
+pairing certificate.
 
-Budget the simultaneous nodes, source owners, Float64 query fragments, control
-indices, exact arithmetic and returned buffers through the same host root.
-For M demanded interpolation query positions, the query payload can be 8M bytes,
-plus the source node's stated scratch and table outputs; deduplicate row queries
-across requested columns. The graph need not retain a full count-sized query
-array for sparse demand. No separate private cache or disk backing is required.
-Mandatory active ownership survives cache-off. Returned owners and any exported
-axis owner obey underlying post-context lifetime and final-release rules.
+Axis remains an independent Float64[3] output: axis-only does not execute the
+expression coefficients, Bezier controls or interpolation x/y. Count=1 still
+omits end payload. For count>1, even a request for only the first value collects
+end and computes the full grid. Each source retains its mathematical formula,
+selection/NaN/typed rules and numeric allowance; complete active input collection
+can propagate previously unrequested upstream/typed failures. Numeric failures
+have their source Whole Run scope. Any active source edit invalidates recorded
+values demand; function controls never dirty axis. Empty reads no payload.
+Output names, generic shapes/dtypes, C=1, explicit exports and post-context
+immutable ownership remain unchanged. Cache-off retains active ownership.
 
 Missing authoring parameters or invalid profile fail template construction with
 InvalidArgument; missing required runtime bindings and invalid expanded-node
@@ -170,18 +173,23 @@ checks the 65536-node limit and constructs both nodes before mutation; invalid
 parameters and allocation failure leave graph contents unchanged. Compiler
 still validates actual metadata/bindings and all graph-wide constraints.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed five manual groups. Each profile compared
-48 generated/explicit graph pairs: six templates, two output dtypes and four
-output/ROI demand modes, including exact source support and dirty mapping.
-Analytic fixtures independently check values; named exports, C=1, mixed
-endpoint types, singleton failing-end isolation, axis function-source isolation,
-equal-endpoint/source dependency differences, cached reversed bindings and
-million-row sparse PCHIP composition are exercised. Resource limits and
-pre-cancelled execution fail explicitly; recovery checks use a new context.
-Installed 0.15 consumers, formatting/lint and independent authoring/acceptance
-reviews passed. This is manual acceptance, with no new CTest/integration entry.
-No performance or continuous-function approximation bound is inferred.
+Current native Clang 21 strict/Apple runs pass six manual groups. Each profile
+compares 48 generated/explicit graph pairs across six templates, both dtypes and
+four demand modes, with independent analytic fixture values and exact dependency
+comparison. Every expanded output is asserted Whole. Tests cover independent
+axis, count=1 failing end, count>1 full end collection, source-specific domains,
+cache replacement, named exports, authoring rollback/ID limits, work/payload
+failure and recovery. Arbitrary signed/unaligned/scalar-zero source layouts are
+imported through InputSnapshotStore before execution; primitive direct-layout
+checks remain in the source suites. Live cancellation after work begins verifies
+release of template intermediates. The million-row sparse multi-PCHIP case is
+now a complete-output budget rejection at 1 MiB.
+
+No additional numeric primitive is introduced. Numerical arithmetic/oracles for
+the underlying operations remain in NUM-01/02 and CRV-01/02; graph equivalence
+alone is not their numerical proof. Native public and callback-chain timing,
+budgets and Instruments evidence are in math-implementation. Other platforms and
+installed consumers were not rerun for this migration.
 
 See the maintained [public example and commands](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04).
 The source specifications remain Proposed independently of implementation.

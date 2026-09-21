@@ -696,22 +696,82 @@ successful local construction, reserving existing/supplied producer IDs and the
 caller's output labels implicitly. Source contracts supply all runtime resource,
 precision, dependency, cache and failure semantics.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed the five baking manual groups. Each profile
-compares 48 generated/explicit graph pairs across six sources, two dtypes and
-four demand modes; checked results include source/dirty witnesses and analytic
-values. Additional tests cover mixed scalar types, N=1 failing end, axis-only
-failing function sources, source-specific equal-endpoint and first-coordinate
-behavior, cached reversed bindings, million-row sparse multi PCHIP under 1 MiB
-payload, C=1 and multiple named bakes, reference/UINT64_MAX IDs and partial
-construction rejection. Runtime cancellation coverage here is pre-cancellation;
-resource recovery checks create a new context. Underlying source clusters cover
-arithmetic-time interruption and owner retirement. Returned results are checked
-after each helper execution context is destroyed. Installed 0.15 consumers,
-ClangFormat 21/cpplint and independent authoring/acceptance reviews passed.
-CRV-05 below covers all six downstream application chains and the expected
-discretization error; graph equivalence alone is not a proof of approximation quality. No new
-runtime primitive, integration-test registration or performance claim is added.
+All expanded formal source outputs now use CPU Whole. A nonempty values request
+computes the complete baked table and retains its full output owner, even when
+only a few cells are returned. Interpolation bakes materialize the complete
+Float64 linspace query array (8*count bytes) before the complete interpolation
+output (count*C*dtype bytes). Account simultaneous source owners, query/table
+buffers and each source's fixed workspace through the same host resource root.
+There is no additional opaque bake primitive, cache, runtime function object or
+pairing certificate.
+
+Axis remains an independent Float64[3] output: axis-only does not execute the
+expression coefficients, Bezier controls or interpolation x/y. Count=1 still
+omits end payload. For count>1, even a request for only the first value collects
+end and computes the full grid. Each source retains its mathematical formula,
+selection/NaN/typed rules and numeric allowance; complete active input collection
+can propagate previously unrequested upstream/typed failures. Numeric failures
+have their source Whole Run scope. Any active source edit invalidates recorded
+values demand; function controls never dirty axis. Empty reads no payload.
+Output names, generic shapes/dtypes, C=1, explicit exports and post-context
+immutable ownership remain unchanged. Cache-off retains active ownership.
+
+Clang21 strict/Apple each pass 48 generated/explicit graph pairs and independent
+analytic fixtures, complete dependencies/dirty mapping, native source selection,
+cache/source failures, named exports/authoring limits, managed work/payload
+budgets and active cancellation. Six-template signed/unaligned/scalar-zero
+snapshot-import tests preserve logical values. A million-row sparse request
+verifies full-output rejection under 1 MiB, not sparse success. Source numeric
+and direct-layout oracles remain in their separately validated families.
+
+
+Native sampling on Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug,
+package 0.18.0 uses all six public templates at count=129, Float64 inputs/output,
+C=1 for scalar and C=2 for multi, with the control fixtures in baking.cpp.
+Expression and quadratic Bezier implement x^2 on [0,1]; linear is 2*x on [0,2];
+PCHIP uses x=[0,1,2], y=[0,1,4] on [0,2]; linear multi uses [2*x,10-2*x] on
+[0,1]; PCHIP multi uses [P(x),4-P(x)] on [.5,1.5]. An independent dyadic
+piecewise polynomial checks all values outside timing. Both values and axis are
+requested. One worker, cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata
+and dependency state, 2^40 dependency/Run work, default unlimited managed work;
+one warm invocation precedes seven samples. Compile/freeze is excluded.
+
+The before adapter replaces only CRV-01/02 with their 3d35f5eb sources in the
+same kernel. Expression was already Whole and has no implementation change;
+its before/after differences are sampling variation. These templates have no
+independent numerical callback. The current core column is the sum of the host's
+monotonic expanded-source callback durations (microsecond resolution), including
+numeric arithmetic, allocation and work metering but excluding input collection
+and graph scheduling. This differs from the unmetered direct-core measurements
+for individual source families. Times are median [min,max] milliseconds.
+
+| Template | Profile | Public before | Public Whole | Expanded callback sum |
+| --- | --- | ---: | ---: | ---: |
+| expression | strict | 0.119 [0.100,0.176] | 0.105 [0.100,0.120] | 0.038 [0.037,0.044] |
+| expression | apple | 0.095 [0.094,0.113] | 0.094 [0.091,0.113] | 0.034 [0.033,0.039] |
+| Bezier | strict | 10.469 [10.269,13.890] | 5.398 [5.300,5.697] | 5.289 [5.197,5.547] |
+| Bezier | apple | 10.260 [10.223,10.479] | 5.211 [5.184,5.293] | 5.117 [5.076,5.202] |
+| linear | strict | 2.755 [2.703,2.788] | 0.814 [0.809,0.898] | 0.724 [0.703,0.773] |
+| linear | apple | 2.771 [2.685,3.046] | 0.807 [0.796,0.883] | 0.709 [0.696,0.753] |
+| PCHIP | strict | 12.639 [12.262,13.035] | 9.457 [9.419,9.693] | 9.324 [9.265,9.529] |
+| PCHIP | apple | 12.268 [12.222,12.448] | 9.007 [8.924,9.236] | 8.883 [8.771,9.062] |
+| linear multi | strict | 5.696 [5.458,5.829] | 1.449 [1.419,1.554] | 1.347 [1.324,1.436] |
+| linear multi | apple | 5.434 [5.360,5.515] | 1.394 [1.367,1.454] | 1.286 [1.264,1.316] |
+| PCHIP multi | strict | 25.563 [25.138,25.875] | 19.718 [19.122,20.369] | 19.541 [18.972,20.181] |
+| PCHIP multi | apple | 24.633 [24.577,24.911] | 18.163 [18.019,18.697] | 17.997 [17.861,18.549] |
+
+For multi PCHIP, context-reported peak Metadata falls from 8,219,352 to 4,376
+bytes; reported payload changes from 290,176 to 290,024 bytes. These are managed
+capacities, not RSS. The 12-second Apple multi-PCHIP Time Profiler trace retains
+11,948 execution-stack samples, with ExactCurve::evaluate inclusive in 98.05%,
+ResourceBudget in 6.05%, and collect in 0.06%; no DependencySession frame is
+sampled. Inclusive categories overlap. Exact curve arithmetic remains the
+observed bottleneck for this nonlinear Float64 template.
+
+Ignored local raw artifacts are `build/crv-whole/baking-times.csv`,
+`baking-perf.cpp`, its build script, `baking-after.trace`, exported XML and
+`baking-profile-summary.txt`. Results cover these native fixtures, not an
+all-shape/platform claim. No new primitive or numerical standard was introduced.
 
 
 ## CRV-05 dynamic-axis LUT1D
