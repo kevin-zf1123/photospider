@@ -3,18 +3,19 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_aggregate.hpp"
-#include "01-numeric/ordered_reduction.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -89,319 +90,223 @@ Result<ScanMetadata> metadata(
     return mismatch("scan source/destination numeric domains differ");
   return Answer(std::move(result));
 }
-struct ScanPoint {
-  std::array<std::uint64_t, 8> coordinate{};
-  std::uint64_t fragment = 0, offset = 0;
+// Store only exact carry, never a rounded output or a complete ratio workspace.
+// Plane traversal is logical row-major: previous rows precede the current row,
+// preserving first-NaN priority while exact finite sums are merged.
+struct SumCarry final {
+  numeric_ops::RatioWorkspace::Integer magnitude;
+  std::uint64_t first_nan = 0;
+  bool negative = false, has_nan = false, positive_inf = false,
+       negative_inf = false, all_negative_zero = true;
+  void load(numeric_ops::ExactAggregate* target) const {
+    target->reset();
+    target->ratio.numerator = magnitude;
+    target->ratio.negative = negative;
+    target->first_nan = first_nan;
+    target->has_nan = has_nan;
+    target->positive_inf = positive_inf;
+    target->negative_inf = negative_inf;
+    target->all_negative_zero = all_negative_zero;
+  }
+  void save(const numeric_ops::ExactAggregate& source) {
+    magnitude = source.ratio.numerator;
+    negative = source.ratio.negative;
+    first_nan = source.first_nan;
+    has_nan = source.has_nan;
+    positive_inf = source.positive_inf;
+    negative_inf = source.negative_inf;
+    all_negative_zero = source.all_negative_zero;
+  }
 };
 struct ScanState final {
-  bool integral, initialized = false, requested = false;
-  SequenceProfile profile;
-  ScanMetadata description;
   numeric_ops::ExactAggregate accumulator, conversion;
-  ResourceVector<ScanPoint> points;
-  ResourceVector<MutableValue> outputs;
-  std::size_t current = 0, line_end = 0;
-  std::uint64_t cursor = 0, end = 0;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
-  std::array<std::uint64_t, 4> replicas{};
-  ScanState(bool rectangle, SequenceProfile selected, ScanMetadata resolved,
-            ElementType source)
-      : integral(rectangle),
-        profile(selected),
-        description(std::move(resolved)),
-        accumulator(selected, numeric_ops::AggregateKind::Sum, source),
-        conversion(selected, numeric_ops::AggregateKind::Sum, source) {}
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied) const {
-    NumericDiagnostics result;
-    result.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        result.implementation.data(), result.implementation.size(),
-        "photospider.scan/1;%s;exact-limbs;replica-store%s",
-        integral ? "integral_image" : "prefix_sum",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= result.implementation.size())
-      return Status{ErrorCode::Internal, "scan identity too long"};
-    result.evaluated_values = evaluated;
-    result.copied_elements = copied;
-    return phase.report_numeric(result);
-  }
-  bool same_line(const ScanPoint& a, const ScanPoint& b) const {
-    for (std::size_t j = 0; j < description.output.shape.size(); ++j)
-      if (j != description.axis && a.coordinate[j] != b.coordinate[j])
-        return false;
-    return true;
-  }
-  std::uint64_t count() const {
-    std::uint64_t result = 1;
-    for (std::size_t j = 0; j < description.output.shape.size(); ++j)
-      if (description.mask & (1U << j))
-        result *= points[current].coordinate[j];
-    return result;
-  }
-  Result<Footprint> window(const DependencyPhase& phase) const {
-    auto shape = phase.query.inputs[0].descriptor.shape;
-    for (std::size_t j = 0; j < shape.size(); ++j)
-      shape[j] = (description.mask & (1U << j))
-                     ? (integral ? points[current].coordinate[j] : shape[j])
-                     : 1;
-    auto local = numeric_ops::ordered_range(shape, cursor, end, phase.sets);
-    if (!local.ok())
-      return Result<Footprint>(local.status());
-    std::vector<Region> boxes;
-    for (const auto& box : local.value().boxes()) {
-      auto dimensions = box.dimensions();
-      for (std::size_t j = 0; j < shape.size(); ++j)
-        if (!(description.mask & (1U << j)))
-          dimensions[j].offset = points[current].coordinate[j];
-      boxes.emplace_back(std::move(dimensions));
-    }
-    return Footprint::from_regions(phase.query.inputs[0].descriptor.shape,
-                                   std::move(boxes), phase.sets);
-  }
-  Status initialize(const DependencyPhase& phase) {
-    const auto total = phase.query.outputs.element_count().value();
-    const auto rank = description.output.shape.size();
-    auto charged = phase.consume_work(total * 2 * rank);
-    if (!charged.ok())
-      return charged;
-    publication = std::make_unique<numeric_ops::ArrayPublication>(
-        phase.query.outputs.boxes().size(), rank);
-    points.reserve(total);
-    outputs.reserve(phase.query.outputs.boxes().size());
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated =
-          MutableValue::allocate(description.output, box, phase.allocator);
-      if (!allocated.ok())
-        return allocated.status();
-      auto region =
-          Footprint::from_regions(description.output.shape, {box}, phase.sets);
-      if (!region.ok())
-        return region.status();
-      std::uint64_t offset = 0;
-      auto visited = region.value().visit(
-          [&](const auto& coordinate) {
-            ScanPoint point;
-            std::copy(coordinate.begin(), coordinate.end(),
-                      point.coordinate.begin());
-            point.fragment = outputs.size();
-            point.offset = offset++;
-            points.push_back(point);
-            return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!visited.ok())
-        return visited;
-      outputs.push_back(allocated.take_value());
-    }
-    if (!integral) {
-      // Comparator failure unwinds the private, unpublished point plan. This
-      // keeps cancellation/work admission responsive during metadata sorting.
-      try {
-        std::sort(
-            points.begin(), points.end(), [&](const auto& a, const auto& b) {
-              auto admitted = phase.consume_work(rank + 1);
-              if (!admitted.ok())
-                throw admitted;
-              for (std::size_t j = 0; j < rank; ++j)
-                if (j != description.axis && a.coordinate[j] != b.coordinate[j])
-                  return a.coordinate[j] < b.coordinate[j];
-              return a.coordinate[description.axis] <
-                     b.coordinate[description.axis];
-            });
-      } catch (const Status& failure) {
+  ScanState(SequenceProfile profile, ElementType source)
+      : accumulator(profile, numeric_ops::AggregateKind::Sum, source),
+        conversion(profile, numeric_ops::AggregateKind::Sum, source) {}
+};
+Result<Value> execute_scan(const OperationInvocation& call, bool integral,
+                           SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    const auto* budget = resource_internal::metadata_budget();
+    const std::function<Status(std::uint64_t)> work =
+        [&](std::uint64_t amount) {
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, {}};
+          return budget ? budget->consume({amount}) : Status::success();
+        };
+    auto status = work(1);
+    if (!status.ok())
+      return Answer(status);
+    const auto& input = call.inputs[0];
+    const auto& shape = input.descriptor().shape;
+    auto parsed = metadata(integral, {input.descriptor(), input.facets()},
+                           call.parameters);
+    if (!parsed.ok())
+      return Answer(parsed.status());
+    const auto& description = parsed.value();
+    auto allocated = call.allocator.allocate(sizeof(ScanState));
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto buffer = allocated.take_value();
+    std::unique_ptr<ScanState, void (*)(ScanState*)> state(
+        new (buffer.data()) ScanState(profile, input.descriptor().element_type),
+        [](ScanState* item) { item->~ScanState(); });
+    auto made = MutableValue::allocate(description.output, call.output_region,
+                                       call.allocator);
+    if (!made.ok())
+      return Answer(made.status());
+    auto output = made.take_value();
+    std::vector<std::uint64_t> coordinate(shape.size(), 0),
+        source(shape.size(), 0);
+    const auto read = [&]() -> Status {
+      auto charged = work(shape.size() + 1);
+      if (!charged.ok())
+        return charged;
+      auto at = input.byte_address(source);
+      if (!at.ok())
+        return at.status();
+      std::uint64_t bits = 0;
+      std::memcpy(&bits, input.bytes().data() + at.value(),
+                  Value::element_size(input.descriptor().element_type));
+      return state->accumulator.add(bits, work);
+    };
+    const auto store = [&](bool empty) -> Status {
+      auto charged = work(shape.size() + 1);
+      if (!charged.ok())
+        return charged;
+      auto calculated = empty ? Result<std::uint64_t>(UINT64_C(0))
+                              : state->conversion.finish_as(
+                                    description.output.element_type, 1, work);
+      if (!calculated.ok()) {
+        auto failure = calculated.status();
+        if (failure.reason == FailureReason::ArithmeticOverflow) {
+          failure.detail = {FailureOrigin::Domain, FailureScope::Run};
+          failure.message += " output=[";
+          for (auto index : coordinate)
+            failure.message += std::to_string(index) + ",";
+          failure.message += "]";
+        }
         return failure;
       }
+      std::uint64_t linear = 0;
+      for (std::size_t j = 0; j < shape.size(); ++j)
+        linear = linear * description.output.shape[j] + coordinate[j];
+      std::array<std::uint64_t, 4> replicas{};
+      numeric_ops::select_words(replicas.data(), calculated.value(),
+                                calculated.value(), 1, profile);
+      std::memcpy(output.data() + linear * Value::element_size(
+                                               description.output.element_type),
+                  replicas.data(),
+                  Value::element_size(description.output.element_type));
+      return Status::success();
+    };
+    std::uint64_t planes = 1;
+    for (std::size_t j = 0; j < shape.size(); ++j)
+      if (!(description.mask & (1U << j)))
+        planes *= shape[j];
+    unsigned outer = description.axis, inner = description.axis;
+    if (integral) {
+      outer = static_cast<unsigned>(__builtin_ctz(description.mask));
+      inner = static_cast<unsigned>(
+          __builtin_ctz(description.mask & ~(1U << outer)));
     }
-    initialized = true;
-    return Status::success();
-  }
-  Result<DependencyPoll> need(const DependencyPhase& phase, Footprint data) {
-    using Answer = Result<DependencyPoll>;
-    auto closure = input_internal::validation_closure(
-        phase.query.inputs[0], data, phase.sets, phase.consume_work);
-    if (!closure.ok())
-      return Answer(closure.status());
-    auto validation = closure.take_value();
-    request_capacity =
-        dependency_internal::metadata_owner(32768 + points.size() * 8192);
-    std::vector<AtomCertificate> rows;
-    rows.reserve(points.size());
-    const auto rank = description.output.shape.size();
-    for (std::size_t j = 0; j < points.size(); ++j) {
-      auto charged = phase.consume_work(rank + 1);
-      if (!charged.ok())
-        return Answer(charged);
-      AtomCertificate row{
-          std::vector<std::uint64_t>(points[j].coordinate.begin(),
-                                     points[j].coordinate.begin() + rank),
-          {}};
-      if (j == current ||
-          (!integral && j > current && same_line(points[current], points[j]))) {
-        if (!integral && points[j].coordinate[description.axis] < end) {
-          std::vector<RegionDimension> dimensions(rank);
-          for (std::size_t axis = 0; axis < rank; ++axis)
-            dimensions[axis] = {points[j].coordinate[axis], 1};
-          dimensions[description.axis] = {
-              cursor, points[j].coordinate[description.axis] - cursor};
-          auto partial =
-              Footprint::from_regions(phase.query.inputs[0].descriptor.shape,
-                                      {Region(dimensions)}, phase.sets);
-          if (!partial.ok())
-            return Answer(partial.status());
-          auto checked = input_internal::validation_closure(
-              phase.query.inputs[0], partial.value(), phase.sets,
-              phase.consume_work);
-          if (!checked.ok())
-            return Answer(checked.status());
-          row.inputs = {{0, 1, partial.take_value(), {}},
-                        {0, 4, checked.take_value(), {}}};
-        } else {
-          row.inputs = {{0, 1, data, {}}, {0, 4, validation, {}}};
+    ResourceVector<SumCarry> columns;
+    if (integral)
+      columns.resize(shape[inner]);
+    for (std::uint64_t plane = 0; plane < planes; ++plane) {
+      if (!integral) {
+        state->accumulator.reset();
+        coordinate[outer] = 0;
+        status = store(true);
+        if (!status.ok())
+          return Answer(status);
+        for (std::uint64_t i = 0; i < shape[outer]; ++i) {
+          source = coordinate;
+          source[outer] = i;
+          status = read();
+          if (!status.ok())
+            return Answer(status);
+          coordinate[outer] = i + 1;
+          status = work(sizeof(ScanState) / 16 + 1);
+          if (!status.ok())
+            return Answer(status);
+          state->conversion = state->accumulator;
+          status = store(false);
+          if (!status.ok())
+            return Answer(status);
         }
-      }
-      rows.push_back(std::move(row));
-    }
-    requested = true;
-    return Answer(DependencyNeedBatch{std::move(rows)});
-  }
-  Status store_current(const DependencyPhase& phase) {
-    const auto required = count();
-    // Final conversion may destroy its workspace. Continue only from the
-    // original exact carry, including source NaN and infinity
-    // classifications.
-    auto status = phase.consume_work(sizeof(accumulator) / 8 + 1);
-    if (!status.ok())
-      return status;
-    conversion = accumulator;
-    auto calculated =
-        required ? conversion.finish_as(description.output.element_type, 1,
-                                        phase.consume_work)
-                 : Result<std::uint64_t>(UINT64_C(0));
-    if (!calculated.ok()) {
-      auto failure = calculated.status();
-      if (failure.reason == FailureReason::ArithmeticOverflow) {
-        failure.detail.origin = FailureOrigin::Domain;
-        failure.detail.scope = FailureScope::Atom;
-        failure.detail.atom =
-            AtomKey{phase.query.output_index,
-                    static_cast<std::uint32_t>(description.output.shape.size()),
-                    points[current].coordinate};
-      }
-      return failure;
-    }
-    status = report(phase, 0, 1);
-    if (!status.ok())
-      return status;
-    numeric_ops::select_words(replicas.data(), calculated.value(),
-                              calculated.value(), 1, profile);
-    const auto width = Value::element_size(description.output.element_type);
-    std::memcpy(outputs[points[current].fragment].data() +
-                    points[current].offset * width,
-                replicas.data(), width);
-    ++current;
-    if (integral || (current < points.size() &&
-                     !same_line(points[current - 1], points[current]))) {
-      accumulator.reset();
-      cursor = 0;
-    }
-    return Status::success();
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(32768);
-    if (!initialized) {
-      auto status = initialize(phase);
-      if (!status.ok())
-        return Answer(status);
-    }
-    request_capacity.reset();
-    if (requested) {
-      auto source = window(phase);
-      if (!source.ok())
-        return Answer(source.status());
-      auto status = source.value().visit(
-          [&](const auto& coordinate) {
-            auto charged = phase.consume_work(
-                (phase.inputs[0].fragments().size() + 1) * coordinate.size() +
-                1);
-            if (!charged.ok())
-              return charged;
-            std::uint64_t bits = 0;
-            auto read =
-                phase.read(0, coordinate, &bits,
-                           Value::element_size(
-                               phase.query.inputs[0].descriptor.element_type));
-            if (!read.ok())
-              return read;
-            charged = report(phase, 1, 0);
-            if (!charged.ok())
-              return charged;
-            auto added = accumulator.add(bits, phase.consume_work);
-            if (!added.ok())
-              return added;
-            if (!integral) {
-              ++cursor;
-              if (current < points.size() && count() == cursor)
-                return store_current(phase);
+      } else {
+        for (auto& column : columns) {
+          status = work(sizeof(SumCarry) / 8 + 1);
+          if (!status.ok())
+            return Answer(status);
+          column = SumCarry{};
+        }
+        coordinate[outer] = 0;
+        for (std::uint64_t x = 0; x <= shape[inner]; ++x) {
+          coordinate[inner] = x;
+          status = store(true);
+          if (!status.ok())
+            return Answer(status);
+        }
+        for (std::uint64_t y = 0; y < shape[outer]; ++y) {
+          state->accumulator.reset();
+          coordinate[outer] = y + 1;
+          coordinate[inner] = 0;
+          status = store(true);
+          if (!status.ok())
+            return Answer(status);
+          for (std::uint64_t x = 0; x < shape[inner]; ++x) {
+            source = coordinate;
+            source[outer] = y;
+            source[inner] = x;
+            status = read();
+            if (!status.ok())
+              return Answer(status);
+            status = work(512 + 2 * sizeof(SumCarry) / 8);
+            if (!status.ok())
+              return Answer(status);
+            auto& row = state->accumulator;
+            auto& combined = state->conversion;
+            columns[x].load(&combined);
+            combined.ratio.term = row.ratio.numerator;
+            combined.ratio.add_term(row.ratio.negative);
+            if (!combined.has_nan && row.has_nan) {
+              combined.first_nan = row.first_nan;
+              combined.has_nan = true;
             }
-            return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!status.ok())
-        return Answer(status);
-      if (integral)
-        cursor = end;
-      requested = false;
-    }
-    while (current < points.size()) {
-      const auto required = count();
-      if (cursor < required) {
-        auto target = required;
-        if (!integral) {
-          if (line_end <= current) {
-            line_end = current;
-            while (line_end + 1 < points.size() &&
-                   same_line(points[current], points[line_end + 1])) {
-              auto charged =
-                  phase.consume_work(description.output.shape.size() + 1);
-              if (!charged.ok())
-                return Answer(charged);
-              ++line_end;
-            }
+            combined.positive_inf |= row.positive_inf;
+            combined.negative_inf |= row.negative_inf;
+            combined.all_negative_zero &= row.all_negative_zero;
+            columns[x].save(
+                combined);  // finish may destroy arithmetic scratch.
+            coordinate[inner] = x + 1;
+            status = store(false);
+            if (!status.ok())
+              return Answer(status);
           }
-          target = points[line_end].coordinate[description.axis];
         }
-        end = cursor + std::min(UINT64_C(64), target - cursor);
-        auto source = window(phase);
-        return source.ok() ? need(phase, source.take_value())
-                           : Answer(source.status());
       }
-      auto status = store_current(phase);
-      if (!status.ok())
-        return Answer(status);
+      for (std::size_t j = 0; j < shape.size(); ++j)
+        if (description.mask & (1U << j))
+          coordinate[j] = 0;
+      for (std::size_t j = shape.size(); j; --j)
+        if (!(description.mask & (1U << (j - 1)))) {
+          if (++coordinate[j - 1] < shape[j - 1])
+            break;
+          coordinate[j - 1] = 0;
+        }
     }
-    ResourceVector<Value> values;
-    values.reserve(outputs.size());
-    for (auto& output : outputs) {
-      auto value = std::move(output).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication->retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    if (phase.query.cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto result = publication->finish(description.output, phase.query.outputs,
-                                      values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
   }
-};
+}
 OperationDefinition scan_operation(const std::string& key, bool integral,
                                    SequenceProfile profile) {
   OperationDefinition operation;
@@ -418,12 +323,9 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
   output.key = "values";
   output.shape_rule = OperationShapeRule::Fixed;
   output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.regional_atomic = true;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
-  output.continuation_bytes = sizeof(ScanState);
-  output.maximum_dependency_stages = 1048576;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(ScanState);
   operation.specialize_metadata = [integral, profile](const auto& inputs,
                                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -436,18 +338,11 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
       return Answer(available);
     OperationOutputSpecialization result;
     result.metadata.descriptor = resolved.value().output;
-    result.regional_atomic = true;
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.start_dependency = [integral, profile](const auto& query,
-                                                   const auto& allocator) {
-    auto resolved = metadata(integral, query.inputs[0], query.parameters);
-    if (!resolved.ok())
-      return Result<DependencyContinuation>(resolved.status());
-    return DependencyContinuation::make<ScanState>(
-        allocator, integral, profile, resolved.take_value(),
-        query.inputs[0].descriptor.element_type);
+  operation.callback = [integral, profile](const OperationInvocation& call) {
+    return execute_scan(call, integral, profile);
   };
   return operation;
 }

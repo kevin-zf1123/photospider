@@ -46,11 +46,12 @@ execution. This generic numeric scan does not infer physical units or image role
 Inherit [reduce_sum's dtype and numeric rules](NUM-11A_reduce_sum.md): four input
 dtypes, required static dtype with integer default Int64 or floating default
 Float64, explicit same-domain destination selection and one final range check
-or correctly rounded conversion. Each requested prefix is the exact sum of its
+or correctly rounded conversion. Each complete-output prefix is the exact sum of its
 own source interval, not a recurrence on previously rounded output values.
 Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 
-Empty prefixes yield integer zero or floating +0 without reading input values.
+Empty mathematical prefixes yield integer zero or floating +0; Whole still
+reads the active input for nonempty output demand.
 For nonempty prefixes, source NaN priority follows original logical axis order,
 with shared quieting/payload conversion. Mixed signed infinities and finite zero
 signs follow reduce_sum. The leading +0 is a boundary output, not an extra
@@ -60,86 +61,39 @@ A newly generated NaN at an earlier prefix is not a source element for later
 prefixes. For source [+Inf,-Inf,NaN_payload], outputs are [+0,+Inf,canonical_NaN,
 quiet_payload_NaN], following the actual source NaN priority at each boundary.
 
-Only requested prefixes undergo destination representability checking. For
-Int64 [INT64_MAX,1,-1], requesting only k=3 succeeds with INT64_MAX; unrequested
-k=2 does not cause an overflow failure. A request including k=2 fails its own
-observation, without poisoning an independently completed valid prefix request.
+Every output prefix undergoes final conversion. For Int64 [INT64_MAX,1,-1],
+output k=2 overflows and fails the Run even when the consumer requests only k=3.
+The exact accumulator itself can exceed destination range; only an actual
+complete-output final conversion fails. Floating overflow remains a numerical
+infinity and does not contaminate the exact carry used by later outputs.
 
-## Dependency, state and invalidation
+## Whole demand, state and invalidation
 
-For output coordinate o with k=o[axis], exact source Data support matches its
-other axes and spans [0,k) on axis. Union these supports over requested Q;
-only the largest requested k per line needs a source scan. Other lines and
-positions >=k are not read. Add typed Validation closure separately. Empty Q,
-or requests solely at k=0, read no source Data.
+Nonempty demand collects/validates complete input and computes complete output,
+including all lines and boundaries. Empty demand reads nothing; a request only
+at k=0 still reads input and can fail upstream/typed validation. Any active source
+edit invalidates all recorded observations. No per-output source-set, association
+row or persistent checkpoint remains. Each line uses an exact accumulator and a
+separate conversion snapshot, preserving NaN/Inf/zero source classifications.
 
-Use exact accumulated state, infinity classification and earliest source NaN
-metadata while scanning bounded blocks. Never use rounded output as continuation
-state or reject an unrequested prefix merely because its destination conversion
-would overflow. Optional reusable prefix checkpoints retain source/version and
-validation witnesses and consume host-accounted capacity; cache-off must preserve
-logical results. No hidden unbounded state is allowed.
+## Resources, errors and acceptance
 
-An input change at source axis i can affect output boundaries k>i on that line;
-map dirty support to that suffix, with typed-validation invalidation separately.
-Output inference and cache identity include source metadata, axis, dtype and
-profile. Return owned dense fragments exactly covering requested global Q.
+Work is O(full_input_count) plus exact arithmetic and full-output conversions.
+Own the complete packed output and potentially a full collected input, plus fixed
+exact state. Coordinate vectors are bounded by rank8. Work/cancellation checks
+cover each input, carry snapshot and final conversion/publication. Integer
+ArithmeticOverflow is Domain/Run with the output coordinate; failures release
+all unpublished output/state. Schema caps, dtype rules and owner lifetime remain.
 
-## Resource, error and acceptance requirements
-
-Work is proportional to actually required source prefix lengths plus arithmetic
-and requested result conversion. Account active exact accumulators, checkpoint
-or continuation state, source owners/windows, dependency/validation metadata,
-output payload and scratch. No full output or source line must be retained merely
-to scan it. Check cancellation per block, at least every 4096 source elements,
-and during exact/refinement work. Work/capacity/stage exhaustion fails explicitly.
-
-Compile/preflight rejects axis/dtype/shape violations or N+1 product above 2^40.
-Requested integer overflow uses OperationFailed/ArithmeticOverflow at the output
-coordinate with Atom scope; floating overflow/nonfinite results follow numeric
-semantics. A batch of eligible execute_atoms observations must preserve successful
-k=0 and representable prefixes alongside an overflowing prefix failure.
-Upstream/typed/resource/cancellation failures remain separate. Publish no partial
-failed observation; final result owners remain valid after context destruction.
-
-Conceptual public fixture: [1,2,3] -> [0,1,3,6]. Use independent exact prefix
-sums and raw payload classification. Verify k=0 performs no source reads,
-disjoint boundary requests read exactly the required prefix union, large
-cancellation avoids unrequested-prefix failures, block partitions do not affect
-bits and changes invalidate only dependent suffixes. Include multi-axis batches,
-negative source strides, subnormals, NaN ordering, signed zeros, budget/cancellation,
-cache-off and owner lifetime through public WorkflowDocument execution when
-implemented. The implementation evidence below records the checks actually run.
+Public [1,2,3] -> [0,1,3,6] and floating cancellation/special-value fixtures must
+retain exact bits. Independent prefix/rectangle sums verify every sampled result;
+integer oracle also checks the entire output for Whole overflow. Test arbitrary
+strides, whole-input dirty, unselected failure, Empty, zero boundary validation,
+work/output/state budgets and active cancellation.
 
 ## Implementation and executable acceptance
 
-Six suffixed keys are registered through `numeric_scans.cpp`; public authoring
-helpers live in `photospider/numeric/scans.hpp`. Each operation retains an exact
-accumulator and a separate conversion snapshot, preserving original source
-NaN/Inf/zero classification. Empty boundaries emit positive zero without Data.
-Windows transport at most 64 numeric source values; typed Validation closure
-is accounted separately and can require additional channel values.
-
-Regional prefix requests group outputs by line and increasing boundary, scanning
-only through each line's largest requested boundary. Integral rectangles are
-streamed independently in original row-major order; repeated arithmetic is
-charged. Separate executions and `execute_atoms` observations can recompute
-source values. No persistent checkpoint or integral table is retained.
-
-The output plan and complete per-observation association rows are host-accounted.
-Each Need stage processes all requested rows; dense prefix boundary requests
-can therefore require quadratic association work even though source terms are
-scanned once. Work/capacity/stage limits reject excessive requests explicitly.
-This is not a whole-execution linear-time or once-per-Run guarantee.
-
-The manual `photospider_numeric_scans` target and `scan_oracle.py` are described
-in [the workflow example](../../../../examples/numeric_workflow/README.md).
-Local Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 runs passed
-2,280 independent Fraction/raw-bit cases per profile on 2026-09-19, plus
-public workflow fixtures, sparse/L-shaped support,
-integer Atom isolation, typed/Empty/zero boundaries, negative strides, fenv,
-output-cap checks, sorting work/cancellation cleanup, and 4,096 source values
-through 64 windows with four sparse results and at most 16 KiB payload. The
-installed strict/Apple consumers, focused compiler unit, formatting/lint and
-independent math/entry reviews passed. No integration test or CTest
-registration is added; specification status remains Proposed.
+All six formal scan keys use Whole through photospider/numeric/scans.hpp.
+See [NUM-13 Whole execution](../scans-whole.md) for current public workflow,
+independent oracle and separate public/core timing. Older regional WSL/installed
+checks predate this implementation. Proposed status is unchanged.
