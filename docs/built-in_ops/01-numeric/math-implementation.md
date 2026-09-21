@@ -596,47 +596,93 @@ the stated grids; it does not establish all-shape or cross-platform speedups.
 
 ## CRV-03 parametric Bezier evaluation
 
-`parametric_bezier.cpp` uses the existing ExactSampling and ExactPolynomial
-facilities without an inverse/topology stage. Demanded controls widen exactly,
-relative handles reconstruct with RN64, and exact Bernstein coefficients are
-converted to power form. Horner uses integer t*2^1074 and denominator
-2^(actual_degree*1074), retaining coefficient units 2^-1075. Trimming the degree
-also changes the denominator; constant/zero polynomials use denominator one.
-The exact numerator has fewer than 5329 bits for degree<=3 and t in [0,1];
-rounding temporaries need under approximately 5330 bits and at most 16 live
-arena slots. The existing 40960-bit/96-slot continuation admits those bounds
-without allocating private arithmetic state. Interior exact zero tests raw
-reconstructed-control zero signs; a nonzero underflow keeps its exact sign.
-Endpoint conversion bypasses all other controls. Finite output obeys the
-correctly converted control convex hull, including extended infinite bounds.
+`parametric_bezier.cpp` retains ExactSampling RN64 reconstruction and
+ExactPolynomial integer Bernstein/power-Horner evaluation with direct output
+rounding. Unlike CRV-02, it evaluates explicit t and does not solve an inverse.
+The scalar numerator bound is 5329 bits for degree<=3 and t in [0,1]. Endpoints
+convert one anchor; interior exact zero is negative only if every reconstructed
+control is negative zero. All profiles retain the current exact calculation,
+with scalar/NEON/AVX2 integer helpers and the unchanged accelerated contract.
 
-The three-poll regional protocol projects Q onto query rows, reads/validates
-segment indices and t once per row, then declares local component control
-Data plus recognized typed Validation. Image handles close Validation across
-all channels while preserving scalar Data. Each output cell retains its own
-certificate; transport deduplicates source coordinates, and no global K/D/N
-scan or full output allocation is used for sparse demand. Explicit metadata
-reservation per Need is 4096+16384*M bytes in addition to managed row/point
-vectors, output fragments, publication owners and exact continuation scratch.
-Dense association/resource exhaustion is an explicit failure. Work checks
-cover reads, row/component loops, reconstruction, limb arithmetic and publication.
+One CPU Whole callback collects all four complete inputs with recognized typed
+validation, then validates every segment_indices/t row before any component
+arithmetic. It evaluates all N*D output cells and publishes one immutable dense
+[N,D] owner. Sparse demand restricts returned coverage but retains complete input
+collection, computation and output memory. Empty reads no payload; complete
+static metadata still validates.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed 1428 independent Fraction Bernstein cases per
-profile. The oracle reconstructs controls with its own integer IEEE rounding
-and uses direct Bernstein weights instead of production power-Horner. Cases
-include mixed types, unordered/repeated segments, partial components, wide
-exponents, subnormal and near-one t, selected/unselected invalid data, RN64
-midpoints, signed zeros and Float32 finite cancellation across extreme controls.
-Five public manual groups passed on each profile: analytic and reconstruction
-fixtures; sparse dependency/dirty and Atom isolation; strides/fenv/Empty/schema
-and resource interruption; cache/large sparse composition and typed closure;
-upstream ordering. The public constant compositions check 2^39 columns and
-2^40 rows with tiny actual requests. Independent review checked 96 additional
-Fraction Bernstein/power expansions and closed the endpoint-overflow diagnostic
-fix using a t=1 regression whose unneeded handles are NaN. Installed 0.15
-consumers, focused compiler unit, formatting/lint and scoped math/entry reviews
-passed. No new CTest/integration registration or performance claim was added.
+Mathematical selection is unchanged: t=0/1 uses only the selected anchor
+component; an interior uses both anchors and all relative handles of that segment
+and component. Generic numeric data outside every evaluated stencil is not
+additionally finite-checked. Complete typed and upstream validation still covers
+unused inputs. All rows/components are evaluated, so formerly unrequested bad
+index/t/components can fail the Run. No partial successful output is published.
+There is no global mathematical topology/monotonicity scan.
+
+Any input edit invalidates recorded output demand. Cache identity includes all
+input versions, profile, metadata and parameters. Output name, dtype, rank-2
+shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
+offsets and unaligned storage remain legal. Output storage survives its context.
+
+The callback retains one row classification and fixed arithmetic workspace,
+independent of N and D. It validates all rows, then reclassifies each row once
+for all columns. Work is O(N+N*D*degree), plus exact arithmetic, complete input
+collection and typed validation. Complete output costs b*N*D bytes. Admit that
+output and fixed workspace even for one requested cell, together with collected
+inputs/retained owners and metadata. Giant broadcast inputs/output can therefore
+fail a small payload budget. No per-cell dependency certificates or full
+coefficient table is retained.
+
+Use the host worker and resource ledger; poll cancellation on reads, row controls,
+inside exact arithmetic and before publication. Work/capacity failures preserve
+ResourceExhausted and release unpublished state/output. Numeric failures have Run
+scope, identifying offending port/index where available. Invalid segment/t is
+InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
+InvalidDomain; actual RN64 reconstruction or final conversion overflow is
+OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
+cancellation errors preserve their categories. Whole numeric counters are not
+available; zero counters must not be interpreted as zero arithmetic/fallbacks.
+
+
+Native Clang 21.1.3 strict/Apple public manual checks and 1428 independent
+Bernstein/RN64 cases per profile passed for the Whole implementation. Focused
+numeric/compiler tests passed. Other CPU platforms were not rerun. The giant
+2^39-column/2^40-row cases validate complete-output budget rejection rather than
+successful sparse numerical evaluation.
+
+Native Apple M5 / macOS 27.0 (26A5425a), package 0.18.0 sampling uses K=2,
+N=128, D=4, degree 2/3, Float64 inputs/output, indices all zero, t[i]=(i%64)/64,
+anchors[0,c]=c and anchors[1,c]=c+1. Quadratic offsets are .5; cubic offsets
+are .25 and -.25. An independent dyadic polynomial checks c+t (quadratic) or
+c+.75*t+.75*t*t-.5*t*t*t (cubic) outside timing. One warm invocation precedes
+seven measurements. One CPU worker, cache off, 1 GiB payload, 2 GiB Host,
+512 MiB Metadata and dependency state, 2^40 dependency/Run work, default
+unlimited managed work apply. The old adapter is source at 3d35f5eb linked to
+the same kernel. Public timing excludes compile/freeze and includes execution,
+collection, metering and result assembly. Core means the prepared complete-Value
+numeric callback with allocation and publication but no scheduling/collection or
+managed metering. Times are median [min,max] milliseconds.
+
+| Degree | Profile | Public before | Public Whole | Numeric callback core |
+| --- | --- | ---: | ---: | ---: |
+| quadratic | strict | 14.542 [13.915,14.971] | 4.491 [4.446,4.595] | 4.309 [4.284,4.350] |
+| quadratic | apple | 13.943 [13.780,14.672] | 4.410 [4.353,4.558] | 4.189 [4.089,4.314] |
+| cubic | strict | 19.812 [19.624,19.997] | 9.592 [9.486,9.674] | 9.124 [9.042,9.292] |
+| cubic | apple | 19.570 [19.045,20.265] | 9.183 [9.149,9.418] | 8.823 [8.638,9.035] |
+
+Context-reported peak Metadata falls from 20,554,216 to 3,432 bytes. Whole
+collection slightly increases peak payload: cubic 523,744 to 525,768 bytes.
+A 12-second Apple cubic Time Profiler capture retains 11,879 execution-stack
+samples: ParametricState::evaluate is inclusive in 98.75%, ExactPolynomial in
+94.01%, ResourceBudget in 3.00%, ExactSampling in 0.35%, and collect in 0.07%.
+Inclusive categories overlap; exact polynomial arithmetic is the remaining
+observed bottleneck. Numerical bounds and the fixed workspace are unchanged;
+no NUM-14 certificate or floating approximation is introduced.
+
+Raw driver/build commands, ranges, trace/XML and analysis are local ignored
+`build/crv-whole/parametric-*` artifacts, including `parametric-times.csv` and
+`parametric-profile-summary.txt`. These results establish the stated native
+workload, not arbitrary-shape or cross-platform speedups.
 
 
 ## CRV-04 public LUT1D authoring

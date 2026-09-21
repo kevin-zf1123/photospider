@@ -1,53 +1,53 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_bezier.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "data/input_validation.hpp"
-#include "photospider/data/semantic.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::BinaryParts;
 using numeric_ops::SequenceProfile;
-struct ParametricPoint {
-  std::uint64_t row, column, fragment, offset;
-  std::size_t lookup;
-};
 struct ParametricRow {
-  std::uint64_t index, t;
-  std::size_t first_point;
-  std::uint64_t segment;
-  int endpoint;
+  std::uint64_t index = 0, t = 0, segment = 0;
+  int endpoint = -1;
 };
 struct ParametricState final {
   SequenceProfile profile;
-  unsigned degree, stage = 0;
+  unsigned degree;
+  const OperationInvocation& call;
+  const ResourceBudget* budget;
+  std::function<Status(std::uint64_t)> consume;
   numeric_ops::ExactPolynomial arithmetic;
   numeric_ops::ExactSampling sampling;
-  ResourceVector<ParametricPoint> points;
-  ResourceVector<ParametricRow> rows;
-  ResourceVector<MutableValue> outputs;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
   std::array<std::uint64_t, 4> controls{}, replicas{};
-  ParametricState(SequenceProfile selected, unsigned order)
+  ParametricState(SequenceProfile selected,
+                  const OperationInvocation& invocation)
       : profile(selected),
-        degree(order),
+        degree(std::get<std::int64_t>(invocation.parameters.at("degree"))),
+        call(invocation),
+        budget(resource_internal::metadata_budget()),
+        consume([this](auto amount) { return work(amount); }),
         arithmetic(selected),
         sampling(selected) {}
-  Status failure(const DependencyPhase& phase, const ParametricPoint& point,
-                 unsigned port, const std::vector<std::uint64_t>& at,
+  Status work(std::uint64_t amount) const {
+    if (call.cancellation.cancelled())
+      return {ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({amount}) : Status::success();
+  }
+  Status failure(unsigned port, const std::vector<std::uint64_t>& at,
                  const char* message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
     Status result{
@@ -57,238 +57,85 @@ struct ParametricState final {
             (port == 4 ? "; output="
                        : "; port=" + std::to_string(port) + " coordinate="),
         reason,
-        {FailureOrigin::Domain, FailureScope::Atom}};
+        {FailureOrigin::Domain, FailureScope::Run}};
     for (auto index : at)
       result.message += std::to_string(index) + ",";
-    AtomKey atom;
-    atom.output_index = phase.query.output_index;
-    atom.rank = 2;
-    atom.coordinate[0] = point.row;
-    atom.coordinate[1] = point.column;
-    result.detail.atom = atom;
     return result;
   }
-  Result<std::uint64_t> read(const DependencyPhase& phase, unsigned port,
-                             const std::vector<std::uint64_t>& at,
-                             const ParametricPoint& point) {
-    auto work = phase.consume_work(phase.inputs[port].fragments().size() + 1);
-    if (!work.ok())
-      return Result<std::uint64_t>(work);
+  Result<std::uint64_t> read(unsigned port,
+                             const std::vector<std::uint64_t>& at) {
+    auto charged = work(at.size() + 1);
+    if (!charged.ok())
+      return Result<std::uint64_t>(charged);
+    const auto& input = call.inputs[port];
     std::uint64_t bits = 0;
-    const bool narrow = phase.query.inputs[port].descriptor.element_type ==
-                        ElementType::Float32;
-    auto status = phase.read(port, at, &bits, narrow ? 4 : 8);
-    if (!status.ok())
-      return Result<std::uint64_t>(status);
+    const bool narrow = input.descriptor().element_type == ElementType::Float32;
+    auto address = input.byte_address(at);
+    if (!address.ok())
+      return Result<std::uint64_t>(address.status());
+    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
     const auto value = BinaryParts::decode(bits, narrow);
     if (value.nan || value.infinite)
       return Result<std::uint64_t>(
-          failure(phase, point, port, at, "nonfinite parametric input"));
+          failure(port, at, "nonfinite parametric input"));
     return Result<std::uint64_t>(numeric_ops::ExactBezier::widen(bits, narrow));
   }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied) const {
-    NumericDiagnostics result;
-    result.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        result.implementation.data(), result.implementation.size(),
-        "photospider.parametric/1;exact-Bernstein;%s%s",
-        profile == SequenceProfile::Strict         ? "scalar-u64"
-        : profile == SequenceProfile::AppleSilicon ? "NEON-u64x2"
-                                                   : "AVX2-u64x4",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= result.implementation.size())
-      return {ErrorCode::Internal, "parametric diagnostic identity"};
-    result.evaluated_values = evaluated;
-    result.copied_elements = copied;
-    return phase.report_numeric(result);
-  }
-  Status initialize(const DependencyPhase& phase) {
-    const auto count = phase.query.outputs.element_count().value();
-    if (count > phase.sets.maximum_boxes)
-      return {ErrorCode::ResourceExhausted, "parametric association capacity",
-              FailureReason::CapacityLimit};
-    auto status = phase.consume_work(count * 4 + 1);
+  Status classify(ParametricRow* row) {
+    auto status = work(2);
     if (!status.ok())
       return status;
-    publication = std::make_unique<numeric_ops::ArrayPublication>(
-        phase.query.outputs.boxes().size(), 2);
-    points.reserve(count);
-    outputs.reserve(phase.query.outputs.boxes().size());
-    // Project the bounded rectangle list, not the logical whole output.
-    // Query lookup then costs O(P), with O(M) cell association work.
-    auto projection_capacity = dependency_internal::metadata_owner(
-        4096 + phase.query.outputs.boxes().size() * 512);
-    std::vector<Region> projected;
-    projected.reserve(phase.query.outputs.boxes().size());
-    for (const auto& box : phase.query.outputs.boxes())
-      projected.emplace_back(std::vector<RegionDimension>{box.dimensions()[0]});
-    auto projection =
-        Footprint::from_regions(phase.query.inputs[2].descriptor.shape,
-                                std::move(projected), phase.sets);
-    if (!projection.ok())
-      return projection.status();
-    rows.reserve(projection.value().element_count().value());
-    for (const auto& box : projection.value().boxes()) {
-      const auto span = box.dimensions()[0];
-      for (std::uint64_t i = 0; i < span.extent; ++i) {
-        status = phase.consume_work(1);
-        if (!status.ok())
-          return status;
-        rows.push_back({span.offset + i, 0, SIZE_MAX, 0, -1});
-      }
-    }
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto output = MutableValue::allocate(phase.query.output.descriptor, box,
-                                           phase.allocator);
-      if (!output.ok())
-        return output.status();
-      const auto row = box.dimensions()[0];
-      const auto col = box.dimensions()[1];
-      status = phase.consume_work(64);
-      if (!status.ok())
-        return status;
-      const auto found =
-          std::lower_bound(rows.begin(), rows.end(), row.offset,
-                           [](const auto& a, auto b) { return a.index < b; });
-      const auto base = static_cast<std::size_t>(found - rows.begin());
-      for (std::uint64_t i = 0; i < row.extent; ++i)
-        for (std::uint64_t j = 0; j < col.extent; ++j) {
-          status = phase.consume_work(1);
-          if (!status.ok())
-            return status;
-          if (rows[base + i].first_point == SIZE_MAX)
-            rows[base + i].first_point = points.size();
-          points.push_back({row.offset + i, col.offset + j, outputs.size(),
-                            i * col.extent + j, base + i});
-        }
-      outputs.push_back(output.take_value());
-    }
-    return Status::success();
-  }
-
-  Status declare(const DependencyPhase& phase, unsigned port,
-                 std::vector<Region> regions,
-                 std::vector<DependencyNeed>* needs) {
-    const auto& metadata = phase.query.inputs[port];
-    auto data =
-        Footprint::from_regions(metadata.descriptor.shape, regions, phase.sets);
-    if (!data.ok())
-      return data.status();
-    auto closure = input_internal::validation_closure(
-        metadata, data.value(), phase.sets, phase.consume_work);
-    if (!closure.ok())
-      return closure.status();
-    auto validation = closure.take_value();
-    needs->push_back({port, 1, data.take_value(), {}});
-    needs->push_back({port, 4, std::move(validation), {}});
-    return Status::success();
-  }
-  Result<DependencyPoll> need(const DependencyPhase& phase, bool query) {
-    using Answer = Result<DependencyPoll>;
-    request_capacity =
-        dependency_internal::metadata_owner(4096 + points.size() * 16384);
-    std::vector<AtomCertificate> certificates;
-    certificates.reserve(points.size());
-    for (const auto& point : points) {
-      auto work = phase.consume_work(8);
-      if (!work.ok())
-        return Answer(work);
-      std::vector<DependencyNeed> needs;
-      if (query) {
-        for (unsigned port : {2, 3}) {
-          auto footprint =
-              Footprint::from_regions(phase.query.inputs[port].descriptor.shape,
-                                      {Region({{point.row, 1}})}, phase.sets);
-          if (!footprint.ok())
-            return Answer(footprint.status());
-          needs.push_back({port, 6, footprint.take_value(), {}});
-        }
-      } else {
-        const auto& row = rows[point.lookup];
-        const auto first = row.segment + (row.endpoint == 1 ? 1 : 0);
-        auto status = declare(
-            phase, 0,
-            {Region({{first, row.endpoint < 0 ? 2U : 1U}, {point.column, 1}})},
-            &needs);
-        if (!status.ok())
-          return Answer(status);
-        if (row.endpoint < 0) {
-          status = declare(
-              phase, 1,
-              {Region({{row.segment, 1}, {0, degree - 1}, {point.column, 1}})},
-              &needs);
-          if (!status.ok())
-            return Answer(status);
-        }
-      }
-      certificates.push_back({{point.row, point.column}, std::move(needs)});
-    }
-    return Answer(DependencyNeedBatch{std::move(certificates)});
-  }
-  Status classify(const DependencyPhase& phase, ParametricRow* row) {
-    const auto& point = points[row->first_point];
-    auto work = phase.consume_work(phase.inputs[2].fragments().size() + 1);
-    if (!work.ok())
-      return work;
     std::int64_t segment = 0;
-    auto status = phase.read(2, {row->index}, &segment, 8);
-    if (!status.ok())
-      return status;
+    auto address = call.inputs[2].byte_address({row->index});
+    if (!address.ok())
+      return address.status();
+    std::memcpy(&segment, call.inputs[2].bytes().data() + address.value(), 8);
     if (segment < 0 || static_cast<std::uint64_t>(segment) >=
-                           phase.query.inputs[0].descriptor.shape[0] - 1)
-      return failure(phase, point, 2, {row->index},
-                     "parametric segment out of range");
+                           call.inputs[0].descriptor().shape[0] - 1)
+      return failure(2, {row->index}, "parametric segment out of range");
     row->segment = static_cast<std::uint64_t>(segment);
-    auto parameter = read(phase, 3, {row->index}, point);
+    auto parameter = read(3, {row->index});
     if (!parameter.ok())
       return parameter.status();
     row->t = parameter.value();
     const auto parts = BinaryParts::decode(row->t, false);
     if ((parts.negative && parts.magnitude) ||
         parts.order_key() > UINT64_C(0xbff0000000000000))
-      return failure(phase, point, 3, {row->index},
-                     "parametric t outside [0,1]");
+      return failure(3, {row->index}, "parametric t outside [0,1]");
     row->endpoint = !parts.magnitude                         ? 0
                     : row->t == UINT64_C(0x3ff0000000000000) ? 1
                                                              : -1;
     return Status::success();
   }
-  Result<std::uint64_t> evaluate(const DependencyPhase& phase,
-                                 const ParametricPoint& point, bool narrow) {
-    const auto& row = rows[point.lookup];
-    auto first =
-        read(phase, 0,
-             {row.segment + (row.endpoint == 1 ? 1 : 0), point.column}, point);
+  Result<std::uint64_t> evaluate(const ParametricRow& row, std::uint64_t column,
+                                 bool narrow) {
+    auto first = read(0, {row.segment + (row.endpoint == 1 ? 1 : 0), column});
     if (!first.ok())
       return first;
     controls[0] = first.value();
     if (row.endpoint >= 0)
       return sampling.weighted(first.value(), 0, 1, 0, 1, narrow, false,
-                               phase.consume_work);
-    auto last = read(phase, 0, {row.segment + 1, point.column}, point);
+                               consume);
+    auto last = read(0, {row.segment + 1, column});
     if (!last.ok())
       return last;
     controls[degree] = last.value();
     for (unsigned h = 0; h + 1 < degree; ++h) {
-      auto offset = read(phase, 1, {row.segment, h, point.column}, point);
+      auto offset = read(1, {row.segment, h, column});
       if (!offset.ok())
         return offset;
       auto absolute =
           sampling.weighted(h ? controls[degree] : controls[0], offset.value(),
-                            1, 1, 1, false, false, phase.consume_work);
+                            1, 1, 1, false, false, consume);
       if (!absolute.ok())
         return absolute;
       if (BinaryParts::decode(absolute.value(), false).infinite)
         return Result<std::uint64_t>(
-            failure(phase, point, 1, {row.segment, h, point.column},
+            failure(1, {row.segment, h, column},
                     "parametric control reconstruction overflow",
                     FailureReason::ArithmeticOverflow));
       controls[h + 1] = absolute.value();
     }
-    arithmetic.begin(phase.consume_work);
+    arithmetic.begin(consume);
     struct End {
       numeric_ops::ExactPolynomial& math;
       ~End() { math.end(); }
@@ -311,72 +158,71 @@ struct ParametricState final {
     }
     return result;
   }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(65536);
-    request_capacity.reset();
-    if (!stage) {
-      auto status = initialize(phase);
+  Result<Value> execute() {
+    using Answer = Result<Value>;
+    const auto& output_traits = call.prepared->traits().outputs[0];
+    const auto& shape = output_traits.fixed_output_shape;
+    for (std::uint64_t i = 0; i < shape[0]; ++i) {
+      ParametricRow row;
+      row.index = i;
+      auto status = classify(&row);
       if (!status.ok())
         return Answer(status);
-      stage = 1;
-      return need(phase, true);
     }
-    if (stage == 1) {
-      for (auto& row : rows) {
-        auto status = classify(phase, &row);
-        if (!status.ok())
-          return Answer(status);
-      }
-      stage = 2;
-      return need(phase, false);
-    }
+    auto allocated =
+        MutableValue::allocate({output_traits.output_element_type, shape},
+                               call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
     const bool narrow =
-        phase.query.output.descriptor.element_type == ElementType::Float32;
+        output_traits.output_element_type == ElementType::Float32;
     const auto width = narrow ? 4U : 8U;
-    for (const auto& point : points) {
-      auto status = report(phase, 1, 0);
+    for (std::uint64_t i = 0; i < shape[0]; ++i) {
+      ParametricRow row;
+      row.index = i;
+      auto status = classify(&row);
       if (!status.ok())
         return Answer(status);
-      auto value = evaluate(phase, point, narrow);
-      if (!value.ok())
-        return Answer(value.status());
-      if (BinaryParts::decode(value.value(), narrow).infinite) {
-        const auto& row = rows[point.lookup];
-        return Answer(failure(
-            phase, point, row.endpoint < 0 ? 4 : 0,
-            {row.endpoint < 0 ? point.row : row.segment + row.endpoint,
-             point.column},
-            "parametric output overflow", FailureReason::ArithmeticOverflow));
+      for (std::uint64_t column = 0; column < shape[1]; ++column) {
+        auto value = evaluate(row, column, narrow);
+        if (!value.ok())
+          return Answer(value.status());
+        if (BinaryParts::decode(value.value(), narrow).infinite)
+          return Answer(failure(
+              row.endpoint < 0 ? 4 : 0,
+              {row.endpoint < 0 ? i : row.segment + row.endpoint, column},
+              "parametric output overflow", FailureReason::ArithmeticOverflow));
+        numeric_ops::select_words(replicas.data(), value.value(), value.value(),
+                                  1, profile);
+        std::memcpy(output.data() + (i * shape[1] + column) * width,
+                    replicas.data(), width);
       }
-      status = report(phase, 0, 1);
-      if (!status.ok())
-        return Answer(status);
-      numeric_ops::select_words(replicas.data(), value.value(), value.value(),
-                                1, profile);
-      std::memcpy(outputs[point.fragment].data() + point.offset * width,
-                  replicas.data(), width);
     }
-    ResourceVector<Value> values;
-    values.reserve(outputs.size());
-    for (auto& output : outputs) {
-      auto work = phase.consume_work(1);
-      if (!work.ok())
-        return Answer(work);
-      auto published = std::move(output).publish();
-      if (!published.ok())
-        return Answer(published.status());
-      auto retained = publication->retain(published.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    auto result =
-        publication->finish(phase.query.output.descriptor, phase.query.outputs,
-                            values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    auto status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
   }
 };
+Result<Value> execute_parametric(const OperationInvocation& call,
+                                 SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    auto allocated = call.allocator.allocate(sizeof(ParametricState));
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto buffer = allocated.take_value();
+    std::unique_ptr<ParametricState, void (*)(ParametricState*)> state(
+        new (buffer.data()) ParametricState(profile, call),
+        [](auto* value) { value->~ParametricState(); });
+    return state->execute();
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
+
 OperationDefinition parametric_operation(const std::string& key,
                                          SequenceProfile profile) {
   OperationDefinition operation;
@@ -394,12 +240,9 @@ OperationDefinition parametric_operation(const std::string& key,
       {"dtype", OperationParameterType::String}};
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.regional_atomic = true;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
-  output.continuation_bytes = sizeof(ParametricState);
-  output.maximum_dependency_stages = 3;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(ParametricState);
   operation.specialize_metadata = [profile](const auto& inputs,
                                             const auto& parameters) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -429,16 +272,11 @@ OperationDefinition parametric_operation(const std::string& key,
     resolved.metadata.descriptor = {
         dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
         {q[0], a[1]}};
-    resolved.regional_atomic = true;
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  operation.start_dependency = [profile](const auto& query,
-                                         const auto& allocator) {
-    return DependencyContinuation::make<ParametricState>(
-        allocator, profile,
-        static_cast<unsigned>(
-            std::get<std::int64_t>(query.parameters.at("degree"))));
+  operation.callback = [profile](const OperationInvocation& call) {
+    return execute_parametric(call, profile);
   };
   return operation;
 }

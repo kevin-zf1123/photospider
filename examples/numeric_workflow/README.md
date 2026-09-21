@@ -1167,7 +1167,7 @@ quadratic/cubic segment at an explicit parameter. Dynamic inputs in order are
 anchors:Float32/64[K,D], relative handles:Float32/64[K-1,degree-1,D],
 segment_indices:Int64[N], t:Float32/64[N]. Each floating port is independent.
 K is 2..65536; D and N are positive, with each input/output product <=2^40.
-D=1 remains an axis. Output `values[N,D]` has empty facets and per-cell Atoms.
+D=1 remains an axis. Output `values[N,D]` has empty facets and one complete dense owner (request coverage may be restricted).
 No geometry or color meaning follows from D; loops and degenerate curves work.
 
 ```cpp
@@ -1193,30 +1193,58 @@ python3 examples/numeric_workflow/parametric_oracle.py \
 Handles reconstruct relative to the start anchor (quadratic/outgoing) or end
 anchor (cubic incoming), rounding each sum to Float64. The whole polynomial
 then rounds once directly to the output dtype. Current profiles agree bitwise.
-Endpoint t=0/1 reads only the corresponding anchor and preserves zero sign;
+Endpoint t=0/1 mathematically selects only the corresponding anchor and preserves zero sign;
 interior exact zero is -0 only when all reconstructed controls are -0.
 Nonzero underflow keeps its sign. No control-conversion overflow is inferred
 from unused Float32 bounds when the actual result is finite.
 
-A nonempty request first reads only selected query rows, then the needed local
-control components. Unrequested bad segments/t/components do not fail it.
-Recognized Image handles retain full-channel Validation independently of the
-requested Data component. Invalid segment/t reports InvalidArgument/InvalidDomain;
-nonfinite demanded controls report OperationFailed/InvalidDomain; RN64 control
-or actual output overflow reports OperationFailed/ArithmeticOverflow, naming
-the affected output Atom. Upstream/resource/cancellation categories survive.
+One CPU Whole callback collects all four complete inputs with recognized typed
+validation, then validates every segment_indices/t row before any component
+arithmetic. It evaluates all N*D output cells and publishes one immutable dense
+[N,D] owner. Sparse demand restricts returned coverage but retains complete input
+collection, computation and output memory. Empty reads no payload; complete
+static metadata still validates.
 
-`cache_composition_and_typed()` composes existing public `constant_node` views
-with this operator and checks two components across a 2^39-column shape and
-the last row of a 2^40-row shape. Returned owners remain readable after the
-execution context is destroyed. `Fixture::run` supplies explicit work budgets.
-Exact scratch and per-request row/output/certificate storage are accounted;
-dense requests can exhaust metadata/association limits. Five manual groups
-cover these paths plus sparse dirty support, joint Atom isolation, all-port
-negative/unaligned/zero strides and fenv, cache reselection, typed Image and
-failing producer order, arithmetic cancellation and second-box owner release.
-The manual executable stays outside CTest/integration registration. Validation
-platforms and bounds are in the [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-03-parametric-bezier-evaluation).
+Mathematical selection is unchanged: t=0/1 uses only the selected anchor
+component; an interior uses both anchors and all relative handles of that segment
+and component. Generic numeric data outside every evaluated stencil is not
+additionally finite-checked. Complete typed and upstream validation still covers
+unused inputs. All rows/components are evaluated, so formerly unrequested bad
+index/t/components can fail the Run. No partial successful output is published.
+There is no global mathematical topology/monotonicity scan.
+
+Any input edit invalidates recorded output demand. Cache identity includes all
+input versions, profile, metadata and parameters. Output name, dtype, rank-2
+shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
+offsets and unaligned storage remain legal. Output storage survives its context.
+
+The callback retains one row classification and fixed arithmetic workspace,
+independent of N and D. It validates all rows, then reclassifies each row once
+for all columns. Work is O(N+N*D*degree), plus exact arithmetic, complete input
+collection and typed validation. Complete output costs b*N*D bytes. Admit that
+output and fixed workspace even for one requested cell, together with collected
+inputs/retained owners and metadata. Giant broadcast inputs/output can therefore
+fail a small payload budget. No per-cell dependency certificates or full
+coefficient table is retained.
+
+Use the host worker and resource ledger; poll cancellation on reads, row controls,
+inside exact arithmetic and before publication. Work/capacity failures preserve
+ResourceExhausted and release unpublished state/output. Numeric failures have Run
+scope, identifying offending port/index where available. Invalid segment/t is
+InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
+InvalidDomain; actual RN64 reconstruction or final conversion overflow is
+OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
+cancellation errors preserve their categories. Whole numeric counters are not
+available; zero counters must not be interpreted as zero arithmetic/fallbacks.
+
+`parametric.cpp` checks the public fixtures, source/cache replacement, full-input
+typed Image validation, upstream failure, layout/fenv, work/output/workspace
+limits, cancellation and owner lifetime. The public constant compositions with
+2^39 columns or 2^40 rows verify full-output budget rejection. The independent
+Bernstein oracle checks all output cells before returning observed cells.
+The manual target remains excluded from default builds and CTest.
+See [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-03-parametric-bezier-evaluation)
+for actual native validation and separate public/callback sampling.
 
 
 ## LUT1D baking templates: CRV-04
