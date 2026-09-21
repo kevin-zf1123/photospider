@@ -44,14 +44,14 @@ These operations do not modify a color description or implement tone mapping.
 
 ## Execution and failures
 
-For nonempty Q, read input[Q] and both bounds even at exact endpoints or NaN.
-Empty Q reads no payload. Inherit exact demand/dirty mapping, typed/upstream
-closures, immutable packed Region origins, arbitrary source strides, owner
-lifetime, cache-off and capacity/work/stage/cancellation obligations from CRV-08.
+Nonempty Q collects the complete input and both bounds, including at exact
+endpoints or NaN. Empty Q reads no payload. Inherit Whole dirty scope, complete
+typed/upstream validation, full-output allocation, sparse public delivery,
+arbitrary input strides, ownership, budgets and cancellation from CRV-08.
 Account all internal guard/broadcast/remap state, not only the exported output.
 Invalid bounds use InvalidArgument/InvalidDomain; shape/dtype mismatch uses
 TypeMismatch. Numeric special results succeed. Resource, backend, stale,
-upstream and cancellation failures preserve the shared categories and atom scope.
+upstream and cancellation failures preserve the shared categories; numeric failures have Run scope.
 
 ## Public workflow and acceptance
 
@@ -71,6 +71,5 @@ specification remains Proposed.
 The public entry point is `linear_shaper_inverse` in `photospider/numeric/shapers.hpp`. This linear helper expands to existing remap/constant nodes and is not a linear primitive.
 See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
 for the shared command, fixture and validation evidence. Native Clang 21
-strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 4,196 independent
-Fraction/directed-MPFR cases per profile. All five manual groups passed
-all four profiles.
+strict/Apple pass 4,196 Fraction/directed-MPFR cases and six manual groups covering
+all four forms. No new x86 or installed-package execution is claimed.

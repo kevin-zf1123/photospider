@@ -41,19 +41,19 @@ The independent operation key selects the CPU profile; there is no additional st
 Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
 zero signs, NaN quieting/payloads, infinity/domain extensions and overflow as
 successful IEEE results. Bound validation always precedes source special values.
-Strict correctly rounds the complete formula. Accelerated allows final nonzero finite error <=4 ULP, exact endpoint/classification/sign agreement and monotone nondecreasing results for fixed bounds. Strict fallback is reported when needed; the combined implementation must remain monotone and partition-independent.
+Strict correctly rounds the complete formula. Accelerated allows final nonzero finite error <=4 ULP, exact endpoint/classification/sign agreement and monotone nondecreasing results for fixed bounds. The strict path is retained when needed; Whole counters are unavailable; the combined implementation must remain monotone and partition-independent.
 These operations do not modify a color description or implement tone mapping.
 
 ## Execution and failures
 
-For nonempty Q, read input[Q] and both bounds even at exact endpoints or NaN.
-Empty Q reads no payload. Inherit exact demand/dirty mapping, typed/upstream
-closures, immutable packed Region origins, arbitrary source strides, owner
-lifetime, cache-off and capacity/work/stage/cancellation obligations from CRV-08.
+Nonempty Q collects the complete input and both bounds, including at exact
+endpoints or NaN. Empty Q reads no payload. Inherit Whole dirty scope, complete
+typed/upstream validation, full-output allocation, sparse public delivery,
+arbitrary input strides, ownership, budgets and cancellation from CRV-08.
 Account certified numerical refinement and scratch growth; do not use a separately rounded pow/log pipeline as the strict oracle.
 Invalid bounds use InvalidArgument/InvalidDomain; shape/dtype mismatch uses
 TypeMismatch. Numeric special results succeed. Resource, backend, stale,
-upstream and cancellation failures preserve the shared categories and atom scope.
+upstream and cancellation failures preserve the shared categories; numeric failures have Run scope.
 
 ## Public workflow and acceptance
 
@@ -73,6 +73,5 @@ specification remains Proposed.
 The public entry point is `log2_shaper_inverse_node` in `photospider/numeric/shapers.hpp`. The log primitive uses certified whole-expression evaluation with a strict certified scalar fallback, preserves monotonicity and partition independence, and may return `ResourceExhausted` when 128..4096 refinement capacity is unresolved.
 See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
 for the shared command, fixture and validation evidence. Native Clang 21
-strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed 4,196 independent
-Fraction/directed-MPFR cases per profile. All five manual groups passed
-all four profiles.
+strict/Apple pass 4,196 Fraction/directed-MPFR cases and six manual groups covering
+all four forms. No new x86 or installed-package execution is claimed.

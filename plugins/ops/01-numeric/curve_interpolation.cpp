@@ -3,16 +3,19 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_curve.hpp"
 #include "data/input_validation.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -62,74 +65,66 @@ Result<ValueDescriptor> metadata(
       dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
       std::move(shape)});
 }
-struct CurvePoint {
-  std::uint64_t row, column, fragment, offset;
-  std::size_t lookup = 0;
-};
 struct CurveRow {
-  std::uint64_t index = 0, bits = 0;
-  std::size_t first_point = 0;
+  std::uint64_t bits = 0;
   unsigned first = 0, count = 0, segment = 0;
   int selected = -1;
 };
 struct CurveState final {
   bool pchip, multi;
   SequenceProfile profile;
+  const OperationInvocation& call;
+  const ResourceBudget* budget;
   unsigned policy;
   numeric_ops::ExactCurve arithmetic;
-  unsigned stage = 0;
   ResourceVector<std::uint64_t> knots;
-  ResourceVector<CurvePoint> points;
-  ResourceVector<CurveRow> rows;
-  ResourceVector<MutableValue> outputs;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
   std::array<std::uint64_t, 4> x{}, y{}, replicas{};
+  std::vector<std::uint64_t> scalar{0}, ordinate;
   CurveState(bool cubic, bool columns, SequenceProfile selected,
-             unsigned domain)
+             const OperationInvocation& invocation)
       : pchip(cubic),
         multi(columns),
         profile(selected),
-        policy(domain),
-        arithmetic(selected) {}
-  std::vector<std::uint64_t> coordinate(const CurvePoint& point) const {
-    return multi ? std::vector<std::uint64_t>{point.row, point.column}
-                 : std::vector<std::uint64_t>{point.row};
+        call(invocation),
+        budget(resource_internal::metadata_budget()),
+        policy(std::get<std::string>(call.parameters.at("out_of_domain")) ==
+                       "reject"
+                   ? 0U
+               : std::get<std::string>(call.parameters.at("out_of_domain")) ==
+                       "clamp"
+                   ? 1U
+                   : 2U),
+        arithmetic(selected),
+        ordinate(multi ? 2 : 1, 0) {}
+  Status work(std::uint64_t amount) const {
+    if (call.cancellation.cancelled())
+      return {ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({amount}) : Status::success();
   }
-  Status failure(const DependencyPhase& phase, const CurvePoint& point,
-                 unsigned port, std::uint64_t index, const char* message,
+  Status failure(unsigned port, std::uint64_t index, const char* message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
-    Status result{ErrorCode::OperationFailed,
-                  std::string(message) + "; port=" + std::to_string(port) +
-                      " index=" + std::to_string(index),
-                  reason,
-                  {FailureOrigin::Domain, FailureScope::Atom}};
-    AtomKey atom;
-    atom.output_index = phase.query.output_index;
-    atom.rank = multi ? 2 : 1;
-    atom.coordinate[0] = point.row;
-    if (multi)
-      atom.coordinate[1] = point.column;
-    result.detail.atom = atom;
-    return result;
+    return {ErrorCode::OperationFailed,
+            std::string(message) + "; port=" + std::to_string(port) +
+                " index=" + std::to_string(index),
+            reason,
+            {FailureOrigin::Domain, FailureScope::Run}};
   }
-  Result<std::uint64_t> read(const DependencyPhase& phase, unsigned port,
-                             const std::vector<std::uint64_t>& at,
-                             const CurvePoint& point) {
-    auto charged =
-        phase.consume_work(phase.inputs[port].fragments().size() + 1);
-    if (!charged.ok())
-      return Result<std::uint64_t>(charged);
-    std::uint64_t bits = 0;
-    const bool narrow = phase.query.inputs[port].descriptor.element_type ==
-                        ElementType::Float32;
-    auto status = phase.read(port, at, &bits, narrow ? 4 : 8);
+  Result<std::uint64_t> read(unsigned port,
+                             const std::vector<std::uint64_t>& at) {
+    using Answer = Result<std::uint64_t>;
+    auto status = work(at.size() + 1);
     if (!status.ok())
-      return Result<std::uint64_t>(status);
+      return Answer(status);
+    const auto& input = call.inputs[port];
+    auto address = input.byte_address(at);
+    if (!address.ok())
+      return Answer(address.status());
+    const bool narrow = input.descriptor().element_type == ElementType::Float32;
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
     const auto value = BinaryParts::decode(bits, narrow);
     if (value.nan || value.infinite)
-      return Result<std::uint64_t>(
-          failure(phase, point, port, at[0], "nonfinite curve input"));
+      return Answer(failure(port, at[0], "nonfinite curve input"));
     if (narrow) {
       const auto sign = (bits >> 31) << 63;
       if (!value.magnitude) {
@@ -141,146 +136,20 @@ struct CurveState final {
                ((value.significand << (52 - top)) & UINT64_C(0xfffffffffffff));
       }
     }
-    return Result<std::uint64_t>(bits);
+    return Answer(bits);
   }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied, bool fallback = false) const {
-    NumericDiagnostics result;
-    result.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        result.implementation.data(), result.implementation.size(),
-        "photospider.curve/2;%s%s;exact-rational;%s%s",
-        pchip ? "pchip" : "linear", multi ? "-multi" : "",
-        profile == SequenceProfile::Strict         ? "scalar-u64"
-        : profile == SequenceProfile::AppleSilicon ? "NEON-u64x2"
-                                                   : "AVX2-u64x4",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= result.implementation.size())
-      return {ErrorCode::Internal, "curve diagnostic identity"};
-    result.evaluated_values = evaluated;
-    result.copied_elements = copied;
-    if (fallback && profile != SequenceProfile::Strict) {
-      result.strict_fallbacks = 1;
-      result.fallback_reasons[static_cast<unsigned>(
-          NumericFallbackReason::RoundingUnresolved)] = 1;
-    }
-    return phase.report_numeric(result);
-  }
-  Status initialize(const DependencyPhase& phase) {
-    const auto count = phase.query.outputs.element_count().value();
-    auto status = phase.consume_work(count * 4 + 1);
-    if (!status.ok())
-      return status;
-    publication = std::make_unique<numeric_ops::ArrayPublication>(
-        phase.query.outputs.boxes().size(), multi ? 2 : 1);
-    points.reserve(count);
-    outputs.reserve(phase.query.outputs.boxes().size());
-    knots.resize(phase.query.inputs[0].descriptor.shape[0]);
-    // Project the bounded rectangle list, not the logical whole output.
-    // Query lookup then costs O(P log K), with O(M) cell association work.
-    auto projection_capacity = dependency_internal::metadata_owner(
-        4096 + phase.query.outputs.boxes().size() * 512);
-    std::vector<Region> projected;
-    projected.reserve(phase.query.outputs.boxes().size());
-    for (const auto& box : phase.query.outputs.boxes())
-      projected.emplace_back(std::vector<RegionDimension>{box.dimensions()[0]});
-    auto projection =
-        Footprint::from_regions(phase.query.inputs[2].descriptor.shape,
-                                std::move(projected), phase.sets);
-    if (!projection.ok())
-      return projection.status();
-    rows.reserve(projection.value().element_count().value());
-    for (const auto& box : projection.value().boxes()) {
-      const auto span = box.dimensions()[0];
-      for (std::uint64_t i = 0; i < span.extent; ++i) {
-        status = phase.consume_work(1);
-        if (!status.ok())
-          return status;
-        rows.push_back({span.offset + i, 0, SIZE_MAX, 0, 0, 0, -1});
-      }
-    }
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto output = MutableValue::allocate(phase.query.output.descriptor, box,
-                                           phase.allocator);
-      if (!output.ok())
-        return output.status();
-      const auto row = box.dimensions()[0];
-      const auto col = multi ? box.dimensions()[1] : RegionDimension{0, 1};
-      status = phase.consume_work(64);
-      if (!status.ok())
-        return status;
-      const auto found =
-          std::lower_bound(rows.begin(), rows.end(), row.offset,
-                           [](const auto& a, auto b) { return a.index < b; });
-      const auto base = static_cast<std::size_t>(found - rows.begin());
-      for (std::uint64_t i = 0; i < row.extent; ++i)
-        for (std::uint64_t j = 0; j < col.extent; ++j) {
-          status = phase.consume_work(1);
-          if (!status.ok())
-            return status;
-          if (rows[base + i].first_point == SIZE_MAX)
-            rows[base + i].first_point = points.size();
-          points.push_back({row.offset + i, col.offset + j, outputs.size(),
-                            i * col.extent + j, base + i});
-        }
-      outputs.push_back(output.take_value());
-    }
-    return Status::success();
-  }
-  Result<DependencyPoll> need(const DependencyPhase& phase, unsigned port) {
-    using Answer = Result<DependencyPoll>;
-    request_capacity =
-        dependency_internal::metadata_owner(4096 + points.size() * 8192);
-    std::vector<AtomCertificate> certificates;
-    certificates.reserve(points.size());
-    for (const auto& point : points) {
-      auto charged = phase.consume_work(8);
-      if (!charged.ok())
-        return Answer(charged);
-      std::vector<RegionDimension> dimensions;
-      if (port == 0) {
-        dimensions = {{0, knots.size()}};
-      } else if (port == 2) {
-        dimensions = {{point.row, 1}};
-      } else {
-        const auto& row = rows[point.lookup];
-        dimensions = {{row.first, row.count}};
-        if (multi)
-          dimensions.push_back({point.column, 1});
-      }
-      auto support =
-          Footprint::from_regions(phase.query.inputs[port].descriptor.shape,
-                                  {Region(dimensions)}, phase.sets);
-      if (!support.ok())
-        return Answer(support.status());
-      auto closure = input_internal::validation_closure(
-          phase.query.inputs[port], support.value(), phase.sets,
-          phase.consume_work);
-      if (!closure.ok())
-        return Answer(closure.status());
-      certificates.push_back({coordinate(point),
-                              {{port,
-                                static_cast<std::uint8_t>(port == 1 ? 1 : 2),
-                                support.take_value(),
-                                {}},
-                               {port, 4, closure.take_value(), {}}}});
-    }
-    return Answer(DependencyNeedBatch{std::move(certificates)});
-  }
-  Status classify(const DependencyPhase& phase, CurveRow* row) {
-    const auto& point = points[row->first_point];
-    auto query = read(phase, 2, {row->index}, point);
+  Status classify(std::uint64_t index, CurveRow* row) {
+    scalar[0] = index;
+    auto query = read(2, scalar);
     if (!query.ok())
       return query.status();
     row->bits = query.value();
     const auto key = BinaryParts::decode(row->bits, false).order_key();
     unsigned lo = 0, hi = knots.size();
     while (lo < hi) {
-      auto work = phase.consume_work(1);
-      if (!work.ok())
-        return work;
+      auto status = work(1);
+      if (!status.ok())
+        return status;
       const auto mid = lo + (hi - lo) / 2;
       if (BinaryParts::decode(knots[mid], false).order_key() < key)
         lo = mid + 1;
@@ -291,9 +160,8 @@ struct CurveState final {
         BinaryParts::decode(knots[lo], false).order_key() == key) {
       row->selected = lo;
     } else if (!lo || lo == knots.size()) {
-      if (policy == 0)
-        return failure(phase, point, 2, row->index,
-                       "curve query outside domain");
+      if (!policy)
+        return failure(2, index, "curve query outside domain");
       if (policy == 1)
         row->selected = lo ? knots.size() - 1 : 0;
       row->segment = lo ? knots.size() - 2 : 0;
@@ -313,96 +181,106 @@ struct CurveState final {
     }
     return Status::success();
   }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(32768);
-    request_capacity.reset();
-    if (!stage) {
-      auto status = initialize(phase);
-      if (!status.ok())
-        return Answer(status);
-      stage = 1;
-      return need(phase, 0);
-    }
-    if (stage == 1) {
-      for (unsigned i = 0; i < knots.size(); ++i) {
-        auto value = read(phase, 0, {i}, points.front());
-        if (!value.ok())
-          return Answer(value.status());
-        knots[i] = value.value();
-        if (i && BinaryParts::decode(knots[i - 1], false).order_key() >=
-                     BinaryParts::decode(knots[i], false).order_key())
-          return Answer(failure(phase, points.front(), 0, i,
-                                "curve knots require strict increase"));
-      }
-      stage = 2;
-      return need(phase, 2);
-    }
-    if (stage == 2) {
-      for (auto& row : rows) {
-        auto status = classify(phase, &row);
-        if (!status.ok())
-          return Answer(status);
-      }
-      stage = 3;
-      return need(phase, 1);
-    }
-    const bool narrow =
-        phase.query.output.descriptor.element_type == ElementType::Float32;
-    const auto width = narrow ? 4U : 8U;
-    for (const auto& point : points) {
-      const auto& row = rows[point.lookup];
-      for (unsigned j = 0; j < row.count; ++j) {
-        std::vector<std::uint64_t> at{row.first + j};
-        if (multi)
-          at.push_back(point.column);
-        auto value = read(phase, 1, at, point);
-        if (!value.ok())
-          return Answer(value.status());
-        x[j] = knots[row.first + j];
-        y[j] = value.value();
-      }
-      auto status = report(phase, 1, 0);
-      if (!status.ok())
-        return Answer(status);
-      auto value = arithmetic.evaluate(
-          pchip, knots.size(), row.first, row.count, row.segment, row.selected,
-          row.bits, x, y, narrow, phase.consume_work,
-          [&] { return report(phase, 0, 0, true); });
+  Result<Value> execute() {
+    using Answer = Result<Value>;
+    auto status = work(1);
+    if (!status.ok())
+      return Answer(status);
+    knots.resize(call.inputs[0].descriptor().shape[0]);
+    for (unsigned i = 0; i < knots.size(); ++i) {
+      scalar[0] = i;
+      auto value = read(0, scalar);
       if (!value.ok())
         return Answer(value.status());
-      if (BinaryParts::decode(value.value(), narrow).infinite)
-        return Answer(failure(phase, point, 1, row.first,
-                              "curve output overflow",
-                              FailureReason::ArithmeticOverflow));
-      status = report(phase, 0, 1);
+      knots[i] = value.value();
+      if (i && BinaryParts::decode(knots[i - 1], false).order_key() >=
+                   BinaryParts::decode(knots[i], false).order_key())
+        return Answer(failure(0, i, "curve knots require strict increase"));
+    }
+    const auto& shape = call.prepared->traits().outputs[0].fixed_output_shape;
+    // Preserve control rejection before ordinate arithmetic without retaining
+    // per-query rows or dependency certificates for the complete output.
+    const auto lower = BinaryParts::decode(knots.front(), false).order_key();
+    const auto upper = BinaryParts::decode(knots.back(), false).order_key();
+    for (std::uint64_t i = 0; i < shape[0]; ++i) {
+      scalar[0] = i;
+      auto query = read(2, scalar);
+      if (!query.ok())
+        return Answer(query.status());
+      const auto key = BinaryParts::decode(query.value(), false).order_key();
+      if (!policy && (key < lower || key > upper))
+        return Answer(failure(2, i, "curve query outside domain"));
+    }
+    const bool narrow =
+        std::get<std::string>(call.parameters.at("dtype")) == "float32";
+    auto allocated = MutableValue::allocate(
+        {narrow ? ElementType::Float32 : ElementType::Float64, shape},
+        call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
+    const auto columns = multi ? shape[1] : 1;
+    const auto width = narrow ? 4U : 8U;
+    std::optional<input_internal::Float32Environment> environment;
+    if (narrow && profile != SequenceProfile::Strict)
+      environment.emplace();
+    const std::function<Status(std::uint64_t)> consume = [&](auto amount) {
+      return work(amount);
+    };
+    for (std::uint64_t i = 0; i < shape[0]; ++i) {
+      CurveRow row;
+      status = classify(i, &row);
       if (!status.ok())
         return Answer(status);
-      numeric_ops::select_words(replicas.data(), value.value(), value.value(),
-                                1, profile);
-      std::memcpy(outputs[point.fragment].data() + point.offset * width,
-                  replicas.data(), width);
+      for (std::uint64_t column = 0; column < columns; ++column) {
+        if (multi)
+          ordinate[1] = column;
+        for (unsigned j = 0; j < row.count; ++j) {
+          ordinate[0] = row.first + j;
+          auto value = read(1, ordinate);
+          if (!value.ok())
+            return Answer(value.status());
+          x[j] = knots[row.first + j];
+          y[j] = value.value();
+        }
+        auto value = arithmetic.evaluate(pchip, knots.size(), row.first,
+                                         row.count, row.segment, row.selected,
+                                         row.bits, x, y, narrow, consume, {},
+                                         environment && environment->active());
+        if (!value.ok())
+          return Answer(value.status());
+        if (BinaryParts::decode(value.value(), narrow).infinite)
+          return Answer(failure(1, row.first, "curve output overflow",
+                                FailureReason::ArithmeticOverflow));
+        numeric_ops::select_words(replicas.data(), value.value(), value.value(),
+                                  1, profile);
+        std::memcpy(output.data() + (i * columns + column) * width,
+                    replicas.data(), width);
+      }
     }
-    ResourceVector<Value> values;
-    values.reserve(outputs.size());
-    for (auto& output : outputs) {
-      auto work = phase.consume_work(1);
-      if (!work.ok())
-        return Answer(work);
-      auto published = std::move(output).publish();
-      if (!published.ok())
-        return Answer(published.status());
-      auto retained = publication->retain(published.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    auto result =
-        publication->finish(phase.query.output.descriptor, phase.query.outputs,
-                            values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
   }
 };
+Result<Value> execute_curve(const OperationInvocation& call, bool pchip,
+                            bool multi, SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    auto allocated = call.allocator.allocate(sizeof(CurveState));
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto buffer = allocated.take_value();
+    std::unique_ptr<CurveState, void (*)(CurveState*)> state(
+        new (buffer.data()) CurveState(pchip, multi, profile, call),
+        [](CurveState* value) { value->~CurveState(); });
+    return state->execute();
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
 OperationDefinition curve_operation(const std::string& key, bool pchip,
                                     bool multi, SequenceProfile profile) {
   OperationDefinition operation;
@@ -417,12 +295,9 @@ OperationDefinition curve_operation(const std::string& key, bool pchip,
   output.key = "values";
   output.shape_rule = OperationShapeRule::Fixed;
   output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.regional_atomic = true;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
-  output.continuation_bytes = sizeof(CurveState);
-  output.maximum_dependency_stages = 4;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(CurveState);
   operation.specialize_metadata = [multi, profile](const auto& inputs,
                                                    const auto& parameters) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -434,19 +309,12 @@ OperationDefinition curve_operation(const std::string& key, bool pchip,
       return Answer(available);
     OperationOutputSpecialization resolved;
     resolved.metadata.descriptor = descriptor.take_value();
-    resolved.regional_atomic = true;
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  operation.start_dependency = [pchip, multi, profile](const auto& query,
-                                                       const auto& allocator) {
-    return DependencyContinuation::make<CurveState>(
-        allocator, pchip, multi, profile,
-        std::get<std::string>(query.parameters.at("out_of_domain")) == "reject"
-            ? 0U
-        : std::get<std::string>(query.parameters.at("out_of_domain")) == "clamp"
-            ? 1U
-            : 2U);
+  operation.callback = [pchip, multi,
+                        profile](const OperationInvocation& call) {
+    return execute_curve(call, pchip, multi, profile);
   };
   return operation;
 }

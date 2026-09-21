@@ -56,9 +56,9 @@ for y direction. No inverse of extrapolated linear/PCHIP tails is provided.
 
 x/y/query independently accept Float32/Float64 and may mix. Output values[N]
 uses static Float32/Float64 dtype, default Float64. K is 2..65536; N is
-1..2^40. Requested query values and returned x values must be finite; unrequested
-query values are not read/validated. Narrowing overflow fails only dependent
-observations, not unrequested outputs.
+1..2^40. Every nonempty request reads all three inputs and computes the complete
+output. Every query and final x must be finite; an invalid query or output
+overflow anywhere fails the run, including outside the delivered footprint.
 
 Strict inverts the forward mathematical curve before destination rounding, then
 correctly rounds x directly to output dtype. It does not invert the many-to-one
@@ -69,9 +69,9 @@ guarantee near zero derivative. Request order/partition cannot affect results.
 
 Exact y-knot hits and clamp directly convert corresponding x knots, preserving
 zero sign on every profile. Other mathematical zero results are +0; nonzero
-underflow preserves sign. PCHIP accelerated falls back to strict and reports it
+underflow preserves sign. PCHIP accelerated falls back to strict
 when error, segment range, zero classification or monotonicity cannot be ensured.
-Only demanded final x is checked for representability; an unreturned segment
+Only final x is checked for representability; an unreturned segment
 endpoint narrowing to infinity does not independently reject a finite root.
 
 ## Exact formulas and algorithms
@@ -110,41 +110,38 @@ classification/sign must match strict. No GPU implementation is specified.
 
 ## Demand, dirty propagation and storage
 
-Empty Q reads no payload. Nonempty Q reads and validates all x/y, then only
-query[Q]. Linear arithmetic uses the selected pair; PCHIP coefficients use its
-local stencil from CRV-01B, but no local arithmetic shortcut suppresses global
-topology validation. Invalid remote x/y affects every dependent observation;
-unrequested invalid query does not. Both global arrays are exact validation
-dependencies, so any x/y change invalidates all dependent inverse observations.
-Query changes invalidate only matching output indices. Preserve any wider
-typed/upstream support and origin identity explicitly.
+Empty Q reads no payload. All six formal profile keys use Whole. Nonempty Q
+collects complete x/y/query before the callback, validates global x/y topology,
+then prechecks every query control before inverse arithmetic. The unchanged
+linear pair or PCHIP stencil is selected from complete inputs. Any input change
+invalidates the complete output. Full typed/upstream validation can fail even
+outside delivered Q. Dynamic numerical failures have Domain/Run scope.
 
-Cache identity includes interpolation method, input descriptions/witnesses,
-dtype, policy and backend profile. Return immutable packed fragments at the
-requested global index origins; arbitrary legal input strides, offsets, unaligned
-access and zero/negative strides are supported. Source/output ownership remains
-valid after context destruction. Missing requested data is never zero-filled.
+Cache identity includes method, dtype, policy, profile and complete inputs.
+The callback publishes one immutable dense values[N]; delivery preserves Q's
+global coordinates. Arbitrary legal strides, offsets, unaligned and zero/negative
+strides are supported. Output ownership survives context destruction.
 
-For M requested points, base lookup work O(K+M log K) plus exact arithmetic/root
-refinement. Retaining promoted x/y costs at most 16K bytes; local PCHIP coefficients
-may be computed on demand or in accounted caches. Output is M*sizeof(dtype).
-Account source owners/windows, global validation state, limbs, bracketing state,
-result fragments and temporary growth overlap under capacity/work/stage budgets.
-No full query-sized output is required for partial Q. Poll cancellation during
-global scans, at least every 64 simple queries and during every root refinement.
-Resource exhaustion fails explicitly without lowering precision; clean all
-temporary state on every terminal path and preserve only owned output state.
+Lookup work is O(K+N log K) plus exact arithmetic/refinement. Promoted x/y use
+16*K element bytes plus allocator/metadata overhead. Fixed arithmetic workspace
+and per-root state replace per-output dependency records; complete output uses
+N*sizeof(dtype), and collected input storage is also budgeted. Sparse demand can
+therefore exhaust capacity that regional execution previously accepted. Work and
+cancellation checks cover topology/query scans, search, each root refinement and
+publication. Failure releases temporary storage and publishes no partial output.
+DependencySession numeric/fallback counters are unavailable for Whole callbacks;
+N/A is not a claim of zero fallback. Scalar/NEON/AVX2 math paths remain available.
 
 ## Errors and acceptance
 
 Malformed static parameters/count limits fail compile/preflight with
 InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Nonfinite
-x/y, invalid global monotonicity, nonfinite demanded query or reject-domain
+x/y, invalid global monotonicity, nonfinite query or reject-domain
 failure uses OperationFailed/InvalidDomain. Final narrowing overflow uses
 OperationFailed/ArithmeticOverflow. ResourceExhausted, BackendUnavailable,
 cancellation, stale and upstream errors retain their shared categories/provenance.
-Each requested inverse sample is one observation; no partial failed sample is
-published. No failure arises merely because an unrequested output would overflow.
+Whole output publication is atomic. A final output overflow anywhere fails the run;
+an unused endpoint that would narrow to infinity does not reject a finite root.
 
 Linear fixture x=[0,1,3],y=[0,2,4],query=[3,1,3] -> [2,0.5,2]. PCHIP fixture
 x=[0,1,2],y=[0,1,4],query=[0.3125,2.1875] -> [0.5,1.5]. Negating y and query
@@ -181,6 +178,9 @@ K=2 paths remain direct. Scalar integer comparison is scoped to inverse work
 and restores the surrounding numeric profile.
 
 See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
-for the shared fixture and validation details. Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18 Strict/AVX2 passed all
-four manual groups and 407 independent Fraction cases per profile. The installed
-0.16 consumer passed both native profiles. WSL checks numerical correctness only.
+for the shared fixture and validation details. Native Clang 21 Strict/Apple
+passed four manual groups and 407 independent Fraction cases per profile, plus
+focused numeric/compiler tests. Tests include full-input failure/dirty support,
+all stride combinations, floating environments, K=65536, a 2^40-output budget
+rejection, active cancellation and owner release. This Whole revision has not
+been validated on WSL/AVX2 or through an installed-package consumer.

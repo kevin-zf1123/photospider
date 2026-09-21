@@ -117,8 +117,8 @@ successful result with only a warning report.
 axis is independently observable: axis-only requests validate and return the
 grid axis without source execution or error measurement. A nonempty table request
 triggers source evaluation of all grid vertices and all validation points plus
-the global acceptance gate, irrespective of its requested table subset. Export
-only requested table storage, but do not confuse this with local source demand.
+the global acceptance gate, irrespective of its requested table subset. The final gate exports only requested table storage, while generated Whole
+Values and source intermediates retain their full owners.
 
 ## Authoring and evaluation contract
 
@@ -209,9 +209,12 @@ and schema identity preserved. No temporary pointer stands in for shared state.
 
 Let V=N0*N1*N2 and P=(N0-1)*(N1-1)*(N2-1)+M. A table/report observation evaluates
 V grid colors and P reference colors, then P applied-LUT queries and exact error
-checks, plus declared source work. Storage may use a complete 3*V*b table or
-bounded tiles/recomputation, but all source executions, shared owners, scratch,
-staging and repeated work count against host limits. No unbudgeted full source
+checks, plus declared source work. The maintained generated Value nodes use complete dense Whole outputs: grid
+3*V*8, validation points 3*P*8, and converted color arrays at their dtype widths.
+Source work and outputs additionally follow each source operator contract.
+Sampled-table Result backing stores all 3*V*b bytes; pack/unpack I/O remains
+bounded by windows. All shared owners, scratch, staging and repeated work count
+against host limits. No unbudgeted full source
 batch or global table cache is allowed. The output subset does not waive global
 work. A small reported managed payload is not a claim about whole-process RSS.
 
@@ -285,13 +288,37 @@ remain attached to the result. A failed tolerance report can be read as
 and budget failures remain execution failures. There is no opaque compose key or
 chain object.
 
-Native Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2 passed all
-seven manual groups and 480 independent Fraction workflow cases per profile.
-Installed 0.16 consumers, focused compiler/representation/Result metadata units,
-ClangFormat 21/cpplint and independent scoped reviews passed. WSL supplies
-correctness evidence only. See the [measured three-dimensional LUT baking workflow](../../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking)
-and [CRV-09 math notes](../math-implementation.md#crv-09-measured-lut3d-baking)
-for commands and implementation details.
+All 15 formal `curve.bake_lut3d_{axis,grid,points,points_extra,color}` profile
+keys execute Whole with complete inputs, complete dense outputs and numeric Run
+failure scope. Any participating input edit invalidates the complete recorded
+Value demand. Axis remains independent from source/extra data. The four
+unsuffixed keys `curve.pack_lut3d`, `curve.measure_lut3d`, `curve.unpack_lut3d`
+and `curve.gate_lut3d` retain ResultProtocol2 and compact source/descriptor
+relations. Their structured schemas, report ordering, quality gate and ObjectId
+association are unchanged. They are not legacy numeric aliases or Value Whole
+callbacks.
+
+Pack uses authorized rectangular collect into owned packed storage, at most
+64 KiB and bounded by the Result page limit. Complete inner rows and planes are
+combined when they fit; smaller limits split the innermost row in logical order.
+Measure collects three authorized windows of up to 64 colors, at most 4608 bytes
+combined, with 289 additional report bytes when preparing the final fields.
+The immutable schema is decoded once and only model/tolerance POD fields are
+retained. Finite/model checks and exact errors keep their order; one-row and
+three-row immutable relations are shared across report fields. Grid and color
+Value workspace is fixed plus three reconstructed axis indexes; all owners and
+allocator/metadata overhead remain managed. A small requested table does not
+reduce generated Whole storage or global measurement work.
+
+Native Clang 21 strict/Apple each pass nine manual groups and 480 independent
+Fraction workflow cases. Tests cover all five geometry kinds, arbitrary layouts,
+active cancellation, workspace/output limits, row/plane boundaries through 64 KiB, 72-byte Result
+windows, Float32/64 negative/unaligned packing, report/table association and
+lifetime. Focused numeric/compiler/color/resource/Result execution and global
+Result tests pass. No new x86 or installed-package run is claimed. See the
+[workflow](../../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking)
+and [math notes](../math-implementation.md#crv-09-measured-lut3d-baking)
+for commands, performance and validation scope.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

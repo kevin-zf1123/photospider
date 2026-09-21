@@ -45,7 +45,7 @@ def reference(pchip, multi, output, policy, xt, yt, qt, xr, yr, qr, columns):
     finite = lambda v: v is not None and v not in (math.inf,-math.inf)
     if not all(map(finite,x)) or any(a >= b for a,b in zip(x,x[1:])):
         return 'domain'
-    # A regional execution validates all requested controls before any y Need.
+    # All query controls are validated before ordinate arithmetic.
     if any(not finite(q) or (not policy and (q < x[0] or q > x[-1])) for q in query):
         return 'domain'
     answer = []

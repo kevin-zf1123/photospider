@@ -18,6 +18,7 @@
 
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -67,14 +68,15 @@ struct Fixture {
                                    bool cache = true,
                                    std::uint64_t proof_work = UINT64_C(64) *
                                                               1024 * 1024,
-                                   std::uint64_t cache_bytes = 65536) {
+                                   std::uint64_t cache_bytes = 65536,
+                                   std::uint64_t payload = 8 * 1024 * 1024) {
     ps::GraphContext graph(document);
     auto plan = ps::Compiler(registry).compile(graph);
     if (!plan.ok())
       return ps::Result<ps::DemandResult>(plan.status());
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
-    config.maximum_live_bytes = 8 * 1024 * 1024;
+    config.maximum_live_bytes = payload;
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
@@ -209,28 +211,29 @@ void axis_and_support(ps::CpuNumericProfile profile) {
                  doubles({3}, {0, 1, .5})});
   auto q = region({2, 2},
                   {ps::Region({{0, 1}, {0, 1}}), ps::Region({{1, 1}, {1, 1}})});
+  auto bad = local.run({{"values", q}}, false);
+  require(!bad.ok() && bad.status().detail.scope == ps::FailureScope::Run,
+          "unrequested table channel fails Whole");
+  local.bindings.inputs[1].value = doubles({3, 2}, {0, 10, 1, 9, 2, 8});
   auto result = take(local.run({{"values", q}}, false));
   value(result, {0, 0}, raw(.5));
   value(result, {1, 1}, raw(8));
   auto support = take(result.dependencies.source_support());
-  require(support.at("input0") == q &&
-              support.at("input1") ==
-                  region({3, 2}, {ps::Region({{0, 2}, {0, 1}}),
-                                  ps::Region({{2, 1}, {1, 1}})}) &&
+  require(support.at("input0") == take(ps::Footprint::all({2, 2})) &&
+              support.at("input1") == take(ps::Footprint::all({3, 2})) &&
               support.at("input2") == take(ps::Footprint::all({3})),
-          "LUT1D exact query/local table/shared axis support");
-  auto dirty = take(result.dependencies.potential_dirty(
-      "input1", region({3, 2}, {ps::Region({{1, 1}, {0, 1}})})));
-  require(dirty.at("values") == region({2, 2}, {ps::Region({{0, 1}, {0, 1}})}),
-          "column-local pair dirty");
-  auto remote = take(result.dependencies.potential_dirty(
-      "input1", region({3, 2}, {ps::Region({{1, 1}, {1, 1}})})));
-  require(!remote.count("values") || remote.at("values").empty(),
-          "unused table column no dirty");
-  dirty = take(result.dependencies.potential_dirty(
-      "input2", region({3}, {ps::Region({{2, 1}})})));
-  require(dirty.at("values") == q,
-          "whole axis invalidates every requested component");
+          "Whole LUT complete support");
+  for (const auto& source : support)
+    require(
+        take(result.dependencies.potential_dirty(source.first, source.second))
+                .at("values") == q,
+        "complete input edits dirty recorded outputs");
+  Fixture selected(node(false, profile),
+                   {doubles({1}, {0}),
+                    array(ps::ElementType::Float64, {3}, {raw(7), nan, nan}),
+                    doubles({3}, {0, 1, .5})});
+  value(take(selected.run({{"values", take(ps::Footprint::all({1}))}}, false)),
+        {0}, raw(7));
   for (auto axis : std::vector<std::vector<std::uint64_t>>{
            {0, raw(1), raw(1)},
            {raw(1), raw(1) + 1, raw(0x1p-53)},
@@ -268,26 +271,22 @@ void axis_and_support(ps::CpuNumericProfile profile) {
               failed.status().reason == ps::FailureReason::InvalidDomain,
           "singleton still validates input");
   std::cout
-      << "exact sparse support/dirty, invalid global axes and collapsed "
+      << "Whole support/dirty, numeric knot selection, invalid global axes and "
+         "collapsed "
          "coordinates, signed-zero and singleton query validation passed\n";
 }
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Footprint> wanted;
-  for (const auto& input : inputs)
-    wanted.push_back(take(ps::Footprint::none(input.descriptor().shape)));
-  for (const auto& need : take(session->pending_reads()))
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-  std::vector<ps::ValueFragments> ready;
-  for (unsigned p = 0; p < inputs.size(); ++p) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[p].descriptor(), inputs[p].facets(),
-        take(ps::Footprint::all(inputs[p].descriptor().shape)), {inputs[p]}));
-    ready.push_back(take(all.restrict(wanted[p])));
-  }
-  require(session->supply(ready, request.snapshot_identity).ok(),
-          "LUT1D exact stage supply");
+ps::Value direct(const std::shared_ptr<ps::OperationRegistry>& registry,
+                 const ps::WorkflowNode& authored,
+                 const std::vector<ps::Value>& inputs) {
+  std::vector<ps::Region> demands;
+  for (const auto& v : inputs)
+    demands.push_back(v.region());
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  ps::ResourceAllocationScope scope(budget);
+  ps::OperationInvocation call(
+      inputs, demands, authored.parameters, ps::Backend::Cpu, {},
+      ps::Region::whole(inputs[0].descriptor().shape), budget.allocator());
+  return take(registry->invoke(authored.operation, call));
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   const auto bytes = value.bytes();
@@ -331,118 +330,30 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                   feraiseexcept(FE_DIVBYZERO) == 0,
               "set LUT fenv");
-      auto session =
-          take(registry->start_dependency(authored.operation, request));
-      for (unsigned stage = 0; stage < 3; ++stage) {
-        require(session->poll().ok(), "LUT Need");
-        supply(session, request, inputs);
-      }
-      auto result = take(session->poll());
+      auto result = direct(registry, authored, inputs);
       std::uint64_t bits = 0;
-      require(std::get<ps::DependencyResult>(result)
-                      .value.read({1, 1}, &bits, 8)
-                      .ok() &&
-                  bits == raw(9),
-              "LUT strided bits");
+      std::memcpy(&bits,
+                  result.bytes().data() + take(result.byte_address({1, 1})), 8);
+      require(bits == raw(9), "LUT strided bits");
+      auto narrow = direct(
+          registry, node(true, profile, ps::ElementType::Float32), inputs);
+      std::uint32_t bits32 = 0;
+      std::memcpy(&bits32,
+                  narrow.bytes().data() + take(narrow.byte_address({1, 1})), 4);
+      require(bits32 == UINT32_C(0x41100000), "LUT Float32 strided/fenv bits");
       require(
           fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
           "LUT preserves fenv");
     }
     require(fesetenv(&saved) == 0, "restore LUT fenv");
   }
-  for (unsigned mode = 0; mode < 3; ++mode) {
-    ps::ResourceBudget budget(ps::ResourceLimits{});
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    request.outputs = region(
-        {2, 2}, {ps::Region({{0, 1}, {0, 1}}), ps::Region({{1, 1}, {1, 1}})});
-    bool interrupted = false;
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(registry->start_dependency(
-        authored.operation, request, budget.allocator(),
-        [&](std::uint64_t work) {
-          if (work == 352 && session->numeric_diagnostics().evaluated_values ==
-                                 (mode == 2 ? 2U : 1U)) {
-            interrupted = true;
-            if (mode)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "LUT inner work", ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    for (unsigned stage = 0; stage < 3; ++stage) {
-      require(session->poll().ok(), "LUT Need before interrupt");
-      supply(session, request, dense);
-    }
-    auto failed = session->poll();
-    require(
-        interrupted && !failed.ok() &&
-            failed.status().code == (mode ? ps::ErrorCode::Cancelled
-                                          : ps::ErrorCode::ResourceExhausted),
-        "LUT arithmetic interruption");
-    require(
-        session->numeric_diagnostics().copied_elements == (mode == 2 ? 1U : 0U),
-        "LUT unpublished count");
-    session.reset();
-    require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-            "LUT failed outputs/state release");
-  }
-  request.cancellation = {};
-  for (unsigned mode = 0; mode < 3; ++mode) {
-    auto limited = request;
-    if (mode == 0)
-      limited.limits.maximum_state_bytes = 1;
-    if (mode == 1)
-      limited.limits.maximum_work = 1;
-    if (mode == 2)
-      limited.limits.maximum_stages = 1;
-    auto started = registry->start_dependency(authored.operation, limited);
-    bool failed = !started.ok();
-    if (started.ok()) {
-      for (unsigned stage = 0; stage < 4; ++stage) {
-        auto progress = started.value()->poll();
-        if (!progress.ok()) {
-          require(progress.status().code == ps::ErrorCode::ResourceExhausted,
-                  "LUT resource status");
-          failed = true;
-          break;
-        }
-        if (std::holds_alternative<ps::DependencyResult>(progress.value()))
-          break;
-        supply(started.value(), limited, dense);
-      }
-    }
-    require(failed, "LUT state/work/stage bounds");
-  }
-  auto grid_request = request;
-  auto grid_inputs = dense;
-  grid_inputs[1] = doubles({16, 2}, std::vector<double>(32, 7));
-  grid_inputs[2] = doubles({3}, {0, 15, 1});
-  grid_request.inputs[1].descriptor = grid_inputs[1].descriptor();
-  ps::CancellationSource grid_cancel;
-  grid_request.cancellation = grid_cancel.token();
-  unsigned grid_calls = 0;
-  ps::ResourceBudget grid_budget(ps::ResourceLimits{});
-  auto interrupted = take(registry->start_dependency(
-      authored.operation, grid_request, grid_budget.allocator(),
-      [&](std::uint64_t amount) {
-        if (amount == 8192 && ++grid_calls == 8)
-          grid_cancel.cancel();
-        return ps::Status::success();
-      }));
-  require(interrupted->poll().ok(), "axis Need before grid cancellation");
-  supply(interrupted, grid_request, grid_inputs);
-  auto cancelled = interrupted->poll();
-  require(!cancelled.ok() &&
-              cancelled.status().code == ps::ErrorCode::Cancelled &&
-              grid_calls == 8 &&
-              interrupted->numeric_diagnostics().evaluated_values == 0,
-          "inside full-axis cancellation precedes query/table");
-  interrupted.reset();
-  require(grid_budget.statistics().live[ps::ResourceKind::Payload] == 0,
-          "axis cancellation owner release");
+  auto large = dense;
+  large[0] = doubles({256, 2}, std::vector<double>(512, .5));
+  point_math_checks::resources(authored, large, 512 * 8);
+  auto grid = dense;
+  grid[1] = doubles({4096, 2}, std::vector<double>(8192, 7));
+  grid[2] = doubles({3}, {0, 4095, 1});
+  point_math_checks::resources(authored, grid, 4 * 8);
   auto zero = doubles({1}, {0}), seven = doubles({1}, {7});
   std::vector<ps::Value> aliases{
       take(ps::Value::from_storage({ps::ElementType::Float64, {2, 2}},
@@ -454,29 +365,16 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       take(ps::Value::from_storage({ps::ElementType::Float64, {3}},
                                    ps::Region::whole({3}), {0, {0}},
                                    zero.storage()))};
-  auto alias_request = request;
-  alias_request.inputs.clear();
-  for (const auto& v : aliases)
-    alias_request.inputs.push_back({v.descriptor(), {}});
-  auto alias =
-      take(registry->start_dependency(authored.operation, alias_request));
-  for (unsigned stage = 0; stage < 3; ++stage) {
-    require(alias->poll().ok(), "zero-stride LUT Need");
-    supply(alias, alias_request, aliases);
-  }
-  auto alias_result = take(alias->poll());
+  auto alias_result = direct(registry, authored, aliases);
   std::uint64_t bits = 0;
-  require(std::get<ps::DependencyResult>(alias_result)
-                  .value.read({1, 1}, &bits, 8)
-                  .ok() &&
-              bits == raw(7),
-          "zero-stride all-port singleton LUT");
-  request.cancellation = {};
-  request.outputs = take(ps::Footprint::none({2, 2}));
-  auto empty = take(registry->start_dependency(authored.operation, request));
-  require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-              empty->poll_count() == 0,
-          "LUT Empty no payload");
+  std::memcpy(
+      &bits,
+      alias_result.bytes().data() + take(alias_result.byte_address({1, 1})), 8);
+  require(bits == raw(7), "zero-stride all-port singleton LUT");
+  Fixture fixture(authored, dense);
+  require(
+      fixture.run({{"values", take(ps::Footprint::none({2, 2}))}}, false).ok(),
+      "Empty no payload");
   for (unsigned kind = 0; kind < 8; ++kind) {
     auto bad = request;
     if (kind == 0)
@@ -495,12 +393,15 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       bad.inputs[0].descriptor.element_type = ps::ElementType::Int64;
     if (kind == 7)
       bad.inputs[1].descriptor.shape = {2, UINT64_C(1) << 40};
-    require(!registry->start_dependency(authored.operation, bad).ok(),
-            "LUT static schema bounds");
+    require(
+        !registry
+             ->resolve_traits(authored.operation, bad.inputs, bad.parameters)
+             .ok(),
+        "LUT static schema bounds");
   }
   std::cout << "all-port negative/unaligned strides/fenv, "
-               "axis/inner-work/cancel/second-box release, zero strides and "
-               "Empty/schema/state/stage passed\n";
+               "axis/arithmetic work/cancel/Whole release, zero strides and "
+               "Empty/schema/output/workspace budgets passed\n";
 }
 void baking_chains(ps::CpuNumericProfile profile) {
   for (unsigned kind = 0; kind < 6; ++kind) {
@@ -626,8 +527,8 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
   auto changed = take(demand.request(query, {}, options));
   value(changed, {0}, raw(1.5));
   require(take(changed.dependencies.source_support()).at("input1") ==
-              region({3}, {ps::Region({{1, 2}})}),
-          "query cache changes pair");
+              take(ps::Footprint::all({3})),
+          "query replacement retains complete table dependency");
   fixture.bindings.inputs[1].snapshot =
       std::make_shared<const ps::InputSnapshot>(
           take(store.import_value(doubles({3}, {0, 1, 4}))));
@@ -642,36 +543,17 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
   changed = take(demand.request(query, {}, options));
   value(changed, {0}, raw(.75));
   require(take(changed.dependencies.source_support()).at("input1") ==
-              region({3}, {ps::Region({{0, 2}})}),
-          "axis cache changes pair");
+              take(ps::Footprint::all({3})),
+          "axis replacement retains complete table dependency");
   const auto nan = UINT64_C(0x7ff0000000000042);
   Fixture isolated(node(true, profile), {doubles({1, 2}, {.5, .5}),
                                          array(ps::ElementType::Float64, {2, 2},
                                                {0, nan, raw(2), nan}),
                                          doubles({3}, {0, 1, 1})});
-  ps::GraphContext isolated_graph(isolated.document);
-  auto isolated_plan =
-      take(ps::Compiler(isolated.registry).compile(isolated_graph));
-  ps::ExecutionContext isolated_context(isolated.registry, config);
-  for (bool joint : {false, true}) {
-    options.enable_joint = joint;
-    auto atoms = take(isolated_context.execute_atoms(
-        isolated_plan.plan, isolated.bindings,
-        {{"values", take(ps::Footprint::all({1, 2}))}}, {}, options));
-    unsigned good = 0, bad = 0;
-    for (const auto& atom : atoms.atoms) {
-      if (atom.outcome.ok()) {
-        ++good;
-      } else {
-        ++bad;
-        require(atom.key.rank == 2 && atom.key.coordinate[1] == 1 &&
-                    atom.outcome.status().detail.atom == atom.key,
-                "channel Atom identity");
-      }
-    }
-    require(good == 1 && bad == 1,
-            "good channel survives remote column failure");
-  }
+  auto bad = isolated.run(
+      {{"values", region({1, 2}, {ps::Region({{0, 1}, {0, 1}})})}}, false);
+  require(!bad.ok() && bad.status().detail.scope == ps::FailureScope::Run,
+          "remote table channel fails complete output");
   const std::vector<std::uint64_t> rank8{2, 1, 1, 1, 1, 1, 1, 2};
   Fixture high_rank(node(true, profile),
                     {doubles(rank8, {0, .5, 1, 1.5}),
@@ -686,11 +568,10 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
                                                            {0, 1},
                                                            {1, 1}})})}},
                     false);
-  require(!rejected.ok() && rejected.status().detail.atom &&
-              rejected.status().detail.atom->rank == 8 &&
-              rejected.status().detail.atom->coordinate[0] == 1 &&
-              rejected.status().detail.atom->coordinate[7] == 1,
-          "rank8 global error Atom");
+  require(!rejected.ok() &&
+              rejected.status().detail.scope == ps::FailureScope::Run &&
+              rejected.status().reason == ps::FailureReason::InvalidDomain,
+          "rank8 Whole query rejection");
   const auto columns = UINT64_C(1) << 39;
   Fixture huge(node(true, profile), {doubles({1}, {.5}), doubles({1}, {7}),
                                      doubles({3}, {0, 1, 1})});
@@ -702,11 +583,13 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
   huge.document.nodes.push_back(take(
       ps::numeric::constant_node(3, ps::WorkflowInputReference{2}, {2, columns},
                                  ps::numeric::ArrayLayout::View, profile)));
-  auto result = take(huge.run(
+  auto rejected_large = huge.run(
       {{"values",
         region({1, columns}, {ps::Region({{0, 1}, {columns - 1, 1}})})}},
-      false));
-  value(result, {0, columns - 1}, raw(7));
+      false);
+  require(!rejected_large.ok() &&
+              rejected_large.status().code == ps::ErrorCode::ResourceExhausted,
+          "giant channels require full input/output payload");
   const unsigned length = 1048576;
   Fixture full_grid(node(false, profile),
                     {doubles({1}, {0}), doubles({1}, {7}),
@@ -715,14 +598,15 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
   full_grid.document.nodes.push_back(take(
       ps::numeric::constant_node(2, ps::WorkflowInputReference{2}, {length},
                                  ps::numeric::ArrayLayout::View, profile)));
-  result =
-      take(full_grid.run({{"values", take(ps::Footprint::all({1}))}}, false));
+  auto result =
+      take(full_grid.run({{"values", take(ps::Footprint::all({1}))}}, false,
+                         UINT64_C(64) * 1024 * 1024, 0, 16 * 1024 * 1024));
   value(result, {0}, raw(7));
   require(take(result.dependencies.source_support()).at("input1") ==
               take(ps::Footprint::all({1})),
           "full grid validation keeps scalar backing for constant table");
-  std::cout << "input/table/axis cache reselection, channel Atom isolation, "
-               "sparse 2^39 columns and complete maximum-L grid passed\n";
+  std::cout << "input/table/axis cache replacement, Whole failures, "
+               "giant-channel budget and complete maximum-L grid passed\n";
 }
 void typed_and_upstream(ps::CpuNumericProfile profile) {
   auto input = array(ps::ElementType::Float32, {1, 1, 4},
@@ -735,48 +619,12 @@ void typed_and_upstream(ps::CpuNumericProfile profile) {
                                 doubles({3}, {0, 1, 1})};
   auto registry = ps::make_default_operation_registry();
   auto authored = node(false, profile);
-  ps::DependencyRequest request;
-  for (const auto& v : inputs)
-    request.inputs.push_back({v.descriptor(), v.facets()});
-  request.parameters = authored.parameters;
-  request.outputs = region({1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {0, 1}})});
-  request.snapshot_identity = "LUT-image";
-  request.limits.maximum_work = UINT64_C(16) << 30;
-  auto session = take(registry->start_dependency(authored.operation, request));
-  require(session->poll().ok(), "typed axis Need");
-  supply(session, request, inputs);
-  require(session->poll().ok(), "typed query Need");
-  std::vector<ps::Footprint> wanted;
-  for (const auto& v : inputs)
-    wanted.push_back(take(ps::Footprint::none(v.descriptor().shape)));
-  bool control = false, validation = false;
-  for (const auto& need : take(session->pending_reads())) {
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-    if (need.port == 0) {
-      if (need.roles & 2) {
-        require(need.samples == request.outputs,
-                "typed Control single channel");
-        control = true;
-      }
-      if (need.roles & 4) {
-        require(need.samples == take(ps::Footprint::all({1, 1, 4})),
-                "typed Validation whole channels");
-        validation = true;
-      }
-    }
-  }
-  require(control && validation && wanted[1].empty(),
-          "typed closure before table demand");
-  std::vector<ps::ValueFragments> ready;
-  for (unsigned p = 0; p < 3; ++p) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[p].descriptor(), inputs[p].facets(),
-        take(ps::Footprint::all(inputs[p].descriptor().shape)), {inputs[p]}));
-    ready.push_back(take(all.restrict(wanted[p])));
-  }
-  require(!session->supply(ready, request.snapshot_identity).ok() &&
-              session->numeric_diagnostics().evaluated_values == 0,
-          "unselected alpha fails before table/evaluation");
+  Fixture typed(authored, inputs);
+  auto failed_typed = typed.run(
+      {{"values", region({1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {0, 1}})})}},
+      false);
+  require(!failed_typed.ok(),
+          "full typed Image validation rejects unrequested alpha");
   registry = ps::make_default_operation_registry(false);
   unsigned calls = 0;
   ps::OperationDefinition source;
@@ -805,22 +653,22 @@ void typed_and_upstream(ps::CpuNumericProfile profile) {
   auto q = ps::DemandQuery{{"values", take(ps::Footprint::all({1}))}};
   auto failed = fixture.run(q, false);
   require(!failed.ok() &&
-              failed.status().reason == ps::FailureReason::InvalidDomain &&
-              !calls,
-          "invalid axis before table producer");
+              failed.status().message == "required LUT table producer" &&
+              calls == 1,
+          "Whole table producer precedes invalid axis");
   fixture.bindings.inputs[1].value = doubles({3}, {0, 1, 1});
   failed = fixture.run(q, false);
   require(!failed.ok() &&
-              failed.status().reason == ps::FailureReason::InvalidDomain &&
-              !calls,
-          "reject query before table producer");
+              failed.status().message == "required LUT table producer" &&
+              calls == 2,
+          "Whole table producer precedes query reject");
   fixture.bindings.inputs[0].value = doubles({1}, {.5});
   failed = fixture.run(q, false);
   require(!failed.ok() &&
               failed.status().message == "required LUT table producer" &&
-              calls == 1,
+              calls == 3,
           "selected table upstream failure preserved");
-  std::cout << "typed Image Control/Validation closure and axis/query/table "
+  std::cout << "full typed Image validation and complete upstream table "
                "producer order passed\n";
 }
 

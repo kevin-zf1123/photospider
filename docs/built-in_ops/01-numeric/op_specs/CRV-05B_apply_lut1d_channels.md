@@ -55,44 +55,49 @@ constructor defaults and explicit direct-node parameters. There is no channel_ax
 per-channel dtype, per-channel policy or independent-axis mode. Validate the
 table/input C relation at compile/preflight; output shape/dtype are static.
 
-For output coordinate q=(...,c), input Control support is q and table Data is
-the scalar lookup's selected singleton/pair indices paired only with c.
-All axis[0:3] is shared Control/Validation for every nonempty request. Validate
-the complete reconstructed coordinate grid once per admitted computation or
-reuse a witnessed immutable valid index. Do not read other input components or
-table columns merely because one channel in a row is requested. An unrequested
-channel's bad table value does not affect this numeric observation. Recognized
-typed Validation closure remains a separate obligation. Empty Q reads no payload.
+Every nonempty request uses one CPU Whole callback over complete input, table
+and axis Values, including recognized typed validation and upstream failures.
+Validate the complete reconstructed axis first, then every finite/domain query
+before table arithmetic. Compute every output element/channel and publish one
+immutable dense owner with the complete input shape. Sparse demand restricts
+returned coverage, not computation or full output memory. Empty reads no payload;
+all static metadata checks still apply.
 
-Changed input[q] invalidates values[q]. Changed table[j,c] invalidates only
-same-channel observations retaining that lookup contribution or validation.
-Axis edits invalidate all dependent outputs, across channels. Retain source and
-lookup witnesses even when a constant table yields unchanged numbers. No hidden
-cross-channel normalization, clipping, premultiplication or color conversion occurs.
+Mathematical table selection is unchanged: knot/clamp/singleton converts one
+entry; interpolation/extrapolation uses its adjacent pair, independently per
+channel. Generic entries outside all evaluated stencils receive no additional
+finite scan. Typed validation and upstream collection cover the complete table.
+Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
+Any input/table/axis edit invalidates recorded output demand. Cache identity
+retains all input versions, profile, metadata and parameters. There is no
+per-channel Atom success isolation. Output dtype, shape and empty facets remain
+unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
+legal. The complete immutable owner survives context destruction.
 
 ## Algorithm, resources and errors
 
-Apply the single-table mathematical lookup independently to each requested
-channel, sharing only the coordinate grid and compatible lookup state. A row's
-input channels may have different query values and therefore different table
-indices; do not share a selected table index solely because coordinates share
-the same non-channel prefix. Use independent input/table values for each (q,c).
+For M total input elements, work is O(L+M log L) plus exact arithmetic, full
+input collection and typed validation. Singleton lookup is constant time per
+query. The callback retains a host-accounted Float64 grid of 8*L element bytes
+(up to 8 MiB) plus allocator/metadata overhead, fixed exact workspace and O(rank)
+coordinate state. It retains no per-output certificates, rows or lookup table.
+Output costs dtype_bytes*M, regardless of requested coverage. Complete table
+collection costs its full L (or L*C) logical payload when a dense collect is
+needed; retained source owners are accounted separately.
 
-For M requested scalar output components, work is O(L+M log L) plus exact
-arithmetic and validation, and output payload is b*M. Account the optional 8L
-grid, requested pair/dedup metadata, selected table/input source owners and windows,
-arithmetic limbs, validation and output fragment capacity. No full L*C or input
-materialization is required for a partial channel request. Support arbitrary
-valid immutable signed/zero strides and offsets along all axes, with packed
-owned returned fragments at the original global output coordinates.
+The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
+floating environment covers axis reconstruction and curve evaluation; unresolved
+accelerated bounds still use the same exact fallback. Work/cancellation is checked
+in axis generation, input reads, lookup and exact arithmetic, and before publishing.
+Resource failure never authorizes skipping axis validation or weaker arithmetic.
+Unpublished output/workspace is released; no partial success is published.
+Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
+resource, stale, backend and cancellation failures retain their categories.
+Whole does not expose per-value fallback counters; report those as unavailable.
 
-Inherit scalar cancellation intervals, host workers/admission, finite-value
-failures, backend availability, cache-off and post-context ownership. A table
-numerical error is attributed to the actual dependent output Atom including its
-channel; a shared invalid axis affects all dependent observations. Compile/preflight
-rejects type/rank/C/product violations. Upstream and typed-validation failures
-retain their original scope rather than being renamed as local color errors.
-Failed observations publish no partial successful Value.
+Each channel may have a different input query; sharing a row prefix does not
+permit sharing the selected table index. Apply the unchanged scalar formula
+with that channel's coordinates and entries. No color conversion is inferred.
 
 ## Acceptance and implementation status
 
@@ -110,18 +115,13 @@ sources, low budgets, cancellation, cache-off and owner lifetime. The public
 WorkflowDocument fixture must connect a multi-function CRV-04 table/axis and
 inspect requested output channels through Compiler/ExecutionContext.
 
-The maintained `apply_lut1d_channels_node` constructor in
-`photospider/numeric/lut1d.hpp` provides the three independently named profile
-keys. `examples/numeric_workflow/lut1d.cpp` executes the analytic fixture above,
-scalar-column references, the two multi-function baking templates and sparse
-2^39-channel composition. It also verifies per-channel cache/source selection,
-independent channel failures and rank-8 Atom coordinates. The shared six manual
-groups and 1416 independent cases/profile passed on native Clang strict/Apple
-and WSL Clang strict/AVX2 on 2026-09-20; installed consumers passed. Full
-algorithm/resource boundaries and commands are linked from
-[CRV-05A](CRV-05A_apply_lut1d.md#maintained-implementation-and-verification).
-Specification status remains Proposed; the executable has no CTest/integration
-registration.
+The maintained constructor preserves six-family formal registration and the
+channel shape, including C=1 and rank-1 vectors. Public workflows compare
+independent scalar references, both multi baking chains, full-input typed/source
+failure, rank-8 Run failures, cache replacement and complete-output budget
+rejection for huge logical channels. Current native strict/Apple share the six
+manual groups and 1416 independent Fraction cases described in CRV-05A. Other
+platforms were not rerun for Whole; specification status remains Proposed.
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Operator template](../../00-foundation/spec-template.md).

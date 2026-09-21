@@ -1,18 +1,18 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_curve.hpp"
-#include "data/input_validation.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -20,7 +20,7 @@ namespace {
 using numeric_ops::BinaryParts;
 using numeric_ops::SequenceProfile;
 struct InversePoint {
-  std::uint64_t row = 0, fragment = 0, offset = 0, query = 0;
+  std::uint64_t row = 0, query = 0;
   unsigned first = 0, count = 0, segment = 0;
   int selected = -1;
 };
@@ -28,46 +28,47 @@ struct InverseState {
   bool pchip, clamp, increasing = true;
   SequenceProfile profile;
   numeric_ops::ExactCurve arithmetic;
-  unsigned stage = 0;
+  const OperationInvocation& call;
+  const ResourceBudget* budget;
+  std::function<Status(std::uint64_t)> consume;
   ResourceVector<std::uint64_t> xs, ys;
-  ResourceVector<InversePoint> points;
-  ResourceVector<MutableValue> outputs;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
-  InverseState(bool cubic, bool clipped, SequenceProfile selected)
-      : pchip(cubic), clamp(clipped), profile(selected), arithmetic(selected) {}
-  Status failure(const DependencyPhase& phase, const InversePoint& point,
-                 unsigned port, std::uint64_t index, const char* message,
-                 FailureReason reason = FailureReason::InvalidDomain) const {
-    Status result{ErrorCode::OperationFailed,
-                  std::string(message) + "; port=" + std::to_string(port) +
-                      " index=" + std::to_string(index),
-                  reason,
-                  {FailureOrigin::Domain, FailureScope::Atom}};
-    AtomKey atom;
-    atom.output_index = phase.query.output_index;
-    atom.rank = 1;
-    atom.coordinate[0] = point.row;
-    result.detail.atom = atom;
-    return result;
+  InverseState(bool cubic, bool clipped, SequenceProfile selected,
+               const OperationInvocation& invocation)
+      : pchip(cubic),
+        clamp(clipped),
+        profile(selected),
+        arithmetic(selected),
+        call(invocation),
+        budget(resource_internal::metadata_budget()),
+        consume([this](auto amount) { return work(amount); }) {}
+  Status work(std::uint64_t amount) const {
+    if (call.cancellation.cancelled())
+      return {ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({amount}) : Status::success();
   }
-  Result<std::uint64_t> read(const DependencyPhase& phase, unsigned port,
-                             std::uint64_t index,
-                             const InversePoint& point) const {
-    auto charged =
-        phase.consume_work(phase.inputs[port].fragments().size() + 1);
+  Status failure(unsigned port, std::uint64_t index, const char* message,
+                 FailureReason reason = FailureReason::InvalidDomain) const {
+    return {ErrorCode::OperationFailed,
+            std::string(message) + "; port=" + std::to_string(port) +
+                " index=" + std::to_string(index),
+            reason,
+            {FailureOrigin::Domain, FailureScope::Run}};
+  }
+  Result<std::uint64_t> read(unsigned port, std::uint64_t index) const {
+    auto charged = work(2);
     if (!charged.ok())
       return Result<std::uint64_t>(charged);
-    const bool narrow = phase.query.inputs[port].descriptor.element_type ==
-                        ElementType::Float32;
+    const auto& input = call.inputs[port];
+    const bool narrow = input.descriptor().element_type == ElementType::Float32;
     std::uint64_t bits = 0;
-    auto status = phase.read(port, {index}, &bits, narrow ? 4 : 8);
-    if (!status.ok())
-      return Result<std::uint64_t>(status);
+    auto address = input.byte_address({index});
+    if (!address.ok())
+      return Result<std::uint64_t>(address.status());
+    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
     const auto value = BinaryParts::decode(bits, narrow);
     if (value.nan || value.infinite)
       return Result<std::uint64_t>(
-          failure(phase, point, port, index, "nonfinite inverse input"));
+          failure(port, index, "nonfinite inverse input"));
     if (narrow) {
       const auto sign = (bits >> 31) << 63;
       if (!value.magnitude) {
@@ -82,108 +83,19 @@ struct InverseState {
     }
     return Result<std::uint64_t>(bits);
   }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied, bool fallback = false) const {
-    NumericDiagnostics result;
-    result.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        result.implementation.data(), result.implementation.size(),
-        "photospider.inverse/2;%s;%s",
-        pchip ? "pchip-exact-lattice" : "linear-exact-rational",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= result.implementation.size())
-      return {ErrorCode::Internal, "inverse diagnostic identity"};
-    result.evaluated_values = evaluated;
-    result.copied_elements = copied;
-    if (fallback && profile != SequenceProfile::Strict) {
-      result.strict_fallbacks = 1;
-      result.fallback_reasons[static_cast<unsigned>(
-          NumericFallbackReason::RoundingUnresolved)] = 1;
-    }
-    return phase.report_numeric(result);
-  }
-  Status initialize(const DependencyPhase& phase) {
-    auto count = phase.query.outputs.element_count();
-    if (!count.ok())
-      return count.status();
-    auto work = phase.consume_work(count.value() * 4 + 1);
-    if (!work.ok())
-      return work;
-    points.reserve(count.value());
-    outputs.reserve(phase.query.outputs.boxes().size());
-    xs.resize(phase.query.inputs[0].descriptor.shape[0]);
-    ys.resize(xs.size());
-    publication = std::make_unique<numeric_ops::ArrayPublication>(
-        phase.query.outputs.boxes().size(), 1);
-    for (const auto& region : phase.query.outputs.boxes()) {
-      auto made = MutableValue::allocate(phase.query.output.descriptor, region,
-                                         phase.allocator);
-      if (!made.ok())
-        return made.status();
-      const auto span = region.dimensions()[0];
-      for (std::uint64_t i = 0; i < span.extent; ++i) {
-        work = phase.consume_work(1);
-        if (!work.ok())
-          return work;
-        points.push_back({span.offset + i, outputs.size(), i});
-      }
-      outputs.push_back(made.take_value());
-    }
-    return Status::success();
-  }
-  Result<DependencyPoll> need(const DependencyPhase& phase, unsigned kind) {
-    using Answer = Result<DependencyPoll>;
-    request_capacity =
-        dependency_internal::metadata_owner(4096 + points.size() * 16384);
-    std::vector<AtomCertificate> certificates;
-    certificates.reserve(points.size());
-    for (const auto& point : points) {
-      auto work = phase.consume_work(16);
-      if (!work.ok())
-        return Answer(work);
-      AtomCertificate certificate{{point.row}, {}};
-      for (unsigned port = kind == 1 ? 2 : 0; port < (kind == 1 ? 3U : 2U);
-           ++port) {
-        const RegionDimension dimension =
-            kind == 0   ? RegionDimension{0, xs.size()}
-            : kind == 1 ? RegionDimension{point.row, 1}
-                        : RegionDimension{point.first, point.count};
-        auto support =
-            Footprint::from_regions(phase.query.inputs[port].descriptor.shape,
-                                    {Region({dimension})}, phase.sets);
-        if (!support.ok())
-          return Answer(support.status());
-        auto closure = input_internal::validation_closure(
-            phase.query.inputs[port], support.value(), phase.sets,
-            phase.consume_work);
-        if (!closure.ok())
-          return Answer(closure.status());
-        certificate.inputs.push_back(
-            {port,
-             static_cast<std::uint8_t>(kind == 2 ? 1 : 2),
-             support.take_value(),
-             {}});
-        certificate.inputs.push_back({port, 4, closure.take_value(), {}});
-      }
-      certificates.push_back(std::move(certificate));
-    }
-    return Answer(DependencyNeedBatch{std::move(certificates)});
-  }
   std::uint64_t key(std::uint64_t bits) const {
     const auto ordered = BinaryParts::decode(bits, false).order_key();
     return increasing ? ordered : UINT64_MAX - ordered;
   }
-  Status classify(const DependencyPhase& phase, InversePoint* point) {
-    auto query = read(phase, 2, point->row, *point);
+  Status classify(InversePoint* point) {
+    auto query = read(2, point->row);
     if (!query.ok())
       return query.status();
     point->query = query.value();
     const auto wanted = key(point->query);
     unsigned lo = 0, hi = ys.size();
     while (lo < hi) {
-      auto work = phase.consume_work(1);
+      auto work = consume(1);
       if (!work.ok())
         return work;
       const auto middle = lo + (hi - lo) / 2;
@@ -196,8 +108,7 @@ struct InverseState {
       point->selected = lo;
     } else if (!lo || lo == ys.size()) {
       if (!clamp)
-        return failure(phase, *point, 2, point->row,
-                       "inverse query outside domain");
+        return failure(2, point->row, "inverse query outside domain");
       point->selected = lo ? ys.size() - 1 : 0;
     } else {
       point->segment = lo - 1;
@@ -215,105 +126,96 @@ struct InverseState {
     }
     return Status::success();
   }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(32768);
-    request_capacity.reset();
-    if (!stage) {
-      auto status = initialize(phase);
+  Result<Value> execute() {
+    using Answer = Result<Value>;
+    xs.resize(call.inputs[0].descriptor().shape[0]);
+    ys.resize(xs.size());
+    for (unsigned i = 0; i < xs.size(); ++i) {
+      auto x = read(0, i), y = read(1, i);
+      if (!x.ok() || !y.ok())
+        return Answer(!x.ok() ? x.status() : y.status());
+      xs[i] = x.value();
+      ys[i] = y.value();
+      if (i && BinaryParts::decode(xs[i - 1], false).order_key() >=
+                   BinaryParts::decode(xs[i], false).order_key())
+        return Answer(failure(0, i, "inverse x requires strict increase"));
+      if (i == 1)
+        increasing = BinaryParts::decode(ys[0], false).order_key() <
+                     BinaryParts::decode(ys[1], false).order_key();
+      if (i && key(ys[i - 1]) >= key(ys[i]))
+        return Answer(failure(1, i, "inverse y requires strict monotonicity"));
+    }
+    const auto count = call.inputs[2].descriptor().shape[0];
+    // Validate all query controls before inverse arithmetic without retaining
+    // per-query classifications or repeating segment searches.
+    for (std::uint64_t row = 0; row < count; ++row) {
+      auto query = read(2, row);
+      if (!query.ok())
+        return Answer(query.status());
+      const auto wanted = key(query.value());
+      if (!clamp && (wanted < key(ys.front()) || wanted > key(ys.back())))
+        return Answer(failure(2, row, "inverse query outside domain"));
+    }
+    const auto& output_traits = call.prepared->traits().outputs[0];
+    const bool narrow =
+        output_traits.output_element_type == ElementType::Float32;
+    const unsigned width = narrow ? 4 : 8;
+    auto allocated = MutableValue::allocate(
+        {output_traits.output_element_type, output_traits.fixed_output_shape},
+        call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
+    for (std::uint64_t row = 0; row < count; ++row) {
+      InversePoint point;
+      point.row = row;
+      auto status = classify(&point);
       if (!status.ok())
         return Answer(status);
-      stage = 1;
-      return need(phase, 0);
-    }
-    if (stage == 1) {
-      for (unsigned i = 0; i < xs.size(); ++i) {
-        auto x = read(phase, 0, i, points.front()),
-             y = read(phase, 1, i, points.front());
-        if (!x.ok() || !y.ok())
-          return Answer(!x.ok() ? x.status() : y.status());
-        xs[i] = x.value();
-        ys[i] = y.value();
-        if (i && BinaryParts::decode(xs[i - 1], false).order_key() >=
-                     BinaryParts::decode(xs[i], false).order_key())
-          return Answer(failure(phase, points.front(), 0, i,
-                                "inverse x requires strict increase"));
-        if (i == 1)
-          increasing = BinaryParts::decode(ys[0], false).order_key() <
-                       BinaryParts::decode(ys[1], false).order_key();
-        if (i && key(ys[i - 1]) >= key(ys[i]))
-          return Answer(failure(phase, points.front(), 1, i,
-                                "inverse y requires strict monotonicity"));
-      }
-      stage = 2;
-      return need(phase, 1);
-    }
-    if (stage == 2) {
-      for (auto& point : points) {
-        auto status = classify(phase, &point);
-        if (!status.ok())
-          return Answer(status);
-      }
-      stage = 3;
-      return need(phase, 2);
-    }
-    const bool narrow =
-        phase.query.output.descriptor.element_type == ElementType::Float32;
-    const unsigned width = narrow ? 4 : 8;
-    for (const auto& point : points) {
       std::array<std::uint64_t, 4> x{}, y{};
       for (unsigned i = 0; i < point.count; ++i) {
-        auto a = read(phase, 0, point.first + i, point),
-             b = read(phase, 1, point.first + i, point);
-        if (!a.ok() || !b.ok())
-          return Answer(!a.ok() ? a.status() : b.status());
-        x[i] = a.value();
-        y[i] = b.value();
+        x[i] = xs[point.first + i];
+        y[i] = ys[point.first + i];
       }
-      const bool known_fallback =
-          !narrow && point.selected < 0 && profile != SequenceProfile::Strict;
-      auto status = report(phase, 1, 0, known_fallback);
-      if (!status.ok())
-        return Answer(status);
-      auto computed = arithmetic.inverse(
-          pchip, xs.size(), point.first, point.count, point.segment,
-          point.selected, point.query, x, y, narrow, phase.consume_work, [&] {
-            return known_fallback ? Status::success()
-                                  : report(phase, 0, 0, true);
-          });
+      auto computed =
+          arithmetic.inverse(pchip, xs.size(), point.first, point.count,
+                             point.segment, point.selected, point.query, x, y,
+                             narrow, consume, [] { return Status::success(); });
       if (!computed.ok())
         return Answer(computed.status());
       const auto bits = computed.value();
       if (BinaryParts::decode(bits, narrow).infinite)
-        return Answer(failure(phase, point, 2, point.row,
-                              "inverse output overflow",
+        return Answer(failure(2, point.row, "inverse output overflow",
                               FailureReason::ArithmeticOverflow));
-      std::memcpy(outputs[point.fragment].data() + point.offset * width, &bits,
-                  width);
-      status = report(phase, 0, 1);
-      if (!status.ok())
-        return Answer(status);
+      std::memcpy(output.data() + row * width, &bits, width);
     }
-    ResourceVector<Value> values;
-    values.reserve(outputs.size());
-    for (auto& output : outputs) {
-      auto charged = phase.consume_work(1);
-      if (!charged.ok())
-        return Answer(charged);
-      auto value = std::move(output).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication->retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    auto result =
-        publication->finish(phase.query.output.descriptor, phase.query.outputs,
-                            values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    auto status = work(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
   }
 };
+Result<Value> execute_inverse(const OperationInvocation& call, bool pchip,
+                              SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    auto scratch = call.allocator.allocate(sizeof(InverseState));
+    if (!scratch.ok())
+      return Answer(scratch.status());
+    auto buffer = scratch.take_value();
+    std::unique_ptr<InverseState, void (*)(InverseState*)> state(
+        new (buffer.data())
+            InverseState(pchip,
+                         std::get<std::string>(
+                             call.parameters.at("out_of_domain")) == "clamp",
+                         profile, call),
+        [](auto* value) { value->~InverseState(); });
+    return state->execute();
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
 OperationDefinition operation(const std::string& name, bool pchip,
                               SequenceProfile profile) {
   OperationDefinition definition;
@@ -328,11 +230,9 @@ OperationDefinition operation(const std::string& name, bool pchip,
   traits.requires_metadata_specialization = true;
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(InverseState);
-  output.maximum_dependency_stages = 4;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(InverseState);
   definition.specialize_metadata = [profile](const auto& inputs,
                                              const auto& parameters) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -369,16 +269,11 @@ OperationDefinition operation(const std::string& name, bool pchip,
     resolved.metadata.descriptor = {
         dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
         inputs[2].descriptor.shape};
-    resolved.regional_atomic = true;
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  definition.start_dependency = [pchip, profile](const auto& query,
-                                                 const auto& allocator) {
-    return DependencyContinuation::make<InverseState>(
-        allocator, pchip,
-        std::get<std::string>(query.parameters.at("out_of_domain")) == "clamp",
-        profile);
+  definition.callback = [pchip, profile](const OperationInvocation& call) {
+    return execute_inverse(call, pchip, profile);
   };
   return definition;
 }

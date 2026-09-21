@@ -45,24 +45,28 @@ All relevant parameters are explicit; no target sample-rate inference occurs.
 ## Execution and numerical obligations
 
 Strict rounds the exact normalized sum once; accelerated final error <=4 ULP,
-with strict classification/zero/sign agreement and reported strict fallback.
+with strict classification/zero/sign agreement and strict fallback.
 Finite constants retain bits when all contributing extended samples match.
 Follow the shared IEEE NaN/Inf ordering and skip only mathematical zero taps.
 Do not drop underflowed approximate coefficients from logical dependencies.
 
-Inherit exact stencil Data/Validation and dirty maps, boundary mapping including
-N=1, normal source/typed closures, immutable Region origins/owners, source strides,
-host coefficient/read-window/scratch accounting, bounded cancellation and cache-off.
-Basic M-output work is O(M*(2R+1)) plus certified arithmetic; budgets include
-precision refinement and scratch overlap. Inherit the shared error phases and
-categories; no partial failed observation is published.
+All three formal profile keys use Whole. Nonempty requests collect the complete
+input and compute one dense output of the same shape/dtype. Any input edit
+invalidates all outputs; full typed/upstream validation can fail outside delivered
+Q. Mathematical tap selection, boundary mapping, NaN/Inf order and zero signs
+remain unchanged. Zero taps remain unused numerical operands. Empty reads nothing.
+For total N elements work is O(N*(2R+1)) plus certified arithmetic, and output
+storage is N*sizeof(dtype), alongside complete collected input and bounded
+coefficient/tap workspace. Failure/cancellation publishes no partial output and
+releases temporaries. Inherit legal strides, owned output, cache-off and managed
+work/capacity checks from the shared contract.
 
 ## Acceptance and implementation status
 
 Use the shared certified coefficient/whole-sum oracle, impulse/DC/sine response,
 both dtypes and all CPU profiles, zero taps, signed zero and IEEE exceptions.
 Test both full signals and sparse/ROI requests, short signals, every boundary,
-strides, exact dirty support, low budgets, cancellation and post-context owners.
+strides, complete dirty support, low budgets, cancellation and post-context owners.
 The frequency response and target-downsampling attenuation require independent
 measurement; this primitive never claims ideal cutoff or zero aliasing.
 
@@ -75,12 +79,12 @@ zero-aliasing behavior.
 
 This primitive is registered in the five-kernel uniform low-pass family.
 Exact tap support precedes numerical evaluation. Accelerated keys cache certified
-coefficient enclosures per continuation and propagate convolution/normalization
+coefficient enclosures per Whole invocation and propagate convolution/normalization
 error to the final output gate. Unresolved coefficients or outputs use strict
-whole-sum evaluation, with actual fallback diagnostics. Support and special-value
+whole-sum evaluation, with Whole fallback counters unavailable. Support and special-value
 shortcuts remain exact.
 Certified precision is bounded to 128..4096 bits; unresolved
 capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed the
-shared public manual groups and independent numerical references. The linked
-workflow records exact counts, commands and installed-consumer checks.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
+that workflow and the math implementation notes. WSL/AVX2 and installed-package
+consumers have not been rerun. Whole numerical/fallback counters are N/A.

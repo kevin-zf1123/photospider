@@ -83,28 +83,33 @@ and nonzero exact underflow preserves sign. Final overflow fails the full color.
 
 ## Demand, mapping and resources
 
-The observation domain is input.shape, excluding the appended three channels.
-Any channel request computes/validates and returns the complete color at that
-position. Control support is all stops and requested input positions. Color
-Data/Validation is exactly the selected complete one/two rows, with no remote
-color scan. Both rows remain required on a constant-color shortcut. Empty Q
-reads no payload; compile/preflight still validates descriptors and static edges.
-Existing typed and upstream support closures remain explicit and retain identity.
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
 
-Stop changes invalidate all dependent observations; position changes affect its
-color; a changed selected row invalidates whole colors using it. Retain white/
-model/parameter and input witnesses in cache identity. Return immutable packed
-fragments at the correct global Region/storage origins, with the OKLab color
-description. Legal immutable arbitrary strides, negative/zero strides, offsets
-and unaligned input are supported. Owners remain valid beyond context lifetime.
+The output is one immutable dense Value of shape input.shape+[C]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
 
-For M requested colors, lookup work is O(K+M log K) plus exact three-component
-interpolation and typed validation. Output payload is 3*M*b and optional stop
-index is 8K bytes. Account descriptors, source owners/windows, complete-color
-fragments, lookup metadata, arithmetic limbs and growth overlap under host
-capacity/work/stage limits. Inherit RGB's cancellation intervals, cache-off,
-ownership and failure-publication obligations without its transfer/alpha scratch.
-No whole color-table or full logical output allocation is required.
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 ## Errors, acceptance and implementation status
 
@@ -112,7 +117,7 @@ Malformed static parameters/white/model descriptions fail compile/preflight with
 InvalidArgument/InvalidDomain; port shape/dtype or attached-description mismatch
 uses TypeMismatch. Nonfinite demanded positions/colors, invalid stops and reject
 domain failures use OperationFailed/InvalidDomain. Destination overflow uses
-OperationFailed/ArithmeticOverflow at the complete color Atom. Host resource,
+OperationFailed/ArithmeticOverflow at Run scope. Host resource,
 backend, upstream/typed, cancellation and stale errors retain their categories,
 origin and scope. No partial successful Lab tuple is published.
 
@@ -125,8 +130,8 @@ exact rational interpolation and bit conversion are the numeric oracle.
 The public workflow binds input/stops/colors, supplies the complete
 description/dtype/policy, and inspects named values and metadata through Compiler/
 ExecutionContext; run commands and checked results are linked below. Verify
-full-color request expansion, unselected invalid colors remaining unread,
-global-stop failures, exact dirty witnesses, strides, low budgets, cancellation,
+full-color request expansion, mathematically unused generic colors and complete typed validation,
+global-stop failures, whole-input dirty witnesses, strides, low budgets, cancellation,
 cache-off and descriptor/data lifetime after context teardown. This coordinate
 interpolation does not perform color-model conversion.
 
@@ -141,10 +146,10 @@ it does not adopt the reference conversion code as a bitwise conversion oracle.
 
 Public [`color_ramp_oklab_node`](../../../../include/photospider/numeric/color_ramps.hpp)
 constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its staged complete-color execution.
+implements its Whole complete-output execution.
 
 All profiles use exact rational component interpolation and return strict
-bits, with one destination rounding. Complete-color metadata and regional
+bits, with one destination rounding. Complete-color metadata and complete-input typed
 validation remain attached to the result.
 
 See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),

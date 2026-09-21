@@ -1,6 +1,7 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -196,7 +198,8 @@ struct Fixture {
   ps::Result<ps::DemandResult> run(const ps::DemandQuery& query,
                                    ps::ExecutionOptions options = {},
                                    std::uint64_t payload = 8 * 1024 * 1024,
-                                   ps::CancellationToken cancellation = {}) {
+                                   ps::CancellationToken cancellation = {},
+                                   std::uint64_t work = UINT64_MAX) {
     ps::GraphContext graph(document);
     auto plan = ps::Compiler(registry).compile(graph);
     if (!plan.ok())
@@ -205,6 +208,7 @@ struct Fixture {
     config.cpu_workers = 1;
     config.maximum_live_bytes = payload;
     config.managed_resources = ps::ResourceLimits{};
+    config.managed_resources->maximum_work = work;
     ps::ExecutionContext context(registry, config);
     auto frozen = context.freeze(plan.value().plan, bindings);
     if (!frozen.ok())
@@ -292,6 +296,13 @@ void graph_equivalence(ps::CpuNumericProfile profile) {
       manual.build(true);
       require(generated.document.nodes.size() == (kind < 2 ? 1U : 2U),
               "ordinary expansion node count");
+      for (const auto& node : generated.document.nodes) {
+        auto traits = take(generated.registry->find_traits(node.operation));
+        for (const auto& output : traits.outputs)
+          require(output.region_rule == ps::OperationRegionRule::Whole &&
+                      output.dependency_version == 0,
+                  "all expanded formal source outputs use Whole");
+      }
       for (unsigned mode = 0; mode < 4; ++mode) {
         ps::DemandQuery query;
         if (mode != 1) {
@@ -387,14 +398,11 @@ void source_semantics(ps::CpuNumericProfile profile) {
                          ? region(first.shape(), {ps::Region({{0, 1}, {0, 1}})})
                          : region(first.shape(), {ps::Region({{0, 1}})});
     auto at_start = first.run({{"values", requested}}, budgets());
-    if (kind < 2)
-      require(!at_start.ok() &&
-                  at_start.status().message == "required baking producer" &&
-                  calls == 1,
-              "function samplers retain N>1 end dependency");
-    else
-      require(at_start.ok() && calls == 0,
-              "interpolation first sample retains linspace local dependency");
+    require(
+        !at_start.ok() &&
+            at_start.status().message == "required baking producer" &&
+            calls == 1,
+        "all Whole baking sources retain N>1 end even for first-value demand");
     Fixture isolated(kind, profile);
     unsigned bad_source = kind == 1 ? 2 : 3;
     if (kind == 0) {
@@ -502,7 +510,7 @@ void dynamic_and_limits(ps::CpuNumericProfile profile) {
     limits.build();
     auto limited = budgets();
     limited.dependencies.maximum_work = 1;
-    auto exhausted = limits.run(query, limited);
+    auto exhausted = limits.run(query, limited, 8 * 1024 * 1024, {}, 1);
     require(!exhausted.ok() &&
                 exhausted.status().code == ps::ErrorCode::ResourceExhausted,
             "bake source work failure");
@@ -524,11 +532,97 @@ void dynamic_and_limits(ps::CpuNumericProfile profile) {
   sparse.build();
   auto q = region(sparse.shape(), {ps::Region({{0, 1}, {1, 1}}),
                                    ps::Region({{1048575, 1}, {1, 1}})});
-  auto result = take(sparse.run({{"values", q}}, budgets(), 1024 * 1024));
-  check_value(result.values.at("values"), {0, 1}, 3.6875);
-  check_value(result.values.at("values"), {1048575, 1}, 1.8125);
+  auto result = sparse.run({{"values", q}}, budgets(), 1024 * 1024);
+  require(
+      !result.ok() && result.status().code == ps::ErrorCode::ResourceExhausted,
+      "million-row sparse bake requires complete query and table payload");
   std::cout << "six cached reversed bindings, work/payload/cancel recovery and "
-               "million-row sparse PCHIP bake passed\n";
+               "full-output budget passed\n";
+}
+
+void layouts_and_active_cancellation(ps::CpuNumericProfile profile) {
+  for (unsigned kind = 0; kind < 6; ++kind) {
+    Fixture fixture(kind, profile);
+    ps::InputSnapshotStore snapshots;
+    for (unsigned port = 0; port < fixture.inputs.size(); ++port) {
+      const auto& input = fixture.inputs[port];
+      const auto width =
+          ps::Value::element_size(input.descriptor().element_type);
+      const auto count = input.bytes().size() / width;
+      auto storage =
+          take(ps::BufferAllocator{}.allocate(input.bytes().size() + 1));
+      for (std::uint64_t i = 0; i < count; ++i)
+        std::memcpy(storage.data() + 1 + (count - 1 - i) * width,
+                    input.bytes().data() + i * width, width);
+      std::vector<std::int64_t> strides(input.descriptor().shape.size());
+      std::int64_t stride = -static_cast<std::int64_t>(width);
+      for (auto j = strides.size(); j; --j) {
+        strides[j - 1] = stride;
+        stride *= input.descriptor().shape[j - 1];
+      }
+      if (count == 1)
+        strides[0] = 0;
+      auto view = take(ps::Value::from_storage(
+          input.descriptor(), input.region(),
+          {1 + (count - 1) * width, strides}, std::move(storage).freeze()));
+      fixture.bindings.inputs[port].snapshot =
+          std::make_shared<const ps::InputSnapshot>(
+              take(snapshots.import_value(view)));
+      fixture.bindings.inputs[port].value = {};
+    }
+    fixture.build();
+    auto result = take(fixture.run(
+        {{"values", take(ps::Footprint::all(fixture.shape()))}}, budgets()));
+    for (unsigned i = 0; i < fixture.count; ++i)
+      for (unsigned c = 0; c < fixture.columns; ++c)
+        check_value(result.values.at("values"),
+                    kind >= 4 ? std::vector<std::uint64_t>{i, c}
+                              : std::vector<std::uint64_t>{i},
+                    fixture.expected[i * fixture.columns + c]);
+    Fixture active(kind, profile);
+    active.count = 4097;
+    active.build();
+    ps::GraphContext graph(active.document);
+    auto plan = take(ps::Compiler(active.registry).compile(graph));
+    ps::ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.result_cache_bytes = 0;
+    config.maximum_live_bytes = 8 * 1024 * 1024;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext context(active.registry, config);
+    auto frozen = take(context.freeze(plan.plan, active.bindings));
+    auto budget = take(context.resource_budget());
+    const auto work = budget.statistics().issued.work;
+    ps::CancellationSource cancel;
+    std::atomic<bool> done{false};
+    std::thread watcher([&] {
+      while (!done.load() && budget.statistics().issued.work < work + 10000)
+        std::this_thread::yield();
+      if (!done.load())
+        cancel.cancel();
+    });
+    ps::Result<ps::DemandResult> cancelled(
+        ps::Status{ps::ErrorCode::Internal, "not executed"});
+    try {
+      cancelled = context.execute_fragments(
+          frozen, {{"values", take(ps::Footprint::all(active.shape()))}},
+          cancel.token(), budgets());
+    } catch (...) {
+      done.store(true);
+      watcher.join();
+      throw;
+    }
+    done.store(true);
+    watcher.join();
+    require(!cancelled.ok() &&
+                cancelled.status().code == ps::ErrorCode::Cancelled &&
+                budget.statistics().issued.work >= work + 10000 &&
+                budget.statistics().live[ps::ResourceKind::Payload] == 0,
+            "active cancellation releases complete template intermediates");
+  }
+  std::cout << "six templates all-port reversed/unaligned/scalar-zero snapshot "
+               "imports "
+               "and active cancellation passed\n";
 }
 
 void reusable_exports(ps::CpuNumericProfile profile) {
@@ -638,6 +732,7 @@ int main(int argc, char** argv) {
     graph_equivalence(profile);
     source_semantics(profile);
     dynamic_and_limits(profile);
+    layouts_and_active_cancellation(profile);
     reusable_exports(profile);
     authoring_boundaries();
     return 0;

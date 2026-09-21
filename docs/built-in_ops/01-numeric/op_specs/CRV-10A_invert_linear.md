@@ -45,17 +45,16 @@ Use the exact selected-segment linear inverse formula and correctly round once; 
 Other mathematical exact zeros are +0 and nonzero underflow retains sign.
 Demanded queries and outputs are finite, with narrowing overflow failure.
 
-Every nonempty request validates all x/y and reads only query[Q]; empty requests
-read no payload. Inherit global topology dirty support, local query invalidation,
-typed/upstream closure, arbitrary strides, immutable packed mapping, ownership,
-cache-off, host accounting and cancellation from CRV-10. Lookup work is
-O(K+M log K) plus the shared exact arithmetic cost for M requested samples.
-No cumulative coordinate updates or rounded intermediate quotients define the inverse.
-
-Compile/preflight type/static errors, global topology errors, requested query
-domain errors, final overflow, resource/backend/cancellation/stale failures use
-the shared error categories and observation scopes. A failed sample has no
-partial publication. Unrequested output overflow cannot cause a failure.
+All three formal profile keys use Whole. Every nonempty request collects all
+x/y/query, validates global topology and all query controls, then computes a
+complete dense output. Any input edit invalidates all outputs; dynamic numerical
+failures are Domain/Run, including invalid or overflowing undelivered positions.
+Empty requests read no payload. Inherit CRV-10's typed/upstream closure, arbitrary
+strides, ownership, cache-off, complete input/output storage, work and cancellation
+rules. Lookup work is O(K+N log K) plus exact arithmetic. Numerical stencils and
+rounding rules remain unchanged; unused endpoint conversion cannot reject a
+finite root. No partial output is published on failure. Whole fallback counters
+are N/A; the actual strict fallback remains available.
 
 Conceptual fixture: x=[0,1,3],y=[0,2,4],query=[3,1,3] -> values=[2,0.5,2].
 Negating y and query retains the result. Apply CRV-10's independent exact oracle,
@@ -72,6 +71,6 @@ The exact rational fallback is bitwise identical across profiles; accelerated
 root brackets may return within the shared FP32-scaled bound.
 See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
 for the public fixture, command and shared validation evidence. Native Clang21
-Strict/Apple and WSL Clang18 Strict/AVX2 passed all four manual groups and 407
-independent Fraction cases per profile. Installed0.16 consumers passed both
-native profiles; WSL is used for numerical correctness only.
+Strict/Apple passed all four manual groups and 407 independent Fraction cases per
+profile, plus focused numeric/compiler tests. WSL and installed consumers have
+not been rerun for this Whole revision.

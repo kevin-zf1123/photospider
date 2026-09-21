@@ -28,7 +28,7 @@ range/fallback rules. Discrete results, copies, selected endpoints and special
 values remain exact.
 
 Inherit the [baking template contract](CRV-04_bake_lut1d.md) in full for authoring
-profile/defaults, count/dtype, named outputs, lazy demand, resources, errors,
+profile/defaults, count/dtype, named outputs, Whole execution, resources, errors,
 owner lifetime and public graph-equivalence acceptance. This is a workflow
 construction template; its name is not an OperationRegistry key.
 
@@ -45,8 +45,8 @@ default remain required. Constructors write expanded-node parameters explicitly.
 Create numeric.linspace with the selected profile suffix, start/end inputs,
 count and fixed dtype="float64". Create curve.interpolate_pchip_multi with the same profile
 suffix; connect x/y and linspace.values to query, and pass the final dtype and
-out_of_domain. Export interpolator.values and linspace.axis. No full query
-materialization or implicit domain adjustment is introduced by this expansion.
+out_of_domain. Export interpolator.values and linspace.axis. Values execution materializes the complete Float64 query array and complete
+interpolation output under the inherited Whole contract.
 
 Each exported shape/dtype is inferred by its expanded source. Scalar values
 retain [count]; multi-function values retain [count,C], including C=1. This
@@ -67,9 +67,8 @@ partial output, low shared budgets, cancellation, cache-off and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
 could reproduce a shared numerical bug. The maintained public constructor in `photospider/numeric/lut1d.hpp` and
-`examples/numeric_workflow/baking.cpp` execute this fixture. Native Clang
-strict/Apple, WSL Clang strict/AVX2 and installed consumers passed the shared
-manual acceptance described in [CRV-04](CRV-04_bake_lut1d.md). The example is
+`examples/numeric_workflow/baking.cpp` execute this fixture. Current native Clang
+strict/Apple passed the Whole template manual acceptance described in [CRV-04](CRV-04_bake_lut1d.md). The example is
 excluded from default builds and CTest/integration registration. See the
 [numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04)
 for build/run commands and editable public-API use.

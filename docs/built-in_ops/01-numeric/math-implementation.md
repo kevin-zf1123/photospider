@@ -390,7 +390,7 @@ must round to the same Float32 result, as well as satisfy the shared quality gat
 This stronger condition preserves cross-query monotonicity when mixed with strict
 fallback. A mere 4 ULP32 bound is insufficient: neighboring binary64 queries can
 otherwise produce a one-ULP64 reversal. Selected knots/clamps remain exact.
-Unresolved cases report strict fallback; no requested-batch repair is applied.
+Unresolved cases use strict fallback; no requested-batch repair is applied.
 Exact cross products detect a collinear complete local stencil and reduce its
 PCHIP formula to the existing linear rational formula. Rounded slope equality
 is insufficient and is never used for this decision.
@@ -401,62 +401,104 @@ The combined Hermite numerator is below 2^20999 and denominator below 2^18897.
 The 352-limb (22528-bit) workspace covers these bounds plus denominator
 alignment, 53 quotient trials and midpoint doubling. The fixed 96-slot arena
 uses at most 49 live slots in the formula; every slot and ratio temporary is
-part of the admitted continuation. Endpoint limits compare exact cross-products.
+part of the admitted callback workspace. Endpoint limits compare exact cross-products.
 Direct node/clamp conversion, two-point linear degeneration and exterior
 tangent evaluation have smaller bounds. Arithmetic polls work/cancellation
 inside limb multiplication and final division. Independent scoped arithmetic
 review also compared 3208 Fraction formula expansions successfully.
 
-The regional continuation acquires complete x Control/Validation, then the
-projection of Q onto query rows, then only column-local y Data/Validation.
-All x must be finite and increasing. Exact node/clamp reads one y, linear reads
-two, PCHIP reads its fixed local stencil even when a slope branch is zero.
-Query classification runs once per distinct requested row. Bounded rectangle
-projection and association construction add metadata work; no whole N*C array
-or full slope table is allocated. Immutable packed fragments retain correct
-global origins and owners. The public examples set explicit session/Run work
-budgets; a default direct invoke can exhaust its discovery budget on a small
-PCHIP batch. That failure preserves ResourceExhausted rather than weakening
-precision or demand.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
 
-On 2026-09-19, native Apple M5 / Clang 21 strict and Apple, and Intel Core
-i9-12900 Ubuntu WSL / Clang 18.1.3 strict and AVX2, passed 2484 independent
-Fraction cases per profile. These cover mixed source/output types, all domain
-policies, random irregular knots, limiter branches, extreme finite arithmetic,
-midpoints, subnormals, signed zeros and ordered adjacent-query shape checks.
-All four profiles passed the five public manual groups: basic single/multi
-fixtures and tangent extrapolation; sparse support/dirty/Atom isolation and
-lifetime; strides/fenv/schema/Empty/resource interruption; cache reselection,
-upstream order and giant sparse public composition; typed Mask validation.
-Local installed consumers, focused compiler unit, ClangFormat 21/cpplint and
-scoped entry/math reviews passed. No new CTest or integration entry was added.
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
 
-The following Apple M5 / Clang 21 RelWithDebInfo native measurements use x=0..16,
-y[j,c]=j+c, query[i]=i/4+1/8, K=17, N=1/64, C=1 for single and 2 for multi,
-Float64, Whole, one worker, cache off, three repetitions. Compile/freeze precede
-timing; synchronous execution and result assembly are timed. Every returned
-sample is checked against query[i]+c, with four polls, N*C evaluations and zero
-fallbacks. Session and Run work limits are 8 Gi and 16 Gi work units. Columns
-show median/max microseconds; these measurements do not establish a general
-speedup claim. WSL supplies correctness evidence only.
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
 
-| Operation | N | Strict median/max us | Apple median/max us |
-| --- | ---: | ---: | ---: |
-| linear | 1 | 208/666 | 205/294 |
-| linear | 64 | 2561/2577 | 2535/2646 |
-| linear_multi | 1 | 208/244 | 208/215 |
-| linear_multi | 64 | 5159/5359 | 4755/5061 |
-| pchip | 1 | 224/246 | 230/252 |
-| pchip | 64 | 7042/7278 | 6660/7034 |
-| pchip_multi | 1 | 356/399 | 337/345 |
-| pchip_multi | 64 | 13849/13917 | 13777/14245 |
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
 
-Peak controlled payload is 285944/286448 bytes for single and 285952/286960
-bytes for multi at N=1/64. The diagnostic does not include ordinary static
-plan storage or unmanaged host containers. The separate giant composition
-checks one last-column result over a logical [2,2^39] constant view, with actual
-value 7; it is a sparse correctness fixture, not a large dense performance test.
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
 
+
+Clang 21.1.3 RelWithDebInfo on Apple M5 / macOS 27.0 (26A5425a), package
+0.18.0, passed 2487 independent Fraction cases for each strict/Apple profile,
+the public workflow groups, active cancellation/budget checks, and focused
+numeric/compiler tests. The existing Apple inverse workflow also passed after
+the shared exact evaluator gained an optional already-normalized environment.
+Other platforms were not rerun for this migration.
+
+Native sampling (2026-09-21) uses K=17, N=512, x[j]=j, y[j,c]=j+c,
+query[i]=(i%64)/4+1/8, dense inputs, complete demand, one CPU worker and cache
+disabled. Strict uses Float64, Apple uses Float32. One warm invocation precedes
+seven measured invocations, with analytic identity checks outside timing. Both
+adapters use the same kernel; the comparison adapter is the CRV-01 source at
+3d35f5eb. Public latency includes execution, managed metering, collection and
+result assembly, excluding compile/freeze. The core column measures the current
+numeric callback on prepared complete Values, including lookup, arithmetic,
+allocation and publication, but excluding scheduling, collection and managed
+metering. It is not a pure arithmetic instruction benchmark.
+
+Budgets: 1 GiB payload, 2 GiB Host, 512 MiB Metadata, 512 MiB dependency state,
+2^40 dependency/Run work units, default unlimited managed work. Raising Metadata
+above the 16 MiB default is necessary for the old C=4 adapter; at that default it
+fails dependency poll allocation. Context-reported peak Metadata changes from
+15,814,976/65,098,224 bytes (C=1/4) to 3,208 bytes; this excludes uninstrumented
+process memory. Complete input collection can slightly increase payload: C=4
+Apple peak is 294,128 before and 296,380 bytes after.
+
+All times below are median [min,max] milliseconds for these seven samples.
+
+| Operation | C | Profile/dtype | Public before | Public Whole | Numeric callback core |
+| --- | ---: | --- | ---: | ---: | ---: |
+| linear | 1 | strict/Float64 | 10.026 [9.726,10.364] | 2.650 [2.602,2.939] | 2.449 [2.417,2.555] |
+| linear | 1 | apple/Float32 | 7.286 [7.084,7.381] | 0.145 [0.141,0.162] | 0.080 [0.076,0.083] |
+| linear | 4 | strict/Float64 | 43.516 [42.457,46.465] | 10.580 [10.360,10.659] | 9.887 [9.775,10.553] |
+| linear | 4 | apple/Float32 | 32.964 [32.647,35.991] | 0.316 [0.311,0.330] | 0.301 [0.243,0.411] |
+| pchip | 1 | strict/Float64 | 13.403 [13.284,13.714] | 5.448 [5.293,5.686] | 5.014 [4.870,5.303] |
+| pchip | 1 | apple/Float32 | 7.511 [7.446,7.657] | 0.225 [0.220,0.237] | 0.167 [0.166,0.171] |
+| pchip | 4 | strict/Float64 | 55.231 [54.921,56.102] | 21.307 [21.054,21.696] | 19.805 [19.645,20.042] |
+| pchip | 4 | apple/Float32 | 32.468 [32.017,33.298] | 0.701 [0.669,0.741] | 0.617 [0.546,0.673] |
+
+Three 12-second Time Profiler captures of Apple Float32 PCHIP C=4 retain
+11,781/11,769/11,745 execution-stack samples for the old adapter, initial Whole
+adapter and final Whole adapter respectively. Inclusive counts overlap. The old
+adapter has DependencySession on 84.14% and Footprint methods on 52.42% of these
+samples. Initial Whole shows repeated fegetenv/fesetenv on 12.59%; moving the
+same guard around the complete callback removes sampled per-value fenv frames
+in the final capture. Final nextafter interval expansion is 42.66%, managed
+ResourceBudget methods 6.84%, and ValueFragments::collect 0.55%. No NUM-14
+finite-Float32 certificate is used. Scalar exact arithmetic and accelerated
+interval/fallback paths retain their existing mathematical contract.
+
+Raw driver, build script, CSV sample ranges, logs, trace exports and analysis
+are local ignored artifacts under `build/crv-whole/` (`curves-final-times.csv`,
+`curves-{before,after,final}.trace`, `profile-summary.txt`). These workloads do
+not establish performance for nonlinear exact fallback, all K/N/C sizes or
+other CPUs. Whole diagnostics do not expose per-value fallback counts.
 
 ## CRV-02 exact Bezier function sampling
 
@@ -471,7 +513,7 @@ Nonzero half-subnormal boundaries use the boundary sign when the tie rounds to
 zero. Direct dyadic roots and constant ordinates use exact evaluation.
 
 The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots,
-all inside the admitted continuation. Initial coefficients have fewer than
+all inside the admitted callback state. Initial coefficients have fewer than
 2105 bits. The worst degree-three integer remainder chain grows through
 4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional
 bit refinement cap stays below 26683 bits; final rounding temporaries fit the
@@ -481,117 +523,166 @@ refinement or storage limits return ResourceExhausted/CapacityLimit. The solver
 has a finite budget, not a promise that every algebraic input resolves at any
 caller-selected budget. All profiles use this exact numerical path, so no
 numerical fallback is reported; profile-specific integer helpers supply the
-scalar/NEON/AVX2 operations. Diagnostics record the actual build/profile.
+scalar/NEON/AVX2 operations. The Whole callback does not expose per-value
+solver/fallback counters.
 
-The four-poll values protocol obtains sampling inputs, global X
-Control/Validation, then local X Data and selected Y Data/Validation, and
-finally publishes immutable packed fragments. Axis has its own two-poll state
-without the polynomial arena and ignores all controls. N=1 also ignores end.
-Topology is validated once per values continuation and searched per requested
-sample; it is not a shared persistent index across independent Atom runs.
-Knot/clamp paths read only one y. Every interior control remains required.
-`strict_math_calls` counts each attempted Bx sign evaluation in refinement,
-including failed calls, excluding topology/interval/GCD work and cache hits.
+Values uses one CPU Whole callback. For every nonempty values request, collect
+complete anchors and handles plus start and, only when count>1, end. Recognized
+typed validation and upstream failures apply to all collected components. Validate
+all x topology, then every generated coordinate/domain/adjacent-separation control
+before y arithmetic. Evaluate all count outputs and allocate one complete dense
+values owner, even for sparse demand. Empty reads no payload.
 
-On 2026-09-20, Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900 Clang
-18.1.3 strict/AVX2 passed five public manual groups and 386 independent
-Fraction/de Casteljau/rational Euclid-Sturm cases per profile. They cover RN64
-reconstruction, inverse rather than direct-t semantics, derivative topology,
-midpoints/subnormals/zero signs, selected-component errors, sparse maximum
-count, source/typed errors, strides/fenv, cache/Atom isolation and resource
-interruption/recovery. Private independent arithmetic probes compared 1758
-common-root cases and 419 inverse cases; review independently checked another
-226 topology and output-boundary cases and found/fixed the signed half-subnormal
-zero issue. Installed 0.15 consumers, focused compiler unit, ClangFormat 21,
-cpplint and final scoped math/entry reviews passed. Shared NUM-01 sampling
-extraction also passed 715 cases/profile plus its seven manual groups on native
-and WSL Clang. No integration/CTest entry was added.
+Mathematical selection remains local: exact anchor/clamp uses that anchor y;
+interior evaluation uses the selected segment's anchor y and relative y handles.
+Generic y outside every evaluated stencil is not additionally finite-checked.
+All output samples are evaluated, so an invalid otherwise-unrequested sample can
+fail the complete values Run. Failure publishes no partial successful values.
+Axis independently collects start/end only (start for count=1), computes its
+24-byte tuple and never validates control payloads or per-coordinate separation.
+Static descriptors of all four edges are still validated for either output.
 
-Native Apple M5/Clang 21 RelWithDebInfo timing below uses one worker, Float64,
-cache off and three repetitions after compile/freeze. The identity curves have
-anchors (j,j), quadratic offsets (.5,.5), or cubic outgoing (.25,.25) and
-incoming (-.25,-.25); the sampling interval is [0,K-1]. Every returned value
-matches the independently rounded exact grid coordinate. The full 48-row
-matrix per profile covers degrees 2/3, K=2/64/4096/65536, N=256/65536/1048576
-and Whole/ROI {0,N/2,N-1}. There are 32 successful rows and 16 dense resource
-failures per profile. WSL is not used for performance comparisons.
+Any collected anchor/handle edit invalidates the recorded values demand; controls
+never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
+Complete immutable input versions, profile, metadata and parameters remain in
+cache identity. Both outputs retain their existing names, dtypes, empty facets
+and independent identity; there is no new pairing object. Returned owners survive
+context destruction. Sparse publication coverage retains the complete owner.
 
-Budgets are 32 MiB controlled payload, default managed capacity (16 MiB
-Metadata), default maximum_boxes=65536, 64 Mi footprint work, 64 Gi session
-work and 128 Gi Run work. Every Need reserves 4096+16384*M metadata bytes;
-full N=65536 exceeds that capacity and N=1048576 exceeds the association
-lower bound before per-point staging. Raising only the payload budget cannot
-make those dense requests complete. Successful N=256 Whole rows peak around
-14 MiB Metadata, while three-point ROI stays below 1.8 MiB even at K=65536.
-The payload peak is 523808 bytes for Whole and 519760 for ROI; separately
-accounted topology capacity contributes to Host/Metadata. Statistics describe
-managed capacities and exclude unmanaged allocation/RSS. Source counts are
-unique support coordinates; direct bound inputs do not provide physical read
-call telemetry. CSV root_calls and issued_work give distinct computation counts.
 
-| Degree | K | N | Region | Strict median/max us | Apple median/max us |
-| --- | ---: | ---: | --- | ---: | ---: |
-| 2 | 2 | 256 | Whole | 223783/227461 | 208945/274228 |
-| 2 | 2 | 1048576 | ROI3 | 883/922 | 811/1138 |
-| 2 | 65536 | 256 | Whole | 375821/385161 | 373107/379647 |
-| 2 | 65536 | 1048576 | ROI3 | 269675/269694 | 253764/253853 |
-| 3 | 2 | 256 | Whole | 356167/358147 | 334603/350061 |
-| 3 | 2 | 1048576 | ROI3 | 1569/1574 | 1367/1373 |
-| 3 | 65536 | 256 | Whole | 802690/808716 | 740536/741101 |
-| 3 | 65536 | 1048576 | ROI3 | 710799/722415 | 656185/658154 |
+Native Clang 21.1.3 strict/Apple public workflows and each profile's 382
+independent Fraction/de Casteljau/Euclid-Sturm numeric/error cases passed; four
+additional maximum-count cases verify full-output admission failure at 1 MiB.
+These four are resource checks, not successful million-element numeric runs.
+Focused numeric/compiler tests, active cancellation/work/output/workspace
+checks, arbitrary layouts/fenv and typed-input validation passed.
 
-The separate stress command uses cubic x=t^3 at t=2^-10 (q=2^-30),
-y=.75*t+.75*t^2-.5*t^3, and a rational root t=1/12 with control y values
-[-17,49,98,742]*2^-1074 whose exact result is -2^-1075. The latter rounds to
--0. Strict median/max are 508/1057 us and 460/499 us; Apple 495/622 us and
-452/480 us. They require 10 and 8 Bx sign attempts respectively, one evaluated
-value and zero fallbacks, with 519720 payload bytes. These small measurements
-do not establish a general accelerated speedup.
+Sampling on Apple M5 / macOS 27.0 (26A5425a), package 0.18.0, uses degree 2/3,
+K=2, N=129, Float64 inputs/output, anchors [[0,0],[1,1]], quadratic offset
+[.5,.5], or cubic offsets [.25,.25],[-.25,-.25]. The grid is [0,1] inclusive.
+Every output is independently checked against RN64(i/128). One warm invocation
+precedes seven measured samples. One CPU worker, cache off, 1 GiB payload,
+2 GiB Host, 512 MiB Metadata and dependency state, 2^40 dependency/Run work,
+and default unlimited managed work apply. Compile/freeze/checking are outside
+public execution timing. The comparison adapter is CRV-02 at 3d35f5eb linked
+to the same kernel; the current core column calls the prepared complete-Value
+numeric callback, including allocation/classification/solver/publication but
+excluding scheduler, collection and managed metering. All times are median
+[min,max] ms. Small overlapping sample ranges cannot establish that core is
+faster or slower than public execution.
+
+| Degree | Profile | Public before | Public Whole | Numeric callback core |
+| --- | --- | ---: | ---: | ---: |
+| quadratic | strict | 9.919 [9.838,10.164] | 5.328 [5.049,5.457] | 5.051 [5.018,5.104] |
+| quadratic | apple | 9.654 [9.525,9.858] | 4.826 [4.793,4.921] | 4.850 [4.812,4.901] |
+| cubic | strict | 87.547 [86.536,87.955] | 76.894 [76.396,78.221] | 76.885 [76.514,77.787] |
+| cubic | apple | 85.549 [84.666,86.681] | 74.007 [73.099,75.409] | 74.512 [73.850,74.814] |
+
+Context-reported peak Metadata drops from 7,281,016/7,281,024 bytes to
+3,584/3,592 bytes for quadratic/cubic. These are managed statistics, not RSS.
+The 12-second Apple cubic Time Profiler capture contains 11,932 execution-stack
+samples: ExactBezier::inverse is inclusive in 99.18%, ExactPolynomial methods
+97.45%, ResourceBudget 2.99%, ExactSampling 0.07%, and collect 0.02%. Inclusive
+categories overlap. Exclusive samples identify fixed-integer top/subtract/add
+and shifting as the main remaining work. The observed cubic improvement is
+limited by exact inverse arithmetic; no cheaper unproved inverse or NUM-14
+Float32 certificate is substituted.
+
+Raw drivers/build commands, seven-sample ranges, trace/XML, logs and analysis
+remain locally under ignored `build/crv-whole/` (`bezier-times.csv`,
+`bezier-after.trace`, `bezier-profile-summary.txt`). This is native evidence for
+the stated grids; it does not establish all-shape or cross-platform speedups.
 
 
 ## CRV-03 parametric Bezier evaluation
 
-`parametric_bezier.cpp` uses the existing ExactSampling and ExactPolynomial
-facilities without an inverse/topology stage. Demanded controls widen exactly,
-relative handles reconstruct with RN64, and exact Bernstein coefficients are
-converted to power form. Horner uses integer t*2^1074 and denominator
-2^(actual_degree*1074), retaining coefficient units 2^-1075. Trimming the degree
-also changes the denominator; constant/zero polynomials use denominator one.
-The exact numerator has fewer than 5329 bits for degree<=3 and t in [0,1];
-rounding temporaries need under approximately 5330 bits and at most 16 live
-arena slots. The existing 40960-bit/96-slot continuation admits those bounds
-without allocating private arithmetic state. Interior exact zero tests raw
-reconstructed-control zero signs; a nonzero underflow keeps its exact sign.
-Endpoint conversion bypasses all other controls. Finite output obeys the
-correctly converted control convex hull, including extended infinite bounds.
+`parametric_bezier.cpp` retains ExactSampling RN64 reconstruction and
+ExactPolynomial integer Bernstein/power-Horner evaluation with direct output
+rounding. Unlike CRV-02, it evaluates explicit t and does not solve an inverse.
+The scalar numerator bound is 5329 bits for degree<=3 and t in [0,1]. Endpoints
+convert one anchor; interior exact zero is negative only if every reconstructed
+control is negative zero. All profiles retain the current exact calculation,
+with scalar/NEON/AVX2 integer helpers and the unchanged accelerated contract.
 
-The three-poll regional protocol projects Q onto query rows, reads/validates
-segment indices and t once per row, then declares local component control
-Data plus recognized typed Validation. Image handles close Validation across
-all channels while preserving scalar Data. Each output cell retains its own
-certificate; transport deduplicates source coordinates, and no global K/D/N
-scan or full output allocation is used for sparse demand. Explicit metadata
-reservation per Need is 4096+16384*M bytes in addition to managed row/point
-vectors, output fragments, publication owners and exact continuation scratch.
-Dense association/resource exhaustion is an explicit failure. Work checks
-cover reads, row/component loops, reconstruction, limb arithmetic and publication.
+One CPU Whole callback collects all four complete inputs with recognized typed
+validation, then validates every segment_indices/t row before any component
+arithmetic. It evaluates all N*D output cells and publishes one immutable dense
+[N,D] owner. Sparse demand restricts returned coverage but retains complete input
+collection, computation and output memory. Empty reads no payload; complete
+static metadata still validates.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed 1428 independent Fraction Bernstein cases per
-profile. The oracle reconstructs controls with its own integer IEEE rounding
-and uses direct Bernstein weights instead of production power-Horner. Cases
-include mixed types, unordered/repeated segments, partial components, wide
-exponents, subnormal and near-one t, selected/unselected invalid data, RN64
-midpoints, signed zeros and Float32 finite cancellation across extreme controls.
-Five public manual groups passed on each profile: analytic and reconstruction
-fixtures; sparse dependency/dirty and Atom isolation; strides/fenv/Empty/schema
-and resource interruption; cache/large sparse composition and typed closure;
-upstream ordering. The public constant compositions check 2^39 columns and
-2^40 rows with tiny actual requests. Independent review checked 96 additional
-Fraction Bernstein/power expansions and closed the endpoint-overflow diagnostic
-fix using a t=1 regression whose unneeded handles are NaN. Installed 0.15
-consumers, focused compiler unit, formatting/lint and scoped math/entry reviews
-passed. No new CTest/integration registration or performance claim was added.
+Mathematical selection is unchanged: t=0/1 uses only the selected anchor
+component; an interior uses both anchors and all relative handles of that segment
+and component. Generic numeric data outside every evaluated stencil is not
+additionally finite-checked. Complete typed and upstream validation still covers
+unused inputs. All rows/components are evaluated, so formerly unrequested bad
+index/t/components can fail the Run. No partial successful output is published.
+There is no global mathematical topology/monotonicity scan.
+
+Any input edit invalidates recorded output demand. Cache identity includes all
+input versions, profile, metadata and parameters. Output name, dtype, rank-2
+shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
+offsets and unaligned storage remain legal. Output storage survives its context.
+
+The callback retains one row classification and fixed arithmetic workspace,
+independent of N and D. It validates all rows, then reclassifies each row once
+for all columns. Work is O(N+N*D*degree), plus exact arithmetic, complete input
+collection and typed validation. Complete output costs b*N*D bytes. Admit that
+output and fixed workspace even for one requested cell, together with collected
+inputs/retained owners and metadata. Giant broadcast inputs/output can therefore
+fail a small payload budget. No per-cell dependency certificates or full
+coefficient table is retained.
+
+Use the host worker and resource ledger; poll cancellation on reads, row controls,
+inside exact arithmetic and before publication. Work/capacity failures preserve
+ResourceExhausted and release unpublished state/output. Numeric failures have Run
+scope, identifying offending port/index where available. Invalid segment/t is
+InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
+InvalidDomain; actual RN64 reconstruction or final conversion overflow is
+OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
+cancellation errors preserve their categories. Whole numeric counters are not
+available; zero counters must not be interpreted as zero arithmetic/fallbacks.
+
+
+Native Clang 21.1.3 strict/Apple public manual checks and 1428 independent
+Bernstein/RN64 cases per profile passed for the Whole implementation. Focused
+numeric/compiler tests passed. Other CPU platforms were not rerun. The giant
+2^39-column/2^40-row cases validate complete-output budget rejection rather than
+successful sparse numerical evaluation.
+
+Native Apple M5 / macOS 27.0 (26A5425a), package 0.18.0 sampling uses K=2,
+N=128, D=4, degree 2/3, Float64 inputs/output, indices all zero, t[i]=(i%64)/64,
+anchors[0,c]=c and anchors[1,c]=c+1. Quadratic offsets are .5; cubic offsets
+are .25 and -.25. An independent dyadic polynomial checks c+t (quadratic) or
+c+.75*t+.75*t*t-.5*t*t*t (cubic) outside timing. One warm invocation precedes
+seven measurements. One CPU worker, cache off, 1 GiB payload, 2 GiB Host,
+512 MiB Metadata and dependency state, 2^40 dependency/Run work, default
+unlimited managed work apply. The old adapter is source at 3d35f5eb linked to
+the same kernel. Public timing excludes compile/freeze and includes execution,
+collection, metering and result assembly. Core means the prepared complete-Value
+numeric callback with allocation and publication but no scheduling/collection or
+managed metering. Times are median [min,max] milliseconds.
+
+| Degree | Profile | Public before | Public Whole | Numeric callback core |
+| --- | --- | ---: | ---: | ---: |
+| quadratic | strict | 14.542 [13.915,14.971] | 4.491 [4.446,4.595] | 4.309 [4.284,4.350] |
+| quadratic | apple | 13.943 [13.780,14.672] | 4.410 [4.353,4.558] | 4.189 [4.089,4.314] |
+| cubic | strict | 19.812 [19.624,19.997] | 9.592 [9.486,9.674] | 9.124 [9.042,9.292] |
+| cubic | apple | 19.570 [19.045,20.265] | 9.183 [9.149,9.418] | 8.823 [8.638,9.035] |
+
+Context-reported peak Metadata falls from 20,554,216 to 3,432 bytes. Whole
+collection slightly increases peak payload: cubic 523,744 to 525,768 bytes.
+A 12-second Apple cubic Time Profiler capture retains 11,879 execution-stack
+samples: ParametricState::evaluate is inclusive in 98.75%, ExactPolynomial in
+94.01%, ResourceBudget in 3.00%, ExactSampling in 0.35%, and collect in 0.07%.
+Inclusive categories overlap; exact polynomial arithmetic is the remaining
+observed bottleneck. Numerical bounds and the fixed workspace are unchanged;
+no NUM-14 certificate or floating approximation is introduced.
+
+Raw driver/build commands, ranges, trace/XML and analysis are local ignored
+`build/crv-whole/parametric-*` artifacts, including `parametric-times.csv` and
+`parametric-profile-summary.txt`. These results establish the stated native
+workload, not arbitrary-shape or cross-platform speedups.
 
 
 ## CRV-04 public LUT1D authoring
@@ -605,83 +696,191 @@ successful local construction, reserving existing/supplied producer IDs and the
 caller's output labels implicitly. Source contracts supply all runtime resource,
 precision, dependency, cache and failure semantics.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed the five baking manual groups. Each profile
-compares 48 generated/explicit graph pairs across six sources, two dtypes and
-four demand modes; checked results include source/dirty witnesses and analytic
-values. Additional tests cover mixed scalar types, N=1 failing end, axis-only
-failing function sources, source-specific equal-endpoint and first-coordinate
-behavior, cached reversed bindings, million-row sparse multi PCHIP under 1 MiB
-payload, C=1 and multiple named bakes, reference/UINT64_MAX IDs and partial
-construction rejection. Runtime cancellation coverage here is pre-cancellation;
-resource recovery checks create a new context. Underlying source clusters cover
-arithmetic-time interruption and owner retirement. Returned results are checked
-after each helper execution context is destroyed. Installed 0.15 consumers,
-ClangFormat 21/cpplint and independent authoring/acceptance reviews passed.
-CRV-05 below covers all six downstream application chains and the expected
-discretization error; graph equivalence alone is not a proof of approximation quality. No new
-runtime primitive, integration-test registration or performance claim is added.
+All expanded formal source outputs now use CPU Whole. A nonempty values request
+computes the complete baked table and retains its full output owner, even when
+only a few cells are returned. Interpolation bakes materialize the complete
+Float64 linspace query array (8*count bytes) before the complete interpolation
+output (count*C*dtype bytes). Account simultaneous source owners, query/table
+buffers and each source's fixed workspace through the same host resource root.
+There is no additional opaque bake primitive, cache, runtime function object or
+pairing certificate.
+
+Axis remains an independent Float64[3] output: axis-only does not execute the
+expression coefficients, Bezier controls or interpolation x/y. Count=1 still
+omits end payload. For count>1, even a request for only the first value collects
+end and computes the full grid. Each source retains its mathematical formula,
+selection/NaN/typed rules and numeric allowance; complete active input collection
+can propagate previously unrequested upstream/typed failures. Numeric failures
+have their source Whole Run scope. Any active source edit invalidates recorded
+values demand; function controls never dirty axis. Empty reads no payload.
+Output names, generic shapes/dtypes, C=1, explicit exports and post-context
+immutable ownership remain unchanged. Cache-off retains active ownership.
+
+Clang21 strict/Apple each pass 48 generated/explicit graph pairs and independent
+analytic fixtures, complete dependencies/dirty mapping, native source selection,
+cache/source failures, named exports/authoring limits, managed work/payload
+budgets and active cancellation. Six-template signed/unaligned/scalar-zero
+snapshot-import tests preserve logical values. A million-row sparse request
+verifies full-output rejection under 1 MiB, not sparse success. Source numeric
+and direct-layout oracles remain in their separately validated families.
+
+
+Native sampling on Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug,
+package 0.18.0 uses all six public templates at count=129, Float64 inputs/output,
+C=1 for scalar and C=2 for multi, with the control fixtures in baking.cpp.
+Expression and quadratic Bezier implement x^2 on [0,1]; linear is 2*x on [0,2];
+PCHIP uses x=[0,1,2], y=[0,1,4] on [0,2]; linear multi uses [2*x,10-2*x] on
+[0,1]; PCHIP multi uses [P(x),4-P(x)] on [.5,1.5]. An independent dyadic
+piecewise polynomial checks all values outside timing. Both values and axis are
+requested. One worker, cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata
+and dependency state, 2^40 dependency/Run work, default unlimited managed work;
+one warm invocation precedes seven samples. Compile/freeze is excluded.
+
+The before adapter replaces only CRV-01/02 with their 3d35f5eb sources in the
+same kernel. Expression was already Whole and has no implementation change;
+its before/after differences are sampling variation. These templates have no
+independent numerical callback. The current core column is the sum of the host's
+monotonic expanded-source callback durations (microsecond resolution), including
+numeric arithmetic, allocation and work metering but excluding input collection
+and graph scheduling. This differs from the unmetered direct-core measurements
+for individual source families. Times are median [min,max] milliseconds.
+
+| Template | Profile | Public before | Public Whole | Expanded callback sum |
+| --- | --- | ---: | ---: | ---: |
+| expression | strict | 0.119 [0.100,0.176] | 0.105 [0.100,0.120] | 0.038 [0.037,0.044] |
+| expression | apple | 0.095 [0.094,0.113] | 0.094 [0.091,0.113] | 0.034 [0.033,0.039] |
+| Bezier | strict | 10.469 [10.269,13.890] | 5.398 [5.300,5.697] | 5.289 [5.197,5.547] |
+| Bezier | apple | 10.260 [10.223,10.479] | 5.211 [5.184,5.293] | 5.117 [5.076,5.202] |
+| linear | strict | 2.755 [2.703,2.788] | 0.814 [0.809,0.898] | 0.724 [0.703,0.773] |
+| linear | apple | 2.771 [2.685,3.046] | 0.807 [0.796,0.883] | 0.709 [0.696,0.753] |
+| PCHIP | strict | 12.639 [12.262,13.035] | 9.457 [9.419,9.693] | 9.324 [9.265,9.529] |
+| PCHIP | apple | 12.268 [12.222,12.448] | 9.007 [8.924,9.236] | 8.883 [8.771,9.062] |
+| linear multi | strict | 5.696 [5.458,5.829] | 1.449 [1.419,1.554] | 1.347 [1.324,1.436] |
+| linear multi | apple | 5.434 [5.360,5.515] | 1.394 [1.367,1.454] | 1.286 [1.264,1.316] |
+| PCHIP multi | strict | 25.563 [25.138,25.875] | 19.718 [19.122,20.369] | 19.541 [18.972,20.181] |
+| PCHIP multi | apple | 24.633 [24.577,24.911] | 18.163 [18.019,18.697] | 17.997 [17.861,18.549] |
+
+For multi PCHIP, context-reported peak Metadata falls from 8,219,352 to 4,376
+bytes; reported payload changes from 290,176 to 290,024 bytes. These are managed
+capacities, not RSS. The 12-second Apple multi-PCHIP Time Profiler trace retains
+11,948 execution-stack samples, with ExactCurve::evaluate inclusive in 98.05%,
+ResourceBudget in 6.05%, and collect in 0.06%; no DependencySession frame is
+sampled. Inclusive categories overlap. Exact curve arithmetic remains the
+observed bottleneck for this nonlinear Float64 template.
+
+Ignored local raw artifacts are `build/crv-whole/baking-times.csv`,
+`baking-perf.cpp`, its build script, `baking-after.trace`, exported XML and
+`baking-profile-summary.txt`. Results cover these native fixtures, not an
+all-shape/platform claim. No new primitive or numerical standard was introduced.
 
 
 ## CRV-05 dynamic-axis LUT1D
 
-`UniformAxis` validates finite start/end/step, singleton raw endpoint/+0 rules,
-RN64 derived step, and every rounded endpoint-weighted coordinate in table order.
-It retains an admitted ResourceVector of 8L bytes; no table value is needed for
-that validation. The four-poll LUT continuation reads shared axis, then exactly
-requested query coordinates, then selected table singleton/pairs and publishes
-all requested packed fragments. Descending lookup compares reversed numerical
-order keys; before exact linear evaluation it reverses both coordinates and
-values to meet ExactCurve's positive-denominator precondition. This is the
-same mathematical negative-denominator formula. Direct hits/clamps/singletons
-convert only the selected entry; other paths preserve both endpoint witnesses
-and apply the whole-formula zero rule. The shared ExactCurve certified Float32
-path retains correctly rounded results and reports fallback where available.
-ExactCurve clears its borrowed work callback on every
-return/exception; native CRV-01 five groups and 2484 Fraction cases regressed
-successfully after that lifetime-only change.
+`UniformAxis` reconstructs each RN64 endpoint-weighted knot, verifies exact step,
+strict ordering and singleton raw endpoints/+0. Scalar/channel lookup preserves
+one-entry selections and exact whole-formula linear interpolation. Descending
+pairs reorder both x/y to satisfy ExactCurve's positive-denominator internal
+representation. Channel queries are classified independently.
 
-Query Control remains per scalar; recognized Image Validation closes channels
-separately. Channel tables do not share a query/index merely because a row prefix
-matches. Numeric errors carry complete global scalar Atom coordinates up to rank
-8. Full axis is revalidated per admitted continuation, with no persistent shared
-grid cache. Work is O(L+M log L) plus exact sampling/interpolation and association
-work. The default direct session work budget can be exhausted by a small grid;
-public fixtures explicitly allow 32 Gi session/64 Gi Run work units. At L=1048576,
-8 MiB of admitted grid capacity fits the default Metadata budget for a tiny Q.
-Per-stage certificate reservation is 4096+16384*M bytes, so output payload alone
-does not bound large dense requests. All output/point/grid/exact scratch and
-publication owners use host admission; resource failure never skips axis checks.
+Every nonempty request uses one CPU Whole callback over complete input, table
+and axis Values, including recognized typed validation and upstream failures.
+Validate the complete reconstructed axis first, then every finite/domain query
+before table arithmetic. Compute every output element/channel and publish one
+immutable dense owner with the complete input shape. Sparse demand restricts
+returned coverage, not computation or full output memory. Empty reads no payload;
+all static metadata checks still apply.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed 1416 independent Fraction grid/linear cases per
-profile and six manual groups. The oracle independently reconstructs RN64 knots
-and exact signed-denominator interpolation, then applies integer IEEE rounding.
-Coverage includes mixed dtypes, both orders/all domain modes/singletons, extreme
-cancellation, mismatched/overflowed/underflowed steps, collapsed coordinates,
-subnormal queries, direct and mixed/extrapolated zero signs, rank-eight queries
-and selected versus remote invalid entries. The manual path checks exact source
-support/dirty, channel Atom isolation, cache changes to all three inputs, all-port
-negative/unaligned/zero strides and fenv, typed Image closure, source failure
-ordering, axis-loop and arithmetic/second-box cancellation, work/state/stage
-admission and unpublished Payload retirement. It executes a complete maximum-L
-grid using one scalar-backed public constant table and a sparse 2^39-channel
-constant composition. All six baking constructors feed their consumer, with
-explicit discrete expected values and rejection of repeated-grid axes.
-Installed 0.15 consumers, focused compiler unit, ClangFormat 21/cpplint and
-independent math/entry/oracle reviews passed. No new CTest/integration entry or
-performance claim was added; WSL results establish correctness only.
+Mathematical table selection is unchanged: knot/clamp/singleton converts one
+entry; interpolation/extrapolation uses its adjacent pair, independently per
+channel. Generic entries outside all evaluated stencils receive no additional
+finite scan. Typed validation and upstream collection cover the complete table.
+Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
+Any input/table/axis edit invalidates recorded output demand. Cache identity
+retains all input versions, profile, metadata and parameters. There is no
+per-channel Atom success isolation. Output dtype, shape and empty facets remain
+unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
+legal. The complete immutable owner survives context destruction.
+
+For M total input elements, work is O(L+M log L) plus exact arithmetic, full
+input collection and typed validation. Singleton lookup is constant time per
+query. The callback retains a host-accounted Float64 grid of 8*L element bytes
+(up to 8 MiB) plus allocator/metadata overhead, fixed exact workspace and O(rank)
+coordinate state. It retains no per-output certificates, rows or lookup table.
+Output costs dtype_bytes*M, regardless of requested coverage. Complete table
+collection costs its full L (or L*C) logical payload when a dense collect is
+needed; retained source owners are accounted separately.
+
+The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
+floating environment covers axis reconstruction and curve evaluation; unresolved
+accelerated bounds still use the same exact fallback. Work/cancellation is checked
+in axis generation, input reads, lookup and exact arithmetic, and before publishing.
+Resource failure never authorizes skipping axis validation or weaker arithmetic.
+Unpublished output/workspace is released; no partial success is published.
+Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
+resource, stale, backend and cancellation failures retain their categories.
+Whole does not expose per-value fallback counters; report those as unavailable.
+
+Native strict/Apple each pass six public workflow groups and 1416 independent
+Fraction grid/linear cases, covering complete output semantics, mixed dtypes,
+Float32/64 fenv/layouts, typed input, cache/source failures and active arithmetic/
+axis cancellation. The maximum L=1048576 grid retains an 8 MiB numeric index and
+uses 16 MiB payload admission for full table collect. Giant channel output is
+verified to reject an insufficient budget. All six public baking-to-LUT chains
+verify their separate approximation and axis constraints. Other CPUs were not
+rerun for this migration.
+
+
+Native Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug, package 0.18.0
+sampling uses L=17, 512 query rows, C=1 for scalar or C=4 for channels, dense
+input/table and Float64 axis=[0,16,1]. Table[j,c]=j+c and query[i,c]=
+((i+c)%64)/4+1/8; an independent identity-line check verifies query+c outside
+timing. Strict uses Float64 input/table/output; Apple uses Float32. One worker,
+cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata and dependency state,
+2^40 dependency/Run work, default unlimited managed work; one warm invocation
+precedes seven measured samples. The comparison adapter uses CRV-05 source at
+3d35f5eb with the same kernel. Public timing excludes compile/freeze and includes
+execution, collect, metering and result assembly. Core is the current prepared
+complete-Value callback with allocation/lookup/arithmetic/publication but no
+scheduler, collection or managed work metering. Times are median [min,max] ms.
+
+| Variant | Profile/dtype | Public before | Public Whole | Numeric callback core |
+| --- | --- | ---: | ---: | ---: |
+| scalar | strict/Float64 | 10.060 [9.604,13.724] | 2.654 [2.619,2.774] | 2.427 [2.403,2.468] |
+| scalar | apple/Float32 | 7.306 [7.211,7.412] | 0.145 [0.141,0.163] | 0.079 [0.075,0.087] |
+| channels | strict/Float64 | 45.436 [44.719,48.061] | 10.491 [10.373,10.585] | 9.777 [9.671,10.225] |
+| channels | apple/Float32 | 35.210 [33.301,35.548] | 0.449 [0.440,0.484] | 0.299 [0.290,0.307] |
+
+Context-reported peak Metadata changes from 19,951,808/83,804,528 bytes
+(scalar/channels) to 3,208 bytes; the comparison needs more than the default
+16 MiB Metadata cap. Full input collect increases channel Apple payload from
+295,176 to 303,624 bytes. These statistics exclude unmanaged memory/RSS.
+The 12-second Apple channel Time Profiler trace retains 11,765 execution-stack
+samples: ExactCurve::evaluate is inclusive in 29.23%, nextafter in 11.49%,
+ResourceBudget in 17.44%, UniformAxis::validate in 0.13%, and collect in 1.06%.
+No per-value fesetenv frame is sampled after guard reuse. Inclusive categories
+overlap. Exclusive samples also identify strided address calculation and mutex
+work, rather than dependency-description construction, among the remaining costs.
+The mathematical exact/interval bounds are unchanged; no NUM-14 certificate is
+used. This is evidence for the stated native workload, not all-shape speedups.
+
+Raw driver/build commands, ranges, trace/XML and summaries remain in ignored
+`build/crv-whole/lut1d-*`, including `lut1d-times.csv` and
+`lut1d-profile-summary.txt`. Current focused numeric/compiler tests, ClangFormat21,
+cpplint and scoped code/spec review passed.
+
 
 ## CRV-06 ColorArray and color ramps
 
-The 15 independent primitives provide 45 CPU-profile keys. A four-poll
-continuation reads all finite ordered stops, requested positions, then only
-selected complete color rows before publishing owned packed ColorArray tuples.
-The final channel axis is the semantic observation unit: compiler/root requests
-touching any component close to the whole color, while generic NUM consumers
-retain local Data and separately close typed Validation. Per-observation
-dependency proofs cannot borrow another Atom's validation. Joint preflight checks
-the union of declared roles before accepting complete typed transport.
+The 15 independent primitives provide 45 CPU-profile Whole keys. Nonempty
+requests collect all input arrays, validate every stop and query, then apply the
+unchanged one/two-row mathematics to every position. A complete dense ColorArray
+Value retains its facet, trailing channel closure and ICC resources; sparse
+public fragments retain that complete owner. Numeric failures affect the run;
+any input edit dirties all recorded output demand. Unused generic color rows
+stay mathematically unused, while complete upstream/typed validation can fail.
+Fixed allocator-owned arithmetic state and O(K) stop keys replace per-output
+points, dependency records and certificates. Account 8K stop element bytes plus
+metadata overhead, all collected inputs and N*C*sizeof(dtype) output payload.
 
 `ExactColorCoordinate` stores source binary64 integers in units `B=2^-1074`,
 with 144 uint64 limbs (9216 bits), 24 slots and a separate directed interval
@@ -733,10 +932,11 @@ rounded RGB produces AssociationUnderflow; otherwise transparent black is +0.
 All profiles currently return strict bits, including the accelerated RGB entries
 whose contract allows four ULP. Profile-specific integer comparisons are used;
 there is no attempted approximate transfer backend and no fabricated fallback.
-Diagnostics distinguish `exact-linear-light` and `exact-rational-pi`. RGB counts
-all component attempts before whole-color arithmetic, records copies only after
-success, and preserves attempted counts on failure. Exact state, callbacks and
-unpublished payload retire under work, capacity or cancellation failure.
+Whole callbacks do not expose DependencySession numerical counters; attempted,
+copy and fallback counts are N/A. Scalar and native NEON integer comparisons are
+retained; AVX2 remains registered for its platform. No Accelerate/SME floating
+backend or NUM-14 certificate is applied. Exact state and unpublished output
+retire under work, capacity or cancellation failure.
 
 ColorArray's canonical model/white/primary/transfer/hue/association metadata is
 independent of the Image semantic enum. Exact 8192-bit integer determinant tests
@@ -749,17 +949,56 @@ Empty color results retain required resources. Sample-only optional caches skip
 resource-bearing results. Package 0.16 requires C++ consumers to rebuild; C ABI 9
 and the existing semantic/digest version numbers remain unchanged.
 
-Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18.1.3 Strict/AVX2 passed
-1784 independent Fraction/Machin-pi and 352 RGB rational-root/Decimal cases per
-profile. These include sRGB golden bits and join neighbors, exact integer-gamma
-cancellation, extreme stops, tiny alpha with HDR premultiplied storage, subnormal
-output and a separately bounded huge-gamma example. ColorArray's 1847 exact
-metadata cases and ICC's 75 structural/MD5/SHA cases passed on both architectures.
-The public manuals inspect ownership/closure and workflow behavior, with commands
-in the [example README](../../../examples/numeric_workflow/README.md).
-These sampled cases and scoped proofs do not establish successful evaluation of
-every legal input under the fixed work/precision capacities. No integration test
-or new CTest registration is added; WSL supplies correctness evidence only.
+Native Clang 21 strict/Apple Whole runs pass 1784 independent Fraction/Machin-pi
+and 352 RGB rational-root/Decimal cases per profile, plus seven public manual
+groups. These cover strict numerical references, mixed dtype, model domains,
+RGB association, hue units, resources, arbitrary layouts, active cancellation,
+full-input typed failure and full-output budgets. Focused numeric, compiler,
+color and resource CTests pass. No new x86 or installed-package run is claimed.
+The retained accelerated allowance is contractual; bit matching in these cases
+does not replace that contract. Public commands are in the workflow README.
+
+
+CRV-06 timing on Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`, package
+0.18.0, traits 16/C ABI 9/provider 1/framing 14: N=128, K=2, Float64 ports and
+output, three channels, all queries .5, full output. XYZ/linear RGB use 0/1
+colors; sRGB checks independently rounded encoded half-light; rational CIELCh
+uses L/C=(20,2)/(80,4), hues 0/1 and 4/1, returning [50,3,RN64(2*pi)].
+One worker, cache off, payload 1 GiB, host 2 GiB, metadata/dependency state
+512 MiB each, dependency/run work 2^40, managed work default unlimited. One
+warmup plus seven samples; checks run outside timing. Before uses only the
+`3d35f5eb` ramp adapter with the current kernel. Core directly invokes the Whole
+numerical callback on complete Values, including allocation, lookup and
+publication but excluding managed work metering, collect and scheduling.
+
+Milliseconds are median [min,max]; columns distinguish public latency and core.
+
+| Path/profile | Before public | Whole public | Whole core |
+| --- | ---: | ---: | ---: |
+| xyz/strict | 3.194 [3.034,3.470] | 2.103 [1.182,6.399] | 1.316 [0.699,2.373] |
+| linear/strict | 7.492 [7.405,7.659] | 4.450 [4.397,4.579] | 2.898 [2.868,3.009] |
+| srgb/strict | 226.070 [225.548,229.811] | 187.108 [186.288,189.224] | 162.833 [162.183,163.605] |
+| rational/strict | 8.926 [8.542,9.358] | 4.230 [4.076,4.586] | 3.102 [3.058,3.325] |
+| xyz/apple | 3.077 [2.919,3.410] | 0.897 [0.887,0.938] | 0.659 [0.655,0.669] |
+| linear/apple | 7.620 [7.385,10.802] | 4.518 [4.372,4.782] | 2.987 [2.915,3.114] |
+| srgb/apple | 221.003 [218.797,222.045] | 183.314 [182.544,183.980] | 158.695 [158.174,159.236] |
+| rational/apple | 8.901 [8.674,9.230] | 4.383 [4.155,4.778] | 2.964 [2.904,3.140] |
+
+Strict XYZ has a wide sample range; its median is not a stable speed ratio.
+Metadata peaks fall from 4,104,440 to 3,088 bytes for ordinary ramps, and from
+7,123,576 to 4,064 for split rational hue. Payload peaks remain dominated by fixed
+exact state: RGB 726,960→727,976 bytes, coordinate 242,376→243,392 and rational
+242,376→243,408. Whole's full output is therefore not a payload saving claim.
+Raw driver, builds, CSV and trace are under local `build/crv-whole/ramps-*`.
+
+A 12-second Instruments Time Profiler capture of repeated Apple sRGB execution
+has 11,856 execution-stack samples: ExactRgb appears in 99.05%, directed interval
+math in 96.79%, collect in 0.02%, Footprint methods in 0.01%, and DependencySession
+in none. Inclusive percentages overlap. The largest exclusive function is
+`ExactRatioWorkspace<192>::top` at 36.91%; interval shifts, divide and memory
+operations follow. This identifies certified integer/interval arithmetic as the
+remaining bottleneck for this fixture. It does not support replacing the exact
+transfer proof or applying NUM-14's finite four-term certificate.
 
 ## CRV-07 joint three-dimensional LUT application
 
@@ -776,9 +1015,8 @@ the vertex's stored index. Every weight uses common denominator `D=h0*h1*h2`.
 Trilinear numerators multiply the chosen `n_i` or `h_i-n_i`. Tetrahedral orders
 the exact fractions descending, preserving axis order on ties, then subtracts
 the scaled `S_i=n_i*h_j*h_k` to obtain `D-Sa`, `Sa-Sb`, `Sb-Sc`, `Sc`.
-Only positive weights enter the compact vertex list used in the later table
-Need. Rebuilding weights from immutable cells/queries avoids a large per-point
-integer cache while preserving exactly the declared support.
+Only positive weights enter the current vertex list used in table mathematics.
+Rebuilding weights from immutable cells/queries avoids a per-output point cache.
 
 The complete component numerator is `sum(W_v*C_v)`, where each finite source
 float is an integer in `2^-1074` units. One ratio rounding produces the output
@@ -790,27 +1028,61 @@ per-component accumulation. Original contributing bits determine all-negative-
 zero results; other exact cancellations are +0 and nonzero underflow retains
 its sign. No floating local coordinate or intermediate blend is rounded.
 
-The four-poll continuation reads global axes, complete requested input colors,
-then exactly contributing table colors, and publishes complete packed results.
-It allocates no full logical table/output for sparse demand. Per-Need certificate
-reservation is `4096+32768*M` Metadata bytes in addition to managed vectors,
-grid, continuation, source windows and output owners. Dense requests can exceed
-host metadata/work budgets independently of output payload size. Work and
-cancellation checks run inside support construction as well as final sums.
-All profiles use the same exact arithmetic with their selected integer compare
-helpers, so no numerical fallback is attempted.
+The six formal profile keys use Whole callbacks. Complete input/table/axis
+collection precedes all callback math. Axis validation precedes a complete
+query/model/domain prepass, followed by exact selected-vertex mathematics.
+Generic zero-weight invalid vertices remain unused; invalid typed vertices or
+upstream failures anywhere remain observable. Sparse delivery retains a full
+dense ColorArray output; any input edit dirties all recorded demand. Numeric
+failures have Run scope. Three ResourceVector axis indices need
+8*(N0+N1+N2) element bytes plus allocator/metadata overhead; fixed admitted
+exact state replaces all per-output dependency certificates and point records.
+Full input/table collection and output payload must fit managed budgets.
+All profiles keep exact integer arithmetic and their scalar/NEON/AVX2 compare
+helpers. No approximate backend or NUM-14 certificate is introduced, and
+DependencySession numerical counters are N/A.
 
-The independent Fraction oracle reconstructs RN64 grids, selects cells and
-simplexes and rounds complete rational sums using separate Python integer IEEE
-logic. Its 1062 cases cover all eight models, source/output dtype combinations,
-all axis directions, unequal extents, split ties and cube boundaries, tiny and
-extreme values, negative-zero rules and zero-weight invalid vertices. Five public
-manual groups additionally inspect actual support/dirty/cache effects, maximum
-`256^3` scalar-backed table and `2^38`-position composition, typed strides/fenv,
-work/state/stage limits, support/final-sum interruption, per-color Atom failures
-and required upstream producer order. Executable commands are in the
-[public example](../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
-No integration or CTest entry is added, and WSL is a correctness environment.
+The independent Fraction oracle reconstructs RN64 grids, cells and simplexes,
+then rounds rational sums using separate Python integer IEEE logic. Native
+strict/Apple each pass 1062 cases across eight models, mixed dtypes, all axis
+directions, unequal extents, split ties, boundaries, extreme/zero cases and
+zero-weight generic invalid vertices. Five public manual groups cover complete
+support/dirty/cache effects, typed table validation, unrequested query failure
+priority, rank-three traversal, arbitrary strides/fenv, full-storage budgets,
+active cancellation and Run errors. Maximal 256^3 broadcast tables are checked
+directly without copying; the public 384 MiB collect and 2^38-position output
+are explicitly rejected under an 8 MiB payload budget. These are resource tests,
+not successful giant public-output numerical tests. Focused numeric/compiler/
+color/resource CTests pass; no new x86 or installed-consumer run is claimed.
+
+
+CRV-07 performance: Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`,
+package 0.18.0/traits16/CABI9/provider1/framing14. Each run has a 17^3 XYZ identity
+table, Float64 input/output, N=128 colors with channel j at
+`((i+j)%64)*.25+.125`, full output, one worker and cache off. Payload 1 GiB,
+host 2 GiB, metadata/dependency state 512 MiB each, dependency/run work 2^40,
+managed work unlimited. One warmup plus seven samples; independent identity
+checks are outside timing. Before links the `3d35f5eb` LUT3D adapter into the
+same current kernel. Core invokes the numerical callback on complete Values,
+including grid construction, lookup, allocation and publication, excluding
+managed metering, collect and scheduling. Milliseconds: median [min,max].
+
+| Method/profile | Before public | Whole public | Whole core |
+| --- | ---: | ---: | ---: |
+| tri/strict | 35.765 [33.452,38.068] | 17.872 [17.596,18.088] | 14.852 [14.670,14.936] |
+| tetra/strict | 22.560 [22.155,23.884] | 12.451 [12.356,12.774] | 11.375 [11.104,11.825] |
+| tri/apple | 34.095 [32.254,35.061] | 16.910 [16.435,17.518] | 14.402 [14.287,14.583] |
+| tetra/apple | 22.046 [21.605,22.729] | 12.120 [11.893,12.464] | 10.902 [10.805,10.962] |
+
+Full collect increases payload peak from 525,048 to 646,032 bytes for this table.
+Metadata drops from 7,566,208 (trilinear) / 7,930,496 (tetrahedral) to 3,736 bytes.
+Raw driver, CSV and 12-second Apple trilinear Instruments capture are local
+`build/crv-whole/lut3d-*`. Among 11,673 execution-stack samples, ExactLut3d is
+present in 96.55%, ExactPolynomial in 93.85%, UniformAxis in 0.04%, collect in
+0.10%, Footprint methods in 0.16%, DependencySession in none. Inclusive figures
+overlap. Exclusive cost is led by `ExactRatioWorkspace<640>::top` (31.56%) and
+`multiply_fixed<640>` (15.44%). The exact weighted-sum machinery remains the
+measured bottleneck; this provides no basis for an unproved floating shortcut.
 
 ## CRV-08 whole-formula shapers
 
@@ -844,26 +1116,73 @@ cancellation failures are terminal, not refinement retries.
 
 All returned finite numeric paths correctly round the same monotone function.
 Thus their combination is monotone without sorting output requests or choosing
-a path from batch values. Accelerated keys report `FunctionUnsupported` scalar
-fallback exactly when general strict interval evaluation begins, including an
-attempt subsequently interrupted by the host. No claimed SIMD throughput or
-WSL performance result follows from this correctness path.
+a path from batch values. Accelerated keys retain the strict certified path;
+Whole does not expose DependencySession fallback/evaluation counters. Existing
+scalar/NEON/AVX2 arithmetic identities remain; there is no new Accelerate/SME
+backend or application of NUM-14's finite four-term certificate.
 
-The three-poll log continuation requests shared scalar Control/Validation,
-then local input Data/Validation, then publishes immutable generic fragments.
-Typed input closure can read the full containing color while output remains a
-scalar observation. Bounds errors precede input special values. The state uses
-host-owned fixed arithmetic, vectors and publication owners; Need reservation
-is `4096+16384*M` metadata bytes. Each certificate and extended arithmetic loop
-consumes host work. Empty is completed by the host without entering the state.
+All six log keys use Whole callbacks with complete input/bounds collection and
+full dense output. Typed/upstream errors remain observable anywhere in inputs;
+callback bounds validation precedes IEEE special handling. Whole errors have
+Run scope and any input edit invalidates all recorded demand. Fixed admitted
+ExactShaper state and O(rank) traversal replace per-output points, certificates
+and publication owners. Account full collected input, full output and workspace.
+Linear templates already expand NUM Whole remap/constant nodes; no redundant
+linear primitive is added and inverse bound-order validation remains connected.
 
-The public manual and 4196-case Fraction/directed MPFR reference cover both
-dtypes, four forms, exact roots and midpoint ties, near-equal and extreme
-bounds, raw IEEE special values, under/overflow and monotonic clusters. Five
-manual groups additionally inspect partition/cache/dirty behavior, all-port
-strides and fenv, ColorArray closure, Empty, inverse -0, state/work/stage limits,
-refinement cancellation, fallback diagnostics and escaped owners. See the
-[commands and editable workflow](../../../examples/numeric_workflow/README.md#scalar-coordinate-shapers).
+Native strict/Apple each pass 4196 Fraction/directed MPFR-4.2.0-p12 cases across
+all four forms and both dtypes, near-equal/extreme bounds, exact roots/midpoints,
+IEEE payload/zero/Inf, underflow/overflow and monotonic groups. Six public manual
+groups inspect whole support/dirty/cache behavior, arbitrary layouts and fenv,
+ColorArray validation, Empty, inverse -0, log direct workspace/refinement
+interruption and all four public paths' work/output/cancellation/upstream errors.
+Focused numeric/compiler CTests pass. No new x86 or installed-package run is
+claimed. Public commands are in the shaper workflow README.
+
+
+CRV-08 performance uses Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`,
+package0.18.0/traits16/CABI9/provider1/framing14. N=128 Float64 values, bounds
+[1,16], full output, one worker, cache off, payload1GiB/host2GiB/metadata512MiB,
+dependency-state512MiB, dependency/run work2^40 and managed work unlimited.
+Exact fixtures use x=4 or inverse t=.5; interval fixtures use x=3 or inverse t=.3.
+One warmup plus seven timed runs; separate Fraction/directed-MPFR expectations
+are checked outside timing. Linear accelerated outputs use the existing FP32
+scaled bound rather than strict bit comparison. Before replaces only the log
+adapter with `3d35f5eb`; linear implementations are identical on both sides.
+
+For log primitives, core directly invokes the numerical Whole callback on
+complete Values with allocation/publication but no scheduler/collect/managed
+metering. For the two linear templates, core is summed host OperationTiming
+callback duration, including metering and intermediates; it is not the same
+unmetered measurement. Milliseconds are median [min,max].
+
+| Form/profile | Before public | Whole public | Core (linear: callbacks) |
+| --- | ---: | ---: | ---: |
+| linear/exact/strict | 0.865 [0.852,0.892] | 0.895 [0.845,1.387] | 0.673 [0.658,0.841] |
+| linear inverse/exact/strict | 0.328 [0.294,0.433] | 0.343 [0.326,0.365] | 0.105 [0.100,0.112] |
+| log/exact/strict | 1.766 [1.733,2.259] | 0.069 [0.063,0.080] | 0.018 [0.018,0.021] |
+| log/interval/strict | 26.253 [25.559,27.353] | 19.916 [19.527,20.206] | 16.712 [16.503,17.015] |
+| log inverse/exact/strict | 1.779 [1.708,1.881] | 0.060 [0.056,0.112] | 0.018 [0.018,0.051] |
+| log inverse/interval/strict | 17.731 [15.281,20.646] | 10.693 [10.503,11.048] | 9.300 [8.839,9.593] |
+| linear/exact/apple | 0.318 [0.276,0.323] | 0.289 [0.259,0.587] | 0.103 [0.097,0.162] |
+| linear inverse/exact/apple | 0.338 [0.312,0.382] | 0.303 [0.293,0.439] | 0.097 [0.095,0.168] |
+| log/exact/apple | 1.838 [1.724,3.044] | 0.113 [0.069,0.201] | 0.019 [0.018,0.024] |
+| log/interval/apple | 26.191 [25.521,26.806] | 19.700 [19.607,20.028] | 16.408 [16.098,16.518] |
+| log inverse/exact/apple | 1.780 [1.710,1.824] | 0.071 [0.060,0.079] | 0.019 [0.018,0.033] |
+| log inverse/interval/apple | 15.603 [15.231,15.805] | 10.462 [10.255,10.910] | 9.249 [8.854,9.375] |
+
+Linear timings are sampling variation, not a new optimization claim. Log metadata
+falls from 4,424,632 to 2,944 bytes; payload peak grows slightly from 209,392 to
+210,264 bytes because full inputs accompany the fixed arithmetic arena.
+Raw drivers, samples and native trace are local `build/crv-whole/shapers-*`.
+The first trace attempt launched xctrace through an x86 Python process and was
+rejected by ktrace; only the explicit `arch -arm64` retry is used as evidence.
+
+The 12-second native Apple forward-interval trace contains 11,460 execution-stack
+samples: ExactShaper appears in 99.27%, DirectedInterval in 99.24%, collect in
+0.02%, Footprint methods in 0.08%, DependencySession in none. Inclusive percentages
+overlap. Exclusive `ExactRatioWorkspace<192>::top` is 32.20% and directed division
+9.25%, identifying certified arithmetic as the remaining cost in this fixture.
 
 ## CRV-09 measured LUT3D baking
 
@@ -909,24 +1228,95 @@ validates all fields/domain/metadata through the closed schema vocabulary.
 The canonical resolved schema already participates in graph/plan/cache identity.
 No C++ record layout, C ABI or workflow framing version changes are required.
 
-The sampled table is packed through at most 4096-byte staging buffers and bounded
-read windows, including nonzero global window origins. Its registered validator
+The sampled table is packed through authorized rectangular collect, bounded by
+page size and 64 KiB, combining complete inner rows/planes when they fit. Negative/unaligned layouts use the
+checked collect fallback; packed inputs use bounded bulk copies. Its registered validator
 scans all colors with cancellation/work accounting. The report validator checks
 canonical schema, counts/classifications, reconstructed axis and recorded point
-domains without recomputing the source. Grid and requested Value outputs have
-host-owned continuation/publication metadata; storage aliases retain admission
-past context retirement. Report/table owners retain mandatory temporary backing.
+domains without recomputing the source. The 15 generated formal profile Value
+keys use Whole, with full input collection and dense outputs, Run numeric errors
+and full-input dirty scope. Their fixed workspace and three ResourceVector axis
+indexes are managed; color outputs retain tuple metadata/resources. Gate/unpack
+retain requested complete-color output fragments. Owners retain admission beyond
+context retirement. Report/table owners retain mandatory temporary backing.
 Source callback state never enters execution. Source operation allocations and
 repeated validation count against host budgets; generated full-grid validation
 currently admits the full grid. Large dense bakes can exceed work, stage or
 capacity limits despite a small requested exported fragment.
 
-Seven public manual groups and a 480-case independent Fraction workflow oracle
-cover numerical reports, object/recipe association, both methods/dtypes and eight
-models, repeated extras, rounded centers, casts, shared snapshots, ICC authoring,
-malformed data, cancellation, resource limits and multiwindow/partial ownership.
-The executable stays outside integration tests and CTest. Commands and modifiable
-source builders are in the [example](../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
+The four unsuffixed pack/measure/unpack/gate keys retain ResultProtocol2; none
+is advertised as a Value Whole key. Measure now collects three 64-row windows
+once per poll, with at most 4608 bytes plus 289 bytes for final report writes.
+The sealed schema is decoded once, retaining only model/tolerance POD fields.
+It preserves finite checks, exact error comparison, earliest equal maximum and
+first failure. Shared immutable one-row/three-row relations reduce repeated
+report-field relation construction without weakening provenance. Pack admits
+64 KiB workspace; Measure admits 4897 bytes, in addition to continuation,
+metadata, source/full Value owners and immutable Result backing. The global gate,
+failed-report success and failed-table behavior remain unchanged.
+
+Native Clang 21 strict/Apple each pass nine public manual groups and 480 Fraction
+report cases. New checks cover all five Whole geometry kinds with independent
+axis/grid/center/extra/color expectations, negative/unaligned direct layouts,
+active work cancellation, fixed-workspace/full-output rejection, 2x2x256 table
+rows, and Float32/64 strided pack/unpack through 72-byte and 64KiB windows.
+Existing quality gate, object mismatch, report cancellation and escaped-owner
+checks remain. Six focused numeric/compiler/color/resource/Result CTests pass.
+No new x86 or installed-consumer run is claimed. Commands and modifiable source
+builders remain in the numeric workflow README.
+
+
+CRV-09 performance: Apple M5/macOS27.0 (26A5425a), Clang21.1.3 `-O2`,
+package0.18.0/traits16/CABI9/provider1/framing14. Identity RGB source, trilinear,
+Float64 table/reference, zero tolerances, [0,1]^3, no extra points; K=5 or 9
+on each axis (125/729 grid colors and 64/512 validation centers). Full table
+and report are jointly exported. One worker, cache off, payload1GiB/host2GiB,
+metadata/dependency-state512MiB each, dependency/run work2^40, managed work
+unlimited, Result window64KiB. One warmup plus seven samples; dyadic table values
+and exact zero-error reports are checked outside timing. Before substitutes
+only the `3d35f5eb` geometry/Result adapters in the same current kernel, retaining
+the current CRV-07 implementation on both sides.
+
+The numerical core directly executes the actual Whole axis, grid, point, color
+and LUT3D callbacks, then ExactBakeError comparison/maxima/upward rounding on the
+same identity fixture. It includes allocation and publication of intermediate
+Values, excludes schema preparation, managed metering, scheduling, collection,
+Result pack/unpack/gate I/O and report serialization. It is a numerical chain
+measurement, not a single arithmetic instruction benchmark. Static preparations
+are reused; all outputs are still checked. Milliseconds: median [min,max].
+
+| Grid/profile | Before public | Whole/batched public | Direct numerical core |
+| --- | ---: | ---: | ---: |
+| 5³/strict | 124.729 [124.324,125.783] | 42.875 [42.709,43.277] | 7.966 [7.894,8.261] |
+| 9³/strict | 414.184 [408.621,415.912] | 118.901 [117.989,120.836] | 59.896 [59.716,62.562] |
+| 5³/apple | 128.888 [124.619,129.964] | 43.002 [42.883,43.512] | 8.391 [7.978,8.472] |
+| 9³/apple | 410.044 [406.159,428.140] | 117.399 [116.588,120.474] | 60.434 [58.796,65.350] |
+
+For 9³, managed payload peak grows 604,376→648,176 bytes and metadata falls
+298,948→253,028 bytes. These use ResourceBudget statistics: structured execution's
+`peak_live_bytes` diagnostic is zero here and cannot be treated as measured zero
+storage. `StructuredExecution::value` also does not append Whole OperationTiming
+records; therefore the raw CSV's callback sum omits numerical Whole work and is
+not used as the numerical core. No kernel telemetry contract is changed here.
+
+The first 12-second Whole/row-window profile had 11,563 execution-stack samples.
+Exclusive `color_internal::multiply` occupied 45.35%; stacks locate repeated
+exact ColorArray basis checks under structured Result advance/value paths.
+Pack was still requesting every innermost row separately. This led to the bounded
+64KiB row/plane rectangle aggregation and one-time Measure schema decoding into
+POD model/tolerance fields. A public test directly verifies one rectangle and
+three Pack polls for a complete 2x2x256 table, alongside five small/full-window
+sizes and Float32/64 negative/unaligned source layouts. An intermediate row-window
+9³ Apple public median was 184.258 ms; the final rectangle median is 117.399 ms.
+Raw drivers, before/row-window/final CSVs and traces are local `build/crv-whole/baking3d-*`.
+
+The final packed-window 12-second trace has 11,737 execution-stack samples:
+ExactLut3d appears in 53.34%, PackState in 0.68%, MeasureState in 3.56%, collect
+in 2.49% and Footprint methods in 1.61%. Inclusive percentages overlap.
+Exclusive ColorArray integer multiply falls to 24.91%; exact-ratio `top` is
+17.65% and Result backing writes 11.69%. The remaining cost is exact LUT math,
+required color/schema validation and retained Result I/O. No unchecked color
+metadata or weaker report/table association is introduced to bypass those costs.
 
 ## CRV-10 inverse curves
 
@@ -957,28 +1347,54 @@ failed arithmetic status is checked before interpreting a comparison as zero.
 The extracted shared Hermite helper retains forward interpolation's original
 1074-unit defaults and identical algebra.
 
-`curve_inverse.cpp` stages global x/y Control+Validation, local query
-Control+Validation, and selected pair/stencil Data+Validation before publication.
-It retains at most 16K bytes of promoted global inputs and requested-output state;
-no allocation scales with unrequested N. All x/y changes invalidate every dependent
-observation, while query changes are pointwise. Dynamic topology errors and
-requested finite/overflow failures carry the dependent Atom; host/source failures
-retain their categories. Accelerated Float32 inverse queries use bracketed
-hardware interval bisection, publishing only when both bracket endpoints round
-to the same Float32 output. Float64, ambiguous comparisons and unresolved rounds
-use the exact inverse; actual fallback is reported. Exact collinear stencils
-bypass lattice search, while noncollinear refinement retains scalar wide-integer
-comparison. The internal profile is scoped and restored on all exits. This yields
-the same monotone mapping independent of request partitions.
+`curve_inverse.cpp` registers all six formal keys as Whole. Complete x/y/query
+collection precedes global topology and all-query control validation. Each query
+then selects its original pair/stencil from promoted x/y and executes the unchanged
+inverse math. Only fixed state plus 16*K promoted element bytes (and allocator
+metadata) are retained, with no per-query certificates. Complete inputs and
+N*sizeof(dtype) output are budgeted. Any input edit invalidates the full output;
+dynamic numerical failures have Domain/Run scope, including undelivered queries
+or output overflow. Empty demand reads nothing. Cancellation/work checks and
+publication remain atomic. DependencySession numerical counters are N/A.
+
+Accelerated Float32 uses the existing certified bracket with unique destination
+rounding, then exact fallback when unresolved. Float64 uses the exact inverse.
+Collinear stencils still bypass lattice search; noncollinear wide-integer
+comparison is scalar and restores the surrounding profile. Scalar/NEON/AVX2
+implementations remain; no Accelerate/SME inverse backend is introduced.
 
 The [public inverse workflow](../../../examples/numeric_workflow/README.md#inverse-curves)
-contains four manual groups and a 407-case independent Fraction reference that
-bisects real x with normalized Hermite evaluation. Native Clang21 Strict/Apple
-and WSL Clang18 Strict/AVX2 passed both, and the installed 0.16 consumer passed
-all four groups on both native profiles. The shared
-forward interpolation and LUT1D regressions passed 2487 and 1416 cases respectively
-on both native profiles. The focused compiler unit passed. No integration test
-was registered or run for this feature.
+passed four manual groups and 407 independent Fraction cases per native
+Strict/Apple profile, plus numeric/compiler focused tests. New cases cover full
+failure/dirty scope, stride combinations/floating environments, K=65536,
+2^40-output capacity rejection, active cancellation and owner release. WSL/AVX2
+and installed-package consumers were not rerun for this Whole revision.
+
+CRV-10 timing uses Apple M5/macOS 27.0 (26A5425a), Clang21.1.3 O2,
+package0.18.0/traits16/CABI9/provider1/framing14. K=3, N=128, alternating
+analytic roots .5 and 2 (linear) or .5 and 1.5 (PCHIP); inputs Float64, output
+Float32/64. One warm run plus seven measured runs, one worker, both caches off,
+payload1GiB/host2GiB/metadata512MiB/dependency-state512MiB, dependency/run work
+2^40 and unlimited managed work. Each run validates the analytic results outside
+timing. Before is the 3d35f5eb inverse adapter linked against the same current
+kernel. Core calls the current numerical callback on complete prepared inputs,
+including allocation/validation/publication but excluding scheduler, collect and
+managed metering. Raw `build/crv-whole/inverse-times.csv` contains every profile,
+dtype and min/median/max; these small samples include substantial timing spread.
+
+| Apple case | Before public ms median [min,max] | Whole public ms | Core ms |
+| --- | --- | --- | --- |
+| linear Float64 | 3.93304 [3.66583,4.68033] | .645875 [.638125,.717] | .5955 [.568875,.622833] |
+| PCHIP Float32 | 63.8515 [63.2178,66.8059] | 59.9372 [56.1078,84.2566] | 42.6794 [42.3566,43.064] |
+| PCHIP Float64 | 133.420 [131.387,138.058] | 124.120 [106.747,134.468] | 91.8836 [91.5059,92.8748] |
+
+N=128 metadata peak falls from5,749,224 to3,248 bytes; Float64 payload peak
+rises from286,856 to287,832 bytes. The native 12s Time Profiler capture
+`build/crv-whole/inverse.trace` has11,948 execution samples: ExactCurve::inverse
+99.78% inclusive, multiply_fixed72.49%, collect.02%, no DependencySession stack.
+Integer multiplication is36.60% exclusive. This directly identifies remaining
+PCHIP exact arithmetic cost; the Whole I/O change does not replace its numerical
+contract. Trace/export/symbol logs and sample JSON are alongside the CSV.
 
 ## CRV-11 resampling and certified lowpass
 
@@ -989,7 +1405,7 @@ controlled and IDs reserve declared/referenced nodes. No new interpolation
 primitive, implicit filtering or sample-rate inference is introduced.
 
 Accelerated uniform lowpass builds certified coefficient enclosures once per
-continuation at 128 fractional bits, retaining them in a resource-accounted vector.
+Whole invocation at 128 fractional bits, retaining them in a resource-accounted vector.
 The hardware convolution propagates coefficient, product, sum and normalization
 error to the final FP32 gate. Exact zero taps, constant shortcuts, special values
 and source demand remain governed by the original discrete reference. Unresolved
@@ -1027,10 +1443,15 @@ Floor quotient/remainder select exact periods; forward segments choose the right
 piece at knots and reflected backward segments choose the left. World coordinate
 copies are clipped to positive-length support, with no wrap seam bridge. Stored
 coordinate combinations fit below 2102 bits; the common 12288-bit records and
-ResourceVector maps are admitted under host capacity. Global positions and local
-value endpoints receive separate Control/Data and typed Validation certificates.
-Output publication metadata is admitted before constructing mutable fragments,
-including on failed/cancelled arithmetic paths.
+ResourceVector maps are admitted under host capacity. All30 formal lowpass keys
+use Whole: complete inputs are collected, all centers/columns are computed, and
+one dense output is published. Positions are globally validated first; only one
+output's exact piece map is retained/reused. Full input/output storage is required
+for partial delivery; any input edit invalidates all output. Full typed/upstream
+validation and nonuniform remote invalid values can fail the run. Dynamic
+numerical errors have Domain/Run scope. Empty requests read no payload.
+Uniform tap order/zero omissions and nonuniform positive-length integration
+remain mathematical rules. No per-output dependency records remain.
 
 For continuous exact landmarks, merge the positive and negative partitions and
 compare `F(u)+F(-u)` by integer rational cross products. If every overlap has zero
@@ -1065,7 +1486,8 @@ heap limbs or cached rounded weights. Global series can be expensive or fail on
 high frequencies/large beta/support-to-sigma ratios; unresolved zero/near-midpoint
 cases return ResourceExhausted rather than guessing a sign or publishing a fixed
 quadrature approximation. No arbitrary one-sided interval is declared negative
-zero. Nonuniform accelerated keys still report FunctionUnsupported strict fallback.
+zero. Nonuniform accelerated keys still use strict fallback. Whole numeric/fallback
+counters are unavailable (N/A).
 Every scale scan, partition piece, coefficient/refinement and limb operation has
 work/cancellation checks. No integration tests or external math dependency enter
 the product. MPFR/Fraction are independent manual references only.
@@ -1074,6 +1496,76 @@ Public examples, exact fixtures, response checks and runtime commands are in
 [resampling](../../../examples/numeric_workflow/README.md#signal-resampling),
 [uniform lowpass](../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [nonuniform lowpass](../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
+
+Whole CRV-11 acceptance: native Strict/Apple each passed twelve public manual
+groups,474 independent directed MPFR uniform cases and245 Fraction/directed MPFR
+continuous cases. The focused numeric/compiler CTests passed2/2. Layout tests
+include all-port negative/unaligned/zero strides, all four floating modes and an
+independent two-constant oracle across a non-last axis. Tests also cover full
+input/dirty support, nonuniform remote-column Run errors, unchanged uniform
+NaN/Inf/tap order, full typed validation, cache replacement, active arithmetic
+and huge-period cancellation, 2^40-output budget rejection, and escaped owners.
+Resampling tests retain independent raw/typed positions, verify complete sample
+support and remote-query failure. A composed accelerated Hann test uses its
+contractual final FP32 bound; Strict still checks the exact reference bits.
+WSL/AVX2 and installed consumers were not rerun for this Whole revision.
+
+Performance: Apple M5/macOS27.0 (26A5425a), Clang21.1.3 O2,
+package0.18.0/traits16/CABI9/provider1/framing14. One warm plus seven measured
+runs, one worker, result/dependency caches off, payload1GiB/host2GiB/
+metadata512MiB/dependency-state512MiB, dependency/run work2^40, unlimited managed
+work. Complete Float64 quarter-wave signals [0,1,0,-1] repeat; uniform N=32,
+R=2; nonuniform K=9 positions0..8, R=.5. Boundary Wrap, cutoff=.25 or sigma1,
+Kaiser beta2. Independent directed MPFR/Fraction full-output references are checked
+outside timing with the profile's numerical contract. Before links the3d35f5eb
+lowpass adapter against the same current kernel. Core invokes current callbacks
+on complete prepared inputs, including validation/allocation/publication and
+excluding scheduler, collection and managed metering. Both profiles and all ten
+kernels have separate public/core results in `build/crv-whole/lowpass-times.csv`.
+
+| Apple Float64 case | Before public ms median [min,max] | Whole public ms | Core ms |
+| --- | --- | --- | --- |
+| uniform Blackman N32 | 2.324 [2.18487,2.55154] | 1.623 [1.57667,1.72717] | 1.36992 [1.31183,1.57867] |
+| uniform Gaussian N32 | 5.46692 [5.39583,5.62338] | 4.42375 [4.23163,4.81121] | 3.67492 [3.62696,4.01025] |
+| nonuniform Blackman K9 | 43.3823 [43.1427,43.7431] | 39.6492 [38.0974,41.9219] | 36.6392 [35.9794,37.244] |
+| nonuniform Gaussian K9 | 5.01475 [4.92554,5.20429] | 4.40404 [4.17438,4.51871] | 3.87596 [3.72346,4.25142] |
+
+Uniform Gaussian metadata peak falls494,536→2,312 bytes, payload205,904→206,184.
+Nonuniform Gaussian metadata falls423,912→67,824, payload205,744→205,856.
+Other rows have visible timing spread, particularly the initial uniform Hann
+before samples; retain the CSV ranges rather than treating medians as guaranteed
+speedups. Scalar/NEON/AVX2 identities and fallback math remain; there is no new
+Accelerate/SME lowpass backend and no NUM-14-specific certificate reuse.
+
+The four public resampling templates were also sampled with both exports:
+K17,N128,C1/2, affine y=x+column, alternating dyadic queries, Float64, identical
+budgets/cache/worker/version/repetitions. Before uses the old CRV-01 adapter;
+identity forwarding is unchanged. `build/crv-whole/resampling-times.csv` contains
+all four templates under Strict/Apple. For Apple PCHIP C2, public20.7837
+[20.5402,21.4798]→15.4488[15.1929,15.8609]ms; interpolation core2.33012
+[2.2685,2.52983]ms. Core excludes independent position forwarding and public
+multi-output orchestration, so it is not the entire template's execution cost.
+
+Native 12s Instruments Time Profiler captures are
+`build/crv-whole/lowpass-uniform.trace` and `lowpass-nonuniform.trace`.
+Gaussian uniform has11,148 execution samples: UniformLowpassMath98.27%,
+DirectedInterval98.17%, DirectedLowpassKernel94.38% inclusive; collect.06%,
+no DependencySession frames. ExactRatio::top is30.27% exclusive. Blackman
+nonuniform has10,649 execution samples: NonuniformLowpassMath99.02%,
+DirectedInterval99.34%, geometry partition.39%, collect.02%; ExactRatio::top
+is34.52% exclusive. Inclusive percentages overlap. The evidence places remaining
+cost in certified numerical evaluation, with the per-output dependency path
+removed. Raw XML/sample JSON, symbol/export logs and drivers accompany the CSV.
+
+The resampling dual-export capture `build/crv-whole/resampling.trace` contains
+11,233 execution samples: Footprint methods43.74%, identity forwarding16.10%,
+curve callback17.72% and collect1.24% inclusive. Tiny allocator allocation/free
+account for27.18% exclusive. The remaining public/core gap includes generic
+multi-output footprint and identity processing; changing that shared kernel path
+is outside the CRV numerical callback migration. Position-only independence and
+original semantic facets are preserved. The maintained public signal benchmark
+also passed Apple Hann N5/N1025 sparse delivery with independent numerical checks
+and owner release; Whole evaluated/fallback columns now print N/A.
 
 ## Shared rounding and regional execution
 

@@ -56,10 +56,10 @@ Exact hit/clamp directly converts the original hue; no source hue is discarded
 because chroma is zero. A mismatched platform is not silently redirected.
 
 Inherit CRV-06D's complete-color observation expansion, global stops validation,
-one/two selected-row demand, descriptor matching, exact dirty support,
+Whole collection and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
 immutable arbitrary-stride input, packed output mapping, owners beyond context
 lifetime, capacity/work/stage accounting, cancellation and cache-off behavior.
-Nonfinite hue in an unselected row is not observed; a selected nonfinite hue fails even if C=0.
+Unused generic hue is mathematically ignored; complete typed validation still applies; a selected nonfinite hue fails even if C=0.
 Failure categories and complete-color publication follow the shared contract,
 including ResourceExhausted on unfinished certified arithmetic.
 
@@ -71,7 +71,7 @@ The example uses the default output unit and a described values result.
 The maintained public Compiler/ExecutionContext workflow and invocation commands are linked below.
 
 Use the shared independent arithmetic oracle, per-profile/dtype/unit fixtures,
-multi-turn and large-angle cases, whole versus partial color requests, exact dirty
+multi-turn and large-angle cases, whole versus partial color requests, whole-input dirty
 witnesses, invalid remote rows, strides, low-budget failures, cancellation and
 owner-lifetime acceptance. Include source/destination precision mixing and finite huge hues.
 The maintained public workflow and current validation boundary are documented below; no performance result is claimed.
@@ -80,7 +80,7 @@ The maintained public workflow and current validation boundary are documented be
 
 Public [`color_ramp_cielch_pi_node`](../../../../include/photospider/numeric/color_ramps.hpp)
 constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its staged complete-color execution.
+implements its Whole complete-output execution.
 
 Coordinates and original hue ratios use exact rational interpolation.
 Conversion between radian and pi units uses a certified pi enclosure with

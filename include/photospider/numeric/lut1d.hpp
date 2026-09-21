@@ -114,13 +114,17 @@ inline Result<BakedLut1d> interpolation(WorkflowDocument& document,
  * @note Construction reads no payload, freezes nothing and writes no files.
  * Runtime obeys expanded source contracts: output values[count] or [count,C]
  * and axis:Float64[3], independently demanded, immutable owners after context
- * teardown, source-specific finite/grid/domain/rounding rules and exact dirty
- * witnesses. N=1 ignores end payload. Interpolation uses Float64 linspace
- * queries regardless of table dtype. Source numerical, typed, upstream,
- * backend, resource, cancellation and stale failures retain their identities;
- * no private cache or table approximation guarantee is added. Unsupported
- * profiles fail at source compile/preflight. Use explicit host budgets for
- * runtime execution.
+ * teardown and source-specific finite/grid/domain/rounding rules. Nonempty
+ * values executes complete Whole source outputs, even for sparse demand.
+ * Interpolation materializes the full Float64 query array and full table.
+ * Active inputs retain complete typed/source validation; numeric failures have
+ * Run scope;
+ * their edits invalidate output demand. Axis-only skips function inputs. N=1
+ * ignores end payload; N>1 retains end even for first-value demand. Source
+ * numerical, typed, upstream, backend, resource, cancellation and stale
+ * failures retain their identities; no private cache or table approximation
+ * guarantee is added. Unsupported profiles fail at source compile/preflight.
+ * Use explicit host budgets for runtime execution.
  */
 /** @brief Bakes a bounded expression; derives coefficient names from source.
  * expression and coefficients follow sample_expression_node. Shared contract
@@ -207,7 +211,7 @@ inline Result<BakedLut1d> bake_lut1d_pchip(
                                      std::move(start), std::move(end), count,
                                      dtype, domain, profile, true, false);
 }
-/** @brief Bakes column-local linear interpolation after Float64 linspace.
+/** @brief Bakes multiple-function linear interpolation after Float64 linspace.
  * x/y and domain follow interpolate_linear_multi_node; default domain Reject.
  * Shared baking contract above applies; C=1 is retained for multi inputs.
  */
@@ -221,7 +225,7 @@ inline Result<BakedLut1d> bake_lut1d_linear_multi(
                                      std::move(start), std::move(end), count,
                                      dtype, domain, profile, false, true);
 }
-/** @brief Bakes column-local PCHIP interpolation after Float64 linspace.
+/** @brief Bakes multiple-function PCHIP interpolation after Float64 linspace.
  * x/y and domain follow interpolate_pchip_multi_node; default domain Reject.
  * Shared baking contract above applies; C=1 is retained for multi inputs.
  */
@@ -243,21 +247,22 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
  * the default output dtype; Compiler validates the actual graph edges.
  * Helpers are pure/concurrent-safe and own metadata; allocation may throw
  * bad_alloc. Invalid authoring parameters fail InvalidArgument/InvalidDomain.
- * Runtime validates the full endpoint-weighted RN64 grid and axis step before
- * input queries, then reads only selected singleton/pair table entries and
- * typed Validation. Singleton axes require bit-identical endpoints and +0 step.
- * Every query is read even for constant tables; invalid axes/queries/demanded
- * entries fail OperationFailed/InvalidDomain at the dependent Atom. Actual
- * destination overflow fails ArithmeticOverflow; host/typed/upstream errors
- * retain their identity. Descending axes and all CurveDomain policies work.
- * Exact selection preserves zero sign. Strict rounds complete linear formulas
- * once, with -0 exact zero only for two -0 endpoints. Accelerated follows
- * CpuNumericProfile's final FP32 bound and preserves caller fenv. Owned packed
- * fragments survive context teardown. Empty reads nothing. Global axis work,
- * exact scratch, optional grid and per-request certificates are bounded by host
- * budgets. Cache witnesses retain complete axis, selected input and local table
- * coordinates. No approximation quality bound relative to the table's
- * generating function is inferred.
+ * Runtime collects all three inputs, validates the complete endpoint-weighted
+ * RN64 grid, then all queries before table arithmetic. Whole computes and owns
+ * the complete output even for sparse demand. Math knot/clamp/singleton selects
+ * one table entry; other paths select two. Generic entries outside all
+ * evaluated stencils are numerically unused; complete typed/source validation
+ * still applies. Singleton axes require bit-identical endpoints and +0 step.
+ * Every query is validated even for constant tables. Numeric domain/overflow
+ * failures have Run scope; typed/upstream/resource/cancellation failures
+ * preserve their identities. Descending axes and all CurveDomain policies
+ * retain their formulas. Exact selection preserves zero sign; exact linear zero
+ * is -0 only for two -0 ends. Strict rounds once; accelerated retains
+ * CpuNumericProfile's final FP32 bound. Caller fenv is preserved. Whole owners
+ * survive context teardown; any active input edit invalidates output demand.
+ * Empty reads nothing. Grid, exact scratch, collected inputs and complete
+ * output consume host budgets. No approximation guarantee relative to the
+ * table's generating function is inferred.
  */
 /** @brief Applies one scalar table to every requested input element. */
 inline Result<WorkflowNode> apply_lut1d_node(

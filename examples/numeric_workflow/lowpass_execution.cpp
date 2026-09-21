@@ -16,6 +16,7 @@
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/lowpass.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -102,44 +103,23 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
                      std::vector<ps::Region> boxes) {
   return take(ps::Footprint::from_regions(shape, std::move(boxes)));
 }
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Footprint> wanted;
-  for (const auto& input : inputs)
-    wanted.push_back(take(ps::Footprint::none(input.descriptor().shape)));
-  for (const auto& need : take(session->pending_reads()))
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-  std::vector<ps::ValueFragments> supplied;
-  for (unsigned i = 0; i < inputs.size(); ++i) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[i].descriptor(), inputs[i].facets(),
-        take(ps::Footprint::all(inputs[i].descriptor().shape)), {inputs[i]}));
-    supplied.push_back(take(all.restrict(wanted[i])));
-  }
-  require(session->supply(supplied, request.snapshot_identity).ok(),
-          "curve exact supply");
-}
 ps::ValueFragments direct(
     const std::shared_ptr<ps::OperationRegistry>& registry,
     const ps::WorkflowNode& node, const std::vector<ps::Value>& inputs,
     const ps::Footprint& outputs) {
-  ps::DependencyRequest request;
-  for (const auto& v : inputs)
-    request.inputs.push_back({v.descriptor(), v.facets()});
-  request.parameters = node.parameters;
-  request.snapshot_identity = "curve-direct";
-  request.outputs = outputs;
-  request.limits.maximum_work = UINT64_C(2048) * 1024 * 1024;
+  std::vector<ps::Region> demands;
+  for (const auto& input : inputs)
+    demands.push_back(input.region());
   ps::ResourceBudget budget(ps::ResourceLimits{});
-  auto session = take(
-      registry->start_dependency(node.operation, request, budget.allocator()));
-  for (;;) {
-    auto progress = take(session->poll());
-    if (auto* result = std::get_if<ps::DependencyResult>(&progress))
-      return result->value;
-    supply(session, request, inputs);
-  }
+  ps::ResourceAllocationScope scope(budget);
+  ps::OperationInvocation call(
+      inputs, demands, node.parameters, ps::Backend::Cpu, {},
+      ps::Region::whole(inputs.back().descriptor().shape), budget.allocator());
+  auto output = take(registry->invoke(node.operation, call));
+  auto all = take(ps::ValueFragments::create(
+      output.descriptor(), output.facets(),
+      take(ps::Footprint::all(output.descriptor().shape)), {output}));
+  return take(all.restrict(outputs));
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   auto bytes = value.bytes();
@@ -235,6 +215,29 @@ void layouts(ps::CpuNumericProfile profile) {
   std::cout << "ten lowpass families: axis-local negative/unaligned/zero "
                "strides and four floating modes passed\n";
 }
+void independent_axis_layout(ps::CpuNumericProfile profile) {
+  auto registry = ps::make_default_operation_registry();
+  for (bool continuous : {false, true})
+    for (unsigned kernel = 0; kernel < 5; ++kernel) {
+      auto node = authored(continuous, kernel, profile, 0);
+      // Separate columns remain constant under Reflect. This independently
+      // checks every output of a non-last axis, including successive maps.
+      std::vector<ps::Value> inputs;
+      if (continuous)
+        inputs.push_back(doubles({4}, {0, .125, 1, 3}));
+      inputs.push_back(doubles({4, 2}, {1, -2, 1, -2, 1, -2, 1, -2}));
+      inputs.back() = reversed_unaligned(inputs.back());
+      auto result =
+          direct(registry, node, inputs, take(ps::Footprint::all({4, 2})));
+      for (unsigned row = 0; row < 4; ++row)
+        for (unsigned column = 0; column < 2; ++column) {
+          std::uint64_t actual = 0;
+          require(result.read({row, column}, &actual, 8).ok() &&
+                      actual == raw(column ? -2 : 1),
+                  "non-last-axis independent two-constant oracle");
+        }
+    }
+}
 void resources(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
   for (bool continuous : {false, true}) {
@@ -243,112 +246,36 @@ void resources(ps::CpuNumericProfile profile) {
     if (continuous)
       inputs.push_back(doubles({3}, {0, .75, 2}));
     inputs.push_back(doubles({3}, {1, -2, 4}));
-    ps::DependencyRequest request;
-    for (const auto& v : inputs)
-      request.inputs.push_back({v.descriptor(), v.facets()});
-    request.parameters = node.parameters;
-    request.snapshot_identity = "lowpass-resource";
-    request.outputs = take(ps::Footprint::none({3}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
+    Fixture fixture(node, inputs);
+    const auto key = continuous ? "samples" : "values";
+    fixture.document.outputs = {{"filtered", 1, key}};
+    auto empty = take(
+        fixture.run({{"filtered", take(ps::Footprint::none({3}))}}, false));
+    require(take(empty.dependencies.source_support()).empty(),
             "Empty lowpass reads none");
-    request.outputs = region({3}, {ps::Region({{1, 1}})});
-    request.limits.maximum_work = UINT64_C(2048) * 1024 * 1024;
-    for (unsigned kind = 0; kind < 3; ++kind) {
-      auto limited = request;
-      if (kind == 0)
-        limited.limits.maximum_work = 1;
-      if (kind == 1)
-        limited.limits.maximum_state_bytes = 1024;
-      if (kind == 2)
-        limited.limits.maximum_stages = 1;
-      auto started = registry->start_dependency(node.operation, limited);
-      bool failed = !started.ok();
-      if (started.ok()) {
-        auto session = started.take_value();
-        for (unsigned stage = 0; stage < 4; ++stage) {
-          auto poll = session->poll();
-          if (!poll.ok()) {
-            require(poll.status().code == ps::ErrorCode::ResourceExhausted,
-                    "lowpass admission category");
-            failed = true;
-            break;
-          }
-          if (std::holds_alternative<ps::DependencyResult>(poll.value()))
-            break;
-          supply(session, limited, inputs);
-        }
-      }
-      require(failed, "bounded lowpass state/stage/work");
-    }
-    for (bool cancel : {false, true}) {
-      ps::ResourceBudget budget(ps::ResourceLimits{});
-      ps::CancellationSource cancellation;
-      request.cancellation = cancellation.token();
-      bool armed = false, interrupted = false;
-      unsigned scale_checks = 0;
-      std::shared_ptr<ps::DependencySession> session;
-      session = take(registry->start_dependency(
-          node.operation, request, budget.allocator(),
-          [&](std::uint64_t amount) {
-            if (armed && session->numeric_diagnostics().evaluated_values == 1 &&
-                ((!continuous &&
-                  (amount == 192 ||
-                   amount == static_cast<std::uint64_t>(
-                                 (std::get<std::int64_t>(
-                                      node.parameters.at("radius")) +
-                                  1) *
-                                 32))) ||
-                 (continuous && amount == 1 && ++scale_checks == 3))) {
-              interrupted = true;
-              if (cancel)
-                cancellation.cancel();
-              else
-                return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                  "lowpass inner work",
-                                  ps::FailureReason::WorkLimit};
-            }
-            return ps::Status::success();
-          }));
-      for (unsigned stage = 0; stage < (continuous ? 2U : 1U); ++stage) {
-        require(session->poll().ok(), "lowpass Need before arithmetic");
-        supply(session, request, inputs);
-      }
-      armed = true;
-      auto failed = session->poll();
-      require(
-          interrupted && !failed.ok() &&
-              failed.status().code == (cancel
-                                           ? ps::ErrorCode::Cancelled
-                                           : ps::ErrorCode::ResourceExhausted),
-          "lowpass inner cancellation/work including nonuniform scale scan");
-      require(session->numeric_diagnostics().copied_elements == 0,
-              "lowpass failure publishes no sample");
-      session.reset();
-      require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-              "lowpass failure releases admitted payload");
-    }
-    request.cancellation = {};
+    point_math_checks::resources(node, inputs, 24);
+    std::vector<ps::OperationMetadata> metadata;
+    for (const auto& input : inputs)
+      metadata.push_back({input.descriptor(), input.facets()});
     for (unsigned kind = 0; kind < 5; ++kind) {
-      auto bad = request;
-      bad.outputs = take(ps::Footprint::none({3}));
+      auto parameters = node.parameters;
+      auto ports = metadata;
       if (kind == 0)
-        bad.parameters["axis"] = static_cast<std::int64_t>(-1);
+        parameters["axis"] = std::int64_t{-1};
       if (kind == 1)
-        bad.parameters["sigma"] = 0.;
+        parameters["sigma"] = 0.;
       if (kind == 2)
-        bad.parameters["unused"] = true;
+        parameters["unused"] = true;
       if (kind == 3)
-        bad.inputs.back().descriptor.element_type = ps::ElementType::Int64;
+        ports.back().descriptor.element_type = ps::ElementType::Int64;
       if (kind == 4)
-        bad.parameters["boundary"] = std::string("mirror");
-      auto started = registry->start_dependency(node.operation, bad);
-      require(!started.ok(), "lowpass preflight even Empty");
+        parameters["boundary"] = std::string("mirror");
+      require(!registry->resolve_traits(node.operation, ports, parameters).ok(),
+              "lowpass schema rejection");
     }
   }
-  std::cout << "Empty/schema, bounded work/state/stages, inner cancellation "
-               "and failed output cleanup passed\n";
+  std::cout << "Empty/schema, Whole work/output/workspace budgets, active "
+               "cancellation and release passed\n";
 }
 void cache_validation_and_owners(ps::CpuNumericProfile profile) {
   for (bool continuous : {false, true}) {
@@ -513,54 +440,23 @@ void sparse_large_and_partition_cancel(ps::CpuNumericProfile profile) {
     const auto wanted =
         continuous ? region(shape, {ps::Region({{huge - 1, 1}, {1, 1}})})
                    : region(shape, {ps::Region({{huge * 2 - 1, 1}})});
-    auto result = take(fixture.run({{"filtered", wanted}}, false));
-    std::uint64_t actual = 0;
-    require(result.values.at("filtered")
-                    .read(continuous ? std::vector<std::uint64_t>{huge - 1, 1}
-                                     : std::vector<std::uint64_t>{huge * 2 - 1},
-                          &actual, 8)
-                    .ok() &&
-                actual == raw(1.5),
-            "2^40 logical signal stays sparse");
+    auto result = fixture.run({{"filtered", wanted}}, false);
+    require(!result.ok() &&
+                result.status().code == ps::ErrorCode::ResourceExhausted,
+            "2^40 Whole output rejects small payload budget");
   }
-  auto registry = ps::make_default_operation_registry();
   auto node = authored(true, 4, profile);
   node.parameters["support_radius"] = 1.;
   node.parameters["boundary"] = std::string("wrap");
   std::vector<ps::Value> inputs{
       array(ps::ElementType::Float64, {2}, {raw(1), raw(1) + 1}),
       doubles({2}, {0, 1})};
-  ps::DependencyRequest request;
-  request.parameters = node.parameters;
-  request.snapshot_identity = "large-period-cancel";
-  request.outputs = region({2}, {ps::Region({{0, 1}})});
-  request.limits.maximum_work = UINT64_C(2048) * 1024 * 1024;
-  for (const auto& input : inputs)
-    request.inputs.push_back({input.descriptor(), input.facets()});
-  ps::CancellationSource cancellation;
-  request.cancellation = cancellation.token();
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  unsigned pieces = 0;
-  auto session = take(registry->start_dependency(
-      node.operation, request, budget.allocator(), [&](std::uint64_t amount) {
-        if (amount == 8192 && ++pieces == 4)
-          cancellation.cancel();
-        return ps::Status::success();
-      }));
-  require(session->poll().ok(), "positions before huge-period partition");
-  supply(session, request, inputs);
-  auto failed = session->poll();
-  require(!failed.ok() && failed.status().code == ps::ErrorCode::Cancelled &&
-              pieces == 4,
-          "cancel huge exact repeated-period partition");
-  session.reset();
-  require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-          "cancelled partition releases maps");
+  point_math_checks::resources(node, inputs, 16);
   Fixture extreme(
       authored(true, 4, profile),
       {array(ps::ElementType::Float64, {3},
              {UINT64_C(0xffefffffffffffff), 0, UINT64_C(0x7fefffffffffffff)}),
-       doubles({3}, {-1, 0, 1})});
+       doubles({3}, {0, 0, 0})});
   double radius;
   auto radius_bits = UINT64_C(0x7fefffffffffffff);
   std::memcpy(&radius, &radius_bits, 8);
@@ -570,10 +466,9 @@ void sparse_large_and_partition_cancel(ps::CpuNumericProfile profile) {
       extreme.run({{"filtered", region({3}, {ps::Region({{1, 1}})})}}, false));
   std::uint64_t value = 1;
   require(result.values.at("filtered").read({1}, &value, 8).ok() && value == 0,
-          "exact extreme-width affine cancellation");
-  std::cout
-      << "sparse 2^40-element public constant/filter workflows, huge-period "
-         "cancellation and extreme-width exact affine passed\n";
+          "exact extreme-width constant cancellation");
+  std::cout << "2^40-element Whole budget rejection, huge-period "
+               "cancellation and extreme-width exact constant passed\n";
 }
 
 }  // namespace
@@ -585,6 +480,7 @@ int main(int argc, char** argv) {
                              ? ps::CpuNumericProfile::AppleSiliconNeon
                              : ps::CpuNumericProfile::X86Avx2;
     layouts(profile);
+    independent_axis_layout(profile);
     resources(profile);
     cache_validation_and_owners(profile);
     sparse_large_and_partition_cancel(profile);

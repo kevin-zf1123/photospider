@@ -52,13 +52,15 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * Allocation may throw bad_alloc. Invalid helper parameters fail
  * InvalidArgument/InvalidDomain/Schema; invalid edge metadata fails
  * TypeMismatch. Nonempty requests validate all x as finite/strictly increasing,
- * then only selected queries and exact local y stencils. Knot/clamp selects one
- * y; linear selects two, PCHIP up to four. Multi requests preserve column-local
- * support. Actual nonfinite input/rejected query fails OperationFailed/
- * InvalidDomain at the dependent Atom; final overflow fails ArithmeticOverflow.
- * Outputs own immutable packed storage beyond context lifetime. Typed,
- * upstream, resource, stale and cancellation failures retain their categories.
- * Cache witnesses include complete x, selected query and selected y. Empty
+ * and collect complete y/query with typed validation. One Whole callback
+ * evaluates all queries/columns and allocates the complete dense output even
+ * for sparse demand. Mathematical knot/clamp uses one y; linear two, PCHIP
+ * up to four. Generic y outside all evaluated stencils is numerically unused.
+ * Nonfinite used input/rejected query fails OperationFailed/InvalidDomain at
+ * Run scope; final overflow fails ArithmeticOverflow. Unrequested rows/columns
+ * and upstream failures can fail the run. Output owns immutable packed storage
+ * beyond context lifetime. Typed, resource, stale and cancellation failures
+ * retain their categories. Any input edit invalidates output demand. Empty
  * reads none. Strict rounds complete exact rational formulas once. Accelerated
  * follows CpuNumericProfile's bound while preserving cross-query monotonicity;
  * the current fast Float32 path requires a uniquely rounded enclosure and
@@ -88,7 +90,8 @@ inline Result<WorkflowNode> interpolate_pchip_node(
   return curve_detail::node(id, "interpolate_pchip", std::move(x), std::move(y),
                             std::move(query), dtype, policy, profile);
 }
-/** @brief Piecewise-linear column-local interpolation; shared contract above.
+/** @brief Piecewise-linear multiple-function interpolation; shared contract
+ * above.
  */
 inline Result<WorkflowNode> interpolate_linear_multi_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,
@@ -99,7 +102,8 @@ inline Result<WorkflowNode> interpolate_linear_multi_node(
                             std::move(y), std::move(query), dtype, policy,
                             profile);
 }
-/** @brief Exact PCHIP column-local interpolation; shared contract above. */
+/** @brief Exact PCHIP multiple-function interpolation; shared contract above.
+ */
 inline Result<WorkflowNode> interpolate_pchip_multi_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,
     ElementType dtype = ElementType::Float64,

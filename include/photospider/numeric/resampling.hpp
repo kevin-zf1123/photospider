@@ -62,7 +62,7 @@ inline Result<ResampledSignal> append(
 }  // namespace resampling_detail
 /** @brief Resamples one scalar signal with the existing linear interpolator.
  * positions[K], values[K] (or [K,C] for _multi), new_positions[N] independently
- * accept Float32/64. K/N/C, requested finite samples, exact rounding and domain
+ * accept Float32/64. K/N/C, finite samples, exact rounding and domain
  * rules follow interpolate_linear_node / interpolate_pchip_node. dtype selects
  * samples only (default Float64); positions retains the new_positions
  * descriptor, dtype, facets and raw bits. Default domain Reject, also
@@ -78,12 +78,13 @@ inline Result<ResampledSignal> append(
  *
  * Position-only requests independently forward requested source bits, including
  * NaN/Inf/sNaN/-0, without reading old positions/values or validating a curve.
- * Typed/upstream source validation still applies. Sample requests inherit exact
- * interpolation dependencies, failures, resource/cancellation checks and
- * owners. Empty reads no payload. Packed/aliased immutable output owns its
- * storage and metadata past context teardown. No hidden cache, filtering,
- * sample-rate inference, antialias guarantee or rounded-output round-trip claim
- * is added.
+ * Typed/upstream source validation still applies. Samples inherit Whole
+ * interpolation: full input/output storage, full invalidation and Run failures
+ * even for undelivered positions/columns. Resource/cancellation checks and
+ * owners follow the interpolator. Empty reads no payload. Packed/aliased
+ * immutable output owns its storage and metadata past context teardown. No
+ * hidden cache, filtering, sample-rate inference, antialias guarantee or
+ * rounded-output round-trip claim is added.
  */
 inline Result<ResampledSignal> resample_linear(
     WorkflowDocument& document, WorkflowInput positions, WorkflowInput values,

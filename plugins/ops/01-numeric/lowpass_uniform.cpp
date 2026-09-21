@@ -1,19 +1,19 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/lowpass_uniform_math.hpp"
-#include "data/input_validation.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -49,16 +49,25 @@ struct UniformState {
   ResourceVector<std::uint64_t> samples;
   ResourceVector<numeric_ops::FastInterval> coefficients;
   numeric_ops::FastInterval normalizer;
-  bool coefficients_attempted = false, coefficients_ready = false;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  bool requested = false;
+  bool coefficients_ready = false;
+  const OperationInvocation& call;
+  const ResourceBudget* budget;
+  std::function<Status(std::uint64_t)> consume;
   UniformState(LowpassParameters p, unsigned dimension, unsigned count,
-               std::string extension, SequenceProfile selected)
+               std::string extension, SequenceProfile selected,
+               const OperationInvocation& invocation)
       : parameters(p),
         axis(dimension),
         radius(count),
         boundary(std::move(extension)),
-        profile(selected) {}
+        profile(selected),
+        call(invocation),
+        budget(resource_internal::metadata_budget()),
+        consume([this](auto amount) {
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, {}};
+          return budget ? budget->consume({amount}) : Status::success();
+        }) {}
   std::optional<std::uint64_t> mapped(std::uint64_t center, int offset,
                                       std::uint64_t size) const {
     const auto at = static_cast<std::int64_t>(center) + offset;
@@ -79,179 +88,109 @@ struct UniformState {
                ? period - reduced
                : reduced;
   }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied, bool fallback = false) const {
-    NumericDiagnostics result;
-    result.profile =
-        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
-    const auto length = std::snprintf(
-        result.implementation.data(), result.implementation.size(),
-        "photospider.lowpass-uniform/2;cached-bounds-4ulp32;%s",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= result.implementation.size())
-      return {ErrorCode::Internal, "lowpass diagnostic identity"};
-    result.evaluated_values = evaluated;
-    result.copied_elements = copied;
-    if (fallback && profile != SequenceProfile::Strict) {
-      result.strict_fallbacks = 1;
-      result.fallback_reasons[static_cast<unsigned>(
-          NumericFallbackReason::RoundingUnresolved)] = 1;
-    }
-    return phase.report_numeric(result);
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    const auto& descriptor = phase.query.output.descriptor;
-    const auto rank = descriptor.shape.size();
-    if (!requested) {
-      const auto count = phase.query.outputs.element_count().value();
-      request_capacity = dependency_internal::metadata_owner(
-          4096 + count * (8192 + (2 * radius + 1) * rank * 128));
-      std::vector<AtomCertificate> rows;
-      rows.reserve(count);
-      auto status = phase.query.outputs.visit(
-          [&](const auto& coordinate) {
-            std::vector<Region> boxes;
-            boxes.reserve(2 * radius + 1);
-            std::vector<RegionDimension> dimensions;
-            for (auto value : coordinate)
-              dimensions.push_back({value, 1});
-            for (int offset = -static_cast<int>(radius);
-                 offset <= static_cast<int>(radius); ++offset) {
-              auto charged = phase.consume_work(rank * 4 + 1);
-              if (!charged.ok())
-                return charged;
-              if (!numeric_ops::uniform_tap_sign(parameters, radius,
-                                                 offset < 0 ? -offset : offset))
-                continue;
-              auto index =
-                  mapped(coordinate[axis], offset, descriptor.shape[axis]);
-              if (!index)
-                continue;
-              dimensions[axis] = {*index, 1};
-              boxes.emplace_back(dimensions);
-            }
-            auto support = Footprint::from_regions(
-                descriptor.shape, std::move(boxes), phase.sets);
-            if (!support.ok())
-              return support.status();
-            auto closure = input_internal::validation_closure(
-                phase.query.inputs[0], support.value(), phase.sets,
-                phase.consume_work);
-            if (!closure.ok())
-              return closure.status();
-            rows.push_back({coordinate,
-                            {{0, 1, support.take_value(), {}},
-                             {0, 4, closure.take_value(), {}}}});
-            return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!status.ok())
-        return Answer(status);
-      requested = true;
-      return Answer(DependencyNeedBatch{std::move(rows)});
-    }
-    request_capacity.reset();
-    auto construction = dependency_internal::metadata_owner(65536);
+  Result<Value> execute() {
+    using Answer = Result<Value>;
+    const auto& input = call.inputs[0];
+    const auto& descriptor = input.descriptor();
+    const auto& shape = descriptor.shape;
     samples.resize(2 * radius + 1);
-    if (profile != SequenceProfile::Strict && !coefficients_attempted) {
+    if (profile != SequenceProfile::Strict) {
       coefficients.resize(radius + 1);
-      auto prepared =
-          arithmetic.prepare(parameters, radius, coefficients.data(),
-                             &normalizer, phase.consume_work);
+      auto prepared = arithmetic.prepare(
+          parameters, radius, coefficients.data(), &normalizer, consume);
       if (!prepared.ok())
         return Answer(prepared.status());
       coefficients_ready = prepared.value();
-      coefficients_attempted = true;
     }
-    numeric_ops::ArrayPublication publication(
-        phase.query.outputs.boxes().size(), rank);
-    ResourceVector<Value> fragments;
-    fragments.reserve(phase.query.outputs.boxes().size());
+    auto allocated =
+        MutableValue::allocate(descriptor, call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
     const bool narrow = descriptor.element_type == ElementType::Float32;
-    const auto width = narrow ? 4U : 8U;
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto writer = allocated.take_value();
-      auto selected =
-          Footprint::from_regions(descriptor.shape, {box}, phase.sets);
-      if (!selected.ok())
-        return Answer(selected.status());
-      std::uint64_t written = 0;
-      auto status = selected.value().visit(
-          [&](const auto& coordinate) {
-            auto at = coordinate;
-            for (int offset = -static_cast<int>(radius);
-                 offset <= static_cast<int>(radius); ++offset) {
-              auto charged = phase.consume_work(
-                  rank * (phase.inputs[0].fragments().size() + 1));
-              if (!charged.ok())
-                return charged;
-              auto& bits = samples[offset + radius];
-              bits = 0;
-              if (!numeric_ops::uniform_tap_sign(parameters, radius,
-                                                 offset < 0 ? -offset : offset))
-                continue;
-              auto source =
-                  mapped(coordinate[axis], offset, descriptor.shape[axis]);
-              if (!source)
-                continue;
-              at[axis] = *source;
-              auto read = phase.read(0, at, &bits, width);
-              if (!read.ok())
-                return read;
-            }
-            auto charged = report(phase, 1, 0);
-            if (!charged.ok())
-              return charged;
-            std::optional<std::uint64_t> fast;
-            if (coefficients_ready) {
-              charged = phase.consume_work((radius + 1) * 32);
-              if (!charged.ok())
-                return charged;
-              fast = arithmetic.fast(parameters, radius, samples.data(), narrow,
-                                     coefficients.data(), normalizer);
-            }
-            if (!fast && profile != SequenceProfile::Strict) {
-              charged = report(phase, 0, 0, true);
-              if (!charged.ok())
-                return charged;
-            }
-            auto value =
-                fast ? Result<std::uint64_t>(*fast)
-                     : arithmetic.evaluate(parameters, radius, samples.data(),
-                                           narrow, phase.consume_work);
-            if (!value.ok())
-              return value.status();
-            charged = phase.consume_work(1);
-            if (!charged.ok())
-              return charged;
-            auto bits = value.value();
-            std::memcpy(writer.data() + written * width, &bits, width);
-            ++written;
-            return report(phase, 0, 1);
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
-      if (!status.ok())
-        return Answer(status);
-      auto value = std::move(writer).publish();
+    const unsigned width = narrow ? 4 : 8;
+    std::uint64_t count = 1;
+    for (auto extent : shape)
+      count *= extent;
+    std::vector<std::uint64_t> coordinate(shape.size()), at(shape.size());
+    for (std::uint64_t row = 0; row < count; ++row) {
+      at = coordinate;
+      for (int offset = -static_cast<int>(radius);
+           offset <= static_cast<int>(radius); ++offset) {
+        auto status = consume(shape.size() + 1);
+        if (!status.ok())
+          return Answer(status);
+        auto& bits = samples[offset + radius];
+        bits = 0;
+        // Complete collection does not make zero-weight samples numerical
+        // operands.
+        if (!numeric_ops::uniform_tap_sign(parameters, radius,
+                                           offset < 0 ? -offset : offset))
+          continue;
+        auto source = mapped(coordinate[axis], offset, shape[axis]);
+        if (!source)
+          continue;
+        at[axis] = *source;
+        auto address = input.byte_address(at);
+        if (!address.ok())
+          return Answer(address.status());
+        std::memcpy(&bits, input.bytes().data() + address.value(), width);
+      }
+      std::optional<std::uint64_t> fast;
+      if (coefficients_ready) {
+        auto status = consume((radius + 1) * 32);
+        if (!status.ok())
+          return Answer(status);
+        fast = arithmetic.fast(parameters, radius, samples.data(), narrow,
+                               coefficients.data(), normalizer);
+      }
+      auto value = fast ? Result<std::uint64_t>(*fast)
+                        : arithmetic.evaluate(parameters, radius,
+                                              samples.data(), narrow, consume);
       if (!value.ok())
         return Answer(value.status());
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      fragments.push_back(retained.take_value());
+      auto status = consume(1);
+      if (!status.ok())
+        return Answer(status);
+      const auto bits = value.value();
+      std::memcpy(output.data() + row * width, &bits, width);
+      for (auto i = shape.size(); i; --i) {
+        if (++coordinate[i - 1] < shape[i - 1])
+          break;
+        coordinate[i - 1] = 0;
+      }
     }
-    auto published =
-        publication.finish(descriptor, phase.query.outputs, fragments.data(),
-                           fragments.size(), phase.sets);
-    return published.ok() ? Answer(published.take_value())
-                          : Answer(published.status());
+    auto status = consume(1);
+    return status.ok() ? std::move(output).publish() : Answer(status);
   }
 };
+Result<Value> execute_uniform(const OperationInvocation& call,
+                              LowpassKernel kernel, SequenceProfile profile) {
+  using Answer = Result<Value>;
+  try {
+    auto scratch = call.allocator.allocate(sizeof(UniformState));
+    if (!scratch.ok())
+      return Answer(scratch.status());
+    auto buffer = scratch.take_value();
+    std::unique_ptr<UniformState, void (*)(UniformState*)> state(
+        new (buffer.data()) UniformState(
+            parameters(kernel, call.parameters),
+            static_cast<unsigned>(
+                std::get<std::int64_t>(call.parameters.at("axis"))),
+            static_cast<unsigned>(
+                std::get<std::int64_t>(call.parameters.at("radius"))),
+            std::get<std::string>(call.parameters.at("boundary")), profile,
+            call),
+        [](auto* value) { value->~UniformState(); });
+    return state->execute();
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
+
 OperationDefinition operation(const std::string& name, LowpassKernel kernel,
                               SequenceProfile profile) {
   OperationDefinition definition;
@@ -272,11 +211,9 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
   traits.requires_metadata_specialization = true;
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(UniformState);
-  output.maximum_dependency_stages = 2;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(UniformState);
   definition.specialize_metadata = [profile](const auto& inputs,
                                              const auto& p) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -323,19 +260,11 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
       return Answer(available);
     OperationOutputSpecialization resolved;
     resolved.metadata.descriptor = inputs[0].descriptor;
-    resolved.regional_atomic = true;
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  definition.start_dependency = [kernel, profile](const auto& query,
-                                                  const auto& allocator) {
-    return DependencyContinuation::make<UniformState>(
-        allocator, parameters(kernel, query.parameters),
-        static_cast<unsigned>(
-            std::get<std::int64_t>(query.parameters.at("axis"))),
-        static_cast<unsigned>(
-            std::get<std::int64_t>(query.parameters.at("radius"))),
-        std::get<std::string>(query.parameters.at("boundary")), profile);
+  definition.callback = [kernel, profile](const OperationInvocation& call) {
+    return execute_uniform(call, kernel, profile);
   };
   return definition;
 }

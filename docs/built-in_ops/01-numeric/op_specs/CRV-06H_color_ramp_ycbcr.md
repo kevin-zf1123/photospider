@@ -81,19 +81,33 @@ the shared final FP32 bound. Hit/clamp/K=1 directly converts the selected row. D
 paths preserve signed zero; genuine interpolation exact zero is +0; nonzero
 underflow preserves sign. Demanded components and final results must be finite.
 
-Inherit the complete-color observation domain, global stop control/validation,
-local one/two full-row reads, exact dirty mapping and cache witnesses from CRV-06C.
-Any requested channel computes/validates and returns its whole color. Empty Q
-reads no payload, unrelated rows remain unread, and existing typed/upstream
-closures retain identity. Arbitrary immutable strides, offsets, packed output
-Regions and owners surviving context teardown follow the same contract.
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
 
-For M colors, work is O(K+M log K) plus exact arithmetic. Output payload is
-3*M*sizeof(dtype); optional stop lookup is 8K bytes. All source owners, scratch
-limbs, metadata and growth overlap are host-accounted; no full logical output
-allocation is required. Inherit the bounded cancellation, cache-off, capacity/
-work/stage and complete-color failure-publication requirements without RGB transfer
-or alpha scratch. Unsupported CPU platforms follow BackendUnavailable behavior.
+The output is one immutable dense Value of shape input.shape+[C]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
+
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 ## Failure and acceptance
 
@@ -102,7 +116,7 @@ fail preflight with InvalidArgument/InvalidDomain; shape/dtype or attached
 description mismatch uses TypeMismatch. Nonfinite demanded floats, invalid stops
 or rejected positions use OperationFailed/InvalidDomain. Final overflow uses
 OperationFailed/ArithmeticOverflow. Preserve resource/cancellation/upstream error
-categories and fail the complete color atom; no partly valid tuple is published.
+categories and fail the Whole run; no partly valid tuple is published.
 
 Fixture: stops=[0,1], colors=[[0,0,0],[1,0.5,-0.5]], input=[0.5]
 returns [[0.5,0.25,-0.25]] with unchanged declared YCbCr description. Include
@@ -123,10 +137,10 @@ are linked below; the document remains Proposed.
 
 Public [`color_ramp_ycbcr_node`](../../../../include/photospider/numeric/color_ramps.hpp)
 constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its staged complete-color execution.
+implements its Whole complete-output execution.
 
 All profiles use exact rational component interpolation and return strict
-bits, with one destination rounding. Complete-color metadata and regional
+bits, with one destination rounding. Complete-color metadata and complete-input typed
 validation remain attached to the result.
 
 See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),

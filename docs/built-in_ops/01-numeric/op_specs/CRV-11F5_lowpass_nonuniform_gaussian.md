@@ -51,17 +51,18 @@ defines this operator.
 
 Strict correctly rounds the complete integral quotient. Accelerated permits
 <=4 ULP final error, exact constant/zero/sign and finite classification, with
-reported strict fallback. All demanded values and outputs must be finite; this
+strict fallback. All values and outputs must be finite; this
 is not the uniform family's IEEE nonfinite aggregation. A precision/work/capacity
 limit fails explicitly instead of publishing unconverged integration.
 
-Global positions validation and exact mapped positive-length interval support
-determine reads. Only required reconstruction endpoints and requested other-axis
-coordinates are read; coefficient cancellation does not remove endpoint validation.
-Inherit boundary folds/seams, exact dirty maps, typed/upstream closure, immutable
-packed mapping, arbitrary strides, owners, cache-off and host accounting from
-the shared contract. Integration/refinement and long repeated-boundary support
-are fully budgeted and cancellation-aware.
+All three formal keys use Whole. Nonempty requests collect complete positions
+and values, validate positions globally, and compute every output. Each numerical
+integral still uses only positive-length pieces and their exact endpoint values;
+coefficient cancellation cannot remove validation. Any input edit invalidates all
+outputs. Nonfinite samples or overflow anywhere, including undelivered columns,
+fail Domain/Run. Empty reads nothing. Output storage is the complete dense shape;
+only one output's managed piece vector is retained at a time. Legal strides,
+immutable owners, cache-off, work/capacity/cancellation follow the shared contract.
 
 Use the shared compile/preflight/runtime error categories for malformed parameters,
 type mismatch, invalid positions, nonfinite demanded samples, output overflow,
@@ -75,7 +76,7 @@ support_radius=0.5: at the middle position, samples is exactly 2.5 for any
 admitted sigma parameters. Verify collinear-knot insertion invariance against
 independent certified continuous integration. Also test constant/impulse hats,
 unequal spacing, boundaries/seams, extreme parameters, dtype mixing, 4-ULP
-bounds, invalid remote data nonreads, exact dirty support, budgets/cancellation,
+bounds, invalid remote data failures, complete dirty support, budgets/cancellation,
 strides and source/result lifetime.
 
 The maintained public workflow binds positions/values and statics, then requests
@@ -87,6 +88,6 @@ commands and current evidence; the spec does not claim universal antialias rejec
 This primitive is registered in the five-kernel nonuniform low-pass family. Exact partition and paired-affine integration use global Taylor moments with a rigorous tail bound; this is not local adaptive quadrature, and accelerated keys currently use the strict fallback.
 Certified precision is bounded to 128..4096 bits and order <=512; unresolved
 capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed the
-shared public manual groups and independent numerical references. The linked
-workflow records exact counts, commands and installed-consumer checks.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
+that workflow and the math implementation notes. WSL/AVX2 and installed-package
+consumers have not been rerun. Whole numerical/fallback counters are N/A.

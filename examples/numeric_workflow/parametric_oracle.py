@@ -20,10 +20,12 @@ def rn(v, dtype=3, negative=False):
 
 
 def reference(degree, k, n, d, dtype, requested, ports):
+    observed = requested
+    requested = [(i, c) for i in range(n) for c in range(d)] if requested else []
     source = [[number(b, t) for b in data] for t, data in ports]
     negative = lambda p, i: bool(ports[p][1][i] >> (31 if ports[p][0] == 4 else 63))
     try:
-        # All demanded row controls are classified before the control Need.
+        # All Whole row controls are classified before component arithmetic.
         for i in sorted({i for i, c in requested}):
             j, t = source[2][i], source[3][i]
             if j < 0 or j >= k - 1 or not finite(t) or not 0 <= t <= 1:
@@ -54,7 +56,7 @@ def reference(degree, k, n, d, dtype, requested, ports):
             controls.append(b); signs.append(negative(0, (j+1)*d+c))
             exact = sum(F(math.comb(degree, r))*(1-t)**(degree-r)*t**r*v for r, v in enumerate(controls))
             out[i, c] = rn(exact, dtype, not exact and all(not v and neg for v, neg in zip(controls, signs)))
-        return ''.join(f'{out[at]:x} ' for at in requested)
+        return ''.join(f'{out[at]:x} ' for at in observed)
     except OverflowError:
         return 'overflow'
 

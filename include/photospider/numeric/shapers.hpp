@@ -147,12 +147,13 @@ inline Result<WorkflowNode> logarithmic(std::uint64_t id, bool inverse,
  * @note Runtime preserves shape/dtype with empty facets. The complete remap
  * formula rounds once, extends without clipping and preserves its IEEE special
  * values/zero rules. Every nonempty request validates both finite ordered
- * bounds even for NaN/endpoints, while input reads and dirty witnesses stay
- * local with typed Validation closure. Empty reads no dynamic payload. Invalid
- * bounds use InvalidArgument/InvalidDomain; upstream, backend, work, capacity,
- * cancellation and stale failures retain their categories. Output owners
- * outlive context; all expanded views/intermediates remain subject to host
- * resource admission.
+ * bounds even for NaN/endpoints. Whole collects full inputs with typed
+ * validation, allocates full output and dirties all recorded demand on any
+ * input edit. Empty reads no dynamic payload. Numeric failures have Run scope.
+ * Invalid bounds use InvalidArgument/InvalidDomain; upstream, backend, work,
+ * capacity, cancellation and stale failures retain their categories. Output
+ * owners outlive context; all expanded views/intermediates remain subject to
+ * host resource admission.
  */
 inline Result<WorkflowNodeOutput> linear_shaper(
     WorkflowDocument& document, WorkflowInput input, WorkflowInput lower,
@@ -182,18 +183,19 @@ inline Result<WorkflowNodeOutput> linear_shaper_inverse(
  * NaN retains its sign/payload and is quieted, either zero returns -Inf,
  * negative input returns canonical quiet NaN, and +Inf returns +Inf.
  * @note Every profile currently correctly rounds the complete expression.
- * Accelerated profiles report a strict scalar fallback when entering certified
- * interval arithmetic. Together with exact branches this preserves monotonicity
+ * Accelerated profiles retain strict certified interval arithmetic when needed.
+ * Whole counters are unavailable. Exact/certified paths remain monotone.
  * independently of request order. Refinement uses 128..4096 fraction bits;
  * unresolved rounding fails ResourceExhausted/CapacityLimit. Work/cancellation
  * can interrupt refinement and retain their original failure categories.
- * @note Every nonempty observation requires both scalar bounds (Control and
- * typed Validation) before local input (Data and typed Validation). Invalid
- * bounds fail InvalidArgument/InvalidDomain with the offending port and Atom.
- * Empty reads no payload. Source/bound witnesses participate in cache identity.
- * Immutable packed output owners outlive the execution context; arbitrary legal
- * source strides are supported. State, scratch, dependencies and output storage
- * use host resource admission. Upstream errors retain their provenance.
+ * @note Every nonempty request collects complete input and both scalar bounds
+ * with typed/upstream validation. Bounds precede IEEE evaluation inside the
+ * callback; collection errors can precede bound checks. Invalid bounds fail
+ * InvalidArgument/InvalidDomain with port and Run scope. Empty reads no data.
+ * Any input edit dirties all recorded demand. A complete dense output backs
+ * sparse public fragments and outlives context. Arbitrary input strides remain
+ * supported. Full collect/output and fixed exact workspace use host budgets;
+ * Upstream provenance is retained; cancellation frees unpublished output.
  */
 inline Result<WorkflowNode> log2_shaper_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput lower,

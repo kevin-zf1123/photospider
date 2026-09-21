@@ -66,9 +66,10 @@ Output appends exactly four channels and carries the matching CMYK profile
 description. Input rank is 1..7 and logical input/color/output counts are <=2^40.
 
 The complete four-channel CMYK tuple is the observation/validation unit. Globally
-validate stops, but read only requested positions and the selected one or two
+validate stops and every position after Whole collection; mathematically use one or two
 complete colors. Direct hit/clamp/single-stop paths convert only that selected
-color; unselected colors are not validated. Attached source color descriptions
+color; unused generic rows skip mathematical checks, while complete typed
+validation still applies. Attached source color descriptions
 must match the explicit static CMYK profile description.
 
 Each channel is interpolated by the exact mathematical linear formula, with one
@@ -110,31 +111,38 @@ clamp and K=1 correctly convert the selected color directly. Values stay in
 no out-of-domain extrapolation is provided. The unchanged profile labels the
 four output amounts and is not numerically consulted by the interpolation.
 
-The observation coordinate is the input position, excluding the four-channel
-axis. Expand a request for any component to the complete CMYK tuple. Control is
-all stops plus the requested input positions; Data/Validation is the union of
-selected complete color rows. Empty Q reads no runtime payload. ICC descriptor/
-resource validity is a compile/preflight obligation, not a per-query CMM pass.
-Every selected row's four ranges are validated, even when an exact formula
-simplification would not use one value. Other rows remain unread.
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
 
-Stop changes invalidate all dependent observations, input changes affect their
-position, and a selected color-row edit invalidates the complete colors using
-that row. Retain exact control/data/typed witnesses and the profile content
-identity. No bounding gaps or whole color-table prevalidation are introduced.
-Upstream Whole support keeps its own failures independently of local demand.
+The output is one immutable dense Value of shape input.shape+[4]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
 
-Return immutable packed complete-color fragments at the correct global
-Region/storage origins, carrying the CMYK color-array description and owned
-profile reference. Source strides/offsets may be arbitrary valid immutable
-layouts. The output shape is input.shape+[4], inferred statically. Profile and
-data owners survive context teardown until final release; closing optional cache
-does not invalidate active outputs or their color interpretation.
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 ## Resources, errors and acceptance
 
-For M requested color tuples, ordinary lookup work is O(K+M log K), plus exact
-four-channel interpolation and typed validation. Output payload is 4*M*b bytes;
+For N full-input color tuples, ordinary lookup work is O(K+N log K), plus exact
+four-channel interpolation and typed validation. Output payload is 4*N*b bytes;
 an optional packed stop index is 8K. Account immutable profile bytes and validator
 work once under actual shared ownership, plus all source windows, descriptor/index
 metadata, arithmetic limbs, output/scratch and simultaneous growth capacity.
@@ -147,7 +155,7 @@ Missing profile, unsupported profile class/version/space or invalid profile data
 fails authoring/compile/preflight with InvalidArgument/InvalidDomain; preserve
 resource-parser detail. Port/descriptor mismatch uses TypeMismatch. Invalid
 requested positions/stops, ink outside finite [0,1] or reject-domain lookup uses
-OperationFailed/InvalidDomain at the complete color Atom. Valid convex numeric
+OperationFailed/InvalidDomain at Run scope. Valid convex numeric
 interpolation has no expected output overflow. Resource/cancellation/backend,
 stale and upstream/typed errors retain their original Status/source/scope.
 No partial color or unowned profile reference is published on failure.
@@ -182,10 +190,10 @@ claim a general ICC color-management engine or arbitrary profile-type support.
 
 Public [`color_ramp_cmyk_node`](../../../../include/photospider/numeric/color_ramps.hpp)
 constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its staged complete-color execution.
+implements its Whole complete-output execution.
 
 All profiles use exact rational component interpolation and return strict
-bits, with one destination rounding. Complete-color metadata and regional
+bits, with one destination rounding. Complete-color metadata and complete-input typed
 validation remain attached to the result.
 The output also retains the explicitly imported and bound ICC profile.
 

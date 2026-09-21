@@ -107,12 +107,43 @@ relevant certified steps, not the integer-capacity bound. Accelerated RGB permit
 the shared FP32 4 ULP by contract. Current implementations return strict bits,
 while the same accelerated allowance applies to non-RGB arithmetic.
 
-Native arm64 Clang strict/Apple and Ubuntu WSL x86 Clang 18 strict/AVX2 passed
-seven manual groups, including RGB full-color Atom isolation, and the reported
-independent Fraction/pi/RGB oracle cases. ICC, metadata and owner evidence also
-passed. Installed 0.16 ColorArray/ICC and seven ramp groups passed under strict
-and Apple profiles. The 19 existing NUM/CRV manual consumers passed strict
-regression, focused `test_compiler` passed, and the 67 changed C++ files passed
-ClangFormat 21 and cpplint. These results do not claim the whole category
-complete. See the [numeric workflow README](../../../../examples/numeric_workflow/README.md)
-and [implementation tracking](../implementation.md).
+Native arm64 Clang 21 strict/Apple Whole validation covers seven public workflow
+groups, 1784 independent Fraction/Machin-pi cases and 352 RGB rational-root/Decimal
+cases per profile. Manual checks include complete-input query/typed failure,
+Run-scoped association errors, sparse delivery, full dirty support, cache rebinding,
+negative/unaligned and zero strides, rank-two traversal, fenv restoration, Empty,
+work/output/workspace budgets, active cancellation and CMYK ICC ownership after
+context teardown. Focused numeric, compiler, color and resource tests pass.
+This Whole change has no new x86 or installed-package execution evidence.
+Public commands and measurements are in the [workflow README](../../../../examples/numeric_workflow/README.md)
+and [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps).
+
+## Whole execution and resources
+
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
+
+The output is one immutable dense Value of shape input.shape+[C]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
+
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.

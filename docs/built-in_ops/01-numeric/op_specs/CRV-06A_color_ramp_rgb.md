@@ -88,18 +88,12 @@ Value limit. Total logical input/color/output products retain the 2^40 cap.
 
 ## Confirmed color observation granularity
 
-A complete RGB/RGBA color at one input position is the evaluation and validation
-unit. Requesting any of its output color components computes and validates all
-C components and reads complete selected stop colors. Other input positions and
-unselected stop colors are not read. Apply alpha and finite-color constraints
-to the entire color before publication; a component request cannot hide another
-component's failure. Mapping this color unit into the host atom/region protocol
-uses the implemented full-color Atom/region closure. The ordering validation
-protocol is stated below.
-
-For every nonempty request, globally validate all stops for finiteness and strict
-order. Read only requested input positions and the complete one or two selected
-stop colors. Exact stop hits, clamp and K=1 use one stop color and directly
+The final channel axis is a complete RGB/RGBA color. Any channel request closes
+to a complete color, and a nonempty request evaluates the full Whole output.
+All input arrays are collected and typed-validated; stop order and every finite
+position are checked before selected-row color mathematics. Alpha and finite
+constraints apply to all components of each mathematically selected color.
+Exact stop hits, clamp and K=1 use one stop color and directly
 perform necessary dtype/association conversion, without transfer decode/encode.
 Unselected stop colors are not numerically validated. Endpoint transparency
 canonicalization and AssociationUnderflow remain applicable to this direct path.
@@ -133,8 +127,8 @@ at most four FP32-scaled representable steps per final RGB or alpha component.
 Exact selected endpoints and zero-alpha cases retain exact semantics; ordinary
 alpha arithmetic must also preserve its [0,1] constraint. Required special values,
 alpha constraints and complete-color numerical success/failure must agree with
-strict. Fall back to strict and report actual fallback when those guarantees
-cannot be established; resource/cancellation failures remain explicit.
+strict. Use the strict path when those guarantees cannot be established; Whole fallback
+counters are unavailable. Resource/cancellation failures remain explicit.
 
 If exact output alpha is positive but its correctly rounded destination value
 is zero while any correctly rounded RGB component remains nonzero, fail the
@@ -175,7 +169,7 @@ arbitrary rank-1..7 positive shape, C=3 or 4, colors.shape[0]=stops.shape[0],
 and output values has shape S+[C]. Enforce the stated K and 2^40 input/color/
 output product limits using checked integer arithmetic. Position input and stops
 are generic floating Values; colors may be generic or already color-described
-under the explicit matching rule. All requested scalar positions must be finite.
+under the explicit matching rule. All scalar positions must be finite for a nonempty Whole request.
 
 | Static parameter | Type/domain | Constructor behavior |
 | --- | --- | --- |
@@ -235,32 +229,33 @@ on the identical-color shortcut.
 
 ## Observation mapping, demand and ownership
 
-The observation domain has shape S, excluding the final color axis. Normalize a
-request touching any component at p to the complete color at p. An AtomKey names
-p in that observation domain, and a failure affects that complete color. This
-uses the host's observation-coordinate protocol and the implemented ColorArray
-planning/validation adapters. Image retains its separate existing rules.
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
 
-For requested positions P, Control support is input[P] and all stops[0:K]. Validate
-global stop ordering before segment lookup, then each finite input before colors.
-The colors Data/Validation support is the exact union of selected full rows:
-one row for hits/clamp/K=1, two adjacent rows for interpolation. No other rows,
-positions or unrequested array gaps are read. Empty requests read no payload.
-Existing typed validation and actual upstream support remain explicit witnesses.
+The output is one immutable dense Value of shape input.shape+[C]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
 
-Changes to stops invalidate all dependent colors; input[p] affects color p;
-colors[j,:] changes affect observations selecting that row. Changing any component
-of a selected row can invalidate the complete output color. Descriptor/profile/
-dtype/policy changes revalidate compilation and cache identity. Preserve all
-control, color and transitive validation witnesses on cached indexes/results.
-
-Return immutable owned packed fragments containing the complete requested color
-tuples with correct global Region/storage origins and the validated color-array
-description. Complete-color expansion is declared semantic coverage, not an
-arbitrary bounding-box read. Support legal immutable arbitrary input strides,
-offsets and unaligned values. Published owners outlive context until final release;
-unpublished state is released on failure. No image geometry or color conversion
-to another primary space is inferred from shape or this output descriptor.
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 ## Reference algorithm, budgets and failures
 
@@ -268,19 +263,12 @@ Validate stops with an optional bounded Float64 index; search each required inpu
 fetch/validate selected complete colors, take exact shortcuts or evaluate the
 whole transfer/association expression using exact rational and directed-precision
 arithmetic. Accelerated libraries require final RGB error/classification guarantees
-for their declared input domains; otherwise use strict fallback and report it.
+for their declared input domains; otherwise use strict fallback. Whole does not expose fallback counters.
 Finite residual or individual pow accuracy alone does not certify the whole ramp.
 
-For M requested colors, work is O(K+M log K) lookup plus C<=4 component arithmetic
-and actual precision/refinement work. Output payload is M*C*b; a packed stop index
-is at most 8K bytes. Account selected color/source windows, descriptor copies,
-input/stop witnesses, region/index metadata, all big-number capacities and growth
-overlap, output and cached owners. No full K*C color scan or full logical output
-allocation is required. Use host workers/budgets and poll cancellation at least
-every 64 stop/color operations, inside refinements and before publication.
-Work/capacity/stage exhaustion returns ResourceExhausted; no guessed RGB, lower
-precision or unbudgeted worker/disk fallback is permitted. Cache-off keeps active
-owners and the same mathematical behavior.
+Whole storage and O(K+N log K) lookup follow the preceding execution contract.
+The RGB fixed state additionally owns the transfer/association arithmetic arena.
+Final-expression guarantees remain required for any accelerated arithmetic.
 
 | Failure | Phase and Status |
 | --- | --- |
@@ -292,10 +280,8 @@ owners and the same mathematical behavior.
 | Rounded alpha zero with nonzero strict-reference rounded RGB | Evaluation; OperationFailed / AssociationUnderflow |
 | Backend, resource, upstream/typed, cancellation or stale failure | Preserve existing host code/reason/source/scope |
 
-Attribute numerical failures to the complete color Atom. No partial channel tuple
-is published, and global stops do not retroactively revoke earlier completed
-observations. Ordinary fail-fast and eligible atom execution remain distinct.
-Bound diagnostics and include the offending color/stop/index when available.
+Attribute numerical failures to Run scope and include the offending port/row
+when available. No partial output is published.
 
 ## Acceptance and implementation status
 
@@ -317,11 +303,11 @@ AssociationUnderflow, valid all-zero underflow, invalid premultiplied sources,
 K=1, irregular stops and description mismatch.
 
 Test strict bits and accelerated final ULP separately from exact selections, complete
-color classification and fallback diagnostics. Public implementation fixtures
+color classification. Whole fallback counters are unavailable. Public implementation fixtures
 must bind all inputs, construct the explicit descriptions/parameters, execute
 through Compiler/ExecutionContext and inspect the color facet and numerical
 results using actual supplied build/run commands. Validate full-color expansion,
-remote invalid colors remaining unread, exact stop/input dirty effects, typed
+mathematically unused generic colors and full typed validation, exact stop/input dirty effects, typed
 closures, strides, low budgets, cancellation, cache-off and post-context lifetime.
 The maintained ColorArray/runtime path and current validation boundary are recorded
 below; the document remains Proposed.
@@ -333,7 +319,7 @@ below; the document remains Proposed.
 
 Public [`color_ramp_rgb_node`](../../../../include/photospider/numeric/color_ramps.hpp)
 constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its staged complete-color execution.
+implements its Whole complete-output execution.
 
 Direct, linear and gamma=2 paths use exact rational/root arithmetic.
 Other gamma and sRGB paths use certified whole-expression enclosures.
