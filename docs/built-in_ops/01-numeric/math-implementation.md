@@ -871,14 +871,16 @@ cpplint and scoped code/spec review passed.
 
 ## CRV-06 ColorArray and color ramps
 
-The 15 independent primitives provide 45 CPU-profile keys. A four-poll
-continuation reads all finite ordered stops, requested positions, then only
-selected complete color rows before publishing owned packed ColorArray tuples.
-The final channel axis is the semantic observation unit: compiler/root requests
-touching any component close to the whole color, while generic NUM consumers
-retain local Data and separately close typed Validation. Per-observation
-dependency proofs cannot borrow another Atom's validation. Joint preflight checks
-the union of declared roles before accepting complete typed transport.
+The 15 independent primitives provide 45 CPU-profile Whole keys. Nonempty
+requests collect all input arrays, validate every stop and query, then apply the
+unchanged one/two-row mathematics to every position. A complete dense ColorArray
+Value retains its facet, trailing channel closure and ICC resources; sparse
+public fragments retain that complete owner. Numeric failures affect the run;
+any input edit dirties all recorded output demand. Unused generic color rows
+stay mathematically unused, while complete upstream/typed validation can fail.
+Fixed allocator-owned arithmetic state and O(K) stop keys replace per-output
+points, dependency records and certificates. Account 8K stop element bytes plus
+metadata overhead, all collected inputs and N*C*sizeof(dtype) output payload.
 
 `ExactColorCoordinate` stores source binary64 integers in units `B=2^-1074`,
 with 144 uint64 limbs (9216 bits), 24 slots and a separate directed interval
@@ -930,10 +932,11 @@ rounded RGB produces AssociationUnderflow; otherwise transparent black is +0.
 All profiles currently return strict bits, including the accelerated RGB entries
 whose contract allows four ULP. Profile-specific integer comparisons are used;
 there is no attempted approximate transfer backend and no fabricated fallback.
-Diagnostics distinguish `exact-linear-light` and `exact-rational-pi`. RGB counts
-all component attempts before whole-color arithmetic, records copies only after
-success, and preserves attempted counts on failure. Exact state, callbacks and
-unpublished payload retire under work, capacity or cancellation failure.
+Whole callbacks do not expose DependencySession numerical counters; attempted,
+copy and fallback counts are N/A. Scalar and native NEON integer comparisons are
+retained; AVX2 remains registered for its platform. No Accelerate/SME floating
+backend or NUM-14 certificate is applied. Exact state and unpublished output
+retire under work, capacity or cancellation failure.
 
 ColorArray's canonical model/white/primary/transfer/hue/association metadata is
 independent of the Image semantic enum. Exact 8192-bit integer determinant tests
@@ -946,17 +949,56 @@ Empty color results retain required resources. Sample-only optional caches skip
 resource-bearing results. Package 0.16 requires C++ consumers to rebuild; C ABI 9
 and the existing semantic/digest version numbers remain unchanged.
 
-Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18.1.3 Strict/AVX2 passed
-1784 independent Fraction/Machin-pi and 352 RGB rational-root/Decimal cases per
-profile. These include sRGB golden bits and join neighbors, exact integer-gamma
-cancellation, extreme stops, tiny alpha with HDR premultiplied storage, subnormal
-output and a separately bounded huge-gamma example. ColorArray's 1847 exact
-metadata cases and ICC's 75 structural/MD5/SHA cases passed on both architectures.
-The public manuals inspect ownership/closure and workflow behavior, with commands
-in the [example README](../../../examples/numeric_workflow/README.md).
-These sampled cases and scoped proofs do not establish successful evaluation of
-every legal input under the fixed work/precision capacities. No integration test
-or new CTest registration is added; WSL supplies correctness evidence only.
+Native Clang 21 strict/Apple Whole runs pass 1784 independent Fraction/Machin-pi
+and 352 RGB rational-root/Decimal cases per profile, plus seven public manual
+groups. These cover strict numerical references, mixed dtype, model domains,
+RGB association, hue units, resources, arbitrary layouts, active cancellation,
+full-input typed failure and full-output budgets. Focused numeric, compiler,
+color and resource CTests pass. No new x86 or installed-package run is claimed.
+The retained accelerated allowance is contractual; bit matching in these cases
+does not replace that contract. Public commands are in the workflow README.
+
+
+CRV-06 timing on Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`, package
+0.18.0, traits 16/C ABI 9/provider 1/framing 14: N=128, K=2, Float64 ports and
+output, three channels, all queries .5, full output. XYZ/linear RGB use 0/1
+colors; sRGB checks independently rounded encoded half-light; rational CIELCh
+uses L/C=(20,2)/(80,4), hues 0/1 and 4/1, returning [50,3,RN64(2*pi)].
+One worker, cache off, payload 1 GiB, host 2 GiB, metadata/dependency state
+512 MiB each, dependency/run work 2^40, managed work default unlimited. One
+warmup plus seven samples; checks run outside timing. Before uses only the
+`3d35f5eb` ramp adapter with the current kernel. Core directly invokes the Whole
+numerical callback on complete Values, including allocation, lookup and
+publication but excluding managed work metering, collect and scheduling.
+
+Milliseconds are median [min,max]; columns distinguish public latency and core.
+
+| Path/profile | Before public | Whole public | Whole core |
+| --- | ---: | ---: | ---: |
+| xyz/strict | 3.194 [3.034,3.470] | 2.103 [1.182,6.399] | 1.316 [0.699,2.373] |
+| linear/strict | 7.492 [7.405,7.659] | 4.450 [4.397,4.579] | 2.898 [2.868,3.009] |
+| srgb/strict | 226.070 [225.548,229.811] | 187.108 [186.288,189.224] | 162.833 [162.183,163.605] |
+| rational/strict | 8.926 [8.542,9.358] | 4.230 [4.076,4.586] | 3.102 [3.058,3.325] |
+| xyz/apple | 3.077 [2.919,3.410] | 0.897 [0.887,0.938] | 0.659 [0.655,0.669] |
+| linear/apple | 7.620 [7.385,10.802] | 4.518 [4.372,4.782] | 2.987 [2.915,3.114] |
+| srgb/apple | 221.003 [218.797,222.045] | 183.314 [182.544,183.980] | 158.695 [158.174,159.236] |
+| rational/apple | 8.901 [8.674,9.230] | 4.383 [4.155,4.778] | 2.964 [2.904,3.140] |
+
+Strict XYZ has a wide sample range; its median is not a stable speed ratio.
+Metadata peaks fall from 4,104,440 to 3,088 bytes for ordinary ramps, and from
+7,123,576 to 4,064 for split rational hue. Payload peaks remain dominated by fixed
+exact state: RGB 726,960→727,976 bytes, coordinate 242,376→243,392 and rational
+242,376→243,408. Whole's full output is therefore not a payload saving claim.
+Raw driver, builds, CSV and trace are under local `build/crv-whole/ramps-*`.
+
+A 12-second Instruments Time Profiler capture of repeated Apple sRGB execution
+has 11,856 execution-stack samples: ExactRgb appears in 99.05%, directed interval
+math in 96.79%, collect in 0.02%, Footprint methods in 0.01%, and DependencySession
+in none. Inclusive percentages overlap. The largest exclusive function is
+`ExactRatioWorkspace<192>::top` at 36.91%; interval shifts, divide and memory
+operations follow. This identifies certified integer/interval arithmetic as the
+remaining bottleneck for this fixture. It does not support replacing the exact
+transfer proof or applying NUM-14's finite four-term certificate.
 
 ## CRV-07 joint three-dimensional LUT application
 

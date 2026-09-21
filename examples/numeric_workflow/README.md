@@ -167,10 +167,14 @@ The independent `rgb_ramp_oracle.py` uses rational integer-root comparisons for
 sRGB and Decimal log/exp enclosures for general gamma. It checks whole-expression
 rounding, association conversions, thresholds, HDR/negative components,
 subnormals, exact integer-gamma cancellation and invalid complete colors. Its
-huge-gamma fixture uses an analytical bound. Manual groups also cover sparse
-selected rows, a `2^38`-position constant view, exact dirty/cache replacement,
-negative/unaligned strides, descriptor mismatch, floating-environment restoration,
-Empty requests, inner RGB/pi work/cancellation, diagnostics and escaped owners.
+huge-gamma fixture uses an analytical bound. All formal keys now use Whole:
+complete input reads and typed validation, full output allocation, whole-input
+dirty scope and Run failures. Numeric selected-row rules are unchanged. Manual
+groups check sparse delivery, generic unused NaNs versus typed failures, a
+`2^38`-position full-output budget rejection, cache replacement, negative/unaligned
+and zero strides, rank-two traversal, fenv, Empty, active RGB/pi work/cancellation
+and CMYK ICC resource ownership beyond all source/compiler/context lifetimes.
+Whole has no per-observation numerical diagnostic counters; these are N/A.
 
 ```sh
 cmake --build build/numeric --target photospider_numeric_color_ramps -j 8

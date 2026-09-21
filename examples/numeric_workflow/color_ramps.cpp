@@ -15,6 +15,7 @@
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -50,7 +51,8 @@ ps::Value i64(std::vector<std::uint64_t> shape,
 }
 ps::ValueFragments run(ps::WorkflowNode node,
                        const std::vector<ps::Value>& values,
-                       ps::ColorModel expected_model) {
+                       ps::ColorModel expected_model,
+                       const ps::ResourceBindings& resources = {}) {
   ps::WorkflowDocument document;
   ps::ExecutionBindings bindings;
   for (std::size_t i = 0; i < values.size(); ++i) {
@@ -64,7 +66,7 @@ ps::ValueFragments run(ps::WorkflowNode node,
   document.outputs = {{"colors", document.nodes[0].id, "values"}};
   auto registry = ps::make_default_operation_registry();
   ps::GraphContext graph(document);
-  auto compiled = take(ps::Compiler(registry).compile(graph));
+  auto compiled = take(ps::Compiler(registry).compile(graph, {}, resources));
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.managed_resources = ps::ResourceLimits{};
@@ -350,48 +352,19 @@ void rgb_failure_isolation(ps::CpuNumericProfile profile) {
         ps::Footprint::from_regions({3, 4}, {ps::Region({{0, 3}, {0, 1}})}));
     for (bool joint : {false, true}) {
       execution.enable_joint = joint;
-      auto atoms = take(context.execute_atoms(
-          compiled.plan, bindings, {{"colors", wanted}}, {}, execution));
-      unsigned good = 0, failed = 0;
-      for (const auto& atom : atoms.atoms) {
-        require(atom.key.rank == 1, "RGB atom excludes channel axis");
-        if (atom.outcome.ok()) {
-          ++good;
-          require(underflow ? atom.key.coordinate[0] != 0
-                            : atom.key.coordinate[0] == 0,
-                  "unaffected color survives remote failure");
-        } else {
-          ++failed;
-          require(atom.outcome.status().detail.atom == atom.key &&
-                      atom.outcome.status().reason ==
-                          (underflow ? ps::FailureReason::AssociationUnderflow
-                                     : ps::FailureReason::InvalidAssociation),
-                  "complete RGB failure retains source and atom identity");
-        }
-      }
-      require(good == (underflow ? 2U : 1U) && failed == (underflow ? 1U : 2U),
-              "RGBA color failures are isolated from completed colors");
+      auto result = context.execute_fragments(
+          take(context.freeze(compiled.plan, bindings)), {{"colors", wanted}},
+          {}, execution);
+      require(!result.ok() &&
+                  result.status().detail.scope == ps::FailureScope::Run &&
+                  result.status().reason ==
+                      (underflow ? ps::FailureReason::AssociationUnderflow
+                                 : ps::FailureReason::InvalidAssociation),
+              "Whole RGB failure retains classification at Run scope");
     }
   }
-  std::cout << "RGB atom outcomes: component request, invalid alpha, "
-               "association underflow, completed-color isolation PASS\n";
-}
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& values) {
-  const auto pending = take(session->pending_reads());
-  std::vector<ps::ValueFragments> ready;
-  for (std::size_t port = 0; port < values.size(); ++port) {
-    auto wanted = take(ps::Footprint::none(values[port].descriptor().shape));
-    for (const auto& read : pending)
-      if (read.port == port)
-        wanted = take(wanted.unite(read.samples));
-    ready.push_back(take(ps::ValueFragments::create(
-        values[port].descriptor(), values[port].facets(), wanted,
-        {values[port]}, {}, request.resources)));
-  }
-  require(session->supply(std::move(ready), request.snapshot_identity).ok(),
-          "supply exact color-ramp transport");
+  std::cout << "RGB Whole outcomes: component request, invalid alpha, "
+               "association underflow and Run failure PASS\n";
 }
 void interruption(ps::CpuNumericProfile profile, bool rgb = false) {
   ps::numeric::HueRampOptions options;
@@ -412,72 +385,16 @@ void interruption(ps::CpuNumericProfile profile, bool rgb = false) {
         ps::WorkflowInputReference{3}, ps::ElementType::Float64,
         ps::numeric::color_ramp_rgb_description(), rgb_options));
   }
-  auto registry = ps::make_default_operation_registry();
-  const std::vector<ps::Value> values{f64({1}, {.5}), f64({2}, {0, 1}),
+  const std::vector<ps::Value> values{f64({256}, std::vector<double>(256, .5)),
+                                      f64({2}, {0, 1}),
                                       rgb ? f64({2, 3}, {0, 0, 0, 1, 1, 1})
                                           : f64({2, 3}, {20, 2, 0, 80, 4, 4})};
-  ps::DependencyRequest request;
-  for (const auto& value : values)
-    request.inputs.push_back({value.descriptor(), value.facets()});
-  request.parameters = node.parameters;
-  request.outputs = take(ps::Footprint::all({1, 3}));
-  request.snapshot_identity = "manual-ramp-stop";
-  request.limits.maximum_work = 100000000;
-  for (bool cancel : {false, true}) {
-    ps::ResourceBudget root;
-    ps::CancellationSource cancellation;
-    request.cancellation = cancellation.token();
-    bool armed = false, observed = false;
-    std::shared_ptr<ps::DependencySession> session;
-    session = take(registry->start_dependency(
-        node.operation, request, root.allocator(), [&](std::uint64_t count) {
-          if (armed && count == 192 &&
-              session->numeric_diagnostics().evaluated_values == 3) {
-            observed = true;
-            if (cancel)
-              cancellation.cancel();
-            else
-              return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                "manual color arithmetic work limit",
-                                ps::FailureReason::WorkLimit};
-          }
-          return ps::Status::success();
-        }));
-    for (unsigned stage = 0; stage < 3; ++stage) {
-      require(session->poll(root.allocator()).ok(), "color-ramp staged Need");
-      supply(session, request, values);
-    }
-    armed = true;
-    auto failed = session->poll(root.allocator());
-    require(
-        observed && !failed.ok() &&
-            failed.status().code == (cancel ? ps::ErrorCode::Cancelled
-                                            : ps::ErrorCode::ResourceExhausted),
-        "certified color arithmetic honors inner cancellation/work failure");
-    require(session->numeric_diagnostics().evaluated_values == 3 &&
-                session->numeric_diagnostics().copied_elements == (rgb ? 0 : 2),
-            "failed color counts actual attempts but publishes no tuple");
-    require(
-        session->numeric_diagnostics().profile == profile &&
-            std::string(session->numeric_diagnostics().implementation.data())
-                    .find(rgb ? "exact-linear-light" : "exact-rational-pi") !=
-                std::string::npos,
-        "color arithmetic diagnostics retain profile and implementation "
-        "identity");
-    session.reset();
-    require(root.statistics().live[ps::ResourceKind::Payload] == 0,
-            "failed color releases state and unpublished channels");
-  }
-  request.cancellation = {};
-  request.outputs = take(ps::Footprint::none({1, 3}));
-  auto empty = take(registry->start_dependency(node.operation, request));
-  require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-              empty->poll_count() == 0,
-          "Empty color ramp reads no input");
+  point_math_checks::resources(node, values, 256 * 3 * 8);
   std::cout << (rgb ? "RGB" : "polar")
-            << " ramp resources: Empty, inner certified math work/cancel, "
-               "failed diagnostics and state release PASS\n";
+            << " ramp Whole work/payload/workspace, active cancellation and "
+               "release PASS\n";
 }
+
 void sparse_and_dirty(ps::CpuNumericProfile profile) {
   ps::numeric::ColorRampOptions options;
   options.profile = profile;
@@ -512,13 +429,20 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
       take(ps::Footprint::from_regions({3, 3}, {ps::Region({{0, 2}, {1, 1}})}));
   const auto complete =
       take(ps::Footprint::from_regions({3, 3}, {ps::Region({{0, 2}, {0, 3}})}));
-  const auto selected =
-      take(ps::Footprint::from_regions({4, 3}, {ps::Region({{0, 2}, {0, 3}})}));
+  auto failed = context.execute_fragments(frozen, {{"colors", wanted}});
+  require(!failed.ok() &&
+              failed.status().reason == ps::FailureReason::InvalidDomain &&
+              failed.status().detail.scope == ps::FailureScope::Run,
+          "unrequested query NaN fails Whole execution");
+  values[0] = f64({3}, {0, .5, 0});
+  bindings.inputs[0].value = values[0];
+  frozen = take(context.freeze(compiled.plan, bindings));
   auto result = take(context.execute_fragments(frozen, {{"colors", wanted}}));
-  require(
-      result.values.at("colors").coverage() == complete &&
-          take(result.dependencies.source_support()).at("input2") == selected,
-      "unselected NaN rows and positions are not read");
+  require(result.values.at("colors").coverage() == complete &&
+              take(result.dependencies.source_support()).at("input2") ==
+                  take(ps::Footprint::all({4, 3})),
+          "Whole transport reads all colors; unused generic NaN rows stay "
+          "mathematically unused");
   auto packed = take(result.values.at("colors").collect(complete.boxes()[0],
                                                         ps::BufferAllocator{}));
   const std::vector<double> expected{0, 1, 2, 5, 6, 7};
@@ -527,9 +451,23 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
   const auto edit =
       take(ps::Footprint::from_regions({4, 3}, {ps::Region({{1, 1}, {2, 1}})}));
   const auto dirty = take(result.dependencies.potential_dirty("input2", edit));
-  require(dirty.at("colors") == take(ps::Footprint::from_regions(
-                                    {3, 3}, {ps::Region({{1, 1}, {0, 3}})})),
-          "selected component edit dirties its whole dependent color only");
+  require(dirty.at("colors") == complete,
+          "any input edit dirties the complete recorded output demand");
+  auto typed_bindings = bindings;
+  typed_bindings.inputs[2].value = take(ps::Value::from_storage(
+      values[2].descriptor(), values[2].region(), values[2].layout(),
+      values[2].storage(), {take(ps::encode_color_array({}))}));
+  auto typed_document = document;
+  typed_document.inputs[2].facets = typed_bindings.inputs[2].value.facets();
+  ps::GraphContext typed_graph(typed_document);
+  auto typed_plan = take(ps::Compiler(registry).compile(typed_graph));
+  auto typed_frozen = context.freeze(typed_plan.plan, typed_bindings);
+  auto typed_result = typed_frozen.ok()
+                          ? context.execute_fragments(typed_frozen.value(),
+                                                      {{"colors", wanted}})
+                          : ps::Result<ps::DemandResult>(typed_frozen.status());
+  require(!typed_result.ok(),
+          "unused invalid typed ColorArray row fails full input validation");
   auto demand = take(context.open_demand(compiled.plan, bindings));
   take(demand.request({{"colors", wanted}}));
   require(take(demand.request({{"colors", wanted}})).diagnostics.cache_hits > 0,
@@ -543,9 +481,7 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
               component == 10,
           "cache invalidation observes edited stop color");
   require(demand.release({{"colors", wanted}}).ok(), "partial demand release");
-  // A rank-1 position source with a huge logical shape uses one broadcast byte
-  // owner; only the final requested position and its three output channels
-  // exist.
+  // A broadcast source still requires a complete Whole output allocation.
   const auto extent = UINT64_C(1) << 38;
   auto seed = f64({1}, {.5});
   document.inputs[0] = {
@@ -560,14 +496,16 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
   auto huge_frozen = take(context.freeze(huge_plan.plan, bindings));
   const auto corner = take(ps::Footprint::from_regions(
       {extent, 3}, {ps::Region({{extent - 1, 1}, {2, 1}})}));
-  auto last =
-      take(context.execute_fragments(huge_frozen, {{"colors", corner}}));
-  require(last.values.at("colors").read({extent - 1, 0}, &component, 8).ok() &&
-              component == 10,
-          "sparse 2^38-position broadcast composition");
+  auto last = context.execute_fragments(huge_frozen, {{"colors", corner}});
+  require(!last.ok() && last.status().code == ps::ErrorCode::ResourceExhausted,
+          "sparse giant request rejects complete Whole output allocation");
+  auto empty = take(context.execute_fragments(
+      frozen, {{"colors", take(ps::Footprint::none({3, 3}))}}));
+  require(empty.values.at("colors").coverage().empty(),
+          "Empty has no sample output");
   std::cout
-      << "color ramp workflow: sparse rows, complete dirty support, cache "
-         "replacement and 2^38-position view PASS\n";
+      << "color ramp workflow: complete inputs/dirty scope, sparse delivery, "
+         "cache replacement, Empty and giant output budget PASS\n";
 }
 ps::Value reversed(const ps::Value& source) {
   const auto width = ps::Value::element_size(source.descriptor().element_type);
@@ -597,13 +535,12 @@ void strides_and_metadata(ps::CpuNumericProfile profile) {
   const std::vector<ps::Value> values{reversed(f64({2}, {0, .5})),
                                       reversed(f64({2}, {0, 1})),
                                       reversed(colors)};
-  ps::DependencyRequest request;
-  for (const auto& value : values)
-    request.inputs.push_back({value.descriptor(), value.facets()});
-  request.parameters = node.parameters;
-  request.outputs = take(ps::Footprint::all({2, 3}));
-  request.snapshot_identity = "manual-ramp-strided";
-  request.limits.maximum_work = 100000000;
+  std::vector<ps::OperationMetadata> metadata;
+  std::vector<ps::Region> demands;
+  for (const auto& value : values) {
+    metadata.push_back({value.descriptor(), value.facets()});
+    demands.push_back(value.region());
+  }
   for (int mode : {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO}) {
     fenv_t saved;
     require(fegetenv(&saved) == 0, "save ramp fenv");
@@ -611,22 +548,42 @@ void strides_and_metadata(ps::CpuNumericProfile profile) {
                 feraiseexcept(FE_INEXACT) == 0,
             "set ramp fenv");
     const int flags = fetestexcept(FE_ALL_EXCEPT);
-    auto session = take(registry->start_dependency(node.operation, request));
-    for (unsigned stage = 0; stage < 3; ++stage) {
-      require(session->poll().ok(), "strided ramp Need");
-      supply(session, request, values);
-    }
-    auto result = take(session->poll());
-    check(std::get<ps::DependencyResult>(result).value, {1, 2, 3, 5, 6, 7});
+    ps::ResourceBudget budget(ps::ResourceLimits{});
+    ps::ResourceAllocationScope scope(budget);
+    ps::OperationInvocation call(values, demands, node.parameters,
+                                 ps::Backend::Cpu, {},
+                                 ps::Region::whole({2, 3}), budget.allocator());
+    auto output = take(registry->invoke(node.operation, call));
+    check(take(ps::ValueFragments::create(output.descriptor(), output.facets(),
+                                          take(ps::Footprint::all({2, 3})),
+                                          {output})),
+          {1, 2, 3, 5, 6, 7});
     require(fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == flags,
             "ramp preserves caller rounding and flags");
     require(fesetenv(&saved) == 0, "restore ramp fenv");
   }
+  auto broadcast = values;
+  auto seed = f64({1}, {.5});
+  broadcast[0] = take(ps::Value::from_storage(
+      {ps::ElementType::Float64, {2, 2}}, ps::Region::whole({2, 2}),
+      {0, {0, 0}}, seed.storage()));
+  demands[0] = broadcast[0].region();
+  ps::OperationInvocation broadcast_call(broadcast, demands, node.parameters,
+                                         ps::Backend::Cpu, {},
+                                         ps::Region::whole({2, 2, 3}));
+  auto broadcast_result =
+      take(registry->invoke(node.operation, broadcast_call));
+  const std::vector<double> expected{5, 6, 7, 5, 6, 7, 5, 6, 7, 5, 6, 7};
+  require(
+      std::memcmp(broadcast_result.bytes().data(), expected.data(), 96) == 0,
+      "rank-two zero-stride input resets after validation and preserves output "
+      "order");
   ps::ColorArrayDescriptor different;
   different.model = ps::ColorModel::Cielab;
   different.white = ps::color_white_d50();
-  request.inputs[2].facets = {take(ps::encode_color_array(different))};
-  auto mismatched = registry->start_dependency(node.operation, request);
+  metadata[2].facets = {take(ps::encode_color_array(different))};
+  auto mismatched =
+      registry->resolve_traits(node.operation, metadata, node.parameters);
   require(!mismatched.ok() &&
               mismatched.status().code == ps::ErrorCode::TypeMismatch,
           "source description conflict fails preflight");
@@ -687,6 +644,24 @@ void examples(ps::CpuNumericProfile profile) {
              i64({2}, {INT64_MAX, INT64_MIN}), i64({2}, {1, 1})},
             ps::ColorModel::Cielch),
         {50, 3, -.5});
+  auto cmyk = [&] {
+    ps::ResourceBudget root;
+    auto bytes = numeric_fixture::fixture();
+    auto icc = take(ps::IccProfile::import({bytes.data(), bytes.size()}, root));
+    auto resources = take(ps::ResourceBindings::create({icc}, root));
+    auto cmyk_node = take(ps::numeric::color_ramp_cmyk_node(
+        1, q, s, c, ps::ElementType::Float64,
+        ps::numeric::color_ramp_cmyk_description(icc.identity()), options));
+    return run(cmyk_node, {query, stops, f64({2, 4}, {0, 0, 0, 0, 1, 1, 1, 1})},
+               ps::ColorModel::Cmyk, resources);
+  }();
+  check(cmyk, {.5, .5, .5, .5});
+  const auto cmyk_description =
+      take(ps::decode_color_array(cmyk.facets().front()));
+  require(cmyk_description.profile &&
+              cmyk.resources().icc_profile(*cmyk_description.profile).ok(),
+          "CMYK output retains ICC owner after compiler/context/source "
+          "destruction");
   std::cout
       << "color ramp public workflows: XYZ/Lab, complete-row zero signs, "
          "unwrapped pi, achromatic hue, INT64 rational cancellation PASS\n";

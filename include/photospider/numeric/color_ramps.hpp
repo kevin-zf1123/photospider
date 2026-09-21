@@ -157,20 +157,24 @@ inline Result<WorkflowNode> node(
  * may be used concurrently; invalid options fail
  * InvalidArgument/InvalidDomain/Schema. Allocation may throw bad_alloc.
  * Descriptor/edge conflicts fail TypeMismatch during compilation. Nonempty
- * runtime requests validate all finite strictly increasing stops, then only
- * requested finite positions and selected one/two complete color rows. Output
- * values has shape S+[C], retains its ColorArray interpretation/resources, and
- * closes component requests to complete colors. Empty reads no sample data.
- * Required typed/upstream validation remains explicit in support and dirty
- * maps. Domain, nonfinite and association failures affect the whole color Atom.
- * Exact interpolation rounds only at destination; direct/complete-identical
- * rows keep converted zero signs, mixed exact zeros are +0. RGB alone decodes
- * and encodes transfer with exact alpha; other models interpolate their own
- * coordinates. Polar hue is unwrapped, including zero chroma/saturation, with
- * certified pi unit conversion. No gamut clipping, model conversion, adaptation
- * or ICC CMM. Host work/capacity/stage/cancellation bounds apply to every
- * refinement; an unfinished proof fails ResourceExhausted. Immutable outputs
- * outlive contexts.
+ * runtime requests collect all inputs and validate all finite strictly
+ * increasing stops, then every finite position before selected one/two
+ * color-row mathematics. Output values is a complete dense S+[C] Value,
+ * retaining ColorArray metadata and resources. Component requests close to
+ * complete colors; fragments retain the full output owner. Empty reads no
+ * sample data. Typed/upstream validation covers whole inputs; any input edit
+ * invalidates the complete recorded output demand. Numeric failures have Run
+ * scope. Unused generic color rows remain mathematically unused, but
+ * upstream/typed failures anywhere are observable. Full-input collect,
+ * full-output payload, fixed arithmetic workspace and O(K) stop storage must
+ * fit host budgets, including for small requested regions. Exact interpolation
+ * rounds only at destination; direct/complete-identical rows keep converted
+ * zero signs, mixed exact zeros are +0. RGB alone decodes and encodes transfer
+ * with exact alpha; other models interpolate their own coordinates. Polar hue
+ * is unwrapped, including zero chroma/saturation, with certified pi unit
+ * conversion. No gamut clipping, model conversion, adaptation or ICC CMM. Host
+ * work/capacity/stage/cancellation bounds apply to every refinement; an
+ * unfinished proof fails ResourceExhausted. Immutable outputs outlive contexts.
  */
 /** @brief Linear-light RGB/RGBA; default description is three-channel sRGB. */
 inline Result<WorkflowNode> color_ramp_rgb_node(

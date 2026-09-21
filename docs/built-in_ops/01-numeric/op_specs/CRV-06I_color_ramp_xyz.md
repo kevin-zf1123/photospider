@@ -68,20 +68,33 @@ must be finite; no spurious intermediate overflow may reject a representable res
 
 ## Demand, resources and failures
 
-Inherit CRV-06C's complete-color observation domain (input.shape), global stop
-validation, requested position reads, exactly one/two complete selected color
-rows, explicit typed/upstream closures, exact dirty witnesses and cache identity.
-Any channel request observes the full XYZ tuple. Empty Q reads no dynamic data;
-unselected invalid colors are not observed. Both rows remain dependencies for
-an identical-color shortcut. Descriptor/white identity is retained in caching.
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
 
-Immutable arbitrary strides, offsets and unaligned input are supported. Return
-packed full-color fragments with correct global Region/storage origins and
-owners surviving context teardown. Output payload is 3*M*sizeof(dtype) for M
-requested colors; lookup work O(K+M log K) plus exact arithmetic and optional
-8K-byte stop lookup. Budget all backing owners, windows, descriptor data,
-exact limbs and scratch growth. Inherit bounded cancellation, capacity/work/stage,
-cache-off and atomic failed-color publication from CRV-06C.
+The output is one immutable dense Value of shape input.shape+[C]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
+
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 Malformed descriptors, white/scale and statics fail preflight with
 InvalidArgument/InvalidDomain; shape/dtype or description mismatch uses TypeMismatch.
@@ -96,7 +109,7 @@ Fixture: stops=[0,1], colors=[[0,0,0],[0.5,1,1.5]], input=[0.5]
 returns [[0.25,0.5,0.75]] with the selected relative-XYZ/white description.
 Use independent exact rational interpolation and destination rounding, negative
 values, HDR, extreme cancellation, mixed dtype, direct signed zeros, white/scale
-mismatches, full-color request expansion, remote invalid rows, exact dirty mapping,
+mismatches, full-color request expansion, remote invalid rows, whole-input dirty mapping,
 strides, low budgets, cancellation, cache-off and owner lifetime acceptance.
 
 Existing XYZ image/model conversion support does not implement this generic
@@ -110,10 +123,10 @@ checked values/metadata are linked below; the document remains Proposed.
 
 Public [`color_ramp_xyz_node`](../../../../include/photospider/numeric/color_ramps.hpp)
 constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its staged complete-color execution.
+implements its Whole complete-output execution.
 
 All profiles use exact rational component interpolation and return strict
-bits, with one destination rounding. Complete-color metadata and regional
+bits, with one destination rounding. Complete-color metadata and complete-input typed
 validation remain attached to the result.
 
 See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),

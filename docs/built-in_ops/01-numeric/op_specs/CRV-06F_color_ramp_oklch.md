@@ -49,13 +49,13 @@ L*/C* with OKLab L/C and configurable white with fixed D65. Specifically:
   retaining multiple turns. There is no hue_path or normalization parameter.
 - C=0 never discards hue. Unit conversion and interpolation are performed as
   one mathematical formula with final correct rounding; all versions match bits.
-- Stops are globally validated; selected complete color rows alone are read.
+- All inputs are collected under Whole; selected complete rows define the mathematics.
   Any channel request observes the full color, including rational numerator and
   denominator, and carries an output OKLCh/D65/hue-unit description.
 
 Attached descriptions must match the explicit input model and hue representation;
 CIELCh descriptors cannot be relabeled as OKLCh. Rational L/C ports alone are not
-complete ColorArrays. All shapes, immutable owners, exact dirty support,
+complete ColorArrays. All shapes, immutable owners, Whole dirty support,
 cancellation and publication scopes are inherited without relaxation.
 
 ## Acceptance and entrypoints
