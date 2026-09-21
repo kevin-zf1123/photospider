@@ -14,7 +14,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
+implementation_base_commit: 3d35f5eb
 implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
@@ -48,7 +48,7 @@ default Float64. Knot x values are finite and strictly increasing. Query order
 and repetition are unrestricted; preserve query order in output.
 
 For every nonempty output request, read and validate the complete x array and
-read only requested query entries. The PCHIP-specific y support and numerical
+collect complete y/query and evaluate every query entry. The PCHIP-specific y support and numerical
 profile below replace linear's two-endpoint support and accelerated bit equality.
 Output facets are empty, no axis output is added and no units are inferred.
 All inputs support the same legal immutable stride/offset layouts as linear.
@@ -91,17 +91,17 @@ in segment j, read y[max(0,j-1):min(K,j+3)], sufficient to construct its two
 endpoint derivatives. At the left or right exterior tangent, read the first or
 last min(K,3) y values respectively. K=2 reduces to a straight line.
 
-Do not read or numerically validate other y entries. Global x validation and
-requested query support remain unchanged. This fixed local support is retained
+Do not include other y entries in the mathematical formula or its finite checks.
+Whole input collection and typed validation remain complete. This local stencil is retained
 even when a slope branch returns zero; input-value shortcuts do not remove its
 declared contributing y dependencies. Precise numeric validation is separate.
 
 ## Confirmed finite-value and zero rules
 
-All actually read y/query values and the final output must be finite. Negative
+All mathematically used y and all query values and the final output must be finite. Negative
 and greater-than-one finite values are allowed. Nonfinite demanded input and
-output overflow fail the affected observation, while unselected y/query errors
-are not evaluated. Exact node hits and clamp correctly convert that y to output
+output overflow fail the run. All query rows are evaluated; generic y values
+outside every mathematical stencil remain numerically unused. Exact node hits and clamp correctly convert that y to output
 dtype and retain its zero sign in every profile.
 
 Otherwise, if the exact curve result is zero, return -0 only when both endpoint
@@ -166,7 +166,8 @@ zero classification/sign. Accelerated outputs obey the shared final FP32-scaled 
 evaluation for zero, FP32-subnormal-range or out-of-FP32-range references. Exact knot and clamp conversions match strict bits.
 
 If a fast path cannot guarantee quality, shape and special-value rules together,
-fall back to strict and report actual fallback counts/reasons. The combined
+fall back to strict. Whole execution does not expose per-value fallback counters;
+zero diagnostic counters must not be interpreted as zero fallbacks. The combined
 fast/fallback function must itself meet the cross-query monotonicity contract;
 checking a single approximate value against endpoints is insufficient. Do not
 sort or repair a requested batch to create apparent monotonicity. Budget
@@ -175,51 +176,43 @@ Exterior tangent extrapolation has no interior endpoint-range bound.
 
 ## Demand, invalidation and ownership
 
-Use x[0:K] as global Control/Validation and requested query indices Q as Control.
-Reject invalid x before segment lookup, and invalid query before dependent y
-reads. The y Data set is exactly the union from the local support section. For
-K=3 the first/last segment each needs three y values; for K=2 only two. Read the
-full fixed local stencil even when a derivative becomes zero, and never infer
-additional y demand from an optional full-slope precomputation. A domain reject
-reads no y. Empty Q reads no payload.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
 
-Retain recognized typed Validation closure and all source/control versions.
-Changed x invalidates all retained observations; changed query[i] invalidates
-values[i]; changed y[k] invalidates only observations whose local stencil or
-selected knot contains k, plus typed-validation effects. Exact node/clamp paths
-do not acquire neighbor-y dependencies. Shared slope/index caches retain their
-precise x/y/query witnesses and consume host resources. Runtime upstream Whole
-support is separate from the declared local support and retains its own failures.
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
 
-Output is immutable packed owned fragments at requested global indices with
-correct Region/storage origins. No whole-N allocation, missing zero or writable
-alias is introduced. Output inference is static; owners survive context teardown
-until final release. Reuse or fallback cannot erase read witnesses.
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
 
 ## Algorithms, resources and errors
 
-The reference scans all x, constructs an optional budgeted x index, searches each
-query, gathers its exact y stencil and evaluates exact slopes/formula. A slope
-cache is optional; it cannot read unrelated y to fill itself. Search work is
-O(K+M log K) for M requested outputs, plus slope/evaluation arithmetic and typed
-validation. At most min(K,4M) distinct y indices are required. Packed x capacity
-is at most 8K bytes; requested output payload is b*M. Also account source owners,
-active exact slopes, secants, limb growth, segment/dedup metadata and certificates.
-No bounded iteration count or fixed libm precision substitutes for correct rounding.
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
 
-Use host workers/admission and cancellation before reads, at least every 64
-knots/queries, within long arithmetic and before publication. Preserve the
-floating environment. If available precision/work/capacity cannot resolve the
-required result, fail explicitly rather than clipping an unproved approximation.
-Cache-off preserves active ownership. No unbudgeted disk, thread pool or full
-source/slope/output materialization is implied.
-
-Use CRV-01A's explicit error table and Atom/publication rules: nonfinite demanded
-data, invalid x topology or reject-domain query is OperationFailed/InvalidDomain;
-actual destination overflow is OperationFailed/ArithmeticOverflow. Correctly
-defined slopes do not add a DivideByZero error: branch zero secants before the
-harmonic expression. Backend/resource/cancellation/typed/upstream statuses retain
-their identities. No failed observation publishes a partial successful Value.
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
 
 ## Acceptance and verification scope
 
@@ -240,11 +233,11 @@ Verify endpoint conversion overflow does not reject a finite interior result.
 Strict compares bits; accelerated checks final ULP, exact node/zero outcomes and
 monotonicity/no-overshoot jointly. Evaluate adjacent representable queries around
 knots and extrema, both independently and in changed request partitions. Exercise
-the actual fast/strict boundary and fallback diagnostics, rather than assuming
+the actual fast/strict boundary, rather than assuming
 a sampled numerical test alone proves all-input shape preservation.
 
-Read logs must show global x, requested query and the exact local y set, including
-single-y node/clamp paths and ignored remote nonfinite y. Test source invalidation,
+Read logs must show complete x/y/query collection. Separately verify mathematical
+single-y node/clamp selection and unused generic nonfinite y. Test source invalidation,
 strides, low budgets, cancellation, cache-off and owner lifetime. These are target
 acceptance requirements, not executed product/platform performance claims.
 
@@ -268,8 +261,8 @@ keys. The public `photospider/numeric/curves.hpp` constructor is
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;
 unresolved cases use exact fallback. Exact cross products identify collinear
-PCHIP stencils and reduce them to the linear formula. Global x validation, requested query rows and the
-local y stencil follow the demand contract above.
+PCHIP stencils and reduce them to the linear formula. Complete input collection, Run failures and complete-output allocation follow
+the Whole contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and actual platform acceptance.

@@ -16,6 +16,7 @@
 
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -234,29 +235,29 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
          array(Type::Float64, {5}, {0, raw(.5), raw(2.5), raw(4), nan})});
     auto demand = region(
         {5, 2}, {ps::Region({{0, 2}, {0, 1}}), ps::Region({{3, 1}, {0, 1}})});
+    auto failure = fixture.run({{"values", demand}}, false);
+    require(!failure.ok() &&
+                failure.status().reason == ps::FailureReason::InvalidDomain &&
+                failure.status().detail.scope == ps::FailureScope::Run,
+            "unrequested column/query failure covers Whole run");
+    fixture.bindings.inputs[1].value =
+        doubles({5, 2}, {0, 0, 1, 1, 4, 4, 9, 9, 16, 16});
+    fixture.bindings.inputs[2].value = doubles({5}, {0, .5, 2.5, 4, 3});
     auto result = take(fixture.run({{"values", demand}}, false));
     auto support = take(result.dependencies.source_support());
     require(support.at("input0") == take(ps::Footprint::all({5})) &&
-                support.at("input2") ==
-                    region({5}, {ps::Region({{0, 2}}), ps::Region({{3, 1}})}) &&
-                support.at("input1") ==
-                    region({5, 2}, {ps::Region({{0, pchip ? 3U : 2U}, {0, 1}}),
-                                    ps::Region({{4, 1}, {0, 1}})}),
-            "curve exact global x / projected query / column-local y");
-    require(take(result.dependencies.potential_dirty(
-                     "input1", region({5, 2}, {ps::Region({{0, 5}, {1, 1}})})))
-                .at("values")
-                .empty(),
-            "unrequested columns do not dirty result");
-    require(take(result.dependencies.potential_dirty(
-                     "input1", region({5, 2}, {ps::Region({{3, 1}, {0, 1}})})))
-                .at("values")
-                .empty(),
-            "remote y outside selected stencil");
-    require(take(result.dependencies.potential_dirty(
-                     "input0", region({5}, {ps::Region({{4, 1}})})))
-                    .at("values") == demand,
-            "global x dirty all selected outputs");
+                support.at("input2") == take(ps::Footprint::all({5})) &&
+                support.at("input1") == take(ps::Footprint::all({5, 2})),
+            "Whole collects complete x/y/query");
+    for (const auto& name : {"input0", "input1", "input2"}) {
+      auto dirty = name == std::string("input1")
+                       ? region({5, 2}, {ps::Region({{3, 1}, {1, 1}})})
+                       : region({5}, {ps::Region({{4, 1}})});
+      require(
+          take(result.dependencies.potential_dirty(name, dirty)).at("values") ==
+              demand,
+          "any input change dirties recorded Whole demand");
+    }
     std::uint64_t value = 0;
     require(result.values.at("values").read({1, 0}, &value, 8).ok() &&
                 value == raw(pchip ? .3125 : .5),
@@ -265,11 +266,6 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
     require(result.values.at("values").read({3, 0}, &value, 8).ok() &&
                 value == raw(16),
             "escaped packed result");
-    auto all =
-        fixture.run({{"values", take(ps::Footprint::all({5, 2}))}}, false);
-    require(!all.ok() && all.status().code == ps::ErrorCode::OperationFailed &&
-                all.status().reason == ps::FailureReason::InvalidDomain,
-            "demanded invalid query fails");
     fixture.bindings.inputs[0].value =
         array(Type::Float64, {5}, {0, raw(1), raw(2), raw(3), nan});
     auto badx = fixture.run(
@@ -277,7 +273,7 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
     require(
         !badx.ok() &&
             badx.status().message.find("port=0 index=4") != std::string::npos &&
-            badx.status().detail.atom->coordinate[0] == 0,
+            badx.status().detail.scope == ps::FailureScope::Run,
         "remote invalid x precedes lookup");
     for (const auto& bad_knots : {std::vector<double>{0, 1, 2, 3, 3},
                                   std::vector<double>{0, 1, 2, 4, 3}}) {
@@ -296,75 +292,40 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
         {doubles({3}, {0, 1, 2}),
          array(Type::Float64, {3, 2}, {0, nan, raw(1), nan, raw(4), nan}),
          doubles({1}, {.5})});
-    ps::GraphContext graph(isolated.document);
-    auto compiled = take(ps::Compiler(isolated.registry).compile(graph));
-    ps::ExecutionContextConfig config;
-    config.cpu_workers = 1;
-    config.managed_resources = ps::ResourceLimits{};
-    ps::ExecutionContext context(isolated.registry, config);
-    ps::ExecutionOptions options;
-    options.maximum_dependency_work = 64 * 1024 * 1024;
-    options.dependencies.maximum_work = 32 * 1024 * 1024;
-    auto outcomes = take(context.execute_atoms(
-        compiled.plan, isolated.bindings,
-        {{"values", take(ps::Footprint::all({1, 2}))}}, {}, options));
-    unsigned good = 0, bad = 0;
-    for (const auto& atom : outcomes.atoms) {
-      if (atom.outcome.ok()) {
-        ++good;
-        require(atom.key.coordinate[1] == 0, "good column");
-      } else {
-        ++bad;
-        require(
-            atom.key.coordinate[1] == 1 &&
-                atom.outcome.status().detail.atom == atom.key &&
-                atom.outcome.status().code == ps::ErrorCode::OperationFailed,
-            "bad column Atom identity");
-      }
-    }
-    require(good == 1 && bad == 1, "one good and one bad column");
+    auto bad = isolated.run(
+        {{"values", region({1, 2}, {ps::Region({{0, 1}, {0, 1}})})}}, false);
+    require(!bad.ok() && bad.status().detail.scope == ps::FailureScope::Run,
+            "bad unrequested column fails complete output");
+    Fixture selected(
+        authored(pchip, false, profile),
+        {doubles({3}, {0, 1, 2}), array(Type::Float64, {3}, {raw(7), nan, nan}),
+         doubles({1}, {0})});
+    auto exact =
+        take(selected.run({{"values", take(ps::Footprint::all({1}))}}, false));
+    require(
+        exact.values.at("values").read({0}, &value, 8).ok() && value == raw(7),
+        "generic unused y NaN remains outside mathematical knot selection");
   }
-  std::cout << "sparse global x / projected query / local y, dirty, lifetime "
-               "and column Atom isolation passed\n";
-}
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Footprint> wanted;
-  for (const auto& input : inputs)
-    wanted.push_back(take(ps::Footprint::none(input.descriptor().shape)));
-  for (const auto& need : take(session->pending_reads()))
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-  std::vector<ps::ValueFragments> supplied;
-  for (unsigned i = 0; i < inputs.size(); ++i) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[i].descriptor(), inputs[i].facets(),
-        take(ps::Footprint::all(inputs[i].descriptor().shape)), {inputs[i]}));
-    supplied.push_back(take(all.restrict(wanted[i])));
-  }
-  require(session->supply(supplied, request.snapshot_identity).ok(),
-          "curve exact supply");
+  std::cout
+      << "Whole support/dirty/failure, selected-knot NaN and lifetime passed\n";
 }
 ps::ValueFragments direct(
     const std::shared_ptr<ps::OperationRegistry>& registry,
     const ps::WorkflowNode& node, const std::vector<ps::Value>& inputs,
     const ps::Footprint& outputs) {
-  ps::DependencyRequest request;
+  std::vector<ps::Region> demands;
   for (const auto& v : inputs)
-    request.inputs.push_back({v.descriptor(), v.facets()});
-  request.parameters = node.parameters;
-  request.snapshot_identity = "curve-direct";
-  request.outputs = outputs;
-  request.limits.maximum_work = UINT64_C(2048) * 1024 * 1024;
+    demands.push_back(v.region());
   ps::ResourceBudget budget(ps::ResourceLimits{});
-  auto session = take(
-      registry->start_dependency(node.operation, request, budget.allocator()));
-  for (;;) {
-    auto progress = take(session->poll());
-    if (auto* result = std::get_if<ps::DependencyResult>(&progress))
-      return result->value;
-    supply(session, request, inputs);
-  }
+  ps::ResourceAllocationScope scope(budget);
+  ps::OperationInvocation call(
+      inputs, demands, node.parameters, ps::Backend::Cpu, {},
+      ps::Region::whole(outputs.shape()), budget.allocator());
+  auto value = take(registry->invoke(node.operation, call));
+  auto full = take(ps::ValueFragments::create(
+      value.descriptor(), value.facets(),
+      take(ps::Footprint::all(value.descriptor().shape)), {value}));
+  return take(full.restrict(outputs));
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   auto bytes = value.bytes();
@@ -418,6 +379,18 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
                   "strided result read");
           require(v == expected[i], "strided curve bits");
         }
+        auto narrow = direct(
+            registry, authored(pchip, true, profile, ps::ElementType::Float32),
+            inputs, take(ps::Footprint::all({2, 2})));
+        for (unsigned i = 0; i < 4; ++i) {
+          double wanted = 0;
+          std::memcpy(&wanted, &expected[i], 8);
+          const float wanted32 = static_cast<float>(wanted);
+          std::uint32_t bits = 0, got = 0;
+          std::memcpy(&bits, &wanted32, 4);
+          require(narrow.read({i / 2, i % 2}, &got, 4).ok() && got == bits,
+                  "Float32 Whole fenv/layout bits");
+        }
         require(
             fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
             "unchanged curve fenv");
@@ -440,84 +413,18 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
               "repeated result read");
       require(v == raw(7), "zero stride y");
     }
+    Fixture fixture(node, dense);
+    auto empty = take(
+        fixture.run({{"values", take(ps::Footprint::none({2, 2}))}}, false));
+    require(empty.values.at("values").coverage().empty(),
+            "Empty reads no payload");
+    auto large = dense;
+    large[2] = doubles({256}, std::vector<double>(256, .5));
+    point_math_checks::resources(node, large, 256 * 2 * 8);
     ps::DependencyRequest request;
     for (const auto& v : dense)
-      request.inputs.push_back({v.descriptor(), {}});
+      request.inputs.push_back({v.descriptor(), v.facets()});
     request.parameters = node.parameters;
-    request.snapshot_identity = "curve-resource";
-    request.outputs = take(ps::Footprint::none({2, 2}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "empty no payload");
-    request.outputs = region({2, 2}, {ps::Region({{1, 1}, {0, 1}})});
-    for (bool cancel : {false, true}) {
-      ps::ResourceBudget resources(ps::ResourceLimits{});
-      ps::CancellationSource cancellation;
-      request.cancellation = cancellation.token();
-      bool armed = false, interrupted = false;
-      std::shared_ptr<ps::DependencySession> session;
-      session = take(registry->start_dependency(
-          node.operation, request, resources.allocator(),
-          [&](std::uint64_t amount) {
-            if (armed && (amount == 352 || amount == 512) &&
-                session->numeric_diagnostics().evaluated_values == 1) {
-              interrupted = true;
-              if (cancel)
-                cancellation.cancel();
-              else
-                return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                  "curve inner work",
-                                  ps::FailureReason::WorkLimit};
-            }
-            return ps::Status::success();
-          }));
-      for (unsigned stage = 0; stage < 3; ++stage) {
-        require(session->poll().ok(), "curve staged Need");
-        supply(session, request, dense);
-      }
-      armed = true;
-      auto failed = session->poll();
-      require(interrupted && !failed.ok() &&
-                  failed.status().code ==
-                      (cancel ? ps::ErrorCode::Cancelled
-                              : ps::ErrorCode::ResourceExhausted),
-              "inner curve interruption");
-      require(session->numeric_diagnostics().evaluated_values == 1 &&
-                  session->numeric_diagnostics().copied_elements == 0,
-              "failed curve counters");
-      session.reset();
-      require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-              "curve state/output released");
-    }
-    request.cancellation = {};
-    for (unsigned kind = 0; kind < 3; ++kind) {
-      auto limited = request;
-      if (kind == 0)
-        limited.limits.maximum_state_bytes = 1024;
-      if (kind == 1)
-        limited.limits.maximum_work = 1;
-      if (kind == 2)
-        limited.limits.maximum_stages = 1;
-      auto started = registry->start_dependency(node.operation, limited);
-      bool failed = !started.ok();
-      if (started.ok()) {
-        auto session = started.take_value();
-        for (unsigned stage = 0; stage < 4; ++stage) {
-          auto progress = session->poll();
-          if (!progress.ok()) {
-            require(progress.status().code == ps::ErrorCode::ResourceExhausted,
-                    "curve admission status");
-            failed = true;
-            break;
-          }
-          if (std::holds_alternative<ps::DependencyResult>(progress.value()))
-            break;
-          supply(session, limited, dense);
-        }
-      }
-      require(failed, "curve state/work/stage bounded");
-    }
     for (unsigned kind = 0; kind < 6; ++kind) {
       auto bad = request;
       bad.outputs = take(ps::Footprint::none({2, 2}));
@@ -533,15 +440,17 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
         bad.parameters["out_of_domain"] = std::string("clip");
       if (kind == 5)
         bad.inputs[1].descriptor.shape = {3, UINT64_C(1) << 40};
-      auto result = registry->start_dependency(node.operation, bad);
+      auto result =
+          registry->resolve_traits(node.operation, bad.inputs, bad.parameters);
       require(!result.ok() &&
                   (result.status().code == ps::ErrorCode::TypeMismatch ||
                    result.status().code == ps::ErrorCode::InvalidArgument),
               "static validation even Empty");
     }
   }
-  std::cout << "all-port negative/unaligned and zero strides/fenv, "
-               "Empty/schema and work/cancel/state/stage release passed\n";
+  std::cout
+      << "all-port negative/unaligned and zero strides/fenv, "
+         "Empty/schema and Whole work/cancel/output/scratch release passed\n";
 }
 
 void cache_composition_and_upstream(ps::CpuNumericProfile profile) {
@@ -579,8 +488,8 @@ void cache_composition_and_upstream(ps::CpuNumericProfile profile) {
             "query replacement");
     auto changed = take(demand.request(query, {}, options));
     require(take(changed.dependencies.source_support()).at("input1") ==
-                region({5}, {ps::Region({{pchip ? 2U : 3U, pchip ? 3U : 2U}})}),
-            "query changes exact selected stencil");
+                take(ps::Footprint::all({5})),
+            "query replacement retains complete input dependency");
     fixture.bindings.inputs[0].snapshot =
         std::make_shared<const ps::InputSnapshot>(
             take(store.import_value(doubles({5}, {0, 1, 2, 4, 5}))));
@@ -588,8 +497,8 @@ void cache_composition_and_upstream(ps::CpuNumericProfile profile) {
             "topology replacement");
     auto moved = take(demand.request(query, {}, options));
     require(take(moved.dependencies.source_support()).at("input1") ==
-                region({5}, {ps::Region({{pchip ? 1U : 2U, pchip ? 4U : 2U}})}),
-            "x changes selected stencil");
+                take(ps::Footprint::all({5})),
+            "topology replacement retains complete input dependency");
     Fixture fresh(authored(pchip, false, profile),
                   {doubles({5}, {0, 1, 2, 4, 5}),
                    doubles({5}, {0, 1, 4, 9, 16}), doubles({1}, {3.5})});
@@ -624,15 +533,14 @@ void cache_composition_and_upstream(ps::CpuNumericProfile profile) {
     rejected.document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{2, "value"};
     rejected.document.nodes.push_back({2, "manual.curve_y", {}, {}});
     auto bad = rejected.run(query, false);
-    require(!bad.ok() &&
-                bad.status().reason == ps::FailureReason::InvalidDomain &&
-                calls == 0,
-            "reject reads no y producer");
+    require(!bad.ok() && bad.status().message == "required curve y producer" &&
+                calls == 1,
+            "Whole collects upstream y before reject classification");
     rejected.document.nodes[0].parameters["out_of_domain"] =
         std::string("clamp");
     bad = rejected.run(query, false);
     require(!bad.ok() && bad.status().message == "required curve y producer" &&
-                calls == 1,
+                calls == 2,
             "clamp preserves selected upstream failure");
   }
   const auto columns = UINT64_C(1) << 39;
@@ -642,63 +550,32 @@ void cache_composition_and_upstream(ps::CpuNumericProfile profile) {
   huge.document.nodes.push_back(take(
       ps::numeric::constant_node(2, ps::WorkflowInputReference{2}, {2, columns},
                                  ps::numeric::ArrayLayout::View, profile)));
-  auto result = take(huge.run(
+  auto result = huge.run(
       {{"values",
         region({1, columns}, {ps::Region({{0, 1}, {columns - 1, 1}})})}},
-      false));
-  std::uint64_t value = 0;
-  require(result.values.at("values").read({0, columns - 1}, &value, 8).ok() &&
-              value == raw(7),
-          "giant constant/curve composition");
-  std::cout << "query/topology cache replacement, reject/upstream order and "
-               "sparse 2^39-column composition passed\n";
+      false);
+  require(
+      !result.ok() && result.status().code == ps::ErrorCode::ResourceExhausted,
+      "giant sparse demand still requires full Whole output allocation");
+  std::cout << "cache replacement, full upstream collection and giant output "
+               "budget passed\n";
 }
 void typed_validation(ps::CpuNumericProfile profile) {
   const auto facet = take(ps::encode_semantic(ps::coverage_semantics()));
-  auto registry = ps::make_default_operation_registry();
-  auto node = authored(true, true, profile);
-  auto source =
-      array(ps::ElementType::Float32, {3, 2},
-            {0, 0x7fc00000, 0x3fc00000, 0x7fc00000, 0x3f800000, 0x7fc00000});
-  source =
-      take(ps::Value::from_storage(source.descriptor(), source.region(),
-                                   source.layout(), source.storage(), {facet}));
-  std::vector<ps::Value> inputs{doubles({3}, {0, 1, 2}), source,
-                                doubles({1}, {.5})};
-  ps::DependencyRequest request;
-  for (const auto& v : inputs)
-    request.inputs.push_back({v.descriptor(), v.facets()});
-  request.parameters = node.parameters;
-  request.snapshot_identity = "curve-mask";
-  request.outputs = region({1, 2}, {ps::Region({{0, 1}, {0, 1}})});
-  auto session = take(registry->start_dependency(node.operation, request));
-  for (unsigned stage = 0; stage < 2; ++stage) {
-    require(session->poll().ok(), "typed curve control Need");
-    supply(session, request, inputs);
+  for (const auto bad_bits : {UINT64_C(0x7fc00000), UINT64_C(0x3fc00000)}) {
+    auto source = array(ps::ElementType::Float32, {3, 2},
+                        {0, bad_bits, 0x3f000000, 0, 0x3f800000, 0});
+    source = take(ps::Value::from_storage(source.descriptor(), source.region(),
+                                          source.layout(), source.storage(),
+                                          {facet}));
+    Fixture fixture(authored(true, true, profile),
+                    {doubles({3}, {0, 1, 2}), source, doubles({1}, {.5})});
+    auto result = fixture.run(
+        {{"values", region({1, 2}, {ps::Region({{0, 1}, {0, 1}})})}}, false);
+    require(!result.ok(),
+            "typed invalid unrequested column rejected during full collect");
   }
-  require(session->poll().ok(), "typed curve y Need");
-  auto pending = take(session->pending_reads());
-  std::vector<ps::Footprint> wanted;
-  for (const auto& v : inputs)
-    wanted.push_back(take(ps::Footprint::none(v.descriptor().shape)));
-  for (const auto& need : pending) {
-    require(need.port == 1, "y only final stage");
-    wanted[1] = take(wanted[1].unite(need.samples));
-  }
-  require(wanted[1] == region({3, 2}, {ps::Region({{0, 3}, {0, 1}})}),
-          "Mask validation stays selected column");
-  std::vector<ps::ValueFragments> ready;
-  for (unsigned i = 0; i < inputs.size(); ++i) {
-    auto full = take(ps::ValueFragments::create(
-        inputs[i].descriptor(), inputs[i].facets(),
-        take(ps::Footprint::all(inputs[i].descriptor().shape)), {inputs[i]}));
-    ready.push_back(take(full.restrict(wanted[i])));
-  }
-  auto failure = session->supply(ready, request.snapshot_identity);
-  require(!failure.ok() && session->numeric_diagnostics().evaluated_values == 0,
-          "typed bad coverage rejects before curve arithmetic");
-  std::cout << "typed Mask column-local Validation rejects finite out-of-range "
-               "y before arithmetic\n";
+  std::cout << "typed Mask full-input NaN and finite range validation passed\n";
 }
 
 void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
@@ -738,7 +615,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                            : std::vector<std::uint64_t>{n};
         ps::DemandQuery query{{"values", take(ps::Footprint::all(shape))}};
         std::vector<std::int64_t> times;
-        std::uint64_t peak = 0, invocations = 0, evaluated = 0, fallbacks = 0;
+        std::uint64_t peak = 0, invocations = 0;
         for (unsigned repeat = 0; repeat < 3; ++repeat) {
           const auto start = std::chrono::steady_clock::now();
           auto result =
@@ -747,15 +624,11 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                               std::chrono::steady_clock::now() - start)
                               .count());
           peak = std::max(peak, result.diagnostics.peak_live_bytes);
-          invocations = evaluated = fallbacks = 0;
+          invocations = 0;
           for (const auto& timing : result.diagnostics.operation_timings) {
             invocations += timing.invocation_count;
-            evaluated += timing.numeric.evaluated_values;
-            fallbacks += timing.numeric.strict_fallbacks;
           }
-          require(
-              evaluated == n * columns && invocations == 4 && fallbacks == 0,
-              "curve benchmark counters");
+          require(invocations == 1, "single Whole callback");
           for (unsigned i = 0; i < n; ++i)
             for (unsigned c = 0; c < columns; ++c) {
               std::vector<std::uint64_t> at{i};
@@ -771,8 +644,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
         std::cout << (pchip ? "pchip" : "linear") << (multi ? "_multi" : "")
                   << ',' << selected << ",17," << n << ',' << columns
                   << ",Float64,Whole,1,off,3," << times[1] << ',' << times[2]
-                  << ',' << peak << ',' << invocations << ',' << evaluated
-                  << ',' << fallbacks << '\n'
+                  << ',' << peak << ',' << invocations << ",N/A,N/A" << '\n'
                   << std::flush;
       }
 }

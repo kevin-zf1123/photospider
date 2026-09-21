@@ -390,7 +390,7 @@ must round to the same Float32 result, as well as satisfy the shared quality gat
 This stronger condition preserves cross-query monotonicity when mixed with strict
 fallback. A mere 4 ULP32 bound is insufficient: neighboring binary64 queries can
 otherwise produce a one-ULP64 reversal. Selected knots/clamps remain exact.
-Unresolved cases report strict fallback; no requested-batch repair is applied.
+Unresolved cases use strict fallback; no requested-batch repair is applied.
 Exact cross products detect a collinear complete local stencil and reduce its
 PCHIP formula to the existing linear rational formula. Rounded slope equality
 is insufficient and is never used for this decision.
@@ -401,62 +401,104 @@ The combined Hermite numerator is below 2^20999 and denominator below 2^18897.
 The 352-limb (22528-bit) workspace covers these bounds plus denominator
 alignment, 53 quotient trials and midpoint doubling. The fixed 96-slot arena
 uses at most 49 live slots in the formula; every slot and ratio temporary is
-part of the admitted continuation. Endpoint limits compare exact cross-products.
+part of the admitted callback workspace. Endpoint limits compare exact cross-products.
 Direct node/clamp conversion, two-point linear degeneration and exterior
 tangent evaluation have smaller bounds. Arithmetic polls work/cancellation
 inside limb multiplication and final division. Independent scoped arithmetic
 review also compared 3208 Fraction formula expansions successfully.
 
-The regional continuation acquires complete x Control/Validation, then the
-projection of Q onto query rows, then only column-local y Data/Validation.
-All x must be finite and increasing. Exact node/clamp reads one y, linear reads
-two, PCHIP reads its fixed local stencil even when a slope branch is zero.
-Query classification runs once per distinct requested row. Bounded rectangle
-projection and association construction add metadata work; no whole N*C array
-or full slope table is allocated. Immutable packed fragments retain correct
-global origins and owners. The public examples set explicit session/Run work
-budgets; a default direct invoke can exhaust its discovery budget on a small
-PCHIP batch. That failure preserves ResourceExhausted rather than weakening
-precision or demand.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
 
-On 2026-09-19, native Apple M5 / Clang 21 strict and Apple, and Intel Core
-i9-12900 Ubuntu WSL / Clang 18.1.3 strict and AVX2, passed 2484 independent
-Fraction cases per profile. These cover mixed source/output types, all domain
-policies, random irregular knots, limiter branches, extreme finite arithmetic,
-midpoints, subnormals, signed zeros and ordered adjacent-query shape checks.
-All four profiles passed the five public manual groups: basic single/multi
-fixtures and tangent extrapolation; sparse support/dirty/Atom isolation and
-lifetime; strides/fenv/schema/Empty/resource interruption; cache reselection,
-upstream order and giant sparse public composition; typed Mask validation.
-Local installed consumers, focused compiler unit, ClangFormat 21/cpplint and
-scoped entry/math reviews passed. No new CTest or integration entry was added.
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
 
-The following Apple M5 / Clang 21 RelWithDebInfo native measurements use x=0..16,
-y[j,c]=j+c, query[i]=i/4+1/8, K=17, N=1/64, C=1 for single and 2 for multi,
-Float64, Whole, one worker, cache off, three repetitions. Compile/freeze precede
-timing; synchronous execution and result assembly are timed. Every returned
-sample is checked against query[i]+c, with four polls, N*C evaluations and zero
-fallbacks. Session and Run work limits are 8 Gi and 16 Gi work units. Columns
-show median/max microseconds; these measurements do not establish a general
-speedup claim. WSL supplies correctness evidence only.
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
 
-| Operation | N | Strict median/max us | Apple median/max us |
-| --- | ---: | ---: | ---: |
-| linear | 1 | 208/666 | 205/294 |
-| linear | 64 | 2561/2577 | 2535/2646 |
-| linear_multi | 1 | 208/244 | 208/215 |
-| linear_multi | 64 | 5159/5359 | 4755/5061 |
-| pchip | 1 | 224/246 | 230/252 |
-| pchip | 64 | 7042/7278 | 6660/7034 |
-| pchip_multi | 1 | 356/399 | 337/345 |
-| pchip_multi | 64 | 13849/13917 | 13777/14245 |
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
 
-Peak controlled payload is 285944/286448 bytes for single and 285952/286960
-bytes for multi at N=1/64. The diagnostic does not include ordinary static
-plan storage or unmanaged host containers. The separate giant composition
-checks one last-column result over a logical [2,2^39] constant view, with actual
-value 7; it is a sparse correctness fixture, not a large dense performance test.
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
 
+
+Clang 21.1.3 RelWithDebInfo on Apple M5 / macOS 27.0 (26A5425a), package
+0.18.0, passed 2487 independent Fraction cases for each strict/Apple profile,
+the public workflow groups, active cancellation/budget checks, and focused
+numeric/compiler tests. The existing Apple inverse workflow also passed after
+the shared exact evaluator gained an optional already-normalized environment.
+Other platforms were not rerun for this migration.
+
+Native sampling (2026-09-21) uses K=17, N=512, x[j]=j, y[j,c]=j+c,
+query[i]=(i%64)/4+1/8, dense inputs, complete demand, one CPU worker and cache
+disabled. Strict uses Float64, Apple uses Float32. One warm invocation precedes
+seven measured invocations, with analytic identity checks outside timing. Both
+adapters use the same kernel; the comparison adapter is the CRV-01 source at
+3d35f5eb. Public latency includes execution, managed metering, collection and
+result assembly, excluding compile/freeze. The core column measures the current
+numeric callback on prepared complete Values, including lookup, arithmetic,
+allocation and publication, but excluding scheduling, collection and managed
+metering. It is not a pure arithmetic instruction benchmark.
+
+Budgets: 1 GiB payload, 2 GiB Host, 512 MiB Metadata, 512 MiB dependency state,
+2^40 dependency/Run work units, default unlimited managed work. Raising Metadata
+above the 16 MiB default is necessary for the old C=4 adapter; at that default it
+fails dependency poll allocation. Context-reported peak Metadata changes from
+15,814,976/65,098,224 bytes (C=1/4) to 3,208 bytes; this excludes uninstrumented
+process memory. Complete input collection can slightly increase payload: C=4
+Apple peak is 294,128 before and 296,380 bytes after.
+
+All times below are median [min,max] milliseconds for these seven samples.
+
+| Operation | C | Profile/dtype | Public before | Public Whole | Numeric callback core |
+| --- | ---: | --- | ---: | ---: | ---: |
+| linear | 1 | strict/Float64 | 10.026 [9.726,10.364] | 2.650 [2.602,2.939] | 2.449 [2.417,2.555] |
+| linear | 1 | apple/Float32 | 7.286 [7.084,7.381] | 0.145 [0.141,0.162] | 0.080 [0.076,0.083] |
+| linear | 4 | strict/Float64 | 43.516 [42.457,46.465] | 10.580 [10.360,10.659] | 9.887 [9.775,10.553] |
+| linear | 4 | apple/Float32 | 32.964 [32.647,35.991] | 0.316 [0.311,0.330] | 0.301 [0.243,0.411] |
+| pchip | 1 | strict/Float64 | 13.403 [13.284,13.714] | 5.448 [5.293,5.686] | 5.014 [4.870,5.303] |
+| pchip | 1 | apple/Float32 | 7.511 [7.446,7.657] | 0.225 [0.220,0.237] | 0.167 [0.166,0.171] |
+| pchip | 4 | strict/Float64 | 55.231 [54.921,56.102] | 21.307 [21.054,21.696] | 19.805 [19.645,20.042] |
+| pchip | 4 | apple/Float32 | 32.468 [32.017,33.298] | 0.701 [0.669,0.741] | 0.617 [0.546,0.673] |
+
+Three 12-second Time Profiler captures of Apple Float32 PCHIP C=4 retain
+11,781/11,769/11,745 execution-stack samples for the old adapter, initial Whole
+adapter and final Whole adapter respectively. Inclusive counts overlap. The old
+adapter has DependencySession on 84.14% and Footprint methods on 52.42% of these
+samples. Initial Whole shows repeated fegetenv/fesetenv on 12.59%; moving the
+same guard around the complete callback removes sampled per-value fenv frames
+in the final capture. Final nextafter interval expansion is 42.66%, managed
+ResourceBudget methods 6.84%, and ValueFragments::collect 0.55%. No NUM-14
+finite-Float32 certificate is used. Scalar exact arithmetic and accelerated
+interval/fallback paths retain their existing mathematical contract.
+
+Raw driver, build script, CSV sample ranges, logs, trace exports and analysis
+are local ignored artifacts under `build/crv-whole/` (`curves-final-times.csv`,
+`curves-{before,after,final}.trace`, `profile-summary.txt`). These workloads do
+not establish performance for nonlinear exact fallback, all K/N/C sizes or
+other CPUs. Whole diagnostics do not expose per-value fallback counts.
 
 ## CRV-02 exact Bezier function sampling
 

@@ -1032,25 +1032,48 @@ and preserve its signed zero. Other exact zero results are -0 only when both
 selected segment endpoints are -0. Numeric input or actual output must be finite;
 there is no intermediate slope overflow rejection or output clipping.
 
-A nonempty request validates all x knots before reading selected query rows,
-then requests only selected y endpoints/stencils and columns. Empty reads no
-payload. The regional path uses four polls and one lookup per distinct query
-row, preserving per-cell error and dependency certificates. The manual checks
-sparse support/dirty/column isolation, query/topology cache replacement, all-port
-negative and unaligned strides, zero strides, caller fenv, typed Mask validation,
-unused/required upstream failures, work/cancel/state/stage limits and escaped
-owner lifetime. `cache_composition_and_upstream()` connects a public
-`constant_node` with logical shape [2,2^39] to PCHIP and reads the last output
-column as 7 under a 4 MiB controlled-payload limit.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
 
-`Fixture::run` and `direct()` show explicit work budgets. Exact arithmetic can
-exhaust the default direct-invocation discovery budget even for a small batch;
-use ExecutionOptions or DependencyRequest limits appropriate to the workload.
-The shared fixed exact workspace is about 280 KiB per admitted continuation.
-The optional x index uses 8K bytes; requested output and association metadata
-are also admitted. Work/capacity exhaustion fails explicitly. See
-[implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-01-exact-interpolation)
-for arithmetic bounds, measured resources and validation.
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
+
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
+
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
+
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
+
+`curves.cpp` supplies full public workflows, cache/source replacement, all-port
+strides and caller fenv, full typed Mask validation, active cancellation and
+managed work/payload/workspace limits. Its giant [2,2^39] constant composition
+checks ResourceExhausted under a 4 MiB payload limit. `point_math_checks.hpp`
+provides direct callback resource checks using ResourceAllocationScope; the
+independent Fraction oracle covers linear/PCHIP and mixed dtypes.
 
 Run `photospider_numeric_curves strict benchmark` or `apple benchmark` locally
 for the four operations at K=17, N=1/64, C=1/2, Float64, Whole, one worker,
