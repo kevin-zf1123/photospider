@@ -67,8 +67,7 @@ the exact Float64 coordinate and step-consistency rules of CRV-05. Globally
 validate every reconstructed coordinate on all three axes for strict order;
 each axis independently supports increasing or decreasing coordinates.
 Each axis extent is 2..256; unequal N0,N1,N2 are supported. Singleton axes are
-not accepted. The largest table has 256^3*3 values, 384 MiB at Float64, although
-only demanded table values need to be read and retained under actual host budgets.
+not accepted. The largest table has 256^3*3 values, 384 MiB at Float64, and a nonempty Whole request collects the complete table under host budgets.
 
 ## Confirmed color spaces
 
@@ -109,18 +108,17 @@ the reference mathematical function.
 
 ## Confirmed table demand
 
-Only vertices with exact nonzero interpolation weight are Data/Validation
-dependencies: at most eight for trilinear and four for tetrahedral. Exact hits
-on grid vertices, edges or faces skip zero-weight vertices; illegal data there
-does not affect this observation. Each contributing vertex is a complete
-three-component color. Any requested output channel computes/validates and returns
-the complete color, with the corresponding atomic failure scope. Global axis
-validation remains required independently of local table demand.
+Whole execution collects all input, table and axis values with complete typed
+and upstream validation. Only exact positive-weight vertices enter the numerical
+formula: at most eight for trilinear or four for tetrahedral. Generic invalid
+zero-weight vertices remain mathematically unused; typed invalid data or an
+upstream failure there still fails the run. Each contributing vertex and output
+is a complete three-component color. Channel requests close to complete colors,
+while numeric failure scope is Run.
 
 input rank is 2..8, last extent is 3 and logical element count is <=2^40.
 A single color uses [1,3]. The observation domain is the remaining input axes,
-rank 1..7, matching the current AtomKey rank constraint without introducing a
-zero-dimensional observation domain.
+rank 1..7.
 
 ## Interpolation formulas
 
@@ -158,37 +156,31 @@ be silently replaced. Table has the output description. No extra interpolation
 mode is accepted because the methods are independent operations.
 
 Empty Q has no payload reads; static edges and descriptions are still preflight
-validated. For nonempty Q, read/validate the entire axis[3,3] and all its derived
-coordinates, then complete input colors at requested positions and exactly the
-union of contributing full table vertices. Model legality is checked on the
-original input before domain clamp, so clamp cannot hide nonfinite or invalid
-source colors. Unrelated input colors and table vertices are not requested.
-Typed/upstream support closures, if broader, are explicit and preserve provenance.
+validated. Nonempty requests collect complete inputs before the callback, then
+validate all axes, every original input color before clamp, and finally all
+selected-vertex mathematics. Thus an upstream table failure can precede callback
+axis/query validation. Among callback numeric checks, axes precede all queries,
+which precede table arithmetic. No per-output dependency or point arrays remain.
 
-Axis changes invalidate all dependent observations. Input tuple changes affect
-the corresponding output color; table vertex changes affect complete colors
-whose exact nonzero support includes that vertex. Retain control/validation and
-descriptor witnesses even when a constant table makes some numerical changes
-invisible. Cache identity includes method, descriptors, grid, dtype and policy.
-Cache-off and request partitioning cannot change values or failure scope.
-
-Return immutable packed fragments with the correct global Region and storage
-origin, complete-color channel coverage, and owning output description. Legal
-unaligned, offset, negative/zero-stride input/table layouts are accepted. Retain
-all source and descriptor backing owners needed by output/read windows beyond
-ExecutionContext lifetime. A missing color is not silently zero-filled.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains method, descriptions, grid, dtype, policy and complete typed/upstream
+support. A complete immutable dense output Value carries ColorArray metadata
+and the final channel closure. Sparse public fragments expose requested complete
+colors and retain that full owner. Legal unaligned, offset, negative/zero-stride
+input/table layouts remain accepted, and outputs survive context teardown.
 
 ## Resource and failure contract
 
-For M colors, grid validation is O(N0+N1+N2), lookup O(M*sum(log Ni)) and
+For M=product(input.shape)/3 colors, grid validation is O(N0+N1+N2), lookup O(M*sum(log Ni)) and
 arithmetic has at most 8 or 4 contributing vertices per color. Output payload is
 3*M*sizeof(dtype). An optional cached Float64 grid needs 8*(N0+N1+N2) bytes.
-Budget exact arithmetic limbs, vertex maps, source read windows/owners, output
-fragments, descriptor storage and scratch growth overlap. No full table copy or
-full logical output allocation is required. The 384 MiB maximal table payload is
+Budget fixed admitted exact arithmetic workspace, complete collected inputs,
+one current vertex/weight set, full output, descriptors and grid metadata. The
+ResourceVector grid additionally charges allocator/metadata overhead. A small
+output request still needs the full input/table collect and logical output. The 384 MiB maximal table payload is
 not a promise that it fits a given execution budget.
 
-Inherit CRV-06A's bounded cancellation polling and host capacity/work/stage
+Inherit CRV-06A's bounded cancellation polling and host capacity/work
 obligations, with polls in axis scans, lookup batches and exact-arithmetic work.
 Release temporary state after success/failure/cancellation and retain only owned
 result state. Unsupported platform keys fail BackendUnavailable; resource limits
@@ -200,8 +192,7 @@ description mismatch uses TypeMismatch. Invalid axes (including derived overflow
 duplicate coordinates or step mismatch), nonfinite/model-invalid demanded colors
 and reject-domain violations fail OperationFailed/InvalidDomain. Final component
 narrowing overflow fails OperationFailed/ArithmeticOverflow. Preserve upstream,
-typed, stale, cancellation and resource categories and provenance. The observation
-is one full output color, and no partial component success is published.
+typed, stale, cancellation and resource categories and provenance. Numeric failure scope is Run; no partial output survives a failed callback.
 
 ## Independent acceptance and public workflow
 
@@ -221,8 +212,8 @@ for this fixture. A polar-model table with hue 0 to 4 retains intermediate hue 2
 No modulo reduction can be substituted for that fixture.
 
 Verify partial channel requests expand to full colors, zero-weight invalid
-vertices remain unread, invalid demanded chroma fails even if domain-clamp would
-hide it, axis errors are global, dirty support is exact, and all output metadata
+generic vertices remain mathematically unused, typed validation covers all inputs, invalid demanded chroma fails even if domain-clamp would
+hide it, axis errors are global, dirty support covers complete inputs, and all output metadata
 matches the declared model/space. Include strides, owners after context teardown,
 low budgets, cancellation, cache-off and joint versus partitioned requests.
 
@@ -265,5 +256,7 @@ contains editable workflows, run commands and five manual acceptance groups.
 The independent Fraction oracle checks 1062 cases across the specified models,
 axis directions, boundaries and dtype combinations. Fixed arithmetic and host
 resource limits are described in the [math implementation](../math-implementation.md#crv-07-joint-three-dimensional-lut-application).
-Platform/installed-consumer validation is recorded in [implementation.md](../implementation.md).
+Native Clang 21 strict/Apple passes these Whole checks and focused numeric,
+compiler, color and resource tests. This migration has no new x86 or installed
+consumer execution evidence.
 Specification acceptance remains Proposed, independently of implemented behavior.

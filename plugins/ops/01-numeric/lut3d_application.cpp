@@ -1,19 +1,19 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_lut3d.hpp"
 #include "01-numeric/uniform_axis.hpp"
-#include "data/input_validation.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -113,65 +113,67 @@ Result<OperationPreparation> prepare(
       inputs[0].descriptor.shape};
   output.metadata.facets = {output_facet.take_value()};
   output.metadata.atomic_trailing_axes = 1;
-  output.regional_atomic = true;
   return Answer(std::move(prepared));
 }
 struct Lut3dPoint {
-  std::array<std::uint64_t, 7> coordinate{};
   std::array<std::uint64_t, 3> query{};
   std::array<unsigned, 3> cell{};
   numeric_ops::ExactLut3d::Support support;
-  std::uint64_t fragment = 0, offset = 0;
 };
 struct Lut3dState {
   const Lut3dProgram* program;
   std::array<numeric_ops::UniformAxis, 3> axes;
   numeric_ops::ExactLut3d arithmetic;
-  unsigned stage = 0, rank = 0;
-  ResourceVector<Lut3dPoint> points;
-  ResourceVector<MutableValue> outputs;
-  std::shared_ptr<const dependency_internal::MetadataOwner> request_capacity;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
-  explicit Lut3dState(const Lut3dProgram* value)
+  const OperationInvocation& call;
+  const ResourceBudget* budget;
+  std::function<Status(std::uint64_t)> consume;
+  std::vector<std::uint64_t> position;
+  Lut3dState(const Lut3dProgram* value, const OperationInvocation& invocation)
       : program(value),
         axes{numeric_ops::UniformAxis(value->profile),
              numeric_ops::UniformAxis(value->profile),
              numeric_ops::UniformAxis(value->profile)},
-        arithmetic(value->profile) {}
-  std::vector<std::uint64_t> coordinate(const Lut3dPoint& point) const {
-    return {point.coordinate.begin(), point.coordinate.begin() + rank};
+        arithmetic(value->profile),
+        call(invocation),
+        budget(resource_internal::metadata_budget()),
+        consume([this](auto amount) { return work(amount); }),
+        position(invocation.inputs[0].descriptor().shape.size() - 1, 0) {}
+  Status work(std::uint64_t amount) const {
+    if (call.cancellation.cancelled())
+      return {ErrorCode::Cancelled, {}};
+    return budget ? budget->consume({amount}) : Status::success();
   }
-  Status failure(const DependencyPhase& phase, const Lut3dPoint& point,
-                 const std::string& message,
+  void advance() {
+    const auto& shape = call.inputs[0].descriptor().shape;
+    for (auto i = position.size(); i; --i) {
+      if (++position[i - 1] < shape[i - 1])
+        break;
+      position[i - 1] = 0;
+    }
+  }
+  Status failure(const std::string& message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
-    Status result{ErrorCode::OperationFailed,
-                  message,
-                  reason,
-                  {FailureOrigin::Domain, FailureScope::Atom}};
-    AtomKey atom;
-    atom.output_index = phase.query.output_index;
-    atom.rank = rank;
-    std::copy_n(point.coordinate.begin(), rank, atom.coordinate.begin());
-    result.detail.atom = atom;
-    return result;
+    return {ErrorCode::OperationFailed,
+            message,
+            reason,
+            {FailureOrigin::Domain, FailureScope::Run}};
   }
-  Result<std::uint64_t> read(const DependencyPhase& phase, unsigned port,
-                             const std::vector<std::uint64_t>& at,
-                             const Lut3dPoint& point) const {
-    auto work =
-        phase.consume_work(phase.inputs[port].fragments().size() + at.size());
-    if (!work.ok())
-      return Result<std::uint64_t>(work);
-    const bool narrow = phase.query.inputs[port].descriptor.element_type ==
-                        ElementType::Float32;
+  Result<std::uint64_t> read(unsigned port,
+                             const std::vector<std::uint64_t>& at) const {
+    auto charged = work(at.size() + 1);
+    if (!charged.ok())
+      return Result<std::uint64_t>(charged);
+    const auto& input = call.inputs[port];
+    const bool narrow = input.descriptor().element_type == ElementType::Float32;
     std::uint64_t bits = 0;
-    auto status = phase.read(port, at, &bits, narrow ? 4 : 8);
-    if (!status.ok())
-      return Result<std::uint64_t>(status);
+    auto address = input.byte_address(at);
+    if (!address.ok())
+      return Result<std::uint64_t>(address.status());
+    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
     const auto parts = BinaryParts::decode(bits, narrow);
     if (parts.nan || parts.infinite)
-      return Result<std::uint64_t>(failure(
-          phase, point, "nonfinite LUT3D input; port=" + std::to_string(port)));
+      return Result<std::uint64_t>(
+          failure("nonfinite LUT3D input; port=" + std::to_string(port)));
     if (narrow) {
       const auto sign = (bits >> 31) << 63;
       if (!parts.magnitude) {
@@ -185,57 +187,13 @@ struct Lut3dState {
     }
     return Result<std::uint64_t>(bits);
   }
-  Status validate_color(const DependencyPhase& phase, const Lut3dPoint& point,
-                        const std::array<std::uint64_t, 3>& color,
+  Status validate_color(const std::array<std::uint64_t, 3>& color,
                         unsigned port) const {
     if (program->model == ColorModel::Cielch ||
         program->model == ColorModel::Oklch) {
       const auto chroma = BinaryParts::decode(color[1], false);
       if (chroma.negative && chroma.magnitude)
-        return failure(phase, point,
-                       "negative LUT3D chroma; port=" + std::to_string(port));
-    }
-    return Status::success();
-  }
-  Status initialize(const DependencyPhase& phase) {
-    rank = phase.query.output.descriptor.shape.size() - 1;
-    auto count = phase.query.observations.element_count();
-    if (!count.ok())
-      return count.status();
-    auto work = phase.consume_work(count.value() * (rank + 2) + 1);
-    if (!work.ok())
-      return work;
-    points.reserve(count.value());
-    outputs.reserve(phase.query.outputs.boxes().size());
-    publication = std::make_unique<numeric_ops::ArrayPublication>(
-        phase.query.outputs.boxes().size(), rank + 1);
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(phase.query.output.descriptor,
-                                              box, phase.allocator);
-      if (!allocated.ok())
-        return allocated.status();
-      Lut3dPoint point;
-      point.fragment = outputs.size();
-      std::uint64_t elements = 1;
-      for (unsigned axis = 0; axis < rank; ++axis) {
-        point.coordinate[axis] = box.dimensions()[axis].offset;
-        elements *= box.dimensions()[axis].extent;
-      }
-      for (std::uint64_t i = 0; i < elements; ++i) {
-        work = phase.consume_work(1);
-        if (!work.ok())
-          return work;
-        point.offset = i * 3;
-        points.push_back(point);
-        for (unsigned axis = rank; axis; --axis) {
-          const auto dimension = box.dimensions()[axis - 1];
-          if (++point.coordinate[axis - 1] <
-              dimension.offset + dimension.extent)
-            break;
-          point.coordinate[axis - 1] = dimension.offset;
-        }
-      }
-      outputs.push_back(allocated.take_value());
+        return failure("negative LUT3D chroma; port=" + std::to_string(port));
     }
     return Status::success();
   }
@@ -245,55 +203,6 @@ struct Lut3dState {
     return {point.cell[0] + (bits & 1), point.cell[1] + ((bits >> 1) & 1),
             point.cell[2] + ((bits >> 2) & 1)};
   }
-  Result<DependencyPoll> need(const DependencyPhase& phase, unsigned port) {
-    using Answer = Result<DependencyPoll>;
-    request_capacity =
-        dependency_internal::metadata_owner(4096 + points.size() * 32768);
-    std::vector<AtomCertificate> certificates;
-    certificates.reserve(points.size());
-    for (const auto& point : points) {
-      auto work = phase.consume_work(32);
-      if (!work.ok())
-        return Answer(work);
-      std::vector<Region> regions;
-      if (port == 2) {
-        regions.push_back(Region::whole({3, 3}));
-      } else if (port == 0) {
-        std::vector<RegionDimension> dimensions;
-        for (auto value : coordinate(point))
-          dimensions.push_back({value, 1});
-        dimensions.push_back({0, 3});
-        regions.emplace_back(std::move(dimensions));
-      } else {
-        for (unsigned i = 0; i < point.support.count; ++i) {
-          const auto at = vertex(point, i);
-          regions.emplace_back(std::vector<RegionDimension>{{at[0], 1},
-                                                            {at[1], 1},
-                                                            {at[2], 1},
-                                                            {0, 3}});
-        }
-      }
-      auto support =
-          Footprint::from_regions(phase.query.inputs[port].descriptor.shape,
-                                  std::move(regions), phase.sets);
-      if (!support.ok())
-        return Answer(support.status());
-      auto validation = input_internal::validation_closure(
-          phase.query.inputs[port], support.value(), phase.sets,
-          phase.consume_work);
-      if (!validation.ok())
-        return Answer(validation.status());
-      AtomCertificate certificate{coordinate(point), {}};
-      certificate.inputs.push_back(
-          {port,
-           static_cast<std::uint8_t>(port == 1 ? 1 : 2),
-           support.take_value(),
-           {}});
-      certificate.inputs.push_back({port, 4, validation.take_value(), {}});
-      certificates.push_back(std::move(certificate));
-    }
-    return Answer(DependencyNeedBatch{std::move(certificates)});
-  }
   numeric_ops::ExactLut3d::Cell cell(const Lut3dPoint& point) const {
     numeric_ops::ExactLut3d::Cell result;
     for (unsigned i = 0; i < 3; ++i)
@@ -301,18 +210,18 @@ struct Lut3dState {
                    axes[i].knots[point.cell[i] + 1]};
     return result;
   }
-  Status classify(const DependencyPhase& phase, Lut3dPoint* point) {
-    auto at = coordinate(*point);
+  Status classify(Lut3dPoint* point, bool weights = true) {
+    auto at = position;
     at.push_back(0);
     // Validate every original component before any domain clamp can hide it.
     for (unsigned i = 0; i < 3; ++i) {
       at.back() = i;
-      auto read_value = read(phase, 0, at, *point);
+      auto read_value = read(0, at);
       if (!read_value.ok())
         return read_value.status();
       point->query[i] = read_value.value();
     }
-    auto valid = validate_color(phase, *point, point->query, 0);
+    auto valid = validate_color(point->query, 0);
     if (!valid.ok())
       return valid;
     for (unsigned i = 0; i < 3; ++i) {
@@ -320,7 +229,7 @@ struct Lut3dState {
       const auto key = axis.key(point->query[i]);
       unsigned lo = 0, hi = axis.knots.size();
       while (lo < hi) {
-        auto work = phase.consume_work(1);
+        auto work = consume(1);
         if (!work.ok())
           return work;
         const auto mid = lo + (hi - lo) / 2;
@@ -334,140 +243,116 @@ struct Lut3dState {
         point->cell[i] = std::min(lo, size - 2);
       } else if (!lo || lo == size) {
         if (!program->clamp)
-          return failure(phase, *point,
-                         "LUT3D query outside axis=" + std::to_string(i));
+          return failure("LUT3D query outside axis=" + std::to_string(i));
         point->cell[i] = lo ? size - 2 : 0;
         point->query[i] = axis.knots[lo ? size - 1 : 0];
       } else {
         point->cell[i] = lo - 1;
       }
     }
+    if (!weights)
+      return Status::success();
     auto support = arithmetic.support(cell(*point), point->query,
-                                      program->tetrahedral, phase.consume_work);
+                                      program->tetrahedral, consume);
     if (!support.ok())
       return support.status();
     point->support = support.take_value();
     return Status::success();
   }
-  Status report(const DependencyPhase& phase, std::uint64_t evaluated,
-                std::uint64_t copied) const {
-    NumericDiagnostics diagnostic;
-    diagnostic.profile = static_cast<CpuNumericProfile>(
-        static_cast<unsigned>(program->profile) + 1);
-    const auto length = std::snprintf(
-        diagnostic.implementation.data(), diagnostic.implementation.size(),
-        "photospider.lut3d/1;exact-%s;%s",
-        program->tetrahedral ? "tetrahedral" : "trilinear",
-        numeric_ops::numeric_build_identity());
-    if (length < 0 ||
-        static_cast<std::size_t>(length) >= diagnostic.implementation.size())
-      return {ErrorCode::Internal, "LUT3D diagnostic identity"};
-    diagnostic.evaluated_values = evaluated;
-    diagnostic.copied_elements = copied;
-    return phase.report_numeric(diagnostic);
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    auto construction = dependency_internal::metadata_owner(65536);
-    request_capacity.reset();
-    if (!stage) {
-      auto status = initialize(phase);
+  Result<Value> execute() {
+    using Answer = Result<Value>;
+    for (unsigned axis = 0; axis < 3; ++axis) {
+      std::array<std::uint64_t, 3> values{};
+      for (unsigned j = 0; j < 3; ++j) {
+        auto value = read(2, {axis, j});
+        if (!value.ok())
+          return Answer(value.status());
+        values[j] = value.value();
+      }
+      auto status = axes[axis].validate(
+          values, call.inputs[1].descriptor().shape[axis], consume);
+      if (!status.ok())
+        return Answer(status.code == ErrorCode::OperationFailed
+                          ? failure(status.message, status.reason)
+                          : status);
+    }
+    const auto count = call.inputs[0].region().element_count().value() / 3;
+    // Preserve complete query/domain validation before selected table
+    // arithmetic.
+    for (std::uint64_t i = 0; i < count; ++i, advance()) {
+      Lut3dPoint point;
+      auto status = classify(&point, false);
       if (!status.ok())
         return Answer(status);
-      stage = 1;
-      return need(phase, 2);
     }
-    if (stage == 1) {
-      for (unsigned axis = 0; axis < 3; ++axis) {
-        std::array<std::uint64_t, 3> values{};
-        for (unsigned j = 0; j < 3; ++j) {
-          auto value = read(phase, 2, {axis, j}, points.front());
-          if (!value.ok())
-            return Answer(value.status());
-          values[j] = value.value();
-        }
-        auto status = axes[axis].validate(
-            values, phase.query.inputs[1].descriptor.shape[axis],
-            phase.consume_work);
-        if (!status.ok())
-          return Answer(status.code == ErrorCode::OperationFailed
-                            ? failure(phase, points.front(), status.message,
-                                      status.reason)
-                            : status);
-      }
-      stage = 2;
-      return need(phase, 0);
-    }
-    if (stage == 2) {
-      for (auto& point : points) {
-        auto status = classify(phase, &point);
-        if (!status.ok())
-          return Answer(status);
-      }
-      stage = 3;
-      return need(phase, 1);
-    }
-    const bool narrow =
-        phase.query.output.descriptor.element_type == ElementType::Float32;
+    const auto& resolved = call.prepared->traits().outputs[0];
+    auto allocated = MutableValue::allocate(
+        {resolved.output_element_type, resolved.fixed_output_shape},
+        call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto output = allocated.take_value();
+    const bool narrow = resolved.output_element_type == ElementType::Float32;
     const unsigned width = narrow ? 4 : 8;
-    for (const auto& point : points) {
+    for (std::uint64_t row = 0; row < count; ++row, advance()) {
+      Lut3dPoint point;
+      auto status = classify(&point);
+      if (!status.ok())
+        return Answer(status);
       std::array<std::array<std::uint64_t, 3>, 8> colors{};
       for (unsigned i = 0; i < point.support.count; ++i) {
         auto at = vertex(point, i);
         at.push_back(0);
         for (unsigned channel = 0; channel < 3; ++channel) {
           at.back() = channel;
-          auto value = read(phase, 1, at, point);
+          auto value = read(1, at);
           if (!value.ok())
             return Answer(value.status());
           colors[i][channel] = value.value();
         }
-        auto valid = validate_color(phase, point, colors[i], 1);
+        auto valid = validate_color(colors[i], 1);
         if (!valid.ok())
           return Answer(valid);
       }
-      auto recorded = report(phase, 3, 0);
-      if (!recorded.ok())
-        return Answer(recorded);
       auto values =
           arithmetic.evaluate(cell(point), point.query, program->tetrahedral,
-                              colors, narrow, phase.consume_work);
+                              colors, narrow, consume);
       if (!values.ok())
         return Answer(values.status());
       for (unsigned channel = 0; channel < 3; ++channel) {
         if (BinaryParts::decode(values.value()[channel], narrow).infinite)
-          return Answer(failure(phase, point, "LUT3D output overflow",
+          return Answer(failure("LUT3D output overflow",
                                 FailureReason::ArithmeticOverflow));
-        std::memcpy(static_cast<std::uint8_t*>(outputs[point.fragment].data()) +
-                        (point.offset + channel) * width,
+        std::memcpy(output.data() + (row * 3 + channel) * width,
                     &values.value()[channel], width);
       }
-      recorded = report(phase, 0, 3);
-      if (!recorded.ok())
-        return Answer(recorded);
     }
-    std::vector<Value> values;
-    values.reserve(outputs.size());
-    for (auto& output : outputs) {
-      auto work = phase.consume_work(1);
-      if (!work.ok())
-        return Answer(work);
-      auto published = std::move(output).publish(phase.query.output.facets,
-                                                 phase.query.resources);
-      if (!published.ok())
-        return Answer(published.status());
-      auto retained = publication->retain(published.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    auto result =
-        publication->finish(phase.query.output.descriptor, phase.query.outputs,
-                            values.data(), values.size(), phase.sets,
-                            phase.query.output.facets, phase.query.resources);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    auto status = work(1);
+    return status.ok() ? std::move(output).publish(resolved.output_facets,
+                                                   call.resources)
+                       : Answer(status);
   }
 };
+Result<Value> execute_lut3d(const OperationInvocation& call) {
+  using Answer = Result<Value>;
+  try {
+    auto allocated = call.allocator.allocate(sizeof(Lut3dState));
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto buffer = allocated.take_value();
+    std::unique_ptr<Lut3dState, void (*)(Lut3dState*)> state(
+        new (buffer.data()) Lut3dState(
+            static_cast<const Lut3dProgram*>(call.prepared->state()), call),
+        [](auto* value) { value->~Lut3dState(); });
+    return state->execute();
+  } catch (const std::bad_alloc&) {
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
+  }
+}
+
 OperationDefinition operation(const std::string& key, bool tetrahedral,
                               SequenceProfile profile) {
   OperationDefinition result;
@@ -486,19 +371,14 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
       {"out_of_domain", OperationParameterType::String}};
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(Lut3dState);
-  output.maximum_dependency_stages = 4;
-  output.failure_delivery = FailureDelivery::PerAtomOutcome;
+  output.region_rule = OperationRegionRule::Whole;
+  output.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(Lut3dState);
   result.prepare_static = [tetrahedral, profile](const auto& inputs,
                                                  const auto& parameters) {
     return prepare(tetrahedral, profile, inputs, parameters);
   };
-  result.start_dependency = [](const auto& query, const auto& allocator) {
-    return DependencyContinuation::make<Lut3dState>(
-        allocator, static_cast<const Lut3dProgram*>(query.prepared->state()));
-  };
+  result.callback = execute_lut3d;
   return result;
 }
 }  // namespace

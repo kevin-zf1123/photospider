@@ -228,12 +228,13 @@ colors when any component is requested.
 
 The editable `lut3d.cpp::examples()` binds all three inputs, constructs each
 method through its public helper, compiles and runs it, and inspects values,
-facets and exact source support. For a 2x2x2 table storing `(r*g,g*b,b*r)` at
+facets and complete source support. For a 2x2x2 table storing `(r*g,g*b,b*r)` at
 binary vertices and input `[.75,.25,.5]`, trilinear gives
 `[.1875,.125,.375]`; tetrahedral gives `[.25,.25,.5]`. Both correctly round the
-whole exact formula once. Zero-weight vertices are excluded from reads and
-validation; the tetrahedral diagonal midpoint therefore depends on just two
-vertices. Direct/all-negative-zero mixtures preserve the specified zero signs.
+whole exact formula once. Whole collects complete inputs and table with typed validation. Only positive
+weights enter the formula; the tetrahedral diagonal midpoint mathematically
+uses two vertices. Generic zero-weight invalid values stay unused, but typed
+invalid values and upstream failures anywhere are observable. Direct/all-negative-zero mixtures preserve the specified zero signs.
 
 ```sh
 cmake --build build/numeric --target photospider_numeric_lut3d -j 8
@@ -243,19 +244,16 @@ python3 examples/numeric_workflow/lut3d_oracle.py \
 ```
 
 Use `apple` or `x86` on matching processors. The five manual groups check the
-cross-component fixture; exact sparse/dirty/cache behavior; maximum 256^3 table
-and `2^38`-position public constant-view composition; all-port unaligned/negative
-strides, typed metadata, floating environment and resource interruption; and
-whole-color Atom failures with axis/query/table producer ordering. The independent
-Fraction oracle checks 1062 cases per profile, including eight axis directions,
-unequal extents, every cube/split boundary, all eight models, mixed dtypes,
-extreme cancellation/subnormals and demanded versus zero-weight invalid colors.
-The target is excluded from the default build and CTest/integration registration.
-
-Native Clang 21 Strict/Apple and Ubuntu WSL Clang 18 Strict/AVX2 passed all five
-manual groups and 1062 oracle cases per profile. Installed 0.16 consumers,
-the focused compiler unit, ClangFormat 21/cpplint and independent math/entry
-reviews passed. WSL measurements are used only for correctness.
+cross-component fixture; Whole support/dirty/cache behavior; maximal table and
+giant output rejection under an 8 MiB budget; direct 256^3 zero-stride table
+arithmetic; all-port negative/unaligned strides, rank-three traversal, typed data,
+fenv, Empty, work/output/workspace and active cancellation. Numeric failures have
+Run scope; complete upstream table collection precedes callback validation.
+The independent Fraction oracle checks 1062 cases per profile across models,
+axis directions, split boundaries, dtypes, extreme values and zero signs.
+Native Clang 21 strict/Apple and four focused CTests pass. Whole numerical
+counters are N/A; no new x86 or installed-package run is claimed. The manual
+target remains excluded from default builds and CTest registration.
 
 ## Sequence generators
 

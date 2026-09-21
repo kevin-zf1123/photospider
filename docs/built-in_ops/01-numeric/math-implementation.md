@@ -1015,9 +1015,8 @@ the vertex's stored index. Every weight uses common denominator `D=h0*h1*h2`.
 Trilinear numerators multiply the chosen `n_i` or `h_i-n_i`. Tetrahedral orders
 the exact fractions descending, preserving axis order on ties, then subtracts
 the scaled `S_i=n_i*h_j*h_k` to obtain `D-Sa`, `Sa-Sb`, `Sb-Sc`, `Sc`.
-Only positive weights enter the compact vertex list used in the later table
-Need. Rebuilding weights from immutable cells/queries avoids a large per-point
-integer cache while preserving exactly the declared support.
+Only positive weights enter the current vertex list used in table mathematics.
+Rebuilding weights from immutable cells/queries avoids a per-output point cache.
 
 The complete component numerator is `sum(W_v*C_v)`, where each finite source
 float is an integer in `2^-1074` units. One ratio rounding produces the output
@@ -1029,27 +1028,61 @@ per-component accumulation. Original contributing bits determine all-negative-
 zero results; other exact cancellations are +0 and nonzero underflow retains
 its sign. No floating local coordinate or intermediate blend is rounded.
 
-The four-poll continuation reads global axes, complete requested input colors,
-then exactly contributing table colors, and publishes complete packed results.
-It allocates no full logical table/output for sparse demand. Per-Need certificate
-reservation is `4096+32768*M` Metadata bytes in addition to managed vectors,
-grid, continuation, source windows and output owners. Dense requests can exceed
-host metadata/work budgets independently of output payload size. Work and
-cancellation checks run inside support construction as well as final sums.
-All profiles use the same exact arithmetic with their selected integer compare
-helpers, so no numerical fallback is attempted.
+The six formal profile keys use Whole callbacks. Complete input/table/axis
+collection precedes all callback math. Axis validation precedes a complete
+query/model/domain prepass, followed by exact selected-vertex mathematics.
+Generic zero-weight invalid vertices remain unused; invalid typed vertices or
+upstream failures anywhere remain observable. Sparse delivery retains a full
+dense ColorArray output; any input edit dirties all recorded demand. Numeric
+failures have Run scope. Three ResourceVector axis indices need
+8*(N0+N1+N2) element bytes plus allocator/metadata overhead; fixed admitted
+exact state replaces all per-output dependency certificates and point records.
+Full input/table collection and output payload must fit managed budgets.
+All profiles keep exact integer arithmetic and their scalar/NEON/AVX2 compare
+helpers. No approximate backend or NUM-14 certificate is introduced, and
+DependencySession numerical counters are N/A.
 
-The independent Fraction oracle reconstructs RN64 grids, selects cells and
-simplexes and rounds complete rational sums using separate Python integer IEEE
-logic. Its 1062 cases cover all eight models, source/output dtype combinations,
-all axis directions, unequal extents, split ties and cube boundaries, tiny and
-extreme values, negative-zero rules and zero-weight invalid vertices. Five public
-manual groups additionally inspect actual support/dirty/cache effects, maximum
-`256^3` scalar-backed table and `2^38`-position composition, typed strides/fenv,
-work/state/stage limits, support/final-sum interruption, per-color Atom failures
-and required upstream producer order. Executable commands are in the
-[public example](../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
-No integration or CTest entry is added, and WSL is a correctness environment.
+The independent Fraction oracle reconstructs RN64 grids, cells and simplexes,
+then rounds rational sums using separate Python integer IEEE logic. Native
+strict/Apple each pass 1062 cases across eight models, mixed dtypes, all axis
+directions, unequal extents, split ties, boundaries, extreme/zero cases and
+zero-weight generic invalid vertices. Five public manual groups cover complete
+support/dirty/cache effects, typed table validation, unrequested query failure
+priority, rank-three traversal, arbitrary strides/fenv, full-storage budgets,
+active cancellation and Run errors. Maximal 256^3 broadcast tables are checked
+directly without copying; the public 384 MiB collect and 2^38-position output
+are explicitly rejected under an 8 MiB payload budget. These are resource tests,
+not successful giant public-output numerical tests. Focused numeric/compiler/
+color/resource CTests pass; no new x86 or installed-consumer run is claimed.
+
+
+CRV-07 performance: Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`,
+package 0.18.0/traits16/CABI9/provider1/framing14. Each run has a 17^3 XYZ identity
+table, Float64 input/output, N=128 colors with channel j at
+`((i+j)%64)*.25+.125`, full output, one worker and cache off. Payload 1 GiB,
+host 2 GiB, metadata/dependency state 512 MiB each, dependency/run work 2^40,
+managed work unlimited. One warmup plus seven samples; independent identity
+checks are outside timing. Before links the `3d35f5eb` LUT3D adapter into the
+same current kernel. Core invokes the numerical callback on complete Values,
+including grid construction, lookup, allocation and publication, excluding
+managed metering, collect and scheduling. Milliseconds: median [min,max].
+
+| Method/profile | Before public | Whole public | Whole core |
+| --- | ---: | ---: | ---: |
+| tri/strict | 35.765 [33.452,38.068] | 17.872 [17.596,18.088] | 14.852 [14.670,14.936] |
+| tetra/strict | 22.560 [22.155,23.884] | 12.451 [12.356,12.774] | 11.375 [11.104,11.825] |
+| tri/apple | 34.095 [32.254,35.061] | 16.910 [16.435,17.518] | 14.402 [14.287,14.583] |
+| tetra/apple | 22.046 [21.605,22.729] | 12.120 [11.893,12.464] | 10.902 [10.805,10.962] |
+
+Full collect increases payload peak from 525,048 to 646,032 bytes for this table.
+Metadata drops from 7,566,208 (trilinear) / 7,930,496 (tetrahedral) to 3,736 bytes.
+Raw driver, CSV and 12-second Apple trilinear Instruments capture are local
+`build/crv-whole/lut3d-*`. Among 11,673 execution-stack samples, ExactLut3d is
+present in 96.55%, ExactPolynomial in 93.85%, UniformAxis in 0.04%, collect in
+0.10%, Footprint methods in 0.16%, DependencySession in none. Inclusive figures
+overlap. Exclusive cost is led by `ExactRatioWorkspace<640>::top` (31.56%) and
+`multiply_fixed<640>` (15.44%). The exact weighted-sum machinery remains the
+measured bottleneck; this provides no basis for an unproved floating shortcut.
 
 ## CRV-08 whole-formula shapers
 
