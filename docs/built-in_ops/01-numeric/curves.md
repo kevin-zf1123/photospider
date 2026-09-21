@@ -9,6 +9,22 @@
 anchors/handles/start/end 动态输入，输出 `values` 与 `axis`；输出默认 Float64。
 strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其他族的建议不覆盖该具体规格。
 
+当前 CRV-01～11 正式 profile 路径已完成 Whole 迁移：公开 helper 使用的
+132 个 Value keys 均为 Whole，包含 CRV-09 的 15 个内部几何 keys；四个
+LUT3D 结构化 Result keys 保留 ResultProtocol2。六个 LUT1D baking、两个
+linear shaper、四个 resampling 和一个 LUT3D baking 仍是组合模板。
+旧无后缀 `curve.sample_linear` / `curve.sample_monotone` 不属于正式
+Bézier 接口，也未被重新实现。
+
+非空 Whole 请求收集完整输入并计算完整输出，任何输入改动使完整输出失效；
+远端 typed/upstream 错误和规定的数值错误可以导致 Run 失败。数学 stencil、
+零权重选择、颜色身份和每族精度契约保持不变。稀疏请求也需要完整输入/输出
+内存；Empty 不读取 payload。模板的独立输出投影、count=1 不读取 end，
+以及 resampling positions 的独立转发仍按各自契约执行。当前验证为 native
+Clang21 Strict/Apple；WSL/AVX2 和安装消费未针对本次 Whole 修改重跑。
+逐簇公开延迟、数值核心、范围和 Instruments 证据见
+[实现与性能说明](math-implementation.md)。
+
 ## 表示与目录
 
 `[N,3]`可表示RGB三条独立函数，也可表示一个标量t到RGB的color ramp。相同shape不足以决定语义，必须写input arity、轴domain和输出通道角色。真正RGB三维LUT是`[Nr,Ng,Nb,3]`，三个颜色分量共同索引；CLF分别定义1D、3×1D与3D LUT，scalar→RGB color ramp是本规格另外定义的映射语义。[^clf]
@@ -21,7 +37,7 @@ strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其�
 | CRV-04 bake_lut1d templates | 六种函数来源+start/end/count→values/axis | 六个独立命名组合模板；作者侧 profile 默认 strict；插值查询固定 Float64；输出按需请求 | [具体规格](op_specs/CRV-04_bake_lut1d.md)，Proposed；六个公开构造器已实现并通过展开图等价验证，不自动保存或冻结，离散误差单独验收 |
 | CRV-05 apply_lut1d family | input+table[L] 或 table[L,C]+axis[3]→同形结果 | 单表与逐通道多表独立；共享动态轴、固定线性插值；数值规则保留；Whole 完整输入/输出，按表项／通道进行数学选择 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；六个 profile keys 已实现并验证，支持单点表、反向轴、三种域外策略及六种 baking 消费链 |
 | CRV-06 color_ramp family | input+stops+颜色表（有理色相拆分整数分子/分母）→input.shape+[C] | RGB、CMYK、XYZ、CIELAB、CIELCh(ab)、OKLab、OKLCh、HSL、YCbCr 独立实现；携带通用颜色数组描述 | [具体规格](op_specs/CRV-06_color_ramp.md)，Proposed；九种模型已澄清，LCh/HSL 各三入口，原始 hue 保留圈数 |
-| CRV-07 apply_lut3d | 三分量颜色+table[N0,N1,N2,3]+axis[3,3]→同形颜色 | trilinear/tetrahedral 独立；八种模型，同模型内可改变描述；三版本整式正确舍入 | [具体规格](op_specs/CRV-07_apply_lut3d.md)，Proposed；全局轴校验、非零权重顶点按需、整颜色观察 |
+| CRV-07 apply_lut3d | 三分量颜色+table[N0,N1,N2,3]+axis[3,3]→同形颜色 | trilinear/tetrahedral 独立；八种模型，同模型内可改变描述；Whole 完整输入/输出；按各 profile 契约验收 | [具体规格](op_specs/CRV-07_apply_lut3d.md)，Proposed；全局轴校验、非零权重顶点数学选择、完整 ColorArray 输出 |
 | CRV-08 shaper | 数值+共享 lower/upper→同形数值 | linear 正反为 remap 模板，log2 正反为 primitive；IEEE 值、无夹紧；log 加速 4 ULP 且单调 | [具体规格](op_specs/CRV-08_shaper.md)，Proposed；完整公式、端点精确、动态边界校验 |
 | CRV-09 bake_lut3d | 逐颜色 workflow+axis→table/axis/report | 同模型 3D 组合模板；固定网格、全单元中心＋额外点 Measured 验收；报告独立，表通过后发布 | [具体规格](op_specs/CRV-09_bake_lut3d.md)，Proposed；调用者声明逐颜色独立性，非全域误差证明 |
 | CRV-10 invert | x/y/query→反查 x | linear/PCHIP 独立；严格单调 y 升降序、reject/clamp；反解数学曲线，PCHIP 加速按 x 的 4 ULP 验收 | [具体规格](op_specs/CRV-10_invert.md)，Proposed；全局 x/y 校验，3D 逆暂不纳入 |

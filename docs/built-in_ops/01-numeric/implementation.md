@@ -7,6 +7,19 @@ the [workflow README](../../../examples/numeric_workflow/README.md).
 Dated entries below record the original implementation deliveries and their
 validation; current per-operation behavior is maintained in `op_specs`.
 
+The 2026-09-21 CRV Whole revision is implemented on `numeric-optimize` in one
+commit per CRV cluster. All132 formal profile Value keys resolve to Whole,
+including15 LUT3D baking geometry keys; the four structured LUT3D Result keys
+retain protocol2 and bounded collect windows. Thirteen authoring templates keep
+their ordinary-node expansion and independent output identities. Legacy unsuffixed
+sample keys remain separate. Whole widens input/output storage, invalidation and
+failure scope as specified per family; numerical contracts remain unchanged.
+Native Clang21 Strict/Apple public workflows, independent oracles, focused tests,
+code/spec reviews and scoped public/core performance captures passed. This revision
+has no new WSL/AVX2 or installed-consumer claim. Current measurements and limits
+are in [math implementation notes](math-implementation.md); older delivery rows
+below remain historical.
+
 Scope: all NUM-01..15 and CRV-01..11 contracts in this directory, based on
 `ops@0c567b6d`, implemented on `ops-impl`. Primitive keys and authoring templates
 retain the distinctions in their individual specifications. Specification

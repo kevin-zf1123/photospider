@@ -201,13 +201,11 @@ enclosing endpoints round identically.
 Certified unit/transfer refinement has a 4096-bit ceiling and fixed admitted
 integer capacity. Other unresolved exact cancellations or rounding boundaries
 can return ResourceExhausted/CapacityLimit; work and cancellation may stop earlier.
-These are explicit execution limits. Native Clang 21 Strict/Apple and Ubuntu WSL
-Clang 18 Strict/AVX2 passed seven manual groups and 352 RGB oracle cases per
-profile; non-RGB oracle coverage is 1784 cases per profile. The installed 0.16
-ColorArray/ICC/ramp consumers passed, as did 19 affected existing NUM/CRV manual
-consumers under Strict. The focused compiler unit, old-minor rejection,
-ClangFormat 21/cpplint and independent math, entry, ownership and cache reviews
-passed. WSL results establish numerical correctness only.
+These are explicit execution limits. The current Whole revision passed native
+Clang21 Strict/Apple seven manual groups,352 independent RGB and1784 non-RGB
+cases per profile, plus focused numeric/color/resource/compiler tests and scoped
+review. WSL/AVX2 and installed consumers were not rerun for this revision. See the
+CRV-06 math implementation notes for current timing and Instruments evidence.
 
 ## Joint three-axis color LUTs
 
