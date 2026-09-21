@@ -1453,23 +1453,23 @@ python3 examples/numeric_workflow/shaper_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_shapers strict
 ```
 
-Use `apple` or `x86` on its matching architecture. Five manual groups print
+Use `apple` or `x86` on its matching architecture. Six manual groups print
 `PASS`; the independent Fraction/directed MPFR oracle prints `4196` cases and
-checks exact bits and monotonic groups. Manuals inspect public execution,
-reverse singleton partitioning, shared-bound cache replacement, pointwise and
-shared dirty support, ColorArray validation closure, signed-zero inverse guard,
-unaligned/negative strides, floating environment and work/state/stage/cancellation
-failure cleanup. The oracle needs MPFR 4.2+ as described in the existing math
-oracle setup. It is not linked into the product.
+checks strict bits, accelerated bounds and monotonic groups. Native Clang 21
+strict/Apple runs pass, alongside focused numeric/compiler CTests. This migration
+has no new x86 or installed-consumer run. MPFR 4.2+ is reference-only.
 
-Current log profiles agree bitwise. General certified evaluation in accelerated
-profiles records a strict scalar fallback; exact/special branches do not. This
-combined mapping is monotone independently of request partition. Refinement is
-bounded at 4096 fraction bits and can fail `ResourceExhausted/CapacityLimit`;
-host work limits and cancellation can stop it earlier. Every nonempty output
-requires both shared scalars plus local input and its typed validation closure.
-Empty output reads no payload. These manual targets have no integration-test or
-CTest registration. WSL Clang supplies numerical correctness evidence only.
+All log keys now use Whole; linear templates retain their NUM Whole expansion
+and mandatory inverse bound guard. Nonempty requests collect complete input and
+both bounds with typed validation, allocate full outputs and dirty all recorded
+demand on any input edit. Numeric bound errors have Run scope. IEEE values,
+endpoint selection and monotonicity remain unchanged. Manual checks cover fenv,
+arbitrary strides, zero-stride rank-two layouts, complete typed inputs, cache
+rebindings, bounded full output/workspace/work, active cancellation and upstream
+failures for all four public helpers. Log direct callbacks additionally exercise
+certified refinement cancellation. Empty reads no payload. Refinement remains
+bounded at 4096 fraction bits; unresolved proofs fail ResourceExhausted. Whole
+fallback/evaluation counters are N/A. Targets remain outside default CTest.
 
 ## Measured three-dimensional LUT baking
 

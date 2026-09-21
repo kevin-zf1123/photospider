@@ -81,8 +81,8 @@ Linear and log2 forward/inverse strict correctly round their whole formulas.
 Accelerated Apple Silicon and x86-64 versions obey the shared final FP32 4 ULP
 contract, including its strict fallback range, while matching
 strict NaN/Inf/zero classification and signs. Exact source endpoints return
-0/1, and inverse t=0/1 returns lower/upper exactly, on every profile. Fall back
-to strict and report the fallback when the bound cannot be guaranteed; host
+0/1, and inverse t=0/1 returns lower/upper exactly, on every profile. Use the strict path
+when the bound cannot be guaranteed; Whole counters are unavailable and host
 budget exhaustion remains an explicit failure.
 
 Accelerated log2 forward and inverse must also be monotone nondecreasing in
@@ -95,12 +95,14 @@ requested output batch to repair an invalid implementation.
 
 Input rank is 1..8, all extents positive and logical count <=2^40. Ordered ports
 are input, lower, upper; output values retains input dtype/shape with empty
-facets. There is no output dtype conversion parameter. For requested indices Q,
-read only input[Q] but always read/validate both scalar bounds for every nonempty
-request, even endpoint and NaN paths. Empty Q reads no dynamic payload. A scalar
-bound error affects all observations depending on it; input changes affect only
-their own observations. All source descriptors and typed/upstream validation
-closures remain explicit and retain provenance.
+facets. There is no output dtype conversion parameter. All six log primitive
+keys execute through Whole; the linear templates reuse Whole NUM remap/constant
+nodes, including the inverse scalar order guard. Nonempty requests collect
+complete input and both scalar bounds, including typed/upstream validation,
+before numerical evaluation. Bounds precede input IEEE handling inside callbacks;
+upstream collection failures can precede callback bound checks. Empty Q reads
+no dynamic payload. Any input or bound change dirties the complete recorded
+output demand. Numeric bound errors have Run scope and publish no output.
 
 Static log2 primitive keys select strict/apple_silicon/x86_64 independently;
 there is no runtime mode parameter. Linear authoring templates take static
@@ -115,28 +117,30 @@ bits, t=1 gives upper bits; other finite t yields a positive exact result, round
 with gradual underflow. Linear zero/endpoint/payload semantics are exactly those
 of remap_range, not newly redefined by the template.
 
-Return immutable packed regions with correct global origins and owner lifetime
+Return a complete immutable dense Value; public fragments retain its full owner
+and expose the requested region. Ownership lasts
 beyond context teardown. Source arbitrary legal offsets, unaligned access and
 negative/zero strides are supported. Cache identity includes source/bound witnesses,
 profile and template expansion identity. Cache-off and fragmented requests have
 the same values, metadata and failure scope as joint requests.
 
-For M requested values, output payload is M*sizeof(dtype); basic work is O(M)
+For M=product(input.shape), output payload is M*sizeof(dtype); basic work is O(M)
 plus certified numerical refinement for log functions. Account source windows,
 owners, broadcast views, template intermediates, output capacity, exact arithmetic
-and overlapping scratch growth under host capacity/work/stage limits. No allocation
-proportional to unrequested logical elements is required. Poll cancellation at
+and overlapping scratch growth under host capacity/work limits. Even small
+requests allocate full output and collect full input. Log callbacks retain fixed
+admitted exact state plus an O(rank) coordinate counter, with no per-output
+point or dependency records. Poll cancellation at
 least every 64 simple samples and during each extended arithmetic refinement.
-Release temporary state on all terminal paths and publish no partial failed atom.
+Release temporary state on all terminal paths and publish no partial failed run.
 
 Invalid bound values/order/positivity fail InvalidArgument/InvalidDomain with
-offending port/value and affected output coordinate; bounds take precedence over
+offending port/value and Run scope; bounds take precedence over
 input NaN. Compile/preflight checks shape/dtype/static profile, using TypeMismatch
 for port incompatibility and InvalidArgument/InvalidDomain for malformed statics.
 Numerical domain/overflow outcomes described above are successful IEEE values.
 ResourceExhausted, BackendUnavailable, cancellation, stale and upstream failures
-retain the NUM shared error categories and provenance. Accelerated fallback is
-reported through execution diagnostics without changing the output schema.
+retain the NUM shared error categories and provenance. Whole callbacks do not expose DependencySession fallback counters.
 
 ## Linear composition and order guard
 
@@ -165,7 +169,7 @@ Exercise near-equal positive bounds, extreme finite bounds, exact endpoint bits,
 NaN payloads/signaling, signed zero, infinities, subnormals and output overflow.
 Accelerated acceptance verifies per-result 4 ULP, classifications, monotonicity
 and cross-fallback/request-partition consistency. Test invalid bound precedence,
-partial reads, shape/strides, exact dirty support, cache-off, resource cancellation
+partial delivery, complete reads, shape/strides, Whole dirty support, cache-off, resource cancellation
 and owners after context destruction.
 
 The public workflow and oracle exercise these Proposed interfaces through
@@ -193,7 +197,9 @@ rounding returns `ResourceExhausted`.
 
 See [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
 and [math implementation](../math-implementation.md) for the target command and
-shared fixture. Native Clang 21 strict/Apple and Ubuntu WSL Clang 18 strict/AVX2
-passed 4,196 independent Fraction/directed-MPFR cases per profile. All five
-manual groups passed all four profiles. Installed 0.16 consumers, the focused
-compiler unit, ClangFormat 21/cpplint and independent math/entry reviews passed. This target has no integration-test registration.
+shared fixture. Native Clang 21 strict/Apple each pass 4,196 independent
+Fraction/directed MPFR-4.2.0-p12 cases. Six manual groups cover all four forms,
+including public budget/cancellation and failing source execution. Focused
+numeric/compiler CTests, ClangFormat 21, cpplint and scoped review pass.
+No new x86 or installed-package run is claimed. This manual target has no
+integration-test registration.

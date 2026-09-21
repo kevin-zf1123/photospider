@@ -1116,26 +1116,73 @@ cancellation failures are terminal, not refinement retries.
 
 All returned finite numeric paths correctly round the same monotone function.
 Thus their combination is monotone without sorting output requests or choosing
-a path from batch values. Accelerated keys report `FunctionUnsupported` scalar
-fallback exactly when general strict interval evaluation begins, including an
-attempt subsequently interrupted by the host. No claimed SIMD throughput or
-WSL performance result follows from this correctness path.
+a path from batch values. Accelerated keys retain the strict certified path;
+Whole does not expose DependencySession fallback/evaluation counters. Existing
+scalar/NEON/AVX2 arithmetic identities remain; there is no new Accelerate/SME
+backend or application of NUM-14's finite four-term certificate.
 
-The three-poll log continuation requests shared scalar Control/Validation,
-then local input Data/Validation, then publishes immutable generic fragments.
-Typed input closure can read the full containing color while output remains a
-scalar observation. Bounds errors precede input special values. The state uses
-host-owned fixed arithmetic, vectors and publication owners; Need reservation
-is `4096+16384*M` metadata bytes. Each certificate and extended arithmetic loop
-consumes host work. Empty is completed by the host without entering the state.
+All six log keys use Whole callbacks with complete input/bounds collection and
+full dense output. Typed/upstream errors remain observable anywhere in inputs;
+callback bounds validation precedes IEEE special handling. Whole errors have
+Run scope and any input edit invalidates all recorded demand. Fixed admitted
+ExactShaper state and O(rank) traversal replace per-output points, certificates
+and publication owners. Account full collected input, full output and workspace.
+Linear templates already expand NUM Whole remap/constant nodes; no redundant
+linear primitive is added and inverse bound-order validation remains connected.
 
-The public manual and 4196-case Fraction/directed MPFR reference cover both
-dtypes, four forms, exact roots and midpoint ties, near-equal and extreme
-bounds, raw IEEE special values, under/overflow and monotonic clusters. Five
-manual groups additionally inspect partition/cache/dirty behavior, all-port
-strides and fenv, ColorArray closure, Empty, inverse -0, state/work/stage limits,
-refinement cancellation, fallback diagnostics and escaped owners. See the
-[commands and editable workflow](../../../examples/numeric_workflow/README.md#scalar-coordinate-shapers).
+Native strict/Apple each pass 4196 Fraction/directed MPFR-4.2.0-p12 cases across
+all four forms and both dtypes, near-equal/extreme bounds, exact roots/midpoints,
+IEEE payload/zero/Inf, underflow/overflow and monotonic groups. Six public manual
+groups inspect whole support/dirty/cache behavior, arbitrary layouts and fenv,
+ColorArray validation, Empty, inverse -0, log direct workspace/refinement
+interruption and all four public paths' work/output/cancellation/upstream errors.
+Focused numeric/compiler CTests pass. No new x86 or installed-package run is
+claimed. Public commands are in the shaper workflow README.
+
+
+CRV-08 performance uses Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`,
+package0.18.0/traits16/CABI9/provider1/framing14. N=128 Float64 values, bounds
+[1,16], full output, one worker, cache off, payload1GiB/host2GiB/metadata512MiB,
+dependency-state512MiB, dependency/run work2^40 and managed work unlimited.
+Exact fixtures use x=4 or inverse t=.5; interval fixtures use x=3 or inverse t=.3.
+One warmup plus seven timed runs; separate Fraction/directed-MPFR expectations
+are checked outside timing. Linear accelerated outputs use the existing FP32
+scaled bound rather than strict bit comparison. Before replaces only the log
+adapter with `3d35f5eb`; linear implementations are identical on both sides.
+
+For log primitives, core directly invokes the numerical Whole callback on
+complete Values with allocation/publication but no scheduler/collect/managed
+metering. For the two linear templates, core is summed host OperationTiming
+callback duration, including metering and intermediates; it is not the same
+unmetered measurement. Milliseconds are median [min,max].
+
+| Form/profile | Before public | Whole public | Core (linear: callbacks) |
+| --- | ---: | ---: | ---: |
+| linear/exact/strict | 0.865 [0.852,0.892] | 0.895 [0.845,1.387] | 0.673 [0.658,0.841] |
+| linear inverse/exact/strict | 0.328 [0.294,0.433] | 0.343 [0.326,0.365] | 0.105 [0.100,0.112] |
+| log/exact/strict | 1.766 [1.733,2.259] | 0.069 [0.063,0.080] | 0.018 [0.018,0.021] |
+| log/interval/strict | 26.253 [25.559,27.353] | 19.916 [19.527,20.206] | 16.712 [16.503,17.015] |
+| log inverse/exact/strict | 1.779 [1.708,1.881] | 0.060 [0.056,0.112] | 0.018 [0.018,0.051] |
+| log inverse/interval/strict | 17.731 [15.281,20.646] | 10.693 [10.503,11.048] | 9.300 [8.839,9.593] |
+| linear/exact/apple | 0.318 [0.276,0.323] | 0.289 [0.259,0.587] | 0.103 [0.097,0.162] |
+| linear inverse/exact/apple | 0.338 [0.312,0.382] | 0.303 [0.293,0.439] | 0.097 [0.095,0.168] |
+| log/exact/apple | 1.838 [1.724,3.044] | 0.113 [0.069,0.201] | 0.019 [0.018,0.024] |
+| log/interval/apple | 26.191 [25.521,26.806] | 19.700 [19.607,20.028] | 16.408 [16.098,16.518] |
+| log inverse/exact/apple | 1.780 [1.710,1.824] | 0.071 [0.060,0.079] | 0.019 [0.018,0.033] |
+| log inverse/interval/apple | 15.603 [15.231,15.805] | 10.462 [10.255,10.910] | 9.249 [8.854,9.375] |
+
+Linear timings are sampling variation, not a new optimization claim. Log metadata
+falls from 4,424,632 to 2,944 bytes; payload peak grows slightly from 209,392 to
+210,264 bytes because full inputs accompany the fixed arithmetic arena.
+Raw drivers, samples and native trace are local `build/crv-whole/shapers-*`.
+The first trace attempt launched xctrace through an x86 Python process and was
+rejected by ktrace; only the explicit `arch -arm64` retry is used as evidence.
+
+The 12-second native Apple forward-interval trace contains 11,460 execution-stack
+samples: ExactShaper appears in 99.27%, DirectedInterval in 99.24%, collect in
+0.02%, Footprint methods in 0.08%, DependencySession in none. Inclusive percentages
+overlap. Exclusive `ExactRatioWorkspace<192>::top` is 32.20% and directed division
+9.25%, identifying certified arithmetic as the remaining cost in this fixture.
 
 ## CRV-09 measured LUT3D baking
 
