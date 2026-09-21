@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 #include "01-numeric/accelerated_curve.hpp"
 #include "01-numeric/exact_product.hpp"
@@ -16,7 +17,7 @@ namespace ps::plugin_internal::numeric_ops {
 // doubling. Inverse comparison uses 2^-1075 units: with B=2100,
 // slope a/b <2^6303, Hermite N <2^21009 and N-target*D <2^21010.
 // Segment-interior comparisons and at most 64 live slots fit this same arena.
-// Every temporary is in this continuation-owned fixed arena.
+// Every temporary is in the caller-owned fixed arena.
 class ExactCurve final {
   static constexpr std::size_t kWords = 352, kSlots = 96;
   using Integer = FixedInteger<kWords>;
@@ -240,7 +241,8 @@ class ExactCurve final {
       const std::array<std::uint64_t, 4>& x,
       const std::array<std::uint64_t, 4>& y, bool narrow,
       const std::function<Status(std::uint64_t)>& consume,
-      const std::function<Status()>& strict_fallback = {}) {
+      const std::function<Status()>& strict_fallback = {},
+      bool normalized_environment = false) {
     used_ = 0;
     status_ = Status::success();
     consume_ = &consume;
@@ -252,8 +254,10 @@ class ExactCurve final {
       auto work = consume(512);
       if (!work.ok())
         return Result<std::uint64_t>(work);
-      input_internal::Float32Environment environment;
-      if (environment.active()) {
+      std::optional<input_internal::Float32Environment> environment;
+      if (!normalized_environment)
+        environment.emplace();
+      if (normalized_environment || environment->active()) {
         auto fast = accelerated_curve(pchip, knots, first, count, segment,
                                       numeric_double(query), x, y);
         if (fast) {

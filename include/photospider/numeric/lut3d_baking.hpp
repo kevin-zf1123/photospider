@@ -64,6 +64,12 @@ struct BakedLut3d {
  * immutable binding snapshot, including shared inputs. No nested execution or
  * file save occurs.
  *
+ * Generated profile Value nodes use Whole: complete inputs and dense outputs,
+ * full-input invalidation and numeric Run failures. Budget full grid, points,
+ * converted colors and source intermediates even for partial table requests.
+ * Pack/measure/unpack/gate retain the structured Result protocol, bounded I/O,
+ * schema provenance and report/table object association. The final table gate
+ * returns requested complete-color fragments backed by its own storage.
  * Every nonempty table or report request validates all grid colors, complete
  * source outputs, centers and extra points. report successfully records
  * passed=false on exceeded tolerances; table then fails OperationFailed/

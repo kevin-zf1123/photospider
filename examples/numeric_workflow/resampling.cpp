@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "accuracy.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/lowpass.hpp"
 #include "photospider/photospider.hpp"
@@ -159,6 +160,31 @@ void examples(ps::CpuNumericProfile profile) {
                     actual == source,
                 "independent position bits");
       }
+      auto partial_shape = yshape;
+      std::vector<ps::RegionDimension> dimensions{{0, 1}};
+      if (multi)
+        dimensions.push_back({0, 1});
+      auto partial = take(fixture.run(
+          {{"samples", region(partial_shape, {ps::Region(dimensions)})}},
+          false));
+      auto full_support = take(partial.dependencies.source_support());
+      for (unsigned port = 0; port < 3; ++port)
+        require(
+            full_support.at("input" + std::to_string(port)) ==
+                take(ps::Footprint::all(
+                    fixture.bindings.inputs[port].value.descriptor().shape)),
+            "resample samples inherit complete Whole inputs");
+      auto valid_queries = fixture.bindings.inputs[2].value;
+      fixture.bindings.inputs[2].value =
+          doubles({3}, {pchip ? .5 : 2., pchip ? 1.5 : .5, 99});
+      auto remote = fixture.run(
+          {{"samples", region(partial_shape, {ps::Region(dimensions)})}},
+          false);
+      require(!remote.ok() &&
+                  remote.status().reason == ps::FailureReason::InvalidDomain &&
+                  remote.status().detail.scope == ps::FailureScope::Run,
+              "remote query fails resample samples Whole run");
+      fixture.bindings.inputs[2].value = valid_queries;
       auto positions = take(fixture.run(
           {{"positions", region({3}, {ps::Region({{1, 1}})})}}, false));
       auto support = take(positions.dependencies.source_support());
@@ -272,7 +298,7 @@ void filtered_workflow(ps::CpuNumericProfile profile) {
   for (unsigned i = 0; i < 4; ++i) {
     std::uint64_t sample = 0, position = 0;
     require(result.values.at("samples").read({i}, &sample, 8).ok() &&
-                sample == UINT64_C(0x3fcc6b828682ab42),
+                numeric_accuracy(sample, UINT64_C(0x3fcc6b828682ab42), profile),
             "Nyquist residual after explicit Hann filter and downsample");
     require(result.values.at("positions").read({i}, &position, 8).ok() &&
                 position == raw(2 * i),

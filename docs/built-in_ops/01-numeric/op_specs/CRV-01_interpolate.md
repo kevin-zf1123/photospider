@@ -41,7 +41,7 @@ implementations/specifications:
 - Single-function interface: x[K], y[K], query[N] -> values[N].
 - Multiple-function interface: x[K], y[K,C], query[N] -> values[N,C],
   with multiple functions sharing the knot/query x coordinates. The independent
-  multi-function specifications define column-local support and product limits.
+  multi-function specifications define column-wise mathematical rules and product limits.
 
 Do not overload one operation with both ranks or silently squeeze/insert the
 function axis. Linear and PCHIP interpolation also use independent operation
@@ -89,29 +89,58 @@ Source inspected at the front-matter commit:
 The four Proposed interfaces are implemented by twelve registered keys in `plugins/ops/01-numeric/curve_interpolation.cpp` and the public
 constructors in `photospider/numeric/curves.hpp`. Strict and Float64 outputs use
 exact rational whole-formula evaluation with 352 limbs (22,528 bits) and a
-96-slot continuation arena; the maximum live formula slots are bounded at 49.
+96-slot callback workspace; the maximum live formula slots are bounded at 49.
 Accelerated Float32 evaluation propagates conservative intervals through the
 complete formula and publishes only when both endpoints round to the same
 Float32 value. This stronger condition preserves monotonicity across queries
 and strict fallbacks. Named knots/clamps remain exact. Exact cross products
 recognize a collinear complete local PCHIP stencil and use the equivalent linear
 formula. Rounded slope equality is not used. NEON/AVX2 integer comparison and
-publication helpers remain available; actual fallback dispatch is diagnosed.
+publication helpers remain available; the Whole callback does not expose DependencySession fallback counters.
 
-Regional execution performs four polls: it acquires and validates all x knots,
-reads and classifies deduplicated query rows, reads column-local y stencils, then
-publishes only requested output fragments. Knot and clamp observations read one y; interpolation and extrapolation
-read the exact local stencil. Explicit `ExecutionOptions` work budgets are
-required for the full public workflow; a small default direct-invoke budget may
-return `ResourceExhausted`.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
+
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
+
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
+
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
+
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
 
 See [the numeric workflow README](../../../../examples/numeric_workflow/README.md)
 and [math implementation](../math-implementation.md) for public commands and
 algorithm details. `implementation_status: implemented` records the current
-manual acceptance boundary while the specification remains Proposed. Local
-Clang 21 strict/Apple and Ubuntu WSL Clang 18.1.3 strict/AVX2 passed 2,487
-independent Fraction cases per profile. Public manual checks separately cover
-fixtures, sparse support/dirty and Atom behavior, lifetime, strides/fenv/resource/
-schema, cache/upstream, giant 2^39-column composition and typed-mask validation.
-Local installed consumers and the focused compiler unit passed. The
-manual target is EXCLUDE_FROM_ALL and has no CTest or integration registration.
+manual acceptance boundary while the specification remains Proposed. Current Whole acceptance uses the public workflow and independent Fraction oracle
+on local Clang 21 strict/Apple. The executable checks full support/dirty and Run
+failure behavior, mathematical knot selection, lifetime, strides/fenv, managed
+work/output/workspace budgets and active cancellation, metadata/Empty, cache and
+upstream collection, giant-output rejection and complete typed-mask validation.
+Cross-platform historical results do not establish current Whole validation.
+The manual target is EXCLUDE_FROM_ALL and has no CTest registration.

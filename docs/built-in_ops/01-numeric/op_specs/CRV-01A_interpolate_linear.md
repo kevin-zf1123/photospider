@@ -14,7 +14,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
+implementation_base_commit: 3d35f5eb
 implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
@@ -126,7 +126,7 @@ intermediate weights. No intermediate hardware zero sign defines the result.
 
 ## Confirmed finite-value policy
 
-All actually read y and query values must be finite. Every published output must
+All mathematically used y and all query values must be finite. Every published output must
 be finite as well; nonfinite input or destination overflow fails the affected
 observation. Finite negative values and values greater than one are valid and
 are not clipped. The x input retains its separately confirmed finite, strictly
@@ -135,88 +135,51 @@ policy rather than NUM-04's IEEE-style successful NaN/Inf outputs.
 
 ## Confirmed requested-data support
 
-For any nonempty output request, globally read and validate all x knots for
-finiteness and strict increase. Read only query entries corresponding to requested
-output positions. Query order and repetition do not change their output positions.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
 
-For each finite requested query:
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
 
-- An exact knot hit reads only that knot's y.
-- An out-of-domain clamp reads only the selected endpoint y.
-- An ordinary interior interpolation or linear extrapolation reads the two
-  endpoint y values of its selected segment.
-- An out-of-domain reject needs no y values.
-
-Unrequested queries and unselected y values are neither read nor numerically
-validated. Their numerical errors do not fail the observation. Global x changes
-invalidate all dependent observations; query changes affect matching output
-positions; y changes affect only retained contributors. Typed validation closure
-and upstream execution obligations are stated separately below.
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
 
 ## Exact mapping, validation and returned storage
 
-For requested output index set Q, query Control support is Q. All x[0:K] forms
-Control/Validation support for each nonempty observation, including knot hits
-and clamp. Validate the finite increasing x array before segment selection;
-validate each demanded query before dependent y reads. A query equal to a knot
-uses that knot path before ordinary segment evaluation. For interior non-knot
-queries, choose the unique j with x[j]<query<x[j+1]; outside the domain use
-j=0 or K-2 for linear_extrapolate. Signed zeros compare numerically equal.
-Both selected y endpoints are read and validated even if they happen to be
-equal; no value-dependent simplification removes these declared dependencies.
-
-Data support for y is the exact union of the selected singleton/endpoints over
-Q. Empty Q requests no x, y or query payload. Add recognized typed-input
-Validation closure separately, without pretending generic finite checks replace
-it. Retain transitive upstream witnesses; genuinely required upstream Whole
-execution retains its own failures. Do not read a bounding gap of queries or y
-merely to simplify a vectorized loop or lookup. Descriptor inference reads no
-runtime payload and validates all static edges even for empty requests.
-
-A changed x invalidates/replans every observation retaining global x support;
-changed query[i] affects values[i]. A changed y[j] invalidates observations whose
-selected singleton or segment endpoints contain j, plus typed-validation effects.
-Snapshot versions, profile, metadata and static parameters remain in execution
-identity even when numerical results happen to be unchanged. Any cached segment
-plan retains both x and query witnesses; x edits can move queries to other y.
-
-Return immutable owned packed fragments covering requested global indices,
-with matching Region/storage origins and element-size strides. No layout
-parameter, writable alias, whole-N allocation or implicit missing zero is defined.
-Published result owners outlive invocation/context until final release.
+The callback chooses an exact knot before interpolation. Otherwise interior
+queries select the unique j with x[j]<query<x[j+1]; extrapolation uses j=0 or
+K-2. Signed zeros compare numerically equal. Both linear endpoints undergo
+finite validation even when equal. Whole execution, ownership and invalidation
+follow the preceding section. All static edges are checked without payload.
 
 ## Reference algorithm and bounded resources
 
-Scan x in logical order and validate its complete topology. A host-accounted
-packed Float64 knot index costs 8K bytes, at most 524288 bytes; retaining it is
-optional and must also account source owners and validation witnesses. Use
-binary search per requested query, exact equality before interpolation, and
-deduplicate actual y requests without altering output order. An ordered-query
-sweep is an optional optimization only for a proven ordered requested subset.
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
 
-For interpolation/extrapolation use exact dyadic/rational arithmetic for the
-complete expression, followed by one direct destination rounding. Correctly
-rounded fast cases are allowed, with exact fallback when rounding cannot be
-established. Do not use a rounded t, clipped intermediate or sequential hardware
-arithmetic as the contract. Opposite extreme x/y endpoints are valid if the
-required inputs and final rounded output are finite. Tiny distinct x differences
-do not fail merely because an approximate slope would overflow.
-
-For M requested queries and U selected y indices (U<=min(K,2M)), a reference
-indexed path costs O(K+M log K) search/validation work plus exact arithmetic,
-typed validation and publication. Output payload is b*M bytes. Account the x
-index, query/y windows, deduplication/segment metadata, retained owners and every
-exact-arithmetic limb and temporary buffer. Work/stage/capacity limits apply even
-to a one-query request because x validation is global. A blocked/read-through
-index alternative must report its additional searches and reads; it cannot
-weaken topology validation to fit a budget. No O(N) intermediate query array is
-required for sparse output.
-
-Use host workers, reserve before growth, and poll cancellation before reads,
-at least every 64 knots/queries, during extended arithmetic and before publication.
-Cache-off retains correctness and active ownership. Resource failure is sticky;
-return ResourceExhausted instead of an inaccurate value, a widened support set
-or an undocumented smaller domain.
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
 
 ## Error model
 
@@ -230,12 +193,9 @@ or an undocumented smaller domain.
 | Insufficient exact arithmetic/index/output budget | Admission/evaluation; ResourceExhausted with existing resource reason |
 | Wrong accelerated target, upstream failure, typed validation, cancellation or stale input | Preserve baseline capability/host Status and original identity |
 
-Numeric/control failures identify each actually dependent output Atom; global x
-validation does not retroactively revoke earlier successful observations. Include
-the offending port/index and available query/output coordinate in diagnostics.
-An output batch failure publishes no partial successful Value. Eligible atom
-execution can retain independent successful observations. Do not fabricate a
-query coordinate for a failure detected before that query has been read.
+Numeric/control failures have Run scope, identify the offending port/index,
+and publish no partial successful Value. An upstream failure may precede the
+callback's numerical rejection because input collection is complete.
 
 ## Acceptance and current verification
 
@@ -256,11 +216,11 @@ irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
 - Exact knots and clamp read one y only; remote nonfinite y does not fail them.
   An interpolated/extrapolated query reads both endpoints. A bad remote x fails
   every requested observation retaining global topology; a bad unrequested query
-  has no effect. Test reject without y reads.
+  fails the run. Test full upstream collection even for reject.
 - Constant -0, mixed signed-zero endpoints, zero cancellation and signed underflow;
   query repetitions/order, K=2 and size limits, dtype mixing and length errors.
 - Read witnesses, query/x/y invalidation, source strides, warm/cache-off state,
-  low work/capacity/stage, cancellation, and owner lifetime after context teardown.
+  low work/capacity, cancellation, and owner lifetime after context teardown.
 
 Numerical precision, exact dependency support and resource behavior are separate
 acceptance obligations. The maintained public workflow and independent oracle
@@ -287,8 +247,8 @@ keys. The public `photospider/numeric/curves.hpp` constructor is
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;
 unresolved cases use exact fallback. Exact cross products identify collinear
-PCHIP stencils and reduce them to the linear formula. Global x validation, requested query rows and the
-local y stencil follow the demand contract above.
+PCHIP stencils and reduce them to the linear formula. Complete input collection, Run failures and complete-output allocation follow
+the Whole contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and actual platform acceptance.

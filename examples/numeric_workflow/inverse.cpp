@@ -15,6 +15,7 @@
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/inverse_curves.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -168,44 +169,21 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
                      std::vector<ps::Region> boxes) {
   return take(ps::Footprint::from_regions(shape, std::move(boxes)));
 }
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Footprint> wanted;
-  for (const auto& input : inputs)
-    wanted.push_back(take(ps::Footprint::none(input.descriptor().shape)));
-  for (const auto& need : take(session->pending_reads()))
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-  std::vector<ps::ValueFragments> supplied;
-  for (unsigned i = 0; i < inputs.size(); ++i) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[i].descriptor(), inputs[i].facets(),
-        take(ps::Footprint::all(inputs[i].descriptor().shape)), {inputs[i]}));
-    supplied.push_back(take(all.restrict(wanted[i])));
-  }
-  require(session->supply(supplied, request.snapshot_identity).ok(),
-          "curve exact supply");
-}
 ps::ValueFragments direct(
     const std::shared_ptr<ps::OperationRegistry>& registry,
     const ps::WorkflowNode& node, const std::vector<ps::Value>& inputs,
     const ps::Footprint& outputs) {
-  ps::DependencyRequest request;
-  for (const auto& v : inputs)
-    request.inputs.push_back({v.descriptor(), v.facets()});
-  request.parameters = node.parameters;
-  request.snapshot_identity = "curve-direct";
-  request.outputs = outputs;
-  request.limits.maximum_work = UINT64_C(2048) * 1024 * 1024;
+  std::vector<ps::Region> demands;
+  for (const auto& value : inputs)
+    demands.push_back(value.region());
   ps::ResourceBudget budget(ps::ResourceLimits{});
-  auto session = take(
-      registry->start_dependency(node.operation, request, budget.allocator()));
-  for (;;) {
-    auto progress = take(session->poll());
-    if (auto* result = std::get_if<ps::DependencyResult>(&progress))
-      return result->value;
-    supply(session, request, inputs);
-  }
+  ps::ResourceAllocationScope scope(budget);
+  ps::OperationInvocation call(
+      inputs, demands, node.parameters, ps::Backend::Cpu, {},
+      ps::Region::whole(inputs[2].descriptor().shape), budget.allocator());
+  auto output = take(registry->invoke(node.operation, call));
+  return take(ps::ValueFragments::create(output.descriptor(), output.facets(),
+                                         outputs, {output}));
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   auto bytes = value.bytes();
@@ -286,12 +264,18 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
          array(ps::ElementType::Float64, {4},
                {raw(.3125), nan, raw(9), raw(16)})});
     auto demand = region({4}, {ps::Region({{0, 1}}), ps::Region({{2, 2}})});
+    auto remote = fixture.run({{"values", demand}}, false);
+    require(!remote.ok() &&
+                remote.status().reason == ps::FailureReason::InvalidDomain &&
+                remote.status().detail.scope == ps::FailureScope::Run,
+            "unrequested nonfinite query fails the Whole inverse");
+    fixture.bindings.inputs[2].value = doubles({4}, {.3125, 1, 9, 16});
     auto result = take(fixture.run({{"values", demand}}, false));
     auto support = take(result.dependencies.source_support());
     require(support.at("input0") == take(ps::Footprint::all({5})) &&
                 support.at("input1") == take(ps::Footprint::all({5})) &&
-                support.at("input2") == demand,
-            "global x/y and local query witnesses");
+                support.at("input2") == take(ps::Footprint::all({4})),
+            "complete x/y/query witnesses");
     for (auto name : {"input0", "input1"})
       require(take(result.dependencies.potential_dirty(
                        name, region({5}, {ps::Region({{4, 1}})})))
@@ -299,17 +283,12 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
               "remote x/y dirties every inverse observation");
     require(take(result.dependencies.potential_dirty(
                      "input2", region({4}, {ps::Region({{1, 1}})})))
-                .at("values")
-                .empty(),
-            "unrequested query does not dirty output");
+                    .at("values") == demand,
+            "any query edit dirties all recorded Whole demand");
     std::uint64_t actual = 0;
     require(result.values.at("values").read({2}, &actual, 8).ok() &&
                 actual == raw(3),
             "escaped packed global origin");
-    auto badq = fixture.run({{"values", take(ps::Footprint::all({4}))}}, false);
-    require(
-        !badq.ok() && badq.status().reason == ps::FailureReason::InvalidDomain,
-        "demanded nonfinite query");
     for (unsigned port = 0; port < 2; ++port) {
       auto saved = fixture.bindings.inputs[port].value;
       for (auto invalid :
@@ -322,7 +301,7 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
             {{"values", region({4}, {ps::Region({{3, 1}})})}}, false);
         require(!bad.ok() &&
                     bad.status().reason == ps::FailureReason::InvalidDomain &&
-                    bad.status().detail.atom->coordinate[0] == 3,
+                    bad.status().detail.scope == ps::FailureScope::Run,
                 "remote invalid topology affects knot path");
       }
       fixture.bindings.inputs[port].value = saved;
@@ -332,19 +311,28 @@ void sparse_and_failures(ps::CpuNumericProfile profile) {
     Fixture wide(authored(pchip, profile, ps::ElementType::Float32),
                  {doubles({3}, {-1e100, 0, 1e100}), doubles({3}, {-1, 0, 1}),
                   doubles({2}, {0, 1})});
-    auto middle = take(
+    auto middle =
+        wide.run({{"values", region({2}, {ps::Region({{0, 1}})})}}, false);
+    require(
+        !middle.ok() &&
+            middle.status().reason == ps::FailureReason::ArithmeticOverflow &&
+            middle.status().detail.scope == ps::FailureScope::Run,
+        "unrequested final output overflow fails Whole execution");
+    wide.bindings.inputs[2].value = doubles({2}, {0, 0});
+    auto finite = take(
         wide.run({{"values", region({2}, {ps::Region({{0, 1}})})}}, false));
     std::uint32_t zero = 1;
-    require(middle.values.at("values").read({0}, &zero, 4).ok() && !zero,
-            "undemanded narrowing overflow");
+    require(finite.values.at("values").read({0}, &zero, 4).ok() && !zero,
+            "unnarrowed segment endpoints do not reject representable roots");
+    wide.bindings.inputs[2].value = doubles({2}, {0, 1});
     auto overflow =
         wide.run({{"values", region({2}, {ps::Region({{1, 1}})})}}, false);
     require(!overflow.ok() && overflow.status().reason ==
                                   ps::FailureReason::ArithmeticOverflow,
             "returned narrowing overflow");
   }
-  std::cout << "global topology/local query, dirty witnesses, sparse ownership "
-               "and output overflow passed\n";
+  std::cout << "complete topology/query, dirty witnesses, sparse ownership "
+               "and Whole output overflow passed\n";
 }
 void layouts_and_resources(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
@@ -392,78 +380,43 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       request.inputs.push_back({v.descriptor(), {}});
     request.parameters = node.parameters;
     request.snapshot_identity = "inverse-resource";
-    request.outputs = take(ps::Footprint::none({2}));
-    auto empty = take(registry->start_dependency(node.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
+    Fixture empty(node, dense);
+    require(take(empty.run({{"values", take(ps::Footprint::none({2}))}}, false))
+                .values.at("values")
+                .coverage()
+                .empty(),
             "empty no payload");
-    request.outputs = region({2}, {ps::Region({{0, 1}})});
-    for (bool cancel : {false, true}) {
-      ps::ResourceBudget resources(ps::ResourceLimits{});
-      ps::CancellationSource cancellation;
-      request.cancellation = cancellation.token();
-      bool armed = false, interrupted = false;
-      std::shared_ptr<ps::DependencySession> session;
-      session = take(registry->start_dependency(
-          node.operation, request, resources.allocator(),
-          [&](std::uint64_t amount) {
-            if (armed && amount == 352 &&
-                session->numeric_diagnostics().evaluated_values == 1) {
-              interrupted = true;
-              if (cancel)
-                cancellation.cancel();
-              else
-                return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                  "inverse inner work",
-                                  ps::FailureReason::WorkLimit};
-            }
-            return ps::Status::success();
-          }));
-      for (unsigned stage = 0; stage < 3; ++stage) {
-        require(session->poll().ok(), "inverse staged Need");
-        supply(session, request, dense);
-      }
-      armed = true;
-      auto failed = session->poll();
-      require(interrupted && !failed.ok() &&
-                  failed.status().code ==
-                      (cancel ? ps::ErrorCode::Cancelled
-                              : ps::ErrorCode::ResourceExhausted),
-              "inner inverse interruption");
-      require(session->numeric_diagnostics().copied_elements == 0,
-              "failed inverse publishes no samples");
-      session.reset();
-      require(resources.statistics().live[ps::ResourceKind::Payload] == 0,
-              "inverse state/output release");
-    }
-    request.cancellation = {};
-    for (unsigned kind = 0; kind < 3; ++kind) {
-      auto limited = request;
-      if (kind == 0)
-        limited.limits.maximum_state_bytes = 1024;
-      if (kind == 1)
-        limited.limits.maximum_work = 1;
-      if (kind == 2)
-        limited.limits.maximum_stages = 1;
-      auto started = registry->start_dependency(node.operation, limited);
-      bool failed = !started.ok();
-      if (started.ok()) {
-        auto session = started.take_value();
-        for (unsigned stage = 0; stage < 4; ++stage) {
-          auto progress = session->poll();
-          if (!progress.ok()) {
-            require(progress.status().code == ps::ErrorCode::ResourceExhausted,
-                    "inverse admission status");
-            failed = true;
-            break;
-          }
-          if (std::holds_alternative<ps::DependencyResult>(progress.value()))
-            break;
-          supply(session, limited, dense);
-        }
-      }
-      require(failed, "inverse bounded state/work/stages");
-    }
+    auto many = dense;
+    many[2] = doubles({128}, std::vector<double>(128, pchip ? .3125 : .5));
+    point_math_checks::resources(node, many, 128 * 8);
+    std::vector<double> topology(65536);
+    for (unsigned i = 0; i < topology.size(); ++i)
+      topology[i] = i;
+    auto maximum =
+        std::vector<ps::Value>{doubles({65536}, topology),
+                               doubles({65536}, topology), doubles({1}, {.5})};
+    auto maximum_value =
+        direct(registry, node, maximum, take(ps::Footprint::all({1})));
+    std::uint64_t maximum_bits = 0;
+    require(maximum_value.read({0}, &maximum_bits, 8).ok() &&
+                maximum_bits == raw(.5),
+            "maximum legal topology exact inverse");
+    point_math_checks::resources(node, maximum, 8);
+    Fixture giant(node, dense);
+    giant.bindings.inputs[2].value = doubles({1}, {.5});
+    const auto& seed = giant.bindings.inputs[2].value;
+    giant.document.inputs[2] = {
+        3, "input2", seed.descriptor(), seed.region(), seed.layout(), {}};
+    giant.document.nodes[0].inputs[2] = ps::WorkflowNodeOutput{2, "values"};
+    giant.document.nodes.push_back(take(ps::numeric::constant_node(
+        2, ps::WorkflowInputReference{3}, {UINT64_C(1) << 40},
+        ps::numeric::ArrayLayout::View, profile)));
+    auto exhausted = giant.run(
+        {{"values", region({UINT64_C(1) << 40}, {ps::Region({{0, 1}})})}},
+        false);
+    require(!exhausted.ok() &&
+                exhausted.status().code == ps::ErrorCode::ResourceExhausted,
+            "sparse giant inverse requires full input/output storage");
     for (unsigned kind = 0; kind < 7; ++kind) {
       auto bad = request;
       bad.outputs = take(ps::Footprint::none({2}));
@@ -482,7 +435,8 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
             bad.inputs[1].descriptor.shape = {65537};
       if (kind == 6)
         bad.inputs[2].descriptor.shape = {(UINT64_C(1) << 40) + 1};
-      auto failed = registry->start_dependency(node.operation, bad);
+      auto failed =
+          registry->resolve_traits(node.operation, bad.inputs, bad.parameters);
       require(!failed.ok() &&
                   (failed.status().code == ps::ErrorCode::TypeMismatch ||
                    failed.status().code == ps::ErrorCode::InvalidArgument),
@@ -490,7 +444,7 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
     }
   }
   std::cout << "negative/unaligned/zero strides, fenv, Empty/schema, "
-               "work/cancel/state/stages passed\n";
+               "work/cancel/full output/workspace/max topology passed\n";
 }
 void cache_composition_and_validation(ps::CpuNumericProfile profile) {
   for (bool pchip : {false, true}) {
@@ -559,21 +513,6 @@ void cache_composition_and_validation(ps::CpuNumericProfile profile) {
             ps::numeric::CurveDomain::Reject, profile)));
     auto restored =
         take(composed.run({{"values", take(ps::Footprint::all({3}))}}, false));
-    std::uint64_t evaluated = 0, fallbacks = 0;
-    for (const auto& timing : restored.diagnostics.operation_timings) {
-      if (timing.numeric.implementation[0] &&
-          std::string(timing.numeric.implementation.data())
-                  .find("photospider.inverse/") == 0) {
-        evaluated += timing.numeric.evaluated_values;
-        fallbacks += timing.numeric.strict_fallbacks;
-      }
-    }
-    if (evaluated != 3 ||
-        fallbacks != (profile != ps::CpuNumericProfile::Strict ? 2U : 0U))
-      throw std::runtime_error(
-          "inverse exact/fallback diagnostics: pchip=" + std::to_string(pchip) +
-          " evaluated=" + std::to_string(evaluated) +
-          " fallbacks=" + std::to_string(fallbacks));
     for (unsigned i = 0; i < 3; ++i) {
       std::uint64_t actual = 0;
       require(restored.values.at("values").read({i}, &actual, 8).ok() &&
@@ -636,7 +575,7 @@ void cache_composition_and_validation(ps::CpuNumericProfile profile) {
                               "sample violates typed semantic domain",
           "global typed payload invalid y rejects exact knot");
   std::cout << "warm cache replacement, public forward/inverse composition, "
-               "partitions, fallback and typed/upstream validation passed\n";
+               "partitions and typed/upstream validation passed\n";
 }
 
 }  // namespace

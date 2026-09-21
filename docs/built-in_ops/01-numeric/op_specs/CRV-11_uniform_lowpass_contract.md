@@ -63,13 +63,12 @@ finite signals near the edge, as specified by the boundary operator.
 
 Each kernel has strict, accelerated_apple_silicon and accelerated_x86_64 keys.
 Accelerated final nonzero finite output error is <=4 ULP relative to strict,
-with strict NaN/Inf/zero classification and signs. Fall back to strict and report
-the fallback when the guarantee is unavailable. Preserve finite constant signals
+with strict NaN/Inf/zero classification and signs. Fall back to strict when the guarantee is unavailable. Preserve finite constant signals
 exactly under non-zero-padding boundaries; approximate kernel normalization
 cannot introduce DC drift. Host budget exhaustion remains explicit failure.
 
-Skip exact mathematical zero coefficients entirely. Read only samples reached by
-nonzero taps, after boundary mapping. Input NaN propagates by the first tap in
+Skip exact mathematical zero coefficients entirely. Numerical operands are samples reached by
+nonzero taps after boundary mapping; Whole collection still reads all inputs. Input NaN propagates by the first tap in
 offset order -R..R, preserving payload/sign and quieting sNaN. Otherwise combine
 infinite contributions with coefficient signs: both signs yield canonical quiet
 NaN, one sign yields that infinity. Generated canonical NaN is positive quiet
@@ -124,29 +123,26 @@ does not define an invalid kernel. Avoid it or refine at adequate precision.
 
 ## Demand, mapping, resources and error contract
 
-For requested output Q, Data/Validation is the exact union of in-range source
-indices reached by nonzero taps under the chosen boundary mapping, separately
-for each other-axis coordinate. Zero padding adds no upstream reads. Empty Q
-reads no input. Repeated mapped indices may share physical reads, while logical
-tap ordering still determines nonfinite rules. An implementation must not fetch
-a whole signal solely because a boundary reflects or wraps.
+All 15 formal profile keys use Whole. Empty Q reads no input. A nonempty Q
+collects the complete input, including typed/upstream validation, and computes
+one dense output with the original shape/dtype. Full input edits invalidate all
+outputs. Sparse delivery does not reduce collection or computation; upstream or
+typed invalid data outside Q can fail the run. The numerical stencil still skips
+exact zero taps and preserves logical ordering for IEEE values. No mathematical
+radius, wrap mapping, sample selection or NaN/Inf rule changes.
 
-Dirty propagation is the inverse of that same support, including wrapped/reflected
-positions and zero-tap omission; no generic radius halo may overclaim exact
-support. Preserve typed/upstream control and validation closures separately.
-Static kernel identity/parameters and source witnesses enter cache identity.
-Return immutable packed requested fragments at correct global origins, retaining
-owners beyond context destruction. Arbitrary source strides, offsets and
-unaligned access remain legal. Cache-off and partitions do not change arithmetic.
+Cache identity includes kernel/profile/parameters and complete input witnesses.
+The immutable output owns full packed storage; requested delivery retains global
+origins. Arbitrary strides, offsets and unaligned source access remain supported.
+Owners survive context destruction, and cache-off/partitioning do not alter math.
 
-Direct evaluation for M outputs costs O(M*(2R+1)) plus certified coefficient/sum
-refinement. Symmetry, shared coefficients, vectorization and FFT-based acceleration
-are implementation options only if the final bound, exact support, special-value
-ordering and resource contract still hold. Static exact-kernel enclosures may be
-cached in host-accounted immutable state, not hidden global allocation. Output
-payload is M*sizeof(dtype); count tap maps, coefficient enclosures/limbs, owners,
-read windows and scratch growth overlap under capacity/work/stage budgets.
-Do not allocate the entire logical output for partial demand.
+For N total elements work is O(N*(2R+1)) plus certified arithmetic. Complete output
+requires N*sizeof(dtype), complete collected inputs are also budgeted. Fixed
+arithmetic workspace, 2R+1 sample bits and accelerated R+1 coefficient enclosures
+are admitted; there are no per-output dependency records. Certified coefficients
+are prepared once per invocation. Sparse requests can now exhaust capacity that
+regional execution accepted. Whole DependencySession numeric/fallback counters
+are unavailable (N/A); strict fallback still executes when certification fails.
 
 Poll cancellation during coefficient/refinement work and at least every 64 tap
 contributions or simpler outputs; release temporaries on all terminal paths.
@@ -156,8 +152,8 @@ or nonpositive exact normalizer is InvalidArgument/InvalidDomain; inability to
 decide under available work is ResourceExhausted, not the same error. Source
 NaN/Inf and final arithmetic overflow are successful numeric values as specified.
 BackendUnavailable, stale, upstream/typed, cancellation and budget failures retain
-the NUM common categories and observation identity; failed output atoms do not
-publish partial results.
+the NUM common categories; the Whole invocation publishes no partial output
+on failure. Dynamic numerical failures have Run scope.
 
 ## Numerical and antialias acceptance
 
@@ -196,8 +192,8 @@ has no brick-wall stopband. A downsampling workflow must separately select radiu
 kernel parameters and verify attenuation above its target Nyquist for its quality
 requirement; this primitive does not infer that target or guarantee zero aliasing.
 
-Verify whole/ROI/disjoint equivalence, exact wrap/reflection dirty support,
-zero-tap nonreads, N=1, short signals, strides, source/result lifetime, low budgets,
+Verify whole/ROI/disjoint numerical equivalence, exact boundary mathematics,
+zero-tap operand omission, complete dirty support and typed validation, N=1, short signals, strides, source/result lifetime, low budgets,
 cancellation and cache-off. The maintained public workflow binds input and
 required statics and requests values through Compiler/ExecutionContext, with
 actual commands and independently checked outputs linked below.
@@ -217,10 +213,11 @@ this implementation and do not claim SciPy floating-point parity.
 This shared contract covers five uniform kernels and 15 profile keys; it is not
 itself a registered operation. The public low-pass helpers and implementation use
 exact tap support and certified whole sums. Accelerated keys cache 128-bit
-coefficient enclosures in accounted continuation storage, then bound the complete
+coefficient enclosures in managed callback state, then bound the complete
 hardware convolution and normalization before final-error acceptance. Unresolved
 coefficients or outputs dispatch strict convolution. Certified strict precision
 is 128..4096 bits and
 may fail `ResourceExhausted`. See the [uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed
-the shared manual groups and 474 independent directed MPFR cases per profile.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
+that workflow and the math implementation notes. WSL/AVX2 and installed-package
+consumers have not been rerun. Whole numerical/fallback counters are N/A.

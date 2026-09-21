@@ -47,8 +47,8 @@ accept Float32/Float64. Output is values, shape input.shape+[3], ordered H,S,L.
 Inherit [CIELCh CRV-06D](CRV-06D_color_ramp_cielch.md) for K=1..65536,
 input rank 1..7 and all positive logical counts <=2^40, finite strictly increasing
 stops, clamp/reject default clamp, singleton behavior, output hue units and defaults,
-static description matching, complete-color observation, selected-row reads,
-exact dirty witnesses, layout/owner/resource accounting, cancellation and errors.
+static description matching, complete-color observation, Whole input collection and selected-row mathematics,
+whole-input dirty witnesses, layout/owner/resource accounting, cancellation and errors.
 Replace its lightness_chroma port with saturation_lightness. Output dtype defaults
 to colors dtype or saturation_lightness dtype. Required static String parameters
 are color_description, dtype, out_of_domain, output_hue_unit. No alpha or hue_path
@@ -78,7 +78,7 @@ expect [[2,0.5,0.5]]. Repeat with saturation zero, negative S or L outside [0,1]
 hue still follows the original angle. Rational numerators=[0,4], denominators=[1,1]
 with saturation_lightness=[[0.25,0.125],[0.75,0.875]] give the same result.
 Use independent exact-rational and certified-pi oracles, both output units/dtypes,
-mixed source precision, large multi-turn angles, q=0 demand failures, no remote
+mixed source precision, large multi-turn angles, q=0 demand failures, complete-input
 reads, partial-channel/full-color expansion, strides, budgets and owner lifetime.
 Public Compiler/ExecutionContext workflow bindings and values/description checks
 are maintained; current commands and runtime evidence are linked below. Source HSL-to-RGB extension semantics will be fixed by

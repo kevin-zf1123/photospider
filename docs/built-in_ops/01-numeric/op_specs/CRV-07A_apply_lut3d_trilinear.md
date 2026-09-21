@@ -52,27 +52,28 @@ Lookup uses actual values; no transfer, model conversion or hue normalization
 is performed. Output carries the declared output color description.
 
 Use the product of three local linear weights for each of the eight cell vertices.
-Read only vertices with exact nonzero weights, at most 8 complete colors.
+Mathematically use only vertices with exact nonzero weights, at most 8 complete colors.
 Weights and complete weighted sums are exact before one final dtype rounding.
 Strict is correctly rounded; accelerated finite arithmetic follows the shared
 FP32-scaled final-result bound. Single-vertex and all-negative-zero
-mixture rules follow CRV-07; zero-weight vertices never affect result or failure.
+mixture rules follow CRV-07; generic zero-weight vertices never affect numerical results; complete typed
+and upstream validation can still fail.
 
 ## Execution, resources and errors
 
 A request for any component observes the full color. Inherit global axis
-validation, requested complete input reads, exact contributing table support,
+validation, complete Whole input/table reads and mathematical vertex selection,
 typed/upstream closures, dirty witnesses and descriptor-aware cache identity.
 Results retain immutable backing/metadata beyond context lifetime and support
-arbitrary legal source strides. Return packed fragments at global request origins.
+arbitrary legal source strides. A complete dense Value backs public fragments at global request origins.
 
 Work is axis validation plus per-color lookup and at most 8 vertices of exact
 arithmetic. Budget output, read owners/windows, exact limbs, lookup maps and growth
-overlap as specified by CRV-07. No whole table copy is required. Host budgets,
-bounded cancellation, cache-off and atomic publication requirements are mandatory.
+overlap as specified by CRV-07. Full-table collect and full-output allocation are required. Host budgets,
+bounded cancellation, cache-off and Run-scoped publication requirements are mandatory.
 Malformed statics, type/description mismatch, invalid demanded colors/grid/domain,
 overflow, resources and unavailable platform keys use the exact CRV-07 error
-phases/categories; failed colors publish no partial channels.
+phases/categories; a failed callback publishes no partial output.
 
 ## Workflow and acceptance
 
@@ -84,7 +85,7 @@ Expect values=[[0.1875,0.125,0.375]] for this method. The public
 Use CRV-07's independent rational oracle, identity/affine/cross-component tests,
 all supported models and mixed dtypes, grid boundaries, tetrahedral split ties
 where applicable, axis directions, finite extensions, hue winding, zero signs,
-partial-channel/full-color requests, zero-weight invalid rows, exact dirty support,
+partial-channel/full-color requests, zero-weight invalid rows, complete-input dirty support,
 strides, budgets, cancellation and lifetime tests. Full CLF compatibility is
 outside this Proposed specification.
 
@@ -94,6 +95,6 @@ outside this Proposed specification.
 constructs the registered primitive in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
 All profiles use exact product weights and a single final rounding; only
-positive-weight full vertices are read. See the [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
+positive-weight full vertices participate in the mathematics. See the [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
 and [public workflow commands](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts)
 for numerical/resource bounds and actual validation.

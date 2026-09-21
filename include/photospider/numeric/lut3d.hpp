@@ -88,14 +88,17 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* method,
  * @return Node with explicit statics and output values, or
  * InvalidArgument/InvalidDomain/Schema for invalid authoring choices.
  * @note Pure and thread-safe; allocation may throw bad_alloc. Runtime observes
- * complete colors, validates original input before clamp and reads only exact
- * nonzero-weight full table vertices (at most eight). Global axis and typed
- * Validation remain dependencies. Every profile correctly rounds each complete
- * weighted sum once; unnormalized hues and supported finite extensions remain.
- * Malformed axes/source domains fail OperationFailed/InvalidDomain; final
- * overflow fails ArithmeticOverflow. Empty reads no data. Host work, capacity,
- * cancellation, atomic failures and immutable output ownership apply. No
- * implicit transfer/color conversion or full-table copy occurs.
+ * complete colors. Nonempty Whole requests collect full inputs/table/axis with
+ * typed/upstream validation, validate every original input before clamp, then
+ * mathematically use only exact positive-weight vertices (at most eight).
+ * The complete dense output retains its ColorArray facet and trailing tuple
+ * closure; sparse fragments retain the full owner. Any input edit dirties the
+ * complete recorded output demand. Numeric failures have Run scope.
+ * Strict correctly rounds weighted sums; accelerated arithmetic retains
+ * its final bound. Malformed axes/source domains fail InvalidDomain;
+ * final overflow fails ArithmeticOverflow. Empty reads no data. Full collect,
+ * full output and admitted exact workspace must fit host capacity/work budgets.
+ * Cancellation releases unpublished storage. No implicit color conversion.
  */
 inline Result<WorkflowNode> apply_lut3d_trilinear_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,
@@ -109,7 +112,8 @@ inline Result<WorkflowNode> apply_lut3d_trilinear_node(
 /** @brief Main-diagonal tetrahedral LUT3D interpolation, at most four vertices.
  * Shares apply_lut3d_trilinear_node's interface, validation and ownership.
  * Exact local coordinates sort descending, with axis 0/1/2 breaking ties;
- * zero-weight vertices are not read. No method parameter/default is implied.
+ * generic zero-weight vertices are mathematically unused. No method
+ * parameter/default is implied.
  */
 inline Result<WorkflowNode> apply_lut3d_tetrahedral_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput table,

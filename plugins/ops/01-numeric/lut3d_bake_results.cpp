@@ -15,6 +15,51 @@ namespace ps::plugin_internal {
 namespace {
 using namespace bake_ops;  // NOLINT(build/namespaces)
 enum class Kind { Pack, Measure, Unpack, Gate };
+constexpr std::uint64_t kPackBytes = 64 * 1024;
+constexpr std::uint64_t kMeasureRows = 64;
+constexpr std::uint64_t kMeasureBytes = 3 * kMeasureRows * 3 * sizeof(double);
+// Grow an authorized rectangle over complete inner rows/planes in logical
+// order. Small page limits still split the innermost row.
+Region pack_window(const ValueDescriptor& descriptor, std::uint64_t first,
+                   std::uint64_t page_bytes, std::uint64_t* count) {
+  const auto at = coordinate(first * 3, descriptor.shape);
+  const auto capacity = std::min(page_bytes, kPackBytes) /
+                        (3 * Value::element_size(descriptor.element_type));
+  const auto& shape = descriptor.shape;
+  std::vector<RegionDimension> dimensions{{at[0], 1},
+                                          {at[1], 1},
+                                          {at[2], 0},
+                                          {0, 3}};
+  dimensions[2].extent = std::min(capacity, shape[2] - at[2]);
+  *count = dimensions[2].extent;
+  if (!at[2] && *count == shape[2]) {
+    dimensions[1].extent = std::min(shape[1] - at[1], capacity / shape[2]);
+    *count *= dimensions[1].extent;
+    if (!at[1] && dimensions[1].extent == shape[1]) {
+      dimensions[0].extent = std::min(shape[0] - at[0], capacity / *count);
+      *count *= dimensions[0].extent;
+    }
+  }
+  return Region(std::move(dimensions));
+}
+Result<Value> collect_window(const ResultProgramPhase& phase, unsigned port,
+                             const Region& region) {
+  FootprintLimits limits;
+  limits.cancellation = phase.query.cancellation;
+  limits.consume_work = phase.consume_work;
+  return phase.values.at(port).collect(region, phase.allocator, limits);
+}
+Result<Value> collect_rows(const ResultProgramPhase& phase, unsigned port,
+                           std::uint64_t first, std::uint64_t count) {
+  const auto& descriptor = phase.query.inputs[port].descriptor;
+  const auto at = coordinate(first * 3, descriptor.shape);
+  auto dimensions = Region::whole(descriptor.shape).dimensions();
+  for (std::size_t i = 0; i < dimensions.size(); ++i)
+    dimensions[i] = {at[i], 1};
+  dimensions[dimensions.size() - 2].extent = count;
+  dimensions.back() = {0, 3};
+  return collect_window(phase, port, Region(std::move(dimensions)));
+}
 Lut3dBakeDescription placeholder() {
   Lut3dBakeDescription result;
   result.recipe_identity.assign(64, '0');
@@ -118,16 +163,12 @@ struct PackState {
   ResultBuilder builder;
   Poll need(const ResultProgramPhase& phase) {
     const auto& descriptor = phase.query.inputs[0].descriptor;
-    const auto row_width = 3 * Value::element_size(descriptor.element_type);
-    batch = std::min(
-        {elements(descriptor) / 3 - row,
-         descriptor.shape[2] - row % descriptor.shape[2],
-         std::min<std::uint64_t>(phase.query.page_bytes, 4096) / row_width});
+    auto window = pack_window(descriptor, row, phase.query.page_bytes, &batch);
     if (!batch)
       return Poll(Status{ErrorCode::ResourceExhausted,
                          "bake color exceeds Result window",
                          FailureReason::CapacityLimit});
-    auto support = rows(descriptor, row, batch);
+    auto support = Footprint::from_regions(descriptor.shape, {window});
     if (!support.ok())
       return Poll(support.status());
     stage = 1;
@@ -156,22 +197,13 @@ struct PackState {
       return need(phase);
     }
     if (stage == 1) {
-      const unsigned width = Value::element_size(descriptor.element_type);
-      auto buffer = phase.allocator.allocate(batch * 3 * width);
-      if (!buffer.ok())
-        return Poll(buffer.status());
-      auto bytes = buffer.take_value();
-      for (std::uint64_t i = 0; i < batch * 3; ++i) {
-        auto work =
-            phase.consume_work(phase.values.at(0).fragments().size() + 8);
-        if (!work.ok())
-          return Poll(work);
-        auto read = phase.read(0, coordinate(row * 3 + i, descriptor.shape),
-                               bytes.data() + i * width, width);
-        if (!read.ok())
-          return Poll(read);
-      }
-      auto append = builder.prepare_append(0, batch, std::move(bytes).freeze());
+      auto window =
+          pack_window(descriptor, row, phase.query.page_bytes, &batch);
+      auto collected = collect_window(phase, 0, window);
+      if (!collected.ok())
+        return Poll(collected.status());
+      auto append =
+          builder.prepare_append(0, batch, collected.value().storage());
       if (!append.ok())
         return Poll(append.status());
       stage = 2;
@@ -200,6 +232,8 @@ struct MeasureState {
   Lut3dBakeReport report;
   numeric_ops::ExactBakeError arithmetic;
   ResultRef table;
+  ColorModel input_model = ColorModel::Rgb, output_model = ColorModel::Rgb;
+  std::uint64_t atol = 0, rtol = 0;
   ResultBuilder builder;
   Result<ResultRelation> relation(const ResultProgramPhase& phase,
                                   std::uint64_t count) {
@@ -220,7 +254,7 @@ struct MeasureState {
   }
   Poll need(const ResultProgramPhase& phase) {
     batch = std::min<std::uint64_t>(
-        64, phase.query.inputs[3].descriptor.shape[0] - row);
+        kMeasureRows, phase.query.inputs[3].descriptor.shape[0] - row);
     ResultProgramNeed need;
     for (unsigned port : {3U, 4U, 5U}) {
       auto region = rows(phase.query.inputs[port].descriptor, row, batch);
@@ -234,11 +268,16 @@ struct MeasureState {
   Poll poll(const ResultProgramPhase& phase) {
     phase_metadata.reset();
     phase_metadata = dependency_internal::metadata_owner(65536);
-    auto decoded = lut3d_bake_description(*phase.query.output.result_schema);
-    if (!decoded.ok())
-      return Poll(decoded.status());
-    const auto& spec = decoded.value();
     if (!stage) {
+      // The sealed schema is immutable for this continuation. Retain only the
+      // POD fields needed by the numerical loop, without another owning copy.
+      auto decoded = lut3d_bake_description(*phase.query.output.result_schema);
+      if (!decoded.ok())
+        return Poll(decoded.status());
+      input_model = decoded.value().input_description.model;
+      output_model = decoded.value().output_description.model;
+      atol = raw(decoded.value().atol);
+      rtol = raw(decoded.value().rtol);
       ResultProgramNeed need;
       // A source may ignore generated colors entirely. The complete original
       // grid therefore remains an explicit global validation prerequisite.
@@ -265,29 +304,44 @@ struct MeasureState {
       return need(phase);
     }
     if (stage == 2) {
+      std::array<Value, 3> windows;
+      for (unsigned p = 0; p < 3; ++p) {
+        auto collected = collect_rows(phase, p + 3, row, batch);
+        if (!collected.ok())
+          return Poll(collected.status());
+        windows[p] = collected.take_value();
+      }
       for (std::uint64_t i = 0; i < batch; ++i) {
+        auto work = phase.consume_work(9);
+        if (!work.ok())
+          return Poll(work);
+        if (phase.query.cancellation.cancelled())
+          return Poll(Status{ErrorCode::Cancelled, {}});
         std::array<std::uint64_t, 3> point{}, reference{}, value{};
-        for (unsigned c = 0; c < 3; ++c) {
-          auto q = read(phase, 3, {row + i, c}),
-               r = read(phase, 4, {row + i, c}),
-               v = read(phase, 5, {row + i, c});
-          if (!q.ok() || !r.ok() || !v.ok())
-            return Poll(!q.ok()   ? q.status()
-                        : !r.ok() ? r.status()
-                                  : v.status());
-          point[c] = q.value();
-          reference[c] = r.value();
-          value[c] = v.value();
+        const std::array<std::array<std::uint64_t, 3>*, 3> targets{
+            &point, &reference, &value};
+        for (unsigned p = 0; p < 3; ++p) {
+          const bool narrow =
+              windows[p].descriptor().element_type == ElementType::Float32;
+          const unsigned width = narrow ? 4 : 8;
+          for (unsigned c = 0; c < 3; ++c) {
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, windows[p].bytes().data() + (i * 3 + c) * width,
+                        width);
+            const auto parts = BinaryParts::decode(bits, narrow);
+            if (parts.nan || parts.infinite)
+              return Poll(domain("nonfinite bake source color"));
+            (*targets[p])[c] = promote(bits, narrow);
+          }
         }
-        if (!model_valid(spec.input_description.model, point) ||
-            !model_valid(spec.output_description.model, reference) ||
-            !model_valid(spec.output_description.model, value))
+        if (!model_valid(input_model, point) ||
+            !model_valid(output_model, reference) ||
+            !model_valid(output_model, value))
           return Poll(domain("measurement requires finite model-valid colors"));
         bool passed = true;
         for (unsigned c = 0; c < 3; ++c) {
-          auto accepted =
-              arithmetic.check(reference[c], value[c], raw(spec.atol),
-                               raw(spec.rtol), phase.consume_work);
+          auto accepted = arithmetic.check(reference[c], value[c], atol, rtol,
+                                           phase.consume_work);
           if (!accepted.ok())
             return Poll(accepted.status());
           passed &= accepted.value();
@@ -368,13 +422,17 @@ struct MeasureState {
       stage = 3;
       return Poll(std::move(need));
     }
+    auto single_relation = relation(phase, 1),
+         triple_relation = relation(phase, 3);
+    if (!single_relation.ok() || !triple_relation.ok())
+      return Poll(!single_relation.ok() ? single_relation.status()
+                                        : triple_relation.status());
     for (unsigned field = 0; field < 11; ++field) {
       const auto count = (field == 1 || field == 5) ? 3 : 1;
-      auto support = relation(phase, count);
-      if (!support.ok())
-        return Poll(support.status());
-      auto published = builder.publish(field, count, support.take_value(),
-                                       {true, true, true, true});
+      auto published = builder.publish(
+          field, count,
+          count == 1 ? single_relation.value() : triple_relation.value(),
+          {true, true, true, true});
       if (!published.ok())
         return Poll(published);
     }
@@ -610,8 +668,8 @@ OperationDefinition operation(Kind kind) {
   if (kind == Kind::Gate)
     object(1, "curve.bake_lut3d.report");
   traits.requires_metadata_specialization = true;
-  traits.workspace_bytes = kind == Kind::Pack      ? 4096
-                           : kind == Kind::Measure ? 289
+  traits.workspace_bytes = kind == Kind::Pack      ? kPackBytes
+                           : kind == Kind::Measure ? kMeasureBytes + 289
                                                    : 0;
   auto& out = traits.outputs[0];
   out.key = kind == Kind::Measure ? "report"

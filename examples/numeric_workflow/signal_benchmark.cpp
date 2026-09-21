@@ -104,63 +104,6 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
                      std::vector<ps::Region> boxes) {
   return take(ps::Footprint::from_regions(shape, std::move(boxes)));
 }
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Footprint> wanted;
-  for (const auto& input : inputs)
-    wanted.push_back(take(ps::Footprint::none(input.descriptor().shape)));
-  for (const auto& need : take(session->pending_reads()))
-    wanted[need.port] = take(wanted[need.port].unite(need.samples));
-  std::vector<ps::ValueFragments> supplied;
-  for (unsigned i = 0; i < inputs.size(); ++i) {
-    auto all = take(ps::ValueFragments::create(
-        inputs[i].descriptor(), inputs[i].facets(),
-        take(ps::Footprint::all(inputs[i].descriptor().shape)), {inputs[i]}));
-    supplied.push_back(take(all.restrict(wanted[i])));
-  }
-  require(session->supply(supplied, request.snapshot_identity).ok(),
-          "curve exact supply");
-}
-ps::ValueFragments direct(
-    const std::shared_ptr<ps::OperationRegistry>& registry,
-    const ps::WorkflowNode& node, const std::vector<ps::Value>& inputs,
-    const ps::Footprint& outputs) {
-  ps::DependencyRequest request;
-  for (const auto& v : inputs)
-    request.inputs.push_back({v.descriptor(), v.facets()});
-  request.parameters = node.parameters;
-  request.snapshot_identity = "curve-direct";
-  request.outputs = outputs;
-  request.limits.maximum_work = UINT64_C(2048) * 1024 * 1024;
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  auto session = take(
-      registry->start_dependency(node.operation, request, budget.allocator()));
-  for (;;) {
-    auto progress = take(session->poll());
-    if (auto* result = std::get_if<ps::DependencyResult>(&progress))
-      return result->value;
-    supply(session, request, inputs);
-  }
-}
-ps::Value reversed_unaligned(const ps::Value& value) {
-  auto bytes = value.bytes();
-  const auto width = ps::Value::element_size(value.descriptor().element_type);
-  const auto count = bytes.size() / width;
-  auto owner = take(ps::BufferAllocator{}.allocate(bytes.size() + 1));
-  for (std::size_t i = 0; i < count; ++i)
-    std::memcpy(owner.data() + 1 + (count - 1 - i) * width,
-                bytes.data() + i * width, width);
-  std::vector<std::int64_t> strides(value.descriptor().shape.size());
-  std::int64_t stride = -static_cast<std::int64_t>(width);
-  for (std::size_t i = strides.size(); i; --i) {
-    strides[i - 1] = stride;
-    stride *= value.descriptor().shape[i - 1];
-  }
-  return take(ps::Value::from_storage(value.descriptor(), value.region(),
-                                      {1 + (count - 1) * width, strides},
-                                      std::move(owner).freeze()));
-}
 ps::WorkflowNode authored(bool continuous, unsigned kernel,
                           ps::CpuNumericProfile profile, unsigned axis = 0) {
   using namespace ps::numeric;  // NOLINT(build/namespaces)
@@ -259,7 +202,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
       ps::ResourceBudget budget;
       ps::ValueFragments retained;
       std::vector<std::int64_t> times;
-      std::uint64_t source_elements = 0, evaluated = 0, fallbacks = 0;
+      std::uint64_t source_elements = 0;
       {
         ps::GraphContext graph(fixture.document);
         auto plan = take(ps::Compiler(fixture.registry).compile(graph));
@@ -285,16 +228,9 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - start)
                     .count());
-          source_elements = evaluated = fallbacks = 0;
+          source_elements = 0;
           for (const auto& support : take(result.dependencies.source_support()))
             source_elements += take(support.second.element_count());
-          for (const auto& timing : result.diagnostics.operation_timings) {
-            evaluated += timing.numeric.evaluated_values;
-            fallbacks += timing.numeric.strict_fallbacks;
-          }
-          require(evaluated == count, "benchmark output accounting");
-          require(fallbacks <= evaluated,
-                  "benchmark actual fallback accounting");
           for (unsigned i = 0; i < count; ++i) {
             std::uint64_t bits = 0;
             require(result.values.at("result")
@@ -316,8 +252,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
                 << stats.peak[ps::ResourceKind::Metadata] << ','
                 << stats.live[ps::ResourceKind::Payload] << ','
                 << stats.live[ps::ResourceKind::Metadata] << ','
-                << source_elements << ',' << evaluated << ',' << fallbacks
-                << '\n'
+                << source_elements << ",N/A,N/A" << '\n'
                 << std::flush;
       retained = {};
       require(budget.statistics().live[ps::ResourceKind::Payload] == 0 &&

@@ -1,6 +1,7 @@
 #include "photospider/numeric/shapers.hpp"
 
 #include <array>
+#include <atomic>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <cstdint>
 #include <cstring>
@@ -8,11 +9,13 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "photospider/numeric/color_ramps.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -146,10 +149,11 @@ void examples(ps::CpuNumericProfile profile) {
           ps::Footprint::from_regions({input.size()}, {ps::Region({{1, 1}})}));
       auto result = take(fixture.run(selected));
       auto support = take(result.dependencies.source_support());
-      require(support.at("input0") == selected &&
-                  support.at("input1") == take(ps::Footprint::all({1})) &&
-                  support.at("input2") == take(ps::Footprint::all({1})),
-              "local input and both shared bounds");
+      require(
+          support.at("input0") == take(ps::Footprint::all({input.size()})) &&
+              support.at("input1") == take(ps::Footprint::all({1})) &&
+              support.at("input2") == take(ps::Footprint::all({1})),
+          "complete input and both shared bounds");
       require(
           read(result.values.at("values"), {1}) == bits(expected[1], narrow),
           "partial shaper survives context destruction");
@@ -160,24 +164,20 @@ void examples(ps::CpuNumericProfile profile) {
   }
   std::cout
       << "four public shapers, both dtypes, exact landmarks/extrapolation, "
-         "joint/cache-off, sparse witnesses, Empty and owner lifetime PASS\n";
+         "joint/cache-off, Whole witnesses, Empty and owner lifetime PASS\n";
 }
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& values) {
-  auto pending = take(session->pending_reads());
-  std::vector<ps::ValueFragments> ready;
-  for (unsigned port = 0; port < values.size(); ++port) {
-    auto wanted = take(ps::Footprint::none(values[port].descriptor().shape));
-    for (const auto& dependency : pending)
-      if (dependency.port == port)
-        wanted = take(wanted.unite(dependency.samples));
-    ready.push_back(take(ps::ValueFragments::create(values[port].descriptor(),
-                                                    values[port].facets(),
-                                                    wanted, {values[port]})));
-  }
-  require(session->supply(std::move(ready), request.snapshot_identity).ok(),
-          "shaper supply");
+ps::Value direct(const std::shared_ptr<ps::OperationRegistry>& registry,
+                 const ps::WorkflowNode& node,
+                 const std::vector<ps::Value>& inputs) {
+  std::vector<ps::Region> demands;
+  for (const auto& input : inputs)
+    demands.push_back(input.region());
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  ps::ResourceAllocationScope scope(budget);
+  ps::OperationInvocation call(inputs, demands, node.parameters,
+                               ps::Backend::Cpu, {}, inputs[0].region(),
+                               budget.allocator());
+  return take(registry->invoke(node.operation, call));
 }
 ps::Value reversed(const ps::Value& value) {
   const unsigned width =
@@ -202,15 +202,8 @@ void resources(ps::CpuNumericProfile profile) {
         {numbers(false, {2, 3, 4}), numbers(false, {1}), numbers(false, {16})});
     const auto operation = fixture.document.nodes[0].operation;
     std::vector<ps::Value> dense;
-    ps::DependencyRequest request;
-    for (const auto& binding : fixture.bindings.inputs) {
+    for (const auto& binding : fixture.bindings.inputs)
       dense.push_back(binding.value);
-      request.inputs.push_back(
-          {binding.value.descriptor(), binding.value.facets()});
-    }
-    request.outputs = take(ps::Footprint::all({3}));
-    request.snapshot_identity = "shaper-resource";
-    request.limits.maximum_work = UINT64_C(1) << 30;
     for (unsigned mask = 0; mask < 8; ++mask) {
       auto values = dense;
       for (unsigned port = 0; port < 3; ++port)
@@ -223,99 +216,48 @@ void resources(ps::CpuNumericProfile profile) {
                     feclearexcept(FE_ALL_EXCEPT) == 0 &&
                     feraiseexcept(FE_DIVBYZERO) == 0,
                 "set shaper environment");
-        auto session = take(registry->start_dependency(operation, request));
-        for (unsigned stage = 0; stage < 2; ++stage) {
-          require(session->poll().ok(), "shaper Need");
-          supply(session, request, values);
-        }
-        auto result = take(session->poll());
-        const auto& output = std::get<ps::DependencyResult>(result).value;
-        require(read(output, {0}) == bits(method == 2 ? .25 : 256.),
-                "strided result");
+        auto output = direct(registry, fixture.document.nodes[0], values);
+        std::uint64_t actual = 0;
+        std::memcpy(&actual, output.bytes().data(), 8);
+        require(actual == bits(method == 2 ? .25 : 256.), "strided result");
         require(fegetround() == rounding &&
                     fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
                 "preserve shaper environment");
         require(fesetenv(&saved) == 0, "restore shaper environment");
       }
     }
-    // Use a non-dyadic value on both paths, ensuring certified refinement and
-    // the accelerated scalar fallback are reached before interruption.
-    dense[0] = numbers(false, {method == 2 ? 3. : .3, 3, 4});
-    for (bool cancel : {false, true}) {
-      ps::ResourceBudget budget;
-      ps::CancellationSource cancellation;
-      request.cancellation = cancellation.token();
-      bool armed = false, reached = false;
-      auto session = take(registry->start_dependency(
-          operation, request, budget.allocator(), [&](std::uint64_t count) {
-            if (armed && count == 192) {
-              reached = true;
-              if (cancel)
-                cancellation.cancel();
-              else
-                return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                  "interrupted shaper refinement",
-                                  ps::FailureReason::WorkLimit};
-            }
-            return ps::Status::success();
-          }));
-      for (unsigned stage = 0; stage < 2; ++stage) {
-        require(session->poll(budget.allocator()).ok(),
-                "shaper pre-refinement Need");
-        supply(session, request, dense);
-      }
-      armed = true;
-      auto failed = session->poll(budget.allocator());
-      require(reached && !failed.ok() &&
-                  failed.status().code ==
-                      (cancel ? ps::ErrorCode::Cancelled
-                              : ps::ErrorCode::ResourceExhausted),
-              "shaper refinement interruption category");
-      const auto diagnostics = session->numeric_diagnostics();
-      require(diagnostics.evaluated_values == 1 &&
-                  diagnostics.copied_elements == 0 &&
-                  diagnostics.strict_fallbacks ==
-                      (profile == ps::CpuNumericProfile::Strict ? 0U : 1U),
-              "failed refinement retains fallback/evaluation diagnostics");
-      session.reset();
-      require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-              "shaper payload cleanup");
+    // Non-dyadic first values enter certified arithmetic before active
+    // cancellation.
+    dense[0] = numbers(false, std::vector<double>(256, method == 2 ? 3. : .3));
+    point_math_checks::resources(fixture.document.nodes[0], dense);
+    auto scalar = numbers(false, {method == 2 ? 4. : .5});
+    dense[0] = take(ps::Value::from_storage({ps::ElementType::Float64, {2, 2}},
+                                            ps::Region::whole({2, 2}),
+                                            {0, {0, 0}}, scalar.storage()));
+    auto broadcast = direct(registry, fixture.document.nodes[0], dense);
+    const auto expected = bits(method == 2 ? .5 : 4.);
+    for (unsigned i = 0; i < 4; ++i) {
+      std::uint64_t actual = 0;
+      std::memcpy(&actual, broadcast.bytes().data() + i * 8, 8);
+      require(actual == expected, "multidimensional zero-stride shaper");
     }
-    request.cancellation = {};
-    for (unsigned ceiling = 0; ceiling < 3; ++ceiling) {
-      auto limited = request;
-      if (ceiling == 0)
-        limited.limits.maximum_state_bytes = 1;
-      if (ceiling == 1)
-        limited.limits.maximum_work = 1;
-      if (ceiling == 2)
-        limited.limits.maximum_stages = 1;
-      auto started = registry->start_dependency(operation, limited);
-      bool failed = !started.ok();
-      if (failed) {
-        require(started.status().code == ps::ErrorCode::ResourceExhausted,
-                "state limit");
-      } else {
-        for (unsigned stage = 0; stage < 3; ++stage) {
-          auto progress = started.value()->poll();
-          if (!progress.ok()) {
-            require(progress.status().code == ps::ErrorCode::ResourceExhausted,
-                    "work/stage limit");
-            failed = true;
-            break;
-          }
-          if (std::holds_alternative<ps::DependencyResult>(progress.value()))
-            break;
-          supply(started.value(), limited, dense);
-        }
-      }
-      require(failed, "enforce shaper resource ceiling");
-    }
+    Fixture giant(
+        method, profile,
+        {numbers(false, {.5}), numbers(false, {1}), numbers(false, {16})});
+    giant.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "values"};
+    giant.document.nodes.push_back(take(ps::numeric::constant_node(
+        2, ps::WorkflowInputReference{1}, {UINT64_C(1) << 40},
+        ps::numeric::ArrayLayout::View, profile)));
+    auto failed = giant.run(take(ps::Footprint::from_regions(
+        {UINT64_C(1) << 40}, {ps::Region({{0, 1}})})));
+    require(!failed.ok() &&
+                failed.status().code == ps::ErrorCode::ResourceExhausted,
+            "sparse giant shaper requires full input/output storage");
   }
   std::cout << "log shaper all-port unaligned/negative strides, floating "
                "environment, "
-               "state/work/stage limits, refinement cancellation, diagnostics "
-               "and cleanup PASS\n";
+               "work/output/workspace, active cancellation, zero strides "
+               "and giant output rejection PASS\n";
 }
 void invalid_bounds(ps::CpuNumericProfile profile) {
   for (unsigned method = 0; method < 4; ++method) {
@@ -382,8 +324,8 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
         ps::Footprint::from_regions({samples.size()}, {ps::Region({{1, 1}})}));
     require(
         take(whole.dependencies.potential_dirty("input0", one)).at("values") ==
-            one,
-        "input changes are pointwise");
+            all,
+        "input changes dirty all recorded Whole demand");
     for (const auto* bound : {"input1", "input2"})
       require(take(whole.dependencies.potential_dirty(
                        bound, take(ps::Footprint::all({1}))))
@@ -418,7 +360,7 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
     }
   }
   std::cout << "four shaper joint/reversed partitions, monotonicity, "
-               "pointwise/shared dirty "
+               "Whole dirty "
                "and both-bound cache replacement PASS\n";
 }
 void typed_and_schema(ps::CpuNumericProfile profile) {
@@ -469,6 +411,96 @@ void typed_and_schema(ps::CpuNumericProfile profile) {
   std::cout << "four shaper ColorArray validation closure/Empty, dtype "
                "rejection and inverse -0 endpoint PASS\n";
 }
+void public_resources_and_upstream(ps::CpuNumericProfile profile) {
+  for (unsigned method = 0; method < 4; ++method) {
+    Fixture fixture(method, profile,
+                    {numbers(false, std::vector<double>(4097, .5)),
+                     numbers(false, {1}), numbers(false, {16})});
+    ps::GraphContext graph(fixture.document);
+    auto plan = take(ps::Compiler(fixture.registry).compile(graph));
+    for (unsigned mode = 0; mode < 3; ++mode) {
+      ps::ExecutionContextConfig config;
+      config.cpu_workers = 1;
+      config.result_cache_bytes = 0;
+      config.maximum_live_bytes = mode == 0 ? 1024 : 8 * 1024 * 1024;
+      config.managed_resources = ps::ResourceLimits{};
+      if (mode == 1)
+        config.managed_resources->maximum_work = 1024;
+      ps::ExecutionContext context(fixture.registry, config);
+      auto frozen = context.freeze(plan.plan, fixture.bindings);
+      if (!frozen.ok()) {
+        require(mode != 2 &&
+                    frozen.status().code == ps::ErrorCode::ResourceExhausted,
+                "public shaper admission budget category");
+        continue;
+      }
+      auto budget = take(context.resource_budget());
+      const auto work = budget.statistics().issued.work;
+      ps::CancellationSource cancellation;
+      std::atomic<bool> done{false};
+      std::thread watcher;
+      if (mode == 2) {
+        watcher = std::thread([&] {
+          while (!done.load() && budget.statistics().issued.work < work + 10000)
+            std::this_thread::yield();
+          if (!done.load())
+            cancellation.cancel();
+        });
+      }
+      ps::Result<ps::DemandResult> result(
+          ps::Status{ps::ErrorCode::Internal, {}});
+      try {
+        result = context.execute_fragments(
+            frozen.value(), {{"values", take(ps::Footprint::all({4097}))}},
+            cancellation.token());
+      } catch (...) {
+        done.store(true);
+        if (watcher.joinable())
+          watcher.join();
+        throw;
+      }
+      done.store(true);
+      if (watcher.joinable())
+        watcher.join();
+      require(!result.ok() &&
+                  result.status().code ==
+                      (mode == 2 ? ps::ErrorCode::Cancelled
+                                 : ps::ErrorCode::ResourceExhausted) &&
+                  budget.statistics().live[ps::ResourceKind::Payload] == 0,
+              "public shaper budget/cancellation releases full intermediates");
+    }
+    auto registry = ps::make_default_operation_registry(false);
+    ps::OperationDefinition producer;
+    producer.key = "manual.shaper_input";
+    producer.traits.input_count = 0;
+    producer.traits.input_schema.clear();
+    producer.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
+    producer.traits.outputs[0].fixed_output_shape = {4097};
+    producer.traits.outputs[0].output_element_type = ps::ElementType::Float64;
+    producer.callback = [](const auto&) {
+      return ps::Result<ps::Value>(
+          ps::Status{ps::ErrorCode::OperationFailed, "required shaper source"});
+    };
+    require(registry->register_operation(std::move(producer)).ok() &&
+                registry->freeze().ok(),
+            "shaper failing producer registry");
+    fixture.registry = registry;
+    for (auto& node : fixture.document.nodes)
+      for (auto& input : node.inputs)
+        if (const auto* ref = std::get_if<ps::WorkflowInputReference>(&input);
+            ref && ref->input_id == 1)
+          input = ps::WorkflowNodeOutput{100, "value"};
+    fixture.document.nodes.push_back({100, "manual.shaper_input", {}, {}});
+    fixture.document.inputs.erase(fixture.document.inputs.begin());
+    fixture.bindings.inputs.erase(fixture.bindings.inputs.begin());
+    auto failed = fixture.run(
+        take(ps::Footprint::from_regions({4097}, {ps::Region({{0, 1}})})));
+    require(!failed.ok() && failed.status().message == "required shaper source",
+            "complete shaper source failure is preserved");
+  }
+  std::cout << "four public shapers: work/output budgets, active cancellation "
+               "and upstream failure PASS\n";
+}
 void probe(ps::CpuNumericProfile profile) {
   unsigned method, type;
   std::string x, l, u;
@@ -507,6 +539,7 @@ int main(int argc, char** argv) {
       resources(profile);
       partitions_and_cache(profile);
       typed_and_schema(profile);
+      public_resources_and_upstream(profile);
     }
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

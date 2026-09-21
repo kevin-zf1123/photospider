@@ -30,20 +30,21 @@ inline Result<WorkflowNode> node(std::uint64_t id, bool pchip, WorkflowInput x,
  *
  * Construction is pure/thread-safe and may throw bad_alloc. Invalid id/profile/
  * policy/dtype fails InvalidArgument/InvalidDomain/Schema; incompatible ports
- * fail TypeMismatch. Every nonempty request validates all x/y before local
- * query samples, even on exact knot/clamp paths. Typed/upstream closures remain
- * dependencies. Empty reads no payload. Output owns packed regions with correct
- * global origins beyond context teardown; arbitrary legal source strides apply.
+ * fail TypeMismatch. Every nonempty request collects complete x/y/query,
+ * validates all topology and query controls, then computes dense values[N].
+ * Empty reads no payload. Legal source strides and offsets are supported;
+ * output ownership survives context teardown. Complete inputs/output and
+ * promoted 16*K element bytes plus overhead consume managed capacity/work.
  *
- * Strict rounds the complete rational expression once. Accelerated follows
- * CpuNumericProfile's FP32 bound and retains the monotone inverse mapping.
- * Knot/clamp conversion preserves x's zero sign; other exact zero is +0 and
- * nonzero underflow preserves sign. Invalid topology/nonfinite query/rejected
- * domain fails OperationFailed/InvalidDomain at the dependent Atom. Only the
- * selected final x may fail ArithmeticOverflow; unreturned endpoints cannot.
- * Work, capacity, cancellation, stale and upstream failures retain categories.
- * Full x/y witnesses invalidate all dependent outputs; query witnesses are
- * local. No output allocation proportional to unrequested N is required.
+ * Strict rounds the complete expression once. Accelerated follows the shared
+ * FP32 bound and retains the monotone inverse mapping. Knot/clamp conversion
+ * preserves x's zero sign; other exact zero is +0, underflow preserves sign.
+ * Dynamic topology/query errors use OperationFailed/InvalidDomain/Domain/Run;
+ * final x overflow uses ArithmeticOverflow. Undelivered positions can fail.
+ * Unused endpoint narrowing does not reject a finite root. Any input edit
+ * invalidates the complete output. Cancellation and resource/upstream failures
+ * retain categories. No partial output is published on failure.
+
  */
 inline Result<WorkflowNode> invert_linear_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,
@@ -58,12 +59,13 @@ inline Result<WorkflowNode> invert_linear_node(
  * It does not swap x/y and fit a new curve. Exact destination lattice and
  * midpoint sign tests include zero-derivative, subnormal and overflow
  * boundaries. Accelerated Float32 uses certified bracketed iteration with
- * unique destination rounding; Float64 and unresolved cases use a reported
- * strict solver. Exact collinear stencils reduce to linear inversion, while
- * knot/clamp conversions remain exact. The combined mapping follows the same
- * monotone inverse independently of request order/partition. Host
- * work/cancellation checks cover every root comparison and limb multiplication;
- * no approximate result replaces exhaustion.
+ * unique destination rounding; Float64 and unresolved cases use the strict
+ * solver. Whole numerical/fallback diagnostics are unavailable. Exact collinear
+ * stencils reduce to linear inversion, while knot/clamp conversions remain
+ * exact. The combined mapping follows the same monotone inverse independently
+ * of request order/partition. Host work/cancellation checks cover every root
+ * comparison and limb multiplication; no approximate result replaces
+ * exhaustion.
  */
 inline Result<WorkflowNode> invert_pchip_node(
     std::uint64_t id, WorkflowInput x, WorkflowInput y, WorkflowInput query,

@@ -15,6 +15,7 @@
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/color_ramps.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -129,6 +130,7 @@ struct Fixture {
       return ps::Result<ps::DemandResult>(compiled.status());
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
+    config.maximum_live_bytes = 8 * 1024 * 1024;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
     auto frozen = context.freeze(compiled.value().plan, bindings);
@@ -177,11 +179,10 @@ void examples(ps::CpuNumericProfile profile) {
                 take(ps::encode_color_array(target)).payload,
             "LUT3D explicit output description");
     auto support = take(result.dependencies.source_support());
-    require(
-        take(support.at("input1").element_count()) == (tetrahedral ? 12 : 24) &&
-            support.at("input0") == take(ps::Footprint::all({1, 3})) &&
-            support.at("input2") == take(ps::Footprint::all({3, 3})),
-        "LUT3D exact contributing vertices and global axes");
+    require(take(support.at("input1").element_count()) == 24 &&
+                support.at("input0") == take(ps::Footprint::all({1, 3})) &&
+                support.at("input2") == take(ps::Footprint::all({3, 3})),
+            "LUT3D complete inputs/table/axes are Whole dependencies");
   }
   std::cout << "LUT3D public cross-component: trilinear [.1875,.125,.375], "
                "tetrahedral [.25,.25,.5], whole-color closure, explicit RGB "
@@ -205,17 +206,23 @@ void sparse_and_cache(ps::CpuNumericProfile profile) {
   auto result = take(tetra.run(wanted));
   check(result.values.at("colors"), {.5, .5, .5});
   const auto support = take(result.dependencies.source_support());
-  const auto endpoints = take(ps::Footprint::from_regions(
-      {2, 2, 2, 3}, {ps::Region({{0, 1}, {0, 1}, {0, 1}, {0, 3}}),
-                     ps::Region({{1, 1}, {1, 1}, {1, 1}, {0, 3}})}));
-  require(support.at("input1") == endpoints,
-          "split ties skip all zero-weight invalid vertices");
+  require(support.at("input1") == take(ps::Footprint::all({2, 2, 2, 3})),
+          "Whole collects zero-weight vertices but leaves generic NaNs "
+          "mathematically unused");
+  auto typed = tetra;
+  const auto original = typed.bindings.inputs[1].value;
+  const auto facet = take(ps::encode_color_array(desc));
+  typed.bindings.inputs[1].value = take(
+      ps::Value::from_storage(original.descriptor(), original.region(),
+                              original.layout(), original.storage(), {facet}));
+  typed.document.inputs[1].facets = {facet};
+  require(!typed.run(wanted).ok(),
+          "Whole typed table validates zero-weight invalid vertices");
   const auto unused = take(ps::Footprint::from_regions(
       {2, 2, 2, 3}, {ps::Region({{0, 1}, {1, 1}, {0, 1}, {1, 1}})}));
   require(take(result.dependencies.potential_dirty("input1", unused))
-              .at("colors")
-              .empty(),
-          "unused table component does not dirty output");
+                  .at("colors") == take(ps::Footprint::all({1, 3})),
+          "any table component dirties complete output demand");
   const auto selected = take(ps::Footprint::from_regions(
       {2, 2, 2, 3}, {ps::Region({{1, 1}, {1, 1}, {1, 1}, {1, 1}})}));
   require(take(result.dependencies.potential_dirty("input1", selected))
@@ -251,7 +258,7 @@ void sparse_and_cache(ps::CpuNumericProfile profile) {
   require(!changed.ok() &&
               changed.status().reason == ps::FailureReason::InvalidDomain,
           "cached LUT3D lookup reselects newly nonzero invalid vertex");
-  std::cout << "LUT3D sparse execution: exact split-tie support, zero-weight "
+  std::cout << "LUT3D sparse execution: exact split-tie math, zero-weight "
                "NaN isolation, complete dirty and cache reselection PASS\n";
 }
 void large_composition(ps::CpuNumericProfile profile) {
@@ -265,11 +272,17 @@ void large_composition(ps::CpuNumericProfile profile) {
     fixture.document.nodes.push_back(take(ps::numeric::constant_node(
         2, ps::WorkflowInputReference{2}, {256, 256, 256, 3},
         ps::numeric::ArrayLayout::View, profile)));
-    auto result = take(fixture.run(take(ps::Footprint::all({1, 3}))));
-    check(result.values.at("colors"), {7, 7, 7});
-    require(take(result.dependencies.source_support()).at("input1") ==
-                take(ps::Footprint::all({1})),
-            "384 MiB logical table uses one scalar backing source");
+    auto result = fixture.run(take(ps::Footprint::all({1, 3})));
+    require(
+        !result.ok() &&
+            result.status().code == ps::ErrorCode::ResourceExhausted,
+        "Whole max-table collect rejects 384 MiB under 8 MiB payload budget");
+    // A smaller table permits isolating the independent complete-output limit.
+    fixture.document.nodes[1] = take(ps::numeric::constant_node(
+        2, ps::WorkflowInputReference{2}, {2, 2, 2, 3},
+        ps::numeric::ArrayLayout::View, profile));
+    fixture.bindings.inputs[2].value =
+        doubles({3, 3}, {0, 1, 1, 0, 1, 1, 0, 1, 1});
     const auto extent = UINT64_C(1) << 38;
     const auto seed = doubles({1}, {.5});
     fixture.document.inputs[0] = {
@@ -281,31 +294,27 @@ void large_composition(ps::CpuNumericProfile profile) {
         ps::numeric::ArrayLayout::View, profile)));
     const auto last = take(ps::Footprint::from_regions(
         {extent, 3}, {ps::Region({{extent - 1, 1}, {1, 1}})}));
-    auto huge = take(fixture.run(last));
-    std::uint64_t actual = 0;
-    require(huge.values.at("colors").read({extent - 1, 2}, &actual, 8).ok() &&
-                actual == bits(7),
-            "sparse 2^38-position LUT3D composition");
+    auto huge = fixture.run(last);
+    require(
+        !huge.ok() && huge.status().code == ps::ErrorCode::ResourceExhausted,
+        "sparse giant query needs complete input/output storage");
   }
-  std::cout << "LUT3D public composition: maximum 256^3 table and "
-               "2^38-position color view with scalar owners PASS\n";
+  std::cout
+      << "LUT3D public composition: maximum 256^3 table and "
+         "2^38-position view reject full storage under bounded budget PASS\n";
 }
-void supply(const std::shared_ptr<ps::DependencySession>& session,
-            const ps::DependencyRequest& request,
-            const std::vector<ps::Value>& values) {
-  const auto pending = take(session->pending_reads());
-  std::vector<ps::ValueFragments> ready;
-  for (unsigned port = 0; port < values.size(); ++port) {
-    auto wanted = take(ps::Footprint::none(values[port].descriptor().shape));
-    for (const auto& read : pending)
-      if (read.port == port)
-        wanted = take(wanted.unite(read.samples));
-    ready.push_back(take(ps::ValueFragments::create(values[port].descriptor(),
-                                                    values[port].facets(),
-                                                    wanted, {values[port]})));
-  }
-  require(session->supply(std::move(ready), request.snapshot_identity).ok(),
-          "supply declared LUT3D transport");
+ps::Value direct(const std::shared_ptr<ps::OperationRegistry>& registry,
+                 const ps::WorkflowNode& authored,
+                 const std::vector<ps::Value>& values) {
+  std::vector<ps::Region> demands;
+  for (const auto& value : values)
+    demands.push_back(value.region());
+  ps::ResourceBudget budget(ps::ResourceLimits{});
+  ps::ResourceAllocationScope scope(budget);
+  ps::OperationInvocation call(values, demands, authored.parameters,
+                               ps::Backend::Cpu, {}, values[0].region(),
+                               budget.allocator());
+  return take(registry->invoke(authored.operation, call));
 }
 ps::Value reversed(const ps::Value& value) {
   const auto width = ps::Value::element_size(value.descriptor().element_type);
@@ -343,14 +352,9 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
   for (bool tetrahedral : {false, true}) {
     auto authored = node(tetrahedral, profile, ps::ElementType::Float64,
                          ps::ElementType::Float64, desc, desc);
-    ps::DependencyRequest request;
-    for (const auto& input : dense)
-      request.inputs.push_back({input.descriptor(), input.facets()});
-    request.parameters = authored.parameters;
-    request.outputs = take(
-        ps::Footprint::from_regions({1, 3}, {ps::Region({{0, 1}, {1, 1}})}));
-    request.snapshot_identity = "LUT3D-layout";
-    request.limits.maximum_work = UINT64_C(1) << 30;
+    std::vector<ps::OperationMetadata> metadata;
+    for (const auto& value : dense)
+      metadata.push_back({value.descriptor(), value.facets()});
     for (unsigned mask = 0; mask < 8; ++mask) {
       auto values = dense;
       for (unsigned port = 0; port < 3; ++port)
@@ -362,105 +366,62 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
         require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                     feraiseexcept(FE_DIVBYZERO) == 0,
                 "set LUT3D fenv");
-        auto session =
-            take(registry->start_dependency(authored.operation, request));
-        for (unsigned stage = 0; stage < 3; ++stage) {
-          require(session->poll().ok(), "LUT3D strided Need");
-          supply(session, request, values);
-        }
-        auto result = take(session->poll());
-        check(std::get<ps::DependencyResult>(result).value, {.25, .5, .75});
+        auto output = direct(registry, authored, values);
+        check(take(ps::ValueFragments::create(
+                  output.descriptor(), output.facets(),
+                  take(ps::Footprint::all({1, 3})), {output})),
+              {.25, .5, .75});
         require(
             fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
             "LUT3D preserves rounding/flags");
         require(fesetenv(&saved) == 0, "restore LUT3D fenv");
       }
     }
-    for (unsigned phase_index : {2U, 3U}) {
-      for (bool cancel : {false, true}) {
-        ps::ResourceBudget root;
-        ps::CancellationSource cancellation;
-        request.cancellation = cancellation.token();
-        bool armed = false, observed = false;
-        auto session = take(registry->start_dependency(
-            authored.operation, request, root.allocator(),
-            [&](std::uint64_t count) {
-              if (armed && count == 640) {
-                observed = true;
-                if (cancel)
-                  cancellation.cancel();
-                else
-                  return ps::Status{ps::ErrorCode::ResourceExhausted,
-                                    "LUT3D inner work",
-                                    ps::FailureReason::WorkLimit};
-              }
-              return ps::Status::success();
-            }));
-        for (unsigned stage = 0; stage < phase_index; ++stage) {
-          require(session->poll(root.allocator()).ok(),
-                  "LUT3D Need before interruption");
-          supply(session, request, dense);
-        }
-        armed = true;
-        auto failed = session->poll(root.allocator());
-        require(observed && !failed.ok() &&
-                    failed.status().code ==
-                        (cancel ? ps::ErrorCode::Cancelled
-                                : ps::ErrorCode::ResourceExhausted),
-                "LUT3D support/weighted-sum interruption");
-        require(session->numeric_diagnostics().copied_elements == 0,
-                "failed LUT3D has no copied complete color");
-        session.reset();
-        require(root.statistics().live[ps::ResourceKind::Payload] == 0,
-                "failed LUT3D releases state and unpublished payload");
-      }
-    }
-    request.cancellation = {};
-    for (unsigned kind = 0; kind < 3; ++kind) {
-      auto limited = request;
-      if (kind == 0)
-        limited.limits.maximum_state_bytes = 1;
-      if (kind == 1)
-        limited.limits.maximum_work = 1;
-      if (kind == 2)
-        limited.limits.maximum_stages = 1;
-      auto started = registry->start_dependency(authored.operation, limited);
-      bool failed = !started.ok();
-      if (failed) {
-        require(started.status().code == ps::ErrorCode::ResourceExhausted,
-                "LUT3D admission status");
-      } else {
-        for (unsigned stage = 0; stage < 4; ++stage) {
-          auto progress = started.value()->poll();
-          if (!progress.ok()) {
-            require(progress.status().code == ps::ErrorCode::ResourceExhausted,
-                    "LUT3D work/stage status");
-            failed = true;
-            break;
-          }
-          if (std::holds_alternative<ps::DependencyResult>(progress.value()))
-            break;
-          supply(started.value(), limited, dense);
-        }
-      }
-      require(failed, "LUT3D state/work/stage ceiling");
-    }
-    auto mismatched = request;
-    mismatched.inputs[1].facets = {
+    auto many = dense;
+    std::vector<double> queries;
+    for (unsigned i = 0; i < 256; ++i)
+      queries.insert(queries.end(), {.25, .5, .75});
+    many[0] = doubles({256, 3}, queries);
+    point_math_checks::resources(authored, many, 256 * 3 * 8);
+    // Maximal legal grid with zero-stride table tests axis reconstruction in
+    // the callback without claiming a bounded public collect of 384 MiB.
+    auto seed = doubles({1}, {7});
+    many = dense;
+    many[1] = take(
+        ps::Value::from_storage({ps::ElementType::Float64, {256, 256, 256, 3}},
+                                ps::Region::whole({256, 256, 256, 3}),
+                                {0, {0, 0, 0, 0}}, seed.storage()));
+    many[2] = doubles({3, 3}, {0, 255, 1, 0, 255, 1, 0, 255, 1});
+    auto output = direct(registry, authored, many);
+    point_math_checks::resources(authored, many, 24);
+    auto ranked = dense;
+    ranked[0] =
+        doubles({2, 2, 3}, {0, 0, 0, .25, .5, .75, 1, 1, 1, .5, .25, .75});
+    auto ranked_output = direct(registry, authored, ranked);
+    require(std::memcmp(ranked_output.bytes().data(), ranked[0].bytes().data(),
+                        96) == 0,
+            "rank-three multirow identity order and validation counter reset");
+
+    const double expected[] = {7, 7, 7};
+    require(std::memcmp(output.bytes().data(), expected, 24) == 0,
+            "maximum axes and zero-stride table direct callback");
+    metadata[1].facets = {
         take(ps::encode_color_array(description("xyz", false)))};
-    auto invalid = registry->start_dependency(authored.operation, mismatched);
+    auto invalid = registry->resolve_traits(authored.operation, metadata,
+                                            authored.parameters);
     require(
         !invalid.ok() && invalid.status().code == ps::ErrorCode::TypeMismatch,
         "LUT3D conflicting typed table rejected");
-    request.outputs = take(ps::Footprint::none({1, 3}));
-    auto empty = take(registry->start_dependency(authored.operation, request));
-    require(std::holds_alternative<ps::DependencyResult>(take(empty->poll())) &&
-                empty->poll_count() == 0,
-            "Empty LUT3D has no payload reads");
+    Fixture empty(authored, dense);
+    require(take(empty.run(take(ps::Footprint::none({1, 3}))))
+                .values.at("colors")
+                .coverage()
+                .empty(),
+            "Empty LUT3D returns no samples");
   }
   std::cout << "LUT3D representation/resources: all-port negative/unaligned "
-               "strides, typed colors, fenv, Empty, state/work/stage, inner "
-               "support/sum cancellation and cleanup PASS\n";
+               "strides, typed colors, fenv, Empty, work/output/workspace, "
+               "active cancellation and cleanup PASS\n";
 }
 void failures_and_upstream(ps::CpuNumericProfile profile) {
   const auto desc = description("xyz", false);
@@ -487,29 +448,31 @@ void failures_and_upstream(ps::CpuNumericProfile profile) {
           ps::Footprint::from_regions({2, 3}, {ps::Region({{0, 2}, {0, 1}})}));
       for (bool joint : {false, true}) {
         options.enable_joint = joint;
-        auto result =
-            take(context.execute_atoms(compiled.plan, fixture.bindings,
-                                       {{"colors", wanted}}, {}, options));
-        unsigned good = 0, bad = 0;
-        for (const auto& atom : result.atoms) {
-          require(atom.key.rank == 1, "LUT3D atom excludes color channels");
-          if (atom.outcome.ok()) {
-            ++good;
-            require(atom.key.coordinate[0] == 0,
-                    "LUT3D completed color preserved");
-          } else {
-            ++bad;
-            require(atom.key.coordinate[0] == 1 &&
-                        atom.outcome.status().detail.atom == atom.key &&
-                        atom.outcome.status().reason ==
-                            (overflow ? ps::FailureReason::ArithmeticOverflow
-                                      : ps::FailureReason::InvalidDomain),
-                    "LUT3D complete-color domain/overflow attribution");
-          }
-        }
-        require(good == 1 && bad == 1, "LUT3D independent color outcomes");
+        auto result = context.execute_fragments(
+            take(context.freeze(compiled.plan, fixture.bindings)),
+            {{"colors", wanted}}, {}, options);
+        require(!result.ok() &&
+                    result.status().detail.scope == ps::FailureScope::Run &&
+                    result.status().reason ==
+                        (overflow ? ps::FailureReason::ArithmeticOverflow
+                                  : ps::FailureReason::InvalidDomain),
+                "LUT3D complete-output domain/overflow Run failure");
       }
     }
+    auto invalid_queries = array(ps::ElementType::Float64, {2, 3},
+                                 {0, 0, 0, UINT64_C(0x7ff8000000000042), 0, 0});
+    Fixture precedence(
+        authored,
+        {invalid_queries,
+         array(ps::ElementType::Float64, {2, 2, 2, 3},
+               std::vector<std::uint64_t>(24, UINT64_C(0x7ff8000000000042))),
+         doubles({3, 3}, {0, 1, 1, 0, 1, 1, 0, 1, 1})});
+    auto remote = precedence.run(take(
+        ps::Footprint::from_regions({2, 3}, {ps::Region({{0, 1}, {1, 1}})})));
+    require(!remote.ok() &&
+                remote.status().message.find("port=0") != std::string::npos &&
+                remote.status().detail.scope == ps::FailureScope::Run,
+            "unrequested invalid query precedes selected generic table error");
     auto registry = ps::make_default_operation_registry(false);
     unsigned calls = 0;
     ps::OperationDefinition producer;
@@ -539,25 +502,25 @@ void failures_and_upstream(ps::CpuNumericProfile profile) {
     const auto wanted = take(ps::Footprint::all({1, 3}));
     auto failed = fixture.run(wanted);
     require(!failed.ok() &&
-                failed.status().reason == ps::FailureReason::InvalidDomain &&
-                !calls,
-            "invalid axis precedes table producer");
+                failed.status().message == "required LUT3D producer" &&
+                calls == 1,
+            "Whole collects upstream table before callback axis validation");
     fixture.bindings.inputs[1].value =
         doubles({3, 3}, {0, 1, 1, 0, 1, 1, 0, 1, 1});
     failed = fixture.run(wanted);
     require(!failed.ok() &&
-                failed.status().reason == ps::FailureReason::InvalidDomain &&
-                !calls,
-            "rejected lookup precedes table producer");
+                failed.status().message == "required LUT3D producer" &&
+                calls == 2,
+            "Whole collects upstream table before callback query validation");
     fixture.bindings.inputs[0].value = doubles({1, 3}, {.5, .5, .5});
     failed = fixture.run(wanted);
     require(!failed.ok() &&
                 failed.status().message == "required LUT3D producer" &&
-                calls == 1,
+                calls == 3,
             "required upstream failure retained");
   }
-  std::cout << "LUT3D errors: domain/overflow complete-color Atom isolation "
-               "and global-axis/query/table producer ordering PASS\n";
+  std::cout << "LUT3D errors: domain/overflow Run failure "
+               "and complete upstream table collection PASS\n";
 }
 void probe(ps::CpuNumericProfile profile) {
   std::string model;

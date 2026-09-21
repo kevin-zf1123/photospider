@@ -198,8 +198,8 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
   auto result = take(
       identity.run({{"values", region({3}, {ps::Region({{1, 1}})})}}, false));
   require(take(result.dependencies.source_support()).at("input0") ==
-              region({3}, {ps::Region({{1, 1}})}),
-          "Hann R1 exactzero nonreads");
+              take(ps::Footprint::all({3})),
+          "Whole collection preserves exactzero arithmetic selection");
   std::uint64_t actual = 0;
   require(
       result.values.at("values").read({1}, &actual, 8).ok() && actual == raw(7),
@@ -211,8 +211,8 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
   auto skipped = take(
       zero_ends.run({{"values", region({5}, {ps::Region({{2, 1}})})}}, false));
   require(take(skipped.dependencies.source_support()).at("input0") ==
-              region({5}, {ps::Region({{1, 3}})}),
-          "integer sinc zeros omit Hamming endpoints");
+              take(ps::Footprint::all({5})),
+          "Whole collects endpoints but sinc zeros remain unused operands");
   Fixture nan_order(
       authored(4, 2, .01, 0, ps::numeric::LowpassBoundary::Reflect, profile),
       {array(ps::ElementType::Float64, {3}, {snan, inf, negative_nan})});
@@ -236,13 +236,12 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
   auto edge = take(
       wrapped.run({{"values", region({8}, {ps::Region({{0, 1}})})}}, false));
   require(take(edge.dependencies.source_support()).at("input0") ==
-              region({8}, {ps::Region({{0, 2}}), ps::Region({{7, 1}})}),
-          "exact wrapped edge support");
+              take(ps::Footprint::all({8})),
+          "Whole wrapped input support");
   require(take(edge.dependencies.potential_dirty(
                    "input0", region({8}, {ps::Region({{3, 1}})})))
-              .at("values")
-              .empty(),
-          "distant sample does not dirty wrapped edge");
+                  .at("values") == region({8}, {ps::Region({{0, 1}})}),
+          "distant sample dirties Whole wrapped output");
   std::cout << "zero tap nonreads, Gaussian underflow support, logical NaN/Inf "
                "order and wrap dirty support passed\n";
 }

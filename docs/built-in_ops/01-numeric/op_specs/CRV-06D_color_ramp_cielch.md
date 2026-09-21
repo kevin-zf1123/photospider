@@ -106,32 +106,42 @@ mixed zero rules to L/C. All source rows remain validated before shortcuts.
 
 ## Demand, invalidation, resources and failures
 
-The observation domain is input.shape: any requested channel expands to the
-complete three-component color. Empty Q reads no payload. For nonempty Q validate
-all stops and only requested input positions. Read exactly one selected full row
-on a hit/clamp/K=1, or both adjacent full rows on interpolation. Rational rows
-include both L/C entries and their numerator/denominator. C=0 never suppresses
-hue reads or denominator validation; no remote table rows are read.
+All formal strict and accelerated keys use Whole execution. Any nonempty
+request collects complete input, stops and color arrays (and both rational-hue
+integer arrays when present), with complete upstream and typed validation.
+The callback validates every stop, then every position, before color arithmetic.
+Each position still uses exactly one hit/clamp/singleton row or two enclosing
+rows mathematically. Unused generic color rows are not subjected to new numeric
+domain checks; invalid typed data or upstream failures anywhere still fail.
+Empty requests perform static preflight but read no sample payload.
 
-Inherit CIELAB's typed/upstream closure, exact dirty witnesses, arbitrary immutable
-stride support, Region/storage origins, complete-color failure publication and
-owner lifetime. Any selected L/C/h or numerator/denominator change invalidates the
-whole dependent color. Global stop changes invalidate dependent queries. Cache
-identity includes input representation, output hue unit, dtype, description and
-source validation witnesses; cache-off remains semantically identical.
+The output is one immutable dense Value of shape input.shape+[C]. The final
+channel axis retains complete-color closure, ColorArray identity and owned ICC
+resources where applicable. Public fragments expose the requested complete
+colors while retaining the full output owner. Arbitrary immutable input strides,
+offsets and unaligned storage are supported. Owners survive context teardown.
+Any input edit invalidates the complete recorded output demand. Cache identity
+retains descriptors, parameters, typed validation and resource identities.
+Numeric errors have Run scope; no successful color subset survives a failed
+callback. Upstream, resource and cancellation errors retain their categories.
 
-For M requested colors, lookup costs O(K+M log K), plus exact arithmetic and
-certified unit-conversion work. Optional lookup storage is 8K bytes, output
-payload is 3*M*sizeof(dtype). Account rational limbs, certified-pi enclosures,
-scratch growth overlap, descriptors, owners and fragments against host budgets.
-Large finite radian values do not justify an unbounded hidden precision cache.
-Poll cancellation during source scans, lookup batches and every adaptive refinement;
-inherit the RGB contract's bounded polling and stage/capacity obligations.
+For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
+certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
+requested region. Account complete collected inputs, fixed admitted arithmetic
+workspace, a ResourceVector stop index with 8K element bytes plus allocator and
+metadata overhead, and retained descriptors/resources. No per-output dependency
+records or point-state array is retained. Work/capacity limits and cancellation
+apply during scans, lookup, arithmetic and before publication; incomplete
+certification fails ResourceExhausted. No reduced-precision fallback is added.
+
+C=0 never suppresses hue mathematics or positive-denominator validation for
+selected rational rows. Certified pi conversion retains its fixed precision
+ceiling; a finite large angle does not create an unbounded precision cache.
 
 Malformed statics/descriptions fail preflight with InvalidArgument/InvalidDomain;
 port shapes/dtypes and descriptor mismatch use TypeMismatch. Nonfinite demanded
 floats, negative C, denominator<=0, invalid stops or rejected input positions use
-OperationFailed/InvalidDomain at the complete-color observation. Final narrowing
+OperationFailed/InvalidDomain at Run scope. Final narrowing
 overflow uses OperationFailed/ArithmeticOverflow. Platform mismatch, resources,
 cancellation, stale and upstream failures retain their established categories.
 No partially valid L/C/h tuple is published. Implementation cannot substitute a
@@ -152,8 +162,8 @@ Equal endpoints remain constant; neither same direction modulo a turn nor C=0
 changes the formula. A hit at hue=4 retains 4 in pi units. No hue_path parameter
 or normalization mode is accepted.
 
-Test channel requests expanding to full colors, unselected invalid rows unread,
-selected q=0 failing even at C=0, global stop failures, exact dirty support,
+Test channel requests expanding to full colors, mathematically unused generic rows and complete typed validation,
+selected q=0 failing even at C=0, global stop failures, whole-input dirty support,
 strides, budgets, cancellation, cache-off and output lifetime. The public
 Compiler/ExecutionContext workflow binds the entrypoint-specific ports and
 checks named values and metadata, with commands and independent expected

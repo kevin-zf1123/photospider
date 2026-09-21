@@ -14,7 +14,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
+implementation_base_commit: 3d35f5eb
 implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
@@ -53,17 +53,25 @@ node. Each port has one dtype, so y columns share that array's dtype; x, y and
 query may independently use Float32/Float64. Outputs select Float32/Float64,
 default Float64, with empty facets.
 
-For any nonempty Q, all x knots are globally read and validated. Query Control
-support is the row projection of Q, deduplicated across requested columns.
-The y Data set is the exact union of the scalar method's required knot indices
-paired with each actually requested column. Unrequested columns and remote
-unselected y entries have no numeric demand or finite validation. Exact knot and
-clamp paths read only y[j,c], and failed y in another column does not fail this
-coordinate. Retain recognized typed Validation closure separately.
+For every nonempty request, one CPU Whole callback collects complete x, y and
+query inputs, including recognized typed validation and upstream failures. It
+validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
+one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
+metadata validation still applies. Sparse demand restricts publication coverage,
+but does not reduce input collection, computation or the complete output owner.
 
-Errors are attributed to each dependent output Atom (i,c), preserving shared
-x/query control effects and column-local y failures. Host upstream support,
-eligible atom execution and fail-fast behavior retain their existing boundaries.
+The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
+linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
+outside every evaluated stencil do not undergo an additional finite scan. Typed
+validation and upstream execution cover complete inputs, including unused values.
+All query rows and output columns are evaluated, so errors in unrequested rows
+or columns can fail the run. Reject still performs full upstream collection.
+
+Any input change invalidates the recorded output demand. Cache identity includes
+complete input versions, profile, metadata and parameters. Numerical failures
+have Run scope and publish no partial successful output; they do not provide
+independent per-column Atom success. Input strides, offsets, zero strides and
+negative strides remain legal. Packed output storage outlives the context.
 
 ## Shape, parameters and inference
 
@@ -82,42 +90,30 @@ and layout choices. Scalar and vector forms are not implicitly interconverted.
 
 ## Mapping, invalidation and ownership
 
-For output Q, deduplicate its row indices for query reads and perform the scalar
-segment lookup once per needed row when useful. Do not expand an irregular Q
-into all columns for each row. Numeric evaluations use only the demanded (i,c)
-pairs, with method-specific endpoint/stencil y coordinates in column c.
-Changed x invalidates observations retaining global topology. A changed query[i]
-invalidates the requested row's dependent outputs across columns; changed y[j,c]
-invalidates only same-column outputs whose retained scalar stencil contains j.
-Typed Validation support and its dirty effects remain explicit and separate.
-
-Read arbitrary legal immutable strides, offsets and unaligned inputs, including
-zero/negative strides along either y axis. Column independence is logical; it
-cannot assume contiguous y columns. Return owned packed output fragments with
-correct global rank-2 Region/storage origins, never writable aliases, implicit
-zero gaps or a forced complete N*C allocation. Results survive context destruction
-until final owner release; unpublished allocations are released on failure.
-Cache keys include source/profile/static parameters and retained dependency
-witnesses. Cache-off and changes to request partition do not change values.
+Whole support, Run failure and ownership follow the scalar contract. Lookup
+runs once per complete query row and is shared across all C columns. Per-column
+formulas and numeric selection are unchanged. Every output column is computed;
+any input edit invalidates recorded output demand. Arbitrary legal immutable
+strides on either y axis remain supported. Output retains the rank-2 shape and
+empty facets, including C=1.
 
 ## Algorithm and resources
 
-Reuse the scalar mathematical evaluator per requested column. A shared bounded
-x index and per-query segment classification may be reused across columns;
-slope caches, where relevant, are keyed by column and exact source support.
-Do not precompute all columns' coefficients for a partial-column request.
-For M requested output cells and P distinct requested rows, indexed lookup work
-is O(K+P log K), plus O(M) scalar evaluations and their exact arithmetic or
-certification/refinement cost. Output payload is b*M. Charge index/segment/set
-metadata, per-column active state, every arithmetic limb, source owners/windows,
-validation and output fragments to host capacity/work/stage budgets.
+Search/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi). Classification is shared across columns. The complete dense
+output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
+collection and retained owners also require admission. The callback declares its
+fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
+524288 bytes. No full slope table is required.
 
-The scalar cancellation intervals apply to x/query lookup and column evaluation;
-large C does not permit a long uninterruptible inner loop. Poll extended arithmetic
-and publication as well. Platform compatibility, actual fallback reporting and
-finite-output errors follow the scalar operation. There is no unbudgeted worker
-pool, disk spill or whole-grid intermediate. Each platform key has an independent
-identity, and a failed observation publishes no partial successful value.
+Poll work/cancellation during reads, binary search, exact arithmetic and before
+publication. Capacity and work exhaustion return ResourceExhausted, with failed
+output/workspace released. A giant logical broadcast can therefore fail a small
+payload budget even for sparse demand. Resource limits do not authorize weaker
+arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
+categories. Numeric failures are OperationFailed/InvalidDomain or final-output
+ArithmeticOverflow, with Run scope and offending port/index where available.
 
 ## Acceptance and implementation status
 
@@ -132,12 +128,11 @@ per-column shape/monotonicity, exact node/zero behavior and strict fallback
 against the corresponding independent exact PCHIP oracle.
 
 Compare every selected column with the matching single-function operation,
-including mixed input dtype, both destinations, C=1 without squeezing, very
-large logical shapes served sparsely, all domain policies and signed zeros.
-Read-witness fixtures request one column while other columns contain invalid y;
-only required typed-validation closure may extend the numeric support. A bad
-shared query or x still affects every dependent selected column. Check ordinary
-fail-fast and eligible per-atom success/failure isolation separately.
+including mixed input dtype, both destinations, C=1 without squeezing, all
+domain policies and signed zeros. Very large logical shapes with sparse demand
+must still satisfy the complete-output budget. Read witnesses cover complete
+inputs; invalid data in another evaluated column fails the Whole run. Test
+both numeric failures and complete typed validation, including unused values.
 
 Deliver public WorkflowDocument examples with x/y/query bindings and named values
 through Compiler/ExecutionContext, with actual build/run commands in the
@@ -153,8 +148,8 @@ keys. The public `photospider/numeric/curves.hpp` constructor is
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;
 unresolved cases use exact fallback. Exact cross products identify collinear
-PCHIP stencils and reduce them to the linear formula. Global x validation, requested query rows and the
-local y stencil follow the demand contract above.
+PCHIP stencils and reduce them to the linear formula. Complete input collection, Run failures and complete-output allocation follow
+the Whole contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and actual platform acceptance.

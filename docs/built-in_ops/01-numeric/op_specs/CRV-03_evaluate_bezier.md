@@ -77,20 +77,32 @@ are inferred merely from D. Query count N is positive and descriptor-defined.
 
 Anchors, handles and t independently accept Float32/Float64 and may mix dtypes.
 Segment indices is always Int64. Output values selects Float32/Float64 through
-a static dtype parameter, default Float64. Every actually read control component
-and t value must be finite, and each published result must be finite. Negative
+a static dtype parameter, default Float64. Every mathematically used control component
+and all t values must be finite, and each published result must be finite. Negative
 and greater-than-one control values are valid; no value clipping is implicit.
-Destination overflow and nonfinite demanded data fail the affected observation.
+Destination overflow and nonfinite demanded data fail the Run.
 
 ## Confirmed requested-component support
 
-For requested output (i,c), first read and validate segment_indices[i] and t[i].
-Only the selected segment's component c is required. At t=0 or t=1, read only
-the corresponding anchor component; no handle or opposite endpoint is read.
-Interior t reads the control components needed by that segment and component.
-Other segments, components and unrequested query rows are not read or numerically
-validated. In particular, a bad unrequested index/t does not fail this request.
-There is no global topology scan; coordinates may repeat or reverse.
+One CPU Whole callback collects all four complete inputs with recognized typed
+validation, then validates every segment_indices/t row before any component
+arithmetic. It evaluates all N*D output cells and publishes one immutable dense
+[N,D] owner. Sparse demand restricts returned coverage but retains complete input
+collection, computation and output memory. Empty reads no payload; complete
+static metadata still validates.
+
+Mathematical selection is unchanged: t=0/1 uses only the selected anchor
+component; an interior uses both anchors and all relative handles of that segment
+and component. Generic numeric data outside every evaluated stencil is not
+additionally finite-checked. Complete typed and upstream validation still covers
+unused inputs. All rows/components are evaluated, so formerly unrequested bad
+index/t/components can fail the Run. No partial successful output is published.
+There is no global mathematical topology/monotonicity scan.
+
+Any input edit invalidates recorded output demand. Cache identity includes all
+input versions, profile, metadata and parameters. Output name, dtype, rank-2
+shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
+offsets and unaligned storage remain legal. Output storage survives its context.
 
 ## Confirmed reconstruction and numerical versions
 
@@ -122,7 +134,7 @@ Endpoint shortcuts never perform unneeded handle reconstruction.
 At the same demanded inputs, accelerated and strict share finite/nonfinite
 success classification and zero signs; the four-ULP allowance applies to nonzero
 finite results. If a fast path cannot guarantee error, range and special cases,
-fall back to strict and report actual counts/reasons. Work/capacity exhaustion
+fall back to strict. Per-value Whole counters are unavailable. Work/capacity exhaustion
 fails explicitly. Results for a fixed profile/input/query do not depend on the
 request partition, neighboring queries, thread order or cache state.
 
@@ -142,7 +154,7 @@ supply both. No output axis, extrapolation, automatic segment selection, squeeze
 or implicit dtype conversion from integers is provided. Shape/dtype inference
 uses descriptors and these static parameters, without numeric input execution.
 
-Require 0<=segment_indices[i]<K-1 and finite 0<=t[i]<=1 for requested rows.
+Require 0<=segment_indices[i]<K-1 and finite 0<=t[i]<=1 for all rows.
 Invalid indices and t fail, without clipping, wrapping or extrapolation. t=-0
 is the t=0 endpoint. Query rows may be unordered or repeated. Adjacent segments
 share their mathematical endpoint but may have unrelated tangents; corners and
@@ -160,66 +172,46 @@ control reconstruction observe their separate rounding boundaries.
 
 ## Demand, dirty mapping and returned ownership
 
-For requested output Q, the row projection of Q determines Control reads of
-segment_indices and t. Validate those controls before reading anchors/handles.
-For (i,c) with selected segment j, endpoint paths have anchor Data {(j,c)} or
-{(j+1,c)}. Interior paths require anchors {(j,c),(j+1,c)} and handles
-{(j,r,c):0<=r<degree-1}. Deduplicate identical source locations across repeated
-queries. Both anchors and all local handles remain required in the interior,
-even when a value simplification could hide a contribution.
+One CPU Whole callback collects all four complete inputs with recognized typed
+validation, then validates every segment_indices/t row before any component
+arithmetic. It evaluates all N*D output cells and publishes one immutable dense
+[N,D] owner. Sparse demand restricts returned coverage but retains complete input
+collection, computation and output memory. Empty reads no payload; complete
+static metadata still validates.
 
-Empty Q reads no runtime payload. No global anchor/handle validation occurs.
-Recognized typed Validation closure is separately declared and retained;
-generic numeric column isolation cannot bypass an attached typed semantic
-obligation. Upstream execution keeps its own transitive support and failures.
+Mathematical selection is unchanged: t=0/1 uses only the selected anchor
+component; an interior uses both anchors and all relative handles of that segment
+and component. Generic numeric data outside every evaluated stencil is not
+additionally finite-checked. Complete typed and upstream validation still covers
+unused inputs. All rows/components are evaluated, so formerly unrequested bad
+index/t/components can fail the Run. No partial successful output is published.
+There is no global mathematical topology/monotonicity scan.
 
-Changed segment_indices[i] or t[i] invalidates all dependent components in row i.
-Changed anchors[j,c] or handles[j,r,c] invalidates only observations retaining
-those exact Data/Validation coordinates. An interior shared-anchor change can
-affect either incident segment; unselected component changes do not affect other
-components. Controls determine future source selection, so cached plans retain
-their row control witnesses as well as source versions. Metadata/static changes
-revalidate the plan and output descriptor.
-
-Return owned packed fragments at the actual global rank-2 output Regions with
-matching storage origins. Accept arbitrary valid immutable source strides and
-offsets, including negative/zero strides and unaligned values. No whole-N*D
-allocation, writable source alias or implicit missing zero is permitted. Result
-owners survive context teardown and release backing only at final owner release.
+Any input edit invalidates recorded output demand. Cache identity includes all
+input versions, profile, metadata and parameters. Output name, dtype, rank-2
+shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
+offsets and unaligned storage remain legal. Output storage survives its context.
 
 ## Algorithm, resources and errors
 
-Classify and validate required row controls, gather selected scalar component
-controls, reconstruct them with RN64, then evaluate the exact polynomial or a
-certified equivalent. An optional reconstructed-control cache is keyed by segment,
-component, degree, profile and source witnesses and cannot pre-read other
-components. For P requested rows and M requested component values, ordinary
-work is O(P+M*degree), plus exact-rounding/certification and typed-validation work.
-No work proportional to all K or all D is required for sparse component requests.
+The callback retains one row classification and fixed arithmetic workspace,
+independent of N and D. It validates all rows, then reclassifies each row once
+for all columns. Work is O(N+N*D*degree), plus exact arithmetic, complete input
+collection and typed validation. Complete output costs b*N*D bytes. Admit that
+output and fixed workspace even for one requested cell, together with collected
+inputs/retained owners and metadata. Giant broadcast inputs/output can therefore
+fail a small payload budget. No per-cell dependency certificates or full
+coefficient table is retained.
 
-Output payload is b*M; active scalar controls require 8*(degree+1) bytes per
-admitted lane, plus local inputs, indices and exact-arithmetic limbs. Account
-all row/control/dedup metadata, source owners/windows, temporary capacity growth,
-cached reconstructed controls, output fragments and validation. Reserve before
-allocation and use host workers/work/stage/capacity limits. Poll cancellation
-before reads, at least every 64 rows/components, within long arithmetic and before
-publication. No unbudgeted private pool or implicit disk backing is introduced.
-Cache-off preserves active owners and numerical results.
-
-| Trigger | Phase and Status |
-| --- | --- |
-| Missing/malformed degree or dtype | Compile/preflight; InvalidArgument / InvalidDomain |
-| Wrong dtype/rank/shape relation or size cap | Compile/preflight; TypeMismatch |
-| Requested segment outside [0,K-2], or t outside finite [0,1] | Evaluation; InvalidArgument / InvalidDomain |
-| Nonfinite demanded anchor/handle component | Evaluation; OperationFailed / InvalidDomain |
-| Nonfinite RN64 reconstructed control or actual output conversion overflow | Evaluation; OperationFailed / ArithmeticOverflow |
-| Resource, cancellation, stale, unsupported backend, typed or upstream failure | Preserve baseline host Status and identity |
-
-Numeric failures name the affected output Atom (i,c); row-control failures apply
-to each dependent requested component. No domain-wide revocation of independent
-observations is implied. Preserve offending port/index and available query detail
-in bounded diagnostics. Failed observations publish no partial Value; independent
-outcomes require the host's eligible atom API, while ordinary execution is fail-fast.
+Use the host worker and resource ledger; poll cancellation on reads, row controls,
+inside exact arithmetic and before publication. Work/capacity failures preserve
+ResourceExhausted and release unpublished state/output. Numeric failures have Run
+scope, identifying offending port/index where available. Invalid segment/t is
+InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
+InvalidDomain; actual RN64 reconstruction or final conversion overflow is
+OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
+cancellation errors preserve their categories. Whole numeric counters are not
+available; zero counters must not be interpreted as zero arithmetic/fallbacks.
 
 ## Acceptance and implementation boundary
 
@@ -229,43 +221,33 @@ Cubic fixture: anchors=[[0,0],[3,0]], handles=[[[1,3],[-1,3]]],
 segment_indices=[0], t=[0.5] -> [[1.5,2.25]]. Use independent exact Bernstein
 polynomials after the separately required RN64 reconstruction, not the production
 de Casteljau helper, as oracle. Strict compares destination bits; accelerated
-checks ULP, converted-control bounds, zero classification and fallback reporting.
+checks ULP, converted-control bounds, zero classification and strict fallback where needed.
 
 Test linear/constant degeneracies, loops/reversals, multiple segments, shared
 endpoints and corners, repeated/unsorted rows, D=1 without squeezing and large
 D with sparse component requests. Include mixed dtypes, RN64 control midpoints,
 actual reconstruction overflow, final cancellation, subnormals and signed zeros.
-An endpoint request must ignore invalid handles and the opposite endpoint; a
-component request ignores unrelated components and unrequested invalid index/t.
-Verify these by exact read logs and dirty mappings, including typed closures.
+Mathematical endpoint evaluation ignores unused generic handles/opposite anchor,
+but full collection and typed validation still apply. An unrequested bad query
+or evaluated component fails the complete Run. Verify complete source support,
+whole invalidation, all-port layouts/fenv, Empty/schema, active cancellation and
+work/output/workspace rejection. Public constant-node composition checks that
+2^39-column and 2^40-row sparse requests still require the complete payload
+budget and fail when it is insufficient.
 
 The maintained public fixture in `examples/numeric_workflow/parametric.cpp`
-binds all four inputs, supplies degree/dtype and executes the named values
-through Compiler/ExecutionContext. It checks the analytic fixtures above,
-RN64 reconstruction, endpoint overflow diagnostics, sparse support/dirty,
-independent Atom failures, negative/zero/unaligned strides, caller fenv,
-work/cancel/state/stage failures and owner release, segment/t cache replacement,
-typed Image handle closure, source failure ordering and large sparse public
-constant-node composition. The latter requests two components of a logical
-2^39-column result and the last row of a logical 2^40-row result.
+uses the constructor and Compiler/ExecutionContext. Its independent Bernstein
+oracle evaluates the complete output before projecting observed cells. Current
+native strict/Apple manual groups and 1428 oracle cases per profile passed.
+Other platforms were not rerun for this Whole migration.
 
-On 2026-09-20 native Apple M5 Clang 21 strict/Apple and Ubuntu WSL i9-12900
-Clang 18.1.3 strict/AVX2 passed five manual groups and 1428 independent exact
-Bernstein/RN64 cases per profile. Installed 0.15 consumers, focused compiler
-unit, formatting/lint and independent arithmetic/entry review passed. WSL
-provides numerical correctness evidence, with no performance claim.
-
-Production evaluates the whole polynomial using exact integer power-Horner
-and one final rounding after the separate RN64 control reconstruction. All
-three profiles currently agree bitwise; NEON/AVX2 use integer publication and
-arithmetic helpers. ExactPolynomial's admitted fixed workspace is reused with
-a smaller 5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse
-or global topology pass is performed. Query rows are projected/deduplicated;
-source transport is deduplicated by the host, while certificates stay per-cell.
-Per-Need certificate reservation is 4096+16384*M metadata bytes for M requested
-cells, in addition to explicit row/output owners and exact scratch. Large
-dense requests can exhaust association/metadata limits; sparse D/N requests
-need no full logical array allocation.
+Production retains RN64 reconstruction and exact integer power-Horner with one
+final rounding. All current profiles use the same exact numerical calculation;
+NEON/AVX2 supply integer helpers. ExactPolynomial's fixed arena is reused with a
+5329-bit numerator bound for degree<=3 and t in [0,1]. No inverse or global
+mathematical topology pass is performed. Whole retains one row and fixed scratch
+instead of per-output associations. See implementation notes for public/core
+performance and its limits.
 
 Build/run commands and editable use are maintained in
 [the numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).

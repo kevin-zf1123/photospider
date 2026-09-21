@@ -2,13 +2,16 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/lut3d_bake_common.hpp"
 #include "01-numeric/uniform_axis.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -86,45 +89,60 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
     if (!facet.ok())
       return Answer(facet.status());
     output.metadata.facets = {facet.take_value()};
+    output.metadata.atomic_trailing_axes = 1;
   }
   return Answer(std::vector<OperationOutputSpecialization>{std::move(output)});
 }
 struct GeometryState {
-  Geometry kind;
-  SequenceProfile profile;
-  unsigned stage = 0;
-  std::shared_ptr<const dependency_internal::MetadataOwner> phase_metadata;
   std::array<numeric_ops::UniformAxis, 3> axes;
-  explicit GeometryState(Geometry value, SequenceProfile selected)
-      : kind(value),
-        profile(selected),
-        axes{numeric_ops::UniformAxis(selected),
-             numeric_ops::UniformAxis(selected),
-             numeric_ops::UniformAxis(selected)} {}
-  Poll poll(const ResultProgramPhase& phase) {
-    phase_metadata.reset();
-    phase_metadata = dependency_internal::metadata_owner(
-        32768 + phase.query.value_outputs->boxes().size() * 8192);
-    const auto& params = phase.query.parameters;
-    if (!stage++) {
-      ResultProgramNeed need;
-      if (kind == Geometry::Color) {
-        auto closure = input_internal::validation_closure(
-            phase.query.inputs[0], *phase.query.value_outputs, {},
-            phase.consume_work);
-        if (!closure.ok())
-          return Poll(closure.status());
-        need.values.push_back({0, closure.take_value()});
-      } else {
-        for (unsigned port = 0; port < phase.query.inputs.size(); ++port) {
-          auto wanted = all(phase, port);
-          if (!wanted.ok())
-            return Poll(wanted.status());
-          need.values.push_back({port, wanted.take_value()});
-        }
-      }
-      return Poll(std::move(need));
-    }
+  explicit GeometryState(SequenceProfile profile)
+      : axes{numeric_ops::UniformAxis(profile),
+             numeric_ops::UniformAxis(profile),
+             numeric_ops::UniformAxis(profile)} {}
+};
+Result<Value> execute_geometry(const OperationInvocation& call, Geometry kind,
+                               SequenceProfile profile) {
+  using Answer = Result<Value>;
+  const auto failed = [](Status status) {
+    if (status.detail.origin == FailureOrigin::Domain)
+      status.detail.scope = FailureScope::Run;
+    return Answer(std::move(status));
+  };
+  try {
+    const auto* budget = resource_internal::metadata_budget();
+    const std::function<Status(std::uint64_t)> consume = [&](auto amount) {
+      if (call.cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, {}};
+      return budget ? budget->consume({amount}) : Status::success();
+    };
+    const auto read_value = [&](unsigned port,
+                                const std::vector<std::uint64_t>& at) {
+      auto work = consume(at.size() + 1);
+      if (!work.ok())
+        return Result<std::uint64_t>(work);
+      const auto& input = call.inputs[port];
+      auto address = input.byte_address(at);
+      if (!address.ok())
+        return Result<std::uint64_t>(address.status());
+      const bool narrow =
+          input.descriptor().element_type == ElementType::Float32;
+      std::uint64_t bits = 0;
+      std::memcpy(&bits, input.bytes().data() + address.value(),
+                  narrow ? 4 : 8);
+      auto parts = BinaryParts::decode(bits, narrow);
+      if (parts.nan || parts.infinite)
+        return Result<std::uint64_t>(domain("nonfinite bake source color"));
+      return Result<std::uint64_t>(promote(bits, narrow));
+    };
+    auto scratch = call.allocator.allocate(sizeof(GeometryState));
+    if (!scratch.ok())
+      return failed(scratch.status());
+    auto buffer = scratch.take_value();
+    std::unique_ptr<GeometryState, void (*)(GeometryState*)> state(
+        new (buffer.data()) GeometryState(profile),
+        [](auto* value) { value->~GeometryState(); });
+    auto& axes = state->axes;
+    const auto& params = call.parameters;
     std::array<std::uint64_t, 3> dimensions{};
     std::array<std::uint64_t, 9> axis_bits{};
     if (kind != Geometry::Color) {
@@ -132,144 +150,118 @@ struct GeometryState {
       for (unsigned d = 0; d < 3; ++d) {
         std::array<std::uint64_t, 3> values{};
         for (unsigned j = 0; j < 3; ++j) {
-          auto result = read(phase, 0, {d, j});
+          auto result = read_value(0, {d, j});
           if (!result.ok())
-            return Poll(result.status());
+            return failed(result.status());
           values[j] = axis_bits[3 * d + j] = result.value();
         }
-        auto validated =
-            axes[d].validate(values, dimensions[d], phase.consume_work);
+        auto validated = axes[d].validate(values, dimensions[d], consume);
         if (!validated.ok())
-          return Poll(validated);
+          return failed(validated);
       }
     }
     auto color = color_array_from_parameter(std::get<std::string>(
         params.at(kind == Geometry::Color ? "color_description"
                                           : "input_color_description")));
     if (!color.ok())
-      return Poll(color.status());
-    const auto& descriptor = phase.query.output.descriptor;
+      return failed(color.status());
+    const auto& output = call.prepared->traits().outputs[0];
+    const ValueDescriptor descriptor{output.output_element_type,
+                                     output.fixed_output_shape};
     const unsigned width = Value::element_size(descriptor.element_type);
-    numeric_ops::ArrayPublication publication(
-        phase.query.value_outputs->boxes().size(), descriptor.shape.size());
-    ResourceVector<Value> output;
-    for (const auto& box : phase.query.value_outputs->boxes()) {
-      auto made = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!made.ok())
-        return Poll(made.status());
-      auto value = made.take_value();
-      auto at = box.dimensions();
-      std::uint64_t count = 1;
-      for (const auto& d : at)
-        count *= d.extent;
-      for (std::uint64_t offset = 0; offset < count;) {
-        auto fuel = phase.consume_work(64);
-        if (!fuel.ok())
-          return Poll(fuel);
-        auto residue = offset;
-        std::vector<std::uint64_t> point(at.size());
-        for (unsigned d = at.size(); d; --d) {
-          point[d - 1] = at[d - 1].offset + residue % at[d - 1].extent;
-          residue /= at[d - 1].extent;
-        }
-        if (kind == Geometry::Axis) {
-          auto bits = axis_bits[point[0] * 3 + point[1]];
-          std::memcpy(static_cast<std::uint8_t*>(value.data()) + offset * 8,
-                      &bits, 8);
-          ++offset;
-          continue;
-        }
-        std::array<std::uint64_t, 3> values{};
-        for (unsigned c = 0; c < 3; ++c) {
-          if (kind == Geometry::Grid) {
-            values[c] = axes[c].knots[point[c]];
-          } else if (kind == Geometry::Color) {
-            point.back() = c;
-            auto result = read(phase, 0, point);
-            if (!result.ok())
-              return Poll(result.status());
-            values[c] = result.value();
-          } else if (point[0] < product(dimensions, 1)) {
-            auto cell = point[0];
-            std::array<unsigned, 3> index{};
-            for (unsigned d = 3; d; --d) {
-              index[d - 1] = cell % (dimensions[d - 1] - 1);
-              cell /= dimensions[d - 1] - 1;
-            }
-            auto result = axes[c].sampling.weighted(
-                axes[c].knots[index[c]], axes[c].knots[index[c] + 1], 1, 1, 2,
-                false, false, phase.consume_work);
-            if (!result.ok())
-              return Poll(result.status());
-            values[c] = result.value();
-          } else {
-            auto result =
-                read(phase, 1, {point[0] - product(dimensions, 1), c});
-            if (!result.ok())
-              return Poll(result.status());
-            values[c] = result.value();
-            auto key = axes[c].key(values[c]);
-            if (key < axes[c].key(axes[c].knots.front()) ||
-                key > axes[c].key(axes[c].knots.back()))
-              return Poll(domain("extra validation point outside bake axis"));
+    auto made =
+        MutableValue::allocate(descriptor, call.output_region, call.allocator);
+    if (!made.ok())
+      return failed(made.status());
+    auto value = made.take_value();
+    const auto& box = call.output_region;
+    auto at = box.dimensions();
+    std::uint64_t count = 1;
+    for (const auto& d : at)
+      count *= d.extent;
+    for (std::uint64_t offset = 0; offset < count;) {
+      auto fuel = consume(64);
+      if (!fuel.ok())
+        return failed(fuel);
+      auto residue = offset;
+      std::vector<std::uint64_t> point(at.size());
+      for (unsigned d = at.size(); d; --d) {
+        point[d - 1] = at[d - 1].offset + residue % at[d - 1].extent;
+        residue /= at[d - 1].extent;
+      }
+      if (kind == Geometry::Axis) {
+        auto bits = axis_bits[point[0] * 3 + point[1]];
+        std::memcpy(static_cast<std::uint8_t*>(value.data()) + offset * 8,
+                    &bits, 8);
+        ++offset;
+        continue;
+      }
+      std::array<std::uint64_t, 3> values{};
+      for (unsigned c = 0; c < 3; ++c) {
+        if (kind == Geometry::Grid) {
+          values[c] = axes[c].knots[point[c]];
+        } else if (kind == Geometry::Color) {
+          point.back() = c;
+          auto result = read_value(0, point);
+          if (!result.ok())
+            return failed(result.status());
+          values[c] = result.value();
+        } else if (point[0] < product(dimensions, 1)) {
+          auto cell = point[0];
+          std::array<unsigned, 3> index{};
+          for (unsigned d = 3; d; --d) {
+            index[d - 1] = cell % (dimensions[d - 1] - 1);
+            cell /= dimensions[d - 1] - 1;
           }
+          auto result = axes[c].sampling.weighted(
+              axes[c].knots[index[c]], axes[c].knots[index[c] + 1], 1, 1, 2,
+              false, false, consume);
+          if (!result.ok())
+            return failed(result.status());
+          values[c] = result.value();
+        } else {
+          auto result = read_value(1, {point[0] - product(dimensions, 1), c});
+          if (!result.ok())
+            return failed(result.status());
+          values[c] = result.value();
+          auto key = axes[c].key(values[c]);
+          if (key < axes[c].key(axes[c].knots.front()) ||
+              key > axes[c].key(axes[c].knots.back()))
+            return failed(domain("extra validation point outside bake axis"));
         }
-        if (!model_valid(color.value().model, values))
-          return Poll(domain("model-invalid bake color"));
-        for (unsigned c = 0; c < 3; ++c) {
-          if (width == 4) {
-            auto converted = axes[0].sampling.weighted(
-                values[c], values[c], 1, 0, 1, true, false, phase.consume_work);
-            if (!converted.ok())
-              return Poll(converted.status());
-            values[c] = converted.value();
-            if (BinaryParts::decode(values[c], true).infinite)
-              return Poll(Status{ErrorCode::OperationFailed,
+      }
+      if (!model_valid(color.value().model, values))
+        return failed(domain("model-invalid bake color"));
+      for (unsigned c = 0; c < 3; ++c) {
+        if (width == 4) {
+          auto converted = axes[0].sampling.weighted(values[c], values[c], 1, 0,
+                                                     1, true, false, consume);
+          if (!converted.ok())
+            return failed(converted.status());
+          values[c] = converted.value();
+          if (BinaryParts::decode(values[c], true).infinite)
+            return failed(Status{ErrorCode::OperationFailed,
                                  "bake source narrowing overflow",
                                  FailureReason::ArithmeticOverflow,
                                  {FailureOrigin::Domain, FailureScope::Group}});
-          }
-          std::memcpy(
-              static_cast<std::uint8_t*>(value.data()) + (offset + c) * width,
-              &values[c], width);
         }
-        offset += 3;
+        std::memcpy(
+            static_cast<std::uint8_t*>(value.data()) + (offset + c) * width,
+            &values[c], width);
       }
-      auto published = std::move(value).publish(phase.query.output.facets,
-                                                phase.query.resources);
-      if (!published.ok())
-        return Poll(published.status());
-      auto retained = publication.retain(published.take_value());
-      if (!retained.ok())
-        return Poll(retained.status());
-      output.push_back(retained.take_value());
+      offset += 3;
     }
-    auto fragments = publication.finish(
-        descriptor, *phase.query.value_outputs, output.data(), output.size(),
-        {}, phase.query.output.facets, phase.query.resources);
-    if (!fragments.ok())
-      return Poll(fragments.status());
-    Result<ResultRelation> relation(
-        Status{ErrorCode::Internal, "bake geometry relation"});
-    if (kind == Geometry::Color) {
-      // Full typed color source closure is part of every scalar in its color.
-      // A compact conservative whole-source witness avoids enumerating colors.
-      relation = ResultRelation::cartesian(
-          phase.resources, elements(descriptor),
-          {0, 5, 0, elements(phase.query.inputs[0].descriptor)},
-          DependencyGuarantee::Conservative);
-    } else {
-      std::vector<ResultSupport> supports{{0, 5, 0, 9}};
-      if (kind == Geometry::Extra)
-        supports.push_back(
-            {1, 5, 0, elements(phase.query.inputs[1].descriptor)});
-      relation = global_relation(phase, elements(descriptor), supports);
-    }
-    return relation.ok() ? Poll(ResultValuePublication{fragments.take_value(),
-                                                       relation.take_value()})
-                         : Poll(relation.status());
+    auto status = consume(1);
+    return status.ok()
+               ? std::move(value).publish(output.output_facets, call.resources)
+               : failed(status);
+  } catch (const std::bad_alloc&) {
+    return failed(Status{ErrorCode::ResourceExhausted,
+                         {},
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Run}});
   }
-};
+}
 OperationDefinition geometry(Geometry kind, SequenceProfile profile,
                              const std::string& key) {
   OperationDefinition definition;
@@ -291,17 +283,15 @@ OperationDefinition geometry(Geometry kind, SequenceProfile profile,
         {"extra_count", OperationParameterType::Int64, true, true, 0, 1048576});
   auto& out = traits.outputs[0];
   out.key = "values";
-  out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
-  out.continuation_bytes = sizeof(GeometryState);
-  out.maximum_dependency_stages = 2;
+  out.region_rule = OperationRegionRule::Whole;
+  out.requires_dense_output = true;
+  traits.workspace_bytes = sizeof(GeometryState);
   definition.specialize_metadata = [kind, profile](const auto& inputs,
                                                    const auto& parameters) {
     return specialize(kind, profile, inputs, parameters);
   };
-  definition.start_result = [kind, profile](const auto&,
-                                            const auto& allocator) {
-    return ResultContinuation::make<GeometryState>(allocator, kind, profile);
+  definition.callback = [kind, profile](const OperationInvocation& call) {
+    return execute_geometry(call, kind, profile);
   };
   return definition;
 }
