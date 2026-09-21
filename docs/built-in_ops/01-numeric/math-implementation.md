@@ -1228,24 +1228,95 @@ validates all fields/domain/metadata through the closed schema vocabulary.
 The canonical resolved schema already participates in graph/plan/cache identity.
 No C++ record layout, C ABI or workflow framing version changes are required.
 
-The sampled table is packed through at most 4096-byte staging buffers and bounded
-read windows, including nonzero global window origins. Its registered validator
+The sampled table is packed through authorized rectangular collect, bounded by
+page size and 64 KiB, combining complete inner rows/planes when they fit. Negative/unaligned layouts use the
+checked collect fallback; packed inputs use bounded bulk copies. Its registered validator
 scans all colors with cancellation/work accounting. The report validator checks
 canonical schema, counts/classifications, reconstructed axis and recorded point
-domains without recomputing the source. Grid and requested Value outputs have
-host-owned continuation/publication metadata; storage aliases retain admission
-past context retirement. Report/table owners retain mandatory temporary backing.
+domains without recomputing the source. The 15 generated formal profile Value
+keys use Whole, with full input collection and dense outputs, Run numeric errors
+and full-input dirty scope. Their fixed workspace and three ResourceVector axis
+indexes are managed; color outputs retain tuple metadata/resources. Gate/unpack
+retain requested complete-color output fragments. Owners retain admission beyond
+context retirement. Report/table owners retain mandatory temporary backing.
 Source callback state never enters execution. Source operation allocations and
 repeated validation count against host budgets; generated full-grid validation
 currently admits the full grid. Large dense bakes can exceed work, stage or
 capacity limits despite a small requested exported fragment.
 
-Seven public manual groups and a 480-case independent Fraction workflow oracle
-cover numerical reports, object/recipe association, both methods/dtypes and eight
-models, repeated extras, rounded centers, casts, shared snapshots, ICC authoring,
-malformed data, cancellation, resource limits and multiwindow/partial ownership.
-The executable stays outside integration tests and CTest. Commands and modifiable
-source builders are in the [example](../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
+The four unsuffixed pack/measure/unpack/gate keys retain ResultProtocol2; none
+is advertised as a Value Whole key. Measure now collects three 64-row windows
+once per poll, with at most 4608 bytes plus 289 bytes for final report writes.
+The sealed schema is decoded once, retaining only model/tolerance POD fields.
+It preserves finite checks, exact error comparison, earliest equal maximum and
+first failure. Shared immutable one-row/three-row relations reduce repeated
+report-field relation construction without weakening provenance. Pack admits
+64 KiB workspace; Measure admits 4897 bytes, in addition to continuation,
+metadata, source/full Value owners and immutable Result backing. The global gate,
+failed-report success and failed-table behavior remain unchanged.
+
+Native Clang 21 strict/Apple each pass nine public manual groups and 480 Fraction
+report cases. New checks cover all five Whole geometry kinds with independent
+axis/grid/center/extra/color expectations, negative/unaligned direct layouts,
+active work cancellation, fixed-workspace/full-output rejection, 2x2x256 table
+rows, and Float32/64 strided pack/unpack through 72-byte and 64KiB windows.
+Existing quality gate, object mismatch, report cancellation and escaped-owner
+checks remain. Six focused numeric/compiler/color/resource/Result CTests pass.
+No new x86 or installed-consumer run is claimed. Commands and modifiable source
+builders remain in the numeric workflow README.
+
+
+CRV-09 performance: Apple M5/macOS27.0 (26A5425a), Clang21.1.3 `-O2`,
+package0.18.0/traits16/CABI9/provider1/framing14. Identity RGB source, trilinear,
+Float64 table/reference, zero tolerances, [0,1]^3, no extra points; K=5 or 9
+on each axis (125/729 grid colors and 64/512 validation centers). Full table
+and report are jointly exported. One worker, cache off, payload1GiB/host2GiB,
+metadata/dependency-state512MiB each, dependency/run work2^40, managed work
+unlimited, Result window64KiB. One warmup plus seven samples; dyadic table values
+and exact zero-error reports are checked outside timing. Before substitutes
+only the `3d35f5eb` geometry/Result adapters in the same current kernel, retaining
+the current CRV-07 implementation on both sides.
+
+The numerical core directly executes the actual Whole axis, grid, point, color
+and LUT3D callbacks, then ExactBakeError comparison/maxima/upward rounding on the
+same identity fixture. It includes allocation and publication of intermediate
+Values, excludes schema preparation, managed metering, scheduling, collection,
+Result pack/unpack/gate I/O and report serialization. It is a numerical chain
+measurement, not a single arithmetic instruction benchmark. Static preparations
+are reused; all outputs are still checked. Milliseconds: median [min,max].
+
+| Grid/profile | Before public | Whole/batched public | Direct numerical core |
+| --- | ---: | ---: | ---: |
+| 5³/strict | 124.729 [124.324,125.783] | 42.875 [42.709,43.277] | 7.966 [7.894,8.261] |
+| 9³/strict | 414.184 [408.621,415.912] | 118.901 [117.989,120.836] | 59.896 [59.716,62.562] |
+| 5³/apple | 128.888 [124.619,129.964] | 43.002 [42.883,43.512] | 8.391 [7.978,8.472] |
+| 9³/apple | 410.044 [406.159,428.140] | 117.399 [116.588,120.474] | 60.434 [58.796,65.350] |
+
+For 9³, managed payload peak grows 604,376→648,176 bytes and metadata falls
+298,948→253,028 bytes. These use ResourceBudget statistics: structured execution's
+`peak_live_bytes` diagnostic is zero here and cannot be treated as measured zero
+storage. `StructuredExecution::value` also does not append Whole OperationTiming
+records; therefore the raw CSV's callback sum omits numerical Whole work and is
+not used as the numerical core. No kernel telemetry contract is changed here.
+
+The first 12-second Whole/row-window profile had 11,563 execution-stack samples.
+Exclusive `color_internal::multiply` occupied 45.35%; stacks locate repeated
+exact ColorArray basis checks under structured Result advance/value paths.
+Pack was still requesting every innermost row separately. This led to the bounded
+64KiB row/plane rectangle aggregation and one-time Measure schema decoding into
+POD model/tolerance fields. A public test directly verifies one rectangle and
+three Pack polls for a complete 2x2x256 table, alongside five small/full-window
+sizes and Float32/64 negative/unaligned source layouts. An intermediate row-window
+9³ Apple public median was 184.258 ms; the final rectangle median is 117.399 ms.
+Raw drivers, before/row-window/final CSVs and traces are local `build/crv-whole/baking3d-*`.
+
+The final packed-window 12-second trace has 11,737 execution-stack samples:
+ExactLut3d appears in 53.34%, PackState in 0.68%, MeasureState in 3.56%, collect
+in 2.49% and Footprint methods in 1.61%. Inclusive percentages overlap.
+Exclusive ColorArray integer multiply falls to 24.91%; exact-ratio `top` is
+17.65% and Result backing writes 11.69%. The remaining cost is exact LUT math,
+required color/schema validation and retained Result I/O. No unchecked color
+metadata or weaker report/table association is introduced to bypass those costs.
 
 ## CRV-10 inverse curves
 

@@ -1551,25 +1551,28 @@ python3 examples/numeric_workflow/baking3d_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_baking3d strict
 ```
 
-Use `apple`/`x86` on the corresponding CPU. Seven manual groups check independent
-outputs, duplicate extras, Float32 scope, all-grid validation even for a constant
-source, ICC authoring, malformed registered data, object association, cancellation,
-resource limits, 512-color multiwindow baking, partial output origins, negative
-unaligned source strides, caller floating environment and escaped metadata owners.
-The independent Fraction oracle checks all report fields for 480 cases, including
-eight models, both methods, both dtypes, all axis directions and cross-component
-sources. No integration-test or CTest registration is added.
+Use `apple`/`x86` on the corresponding CPU. Native strict/Apple each pass nine
+manual groups and 480 independent Fraction report cases. Tests cover independent
+outputs, false-report/table-gate distinction, shared snapshots, dtype/model rules,
+ICC authoring, object association, malformed data, resource/cancellation failures,
+all five generated geometry kinds, exact grid/center/extra values, full-output
+limits, arbitrary direct layouts, negative/unaligned Float32/64 Result packing,
+row/plane batches through 64 KiB, 72-byte windows, partial outputs and escaped owners.
+Focused numeric/compiler/color/resource/Result tests pass. No new x86 or installed
+consumer run is claimed. The manual executable remains outside default CTest.
 
-All work uses the final graph's single immutable binding snapshot. Geometry,
-source requests, table backing, conversion and report validation are admitted
-against host limits. Table backing is stored through bounded Result I/O windows;
-measurement keeps a fixed-size summary and requests at most 64 validation colors
-per batch. Source operators still determine their own physical work and storage,
-and full generated grid validation currently requests the complete grid. A small
-output ROI does not reduce this global work. Examples provide explicit work
-budgets; large bakes may require larger work/stage/capacity limits or fail cleanly.
-The current report reader needs a window of at least 72 bytes. WSL Clang is used
-for correctness, with no performance inference.
+All 15 generated profile Value keys now execute Whole and allocate complete
+outputs after full input collection. Axis remains independently observable.
+The four unsuffixed Result nodes retain protocol2, compact dependency relations,
+fixed report summary, global gate and exact report/table object association.
+Pack combines bounded authorized rows/planes into rectangles; Measure collects three 64-color
+windows then checks finite/model rules and exact errors in ordinal order. Pack
+workspace is at most 64 KiB; Measure windows are at most 4608 bytes plus
+289 report payload bytes, with metadata and source owners charged separately.
+Source operators determine their own work and storage. Full grid/point/source
+arrays and table backing may exceed budgets even for tiny exported regions.
+The report reader needs at least a 72-byte I/O window. Raw performance evidence
+and callback/core scope are documented in the CRV-09 math implementation notes.
 
 ## Inverse curves
 

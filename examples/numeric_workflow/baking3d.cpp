@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <cstring>
 #include <iostream>
@@ -15,6 +16,7 @@
 #include "photospider/numeric/lut3d_baking.hpp"
 #include "photospider/numeric/matrix.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool value, const char* message) {
@@ -663,6 +665,214 @@ ps::ColorArrayDescriptor model_description(unsigned model) {
         take(ps::color_ncl_coefficients(ps::ColorNclPreset::Bt709));
   return description;
 }
+ps::Value reversed_value(const ps::Value& value) {
+  const auto width = ps::Value::element_size(value.descriptor().element_type);
+  const auto count = value.bytes().size() / width;
+  auto buffer = take(ps::BufferAllocator{}.allocate(value.bytes().size() + 1));
+  for (std::size_t i = 0; i < count; ++i)
+    std::memcpy(buffer.data() + 1 + (count - 1 - i) * width,
+                value.bytes().data() + i * width, width);
+  auto strides = value.layout().byte_strides;
+  for (auto& stride : strides)
+    stride = -stride;
+  return take(ps::Value::from_storage(
+      value.descriptor(), value.region(), {1 + (count - 1) * width, strides},
+      std::move(buffer).freeze(), value.facets()));
+}
+void whole_geometry(ps::CpuNumericProfile profile) {
+  const auto color = ps::numeric::color_ramp_rgb_description();
+  ps::numeric::Lut3dBakeOptions options{
+      {2, 2, 256}, ps::Lut3dInterpolation::Trilinear,
+      0,           0,
+      color,       color,
+      true,        {},
+      profile};
+  const auto axes = doubles({3, 3}, {0, 1, 1, 0, 1, 1, 0, 255, 1});
+  Fixture fixture(0, options, axes, std::vector<double>(128 * 3, .5));
+  std::vector<ps::WorkflowNode> nodes;
+  for (const auto& node : fixture.document.nodes)
+    if (node.operation.find("curve.bake_lut3d_") == 0)
+      nodes.push_back(node);
+  auto extra = *std::find_if(nodes.begin(), nodes.end(), [](const auto& node) {
+    return node.operation.find("points_extra") != std::string::npos;
+  });
+  extra.operation.erase(extra.operation.find("_extra"), 6);
+  extra.parameters["extra_count"] = std::int64_t{0};
+  nodes.push_back(extra);
+  unsigned tested = 0;
+  for (const auto& node : nodes) {
+    const bool is_axis = node.operation.find("_axis_") != std::string::npos;
+    const bool is_grid = node.operation.find("_grid_") != std::string::npos;
+    const bool is_color = node.operation.find("_color_") != std::string::npos;
+    const bool extras = node.operation.find("_extra_") != std::string::npos;
+    std::vector<ps::Value> inputs{axes};
+    if (is_color)
+      inputs[0] = doubles({257, 3}, std::vector<double>(257 * 3, .5));
+    if (extras)
+      inputs.push_back(doubles({128, 3}, std::vector<double>(128 * 3, .5)));
+    std::vector<ps::OperationMetadata> metadata;
+    std::vector<ps::Region> demands;
+    for (const auto& value : inputs) {
+      metadata.push_back({value.descriptor(), value.facets()});
+      demands.push_back(value.region());
+    }
+    auto traits = take(fixture.registry->resolve_traits(
+        node.operation, metadata, node.parameters));
+    const auto shape = traits.outputs[0].fixed_output_shape;
+    const auto region = ps::Region::whole(shape);
+    const auto bytes = take(region.element_count()) * 8;
+    point_math_checks::resources(node, inputs, bytes);
+    for (unsigned layout = 0; layout < 2; ++layout) {
+      auto values = inputs;
+      if (layout)
+        for (auto& value : values)
+          value = reversed_value(value);
+      ps::OperationInvocation call(values, demands, node.parameters,
+                                   ps::Backend::Cpu, {}, region);
+      auto output = take(fixture.registry->invoke(node.operation, call));
+      require(
+          output.descriptor().shape == shape &&
+              (is_axis ? output.facets().empty() : !output.facets().empty()),
+          "Whole geometry shape and ColorArray identity");
+      for (std::uint64_t i = 0; i < bytes / 8; ++i) {
+        double actual;
+        std::memcpy(&actual, output.bytes().data() + i * 8, 8);
+        const auto row = i / 3, c = i % 3;
+        double expected = .5;
+        if (is_axis)
+          std::memcpy(&expected, axes.bytes().data() + i * 8, 8);
+        else if (is_grid)
+          expected = c == 0 ? row / 512 : c == 1 ? (row / 256) % 2 : row % 256;
+        else if (!is_color && row < 255)
+          expected = c == 2 ? row + .5 : .5;
+        require(actual == expected,
+                "independent geometry axis/grid/center/extra/color values");
+      }
+    }
+    if (is_grid) {
+      auto huge = node;
+      for (const auto* parameter : {"n0", "n1", "n2"})
+        huge.parameters[parameter] = std::int64_t{256};
+      auto full_axes = doubles({3, 3}, {0, 255, 1, 0, 255, 1, 0, 255, 1});
+      ps::ResourceLimits limits;
+      limits.capacity[ps::ResourceKind::Payload] = 8 * 1024 * 1024;
+      ps::ResourceBudget budget(limits);
+      ps::ResourceAllocationScope scope(budget);
+      const std::vector<ps::Value> full_inputs{full_axes};
+      const std::vector<ps::Region> full_demands{full_axes.region()};
+      ps::OperationInvocation call(
+          full_inputs, full_demands, huge.parameters, ps::Backend::Cpu, {},
+          ps::Region::whole({256, 256, 256, 3}), budget.allocator());
+      auto failed = fixture.registry->invoke(huge.operation, call);
+      require(!failed.ok() &&
+                  failed.status().code == ps::ErrorCode::ResourceExhausted,
+              "maximal Whole grid output rejects bounded payload");
+    }
+    ++tested;
+  }
+  require(tested >= 5, "all five geometry registrations covered");
+  auto report = take(ps::read_lut3d_bake_report(
+      take(fixture.run("report")).results.at("report")));
+  require(report.passed && report.validation_count == 383,
+          "full 6144-byte table rows and 64-row measure windows retain report "
+          "semantics");
+  std::cout << "five Whole geometries: direct layout/oracle/workspace/cancel, "
+               "maximal output budget and full-row Result packing PASS\n";
+}
+void packed_result_layouts(ps::CpuNumericProfile profile) {
+  const auto color = ps::numeric::color_ramp_rgb_description();
+  for (bool narrow : {false, true}) {
+    const auto dtype =
+        narrow ? ps::ElementType::Float32 : ps::ElementType::Float64;
+    ps::numeric::Lut3dBakeOptions options{
+        {2, 2, 256}, ps::Lut3dInterpolation::Trilinear,
+        0,           0,
+        color,       color,
+        true,        dtype,
+        profile};
+    Fixture fixture(0, options, doubles({3, 3}, {0, 1, 1, 0, 1, 1, 0, 255, 1}));
+    const std::vector<std::uint64_t> shape{2, 2, 256, 3};
+    auto made = take(ps::MutableValue::allocate(
+        {dtype, shape}, ps::Region::whole(shape), ps::BufferAllocator{}));
+    for (unsigned i = 0; i < 3072; ++i) {
+      if (narrow) {
+        const float value = (i % 17) * .25f;
+        std::memcpy(made.data() + i * 4, &value, 4);
+      } else {
+        const double value = (i % 17) * .25;
+        std::memcpy(made.data() + i * 8, &value, 8);
+      }
+    }
+    auto original =
+        take(std::move(made).publish({take(ps::encode_color_array(color))}));
+    auto reversed = reversed_value(original);
+    auto registry = ps::make_default_operation_registry(false);
+    ps::OperationDefinition producer;
+    producer.key = "example.strided_bake_table";
+    producer.traits.input_count = 0;
+    producer.traits.input_schema.clear();
+    producer.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
+    producer.traits.outputs[0].fixed_output_shape = shape;
+    producer.traits.outputs[0].output_element_type = dtype;
+    producer.traits.outputs[0].output_facets = original.facets();
+    producer.traits.outputs[0].output_semantic_rule =
+        ps::OperationSemanticRule::Establish;
+    producer.callback = [reversed](const auto&) {
+      return ps::Result<ps::Value>(reversed);
+    };
+    auto registered = registry->register_operation(std::move(producer));
+    if (!registered.ok())
+      throw std::runtime_error(registered.message);
+    require(registry->freeze().ok(),
+            "strided Result transport registry freeze");
+    const auto id =
+        take(ps::numeric::available_workflow_node_ids(fixture.document, 1))[0];
+    std::uint64_t pack_id = 0;
+    for (auto& node : fixture.document.nodes) {
+      if (node.operation == "curve.pack_lut3d") {
+        node.inputs[0] = ps::WorkflowNodeOutput{id, "value"};
+        pack_id = node.id;
+      }
+      if (node.operation == "curve.unpack_lut3d")
+        fixture.document.outputs = {{"table", node.id, "values"}};
+    }
+    fixture.document.nodes.push_back(
+        {id, "example.strided_bake_table", {}, {}});
+    ps::GraphContext graph(fixture.document);
+    auto plan = take(ps::Compiler(registry).compile(graph));
+    for (auto window : {UINT64_C(72), UINT64_C(4096), UINT64_C(6144),
+                        UINT64_C(16384), UINT64_C(65536)}) {
+      ps::ExecutionContextConfig config;
+      config.cpu_workers = 1;
+      config.managed_resources = ps::ResourceLimits{};
+      ps::ExecutionContext context(registry, config);
+      auto execution = fixture.execution;
+      execution.maximum_result_window_bytes = window;
+      auto output =
+          take(context.execute(plan.plan, fixture.bindings, {}, execution));
+      if (window == 65536) {
+        const auto timing = std::find_if(
+            output.diagnostics.operation_timings.begin(),
+            output.diagnostics.operation_timings.end(),
+            [&](const auto& item) { return item.output.node_id == pack_id; });
+        require(timing != output.diagnostics.operation_timings.end() &&
+                    timing->invocation_count == 3,
+                "complete 2x2x256 table packs in one rectangle and three "
+                "protocol polls");
+      }
+      const auto& value = output.values.at("table");
+      require(value.bytes().size() == original.bytes().size() &&
+                  std::memcmp(value.bytes().data(), original.bytes().data(),
+                              value.bytes().size()) == 0 &&
+                  value.facets().front().payload ==
+                      original.facets().front().payload,
+              "packed Result collect preserves negative/unaligned Float32/64 "
+              "rows and color metadata");
+    }
+  }
+  std::cout << "Result pack/unpack negative-unaligned Float32/64 full rows and "
+               "72-byte windows PASS\n";
+}
 void probe(ps::CpuNumericProfile profile) {
   unsigned mode, method, dtype, model;
   std::array<std::uint64_t, 3> shape;
@@ -851,6 +1061,8 @@ int main(int argc, char** argv) {
       associations_and_streaming(profile);
       specialization_contract(profile);
       regional_layouts(profile);
+      whole_geometry(profile);
+      packed_result_layouts(profile);
     }
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
