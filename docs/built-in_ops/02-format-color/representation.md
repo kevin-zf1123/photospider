@@ -27,7 +27,7 @@ CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contra
 
 | ID / 提议操作 | 输入 → 输出 | 关键参数和建议默认 | 实现/支持与验收 |
 | --- | --- | --- | --- |
-| FMT-01 `channel.extract` | `[H,W,C]`→`[H,W]` | `channel` 必填，0-based或精确通道名；拒绝重复歧义 | copy/view；提取alpha保留coverage角色，提取L*保留其单位；RGB不变相转灰 |
+| [FMT-01 通道提取族](op_specs/FMT-01_channel_extraction_contract.md) | 任意显式通道轴张量→单分量张量／独立输出引用 | A 静态索引；B 静态名称／角色；C 编译期拆分；keepdims=false，rank-1 要求 true | 精确区域请求；auto/view/materialize；保留分量解释；新目标依赖通用 metadata 迁移，现有 `channel.extract` 为 Whole HWC 子集 |
 | FMT-02 `channel.merge` / `append` | 多个HW/HWC→HWC | channel order必填，默认严格同尺寸；禁止隐式resize | 颜色通道和AOV可拼接，输出必须验证新描述；extract→merge identity |
 | FMT-03 `channel.swizzle` / `replace` | HWC+映射/源通道→HWC | indices/constant0/1；是否保留alpha显式 | RGB↔BGR、添加opaque alpha；G3通道数推断 |
 | FMT-04 `alpha.associate` / `unassociate` | straight/premul→另一形式 | alpha角色必填；zero-alpha策略按profile | `Cp=a*C`，a>0时`C=Cp/a`；测试a=0/极小值/HDR，不对其他AOV相乘 |
