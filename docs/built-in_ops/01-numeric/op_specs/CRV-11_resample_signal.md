@@ -68,8 +68,9 @@ defined extrapolation). No implicit low-pass, sample-rate inference, period or
 anti-alias quality claim is added. Construction is lazy and outputs remain dynamic
 with their bound source snapshots.
 
-Sample requests inherit CRV-01's x-wide topology validation, local query/y or
-per-column stencils, precise error/dirty scopes, resources and returned mapping.
+Sample requests inherit CRV-01's Whole complete-input collection, full output
+allocation/invalidation and Run numerical failures. Mathematical stencils remain
+unchanged; undelivered invalid queries or columns can fail the run.
 Position-only requests have only the exact requested new_positions source
 support and no source curve reads. Joint execution is an optimization, not a
 dependency change. Empty requests, arbitrary source strides, owners after context
@@ -113,7 +114,7 @@ these are Proposed templates, not new registered interpolation primitives.
 
 The four public resampling templates are maintained through the public
 `resampling.hpp` authoring helpers. Uniform and nonuniform low-pass families each
-provide 15 registered profile keys (five kernels across strict, Apple and x86);
+provide 15 Whole registered profile keys (five kernels across strict, Apple and x86);
 accelerated uniform keys reuse certified coefficient enclosures and bound the
 complete convolution before final-error acceptance, with strict fallback when
 unresolved. Exact tap support is unchanged. Nonuniform accelerated keys retain
@@ -126,7 +127,6 @@ by 512; capacity or unresolved rounding may return `ResourceExhausted`. See the
 [signal-resampling workflow](../../../../examples/numeric_workflow/README.md#signal-resampling),
 [uniform low-pass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [nonuniform low-pass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
-Native Clang21 Strict/Apple and WSL Clang18 Strict/AVX2 passed all twelve
-manual groups, 474 directed MPFR uniform cases and 245 Fraction/directed MPFR
-continuous cases per profile. Installed0.16 consumers passed both native
-profiles. WSL validates numerical correctness only; no integration test is registered.
+Native Clang21 Strict/Apple validation for the Whole revision is recorded in
+that workflow and the math implementation notes. WSL/AVX2 and installed-package
+consumers have not been rerun. Whole numerical/fallback counters are N/A.

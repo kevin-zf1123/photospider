@@ -75,7 +75,7 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  *
  * Strict rounds the exact normalized whole sum once. Accelerated follows
  * CpuNumericProfile's final FP32 bound, reusing certified coefficient
- * enclosures and propagating convolution error. Unresolved cases report strict
+ * enclosures and propagating convolution error. Unresolved cases use strict
  * fallback; rounded weights alone do not define the reference. Logical zero
  * taps are omitted; every nonzero tap remains a dependency, including Gaussian
  * underflow. NaN propagation follows first logical tap from -R to R, preserving
@@ -85,11 +85,14 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * retain their bits, including -0. Other exact zero is +0; nonzero underflow
  * keeps its sign. Caller fenv is preserved.
  *
- * Empty reads no payload. Exact mapped Data support and typed/upstream
- * Validation control dirty mapping; arbitrary legal strides and packed partial
- * outputs work. Source failures retain their provenance. Output/storage
- * metadata outlive the context. Coefficients, limbs, tap maps and outputs
- * consume host capacity/work; cancellation is polled throughout. An unresolved
+ * All formal profiles use Whole: nonempty demand collects complete input and
+ * publishes a dense output of the same shape. Any input edit invalidates all
+ * outputs. Full typed/upstream validation can fail outside delivered positions.
+ * Empty reads nothing. Legal strides and owning output remain supported.
+ * Complete input/output, fixed math state and coefficient/tap vectors consume
+ * managed capacity/work. Sparse demand can exhaust full-output capacity.
+ * Failure/cancellation publishes no partial output and releases temporaries.
+ * Whole fallback counters are unavailable. An unresolved
  * normalizer or final rounding returns ResourceExhausted; no unconverged
  * approximation is published. Finite radius has transition/stopband leakage;
  * choose and verify downsampling quality separately using the public examples.
@@ -200,27 +203,27 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
  *
  * Runtime integrates the exact continuous affine reconstruction against the
  * real kernel and divides by its full integral, rounding once. Current
- * accelerated keys report strict fallback. Exact symmetry handles
+ * accelerated keys use strict fallback. Exact symmetry handles
  * affine/constant/halfway cases; other results use certified polynomial moments
  * and explicit remainder bounds. All participating finite constant bits are
  * retained, including -0; other exact zero is +0, and nonzero underflow keeps
- * its sign. Unlike uniform filtering, nonfinite demanded samples fail
+ * its sign. Unlike uniform filtering, nonfinite samples fail
  * OperationFailed/InvalidDomain; final overflow fails ArithmeticOverflow.
  * Caller floating state is preserved.
  *
- * Nonempty requests validate positions globally, then only endpoints of
- * segments intersecting positive integration length for requested signals.
- * Isolated contacts add no reads; coefficient cancellation cannot remove
- * validation. Position changes invalidate all dependent outputs, values follow
- * exact mapped segment support. Typed/upstream closure and errors remain
- * observable. Empty reads no payload. Arbitrary legal strides and owned packed
- * partial outputs survive context teardown. All piece maps, owners, limbs and
- * polynomial storage consume host resources; cancellation is polled through
- * partition/refinement. Huge period counts or unresolved precision/order fail
- * ResourceExhausted, with no approximate substitute.
- * Reconstruction/filter/resampling quality must be measured for the caller's
- * downsampling task; there is no universal Nyquist inferred from nonuniform
- * positions or promise of zero aliasing.
+ * All formal profiles use Whole: nonempty demand collects complete positions
+ * and values, validates topology and computes every center/column. Each
+ * integral retains its exact positive-length support and endpoint rules. Any
+ * input edit invalidates all outputs; invalid or overflowing undelivered
+ * positions fail Domain/Run. Empty reads no payload. Complete inputs and dense
+ * output consume managed capacity; only one output's pieces are retained at a
+ * time. Arbitrary strides, owned output and cancellation/work checks remain
+ * supported. No partial output is published on failure. Whole
+ * numerical/fallback counters are N/A. Huge period counts or unresolved
+ * precision/order fail ResourceExhausted. Reconstruction/filter/resampling
+ * quality must be measured for the caller's downsampling task; there is no
+ * universal Nyquist inferred from nonuniform positions or promise of zero
+ * aliasing.
  */
 inline Result<WorkflowNode> lowpass_nonuniform_hann_sinc_node(
     std::uint64_t id, WorkflowInput positions, WorkflowInput values,

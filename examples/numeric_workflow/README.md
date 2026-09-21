@@ -1688,8 +1688,9 @@ document.outputs.insert(document.outputs.end(), exports.begin(), exports.end());
 ```
 
 With old positions `[0,1,2,3,4,5,6,7]`, input `[1,-1,1,-1,1,-1,1,-1]`
-and new positions `[0,2,4,6]`, the four output samples all have Float64 bits
-`0x3fcc6b828682ab42`: `(pi-2)/(pi+2)` rounded once. This is the measured residual
+and new positions `[0,2,4,6]`, the four Strict output samples have Float64 bits
+`0x3fcc6b828682ab42`: `(pi-2)/(pi+2)` rounded once. Accelerated uses the
+shared FP32 four-ULP bound. This is the measured residual
 of this finite kernel at the original Nyquist frequency. It is positive and
 nonzero; this particular short filter does not remove all aliasing. The exported
 positions are exactly `[0,2,4,6]`. Choose a larger radius or different parameters
@@ -1699,6 +1700,11 @@ and rerun the independent response checks for a different quality requirement.
 cmake --build build/clang21-numeric --target photospider_numeric_resampling -j 6
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_resampling strict
 ```
+
+Samples now inherit CRV-01 Whole: full positions/values/query collection, full
+output allocation, complete invalidation and Run failures including undelivered
+queries/columns. Position-only forwarding remains independent, preserves original
+bits/facets and reads only its requested source support.
 
 The four groups also check single/multi fixtures, independent special positions,
 transactional IDs and typed SampledSignal position metadata. Use `apple` on an
@@ -1718,7 +1724,7 @@ Wrap are explicit alternatives. Output positions remain aligned to the input.
 
 Every logical nonzero coefficient is included, even when its numerical enclosure
 is too small to affect a finite result. Exact sinc integer zeros and Hann/Blackman
-endpoints are omitted from Data support. Logical order `-R..R` controls first-NaN
+endpoints are omitted from numerical operands; Whole still collects all input. Logical order `-R..R` controls first-NaN
 payload/sign and infinite contribution aggregation, including repeated reflected
 indices. These are successful IEEE results. Finite constant extended samples
 preserve their identical bits; other exact zeros are +0. Caller floating state
@@ -1726,10 +1732,13 @@ is preserved. Inputs with attached typed semantics retain their additional
 validation requirements.
 
 The whole mathematical sum and full normalizer are enclosed before one final
-rounding. Current accelerated keys report strict scalar fallback. This is not
-an implementation with pre-rounded Float64 weights. Work/precision/capacity
-exhaustion returns an explicit failure; source support is still determined by
-mathematical nonzero taps. A partial output allocates only its requested payload.
+rounding in strict. Accelerated prepares certified coefficient enclosures once
+per Whole invocation and applies the final FP32 bound, with strict fallback if
+unresolved. Whole counters are N/A. All 15 keys collect complete input and
+allocate a complete dense output; any input edit invalidates all output. Full
+typed/upstream validation can fail outside delivery. Empty reads nothing. Large
+sparse requests can exhaust capacity; failure/cancellation publishes no partial
+output. Legal strides, ownership and logical zero-tap/IEEE rules remain unchanged.
 
 For `[0,0,1,0,0]`, radius 2 and center index 2, the exact Float64 fixtures are:
 
@@ -1755,7 +1764,8 @@ kernels/dtypes/boundaries, impulses, exact quarter-wave and Nyquist periodic
 sinusoids, repeated logical taps, source specials and extreme Gaussian scales.
 This verifies the defined discrete response, not a universal attenuation target.
 `lowpass_execution.cpp` exercises every family under all-port negative/unaligned
-layouts and four floating modes, plus sparse 2^40-element composition, cache
+layouts and four floating modes, independent non-last-axis constants,
+2^40-element Whole budget rejection, cache
 replacement, actual typed payload/upstream errors, inner cancellation, resource
 limits and data/metadata ownership after context destruction.
 
@@ -1774,11 +1784,14 @@ continuous kernel using coordinate-length measure. Reflect folds at the domain
 endpoints, Replicate extends endpoint values, Zero extends +0, and Wrap repeats
 the domain with a possible seam jump and no extra connecting segment. Full-kernel
 normalization remains in force at boundaries. Global positions are validated for
-each nonempty request. Values are read only at endpoints of reconstructed
-segments with positive integration length, for requested other-axis coordinates.
-An isolated contact does not add a read; algebraic cancellation cannot remove a
-required endpoint's validation. All demanded values and final results must be
-finite; source nonfinite data and final overflow fail the dependent sample.
+each nonempty request. All 15 keys use Whole: complete positions/values are
+collected and all centers/columns computed into one dense output. Numerical
+integrals retain their original positive-length support and exact endpoint rules.
+Nonfinite values or output overflow anywhere, including undelivered columns,
+fail Domain/Run. Every input edit invalidates the complete output. Full input and
+output storage is budgeted; only one output's piece vector is retained/reused.
+Empty reads no payload; typed/upstream failures remain observable. Whole
+numerical/fallback counters are N/A; nonuniform profiles still use strict math.
 
 `lowpass_nonuniform.cpp` contains the full public binding/execution example. For
 `positions=[0,.75,2]`, `values=[1,2.5,5]`, `support_radius=.5`, every kernel
@@ -1814,14 +1827,17 @@ vectors and growth overlap are admitted explicitly. This first implementation
 prioritizes certified results and composability; it makes no throughput claim.
 All lowpass/resampling executables are manual and excluded from CTest/integration.
 
-All twelve CRV-11 manual groups, 474 uniform cases and 245 continuous cases
-passed on native Clang21 Strict/Apple and Ubuntu WSL Clang18 Strict/AVX2.
-Installed package0.16 consumers passed both native profiles. The focused compiler
-unit, ClangFormat21/cpplint and independent math/runtime reviews passed; required
-review fixes cover bounded scale-scan cancellation and pre-allocation output
-metadata admission. WSL results are numerical correctness evidence only.
+Native Clang21 Strict/Apple validation covers twelve manual groups, 474 directed
+MPFR uniform cases and 245 Fraction/directed MPFR continuous cases per profile.
+Focused numeric/compiler tests, ClangFormat21/cpplint and independent code review
+are run for this Whole revision. WSL/AVX2 and installed-package consumers were
+not rerun. Current Whole performance, raw files and Instruments evidence are in
+the CRV-11 math implementation notes.
 
-## Native signal timing and accounting
+## Historical regional signal timing and accounting
+
+The following table predates Whole and is retained as historical measurement.
+Current counters and storage differ; use the CRV-10/11 math notes for this revision.
 
 `signal_benchmark.cpp` runs inverse-linear/PCHIP and all ten lowpass kernels
 through public Compiler/ExecutionContext. It verifies analytic raw bits before

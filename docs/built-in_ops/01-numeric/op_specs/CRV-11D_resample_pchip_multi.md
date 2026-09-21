@@ -36,15 +36,17 @@ are inherited. C=1 retains its second dimension; channels have no implicit color
 
 Static profile is strict/apple_silicon/x86_64, default strict. dtype and
 out_of_domain are the corresponding interpolation parameters/defaults.
-Strict samples correctly round the exact PCHIP formula; accelerated satisfies the final 4-ULP/shape/monotonicity contract and reports strict fallback where required.
+Strict samples correctly round the exact PCHIP formula; accelerated satisfies the final 4-ULP/shape/monotonicity contract and uses strict fallback where required.
 Domain extrapolation has precisely the selected source interpolator's meaning.
 No filtering, implicit uniform sampling or periodic extension is performed.
 
 ## Output-specific execution
 
 [CRV-11's complete template contract](CRV-11_resample_signal.md) is normative.
-Samples demand inherits the forward interpolator's global source-position
-validation and local query/value support, restricted to requested columns.
+Samples demand inherits the forward interpolator's Whole execution: complete
+positions/values/new_positions collection, full output allocation, full input
+invalidation and Run numerical failures. Mathematical column independence remains;
+invalid undelivered queries or columns can fail the run. Empty reads no payload.
 Positions output independently forwards requested new_positions with bitwise
 dtype/descriptor/owner preservation, including floating special values; it does
 not invoke the interpolator or read old positions/values. Normal upstream
@@ -71,6 +73,6 @@ This public resampling template is maintained through the corresponding helper
 in `photospider/numeric/resampling.hpp` and ordinary workflow composition. See
 [signal-resampling](../../../../examples/numeric_workflow/README.md#signal-resampling)
 and the [CRV-11 umbrella](CRV-11_resample_signal.md) for commands and shared
-validation evidence. All four template groups passed on native Clang21 Strict/Apple and WSL
-Clang18 Strict/AVX2, including an explicit filter/resample workflow and typed
-position metadata. Installed0.16 consumers passed both native profiles.
+validation evidence. Native Clang21 Strict/Apple validation for the Whole revision is recorded in
+that workflow and the math implementation notes. WSL/AVX2 and installed-package
+consumers have not been rerun. Whole numerical/fallback counters are N/A.

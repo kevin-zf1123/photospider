@@ -66,23 +66,21 @@ resampling followed by discrete filtering is not the strict reference. Boundary
 handling retains full-kernel normalization.
 
 positions and values independently accept Float32/Float64 and may mix. Output
-retains values dtype. All demanded source values and final outputs must be finite;
-nonfinite samples or final overflow fail the corresponding output observation.
+retains values dtype. All source values and final outputs must be finite;
+nonfinite samples or final overflow fail the Whole run.
 This is a continuous real-signal contract, unlike the uniform discrete family's
 explicit IEEE NaN/Inf aggregation. Dependency and accelerated details follow.
 
-Every nonempty output request validates positions globally. Value dependencies
-are only endpoints of reconstructed segments intersecting the positive-length
-integration support after boundary mapping, for the requested other-axis
-coordinates. Replicate outside support reads its endpoint; zero outside reads
-no value. Reflections/wraps union their source segments. Isolated support contact
-has zero integration measure and does not introduce an otherwise unused segment.
-Do not discard actual reconstruction endpoints because integrated coefficients
-cancel. Unrelated channels/batches and distant values remain unread.
+Every nonempty output request collects complete positions and values, including
+typed/upstream validation, and validates positions globally. Every output then
+uses its original positive-length reconstructed segments and mapped endpoints.
+Isolated contacts do not add a numerical operand; coefficient cancellation does
+not remove endpoint validation. Whole computes all columns and centers, so remote
+invalid values may fail even when their outputs are not delivered.
 
 Strict correctly rounds the complete integral quotient; accelerated Apple Silicon
 and x86-64 keys allow final nonzero finite error <=4 ULP and must match strict
-finite/zero/sign classification. Report strict fallback when needed. Certified
+finite/zero/sign classification. Strict fallback remains available; Whole fallback counters are N/A. Certified
 integration/rounding that cannot finish within available capacity/work/stage
 returns ResourceExhausted. Do not publish an unconverged approximation.
 When every participating finite source/extension sample has identical bits,
@@ -120,7 +118,7 @@ selected by independent operation key, not a mode parameter.
 
 ## Algorithm, resources and mapping
 
-Globally validate/promote positions and locate each requested center's support.
+Globally validate/promote positions and locate each output center's support.
 Partition the integration domain at reconstructed segment boundaries and boundary
 extension folds/seams. On each piece, the source is affine. Analytic antiderivatives
 where available or certified quadrature/error enclosures may evaluate kernel
@@ -130,21 +128,19 @@ residual are not sufficient. Do not first create an approximate uniform source.
 
 Large support may traverse many periods or all source intervals. Account all
 such work; exploiting repeated periods is allowed only with the same mathematical
-and dependency result. For M requested values and J intersected segment pieces,
-base work is O(K+M log K+J), plus certified integration. Optional Float64 position
-storage is 8K bytes, output payload M*sizeof(values dtype). Charge interval maps,
-source owners/windows, normalization enclosures, arithmetic/quadrature state,
-coefficient caches and scratch growth overlap under host capacity/work/stage.
-No full logical values/output materialization is required for sparse requests.
+result. For N total values and J intersected pieces, base work is
+O(K+N log K+J) plus certified integration. Promoted positions retain 8*K element
+bytes plus metadata. Only one output's pieces are retained/reused at a time;
+no per-output certificate or full-output interval map is retained. Fixed arithmetic
+workspace, pieces/coefficient vectors and growth overlap consume managed capacity.
+Complete collected positions/values and N*sizeof(dtype) output are required even
+for sparse delivery; large sparse requests can now fail capacity admission.
 
-Position changes invalidate all dependent observations due to global topology and
-coordinate validation. Value changes invalidate only observations whose mapped
-reconstruction segments use that endpoint, for the same other-axis coordinates.
-Retain exact support unions, separate source typed/upstream closures and descriptor
-identity. Arbitrary immutable strides, zero/negative strides, offsets and unaligned
-source values are supported. Return packed requested samples at global index
-origins with owning data/metadata that survive context teardown. Cache-off and
-request partitions cannot change values or support.
+All input edits invalidate the complete output. All 15 formal keys use Whole;
+source typed/upstream failures remain observable. Arbitrary immutable strides,
+zero/negative strides, offsets and unaligned access are supported. One immutable
+dense output owns data/metadata past context teardown, and requested delivery
+retains global coordinates. Cache-off/partitions do not change mathematical values.
 
 Poll cancellation during global positions validation, each integration/refinement
 piece and at bounded source-read/output batches; release temporary state on all
@@ -155,12 +151,12 @@ capacity. Empty Q reads no dynamic payload, though static preflight remains.
 
 Invalid static shape/axis/parameters fail compile/preflight with
 InvalidArgument/InvalidDomain; dtype/shape mismatch uses TypeMismatch. Invalid
-global positions or nonfinite demanded source samples fail
+global positions or nonfinite source samples fail
 OperationFailed/InvalidDomain. Final output narrowing overflow fails
 OperationFailed/ArithmeticOverflow. ResourceExhausted, BackendUnavailable,
 upstream, typed, stale and cancellation errors retain their established identity.
-Each requested sample is one observation; unrequested distant values do not fail
-it, and no partial failed sample is published.
+Dynamic numerical failures use Domain/Run, including undelivered values or
+output overflow. Failure/cancellation publishes no partial output.
 
 Independent oracle uses the exact piecewise-linear reconstruction and certified
 continuous convolution. Finite constants under reflect/replicate/wrap are exactly
@@ -198,7 +194,8 @@ filter/resampling error and attenuation requirements. Uniform and nonuniform
 operators need not agree even at equally spaced positions: one filters discrete
 samples and the other filters their continuous linear reconstruction.
 
-Test partial outputs, exact segment/dirty support, other-axis independence,
+Test partial delivery, exact mathematical segment selection and independent
+signal arithmetic, complete source/dirty support and remote-column Run failures,
 strides, low budgets, cancellation, cache-off and context-lifetime owners.
 The maintained public workflow binds positions/values and kernel parameters,
 then inspects samples through Compiler/ExecutionContext; commands and independent
@@ -215,6 +212,6 @@ paired-affine integration plus global Taylor moments with a rigorous tail bound,
 not local adaptive quadrature. All accelerated keys currently use the strict
 fallback; 128..4096-bit precision and order <=512 may return `ResourceExhausted`.
 See the [nonuniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple
-and WSL Clang18 Strict/AVX2 passed the shared manual groups and 245 independent
-Fraction/directed MPFR continuous cases per profile.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
+that workflow and the math implementation notes. WSL/AVX2 and installed-package
+consumers have not been rerun. Whole numerical/fallback counters are N/A.

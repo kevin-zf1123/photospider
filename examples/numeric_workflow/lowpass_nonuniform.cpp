@@ -234,21 +234,29 @@ void support_and_failures(ps::CpuNumericProfile profile) {
                  ps::numeric::LowpassBoundary::Zero, profile),
         {doubles({4}, {0, 1, 2, 3}),
          array(ps::ElementType::Float64, {4}, {raw(0), raw(1), raw(2), nan})});
+    auto rejected =
+        fixture.run({{"samples", region({4}, {ps::Region({{1, 1}})})}}, false);
+    require(!rejected.ok() &&
+                rejected.status().reason == ps::FailureReason::InvalidDomain &&
+                rejected.status().detail.scope == ps::FailureScope::Run,
+            "undelivered nonfinite sample fails Whole run");
+    fixture.bindings.inputs[1].value = doubles({4}, {0, 1, 2, 3});
     auto result = take(
         fixture.run({{"samples", region({4}, {ps::Region({{1, 1}})})}}, false));
     auto support = take(result.dependencies.source_support());
     require(support.at("input0") == take(ps::Footprint::all({4})) &&
-                support.at("input1") == region({4}, {ps::Region({{0, 3}})}),
-            "point contact excludes distant endpoint");
+                support.at("input1") == take(ps::Footprint::all({4})),
+            "Whole complete support");
     require(take(result.dependencies.potential_dirty(
                      "input1", region({4}, {ps::Region({{3, 1}})})))
-                .at("samples")
-                .empty(),
-            "touch-only endpoint does not dirty");
+                    .at("samples") == region({4}, {ps::Region({{1, 1}})}),
+            "remote sample dirties Whole output");
     std::uint64_t actual = 0;
     require(result.values.at("samples").read({1}, &actual, 8).ok() &&
                 actual == raw(1),
-            "escaped continuous affine result");
+            "continuous affine interior result");
+    fixture.bindings.inputs[1].value =
+        array(ps::ElementType::Float64, {4}, {raw(0), raw(1), raw(2), nan});
     fixture.document.nodes[0].parameters["support_radius"] = 1.25;
     auto failed =
         fixture.run({{"samples", region({4}, {ps::Region({{1, 1}})})}}, false);
@@ -269,14 +277,14 @@ void support_and_failures(ps::CpuNumericProfile profile) {
       {doubles({3}, {0, .75, 2}),
        array(ps::ElementType::Float64, {3, 2},
              {raw(1), nan, raw(2.5), nan, raw(5), nan})});
-  auto result = take(columns.run(
-      {{"samples", region({3, 2}, {ps::Region({{1, 1}, {0, 1}})})}}, false));
-  auto support = take(result.dependencies.source_support());
-  require(
-      support.at("input1") == region({3, 2}, {ps::Region({{0, 3}, {0, 1}})}),
-      "other-axis independence");
-  std::cout << "positive-length support, global positions, local columns, "
-               "dirty witnesses and demanded finite errors passed\n";
+  auto result = columns.run(
+      {{"samples", region({3, 2}, {ps::Region({{1, 1}, {0, 1}})})}}, false);
+  require(!result.ok() &&
+              result.status().reason == ps::FailureReason::InvalidDomain &&
+              result.status().detail.scope == ps::FailureScope::Run,
+          "invalid unrequested column fails Whole run");
+  std::cout << "complete input support, global positions, remote columns, full "
+               "dirty and Run errors passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) {

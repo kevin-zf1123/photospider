@@ -1405,7 +1405,7 @@ controlled and IDs reserve declared/referenced nodes. No new interpolation
 primitive, implicit filtering or sample-rate inference is introduced.
 
 Accelerated uniform lowpass builds certified coefficient enclosures once per
-continuation at 128 fractional bits, retaining them in a resource-accounted vector.
+Whole invocation at 128 fractional bits, retaining them in a resource-accounted vector.
 The hardware convolution propagates coefficient, product, sum and normalization
 error to the final FP32 gate. Exact zero taps, constant shortcuts, special values
 and source demand remain governed by the original discrete reference. Unresolved
@@ -1443,10 +1443,15 @@ Floor quotient/remainder select exact periods; forward segments choose the right
 piece at knots and reflected backward segments choose the left. World coordinate
 copies are clipped to positive-length support, with no wrap seam bridge. Stored
 coordinate combinations fit below 2102 bits; the common 12288-bit records and
-ResourceVector maps are admitted under host capacity. Global positions and local
-value endpoints receive separate Control/Data and typed Validation certificates.
-Output publication metadata is admitted before constructing mutable fragments,
-including on failed/cancelled arithmetic paths.
+ResourceVector maps are admitted under host capacity. All30 formal lowpass keys
+use Whole: complete inputs are collected, all centers/columns are computed, and
+one dense output is published. Positions are globally validated first; only one
+output's exact piece map is retained/reused. Full input/output storage is required
+for partial delivery; any input edit invalidates all output. Full typed/upstream
+validation and nonuniform remote invalid values can fail the run. Dynamic
+numerical errors have Domain/Run scope. Empty requests read no payload.
+Uniform tap order/zero omissions and nonuniform positive-length integration
+remain mathematical rules. No per-output dependency records remain.
 
 For continuous exact landmarks, merge the positive and negative partitions and
 compare `F(u)+F(-u)` by integer rational cross products. If every overlap has zero
@@ -1481,7 +1486,8 @@ heap limbs or cached rounded weights. Global series can be expensive or fail on
 high frequencies/large beta/support-to-sigma ratios; unresolved zero/near-midpoint
 cases return ResourceExhausted rather than guessing a sign or publishing a fixed
 quadrature approximation. No arbitrary one-sided interval is declared negative
-zero. Nonuniform accelerated keys still report FunctionUnsupported strict fallback.
+zero. Nonuniform accelerated keys still use strict fallback. Whole numeric/fallback
+counters are unavailable (N/A).
 Every scale scan, partition piece, coefficient/refinement and limb operation has
 work/cancellation checks. No integration tests or external math dependency enter
 the product. MPFR/Fraction are independent manual references only.
@@ -1490,6 +1496,76 @@ Public examples, exact fixtures, response checks and runtime commands are in
 [resampling](../../../examples/numeric_workflow/README.md#signal-resampling),
 [uniform lowpass](../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [nonuniform lowpass](../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
+
+Whole CRV-11 acceptance: native Strict/Apple each passed twelve public manual
+groups,474 independent directed MPFR uniform cases and245 Fraction/directed MPFR
+continuous cases. The focused numeric/compiler CTests passed2/2. Layout tests
+include all-port negative/unaligned/zero strides, all four floating modes and an
+independent two-constant oracle across a non-last axis. Tests also cover full
+input/dirty support, nonuniform remote-column Run errors, unchanged uniform
+NaN/Inf/tap order, full typed validation, cache replacement, active arithmetic
+and huge-period cancellation, 2^40-output budget rejection, and escaped owners.
+Resampling tests retain independent raw/typed positions, verify complete sample
+support and remote-query failure. A composed accelerated Hann test uses its
+contractual final FP32 bound; Strict still checks the exact reference bits.
+WSL/AVX2 and installed consumers were not rerun for this Whole revision.
+
+Performance: Apple M5/macOS27.0 (26A5425a), Clang21.1.3 O2,
+package0.18.0/traits16/CABI9/provider1/framing14. One warm plus seven measured
+runs, one worker, result/dependency caches off, payload1GiB/host2GiB/
+metadata512MiB/dependency-state512MiB, dependency/run work2^40, unlimited managed
+work. Complete Float64 quarter-wave signals [0,1,0,-1] repeat; uniform N=32,
+R=2; nonuniform K=9 positions0..8, R=.5. Boundary Wrap, cutoff=.25 or sigma1,
+Kaiser beta2. Independent directed MPFR/Fraction full-output references are checked
+outside timing with the profile's numerical contract. Before links the3d35f5eb
+lowpass adapter against the same current kernel. Core invokes current callbacks
+on complete prepared inputs, including validation/allocation/publication and
+excluding scheduler, collection and managed metering. Both profiles and all ten
+kernels have separate public/core results in `build/crv-whole/lowpass-times.csv`.
+
+| Apple Float64 case | Before public ms median [min,max] | Whole public ms | Core ms |
+| --- | --- | --- | --- |
+| uniform Blackman N32 | 2.324 [2.18487,2.55154] | 1.623 [1.57667,1.72717] | 1.36992 [1.31183,1.57867] |
+| uniform Gaussian N32 | 5.46692 [5.39583,5.62338] | 4.42375 [4.23163,4.81121] | 3.67492 [3.62696,4.01025] |
+| nonuniform Blackman K9 | 43.3823 [43.1427,43.7431] | 39.6492 [38.0974,41.9219] | 36.6392 [35.9794,37.244] |
+| nonuniform Gaussian K9 | 5.01475 [4.92554,5.20429] | 4.40404 [4.17438,4.51871] | 3.87596 [3.72346,4.25142] |
+
+Uniform Gaussian metadata peak falls494,536→2,312 bytes, payload205,904→206,184.
+Nonuniform Gaussian metadata falls423,912→67,824, payload205,744→205,856.
+Other rows have visible timing spread, particularly the initial uniform Hann
+before samples; retain the CSV ranges rather than treating medians as guaranteed
+speedups. Scalar/NEON/AVX2 identities and fallback math remain; there is no new
+Accelerate/SME lowpass backend and no NUM-14-specific certificate reuse.
+
+The four public resampling templates were also sampled with both exports:
+K17,N128,C1/2, affine y=x+column, alternating dyadic queries, Float64, identical
+budgets/cache/worker/version/repetitions. Before uses the old CRV-01 adapter;
+identity forwarding is unchanged. `build/crv-whole/resampling-times.csv` contains
+all four templates under Strict/Apple. For Apple PCHIP C2, public20.7837
+[20.5402,21.4798]→15.4488[15.1929,15.8609]ms; interpolation core2.33012
+[2.2685,2.52983]ms. Core excludes independent position forwarding and public
+multi-output orchestration, so it is not the entire template's execution cost.
+
+Native 12s Instruments Time Profiler captures are
+`build/crv-whole/lowpass-uniform.trace` and `lowpass-nonuniform.trace`.
+Gaussian uniform has11,148 execution samples: UniformLowpassMath98.27%,
+DirectedInterval98.17%, DirectedLowpassKernel94.38% inclusive; collect.06%,
+no DependencySession frames. ExactRatio::top is30.27% exclusive. Blackman
+nonuniform has10,649 execution samples: NonuniformLowpassMath99.02%,
+DirectedInterval99.34%, geometry partition.39%, collect.02%; ExactRatio::top
+is34.52% exclusive. Inclusive percentages overlap. The evidence places remaining
+cost in certified numerical evaluation, with the per-output dependency path
+removed. Raw XML/sample JSON, symbol/export logs and drivers accompany the CSV.
+
+The resampling dual-export capture `build/crv-whole/resampling.trace` contains
+11,233 execution samples: Footprint methods43.74%, identity forwarding16.10%,
+curve callback17.72% and collect1.24% inclusive. Tiny allocator allocation/free
+account for27.18% exclusive. The remaining public/core gap includes generic
+multi-output footprint and identity processing; changing that shared kernel path
+is outside the CRV numerical callback migration. Position-only independence and
+original semantic facets are preserved. The maintained public signal benchmark
+also passed Apple Hann N5/N1025 sparse delivery with independent numerical checks
+and owner release; Whole evaluated/fallback columns now print N/A.
 
 ## Shared rounding and regional execution
 
