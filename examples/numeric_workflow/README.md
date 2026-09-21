@@ -1621,36 +1621,31 @@ python3 examples/numeric_workflow/inverse_oracle.py \
 Linear evaluates the exact rational inverse with one final conversion. PCHIP
 inverts the original exact forward Hermite polynomial and derivatives. It compares
 that polynomial at destination IEEE lattice points and their exact midpoint,
-including subnormals and overflow boundaries. All current profiles correctly
-round the same result. Accelerated PCHIP reports a strict scalar fallback for
-non-knot queries when K>2; knot/clamp and K=2 paths need no fallback. Exact
-knot/clamp conversion preserves x's signed zero, other exact zeros are +0, and
-nonzero underflow keeps its sign. Only the returned root can fail narrowing
-overflow; an unreturned endpoint cannot reject a finite root.
+including subnormals and overflow boundaries. Accelerated results obey the
+shared final FP32 four-ULP contract; exact knot/clamp and signed-zero rules remain.
+Float32 PCHIP uses a certified bracket, then the strict solver if unresolved.
+Whole callbacks do not expose DependencySession fallback counters (N/A).
 
-Each nonempty demand validates all x/y, then the requested query positions.
-Both global arrays invalidate every dependent output; query support stays local.
-Typed/upstream validation and failures remain observable, including on exact
-knot/clamp paths. Outputs own packed fragments at their requested global origins.
-The fixed integer arena and promoted 16K-byte x/y storage are host-accounted;
-root comparisons and limb operations consume work and poll cancellation. Large
-requests or extreme scales can require explicitly larger host budgets, and an
-exhausted solver returns ResourceExhausted without an approximate substitute.
+All six formal keys use Whole. Nonempty demand collects complete x/y/query,
+validates x/y topology and all query controls, then publishes dense values[N].
+Any input edit invalidates the full output. Invalid queries, typed/upstream errors
+or output overflow outside the delivered footprint can now fail the run. Unused
+endpoints are still not narrowed before computing a finite root. Empty demand
+reads nothing. Complete input/output storage, fixed integer workspace and 16*K
+promoted element bytes plus overhead are managed; large sparse requests may
+exhaust capacity. Every refinement checks work/cancellation and failure releases
+all temporary storage. Output owners survive context teardown.
 
-Four manual groups cover fixtures, global/local failures and dirty support,
-strides/floating environment, schema/Empty, cancellation/resource release,
-cache replacement, public composition, partition equivalence, typed/upstream
-failures and fallback diagnostics. `inverse_oracle.py` checks 407 independent
-Fraction cases using normalized Hermite formulas and rational root bisection,
-including both directions/dtypes, mixed input precision, zero endpoint slopes,
-normal/subnormal ties, narrow intervals, large scales and output overflow.
-These executables have no CTest or integration registration.
-
-Validated with native Clang21 Strict/Apple and Ubuntu WSL Clang18 Strict/AVX2:
-all four groups and all 407 oracle cases passed per profile. Installed package
-0.16 consumers passed both native profiles. WSL results establish numerical
-correctness, with no performance claim. The shared forward and LUT1D arithmetic
-regressions passed 2487 and 1416 cases per native profile.
+Native Clang21 Strict/Apple passed four manual groups and 407 independent Fraction
+cases per profile. The oracle uses normalized Hermite formulas and rational root
+bisection, covering directions/dtypes, mixed precision, zero endpoint slopes,
+ties, narrow intervals, extreme scales and overflow. Manual coverage includes
+all stride combinations/floating environments, remote query failures/full dirty
+scope, cache-off, typed/upstream failures, K=65536, 2^40-output budget rejection,
+active cancellation and owner release. Focused numeric/compiler tests passed.
+These executables have no CTest registration. WSL and installed consumers were
+not rerun for this Whole revision. Performance scope and raw paths are in the
+CRV-10 math implementation notes.
 
 ## Signal resampling
 

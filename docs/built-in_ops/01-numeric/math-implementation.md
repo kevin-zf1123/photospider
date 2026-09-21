@@ -1347,28 +1347,54 @@ failed arithmetic status is checked before interpreting a comparison as zero.
 The extracted shared Hermite helper retains forward interpolation's original
 1074-unit defaults and identical algebra.
 
-`curve_inverse.cpp` stages global x/y Control+Validation, local query
-Control+Validation, and selected pair/stencil Data+Validation before publication.
-It retains at most 16K bytes of promoted global inputs and requested-output state;
-no allocation scales with unrequested N. All x/y changes invalidate every dependent
-observation, while query changes are pointwise. Dynamic topology errors and
-requested finite/overflow failures carry the dependent Atom; host/source failures
-retain their categories. Accelerated Float32 inverse queries use bracketed
-hardware interval bisection, publishing only when both bracket endpoints round
-to the same Float32 output. Float64, ambiguous comparisons and unresolved rounds
-use the exact inverse; actual fallback is reported. Exact collinear stencils
-bypass lattice search, while noncollinear refinement retains scalar wide-integer
-comparison. The internal profile is scoped and restored on all exits. This yields
-the same monotone mapping independent of request partitions.
+`curve_inverse.cpp` registers all six formal keys as Whole. Complete x/y/query
+collection precedes global topology and all-query control validation. Each query
+then selects its original pair/stencil from promoted x/y and executes the unchanged
+inverse math. Only fixed state plus 16*K promoted element bytes (and allocator
+metadata) are retained, with no per-query certificates. Complete inputs and
+N*sizeof(dtype) output are budgeted. Any input edit invalidates the full output;
+dynamic numerical failures have Domain/Run scope, including undelivered queries
+or output overflow. Empty demand reads nothing. Cancellation/work checks and
+publication remain atomic. DependencySession numerical counters are N/A.
+
+Accelerated Float32 uses the existing certified bracket with unique destination
+rounding, then exact fallback when unresolved. Float64 uses the exact inverse.
+Collinear stencils still bypass lattice search; noncollinear wide-integer
+comparison is scalar and restores the surrounding profile. Scalar/NEON/AVX2
+implementations remain; no Accelerate/SME inverse backend is introduced.
 
 The [public inverse workflow](../../../examples/numeric_workflow/README.md#inverse-curves)
-contains four manual groups and a 407-case independent Fraction reference that
-bisects real x with normalized Hermite evaluation. Native Clang21 Strict/Apple
-and WSL Clang18 Strict/AVX2 passed both, and the installed 0.16 consumer passed
-all four groups on both native profiles. The shared
-forward interpolation and LUT1D regressions passed 2487 and 1416 cases respectively
-on both native profiles. The focused compiler unit passed. No integration test
-was registered or run for this feature.
+passed four manual groups and 407 independent Fraction cases per native
+Strict/Apple profile, plus numeric/compiler focused tests. New cases cover full
+failure/dirty scope, stride combinations/floating environments, K=65536,
+2^40-output capacity rejection, active cancellation and owner release. WSL/AVX2
+and installed-package consumers were not rerun for this Whole revision.
+
+CRV-10 timing uses Apple M5/macOS 27.0 (26A5425a), Clang21.1.3 O2,
+package0.18.0/traits16/CABI9/provider1/framing14. K=3, N=128, alternating
+analytic roots .5 and 2 (linear) or .5 and 1.5 (PCHIP); inputs Float64, output
+Float32/64. One warm run plus seven measured runs, one worker, both caches off,
+payload1GiB/host2GiB/metadata512MiB/dependency-state512MiB, dependency/run work
+2^40 and unlimited managed work. Each run validates the analytic results outside
+timing. Before is the 3d35f5eb inverse adapter linked against the same current
+kernel. Core calls the current numerical callback on complete prepared inputs,
+including allocation/validation/publication but excluding scheduler, collect and
+managed metering. Raw `build/crv-whole/inverse-times.csv` contains every profile,
+dtype and min/median/max; these small samples include substantial timing spread.
+
+| Apple case | Before public ms median [min,max] | Whole public ms | Core ms |
+| --- | --- | --- | --- |
+| linear Float64 | 3.93304 [3.66583,4.68033] | .645875 [.638125,.717] | .5955 [.568875,.622833] |
+| PCHIP Float32 | 63.8515 [63.2178,66.8059] | 59.9372 [56.1078,84.2566] | 42.6794 [42.3566,43.064] |
+| PCHIP Float64 | 133.420 [131.387,138.058] | 124.120 [106.747,134.468] | 91.8836 [91.5059,92.8748] |
+
+N=128 metadata peak falls from5,749,224 to3,248 bytes; Float64 payload peak
+rises from286,856 to287,832 bytes. The native 12s Time Profiler capture
+`build/crv-whole/inverse.trace` has11,948 execution samples: ExactCurve::inverse
+99.78% inclusive, multiply_fixed72.49%, collect.02%, no DependencySession stack.
+Integer multiplication is36.60% exclusive. This directly identifies remaining
+PCHIP exact arithmetic cost; the Whole I/O change does not replace its numerical
+contract. Trace/export/symbol logs and sample JSON are alongside the CSV.
 
 ## CRV-11 resampling and certified lowpass
 
