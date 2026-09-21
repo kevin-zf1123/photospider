@@ -31,22 +31,20 @@ enum class BezierDomain { Reject, Clamp };
  * @note Helpers are pure/concurrent-safe. Compiler validates all static edges.
  * Outputs values[count] and axis:Float64[3] have empty facets and own immutable
  * packed storage beyond context lifetime. Axis is one tuple observation.
- * Values globally validate all anchor/handle x and segment monotonicity, then
- * read only selected y. Knot/clamp reads one anchor y and preserves signed
- * zero; axis-only reads no controls. N=1 ignores end; Empty reads no payload.
- * Inputs, reconstructed controls and actual outputs must be finite. Numeric
- * domain/overflow errors identify the dependent Atom; typed/upstream/resource/
- * cancellation/stale failures retain their categories. Cache witnesses retain
- * global x and selected y plus sampling inputs; controls never dirty axis.
- * Sampling uses exact weighted endpoints rounded to Float64, with requested
- * adjacent-coordinate separation checks. Interior results correctly round the
- * mathematical inverse Bx(t)=x and By(t), after RN64 control reconstruction.
- * A bounded exact algebraic/interval solver can exhaust work or capacity;
- * use explicit execution budgets as shown in numeric_workflow. The caller's
- * floating environment is preserved. No y clipping or implicit handle repair.
- * Interior exact zero is +0. NumericDiagnostics::strict_math_calls counts
- * actual dyadic Bx sign evaluations, including failed attempts, independently
- * of the selected exact integer CPU profile; cache hits add no calls.
+ * Values uses one Whole callback: collect complete anchors/handles and active
+ * sampling scalars, validate all x topology and generated coordinates, compute
+ * every value and allocate the complete output even for sparse demand. Math
+ * knot/clamp uses one anchor y and preserves signed zero; generic y outside all
+ * evaluated stencils is numerically unused. Axis-only reads no controls. N=1
+ * ignores end; Empty reads no payload. Complete typed validation and upstream
+ * failures apply to active inputs. Numeric domain/overflow failures have Run
+ * scope; other error categories are preserved. Any active input edit dirties
+ * values; controls never dirty axis. Output publication is all-or-nothing.
+ * Sampling uses exact weighted endpoints rounded to Float64. Interior results
+ * correctly round the mathematical inverse Bx(t)=x and By(t) after RN64 control
+ * reconstruction. Exact algebraic/interval solving can exhaust work/capacity.
+ * Caller fenv is preserved; no y clipping or implicit handle repair is applied.
+ * Interior exact zero is +0. Whole does not expose per-value numeric counters.
  */
 inline Result<WorkflowNode> sample_bezier_function_node(
     std::uint64_t id, WorkflowInput anchors, WorkflowInput handles,

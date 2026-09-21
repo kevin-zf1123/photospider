@@ -1119,35 +1119,45 @@ agree bitwise, with zero numerical fallbacks. Interior exact zero is +0;
 nonzero underflow keeps its sign. Knot/clamp copies preserve the anchor zero.
 All demanded inputs, reconstructed controls and actual outputs must be finite.
 
-Nonempty values first read the dynamic sampling scalars, then validate every
-anchor/handle x and every segment's monotonicity, then read only selected y.
-C0 corners, crossed cubic handles without x folding, and y overshoot are valid.
-Knot/clamp reads only one anchor y. Axis-only never reads controls. For count=1,
-end is unread and axis is [start,start,0]. Empty requests read no payload.
-The five manual groups check these observations, sparse dirty mapping and
-cache reselection, all-port negative/unaligned/zero strides and caller fenv,
-independent Atom failures, typed Mask validation, source failure ordering,
-work/cancel/stage/capacity failures and owner release.
+Values uses one CPU Whole callback. For every nonempty values request, collect
+complete anchors and handles plus start and, only when count>1, end. Recognized
+typed validation and upstream failures apply to all collected components. Validate
+all x topology, then every generated coordinate/domain/adjacent-separation control
+before y arithmetic. Evaluate all count outputs and allocate one complete dense
+values owner, even for sparse demand. Empty reads no payload.
 
-`Fixture::run` sets explicit work budgets. Each continuation owns about
-508 KiB of exact scratch; topology uses 8*(K+(degree-1)*(K-1)) bytes and every
-requested sample also retains explicit dependency records. Per-Need metadata
-reservation is 4096+16384*M bytes for M requested values. Large dense requests
-can exhaust metadata/association limits despite a small numeric output.
-Request small Regions, as the public fixture does, to inspect large logical
-arrays under bounded resources. Work/capacity failure never reduces precision.
-See [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-02-exact-bezier-function-sampling).
+Mathematical selection remains local: exact anchor/clamp uses that anchor y;
+interior evaluation uses the selected segment's anchor y and relative y handles.
+Generic y outside every evaluated stencil is not additionally finite-checked.
+All output samples are evaluated, so an invalid otherwise-unrequested sample can
+fail the complete values Run. Failure publishes no partial successful values.
+Axis independently collects start/end only (start for count=1), computes its
+24-byte tuple and never validates control payloads or per-coordinate separation.
+Static descriptors of all four edges are still validated for either output.
 
-`photospider_numeric_bezier strict benchmark` (or `apple benchmark`) prints
-48 CSV rows for both degrees, K=2/64/4096/65536, N=256/65536/1048576,
-Whole/three-point ROI, one worker, cache off and three repetitions. Each
-successful y=x output is checked; failed dense rows retain their actual status.
-`benchmark_stress` checks a nearly stationary x fixture and signed subnormal
-y cancellation. Compile/freeze precede timing. Root calls count actual Bx sign
-attempts, while issued work also includes topology and host bookkeeping;
-source_coordinates is unique dependency support, not physical read-call count.
-This target is excluded from default builds, CTest and integration registration.
-WSL Clang validation is correctness-only.
+Any collected anchor/handle edit invalidates the recorded values demand; controls
+never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
+Complete immutable input versions, profile, metadata and parameters remain in
+cache identity. Both outputs retain their existing names, dtypes, empty facets
+and independent identity; there is no new pairing object. Returned owners survive
+context destruction. Sparse publication coverage retains the complete owner.
+
+`Fixture::run` uses an 8 MiB payload cap and explicit dependency-work limits;
+Whole arithmetic consumes the managed work ledger. The standalone resource
+checks impose finite work/payload caps and cancel during execution. Exact state
+is about 508 KiB plus the budgeted topology index; output costs count*dtype bytes.
+Default Whole diagnostics have no per-value/root/fallback counts.
+
+`bezier_oracle.py` checks 382 independent numeric/error cases and four maximum
+count full-output budget rejections under 1 MiB. Both degrees, inverse-versus-t,
+RN64 reconstruction, extreme/zero/tie cases and axis-only independence are tested.
+The bounded optional `benchmark` uses K=2/64, N=17/129, full/three-point demand,
+one worker, cache off, three repetitions. `benchmark_stress` checks stationary-x
+and signed subnormal cancellation. Compile/freeze precede timing; each successful
+returned identity value is checked. Numeric counters are printed N/A.
+See [implementation notes](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-02-exact-bezier-function-sampling)
+for separately measured public and callback costs and Instruments evidence.
+The manual target remains excluded from default builds and CTest.
 
 
 ## Parametric Bezier evaluation: CRV-03
