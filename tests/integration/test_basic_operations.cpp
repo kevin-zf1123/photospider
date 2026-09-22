@@ -32,10 +32,6 @@ Parameters levels(double gamma = 1) {
           {"out_min", 0.},
           {"out_max", 1.}};
 }
-ps::Value mask(const std::vector<float>& values,
-               std::vector<std::uint64_t> shape) {
-  return array(values, shape, facets(ps::coverage_semantics()));
-}
 void curves() {
   const auto controls = array<float>({0, 0, .5, .25, 1, 1}, {3, 2});
   exact<float>(output(operation("curve.sample_linear", {controls}, samples())),
@@ -155,68 +151,6 @@ void curves() {
         {tiny / 2});
   }
 }
-void masks_and_mix() {
-  const auto a = mask({0, .5, 1}, {1, 3});
-  exact<float>(output(operation("mask.invert", {a})), {1, .5, 0});
-  for (const auto& alg :
-       {std::string("fuzzy"), std::string("independent_coverage")}) {
-    const bool fuzzy = alg == "fuzzy";
-    unsigned op = 0;
-    for (const auto* name : {"and", "or", "xor"}) {
-      const float mid[] = {fuzzy ? .5F : .25F, fuzzy ? .5F : .75F,
-                           fuzzy ? 0.F : .5F};
-      exact<float>(output(operation(
-                       "mask.combine", {a, a},
-                       {{"algebra", alg}, {"operation", std::string(name)}})),
-                   {0, mid[op], op == 2 ? 0.F : 1.F});
-      ++op;
-    }
-  }
-  rejected(operation("mask.invert", {array<float>({0}, {1, 1})}),
-           ErrorCode::TypeMismatch);
-  const auto impulse = mask({0, 0, 0, 0, 1, 0, 0, 0, 0}, {3, 3});
-  exact<float>(output(operation("mask.dilate", {impulse},
-                                {{"radius", std::int64_t{1}},
-                                 {"footprint", std::string("disk")}})),
-               {0, 1, 0, 1, 1, 1, 0, 1, 0});
-  exact<float>(output(operation("mask.dilate", {impulse},
-                                {{"radius", std::int64_t{1}},
-                                 {"footprint", std::string("square")}})),
-               std::vector<float>(9, 1));
-  for (const auto* key : {"mask.dilate", "mask.erode"})
-    exact<float>(output(operation(key, {a},
-                                  {{"radius", std::int64_t{0}},
-                                   {"footprint", std::string("disk")}})),
-                 {0, .5, 1});
-  exact<float>(
-      output(operation(
-          "mask.erode", {mask(std::vector<float>(9, 1), {3, 3})},
-          {{"radius", std::int64_t{1}}, {"footprint", std::string("square")}})),
-      {0, 0, 0, 0, 1, 0, 0, 0, 0});
-  exact<float>(output(operation("mask.erode", {a},
-                                {{"radius", std::int64_t{64}},
-                                 {"footprint", std::string("disk")}})),
-               {0, 0, 0});
-  const auto rgba = facets(ps::rgba_semantics());
-  const auto image_a =
-      array<float>({-1, 2, 3, .5, 1, 1, 1, 1, 0, 0, 0, 0}, {1, 3, 4}, rgba);
-  const auto image_b =
-      array<float>({2, 1, 0, 1, 0, 0, 0, 0, -2, 1, 0, 1}, {1, 3, 4}, rgba);
-  exact<float>(output(operation("image.mix", {image_a, image_b, a})),
-               {-1, 2, 3, .5, .5, .5, .5, .5, -2, 1, 0, 1});
-  exact<float>(output(operation("image.mix", {image_a, image_a, a})),
-               {-1, 2, 3, .5, 1, 1, 1, 1, 0, 0, 0, 0});
-  const auto positive_zero =
-      array<float>({0.F, 0.F, 0.F, 0.F}, {1, 1, 4}, rgba);
-  const auto negative_zero =
-      array<float>({-0.F, -0.F, -0.F, -0.F}, {1, 1, 4}, rgba);
-  exact<float>(output(operation("image.mix", {negative_zero, positive_zero,
-                                              mask({1}, {1, 1})})),
-               {0.F, 0.F, 0.F, 0.F});
-  exact<float>(output(operation("image.mix", {positive_zero, negative_zero,
-                                              mask({1}, {1, 1})})),
-               {-0.F, -0.F, -0.F, -0.F});
-}
 void fields() {
   const auto input = array<float>({0, .25, .5, 1}, {2, 2});
   exact<float>(output(operation("grade.levels", {input}, levels(2))),
@@ -227,13 +161,12 @@ void fields() {
   bad = levels();
   bad["white"] = 0.;
   rejected(operation("grade.levels", {input}, bad), ErrorCode::InvalidArgument);
-  const auto smooth = output(
-      operation("field.smoothstep", {input}, {{"edge0", 0.}, {"edge1", 1.}}));
-  exact<float>(smooth, {0, .15625, .5, 1});
-  exact<float>(output(operation("mask.invert", {smooth})), {1, .84375, .5, 0});
+  rejected(
+      operation("field.smoothstep", {input}, {{"edge0", 0.}, {"edge1", 1.}}),
+      ErrorCode::TypeMismatch);
   rejected(
       operation("field.smoothstep", {input}, {{"edge0", 1.}, {"edge1", 0.}}),
-      ErrorCode::InvalidArgument);
+      ErrorCode::TypeMismatch);
   for (const auto* key : {"numeric.minimum", "numeric.maximum"}) {
     const bool minimum = std::string(key) == "numeric.minimum";
     exact<double>(output(operation(key, {array<double>({-0., 1, -3}),
@@ -305,10 +238,6 @@ void filters_and_counts() {
     close(output(operation(
               key, {array<float>(std::vector<float>(12, 3), {3, 4})}, blur)),
           std::vector<float>(12, 3));
-    const auto covered =
-        output(operation(key, {mask(std::vector<float>(6, 1), {2, 3})}, blur));
-    close(output(operation("mask.invert", {covered})),
-          std::vector<float>(6, 0));
   }
   close(output(operation("field.box_mean", {input},
                          {{"radius", std::int64_t{1}}})),
@@ -358,7 +287,7 @@ void regional() {
     data[i] = static_cast<float>(i % 11) - 5;
   auto input = array(data, {5, 7});
   for (const auto* key : {"field.box_mean", "field.gaussian_blur",
-                          "grade.levels", "field.smoothstep", "numeric.abs"}) {
+                          "grade.levels", "numeric.abs"}) {
     Parameters p;
     const std::string name(key);
     if (name == "field.box_mean" || name == "field.gaussian_blur")
@@ -367,8 +296,6 @@ void regional() {
       p["sigma"] = 1.;
     if (name == "grade.levels")
       p = levels();
-    if (name == "field.smoothstep")
-      p = {{"edge0", -2.}, {"edge1", 3.}};
     const auto whole = output(operation(key, {input}, p));
     ps::PlanningOptions options;
     options.tile_height = 1;
@@ -411,11 +338,6 @@ void views_and_failures() {
         {4.F / 3, 2.F / 3, 0});
   const float value = .5;
   std::memcpy(bytes.data() + 1, &value, 4);
-  auto broadcast = take(ps::Value::create(
-      {ps::ElementType::Float32, {2, 3}}, ps::Region::whole({2, 3}),
-      {1, {0, 0}}, bytes, facets(ps::coverage_semantics())));
-  exact<float>(take(invoke("mask.invert", {broadcast}, {})),
-               std::vector<float>(6, .5));
   // A partial view retains full descriptor coordinates and a nonzero origin.
   auto partial = take(ps::Value::create({ps::ElementType::Float32, {9, 9}},
                                         ps::Region({{4, 1}, {5, 3}}),
@@ -547,7 +469,6 @@ void views_and_failures() {
 int main() {
   try {
     curves();
-    masks_and_mix();
     fields();
     filters_and_counts();
     regional();

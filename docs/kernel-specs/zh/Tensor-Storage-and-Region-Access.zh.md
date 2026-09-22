@@ -1,18 +1,19 @@
 ---
 spec_schema_version: 1
 id: KERNEL-tensor-storage-zh
-status: Proposed
-implementation_status: not_implemented
+status: Accepted
+implementation_status: implemented_cpu
 clarification_status: selected_storage_policy_complete
 ---
 
 # 张量存储与区域访问
 
-本文是 2026-09-22 随 FMT 澄清的目标规格译文，
-[英文版本](../Tensor-Storage-and-Region-Access.md)为权威。它描述尚未实现的目标，
+本文是 package 0.19.0 所实现的存储契约译文，源于 2026-09-22 的 FMT 澄清，
+[英文版本](../Tensor-Storage-and-Region-Access.md)为权威。本文
 负责物理布局、tile 几何、区域访问和存储所有权；颜色与 alpha 解释由
 [FMT 公共规格](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
-定义。本规格不创建 ADR，不改变运行时。
+定义。下文明确 CPU 接口支持范围与迁移边界；本次不实现 FMT-01，也不保留
+已退休图像的内存或数值契约。
 
 ## 已确认决定
 
@@ -98,7 +99,7 @@ sample_offset(y,x) = tile_offset + (y mod Th)*Tw*d + (x mod Tw)*d
 零像素或滤波边界规则，不影响颜色结果、样本身份或 dirty 映射。字节量、pitch、
 偏移、对齐取整和 shape 乘积必须在按规模分配前检查溢出。
 
-tile 大小是 DAG 策略，不是算子参数。当前 128×128 默认值是保留默认的候选，不
+tile 大小是 DAG 策略，不是算子参数。128×128 默认值保留且可配置，不
 限制为唯一尺寸。halo 与跨 tile ROI 可以超过一块，但不改变输出块几何。无图像
 空间轴的普通数值张量不凭空增加图像轴。不合规的图像存储通过显式导入／布局
 转换满足 planar 和 DAG tile 配置。
@@ -144,9 +145,9 @@ view 保留地址空间 owner 和访问窗口所需 backing；owner 存活期间
 锁定常驻；资源计数描述已提供 backing，操作系统驻留另计。活动窗口不可撤销。
 失败且未发布的分配可正常释放，不能丢弃既有观察或共享页面中的有效数据。
 
-本层存储策略已确定。平台预留／供页调用、能力报告、metadata 编码、并发控制和
-公开窗口 API 仍需实现契约与验证。FMT-01 使用 auto/view/materialize：materialize
-在新结果的完整虚拟范围内提供所请求样本；紧密 ROI 读取属于显式窗口操作。
+CPU 存储 owner 和窗口 API 实现本策略。FMT-01 仍为独立的 Proposed 算子族，
+采用 auto/view/materialize；其物化结果须在完整结果虚拟范围内提供所请求样本。
+紧密 ROI 读取属于显式窗口操作，不是第二套权威图像表示。
 
 ## 已验算的行填充与页对齐示例
 
@@ -171,31 +172,85 @@ W=200、H=130、C=4、Float32、T=128，页／预留粒度 P=16384。
 另检查完整 64×64 UInt8 tile：4096 字节 payload 后，下一块仍从 16384 字节页
 边界开始。未分配虚拟图像、未运行算子，也未测量 OS 驻留。
 
-## 当前实现与迁移条件
+## 已实现的 CPU 接口与迁移边界
 
-当前 [Value](../../kernel-architecture/Data-Model.md) 使用一个仿射布局和 owner。
-[ValueFragments](../../../include/photospider/data/value_fragments.hpp) 支持精确矩形，
-但已识别的图像／颜色元组仍限制部分通道分片。当前
-[快照存储](../../../src/lib/data/input_snapshot.cpp) 独立分配各块，并把颜色元组的
-通道放在一起，尚不满足新的整图连续 planar 目标。快照块尺寸与
-[规划器 tile 配置](../../../include/photospider/compiler/compiler.hpp)也是独立机制，
-需要统一 DAG 策略。
+[PlanarImage](../../../include/photospider/data/planar_image.hpp) 是通用
+`ValueDescriptor`、facets、resources 和结构轴／分组的物理存储 owner，不增加
+RGB、alpha 范围、预乘或颜色 transfer 运算。rank-2 声明高／宽轴且没有通道轴；
+rank-3 显式声明全部三个轴。当前物理 dtype 为 UInt8、Int64、Float32、Float64。
+分量组采用互不重叠的通道区间，最多 64 组；role 非空且最多 128 字节。
 
-迁移必须交付结构性图像布局描述、虚拟地址预留与页 backing、区域读写窗口、行填充边缘布局、
-metadata 组投影、显式导入转换，以及编译器／provider 对 DAG tile 策略的检查。
-在实现与公开工作流验证完成前，现有实现文档继续描述当前事实。
+`PlanarImage::create` 预留整图，但不使样本有效。`import_value` 显式将完整的交错／
+strided 外部 Value 复制到声明的 planar 布局，不另建整图 packed 缓冲区。
+`publish` 以事务方式复制精确 packed 区域；`acquire` 返回保留 owner 的读取窗口，
+`row_run` 在获准 ROI 或 tile 边界停止。`read` 是显式 packed 区域导出。
+没有接口将完整预留地址暴露为可无条件读取的 ByteView。缺失覆盖返回 NotFound；
+重复发布既有样本失败，不修改已发布区域。
 
-验收应独立检查连续／分块平面寻址、非整除尺寸、行／页 padding、同 DAG 几何一致、
-颜色／alpha 分组、跨块精确分量读取、不可变生命周期，以及虚拟预留／供页／有效样本量。
-还需验证页面混合已产生／未产生区域不会伪造有效性，活动窗口可用，稀疏 ROI 不提供
-整图 backing，失败时清理部分供页。
-检查 padding 不参与样本或边界扩展，交错图像未经显式转换不能作为合规图像绑定。
-本轮未实现，也未运行算子测试。
+已准备的 `PlanarImageWriteWindow` 只提供获准行段。宿主在调用算子前准备目标页，
+成功完成后提交覆盖。放弃窗口、回调失败或已观察到的取消，会回滚未发布页和计费，
+保留既有已发布区域。普通读取窗口不阻止不相交发布；获取锁时观察取消。
+执行还会固定外部输入 owner，在 Run 退役前以 Stale 拒绝发布，使准入期间输入容量和样本
+覆盖保持稳定。
+
+统计区分 `reserved_bytes()`、`backed_bytes()`、`metadata_bytes()` 和
+`valid_samples()`。metadata 保守计费，包含持有的 groups／facets、稀疏覆盖／页记录
+及事务峰值容量。`resident_bytes()` 是 backing 加已计费 metadata 的原子快照，
+**不是**实测物理 RSS。`PlanarPageBudget` 聚合各 owner 的 backing 与 metadata，
+执行时租约接入通用张量使用的同一个 `MemoryBudget`。重复 owner 以及回绑到原计费域
+的结果不能重复计费。逐图虚拟地址、页面、metadata 记录和访问工作量分别检查上限。
+
+### 公开编译与执行链路
+
+WorkflowDocument schema 3 使用 `WorkflowInputDeclaration.planar_layout` 声明图像，
+其仿射 `layout` 必须为空。声明包含存储模式、空间／通道轴、行 pitch 和分量组。
+tile 几何统一来自 `PlanningOptions`，整个 DAG 默认 128×128。通用数值声明继续使用
+其仿射布局；raw metadata override 不能交换这两种存储契约。
+
+C++ 算子显式注册 `planar_storage_capable`、`planar_callback` 和
+`OperationOutputTraits.planar_layout`。编译器检查边上的结构布局连续性。
+回调接收精确读取窗口与宿主准备的写窗口，不接收可任意写入的输出 owner。
+执行器验证绑定与声明／DAG tile 几何一致，使用共享 CPU 队列与准入服务，并在回调
+执行前及结果发布前检查取消和图版本。具名图像结果位于 `ExecutionResult.images`。
+通用 `values` map 不隐式导出 dense 图像；调用方显式 acquire 或 read 图像区域。
+
+当前 planar 算子路径支持至少一个 planar 输入、通用 `Value` 端口 schema、CPU 单输出回调
+及 Whole／Elementwise 区域规则。数值检查由消费算子负责；该路径不接受旧 `Typed`
+或特殊 image／mask／scalar 端口 schema。
+不支持的回调／trait 组合在注册时拒绝，包括 GPU、staged／joint 执行、prepared
+metadata specialization、workspace 声明及旧 view-output traits。尚无结构图像输出
+支持的 freeze／demand／stream／atom 入口明确拒绝请求。旧 image／Layer 结构化
+结果 schema 也不属于本存储契约，不能绕过 Value 门槛。不回退到旧图像 Value、
+独立分块 snapshot 或原有数值规则。这些是后续算子迁移的明确能力边界。
+非图像通用张量能力继续提供。
+
+### 可运行验收
+
+[公开 workflow fixture](../../../tests/integration/test_planar_image_workflow.cpp)
+注册 planar copy 回调，构造两节点 WorkflowDocument，并通过 Compiler 和
+ExecutionContext 执行。ROI 跨越四个存储 tile，oracle 检查原始样本位、精确有效
+覆盖和缺失样本失败。其他案例覆盖连续平面、不同轴顺序、边缘 padding、小块页对齐、
+owner／窗口生命周期、资源耗尽、回滚、取消和同 context 结果回绑。预期地址使用实际
+主机页几何；上面的 16384 字节页示例不是平台默认值。安装消费方用安装后的包构建
+同一公开 fixture，不依赖内核私有头文件。
+
+构建前遵循仓库的[依赖前提](../../development/Testing-and-Validation.md#build-prerequisite)。
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build build --target test_planar_image_workflow -j 8
+ctest --test-dir build -R '^test_planar_image_workflow$' --output-on-failure
+ctest --test-dir build -R '^test_installed_consumer$' --output-on-failure
+```
+
+planar fixture 检查 DAG 结果和存储边界后以状态零退出。包消费 gate 还保留通用张量、
+C SDK 和共享库消费检查。已退休的旧图像 golden tests 不构成新接口的支持证据。
 
 ## 平台参考边界
 
 [Microsoft VirtualAlloc](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)
 区分 reserve 与 commit、主机页／分配粒度，以及 commitment 和物理分配。这支持
-本文术语，不代表跨平台后端已实现。本机 getconf PAGESIZE 返回 P=16384；布局需
-读取主机属性，不固定假设 4096。POSIX/macOS、Windows 及 GPU 映射路径需要各自
-的实现与验证证据。
+本文术语。CPU 后端在 POSIX 使用匿名虚拟地址预留及显式页保护／供页，在 Windows
+使用 reserve／commit。本机 macOS 的 getconf PAGESIZE 返回 P=16384，后端读取实际
+主机属性，不固定假设 4096。macOS 原生验收不代表 Windows／Linux 运行时已验收；
+planar 回调路径尚不提供 GPU 图像映射。

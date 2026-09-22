@@ -11,6 +11,7 @@
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/data/planar_image.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
@@ -240,6 +241,8 @@ enum class OperationSemanticRule : std::uint32_t {
  * are copied at registration and may be read concurrently afterwards.
  */
 struct PHOTOSPIDER_API OperationOutputTraits final {
+  /** @brief Structural image axes/groups; DAG tile size comes from plan. */
+  std::optional<PlanarImageLayout> planar_layout = {};
   /** @brief Unique strict UTF-8 result key, 1..128 bytes. */
   std::string key = "value";
   /** @brief Optional ordered original input-port projection for evaluation. */
@@ -349,6 +352,9 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
+  /** @brief CPU callback consumes and publishes structural planar image
+   * windows. Legacy Value callbacks cannot claim image storage compliance. */
+  bool planar_storage_capable = false;
   /** @brief Optional CPU joint contract version, zero disables grouping. */
   std::uint32_t joint_contract = 0;
   /** @brief Shared host-owned state capacity, charged once per group. */
@@ -391,7 +397,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 16U;
+  std::uint32_t version = 17U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -562,6 +568,21 @@ using CallbackSignature = Result<Value>(const OperationInvocation&);
 /** @brief Type-erased callable implementing `CallbackSignature`. */
 using OperationCallback = std::function<CallbackSignature>;
 
+/** @brief Borrowed call scope for a structural planar image operation. */
+struct PHOTOSPIDER_API PlanarOperationInvocation final {
+  const std::vector<PlanarImageReadWindow>& inputs;
+  const std::vector<Region>& input_demands;
+  const std::map<std::string, ParameterValue>& parameters;
+  const Region& output_region;
+  const PlanarImageWriteWindow& output;
+  CancellationToken cancellation;
+};
+/** @brief Callback writes only the requested output window; host publishes
+ * that coverage after successful return and cancellation/current checks.
+ */
+using PlanarOperationCallback = std::function<Status(
+    const PlanarOperationInvocation&)>;  // NOLINT(whitespace/indent_namespace)
+
 /** @brief Owned per-node Value or structured Result metadata.
  * Result specialization requires protocol 2 and preserves the registered schema
  * id/version and Result port kind. It may resolve fields/domain/semantic
@@ -672,6 +693,8 @@ struct PHOTOSPIDER_API OperationDefinition final {
    * Supported only for deterministic side-effect-free operations.
    */
   OperationPreparer prepare_static = {};
+  /** @brief Exclusive structural image callback when planar_storage_capable. */
+  PlanarOperationCallback planar_callback = {};
 };
 
 /**
@@ -889,6 +912,15 @@ class PHOTOSPIDER_API OperationRegistry final {
       const BufferAllocator& allocator,
       std::shared_ptr<std::atomic<ErrorCode>> failure) const;
   friend class ExecutionContext;
+  /** @brief Host-only structural callback entry after plan/binding validation.
+   * The registry still checks exact window authorization and parameters before
+   * preparing output pages or invoking the callback. */
+  Status invoke_planar(const std::string& key,
+                       const std::vector<PlanarImageReadWindow>& inputs,
+                       const std::vector<Region>& input_demands,
+                       const std::map<std::string, ParameterValue>& parameters,
+                       const Region& output_region, PlanarImage& output,
+                       const CancellationToken& cancellation = {}) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

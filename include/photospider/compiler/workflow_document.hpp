@@ -4,12 +4,14 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include "photospider/core/export.hpp"
+#include "photospider/data/planar_image.hpp"
 #include "photospider/data/value.hpp"
 
 namespace ps {
@@ -84,6 +86,9 @@ struct PHOTOSPIDER_API WorkflowInputDeclaration final {
   StridedLayout layout;
   /** @brief Exact closed facet set using Value bounds, canonicalized by key. */
   std::vector<ValueFacet> facets;
+  /** @brief Structural planar image declaration; when set, layout is empty
+   * because tiled addresses cannot be represented by affine strides. */
+  std::optional<PlanarImageLayout> planar_layout = {};
 };
 
 /**
@@ -124,8 +129,8 @@ struct PHOTOSPIDER_API WorkflowOutput final {
  * identity.
  */
 struct PHOTOSPIDER_API WorkflowDocument final {
-  /** @brief Positive source schema version; current writer emits 2. */
-  std::uint32_t schema_version = 2;
+  /** @brief Positive source schema version; current writer emits 3. */
+  std::uint32_t schema_version = 3;
   /** @brief Required runtime inputs; canonical semantic order is declaration
    * id. */
   std::vector<WorkflowInputDeclaration> inputs;

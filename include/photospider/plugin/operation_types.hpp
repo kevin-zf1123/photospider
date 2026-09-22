@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "photospider/data/planar_image.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/value.hpp"
 
@@ -37,5 +38,7 @@ struct PHOTOSPIDER_API OperationMetadata final {
    * and standalone Values default to sample observations. No payload is held.
    */
   std::uint32_t atomic_trailing_axes = 0;
+  /** @brief Structural image layout, independent of semantic facets. */
+  std::optional<PlanarImageLayout> planar_layout = {};
 };
 }  // namespace ps

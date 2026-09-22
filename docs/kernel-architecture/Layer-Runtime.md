@@ -1,4 +1,13 @@
-# Layer, emission and weighted runtime
+# Retired Layer, emission and weighted runtime
+
+Package 0.19 rejects the six legacy schemas listed below, and Result metadata
+with the `photospider.layer` key, with TypeMismatch during schema validation.
+ResultBuilder propagates that rejection; these operation definitions cannot
+register as an alternative image-memory path. The remainder records the former
+runtime for migration reference and does not authorize its numerical semantics
+or execution commands. Ordinary non-image Result schemas remain supported.
+Use [Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md)
+for the current planar storage contract.
 
 Implemented in package 0.10, C++ API. The C operation ABI remains 9. These CPU
 operations use structured protocol 2 and managed mandatory backing. They do not

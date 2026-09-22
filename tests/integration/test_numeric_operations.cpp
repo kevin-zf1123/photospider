@@ -331,7 +331,8 @@ int math_and_views() {
   auto twice = Value::create(mask.descriptor(), mask.region(), mask.layout(),
                              array<float>({2}).copy_bytes())
                    .take_value();
-  PS_CHECK(equal<float>(run("numeric.multiply", {mask, twice}), {1.5F}));
+  auto old_mask = run("numeric.multiply", {mask, twice});
+  PS_CHECK(old_mask.status().code == ErrorCode::TypeMismatch);
   return 0;
 }
 int failures_and_resources() {

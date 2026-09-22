@@ -45,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 16)
+  if (count > 1024 || traits.version != 17)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -162,6 +162,7 @@ Result<OperationMetadata> infer_operation_output(
   }
   OperationMetadata result;
   result.atomic_trailing_axes = t.outputs[0].atomic_trailing_axes;
+  result.planar_layout = t.outputs[0].planar_layout;
   result.descriptor.element_type = t.outputs[0].output_element_type;
   if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input ||
       t.outputs[0].output_dtype_rule == OperationDtypeRule::WidenNumericInput) {
@@ -391,6 +392,12 @@ Result<OperationMetadata> infer_operation_output(
         *t.outputs[0].static_dependency_pieces);
     if (!certificate.ok())
       return Result<OperationMetadata>(certificate.status());
+  }
+  if (result.planar_layout) {
+    const auto layout_status =
+        PlanarImage::validate_layout(result.descriptor, *result.planar_layout);
+    if (!layout_status.ok())
+      return Result<OperationMetadata>(layout_status);
   }
   return Result<OperationMetadata>(std::move(result));
 }

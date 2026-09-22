@@ -79,6 +79,12 @@ class MemoryReservation final
     : public std::enable_shared_from_this<MemoryReservation> {
  public:
   ~MemoryReservation() { seal(); }
+  /** @brief Charge externally supplied page backing without allocating a
+   * second host buffer. The returned lease retains both resource and payload
+   * capacity until the image owner retires. */
+  Result<std::shared_ptr<void>> reserve_external(std::uint64_t bytes) {
+    return allocate(bytes);
+  }
   BufferAllocator allocator(std::uint64_t limit = UINT64_MAX) {
     struct Local {
       std::mutex mutex;

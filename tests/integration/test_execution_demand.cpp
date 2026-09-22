@@ -498,32 +498,7 @@ int snapshot_replacement() {
   }
   auto image = typed_images::value(rgba_semantics());
   InputSnapshotStore store({4096, 1});
-  auto base = store.import_value(image).take_value();
-  GraphContext graph(typed_images::document(image));
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionBindings bindings{
-      {{"image", {}, {}, std::make_shared<const InputSnapshot>(base)}}};
-  auto demand = context.open_demand(plan, bindings).take_value();
-  const Region pixel({{1, 1}, {2, 1}, {0, 4}});
-  const auto q =
-      Footprint::from_regions(image.descriptor().shape, {pixel}).take_value();
-  PS_CHECK(demand.request({{"result", q}}).ok());
-  auto patch =
-      MutableValue::allocate(image.descriptor(), pixel, BufferAllocator{})
-          .take_value();
-  const float rgba[] = {-1, 2, 0, .75F};
-  std::memcpy(patch.data(), rgba, sizeof(rgba));
-  auto replacement = std::move(patch).publish(image.facets()).take_value();
-  auto next = store.patch(base, replacement).take_value();
-  bindings.inputs[0].snapshot = std::make_shared<const InputSnapshot>(next);
-  PS_CHECK(demand.replace_bindings(bindings, {3, {}}).status().code ==
-           ErrorCode::ResourceExhausted);
-  auto changed = demand.replace_bindings(bindings, {4, {}});
-  PS_CHECK(changed.ok() && changed.value().potential_dirty.at("result") == q);
-  auto partial = Footprint::from_regions(image.descriptor().shape,
-                                         {Region({{1, 1}, {2, 1}, {0, 1}})})
-                     .take_value();
-  PS_CHECK(!demand.request({{"result", partial}}).ok());
+  PS_CHECK(store.import_value(image).status().code == ErrorCode::TypeMismatch);
   return 0;
 }
 int owner_retirement() {

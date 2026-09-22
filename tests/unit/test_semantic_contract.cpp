@@ -283,7 +283,8 @@ int explicit_drop() {
     doc.outputs = {{"output", 2, "value"}};
     GraphContext graph(doc);
     Compiler compiler(registry);
-    PS_CHECK(compiler.compile(graph).status().code == ErrorCode::TypeMismatch);
+    PS_CHECK(compiler.compile(graph).status().code ==
+             ErrorCode::InvalidArgument);
   }
   return 0;
 }
@@ -342,7 +343,18 @@ int builtin_identity() {
   auto bytes = Value::create({ElementType::UInt8, {2}}, Region::whole({2}),
                              {0, {1}}, {3, 7}, {{"opaque", 1, {9}}})
                    .take_value();
-  for (const auto& value : {mask, bytes}) {
+  {
+    WorkflowDocument legacy;
+    legacy.inputs = {{1, "input", mask.descriptor(), mask.region(),
+                      mask.layout(), mask.facets()}};
+    legacy.nodes = {{1, "core.identity", {WorkflowInputReference{1}}, {}}};
+    legacy.outputs = {{"output", 1, "value"}};
+    GraphContext graph(legacy);
+    auto rejected = compiler.compile(graph);
+    PS_CHECK(!rejected.ok() &&
+             rejected.status().code == ErrorCode::InvalidArgument);
+  }
+  for (const auto& value : {bytes}) {
     for (const auto* key :
          {"core.identity", "core.delay", "core.gpu_fallback_probe"}) {
       std::map<std::string, ParameterValue> parameters;

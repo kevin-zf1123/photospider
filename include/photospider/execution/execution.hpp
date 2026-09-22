@@ -130,6 +130,8 @@ struct PHOTOSPIDER_API ExecutionBinding final {
   std::shared_ptr<const RegionalSource> source = {};
   /** @brief Alternative immutable kernel snapshot; select exactly one input. */
   std::shared_ptr<const InputSnapshot> snapshot = {};
+  /** @brief Structural planar image binding; exact plan geometry required. */
+  std::shared_ptr<const PlanarImage> image = {};
 };
 /**
  * @brief Per-call input snapshot; duplicate entries remain visible to
@@ -326,6 +328,8 @@ struct AtomObservation final {
 struct PHOTOSPIDER_API ExecutionResult final {
   /** @brief Sorted caller-requested named Values. */
   std::map<std::string, Value> values;
+  /** @brief Authoritative planar image outputs; no implicit dense export. */
+  std::map<std::string, PlanarImage> images;
   /** @brief Raw compiler-independent execution diagnostics. */
   ExecutionDiagnostics diagnostics;
   /** @brief Direct structural evidence for a completed dependency-network Run.
@@ -681,6 +685,10 @@ class PHOTOSPIDER_API ExecutionContext final {
       const ExecutionOptions& options = {});
 
  private:
+  Result<ExecutionResult> execute_planar(const ExecutionPlan& plan,
+                                         ExecutionBindings bindings,
+                                         const CancellationToken& cancellation,
+                                         const ExecutionOptions& options);
   Result<ExecutionResult> execute_regions(
       const ExecutionPlan& plan, ExecutionBindings bindings,
       const ExecutionSink* sink, const CancellationToken& cancellation,

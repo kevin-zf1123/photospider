@@ -2,20 +2,21 @@
 spec_schema_version: 1
 id: KERNEL-tensor-storage
 kind: shared_kernel_contract
-status: Proposed
-implementation_status: not_implemented
+status: Accepted
+implementation_status: implemented_cpu
 clarification_status: selected_storage_policy_complete
 inspection_commit: d49d1840
 ---
 
 # Tensor storage and region access
 
-This is the selected storage-policy target clarified with FMT on 2026-09-22. It is not a
-description of the implemented runtime. [Chinese reader version](zh/Tensor-Storage-and-Region-Access.zh.md).
+This is the storage contract implemented by package 0.19.0, following the FMT
+clarification of 2026-09-22. [Chinese reader version](zh/Tensor-Storage-and-Region-Access.zh.md).
 It owns physical layout, tile geometry, region access and storage ownership;
 [FMT-common](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
-owns the associated color/alpha interpretation. No ADR or runtime change is
-created by this specification.
+owns the associated color/alpha interpretation. The supported CPU interfaces
+and explicit migration boundaries are described below. This implementation does
+not implement FMT-01 or preserve the retired image memory/numeric contracts.
 
 ## Confirmed decisions
 
@@ -126,8 +127,8 @@ Storage padding must not affect color results, sample identity or dirty mapping.
 Byte count, pitch, offset, alignment rounding and shape products use checked
 arithmetic before proportional allocation.
 
-Tile size is a graph policy rather than an operator parameter. The current 128x128
-planning default is a candidate retained default, not a restriction to one size.
+Tile size is a graph policy rather than an operator parameter. The 128x128
+planning default remains configurable, not a restriction to one size.
 Halo reads and cross-tile ROIs may exceed a tile; they do not change stored output
 tile geometry. Tileless numeric tensors are not assigned fictitious image axes.
 Incoming image storage that does not match the required planar/tiling layout
@@ -194,12 +195,11 @@ page backing, while OS residency is separate. Active access windows cannot be
 revoked. Unpublished failed allocations can be released normally, without
 discarding already published observations or data sharing a provided page.
 
-The storage decisions are complete at this level. Concrete platform reservation/
-provisioning calls, capability reporting, metadata encoding, concurrency control
-and public window APIs still need implementation contracts and validation. The
-FMT-01 uses auto/view/materialize under this rule. Materialize provides requested
-samples within a new full-result virtual range; packed ROI reading remains an
-explicit access-window operation rather than a different primary image backing.
+The CPU storage owner and window APIs implement this policy. FMT-01 remains a
+separate Proposed operator family using auto/view/materialize: its materialized
+result must provide requested samples within a full-result virtual range. Packed
+ROI reading is an explicit access-window operation, not a second authoritative
+image representation.
 
 ## Checked row-padded edge example
 
@@ -230,40 +230,114 @@ the total reservation and that one-sample page calculation. An additional full
 next 16384-byte page boundary under this host geometry. It did not allocate
 virtual image storage, run an operator or measure OS residency.
 
-## Current implementation and migration gates
+## Implemented CPU interfaces and migration boundary
 
-Current [Value](../kernel-architecture/Data-Model.md) carries one affine layout
-and owner. [ValueFragments](../../include/photospider/data/value_fragments.hpp)
-provides exact rectangles, but recognized image/color tuples still constrain
-partial-channel fragments. The current
-[snapshot store](../../src/lib/data/input_snapshot.cpp) allocates blocks
-independently and keeps recognized tuple channels together. These are not the
-single-image continuous planar target. Its current block-size setting and the
-[planner's tile options](../../include/photospider/compiler/compiler.hpp) are
-also distinct mechanisms needing coherent graph policy.
+[PlanarImage](../../include/photospider/data/planar_image.hpp) is a physical
+storage owner for a generic `ValueDescriptor`, facets, resources and structural
+axes/groups. It imposes no RGB, alpha-range, premultiplication or color-transfer
+arithmetic. Rank-two storage declares height/width axes and no channel axis;
+rank-three storage declares all three axes explicitly. Current physical dtypes
+are UInt8, Int64, Float32 and Float64. Component groups are nonoverlapping channel
+intervals, with at most 64 groups and a nonempty role of at most 128 bytes.
 
-The migration must provide a structural image-layout description, virtual range
-reservation and page backing, regional read/write windows, row-padded edge layout, metadata group
-projection, explicit import conversion, and compiler/provider validation of the
-DAG tile policy. Existing contracts documenting current behavior remain current
-until code and focused public workflows implement the target.
+`PlanarImage::create` reserves a full image without making samples valid.
+`import_value` explicitly copies a complete interleaved/strided external Value
+into the declared planar layout without an additional full-image packed buffer.
+`publish` copies an exact packed region transactionally. `acquire` returns an
+owner-retaining read window; `row_run` stops at the authorized ROI or tile edge.
+`read` is an explicit packed-region export. No API publishes the whole reserved
+address span as an unconditional ByteView. Missing coverage returns NotFound;
+overlapping publication fails rather than mutating published samples.
 
-Acceptance must independently verify planar addresses for continuous/tiled modes,
-nondivisible dimensions, row/page padding, same-DAG geometry consistency, multiple
-color/alpha groups, cross-tile exact component reads, immutable lifetime and actual
-reserved virtual versus provided page versus valid sample bytes. Verify that
-pages can contain mixed produced/unproduced regions without false validity,
-active windows remain usable, sparse ROI avoids full-image backing provision,
-and failures clean up partial provision. Verify that padding never contributes to samples
-or boundary extension, and that incompatible interleaved image bindings fail
-until explicitly converted. No implementation or runtime tests have run here.
+A prepared `PlanarImageWriteWindow` supplies only its authorized row runs.
+The host prepares destination pages before invoking an operation and commits
+coverage after successful completion. Abandonment, callback failure or observed
+cancellation rolls back unpublished pages and charges while preserving existing
+published regions. Ordinary read windows do not prevent disjoint publication.
+Lock acquisition observes cancellation. Execution additionally pins external
+input owners against publication until the Run retires (publication returns
+Stale), so input capacity and sample coverage remain stable while their retained
+capacity is admitted.
+
+Accounting distinguishes `reserved_bytes()`, `backed_bytes()`,
+`metadata_bytes()` and `valid_samples()`. Metadata is conservatively charged,
+including owned groups/facets, sparse coverage/page records and transactional
+peak capacity. `resident_bytes()` is an atomic snapshot of backing plus charged
+metadata, **not** measured physical RSS. `PlanarPageBudget` aggregates admitted
+backing and metadata across owners; execution connects its leases to the same
+`MemoryBudget` as generic tensors. Repeated owners and results rebound to their
+own accounting domain must not be charged twice. Per-image virtual, page,
+metadata-record and access-work limits are checked independently.
+
+### Public compiler and execution path
+
+WorkflowDocument schema 3 represents an image with
+`WorkflowInputDeclaration.planar_layout`; its affine `layout` must be empty.
+The declaration records storage mode, spatial/channel axes, row pitch and
+component groups. Its tile geometry comes from `PlanningOptions`, defaulting
+to 128x128 for the entire DAG. Generic numeric declarations retain their own
+affine layout. Raw metadata overrides cannot exchange these storage contracts.
+
+A C++ operation explicitly registers `planar_storage_capable`, a
+`planar_callback`, and `OperationOutputTraits.planar_layout`. The compiler
+checks structural layout continuity on its edges. The callback receives exact
+read windows and a host-prepared write window, not an unrestricted output owner.
+The executor checks bindings against the declaration and DAG tile geometry,
+uses the shared CPU queue/admission services, and checks cancellation/currentness
+before callback work and before publishing results. Named image results live in
+`ExecutionResult.images`. The generic `values` map is not an implicit dense
+image export; callers explicitly acquire or read an image region.
+
+The current planar operation path supports CPU single-output callbacks with
+one or more planar inputs, generic `Value` port schemas and Whole or Elementwise
+region rules. Numerical checks belong to the consuming operation; legacy
+`Typed` and special image/mask/scalar port schemas are not accepted on this path.
+Unsupported callback/trait combinations, including GPU, staged/joint execution,
+prepared metadata specialization,
+workspace declarations and legacy view-output traits, are rejected at
+registration. Planar freeze/demand/stream/atom entry points that do not yet have
+structural image outputs reject the request. Legacy image/Layer structured-result
+schemas are also outside this storage contract and must not bypass the Value
+gates. There is no fallback to legacy image Values, independently allocated
+snapshots or the previous numeric rules.
+These are explicit capability boundaries for subsequent operator migration.
+Generic non-image tensor facilities remain available.
+
+### Runnable acceptance
+
+The [public workflow fixture](../../tests/integration/test_planar_image_workflow.cpp)
+registers a planar copy callback, builds a two-node WorkflowDocument, compiles
+it and executes it through ExecutionContext. Its ROI crosses four stored tiles;
+the oracle checks original sample bits, exact valid coverage and missing-sample
+failure. Additional cases exercise continuous planes, alternate axes, edge
+padding, small page-aligned tiles, owner/window lifetime, resource exhaustion,
+rollback, cancellation and same-context result rebinding. Expected offsets use
+host page geometry; the 16384-byte-page example above is not a platform default.
+The installed consumer builds the same public fixture against the installed
+package, independently of private kernel headers.
+
+Use the repository [build prerequisites](../development/Testing-and-Validation.md#build-prerequisite).
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build build --target test_planar_image_workflow -j 8
+ctest --test-dir build -R '^test_planar_image_workflow$' --output-on-failure
+ctest --test-dir build -R '^test_installed_consumer$' --output-on-failure
+```
+
+A passing planar fixture exits with status zero after checking both the DAG
+result and storage boundary cases. The package gate also retains generic tensor,
+C SDK and shared-library consumer checks. Retired image-contract golden tests
+are not evidence of support for the new interfaces.
 
 ## Platform reference boundary
 
 [Microsoft VirtualAlloc](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)
 distinguishes reserve and commit, including host page/allocation granularity and
 the distinction between commitment and physical allocation. It supports the
-terminology here, not a claim that the cross-platform storage backend exists.
-The inspected local host reports P=16384 through getconf PAGESIZE; the layout
-must resolve host properties rather than assume 4096. POSIX/macOS, Windows and
-any GPU mapping paths require their own implementation and validation evidence.
+terminology here. The CPU backend uses anonymous virtual reservation and
+explicit page protection/provision on POSIX, and reserve/commit on Windows.
+The inspected macOS host reports P=16384 through getconf PAGESIZE; the backend
+resolves host properties rather than assuming 4096. Native macOS acceptance
+does not establish Windows/Linux runtime acceptance. GPU image mapping is not
+provided by the planar callback path.

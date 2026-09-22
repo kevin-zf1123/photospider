@@ -55,13 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.17 CONFIG QUIET COMPONENTS kernel)
+find_package(Photospider 0.18 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.18 must reject a 0.17 consumer")
+  message(FATAL_ERROR "Photospider 0.19 must reject a 0.18 consumer")
 endif()
 
 find_package(
-  Photospider 0.18 CONFIG REQUIRED
+  Photospider 0.19 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -111,30 +111,11 @@ set_target_properties(
              C_EXTENSIONS OFF)
 
 # Both source packages consume only the installed public targets above.
-add_subdirectory(../../plugins/ops/rgba32f rgba32f)
-add_subdirectory(../../examples/image_vertical image_vertical)
-add_subdirectory(../../examples/regional_image_vertical regional_image_vertical)
-add_subdirectory(../../examples/s3_image_workflow s3_image_workflow)
-add_subdirectory(../../examples/s4_gpu_workflow s4_gpu_workflow)
 add_subdirectory(../../examples/foundations_workflow foundations_workflow)
 target_compile_options(photospider_foundations_workflow PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_foundations_workflow PRIVATE ${_photospider_consumer_link_options})
-target_compile_options(photospider_s4_gpu_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_s4_gpu_workflow PRIVATE ${_photospider_consumer_link_options})
-target_compile_options(photospider_s3_image_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_s3_image_workflow PRIVATE ${_photospider_consumer_link_options})
-target_compile_options(photospider_regional_image_vertical PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_regional_image_vertical PRIVATE ${_photospider_consumer_link_options})
-target_compile_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_rgba32f_ops PRIVATE ${_photospider_consumer_link_options})
-target_compile_options(photospider_image_vertical PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_image_vertical PRIVATE ${_photospider_consumer_link_options})
 
 add_library(photospider_consumer_bridge SHARED pipeline_bridge.cpp)
-add_dependencies(photospider_consumer_bridge photospider_rgba32f_ops)
-target_include_directories(photospider_consumer_bridge PRIVATE ../../examples)
-target_compile_definitions(photospider_consumer_bridge PRIVATE
-  PS_IMAGE_CONSUMER_PLUGIN_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
 target_link_libraries(
   photospider_consumer_bridge PRIVATE Photospider::kernel)
 target_compile_options(
@@ -177,16 +158,11 @@ target_compile_options(photospider_semantic_consumer PRIVATE ${_photospider_cons
 target_link_options(photospider_semantic_consumer PRIVATE ${_photospider_consumer_link_options})
 add_dependencies(photospider_semantic_consumer photospider_contract_fixture)
 
-add_library(photospider_channel_contract MODULE ../fixtures/channel_contract_fixture.c)
-target_link_libraries(photospider_channel_contract PRIVATE Photospider::operation_sdk)
-set_target_properties(photospider_channel_contract PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_color_consumer ../integration/test_color_operations.cpp)
+add_executable(photospider_color_consumer ../integration/test_generic_color_operations.cpp)
 target_include_directories(photospider_color_consumer PRIVATE ..)
 target_link_libraries(photospider_color_consumer PRIVATE Photospider::kernel)
-target_compile_definitions(photospider_color_consumer PRIVATE PS_CHANNEL_CONTRACT_FIXTURE="$<TARGET_FILE:photospider_channel_contract>")
 target_compile_options(photospider_color_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_color_consumer PRIVATE ${_photospider_consumer_link_options})
-add_dependencies(photospider_color_consumer photospider_channel_contract)
 
 add_library(photospider_expression_contract MODULE ../fixtures/expression_contract_fixture.c)
 target_link_libraries(photospider_expression_contract PRIVATE Photospider::operation_sdk)
@@ -199,7 +175,7 @@ target_compile_options(photospider_expression_consumer PRIVATE ${_photospider_co
 target_link_options(photospider_expression_consumer PRIVATE ${_photospider_consumer_link_options})
 add_dependencies(photospider_expression_consumer photospider_expression_contract)
 
-add_executable(photospider_component_consumer ../integration/test_component_operations.cpp)
+add_executable(photospider_component_consumer ../integration/test_generic_component_operations.cpp)
 target_include_directories(photospider_component_consumer PRIVATE ..)
 target_link_libraries(photospider_component_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_component_consumer PRIVATE ${_photospider_consumer_compile_options})
@@ -210,6 +186,16 @@ target_include_directories(photospider_basic_consumer PRIVATE ../../examples)
 target_link_libraries(photospider_basic_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_link_options})
+
+# Public structural-image DAG through the installed C++ package.
+add_executable(photospider_planar_consumer
+  ../integration/test_planar_image_workflow.cpp)
+target_include_directories(photospider_planar_consumer PRIVATE ..)
+target_link_libraries(photospider_planar_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_planar_consumer PRIVATE
+  ${_photospider_consumer_compile_options})
+target_link_options(photospider_planar_consumer PRIVATE
+  ${_photospider_consumer_link_options})
 
 add_library(photospider_dependency_fixture MODULE ../fixtures/dependency_fixture.c)
 target_link_libraries(photospider_dependency_fixture PRIVATE Photospider::operation_sdk)
@@ -305,8 +291,6 @@ target_link_options(photospider_multi_output_workflow PRIVATE ${_photospider_con
 
 add_custom_target(
   run_photospider_consumer
-  COMMAND "$<TARGET_FILE:photospider_multi_output_workflow>" --scenario all
-  COMMAND "$<TARGET_FILE:photospider_multi_output_workflow>" --scenario all --joint off
   COMMAND "$<TARGET_FILE:photospider_consumer>"
   COMMAND "$<TARGET_FILE:photospider_dependency_consumer>"
   COMMAND "$<TARGET_FILE:photospider_execution_dependencies_consumer>"
@@ -316,29 +300,13 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_fragment_atlas_consumer>"
   COMMAND "$<TARGET_FILE:photospider_ordered_scan_consumer>"
   COMMAND "$<TARGET_FILE:photospider_ordered_reduction_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_foundations_workflow>" --scenario all
   COMMAND "$<TARGET_FILE:photospider_color_consumer>"
   COMMAND "$<TARGET_FILE:photospider_expression_consumer>"
   COMMAND "$<TARGET_FILE:photospider_component_consumer>"
   COMMAND "$<TARGET_FILE:photospider_basic_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_planar_consumer>"
   COMMAND "$<TARGET_FILE:photospider_semantic_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_image_vertical>"
-  COMMAND "$<TARGET_FILE:photospider_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
-  COMMAND "$<TARGET_FILE:photospider_regional_image_vertical>"
-  COMMAND "$<TARGET_FILE:photospider_regional_image_vertical>" "$<TARGET_FILE:photospider_rgba32f_ops>"
-  COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario cache
-  COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario cache --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario preview
-  COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario preview --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario disk-write --cache-dir "${CMAKE_CURRENT_BINARY_DIR}/s3-cache"
-  COMMAND "$<TARGET_FILE:photospider_s3_image_workflow>" --scenario disk-read --cache-dir "${CMAKE_CURRENT_BINARY_DIR}/s3-cache"
-  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend cpu --layout roi --no-cache
-  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --no-cache
-  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations
-  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario all-operations --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario cache-edits --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  COMMAND "$<TARGET_FILE:photospider_s4_gpu_workflow>" --backend metal --scenario preview-export --module "$<TARGET_FILE:photospider_rgba32f_ops>"
-  DEPENDS photospider_multi_output_workflow photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_component_consumer photospider_expression_consumer photospider_color_consumer photospider_semantic_consumer photospider_s4_gpu_workflow photospider_s3_image_workflow photospider_consumer photospider_image_vertical photospider_regional_image_vertical photospider_rgba32f_ops
+  DEPENDS photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_planar_consumer photospider_foundations_workflow photospider_color_consumer photospider_expression_consumer photospider_component_consumer photospider_semantic_consumer photospider_consumer
   USES_TERMINAL
   VERBATIM)
 

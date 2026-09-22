@@ -55,6 +55,19 @@ Result<std::uint64_t> scaled(const ResultExtent& extent, std::uint64_t count) {
 }
 }  // namespace
 Status SchemaTemplate::validate(bool resolved) const {
+  // These historical schemas pack image planes into result fields. Structural
+  // images now require PlanarImage owners and cannot use ResultBuilder.
+  if (id == "photospider.layer" || id == "photospider.layer_response" ||
+      id == "photospider.raw_rgba_sum" ||
+      id == "photospider.layer_contributions" ||
+      id == "photospider.weighted_layer_sum" ||
+      id == "photospider.optional_layer" ||
+      std::any_of(metadata.begin(), metadata.end(),
+                  [](const ResultFacet& facet) {
+                    return facet.key == "photospider.layer";
+                  }))
+    return Status::failure(ErrorCode::TypeMismatch,
+                           "legacy layer schema requires planar storage");
   if (!key_valid(id) || !version || fields.empty() || fields.size() > 16 ||
       domain.size() > 8 ||
       (publication != PublishPolicy::CompleteBundle &&
@@ -629,7 +642,9 @@ Result<ResultBuilder> ResultBuilder::start(
     std::string_view semantic_key, ResultGrowthLimits limits,
     std::vector<std::uint64_t> association) {
   auto valid = schema.validate(true);
-  if (!valid.ok() || semantic_key.empty() || semantic_key.size() > 4096 ||
+  if (!valid.ok())
+    return Result<ResultBuilder>(valid);
+  if (semantic_key.empty() || semantic_key.size() > 4096 ||
       association.size() > 16 ||
       std::any_of(association.begin(), association.end(),
                   [](auto id) { return id == 0; }))
