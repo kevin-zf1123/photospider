@@ -1,0 +1,208 @@
+{
+  "table_version": 1,
+  "status": "Proposed",
+  "implementation_status": "not_implemented",
+  "scope": "FMT-09 semantic modes only; scalar composition summary, not a runtime metadata codec or executable domain validator",
+  "formula_source": "FMT-09_transfer_math.md",
+  "rules": [
+    "All semantic inputs and requested outputs must be finite; finite-input overflow fails.",
+    "Domain endpoints are exact decimal strings or named parameters; validate parameters under the family contract.",
+    "Composition requires matching descriptors, native units/reference, and a stored first-stage result within the second-stage domain.",
+    "false bitwise_inverse_cancellation means no general cancellation authorization; true still requires preserving validation, metadata, support and resource behavior.",
+    "Raw uses the formula source and NUM outcomes, not these semantic input domains."
+  ],
+  "curves": [
+    {
+      "curve": "linear",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "unchanged",
+      "successful_output_guarantee": "All bits copied after semantic finite checks.",
+      "loss_or_composition_caveat": "Identity only with matching descriptors and required validation.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": true
+    },
+    {
+      "curve": "power_gamma",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative_or_display_relative",
+      "successful_output_guarantee": "Signed finite result on successful evaluation; gamma is finite and positive.",
+      "loss_or_composition_caveat": "Rounding and underflow prevent general bitwise inversion; gamma=1 has the explicit copy rule.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "srgb",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative_or_display_relative",
+      "successful_output_guarantee": "Signed finite result on successful evaluation; no gamut clamp.",
+      "loss_or_composition_caveat": "Published rounded joins and dtype rounding prevent general inverse cancellation.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "bt709",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Signed finite result on successful evaluation; no gamut clamp.",
+      "loss_or_composition_caveat": "Dtype rounding prevents bitwise inversion; rounded variants also retain their join gaps/overlaps.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "bt2020",
+      "coefficient_variant": "smooth",
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Signed finite result on successful evaluation; no gamut clamp.",
+      "loss_or_composition_caveat": "Dtype rounding prevents bitwise inversion; rounded variants also retain their join gaps/overlaps.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "bt2020",
+      "coefficient_variant": "rounded_10bit",
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Signed finite result on successful evaluation; no gamut clamp.",
+      "loss_or_composition_caveat": "Dtype rounding prevents bitwise inversion; rounded variants also retain their join gaps/overlaps.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "bt2020",
+      "coefficient_variant": "rounded_12bit",
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Signed finite result on successful evaluation; no gamut clamp.",
+      "loss_or_composition_caveat": "Dtype rounding prevents bitwise inversion; rounded variants also retain their join gaps/overlaps.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "bt1886",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "closed_interval",
+        "lower": "0",
+        "upper": "1"
+      },
+      "encode_semantic_input": {
+        "kind": "closed_interval",
+        "lower": "black_luminance",
+        "upper": "white_luminance"
+      },
+      "native_reference": "absolute_display_cd_m2",
+      "successful_output_guarantee": "Exact semantic D lies in [Lb,Lw], E in [0,1]; final dtype rounding applies.",
+      "loss_or_composition_caveat": "Check the stored rounded value against the next input domain, especially nonrepresentable Lb/Lw; raw D has a zero plateau.",
+      "explicit_unit_bridge": "relative_to_absolute_display_requires_explicit_mapping",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "pq",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "closed_interval",
+        "lower": "0",
+        "upper": "1"
+      },
+      "encode_semantic_input": {
+        "kind": "closed_interval",
+        "lower": "0",
+        "upper": "10000"
+      },
+      "native_reference": "absolute_display_cd_m2",
+      "successful_output_guarantee": "Semantic D lies in [0,10000] cd/m2; semantic E lies in [0,1].",
+      "loss_or_composition_caveat": "Decode zero plateau loses codes; encode(0) is positive; rounding prevents bitwise inversion.",
+      "explicit_unit_bridge": "relative_to_absolute_display_requires_explicit_mapping",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "hlg_oetf",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "closed_interval",
+        "lower": "0",
+        "upper": "1"
+      },
+      "encode_semantic_input": {
+        "kind": "closed_interval",
+        "lower": "0",
+        "upper": "1"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Finite output on success; D output is not guaranteed within [0,1].",
+      "loss_or_composition_caveat": "Float64 decode(1) exceeds encode input domain; no snapping/clamp; dtype-specific round trips required.",
+      "explicit_unit_bridge": "display_rendering_requires_explicit_separate_stages",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "acescc",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Finite result on success; exact D is capped at 65504, not at 1.",
+      "loss_or_composition_caveat": "Decode cap loses high codes; encode floor loses nonpositive inputs; rounding prevents bitwise inversion.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    },
+    {
+      "curve": "acescct",
+      "coefficient_variant": null,
+      "decode_semantic_input": {
+        "kind": "finite"
+      },
+      "encode_semantic_input": {
+        "kind": "finite"
+      },
+      "native_reference": "scene_relative",
+      "successful_output_guarantee": "Finite result on success; exact D is capped at 65504, not at 1.",
+      "loss_or_composition_caveat": "Decode cap loses high codes; published toe/join and dtype rounding prevent general bitwise inversion.",
+      "explicit_unit_bridge": "none",
+      "bitwise_inverse_cancellation": false
+    }
+  ]
+}

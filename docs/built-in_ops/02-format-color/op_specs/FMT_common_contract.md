@@ -239,8 +239,20 @@ Plain numerical arithmetic consumes dtype, shape and numerical operands by
 default; merely attaching color metadata adds no color-domain validation or
 whole-color read closure. A color/coverage/compositing consumer validates the
 effective semantic fields and associated samples it actually relies on. It must
-include required complete-color or cross-component relationships in its demand;
-this rule does not permit skipping an invariant required by its formula.
+include sample dependencies required by its formula or consumed semantic
+invariants. Structural completeness of a color group does not itself demand
+all color samples or alpha. Alpha samples enter demand/validation only when the
+formula or consumed alpha/coverage/compositing semantics require them. Descriptor
+checks remain mandatory even when their corresponding samples are not read.
+
+The canonical logical mode field is `metadata_mode=respect|override|raw`, with
+`respect` as default wherever the member exposes this choice. Authoring helpers
+serialize the resolved choice explicitly; compiler, direct invocation and cache
+identity use the same field. `interpretation` is not an alternative parameter
+name. This naming rule adds no mode to members that do not offer it (for example,
+FMT-08 edits and the FMT-15C semantic composition helper). Member-specific raw
+domains remain authoritative: FMT-09 retains NUM nonfinite formula outcomes,
+whereas FMT-14/15 require finite consumed samples and requested arithmetic.
 
 Explicit raw mode ignores semantic interpretation for numerical processing.
 It still checks storage bounds, dtype/shape compatibility, memory ownership and
@@ -420,8 +432,13 @@ The later implementation requires at least these independent checks:
 
 - Raw alpha arithmetic succeeds outside coverage range; a semantic coverage
   consumer then rejects the affected observation.
-- A numeric red-channel read does not observe unrelated alpha merely because
-  color metadata exists; an operation requiring a complete color does observe it.
+- A numeric red-channel read and a componentwise FMT-09 red request do not
+  observe unrelated alpha. A structurally complete color group does not expand
+  their sample support. Unrequested alpha NaN, missing coverage or upstream
+  failure cannot fail these observations unless required upstream Whole behavior
+  already makes that failure unavoidable. Semantic FMT-04 unassociation requests and
+  validates alpha for a requested color component. Explicit alpha bypass requests
+  copy its bits under the member contract without adding coverage validation.
 - Two consumers can interpret the same immutable source differently through
   one explicit override without changing the other consumer or source.
 - Untagged data with a complete explicit interpretation works; missing required
@@ -434,6 +451,114 @@ The later implementation requires at least these independent checks:
   resource, cancellation, or required upstream failures.
 
 These are required future acceptance cases, not tests run in this session.
+
+## Shared representation implementation gate
+
+Before registering a member that consumes the revised descriptions or emitting
+persisted workflows using them, freeze and review the following shared artifacts:
+
+| Artifact | Required decision and acceptance |
+| --- | --- |
+| Generic metadata codec | Canonical tensor/axis/component/group/reference/encoding records, structural invariants, unknown-field policy and equality. Equivalent descriptions must have one canonical encoding. |
+| Version and migration | An explicit persisted schema/version discriminator for the revised coordinate convention, old-v1 import conversion or retirement, and rejection of silently mixed meanings. The Markdown `spec_schema_version` is not this runtime discriminator. |
+| Typed parameters | Exact integer endpoints, Float64 bit patterns where significant, enum/default normalization and conditional-field rejection. Preserve signed zero where FMT-06 endpoint/identity rules observe it; do not pass Int64 endpoints through Float64. |
+| Resource binding | Immutable profile/configuration and transitive resource content identities, execution/build settings, owned lifetimes and cache-key rules. Names or host paths alone cannot identify engine results. |
+| Consumer migration | Compiler inference, bindings, NUM/CRV consumers, LUT axes, import paths, fixtures and cache/validation identity must agree on the version and coordinate units. |
+
+The gate is still open. These documents do not select a numeric persisted version,
+provide its codec or claim migration completion. Implementations may prototype
+arithmetic independently; they must not attach new formulas to old v1 descriptors
+and defer the discriminator until after registration. See the
+[relative-coordinate migration](FMT_relative_coordinate_scale.md).
+
+## Numerical and dependency plans
+
+Compile immutable per-invocation plans from the effective description and typed
+parameters. Resolve roles, axes, encodings, exact basis/inverse matrices, branch
+thresholds and coefficient enclosures once where possible. For each output,
+represent three distinct support sets: `Data` (formula/copy operands),
+`Validation` (sample-domain checks), and `Descriptor` (structural metadata and
+resource checks). Use the union of required sample sets for reads and its
+transpose for dirty propagation; descriptor checks do not imply sample reads.
+Honor member-defined static support even when a pixel-dependent branch could
+use fewer samples. Do not replace local FMT demand with an existing NUM Whole
+callback merely because its arithmetic is reusable.
+
+Examples include FMT-09 R <- R, FMT-11A l <- Y, and FMT-04B color <- that color
+plus alpha. FMT-01/FMT-08 bit copies establish no coverage validity. FMT-04A->B
+must request the published alpha edge as specified by FMT-04; hidden metadata
+cannot recover a previously consumed sample. Batch/SIMD reads may not cross into
+unrequested peers, unprepared pages, row padding or page gaps.
+
+A suitable native implementation computes a machine-precision candidate, proves
+branch/domain decisions and a conservative enclosure of the complete reference,
+then certifies the final result or falls back to exact/refined evaluation.
+Refinement, scratch and exact state remain budgeted and cancellable. Stable
+algebraic forms can improve certification only within the selected reference
+branch; raw expression and special-value rules still apply.
+
+| Execution contract | Required numerical acceptance |
+| --- | --- |
+| Native strict | Correct rounding at each member-defined boundary, exact copy/branch/special-value rules. |
+| Native accelerated, only where offered | NUM final-output FP32-scaled bound, including its Float64 rule and strict-required classifications; no automatic four-Float64-ULP claim. |
+| ICC/OCIO | Pinned engine/integration/build/resource/settings identity and member-specific acceptance. OCIO Float64 selected colors retain RN32/Float32/widen even for a no-op processor. |
+
+## Optimization admission
+
+An optimization must preserve the member's output bits or permitted error bound,
+metadata, sample/descriptor support, valid coverage, observable failures and
+publication, ownership, resource and cancellation rules. Numerical equality alone
+is insufficient. Apply the following constraints before admitting an optimization:
+
+| Candidate | Admission condition |
+| --- | --- |
+| Channel selection/copy traversal and simultaneous replacement maps | Preserve exact source mappings, bits, requested support and physical alias legality. |
+| FMT-08 copy elimination | Retain the new immutable descriptor, resource owners and validation/cache identity. |
+| Static coefficient preparation and vectorized candidates | Preserve exact coefficient meaning, branch decisions and per-output certification. |
+| FMT-10D matrix-chain fusion | Keep every specified stage rounding and required intermediate failure; a single combined matrix is not generally equivalent. |
+| Transfer encode/decode cancellation | Prove the actual domains, branch joins, saturation, units and rounded results. Paired names are insufficient. |
+| External-engine no-op elimination or batching | Preserve the pinned input/output adapters and required point-path bit results, including dtype conversion. |
+
+FMT-10D with equal source/target bases still has rounded intermediate XYZ; large
+finite RGB can overflow a required intermediate even when an algebraically
+combined matrix is identity. HLG decode(1) in Float64 can fail a following encode
+domain check; PQ's zero plateau and ACES floor/caps lose information. These
+behaviors cannot be removed by fusion. A different once-rounded primitive or
+changed FMT-14B iteration/termination algorithm requires a separate contract.
+
+## Implementation sequence and focused acceptance
+
+1. Close the shared representation gate and validate canonicalization, version
+   rejection, typed endpoints and owned resource identity independently.
+2. Exercise a minimal public workflow spanning channel mapping, metadata assign,
+   FMT-06, a transfer, RGB/XYZ and XYZ/Lab. Check bits, descriptors, sparse ROI,
+   dirty propagation and failure scope against independent expectations.
+3. Prototype difficult native paths early: FMT-14B's fixed 32/64 iterations,
+   ill-conditioned bases, near-neutral cancellation and strict/accelerated
+   boundaries. Report input distribution, certification/fallback frequency,
+   timing and cancellation latency; do not infer speed from operation counts.
+4. Validate pinned ICC/OCIO integrations with independent direct-engine harnesses
+   and analytic/synthetic fixtures. Cover Lab and CMYK unit adapters, FMT-18's
+   source-domain dimension correction (including K-only variation), construction
+   failure latching, resource isolation and OCIO batch/point agreement over tails,
+   alignment, ROI and thread partitions. Wrapper self-comparison is insufficient.
+5. Admit broader optimization only after the preceding behavior is established.
+
+Focused regression inputs include adjacent floats at branch thresholds, signed
+zero/NaN payload copies, exact Int64 endpoints, tiny alpha, large hue, near-singular
+bases, one-component requests with invalid unrequested peers, missing alpha
+coverage, low budgets and cancellation during construction/refinement. Member
+formulas decide which of these inputs are accepted; the list adds no new domains.
+
+Memory measurements distinguish virtual reservation, committed backing, retained
+ancestor owners, valid sample bytes and private scratch/engine state. A view can
+retain a large backing; a full virtual reservation does not prove full physical
+allocation. Page retention until final owner retirement and the prohibition on
+automatic eviction/replay remain unchanged. Gamut containment and luminance
+bounds must be reported separately from perceptual quality; FMT-14B does not
+promise maximum chroma/minimum color difference and FMT-14C is not idempotent.
+These are future implementation gates, not evidence of tests or engines run by
+this documentation revision.
 
 ## Completed member scope and future extensions
 

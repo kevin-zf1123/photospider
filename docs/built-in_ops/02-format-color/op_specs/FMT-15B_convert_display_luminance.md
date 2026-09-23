@@ -24,7 +24,7 @@ normative B section. Proposed/unimplemented; no old operation alias is restored.
 ## Interface and inference
 
 Static direction mandatory; black_nits/white_nits mandatory with 0<=black<white. Match source units and display reference, publish the actual destination unit/range convention.
-One input tensor Value produces values with unchanged Float32/Float64 dtype, shape, axis and slots. Select one RGB/linear-Y Gray group; interpretation defaults to respect and supports call-local override or finite-domain raw. Output metadata follows the family unit/reference rule.
+One input tensor Value produces values with unchanged Float32/Float64 dtype, shape, axis and slots. Select one RGB/linear-Y Gray group; `metadata_mode` defaults to respect and supports call-local override or finite-domain raw. Output metadata follows the family unit/reference rule.
 
 ## Formula, request and errors
 

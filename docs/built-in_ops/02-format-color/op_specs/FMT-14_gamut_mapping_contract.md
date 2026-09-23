@@ -54,7 +54,7 @@ members. Finite signed/HDR inputs are valid candidates for mapping, not automati
 input errors. Scene/display reference is retained; this family does not render
 scene-referred data to display-referred data.
 
-Static fields: `group`, `interpretation=respect|override|raw` (respect default),
+Static fields: `group`, `metadata_mode=respect|override|raw` (respect default),
 applicable source override/assertions, `layout=auto|materialize` (auto default),
 and member-specific fields. Forced `view` is rejected for every member, including
 sample-dependent identity branches. No data-dependent layout or profile choice.

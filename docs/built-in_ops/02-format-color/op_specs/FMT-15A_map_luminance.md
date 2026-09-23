@@ -24,7 +24,7 @@ normative A section. Proposed/unimplemented; no old operation alias is restored.
 ## Interface and inference
 
 Static curve=simple/white_extended, gain=1 default, optional required white for extended, negative_luminance=reject default. Relative linear RGB/linear-Y Gray -> display-relative linear in the same basis.
-One input tensor Value produces values with unchanged Float32/Float64 dtype, shape, axis and slots. Select one RGB/linear-Y Gray group; interpretation defaults to respect and supports call-local override or finite-domain raw. Output metadata follows the family unit/reference rule.
+One input tensor Value produces values with unchanged Float32/Float64 dtype, shape, axis and slots. Select one RGB/linear-Y Gray group; `metadata_mode` defaults to respect and supports call-local override or finite-domain raw. Output metadata follows the family unit/reference rule.
 
 ## Formula, request and errors
 

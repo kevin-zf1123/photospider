@@ -71,6 +71,10 @@ coordinate convention; complete-group validation, authoring, caches, LUT axes,
 tables, sample fixtures and consuming operations must migrate together.
 Old payloads require explicit import conversion or retirement, not a silent
 compatibility alias. No new persisted schema/version number is selected here.
+Closing the [shared representation implementation gate](FMT_common_contract.md#shared-representation-implementation-gate)
+is mandatory before registering consumers or persisting the revised descriptions.
+The document front matter's `spec_schema_version: 1` versions the specification
+format only; it cannot identify either old or revised runtime coordinate units.
 
 The existing interpolation algorithms are scale-linear, but that fact alone
 does not migrate their public metadata or runtime evidence. Affected specs mark

@@ -45,7 +45,7 @@ some otherwise legal virtual bases. B is componentwise and imposes no extra
 primary restriction. Gray lightness/luma is converted explicitly before use.
 Integers and numeric code-domain values require explicit decoding first.
 
-Static fields: group, interpretation=respect|override|raw (respect default),
+Static fields: group, metadata_mode=respect|override|raw (respect default),
 source assertions/override, layout=auto|materialize (auto default), and the
 member fields below. Forced view is rejected even for a numerically identity
 parameter choice because the operation publishes a specified rendering/unit

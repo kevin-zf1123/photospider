@@ -178,3 +178,21 @@ join. Both semantic directions accept finite values, including negative codes
 and values above 1, subject to finite output. The ACEScc floor and both decoding
 caps are preserved. Cct's negative linear toe is not clipped. No half-float
 storage restriction is imposed by the mathematical cap; both dtypes retain it.
+
+## Composition capability table
+
+The [machine-readable capability table](FMT-09_composition_capabilities.json)
+records every selected curve/coefficient variant, semantic input domains, native
+reference, successful-output guarantees, lossy behavior and explicit unit-bridge
+requirements. It is a summary of this mathematical contract, not a runtime codec
+or executable validator. Its `table_version` does not version persisted metadata.
+Domain endpoints are exact decimal strings or named family parameters. `finite`
+still permits arithmetic overflow to fail; it promises no total finite mapping.
+
+Before composing D/E, check the actual stored first-stage result against the
+next stage's input domain and descriptor. In particular, BT.1886's exact bounds
+Lb/Lw can round outside those bounds when not representable in the output dtype.
+HLG has the separate endpoint excess specified above. Even when composition is
+admissible, quantization, underflow, rounded joins and floor/cap branches preclude
+a general inverse-elimination rule. The table does not add a clamp, unit bridge,
+normalization or rendering stage.
