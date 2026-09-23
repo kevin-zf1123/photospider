@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented
+implementation_status: implemented_subset
 implementation_branch: numeric-optimize
 implementation_base_commit: eb0e90c8
 implementation_updated: 2026-09-21
@@ -22,6 +22,17 @@ repository_commit: 6617c78c
 ---
 
 # CRV-06D1: color_ramp_cielch
+
+## Revised lightness coordinate and implementation boundary
+
+The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
+LUT input axes and output table coordinates. Finite values outside 0..1 remain
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
+ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
+and consumers need explicit migration before this revised target is implemented.
+Historical implementation/test evidence below does not establish that migration;
+no silent old/new unit alias or sample-magnitude inference is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -33,7 +44,7 @@ values remain exact.
 
 This independent CIELCh(ab) ramp uses floating radian source hue.
 The ordered dynamic inputs are input, stops, colors; output is named values.
-colors is Float32/Float64[K,3], ordered L*, C*, h.
+colors is Float32/Float64[K,3], ordered l=L*/100, C*, h.
 input and stops independently accept Float32/Float64. stops is [K] with
 1<=K<=65536; input has rank 1..7, and values has shape input.shape+[3].
 All logical element limits, matching K and finite-value rules come from the
@@ -66,7 +77,7 @@ including ResourceExhausted on unfinished certified arithmetic.
 ## Workflow and acceptance
 
 Bind the ordered ports above, stops=[0,1], matching color_description, and
-explicit static parameters. colors=[[20,2,0],[80,4,0]], input=[0.5] gives [[50,3,+0]].
+explicit static parameters. colors=[[0.25,2,0],[0.75,4,0]], input=[0.5] gives [[0.5,3,+0]].
 The example uses the default output unit and a described values result.
 The maintained public Compiler/ExecutionContext workflow and invocation commands are linked below.
 

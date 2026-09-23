@@ -39,7 +39,8 @@ conversion during interpolation.
 Inherit every port, parameter, default, domain, limit, mathematical, precision,
 zero, demand, invalidation, mapping, resource, error and acceptance obligation
 from [CIELCh CRV-06D](CRV-06D_color_ramp_cielch.md), replacing the model with OKLCh,
-L*/C* with OKLab L/C and configurable white with fixed D65. Specifically:
+normalized CIELAB l/C* with OKLab L/C and configurable white with fixed D65.
+The shared lightness revision does not rescale OKLab coordinates. Specifically:
 
 - Floating radian/pi inputs use colors[K,3]; rational input uses
   lightness_chroma[K,2] and Int64 numerator/denominator arrays, q>0.

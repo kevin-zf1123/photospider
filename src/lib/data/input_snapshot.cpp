@@ -86,6 +86,21 @@ Status validate_value(const Value& value,
   if (!value.valid())
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid snapshot Value");
+  for (const auto& facet : value.facets()) {
+    bool image = facet.key == "photospider.image" ||
+                 (facet.key == "photospider.color-array" &&
+                  value.descriptor().shape.size() >= 3);
+    if (facet.key == "photospider.semantic") {
+      auto semantic = decode_semantic(facet);
+      image =
+          semantic.ok() && (semantic.value().kind == SemanticKind::ImagePlane ||
+                            semantic.value().kind == SemanticKind::Mask);
+    }
+    if (image)
+      return Status::failure(
+          ErrorCode::TypeMismatch,
+          "image snapshots require structural planar storage");
+  }
   auto status =
       coverage(value.descriptor(), value.facets(), value.region(), options);
   if (!status.ok())

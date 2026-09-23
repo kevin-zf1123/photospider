@@ -15,6 +15,13 @@ Internal semantic/optimized/plan representations are not public serialization
 formats. The package does not promise that an internal IR from another build
 can be decoded or executed. The daemon never places internal IR on local IPC.
 
+Package 0.20.0 removes 13 legacy format/color registry keys, including
+`numeric.cast` and `numeric.encode_range`; see the
+[retirement record](../built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md).
+This is a breaking operation-surface change. C ABI, WorkflowDocument and trait
+schema versions are unchanged. The installed consumer rejects a 0.19 package
+request and verifies removed-key lookup, invocation and compilation failures.
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and
@@ -349,3 +356,40 @@ This changes C++ trait/specialization layout, requiring an installed-consumer
 rebuild and rejecting package0.17 consumers. Canonical framing14, document2,
 C operation ABI9 and provider ABI1 are unchanged; traits16 changes semantic
 identity. No daemon ownership or persistent format is introduced.
+
+## Package 0.19.0: planar image storage
+
+Package 0.19.0 introduces breaking C++ layouts for structural image storage,
+workflow declarations, operation metadata/traits/callbacks and execution results.
+Consumers rebuild against 0.19; requests for package 0.18 are rejected.
+WorkflowDocument schema **3** rejects schema 2. The document remains a C++
+compiler input, not a newly introduced persistent document format or dual reader.
+OperationTraits is **17**. Semantic, physical-plan and plan-cache framing use
+`semantic-graph-ir-v15`, `physical-plan-v15` and `plan-cache-key-v15`.
+The optimizer rule remains `optimizer-v5-canonical-noop`. The C operation ABI
+remains **9**, provider ABI **1**, and C++17 remains required; unchanged C tables
+do not grant planar operation capability.
+
+`WorkflowInputDeclaration.planar_layout` records explicit image axes, storage
+mode, row pitch and component groups; its affine layout is empty. Planar
+capability and output layout enter operation identity. Source declarations and
+edge inference carry the structural layout. Per-DAG tile geometry remains a
+planning choice included in physical identity. VM addresses, page owners,
+budget identities and residency are excluded from semantic identity.
+
+`PlanarImage` supplies the one CPU image-storage contract: one full-image virtual
+reservation, on-demand page backing, planar row/tile addressing, exact valid
+coverage and owner-retained read/write windows. Successful image outputs use
+`ExecutionResult.images`, with explicit packed-region export. Generic numeric
+Values retain their affine storage. Interleaved image input requires an explicit
+import conversion; legacy image snapshots, Value fragments and callbacks do not
+serve as compatibility implementations. Unsupported image operation/entry-point
+capabilities fail explicitly and require subsequent migration or retirement.
+No old numerical semantics are added as a fallback.
+
+The public [storage contract](../kernel-specs/Tensor-Storage-and-Region-Access.md)
+defines the supported CPU callback subset, resource/lifetime rules and runnable
+workflow acceptance. The installed consumer exercises this structural workflow,
+C SDK/header consumers and generic execution facilities. Older sections above
+record their respective delivery contracts; they do not reinstate retired image
+execution in package 0.19.

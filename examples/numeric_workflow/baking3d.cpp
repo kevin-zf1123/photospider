@@ -70,15 +70,6 @@ ps::numeric::Lut3dSourceBuilder source_builder(unsigned mode,
           ids[0], source.colors, source.colors, profile)));
       return ps::Result<ps::WorkflowNodeOutput>({ids[0], "values"});
     }
-    if (mode == 2) {
-      graph.nodes.push_back({ids[0],
-                             "numeric.cast",
-                             {source.colors},
-                             {{"dtype", std::string("float32")},
-                              {"rounding", std::string("ties_even")},
-                              {"overflow", std::string("reject")}}});
-      return ps::Result<ps::WorkflowNodeOutput>({ids[0], "value"});
-    }
     if (mode == 6) {
       graph.nodes.push_back(take(ps::numeric::matrix_transform_node(
           ids[0], source.colors, ps::WorkflowInputReference{4},
@@ -213,21 +204,6 @@ void facilities(ps::CpuNumericProfile profile) {
   Fixture outside(0, options, axis(), {1.25, .5, .5});
   require(outside.run("axis").ok() && !outside.run("report").ok(),
           "extra range errors do not affect axis");
-  auto narrow_options = options;
-  narrow_options.atol = 0;
-  const auto close_axis =
-      doubles({3, 3}, {1, 1 + 0x1p-23, 0x1p-23, 0, 1, 1, 0, 1, 1});
-  Fixture narrow(2, narrow_options, close_axis);
-  auto rounded = take(narrow.run("report"));
-  auto narrow_report =
-      take(ps::read_lut3d_bake_report(rounded.results.at("report")));
-  require(narrow_report.passed && narrow_report.max_abs_error[0] == 0,
-          "measurement applies LUT at explicit table dtype");
-  auto desc =
-      take(ps::lut3d_bake_description(rounded.results.at("report").schema()));
-  require(desc.source_dtype == ps::ElementType::Float32 &&
-              desc.table_dtype == ps::ElementType::Float32,
-          "source cast and default table dtype are preserved");
   auto hue = color;
   hue.model = ps::ColorModel::Cielch;
   hue.primaries.reset();
@@ -255,9 +231,8 @@ void facilities(ps::CpuNumericProfile profile) {
           changed.results.at("report").object_id() !=
               first.results.at("report").object_id(),
       "new shared-parameter snapshot obtains new report");
-  std::cout << "LUT3D repeated extras, retained failed report, explicit "
-               "Float32 measurement, "
-               "ignored-input grid validation and shared snapshots PASS\n";
+  std::cout << "LUT3D repeated extras, retained failed report, ignored-input "
+               "grid validation and shared snapshots PASS\n";
 }
 void authoring(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
@@ -887,7 +862,7 @@ void probe(ps::CpuNumericProfile profile) {
       std::memcpy(&value, &bits, 8);
       return value;
     };
-    require((mode == 0 || mode == 1 || mode == 2 || (mode == 5 || mode == 6)) &&
+    require((mode == 0 || mode == 1 || (mode == 5 || mode == 6)) &&
                 method < 2 && (dtype == 3 || dtype == 4) && extra_count < 64,
             "bake probe framing");
     const auto absolute = read_double(), relative = read_double();

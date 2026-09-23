@@ -1,28 +1,24 @@
-# 多输出与 Atomic 联合执行示例
+# 多输出图像迁移示例
 
-`main.cpp` 仅使用已安装的 C++17 公开 API，包含四种 workflow 和独立数值 oracle。
-构建、static/shared 独立安装命令见 [英文说明](README.md)。每次运行打印输出
-shape、`node_id:output_index` 对应的实际执行次数、joint group 数量，以及每个
-regional source 真正读取的 Region 集合。传输集合与逐输出依赖证书分开；证书在
-`ExecutionResult::dependencies` 中可查询。最终应输出 `multi-output oracle=passed`。
+本 C++17 源码使用公开命名输出和可选 joint 执行 API。包 0.20.0 移除 `420` 场景及其
+`color.rgb_to_ycbcr420` 依赖。保留 `split`、`channels`、`gaussian` 三个旧图像场景
+供迁移。它们能够构建，但旧 typed 图像绑定会被当前 planar 存储门禁拒绝，
+不属于活动运行验收。
 
-- `420`：Y 为 3×5，Cb/Cr 为 2×3，匹配 long-double BT.709 与有效边缘 box oracle。
-  Y-only 没有兄弟输出执行。可把 `WorkflowNodeOutput{1,"cb"}` 接入 HW field 算子。
-- `split`：full/left/right 为 3×5×3、3×2×3、3×3×3，独立 ROI 精确对应源坐标。
-  可修改 `split_x` 和 `PlanningOptions::output_regions`。
-- `channels`：三组独立奇偶、非对称 kernel 与 anchor，逐样本精确匹配标量卷积。
-  G-only 只读取 input0 和 input2；input1/input3 对 G 的 dirty 影响为空。
-- `gaussian`：默认 radius=1.25、sigma=0.9，产生 5×5 kernel。通过公开
-  `channel.extract` → `field.convolve` 精确复算 image R。Kernel-only 图像读取为零。
+```sh
+cmake --build build --target photospider_multi_output_workflow -j 8
+build/examples/multi_output_workflow/photospider_multi_output_workflow --help
+```
 
-参数为 `--scenario all|420|split|channels|gaussian`、`--joint on|off`、
-`--radius FLOAT`、`--sigma FLOAT`。Radius/sigma 必须有限且位于 `[0,64]`。
-Radius 0、0.25、1、1.25、2、64 对应边长 1、3、3、5、5、129；sigma=0
-保持尺寸并生成中心冲激。示例显式给予 100,000,000 单位依赖/work 预算，以运行
-最大 kernel 及独立复算。radius>8 时图像与复算输出仅请求 `(1,2)` 像素，
-仍生成并检查完整 kernel，以限制无结果保留示例中的重复上游观察。实际产品应根据图像尺寸选择预算；不足时返回错误。
+源码保留独立偏移、卷积与高斯系数 oracle。Gaussian 复算使用单独提供的 R 参考平面，
+不再调用已退休的通道提取。`all|split|channels|gaussian`、`--joint on|off`、
+`--radius`、`--sigma` 参数保留供迁移使用；成功执行图像仍需完成迁移。
 
-选择单端口可以只保留 `WorkflowDocument::outputs` 中对应条目，也可对 frozen
-plan 使用 `execute_fragments` 与 `DemandQuery`。端口与 shape 在编译时确定。
-运行时变长端口、RequestRecord 联合执行不在本轮范围。独立安装消费者检查同时
-运行 joint on/off，并继承 producer 的 sanitizer 设置。
+独立构建消费已安装的 Photospider 0.20：
+`cmake -S examples/multi_output_workflow -B build/multi-output-consumer -DCMAKE_PREFIX_PATH=/path/to/install`。
+安装消费测试构建此示例，但不将它列作通过的图像运行测试，另行运行
+[格式退休回归](../../tests/integration/test_format_color_retirement.cpp)。
+
+支持边界见[多输出说明](../../docs/kernel-architecture/zh/Multi-Output-Operations.zh.md)，
+删除范围见[FMT 退休记录](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md)。
+[英文说明](README.md)为权威来源。

@@ -19,7 +19,7 @@ def bits(value, dtype=3):
 
 
 def reference(mode, method, dtype, model, shape, axis, extra, atol, rtol):
-    source_type = 4 if mode == 2 else 3
+    source_type = 3
     grids = []
     for d, n in enumerate(shape):
         a, b, step = (number(v, 3) for v in axis[d*3:d*3+3])
@@ -101,9 +101,9 @@ def cases():
             axis = axis_override
         extra = [[bits(v) for v in point] for point in points]
         rows.append((mode, method, dtype, model, shape, axis, extra, bits(atol), bits(rtol)))
-    for mode, method, dtype, model in itertools.product((0, 1, 2, 5, 6), (0, 1), (3, 4), range(8)):
+    for mode, method, dtype, model in itertools.product((0, 1, 5, 6), (0, 1), (3, 4), range(8)):
         add(mode, method, dtype, model, points=((F(1, 2),)*3, (F(1, 4), F(3, 4), F(1, 2))), atol=F(1, 10))
-    for mode, method, dtype in itertools.product((0, 1, 2, 5, 6), (0, 1), (3, 4)):
+    for mode, method, dtype in itertools.product((0, 1, 5, 6), (0, 1), (3, 4)):
         for mask in range(8):
             ends = tuple((1, 0) if mask & (1 << d) else (0, 1) for d in range(3))
             add(mode, method, dtype, shape=(3, 4, 2), endpoints=ends, atol=F(1, 8), rtol=F(1, 20))
@@ -112,10 +112,8 @@ def cases():
             ends = tuple((F(rng.randrange(4), 8), F(rng.randrange(8, 17), 8)) for _ in range(3))
             add(mode, method, dtype, shape=shape, endpoints=ends, atol=rng.choice((0, F(1, 100), F(1, 4))), rtol=rng.choice((0, F(1, 5))))
         add(mode, method, dtype, points=((2, F(1, 2), F(1, 2)),))
-    # Source Float32 cast belongs to reference, and internal LUT must use the
-    # explicit table dtype when measuring the rounded cell center.
+    # Internal LUT measurement uses the explicit table dtype.
     for dtype, method in itertools.product((3, 4), (0, 1)):
-        add(2, method, dtype, endpoints=((1, 1+F(2)**-23), (0, 1), (0, 1)))
         add(0, method, dtype, endpoints=((1, 1+F(2)**-52), (0, 1), (0, 1)))
         add(1, method, dtype, points=((F(1, 2),)*3,)*3, atol=F(1, 4))
         add(1, method, dtype, atol=F(1, 4)-F(2)**-54)

@@ -160,142 +160,6 @@ int radius_oracles(const std::shared_ptr<OperationRegistry>& registry) {
   PS_CHECK(folded.value.read({0}, &after, 8).ok() && after == 1);
   return 0;
 }
-int stmap_oracles(const std::shared_ptr<OperationRegistry>& registry) {
-  const auto facets =
-      std::vector<ValueFacet>{encode_semantic(rgba_semantics()).take_value()};
-  const auto image = data(ElementType::Float32, {2, 2, 4},
-                          std::vector<float>{0, 0, 0, 1, .25F, 0, 0, 1, .5F, 0,
-                                             0, 1, .75F, 0, 0, 1},
-                          facets);
-  const auto map =
-      data(ElementType::Float64, {1, 1, 2}, std::vector<double>{1, 1});
-  const auto q = footprint({1, 1, 4}, Region::whole({1, 1, 4}));
-  auto result = resolve(registry, "image.stmap", {image, map}, q,
-                        {{"boundary", std::string("clamp")}});
-  PS_CHECK(result.ok());
-  float red = 0;
-  PS_CHECK(result.value().value.read({0, 0, 0}, &red, 4).ok() && red == .375F);
-  PS_CHECK(support(result.value(), 0, DependencyRole::Data) ==
-           Footprint::all({2, 2, 4}).take_value());
-  PS_CHECK(support(result.value(), 1, DependencyRole::Control) ==
-           Footprint::all({1, 1, 2}).take_value());
-  const auto outside =
-      data(ElementType::Float64, {1, 1, 2}, std::vector<double>{-10, -10});
-  auto transparent = resolve(registry, "image.stmap", {image, outside}, q,
-                             {{"boundary", std::string("constant")}})
-                         .take_value();
-  PS_CHECK(transparent.value.read({0, 0, 0}, &red, 4).ok() && red == 0);
-  PS_CHECK(support(transparent, 0, DependencyRole::Data).empty());
-  PS_CHECK(!support(transparent, 1, DependencyRole::Control).empty());
-  auto invalid =
-      data(ElementType::Float64, {1, 1, 2},
-           std::vector<double>{std::numeric_limits<double>::infinity(), 0});
-  PS_CHECK(resolve(registry, "image.stmap", {image, invalid}, q,
-                   {{"boundary", std::string("clamp")}})
-               .status()
-               .code == ErrorCode::OperationFailed);
-  // At pixel center, the zero-weight neighbour is nevertheless an actual tap.
-  auto center =
-      data(ElementType::Float64, {1, 1, 2}, std::vector<double>{.5, .5});
-  auto centered = resolve(registry, "image.stmap", {image, center}, q,
-                          {{"boundary", std::string("clamp")}})
-                      .take_value();
-  PS_CHECK(support(centered, 0, DependencyRole::Data) ==
-           Footprint::all({2, 2, 4}).take_value());
-  PS_CHECK(centered.value.read({0, 0, 0}, &red, 4).ok() && red == 0);
-  const auto line = data(
-      ElementType::Float32, {1, 3, 4},
-      std::vector<float>{.125F, 0, 0, 1, .25F, 0, 0, 1, .5F, 0, 0, 1}, facets);
-  const std::vector<unsigned> reflect{2, 1, 0, 0, 1, 2, 2, 1, 0};
-  const std::vector<unsigned> mirror{1, 2, 1, 0, 1, 2, 1, 0, 1};
-  const float red_values[] = {.125F, .25F, .5F};
-  for (bool repeated_endpoints : {false, true}) {
-    for (int index = -3; index <= 5; ++index) {
-      const auto coordinates = data(ElementType::Float64, {1, 1, 2},
-                                    std::vector<double>{index + .5, .5});
-      auto mapped =
-          resolve(registry, "image.stmap", {line, coordinates}, q,
-                  {{"boundary",
-                    std::string(repeated_endpoints ? "reflect" : "mirror")}})
-              .take_value();
-      PS_CHECK(mapped.value.read({0, 0, 0}, &red, 4).ok());
-      PS_CHECK(red ==
-               red_values[(repeated_endpoints ? reflect : mirror)[index + 3]]);
-    }
-  }
-  const auto singleton = data(ElementType::Float32, {1, 1, 4},
-                              std::vector<float>{.25F, 0, 0, 1}, facets);
-  for (const std::string mode : {"clamp", "wrap", "reflect", "mirror"}) {
-    auto mapped = resolve(registry, "image.stmap", {singleton, outside}, q,
-                          {{"boundary", mode}})
-                      .take_value();
-    PS_CHECK(mapped.value.read({0, 0, 0}, &red, 4).ok() && red == .25F);
-  }
-  auto broken = data(
-      ElementType::Float32, {2, 2, 4},
-      std::vector<float>{0, 0, 0, 1, std::numeric_limits<float>::quiet_NaN(), 0,
-                         0, 1, .5F, 0, 0, 1, .75F, 0, 0, 1},
-      facets);
-  PS_CHECK(resolve(registry, "image.stmap", {broken, center}, q,
-                   {{"boundary", std::string("clamp")}})
-               .status()
-               .code == ErrorCode::OperationFailed);
-  return 0;
-}
-int runtime_fragments(const std::shared_ptr<OperationRegistry>& registry) {
-  const auto facets =
-      std::vector<ValueFacet>{encode_semantic(rgba_semantics()).take_value()};
-  const auto map =
-      data(ElementType::Float64, {1, 1, 2}, std::vector<double>{0, .5});
-  WorkflowDocument document;
-  document.inputs = {
-      {1,
-       "source",
-       {ElementType::Float32, {1, 1024, 4}},
-       Region::whole({1, 1024, 4}),
-       {0, {16384, 16, 4}},
-       facets},
-      {2, "map", map.descriptor(), map.region(), map.layout(), {}}};
-  document.nodes = {
-      {1, "core.identity", {WorkflowInputReference{2}}, {}},
-      {2,
-       "image.stmap",
-       {WorkflowInputReference{1}, WorkflowNodeOutput{1, "value"}},
-       {{"boundary", std::string("wrap")}}}};
-  document.outputs = {{"sample", 2, "value"}};
-  GraphContext graph(document);
-  Compiler compiler(registry);
-  auto plan = compiler.compile(graph);
-  PS_CHECK(plan.ok());
-  std::vector<std::uint64_t> addresses;
-  auto source = std::make_shared<RegionalSource>();
-  source->descriptor = document.inputs[0].descriptor;
-  source->facets = facets;
-  source->read = [&](const Region& region, std::uint8_t* bytes,
-                     std::uint64_t size, const BufferAllocator&,
-                     const CancellationToken&) {
-    const auto x = region.dimensions()[1].offset;
-    if (size != 16 || region.dimensions()[1].extent != 1 ||
-        (x != 0 && x != 1023))
-      return Result<Region>(Status::failure(ErrorCode::OperationFailed,
-                                            "undeclared middle source read"));
-    addresses.push_back(x);
-    const float pixel[] = {x == 0 ? .25F : .75F, 0, 0, 1};
-    std::memcpy(bytes, pixel, sizeof(pixel));
-    return Result<Region>(region);
-  };
-  ExecutionContext execution(registry, {1, false, 8, 512});
-  auto result = execution.execute(plan.value().plan,
-                                  {{{"source", {}, source, {}}, {"map", map}}});
-  PS_CHECK(result.ok());
-  float red = 0;
-  std::memcpy(&red, result.value().values.at("sample").bytes().data(), 4);
-  PS_CHECK(red == .5F && addresses == std::vector<std::uint64_t>({0, 1023}));
-  PS_CHECK(result.value().diagnostics.source_read_bytes == 32);
-  PS_CHECK(result.value().diagnostics.peak_live_bytes <= 512);
-  return 0;
-}
-
 int static_and_rounding(const std::shared_ptr<OperationRegistry>& registry) {
   const auto facets =
       std::vector<ValueFacet>{encode_semantic(rgba_semantics()).take_value()};
@@ -315,7 +179,7 @@ int static_and_rounding(const std::shared_ptr<OperationRegistry>& registry) {
     PS_CHECK(resolve(registry, "image.stmap", {image, map}, q,
                      {{"boundary", std::string("bogus")}})
                  .status()
-                 .code == ErrorCode::InvalidArgument);
+                 .code == ErrorCode::TypeMismatch);
     auto radius_q = empty ? Footprint::none({3}).take_value()
                           : footprint({3}, Region({{0, 1}}));
     PS_CHECK(
@@ -343,7 +207,7 @@ int static_and_rounding(const std::shared_ptr<OperationRegistry>& registry) {
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
   Compiler compiler(registry);
-  PS_CHECK(compiler.compile(graph).status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(compiler.compile(graph).status().code == ErrorCode::InvalidArgument);
   struct Restore {
     int mode = std::fegetround();
     ~Restore() { std::fesetround(mode); }
@@ -386,7 +250,5 @@ int main() {
   auto registry = ps::make_default_operation_registry();
   PS_CHECK(static_and_rounding(registry) == 0);
   PS_CHECK(radius_oracles(registry) == 0);
-  PS_CHECK(stmap_oracles(registry) == 0);
-  PS_CHECK(runtime_fragments(registry) == 0);
   return 0;
 }

@@ -176,8 +176,12 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
     request.limits.sets.maximum_boxes = 32;
   if (mode == 23)
     request.limits.sets.maximum_boxes = 4;
-  auto session =
-      registry.start_dependency(definition.key, request).take_value();
+  auto started = registry.start_dependency(definition.key, request);
+  if (mode == 24) {
+    PS_CHECK(started.status().code == ErrorCode::TypeMismatch);
+    return 0;
+  }
+  auto session = started.take_value();
   unsigned allocations = 0, live = 0;
   BufferAllocator allocator([&](std::uint64_t) {
     ++live;
@@ -216,9 +220,6 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
     PS_CHECK(allocations == 0);
   if (mode == 23)
     PS_CHECK(progress.status().message == "GPU discovery metadata limit");
-  if (mode == 24)
-    PS_CHECK(progress.status().message ==
-             "GPU discovery omits image channel closure");
   if (expected != ErrorCode::Ok)
     return 0;
   if (mode == 25) {

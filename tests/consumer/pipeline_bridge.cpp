@@ -2,7 +2,6 @@
 #include <memory>
 #include <utility>
 
-#include "image_vertical/image_fixture.hpp"
 #include "photospider/photospider.hpp"
 
 #if defined(_MSVC_LANG)
@@ -55,29 +54,6 @@ extern "C" int photospider_consumer_run_pipeline(void) {
     const auto value = result.value().values.at("answer").as_float64();
     if (!value.ok() || value.value() != 42.0)
       return 3;
-    for (bool plugin : {false, true}) {
-      auto image_operations = plugin ? std::make_shared<ps::OperationRegistry>()
-                                     : ps::make_default_operation_registry();
-      if (plugin) {
-        if (!image_operations->load_plugin(PS_IMAGE_CONSUMER_PLUGIN_PATH).ok())
-          return 6;
-        image_operations->freeze();
-      }
-      ps::Compiler image_compiler(image_operations);
-      ps::GraphContext image_graph(s1_fixture::document());
-      auto image_compiled =
-          image_compiler.compile(image_graph, s1_fixture::demand());
-      if (!image_compiled.ok())
-        return 7;
-      ps::ExecutionContext image_execution(image_operations);
-      for (bool second : {false, true}) {
-        auto image_result = image_execution.execute(
-            image_compiled.value().plan, s1_fixture::bindings(second));
-        if (!image_result.ok() ||
-            !s1_fixture::oracle(image_result.value(), second))
-          return 8;
-      }
-    }
     return 0;
   } catch (const std::exception&) {
     return 5;

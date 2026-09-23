@@ -870,7 +870,7 @@ for exact oracle, layout/error/resource validation and public/core performance.
 followed by output dtype (default Float64) and profile.
 
 All 66 keys have `values` output with empty facets. Generic arrays retain shape;
-use explicit broadcast/cast operators for adaptation. Most basic transforms
+use explicit broadcast for shape adaptation; dtype conversion awaits FMT-06. Most basic transforms
 support all four dtypes; neg excludes UInt8, while roots, reciprocals and
 transcendentals require Float32/64. Integer range failures affect the complete Whole invocation.
 Rational denominators must be positive at every logical coordinate,
@@ -940,7 +940,7 @@ profile defaults to Strict. Angle arguments are ordered `(y,x)`, other arguments
 `(a,b)`. Both inputs must match positive rank-1..8 shape and dtype, with at most
 2^40 elements. `values` preserves shape/dtype with empty facets. Divide, power
 and angles require Float32/64; the other five accept UInt8/Int64/Float32/64.
-Use explicit broadcast/cast operators for adaptation.
+Use explicit broadcast for shape adaptation; dtype conversion awaits FMT-06.
 
 ```sh
 cmake --build build/numeric --target photospider_numeric_binary -j 8
@@ -1425,7 +1425,7 @@ auto log_inverse = ps::numeric::log2_shaper_inverse_node(
 
 Check each `Result` before accessing its value, as the complete editable
 `Fixture` and `examples()` in [shapers.cpp](shapers.cpp) do. Linear helpers
-append ordinary remap, scalar constant, cast and constant-view nodes, return a
+append ordinary remap, scalar constant, one-element sequence and constant-view nodes, return a
 connectable output reference and preserve existing exports. They reserve IDs
 against existing declarations and references. They do not register additional
 primitive keys. The inverse includes the mandatory scalar bound-order guard.
@@ -1496,9 +1496,16 @@ auto baked = ps::numeric::bake_lut3d(
 document.outputs = {{"report", baked.value().report.source_node, "report"}};
 ```
 
+The baking3d executable currently encounters the legacy image-operation planar
+gate before completing its suite. The color-array and color-ramp executables
+also retain image paths awaiting planar migration. Their source/oracle material
+below is not a claim that those full suites currently pass. The format-retirement
+change preserves their shared data/math infrastructure without migrating those
+image paths.
+
 The complete binding, compilation, execution and inspection code is in
 [examples() and Fixture](baking3d.cpp). `source_builder()` adds editable square,
-explicit Float32 cast, shared scalar gain, constant and cross-component sources
+shared scalar gain, constant and cross-component sources
 using current public helpers. `available_workflow_node_ids` finds collision-free
 IDs before appending source nodes. A builder may append nodes only; an error or
 exception leaves the caller's document unchanged. Pass optional `ResourceBindings`
@@ -1514,7 +1521,8 @@ cell are always included, with each coordinate rounded once from its two actual
 Float64 neighbors. Extras follow centers in array order and must lie in-domain;
 repeated points count separately. Source and converted colors must remain finite
 and legal in the explicitly supplied same-model descriptions. Table dtype defaults
-to the inferred source dtype; a source Float32 cast is part of the reference.
+to the inferred source dtype. The former Float32 source-cast fixture and its
+oracle cases were removed with the old numeric.cast interface in package 0.20.0.
 
 `read_lut3d_bake_report(result.results.at("report"))` reads a sealed
 `curve.bake_lut3d.report` v1 Result. The fixed 289-byte payload contains pass/counts,

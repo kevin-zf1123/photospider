@@ -138,6 +138,21 @@ Result<ValueFragments> ValueFragments::create_view(
   auto status = input_internal::canonicalize_facets(&facets);
   if (!status.ok())
     return Result<ValueFragments>(status);
+  for (const auto& facet : facets) {
+    bool image = facet.key == "photospider.image" ||
+                 (facet.key == "photospider.color-array" &&
+                  descriptor.shape.size() >= 3);
+    if (facet.key == "photospider.semantic") {
+      auto semantic = decode_semantic(facet);
+      image =
+          semantic.ok() && (semantic.value().kind == SemanticKind::ImagePlane ||
+                            semantic.value().kind == SemanticKind::Mask);
+    }
+    if (image)
+      return Result<ValueFragments>(
+          Status::failure(ErrorCode::TypeMismatch,
+                          "image fragments require structural planar storage"));
+  }
   status = input_internal::validate_port_metadata({}, descriptor, facets);
   if (!status.ok())
     return Result<ValueFragments>(status);

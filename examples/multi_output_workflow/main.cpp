@@ -147,48 +147,6 @@ std::vector<float> pixels() {
     data[i] = static_cast<float>((i * 7) % 23) / 22;
   return data;
 }
-std::array<long double, 3> ycbcr(const float* rgb) {
-  std::array<long double, 3> encoded;
-  for (unsigned c = 0; c < 3; ++c) {
-    const long double linear = rgb[c];
-    encoded[c] = linear < .018L ? 4.5L * linear
-                                : 1.099L * std::pow(linear, .45L) - .099L;
-  }
-  const auto y =
-      .2126L * encoded[0] + .7152L * encoded[1] + .0722L * encoded[2];
-  return {y, (encoded[2] - y) / 1.8556L, (encoded[0] - y) / 1.5748L};
-}
-void color(bool joint) {
-  auto data = pixels();
-  auto image = samples({3, 5, 3}, data, true);
-  WorkflowDocument doc;
-  doc.nodes = {{1, "color.rgb_to_ycbcr420", {WorkflowInputReference{1}}, {}}};
-  doc.outputs = {{"y", 1, "y"}, {"cb", 1, "cb"}, {"cr", 1, "cr"}};
-  auto result = run(doc, {image}, joint, "420");
-  const std::array<std::string, 3> names{"y", "cb", "cr"};
-  for (unsigned c = 0; c < 3; ++c) {
-    const std::uint64_t stride = c ? 2 : 1;
-    for (std::uint64_t y = 0; y < (c ? 2U : 3U); ++y)
-      for (std::uint64_t x = 0; x < (c ? 3U : 5U); ++x) {
-        long double expected = 0;
-        unsigned count = 0;
-        for (auto sy = y * stride;
-             sy < std::min<std::uint64_t>(3, (y + 1) * stride); ++sy)
-          for (auto sx = x * stride;
-               sx < std::min<std::uint64_t>(5, (x + 1) * stride); ++sx) {
-            expected += ycbcr(&data[(sy * 5 + sx) * 3])[c];
-            ++count;
-          }
-        require(std::abs(sample(result.values.at(names[c]), {y, x}) -
-                         expected / count) < 1e-7L,
-                "420 oracle");
-      }
-  }
-  doc.outputs = {{"y", 1, "y"}};
-  auto only = run(doc, {image}, joint, "420-only-y");
-  for (const auto& timing : only.diagnostics.operation_timings)
-    require(timing.output.output_index == 0, "unrequested sibling executed");
-}
 void split(bool joint) {
   auto data = pixels();
   WorkflowDocument doc;
@@ -279,25 +237,24 @@ void gaussian(bool joint, double radius, double sigma) {
   const auto side = static_cast<std::uint64_t>(2 * extent + 1);
   auto data = pixels();
   WorkflowDocument doc;
-  doc.nodes = {
-      {1,
-       "image.gaussian_blur_with_kernel",
-       {WorkflowInputReference{1}},
-       {{"radius", radius}, {"sigma", sigma}}},
-      {2,
-       "channel.extract",
-       {WorkflowInputReference{1}},
-       {{"index", std::int64_t{0}}}},
-      {3,
-       "field.convolve",
-       {WorkflowNodeOutput{2, "value"}, WorkflowNodeOutput{1, "kernel"}},
-       {{"anchor_y", extent},
-        {"anchor_x", extent},
-        {"boundary", std::string("clamp")}}}};
+  doc.nodes = {{1,
+                "image.gaussian_blur_with_kernel",
+                {WorkflowInputReference{1}},
+                {{"radius", radius}, {"sigma", sigma}}},
+               {3,
+                "field.convolve",
+                {WorkflowInputReference{2}, WorkflowNodeOutput{1, "kernel"}},
+                {{"anchor_y", extent},
+                 {"anchor_x", extent},
+                 {"boundary", std::string("clamp")}}}};
   doc.outputs = {{"image", 1, "image"},
                  {"kernel", 1, "kernel"},
                  {"recomputed", 3, "value"}};
   auto image = samples({3, 5, 3}, data, true);
+  std::vector<float> reference_values;
+  for (std::size_t i = 0; i < data.size(); i += 3)
+    reference_values.push_back(data[i]);
+  const auto reference = samples({3, 5}, reference_values);
   PlanningOptions planning;
   // Keep the maximum-kernel demonstration small while retaining its complete
   // kernel output and a real independently recomputed image observation.
@@ -305,7 +262,7 @@ void gaussian(bool joint, double radius, double sigma) {
     planning.output_regions = {{"image", Region({{1, 1}, {2, 1}, {0, 3}})},
                                {"recomputed", Region({{1, 1}, {2, 1}})}};
   }
-  auto result = run(doc, {image}, joint, "gaussian", planning);
+  auto result = run(doc, {image, reference}, joint, "gaussian", planning);
   require(result.values.at("kernel").descriptor().shape ==
               std::vector<std::uint64_t>({side, side}),
           "kernel shape");
@@ -337,7 +294,7 @@ void gaussian(bool joint, double radius, double sigma) {
                   sample(result.values.at("recomputed"), {y, x}),
               "public convolution recomputation");
   doc.outputs = {{"kernel", 1, "kernel"}};
-  auto only = run(doc, {image}, joint, "gaussian-only-kernel");
+  auto only = run(doc, {image, reference}, joint, "gaussian-only-kernel");
   require(only.diagnostics.source_read_count == 0, "kernel read image samples");
 }
 }  // namespace
@@ -349,7 +306,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
       const std::string option = argv[i];
       if (option == "--help") {
-        std::cout << "--scenario all|420|split|channels|gaussian --joint "
+        std::cout << "--scenario all|split|channels|gaussian --joint "
                      "on|off --radius FLOAT --sigma FLOAT\n";
         return 0;
       }
@@ -368,11 +325,9 @@ int main(int argc, char** argv) {
         require(false, "unknown option");
       }
     }
-    require(scenario == "all" || scenario == "420" || scenario == "split" ||
+    require(scenario == "all" || scenario == "split" ||
                 scenario == "channels" || scenario == "gaussian",
             "scenario");
-    if (scenario == "all" || scenario == "420")
-      color(joint);
     if (scenario == "all" || scenario == "split")
       split(joint);
     if (scenario == "all" || scenario == "channels")

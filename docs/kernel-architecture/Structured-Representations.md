@@ -128,8 +128,12 @@ rather than allocate an unbounded resident index.
 
 ## Planar YCbCr
 
-Version 1 follows the existing
-[`color.rgb_to_ycbcr420` contract](Multi-Output-Operations.md#colorrgb_to_ycbcr420):
+This retained version-1 data schema records the former converter's fixed
+representation. Package 0.20.0 removes `color.rgb_to_ycbcr420`; the schema is not
+an implementation of an I/O codec. FMT-16 is retired; internal image planes
+remain same-size and planar. This legacy schema does not authorize heterogeneous
+planes as a canonical kernel image.
+Its historical fields are:
 BT.709 transfer/matrix, sRGB D65 primaries, preserved scene/display reference,
 full-range Float32 Y in [0,1] and signed Cb/Cr in [-.5,.5]. Plane roles and
 reconstruction/box-clipped boundary mode are fixed by the schema version.

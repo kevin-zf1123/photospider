@@ -12,7 +12,7 @@ category: 01-numeric
 kind: primitive
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented
+implementation_status: implemented_subset
 implementation_branch: numeric-optimize
 implementation_base_commit: eb0e90c8
 implementation_updated: 2026-09-21
@@ -22,6 +22,17 @@ repository_commit: 6617c78c
 ---
 
 # CRV-06C: color_ramp_cielab
+
+## Revised lightness coordinate and implementation boundary
+
+The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
+LUT input axes and output table coordinates. Finite values outside 0..1 remain
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
+ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
+and consumers need explicit migration before this revised target is implemented.
+Historical implementation/test evidence below does not establish that migration;
+no silent old/new unit alias or sample-magnitude inference is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -33,23 +44,23 @@ The maintainer requires separate CIELAB, CIELCh(ab), OKLab and OKLCh ramp
 implementations. This specification covers CIELAB only, rather than an ambiguous
 Lab mode. Use explicit stops and a model-described color array under the
 [ramp family](CRV-06_color_ramp.md). This primitive's clarification is complete;
-its ColorArray representation and registry implementation are available in the
-current runtime; the specification remains Proposed.
+its numerical interpolation is available, while the revised coordinate metadata
+remains pending as noted above; the specification remains Proposed.
 
 ## Confirmed interpolation and white
 
-Linearly interpolate the L*, a*, b* components directly and return CIELAB in the
+Linearly interpolate the normalized l=L*/100, a*, b* components directly and return CIELAB in the
 same explicitly declared reference white. The authoring default is D50. Do not
 automatically convert the result to RGB or adapt between reference whites;
 those are separate color-management operations. No RGB transfer/gamut parameter
 is used to redefine the CIELAB coordinate values.
 
-All three CIELAB components may take any finite values. L*'s customary [0,100]
+All three CIELAB components may take any finite values. l's nominal [0,1]
 reference range is documented but not a clipping/validity limit. a*/b* retain
 their signed values. Signed/HDR coordinate extensions and out-of-RGB-gamut colors
 are not rejected by this ramp; conversion/gamut policy belongs to other operators.
 
-This version uses exactly L*,a*,b* with no alpha. The maintainer selected the
+This version uses exactly l,a*,b* with no alpha. The maintainer selected the
 same three-component-only scope for CIELCh(ab), OKLab and OKLCh, with coverage
 handled separately. No four-channel perceptual-space association is inferred.
 
@@ -59,14 +70,14 @@ Inherit [RGB ramp](CRV-06A_color_ramp_rgb.md) for the explicit input/stops/color
 port order, static color-description matching, K=1..65536, finite strictly
 increasing stops, clamp/reject default clamp, singleton behavior, independently
 mixed Float32/Float64 inputs and output dtype defaulting to colors dtype.
-Replace RGB/RGBA with colors[K,3] in L*,a*,b* order and output input.shape+[3].
+Replace RGB/RGBA with colors[K,3] in l,a*,b* order and output input.shape+[3].
 Input rank is 1..7 and all input/color/output logical counts are <=2^40.
 The output is a described CIELAB color array with unchanged reference white,
 not a generic untagged array or inferred RGB Image. No ICC or transfer execution
 is part of this primitive.
 
 Required static String parameters are color_description, dtype and out_of_domain.
-The description identifies CIELAB, an explicit white xy (default D50), L*/a*/b*
+The description identifies CIELAB, an explicit white xy (default D50), l/a*/b*
 channel units and alpha=none. No RGB primaries or RGB transfer override is accepted.
 Direct nodes supply all parameters; constructors write dtype and clamp defaults.
 An attached colors description must match the explicit description, including white.
@@ -121,9 +132,9 @@ OperationFailed/ArithmeticOverflow at Run scope. Host resource,
 backend, upstream/typed, cancellation and stale errors retain their categories,
 origin and scope. No partial successful Lab tuple is published.
 
-Fixture: stops=[0,1], colors=[[20,10,-20],[80,-10,40]], input=[0.5]
--> values=[[50,0,10]], with the same explicit D50 CIELAB description. Also use
-L* outside [0,100], large opposite signed a*/b*, white mismatch, all source/destination
+Fixture: stops=[0,1], colors=[[0.25,10,-20],[0.75,-10,40]], input=[0.5]
+-> values=[[0.5,0,10]], with the same explicit D50 CIELAB description. Also use
+l outside [0,1], large opposite signed a*/b*, white mismatch, all source/destination
 dtype combinations, direct signed zeros and final narrowing overflow. Independent
 exact rational interpolation and bit conversion are the numeric oracle.
 

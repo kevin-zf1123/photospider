@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.18.0
+  VERSION 0.20.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -116,10 +116,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/math_add.cpp
   plugins/ops/01-numeric/numeric_abs.cpp
   plugins/ops/01-numeric/numeric_add.cpp
-  plugins/ops/01-numeric/numeric_cast.cpp
   plugins/ops/01-numeric/numeric_clamp.cpp
   plugins/ops/01-numeric/numeric_divide.cpp
-  plugins/ops/01-numeric/numeric_encode_range.cpp
   plugins/ops/01-numeric/numeric_maximum.cpp
   plugins/ops/01-numeric/numeric_mean.cpp
   plugins/ops/01-numeric/numeric_ordered_scan.cpp
@@ -159,17 +157,6 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
-  plugins/ops/02-format-color/alpha_associate.cpp
-  plugins/ops/02-format-color/alpha_unassociate.cpp
-  plugins/ops/02-format-color/channel_extract.cpp
-  plugins/ops/02-format-color/channel_merge.cpp
-  plugins/ops/02-format-color/channel_swizzle.cpp
-  plugins/ops/02-format-color/color_assign.cpp
-  plugins/ops/02-format-color/color_lab_to_xyz.cpp
-  plugins/ops/02-format-color/color_rgb_to_xyz.cpp
-  plugins/ops/02-format-color/color_rgb_to_ycbcr420.cpp
-  plugins/ops/02-format-color/color_xyz_to_lab.cpp
-  plugins/ops/02-format-color/color_xyz_to_rgb.cpp
   plugins/ops/03-generation/field_constant.cpp
   plugins/ops/03-generation/field_coordinate.cpp
   plugins/ops/04-mask-morphology/component_area.cpp
@@ -241,6 +228,7 @@ set(
   src/lib/execution/resources.cpp
   src/lib/execution/cancellation.cpp
   src/lib/data/value.cpp
+  src/lib/data/planar_image.cpp
   src/lib/data/semantic.cpp
   src/lib/data/color_array.cpp
   src/lib/data/icc_profile.cpp
@@ -493,26 +481,8 @@ add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
-  foreach(_joint on off)
-    add_test(NAME test_multi_output_workflow_${_joint}
-      COMMAND photospider_multi_output_workflow --scenario all --joint ${_joint})
-  endforeach()
-  foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
-    add_test(NAME test_s4_${_scenario} COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native)
-    add_test(NAME test_s4_${_scenario}_plugin COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native --module $<TARGET_FILE:photospider_rgba32f_ops>)
-    set_tests_properties(test_s4_${_scenario} test_s4_${_scenario}_plugin PROPERTIES SKIP_RETURN_CODE 77)
-  endforeach()
-  add_test(NAME test_s4_cpu COMMAND photospider_s4_gpu_workflow --backend cpu --layout roi --no-cache)
-  add_test(NAME test_s3_cache COMMAND photospider_s3_image_workflow --scenario cache)
-  add_test(NAME test_s3_cache_plugin COMMAND photospider_s3_image_workflow --scenario cache --module $<TARGET_FILE:photospider_rgba32f_ops>)
-  add_test(NAME test_s3_preview COMMAND photospider_s3_image_workflow)
-  add_test(NAME test_s3_preview_plugin COMMAND photospider_s3_image_workflow --module $<TARGET_FILE:photospider_rgba32f_ops>)
-  add_test(NAME test_s2_vertical COMMAND photospider_regional_image_vertical)
-  add_test(NAME test_s2_vertical_plugin COMMAND photospider_regional_image_vertical
-    $<TARGET_FILE:photospider_rgba32f_ops>)
-  add_test(NAME test_image_vertical COMMAND photospider_image_vertical)
-  add_test(NAME test_image_vertical_plugin COMMAND photospider_image_vertical
-    "$<TARGET_FILE:photospider_rgba32f_ops>")
+  # Legacy image examples are retained as migration sources, not active
+  # executable storage contracts. The planar workflow below is the image gate.
   add_library(
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
     ${PHOTOSPIDER_KERNEL_SOURCES}
@@ -641,7 +611,6 @@ if(BUILD_TESTING)
   photospider_add_test(test_multi_output_contract Photospider::kernel tests/unit/test_multi_output_contract.cpp)
   target_compile_definitions(test_multi_output_contract PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
   add_dependencies(test_multi_output_contract multi_output_fixture)
-  photospider_add_test(test_multi_output_ops Photospider::kernel tests/integration/test_multi_output_ops.cpp)
   photospider_add_test(test_joint_execution Photospider::kernel tests/integration/test_joint_execution.cpp)
   photospider_add_test(test_multi_output_execution Photospider::kernel tests/integration/test_multi_output_execution.cpp)
   target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
@@ -661,68 +630,23 @@ if(BUILD_TESTING)
     add_dependencies(test_semantic_contract operation_bad_contract_${_case})
   endforeach()
 
-  photospider_add_test(test_bindings Photospider::kernel tests/integration/test_bindings.cpp)
-  target_include_directories(test_bindings PRIVATE examples)
-  add_dependencies(test_bindings photospider_image_vertical photospider_regional_image_vertical)
-  add_library(operation_bad_image_fixture MODULE tests/fixtures/operation_bad_image_fixture.c)
-  target_link_libraries(operation_bad_image_fixture PRIVATE Photospider::operation_sdk)
-  target_compile_definitions(operation_bad_image_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-  add_library(data_provider_float32_fixture MODULE tests/fixtures/data_provider_float32_fixture.c)
-  target_link_libraries(data_provider_float32_fixture PRIVATE Photospider::data_provider_sdk)
-  target_compile_definitions(data_provider_float32_fixture PRIVATE PHOTOSPIDER_DATA_PROVIDER_BUILD)
-  add_dependencies(test_bindings photospider_rgba32f_ops operation_bad_image_fixture data_provider_float32_fixture)
-  target_compile_definitions(test_bindings PRIVATE
-    PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>"
-    PS_BAD_IMAGE_FIXTURE_PATH="$<TARGET_FILE:operation_bad_image_fixture>"
-    PS_FLOAT32_PROVIDER_PATH="$<TARGET_FILE:data_provider_float32_fixture>")
-  foreach(_port_case RANGE 1 8)
-    add_library(operation_bad_port_${_port_case} MODULE tests/fixtures/operation_bad_port_fixture.cpp)
-    target_link_libraries(operation_bad_port_${_port_case} PRIVATE Photospider::operation_sdk)
-    target_compile_definitions(operation_bad_port_${_port_case} PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD PS_BAD_PORT_CASE=${_port_case})
-    add_dependencies(test_bindings operation_bad_port_${_port_case})
-    target_compile_definitions(test_bindings PRIVATE PS_BAD_PORT_${_port_case}="$<TARGET_FILE:operation_bad_port_${_port_case}>")
-  endforeach()
+  photospider_add_test(test_generic_binding_identity Photospider::kernel tests/unit/test_generic_binding_identity.cpp)
+  target_include_directories(test_generic_binding_identity PRIVATE examples)
 
-  photospider_add_test(test_regional_execution Photospider::kernel tests/integration/test_regional_execution.cpp)
-  target_include_directories(test_regional_execution PRIVATE examples)
-  add_dependencies(test_regional_execution photospider_rgba32f_ops)
-  target_compile_definitions(test_regional_execution PRIVATE PS_IMAGE_FIXTURE_PATH="$<TARGET_FILE:photospider_rgba32f_ops>")
-  add_executable(test_disk_cache tests/integration/test_disk_cache.cpp)
-  target_link_libraries(test_disk_cache PRIVATE Photospider::kernel)
-  target_include_directories(test_disk_cache PRIVATE tests examples src/lib)
-  add_test(NAME test_disk_cache COMMAND ${CMAKE_COMMAND}
-    -DPHOTOSPIDER_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-    -DPHOTOSPIDER_DISK_TEST=$<TARGET_FILE:test_disk_cache>
-    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunDiskCache.cmake)
-  photospider_add_test(test_s3_operations Photospider::kernel tests/integration/test_s3_operations.cpp)
-  add_dependencies(test_s3_operations photospider_rgba32f_ops photospider_s3_image_workflow)
-  add_test(NAME test_s3_operations_plugin COMMAND test_s3_operations $<TARGET_FILE:photospider_rgba32f_ops>)
-  foreach(_scenario cast-range channels alpha-color expression-lut generator-gain components basic-curves basic-masks basic-filters basic-fields all)
+  foreach(_scenario numeric expression-lut basic-filters)
     add_test(NAME test_foundations_${_scenario} COMMAND photospider_foundations_workflow --scenario ${_scenario})
   endforeach()
   photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
   target_include_directories(test_basic_operations PRIVATE examples)
-  photospider_add_test(test_component_operations Photospider::kernel tests/integration/test_component_operations.cpp)
-  add_dependencies(test_component_operations photospider_foundations_workflow)
-  add_dependencies(test_multi_output_ops photospider_multi_output_workflow)
+  photospider_add_test(test_generic_component_operations Photospider::kernel tests/integration/test_generic_component_operations.cpp)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
   add_library(expression_contract_fixture MODULE tests/fixtures/expression_contract_fixture.c)
   target_link_libraries(expression_contract_fixture PRIVATE Photospider::operation_sdk)
   set_target_properties(expression_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
   target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
   add_dependencies(test_expression_operations expression_contract_fixture)
-  photospider_add_test(test_color_operations Photospider::kernel tests/integration/test_color_operations.cpp)
-  foreach(_case RANGE 0 2)
-    add_library(channel_contract_${_case} MODULE tests/fixtures/channel_contract_fixture.c)
-    target_link_libraries(channel_contract_${_case} PRIVATE Photospider::operation_sdk)
-    set_target_properties(channel_contract_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-    target_compile_definitions(channel_contract_${_case} PRIVATE PS_CHANNEL_BAD_CASE=${_case})
-    add_dependencies(test_color_operations channel_contract_${_case})
-  endforeach()
-  target_compile_definitions(test_color_operations PRIVATE
-    PS_CHANNEL_CONTRACT_FIXTURE="$<TARGET_FILE:channel_contract_0>"
-    PS_BAD_CHANNEL_1="$<TARGET_FILE:channel_contract_1>"
-    PS_BAD_CHANNEL_2="$<TARGET_FILE:channel_contract_2>")
+  photospider_add_test(test_format_color_retirement Photospider::kernel tests/integration/test_format_color_retirement.cpp)
+  photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_matrix_certificate photospider_test_kernel tests/unit/test_matrix_certificate.cpp)
   target_include_directories(test_matrix_certificate PRIVATE plugins/ops src/lib)
@@ -735,13 +659,9 @@ if(BUILD_TESTING)
   photospider_add_test(test_ordered_scan Photospider::kernel tests/integration/test_ordered_scan.cpp)
   photospider_add_test(test_scan_waiters photospider_test_kernel tests/integration/test_scan_waiters.cpp)
   target_include_directories(test_scan_waiters PRIVATE src/lib)
-  photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
-  target_include_directories(test_computed_scalar PRIVATE examples)
-  add_dependencies(test_computed_scalar photospider_rgba32f_ops)
-  add_test(NAME test_computed_scalar_plugin COMMAND test_computed_scalar $<TARGET_FILE:photospider_rgba32f_ops>)
   # This test directly exercises private cache validation and allocation code.
-  photospider_add_test(test_result_cache photospider_test_kernel tests/integration/test_result_cache.cpp)
-  target_include_directories(test_result_cache PRIVATE src/lib)
+  photospider_add_test(test_generic_result_cache photospider_test_kernel tests/integration/test_generic_result_cache.cpp)
+  target_include_directories(test_generic_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
   photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
   photospider_add_test(test_execution_dependencies Photospider::kernel tests/integration/test_execution_dependencies.cpp)
@@ -787,19 +707,8 @@ if(BUILD_TESTING)
   photospider_add_test(test_value_fragments Photospider::kernel tests/unit/test_value_fragments.cpp)
   photospider_add_test(test_fragment_atlas Photospider::kernel tests/unit/test_fragment_atlas.cpp)
   photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
+  photospider_add_test(test_planar_image_workflow Photospider::kernel tests/integration/test_planar_image_workflow.cpp)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
-  photospider_add_test(test_scaled_regions Photospider::kernel tests/unit/test_scaled_regions.cpp)
-  photospider_add_test(test_tile_plan Photospider::kernel tests/unit/test_tile_plan.cpp)
-  photospider_add_test(test_native_cache Photospider::kernel tests/integration/test_native_cache.cpp)
-  target_include_directories(test_native_cache PRIVATE examples)
-  add_dependencies(test_native_cache photospider_rgba32f_ops)
-  add_test(NAME test_native_cache_plugin COMMAND test_native_cache $<TARGET_FILE:photospider_rgba32f_ops>)
-  set_tests_properties(test_native_cache test_native_cache_plugin PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_metal_images Photospider::kernel tests/integration/test_metal_images.cpp)
-  target_include_directories(test_metal_images PRIVATE examples)
-  add_dependencies(test_metal_images photospider_rgba32f_ops photospider_s4_gpu_workflow)
-  add_test(NAME test_metal_images_plugin COMMAND test_metal_images $<TARGET_FILE:photospider_rgba32f_ops>)
-  set_tests_properties(test_metal_images test_metal_images_plugin PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_dependency_gpu Photospider::kernel tests/unit/test_dependency_gpu.cpp)
@@ -833,7 +742,6 @@ if(BUILD_TESTING)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
   photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
-  photospider_add_test(test_layer Photospider::kernel tests/unit/test_layer.cpp)
   add_subdirectory(examples/atom_outcomes_workflow)
   add_test(NAME example_atom_outcomes_workflow COMMAND photospider_atom_outcomes_workflow)
   photospider_add_test(test_atom_outcomes Photospider::kernel tests/integration/test_atom_outcomes.cpp)
@@ -848,8 +756,6 @@ if(BUILD_TESTING)
   add_test(NAME example_fft_workflow COMMAND photospider_fft_workflow)
   add_subdirectory(examples/statistics_workflow)
   add_test(NAME example_statistics_workflow COMMAND photospider_statistics_workflow)
-  photospider_add_test(photospider_layer_workflow Photospider::kernel examples/layer_workflow/main.cpp)
-  photospider_add_test(photospider_layer_raster_workflow Photospider::kernel examples/layer_workflow/raster.cpp)
   photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
   photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
   photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
@@ -959,16 +865,6 @@ if(BUILD_TESTING)
 endif()
 
 install(FILES plugins/ops/09-composite/inpaint_ns_license.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
-
-if(BUILD_TESTING)
-  photospider_add_test(test_inpaint_ns Photospider::kernel tests/integration/test_inpaint_ns.cpp)
-  target_include_directories(test_inpaint_ns PRIVATE examples)
-  if(PHOTOSPIDER_ENABLE_INPAINT_OPENCV)
-    target_include_directories(test_inpaint_ns SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_compile_definitions(test_inpaint_ns PRIVATE PHOTOSPIDER_TEST_INPAINT_OPENCV)
-    target_link_libraries(test_inpaint_ns PRIVATE opencv_core opencv_photo)
-  endif()
-endif()
 
 install(FILES third_party/sleef/LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider RENAME SLEEF.txt)

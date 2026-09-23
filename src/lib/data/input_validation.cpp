@@ -172,6 +172,41 @@ bool whole_region(const Region& region,
 }
 
 Status validate_declaration(WorkflowInputDeclaration* declaration) {
+  if (declaration->planar_layout) {
+    const auto& layout = *declaration->planar_layout;
+    auto structural =
+        PlanarImage::validate_layout(declaration->descriptor, layout);
+    if (!structural.ok())
+      return structural;
+    const auto rank = declaration->descriptor.shape.size();
+    if ((rank != 2 && rank != 3) || layout.height_axis >= rank ||
+        layout.width_axis >= rank || layout.height_axis == layout.width_axis ||
+        (rank == 2 && layout.channel_axis) ||
+        (rank == 3 && (!layout.channel_axis || *layout.channel_axis >= rank ||
+                       *layout.channel_axis == layout.height_axis ||
+                       *layout.channel_axis == layout.width_axis)) ||
+        !whole_region(declaration->region, declaration->descriptor.shape) ||
+        declaration->layout.byte_offset ||
+        !declaration->layout.byte_strides.empty() ||
+        !declaration->layout.origin.empty())
+      return failure(ErrorCode::InvalidArgument,
+                     "invalid structural image declaration");
+    return canonicalize_facets(&declaration->facets);
+  }
+  for (const auto& facet : declaration->facets) {
+    if (facet.key == "photospider.image" ||
+        (facet.key == "photospider.color-array" &&
+         declaration->descriptor.shape.size() >= 3))
+      return failure(ErrorCode::InvalidArgument,
+                     "image declaration requires planar layout");
+    if (facet.key == "photospider.semantic") {
+      auto semantic = decode_semantic(facet);
+      if (semantic.ok() && (semantic.value().kind == SemanticKind::ImagePlane ||
+                            semantic.value().kind == SemanticKind::Mask))
+        return failure(ErrorCode::InvalidArgument,
+                       "image declaration requires planar layout");
+    }
+  }
   auto dense = dense_metadata(declaration->descriptor);
   if (!dense.ok())
     return dense.status();
@@ -192,6 +227,9 @@ Status validate_declaration(WorkflowInputDeclaration* declaration) {
 
 Status validate_binding(const WorkflowInputDeclaration& declaration,
                         const Value& value) {
+  if (declaration.planar_layout)
+    return failure(ErrorCode::TypeMismatch,
+                   "structural image binding requires planar storage");
   if (!value.valid())
     return failure(ErrorCode::InvalidArgument, "invalid bound Value");
   if (value.descriptor().element_type != declaration.descriptor.element_type ||

@@ -595,24 +595,7 @@ Case legacy_fixture(const std::string& key, std::uint64_t n) {
     std::memcpy(&bits, &f, 4);
     return bits;
   };
-  if (key == "numeric.cast" || key == "numeric.encode_range") {
-    ps::WorkflowNode node{
-        1,
-        key,
-        {values(n, key == "numeric.cast" ? 1.5 : .5)},
-        {{"dtype", std::string(key == "numeric.cast" ? "float32" : "uint8")},
-         {"rounding", std::string("ties_even")},
-         {"overflow", std::string("reject")}}};
-    if (key == "numeric.encode_range") {
-      node.parameters["src_min"] = 0.;
-      node.parameters["src_max"] = 1.;
-      node.parameters["dst_min"] = 0.;
-      node.parameters["dst_max"] = 254.;
-    }
-    c.node(std::move(node));
-    c.dtype = key == "numeric.cast" ? T::Float32 : T::UInt8;
-    c.expected.assign(n, key == "numeric.cast" ? f32(1.5) : 127);
-  } else if (key == "numeric.mean" || key == "numeric.variance") {
+  if (key == "numeric.mean" || key == "numeric.variance") {
     c.node({1, key, {values(n, 1)}, {}});
     c.shape = {1};
     expect(1, key == "numeric.mean" ? 1 : 0);
@@ -857,26 +840,14 @@ int main(int argc, char** argv) {
                  "bytes,peak_payload,peak_metadata,retained_payload,retained_"
                  "metadata,source_elements,evaluated,fallbacks\n";
     if (argc > 2 && std::string(argv[2]) == "legacy") {
-      for (const std::string key : {"numeric.cast",
-                                    "numeric.encode_range",
-                                    "numeric.add",
-                                    "numeric.subtract",
-                                    "numeric.multiply",
-                                    "numeric.divide",
-                                    "numeric.clamp",
-                                    "numeric.mean",
-                                    "numeric.ordered_scan",
-                                    "numeric.variance",
-                                    "numeric.minimum",
-                                    "numeric.maximum",
-                                    "numeric.abs",
-                                    "field.apply_lut_1d",
-                                    "field.smoothstep",
-                                    "math.add",
-                                    "curve.sample_linear",
-                                    "curve.sample_monotone",
-                                    "numeric.sample_expression",
-                                    "lut.apply_1d"})
+      for (const std::string key :
+           {"numeric.add", "numeric.subtract", "numeric.multiply",
+            "numeric.divide", "numeric.clamp", "numeric.mean",
+            "numeric.ordered_scan", "numeric.variance", "numeric.minimum",
+            "numeric.maximum", "numeric.abs", "field.apply_lut_1d",
+            "field.smoothstep", "math.add", "curve.sample_linear",
+            "curve.sample_monotone", "numeric.sample_expression",
+            "lut.apply_1d"})
         for (std::uint64_t n : {1, 256}) {
           std::cerr << key << " N=" << n << '\n';
           measure(legacy_fixture(key, n), "legacy");
