@@ -14,6 +14,11 @@ inspection_commit: d49d1840
 
 # FMT-01: channel extraction family
 
+Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
+Descriptions of old registrations below record the inspected baseline only;
+those keys and pixel callbacks are no longer available. This target remains
+Proposed and unimplemented.
+
 Inherit [FMT-common](FMT_common_contract.md), including the selected generic
 tensor/metadata target, consumer-scoped validation, raw computation and call-local
 override. Inherit NUM numerical and resource conventions through that contract.
@@ -59,11 +64,11 @@ not fabricate a complete RGB/CMYK model from one selected component.
 
 ## Current implementation versus target
 
-[channel.extract](../../../../plugins/ops/02-format-color/channel_extract.cpp)
-currently registers a typed Float32/Float64 HWC to HW Whole operation with static
+channel.extract
+previously registered a typed Float32/Float64 HWC to HW Whole operation with static
 Int64 index in 0..63 and below C. Its implementation copies bytes through
-[color_common.hpp](../../../../plugins/ops/02-format-color/color_common.hpp).
-This is the existing subset, not acceptance of the family described here.
+color_common.hpp.
+This is the historical subset, not acceptance of the family described here.
 
 [NUM gather](../../01-numeric/op_specs/NUM-10B_gather.md) provides a dynamic index
 vector and repeated/reordered selections, preserves rank, clears output facets
@@ -258,14 +263,16 @@ descriptions with the shape mapping. With a removed channel axis, keep the
 component description without claiming that the output still has that axis.
 Spatial axes keep their own origin/step; extraction does not resample them.
 
-For premultiplied RGB, the extracted R component remains premultiplied R. For
-Lab, L* remains in its native unit and is not relabeled as linear gray. For alpha,
+For an explicitly described premultiplied numeric boundary payload, extracted R
+remains a premultiplied component, not a canonical complete image. For
+Lab, l=L*/100 remains normalized perceptual lightness and is not relabeled as
+linear gray. For alpha,
 coverage remains a descriptive role; extraction does not validate its interval.
 Record the component's source interpretation without attaching an active complete
-RGB/CMYK tuple guarantee. This also applies to singleton selections. An alpha
-relationship is descriptive; later operations needing its samples declare the corresponding alpha input,
-which can be a plane/group of the same tensor or a separate tensor. Extraction
-itself does not introduce a hidden alpha read.
+RGB/CMYK tuple guarantee. This also applies to singleton selections. Component alpha provenance is descriptive and creates no persistent external
+alpha binding. Later numeric consumers declare any needed alpha input explicitly;
+complete images use internal alpha under FMT-common. Extraction itself does not
+introduce a hidden alpha read.
 
 In raw mode, if the explicit axis agrees with the described channel axis, project
 known channel descriptions structurally without color-domain validation. If it

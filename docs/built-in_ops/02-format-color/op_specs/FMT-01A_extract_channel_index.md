@@ -23,7 +23,7 @@ inspection_commit: d49d1840
 Inherit the complete [FMT-01 family contract](FMT-01_channel_extraction_contract.md)
 for ports, shape inference, metadata modes, exact mapping, regional support,
 layout, ownership, resources, errors and acceptance. These are proposed keys;
-the existing `channel.extract` Whole typed-HWC node is a documented subset,
+the removed `channel.extract` Whole typed-HWC node is a historical baseline,
 not an alias or a conforming implementation of these entries.
 Registration targets the default operation registry. The family supplies the
 support matrix, reference/optimized algorithm, performance acceptance plan and
