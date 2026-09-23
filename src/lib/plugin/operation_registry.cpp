@@ -228,6 +228,12 @@ Result<ElementType> decode_element_type(std::uint32_t type) {
       return Result<ElementType>(ElementType::Float32);
     case PS_OPERATION_ELEMENT_FLOAT64_V9:
       return Result<ElementType>(ElementType::Float64);
+    case PS_OPERATION_ELEMENT_INT8_V9:
+      return Result<ElementType>(ElementType::Int8);
+    case PS_OPERATION_ELEMENT_UINT16_V9:
+      return Result<ElementType>(ElementType::UInt16);
+    case PS_OPERATION_ELEMENT_INT16_V9:
+      return Result<ElementType>(ElementType::Int16);
     default:
       return Result<ElementType>(Status::failure(
           ErrorCode::TypeMismatch, "plugin output uses unknown element type"));
@@ -1016,6 +1022,9 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const bool staged = definition.traits.outputs[0].dependency_version == 1;
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
   const bool planar = definition.traits.planar_storage_capable;
+  const bool dual_planar = planar && staged && definition.prepare_static &&
+                           definition.start_dependency &&
+                           definition.planar_callback;
   if (!valid_key(definition.key) || !traits_status.ok() ||
       definition.traits.requires_metadata_specialization !=
           (static_cast<bool>(definition.specialize_metadata) ||
@@ -1031,7 +1040,7 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
                                  }))) ||
         !definition.traits.deterministic ||
         !definition.traits.side_effect_free)) ||
-      (planar
+      (planar && !dual_planar
            ? (!definition.planar_callback || definition.callback ||
               definition.traits.input_count == 0 ||
               definition.start_dependency || definition.start_result ||
@@ -1059,23 +1068,35 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
                    OperationRegionRule::Whole &&
                definition.traits.outputs[0].region_rule !=
                    OperationRegionRule::Elementwise))
-           : definition.planar_callback ||
-                 std::any_of(definition.traits.outputs.begin(),
-                             definition.traits.outputs.end(),
-                             [](const auto& output) {
-                               return output.planar_layout.has_value();
-                             }) ||
-                 (structured
-                      ? (!definition.start_result ||
-                         definition.start_dependency || definition.callback)
-                  : staged
-                      ? (!definition.start_dependency || definition.callback ||
-                         definition.start_result)
-                      : (!definition.callback || definition.start_dependency ||
-                         definition.start_result ||
-                         definition.validate_dependency))))
+           : !dual_planar &&
+                 (definition.planar_callback ||
+                  std::any_of(definition.traits.outputs.begin(),
+                              definition.traits.outputs.end(),
+                              [](const auto& output) {
+                                return output.planar_layout.has_value();
+                              }) ||
+                  (structured
+                       ? (!definition.start_result ||
+                          definition.start_dependency || definition.callback)
+                   : staged
+                       ? (!definition.start_dependency || definition.callback ||
+                          definition.start_result)
+                       : (!definition.callback || definition.start_dependency ||
+                          definition.start_result ||
+                          definition.validate_dependency)))))
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
+  if (dual_planar &&
+      (definition.callback || definition.start_result ||
+       definition.start_joint || definition.validate_dependency ||
+       definition.specialize_metadata || definition.traits.input_count != 1 ||
+       definition.traits.outputs.size() != 1 ||
+       definition.traits.outputs[0].planar_layout ||
+       definition.traits.outputs[0].output_schema.kind !=
+           OperationPortKind::Value ||
+       definition.traits.supports_gpu))
+    return Status::failure(ErrorCode::InvalidArgument,
+                           "dual storage operation definition is malformed");
   if (static_cast<bool>(definition.start_joint) !=
           (definition.traits.joint_contract != 0) ||
       definition.traits.joint_contract > 2 ||
@@ -1932,6 +1953,7 @@ OperationRegistry::prepare_operation(
         output.output_semantic_input = 0;
         output.output_semantic_parameter.clear();
         output.output_facets = std::move(metadata.facets);
+        output.planar_layout = std::move(metadata.planar_layout);
         output.atomic_trailing_axes = metadata.atomic_trailing_axes;
         output.regional_atomic = specialization.regional_atomic;
         output.preserve_output_views = specialization.preserve_output_views;
@@ -2349,6 +2371,15 @@ Status OperationRegistry::invoke_planar(
   auto status = validate_operation_parameters(definition->traits, parameters);
   if (!status.ok())
     return status;
+  const bool channel_extract =
+      key.compare(0, 22, "channel.extract_index_") == 0 ||
+      key.compare(0, 22, "channel.extract_named_") == 0;
+  if (channel_extract &&
+      std::get<std::string>(parameters.at("layout")) != "materialize")
+    return {ErrorCode::InvalidArgument,
+            "ViewUnavailable: direct planar output cannot replace its owner",
+            FailureReason::InvalidDomain,
+            {FailureOrigin::Domain, FailureScope::Run}};
   if (inputs.empty() || output_region.empty() ||
       !output_region.validate(output.descriptor().shape).ok())
     return Status::failure(ErrorCode::InvalidArgument,
@@ -2396,8 +2427,12 @@ Status OperationRegistry::invoke_planar(
         input.config().row_pitch_bytes, input.config().groups};
     metadata.push_back(std::move(item));
   }
+  auto prepared = prepare_operation(key, metadata, parameters);
+  if (!prepared.ok())
+    return prepared.status();
+  const auto& resolved_traits = prepared.value()->traits();
   auto expected_output =
-      infer_operation_output(definition->traits, metadata, parameters);
+      infer_operation_output(resolved_traits, metadata, parameters);
   if (!expected_output.ok())
     return expected_output.status();
   const auto& inferred = expected_output.value();
@@ -2426,14 +2461,14 @@ Status OperationRegistry::invoke_planar(
       !same_groups)
     return Status::failure(ErrorCode::TypeMismatch,
                            "planar output differs from inferred contract");
-  if (definition->traits.outputs[0].region_rule == OperationRegionRule::Whole &&
+  if (resolved_traits.outputs[0].region_rule == OperationRegionRule::Whole &&
       !input_internal::whole_region(output_region, output.descriptor().shape))
     return Status::failure(ErrorCode::InvalidArgument,
                            "Whole planar output requires whole region");
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     auto required = input_internal::derive_input_demand(
-        definition->traits, output_region, output.descriptor().shape,
-        inputs[i].descriptor().shape, definition->traits.input_schema[i].kind);
+        resolved_traits, output_region, output.descriptor().shape,
+        inputs[i].descriptor().shape, resolved_traits.input_schema[i].kind);
     if (!required.ok())
       return required.status();
     const auto& actual = input_demands[i].dimensions();

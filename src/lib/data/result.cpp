@@ -87,7 +87,7 @@ Status SchemaTemplate::validate(bool resolved) const {
   for (std::size_t i = 0; i < fields.size(); ++i) {
     const auto& field = fields[i];
     const auto type = static_cast<std::uint32_t>(field.element_type);
-    if (!key_valid(field.key) || !add_key(field.key) || type < 1 || type > 4 ||
+    if (!key_valid(field.key) || !add_key(field.key) || type < 1 || type > 7 ||
         field.record_shape.size() > 7 ||
         !extent_valid(field.rows, resolved, i) ||
         !row_bytes(static_cast<std::uint32_t>(i)).ok())
@@ -112,7 +112,7 @@ Result<std::uint64_t> SchemaTemplate::row_bytes(std::uint32_t field) const {
   if (field >= fields.size())
     return Result<std::uint64_t>(invalid_schema());
   const auto type = static_cast<std::uint32_t>(fields[field].element_type);
-  if (type < 1 || type > 4)
+  if (type < 1 || type > 7)
     return Result<std::uint64_t>(invalid_schema());
   std::uint64_t bytes = Value::element_size(fields[field].element_type);
   for (const auto extent : fields[field].record_shape) {

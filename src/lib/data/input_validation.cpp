@@ -35,8 +35,8 @@ bool valid_constraint(const OperationPortConstraint& port) {
   }
   if (!port.result_schema_id.empty() || port.result_schema_version)
     return false;
-  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 10 ||
-      (port.element_type_mask & ~UINT32_C(15)) ||
+  if (port.rank > 8 || port.element_type > 7 || port.semantic_kind > 10 ||
+      (port.element_type_mask & ~UINT32_C(127)) ||
       (port.element_type && port.element_type_mask))
     return false;
   if (port.kind != OperationPortKind::Typed &&
@@ -322,7 +322,9 @@ Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
     const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
-  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency)
+  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency &&
+      !(traits.planar_storage_capable &&
+        traits.outputs[0].static_dependency_pieces))
     return Result<Region>(
         Status::failure(ErrorCode::InvalidArgument,
                         "dependency program requires runtime resolution"));
@@ -375,6 +377,48 @@ Result<Region> derive_input_demand(
   }
   switch (traits.outputs[0].region_rule) {
     case OperationRegionRule::Dependency:
+      if (traits.planar_storage_capable && traits.input_count == 1 &&
+          traits.outputs[0].static_dependency_pieces &&
+          traits.outputs[0].static_dependency_pieces->size() == 1) {
+        const auto& piece = traits.outputs[0].static_dependency_pieces->front();
+        for (const auto& map : piece.inputs) {
+          if (map.port != 0 ||
+              map.roles != static_cast<std::uint32_t>(DependencyRole::Data) ||
+              map.axes.size() != input_shape.size())
+            continue;
+          std::vector<RegionDimension> mapped;
+          mapped.reserve(map.axes.size());
+          for (std::size_t axis = 0; axis < map.axes.size(); ++axis) {
+            const auto& relation = map.axes[axis];
+            if (relation.observation_axis < 0) {
+              mapped.push_back(relation.fixed);
+            } else {
+              if (static_cast<std::size_t>(relation.observation_axis) >=
+                  output_demand.rank())
+                return Result<Region>(
+                    failure(ErrorCode::InvalidArgument,
+                            "invalid static planar dependency axis"));
+              const auto source =
+                  output_demand.dimensions()[static_cast<std::size_t>(
+                      relation.observation_axis)];
+              const auto offset =
+                  static_cast<__int128>(source.offset) + relation.translation;
+              if (offset < 0 || offset > UINT64_MAX)
+                return Result<Region>(
+                    failure(ErrorCode::InvalidArgument,
+                            "static planar dependency translation overflows"));
+              mapped.push_back(
+                  {static_cast<std::uint64_t>(offset), source.extent});
+            }
+          }
+          Region demand(std::move(mapped));
+          if (!demand.validate(input_shape).ok())
+            return Result<Region>(
+                failure(ErrorCode::InvalidArgument,
+                        "static planar dependency exceeds input"));
+          return Result<Region>(std::move(demand));
+        }
+      }
       return Result<Region>(
           failure(ErrorCode::InvalidArgument,
                   "runtime dependency relation is unresolved"));
@@ -450,7 +494,7 @@ Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
                               const std::vector<ValueFacet>& facets) {
   const auto element = static_cast<std::uint32_t>(descriptor.element_type);
-  if (element < 1 || element > 4 || descriptor.shape.empty() ||
+  if (element < 1 || element > 7 || descriptor.shape.empty() ||
       descriptor.shape.size() > 8 ||
       std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
                   [](auto n) { return n == 0; }))

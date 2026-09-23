@@ -3,6 +3,7 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal {
+Status register_channel_extraction(OperationRegistry* registry);
 /** @brief Registers the source-tree operations grouped by docs/built-in_ops. */
 Status register_builtin_operations(OperationRegistry* registry);
 Status register_numeric_layouts(OperationRegistry* registry);

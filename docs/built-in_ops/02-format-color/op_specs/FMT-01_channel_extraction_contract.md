@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: d49d1840
@@ -14,10 +14,16 @@ inspection_commit: d49d1840
 
 # FMT-01: channel extraction family
 
+Runtime update: the CPU registrations and public split helper are implemented.
+See the [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-01-channel-extraction)
+for current storage behavior, validation commands and the measured performance scope.
+Proposed is retained as the specification decision status.
+
+
 Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
 Descriptions of old registrations below record the inspected baseline only;
 those keys and pixel callbacks are no longer available. This target remains
-Proposed and unimplemented.
+Proposed; runtime implementation is described above.
 
 Inherit [FMT-common](FMT_common_contract.md), including the selected generic
 tensor/metadata target, consumer-scoped validation, raw computation and call-local
@@ -86,7 +92,7 @@ therefore uses ordinary graph limits rather than widening that native interface.
 The front-matter branch/commit records code inspection at ops-specs@d49d1840.
 The subsequently committed kernel storage target is documented at ecfb1631; that
 documentation commit adds no runtime support. D1_draft describes the mathematical
-and interface draft, while Proposed and not_implemented retain their separate
+and interface draft, while specification decision status and implementation status retain separate
 meanings from the [category maturity definitions](../../README.md#规格完整程度).
 
 Dependencies are FMT-common's tensor metadata consumption/codec migration,
@@ -94,7 +100,7 @@ native support for the selected missing integer widths, the kernel virtual
 image/page-window contract, and the public exact dependency/publication path.
 C additionally depends on A's authoring and execution entry. The new codec's
 public encoding and the page-window API are implementation prerequisites; this
-family does not claim they already exist. B's name table and output component
+family now uses the public codec and page-window APIs linked above. B's name table and output component
 description must use that shared schema rather than a private substitute.
 
 ## Support matrix
@@ -400,8 +406,11 @@ the nontrivial A/B/C fixtures and the inherited special-value bit cases.
 
 ## Performance acceptance plan
 
-Performance remains unmeasured until the new entries and kernel storage exist.
-Use the following declared workloads in the public implementation harness:
+Native index-extraction measurements now cover FP32 continuous/tiled planes,
+view/materialize, cross-tile ROI, UInt8/Float64 and the Apple profile; see the
+[performance workflow](../../../../examples/channel_extraction_performance/README.md).
+Named lookup and split consumption remain unmeasured. The complete acceptance
+workload plan is:
 
 | Case | Workload and observation |
 | --- | --- |
@@ -431,7 +440,7 @@ commercial implementation or pixel-compatibility level is claimed (U: unverified
 for such comparisons under the repository template).
 
 No user-facing selection/layout question remains open. Shared metadata encoding,
-native dtype expansion, public page-window/region integration and the concrete
-registry/authoring implementation remain required work. Actual public workflow
-commands, runtime results and benchmark measurements must be supplied by that
-implementation; they are not fabricated in this Proposed specification.
+native dtype expansion, page-window integration and registry/authoring code now
+exist; the linked public workflow checks their CPU behavior. Native index-extraction
+measurements are linked above; named lookup and split performance remain
+unmeasured. No performance guarantee is claimed.

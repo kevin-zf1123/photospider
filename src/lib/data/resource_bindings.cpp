@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "photospider/data/color_array.hpp"
+#include "photospider/data/tensor_description.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
@@ -143,6 +144,13 @@ Result<ResourceBindings> ResourceBindings::select(
           if (description.value().profile)
             return Result<ResourceBindings>(
                 invalid("unresolved ICC profile identity"));
+        } else if (facet.key == "photospider.tensor-description") {
+          auto description = decode_tensor_description(facet);
+          if (!description.ok())
+            return Result<ResourceBindings>(description.status());
+          if (description.value().profile)
+            return Result<ResourceBindings>(
+                invalid("unresolved ICC profile identity"));
         }
       return Result<ResourceBindings>(ResourceBindings{});
     }
@@ -153,14 +161,21 @@ Result<ResourceBindings> ResourceBindings::select(
       auto status = impl_->resources.consume({1 + facet.payload.size()});
       if (!status.ok())
         return Result<ResourceBindings>(status);
-      if (facet.key != "photospider.color-array")
+      std::optional<ColorProfileIdentity> identity;
+      if (facet.key == "photospider.color-array") {
+        auto description = decode_color_array(facet);
+        if (!description.ok())
+          return Result<ResourceBindings>(description.status());
+        identity = description.value().profile;
+      } else if (facet.key == "photospider.tensor-description") {
+        auto description = decode_tensor_description(facet);
+        if (!description.ok())
+          return Result<ResourceBindings>(description.status());
+        identity = description.value().profile;
+      }
+      if (!identity)
         continue;
-      auto description = decode_color_array(facet);
-      if (!description.ok())
-        return Result<ResourceBindings>(description.status());
-      if (!description.value().profile)
-        continue;
-      auto profile = icc_profile(*description.value().profile);
+      auto profile = icc_profile(*identity);
       if (!profile.ok())
         return Result<ResourceBindings>(profile.status());
       matched = true;

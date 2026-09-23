@@ -141,7 +141,7 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
   std::uint32_t rank = 0;
   /** @brief Allowed dtype set, bit (element code - 1); zero adds no
    * restriction.
-   * @note Only low four bits are valid; nonzero element_type is mutually
+   * @note Only low seven bits are valid; nonzero element_type is mutually
    * exclusive.
    */
   std::uint32_t element_type_mask = 0;

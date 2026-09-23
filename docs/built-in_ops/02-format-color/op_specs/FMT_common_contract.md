@@ -22,6 +22,12 @@ below. It registers no operation and changes no runtime ABI.
 Decisions belong in this category's specifications; this clarification creates
 neither an ADR nor a separate glossary.
 
+Implementation note: FMT-01 now uses the public tensor-description v1 codec and
+native Int8/UInt16/Int16 widths. Its runtime and runnable workflow are documented
+in [Channel and color operations](../../../kernel-architecture/Channel-and-Color-Operations.md).
+This does not complete every category-wide metadata field or operator migration
+listed below; existing ColorArray consumers retain their current contracts.
+
 ## Inherited baseline
 
 The later [relative-coordinate scale decision](FMT_relative_coordinate_scale.md)

@@ -43,7 +43,8 @@ class PHOTOSPIDER_API ResourceBindings final {
   Result<IccProfile> icc_profile(const ColorProfileIdentity& identity) const;
   /** @brief Restricts ownership to ICC identities named by the given facets.
    * @note A facet list may combine declarations/outputs. Irrelevant facet keys
-   * are ignored; color-array-v1 metadata is validated. Unresolved identities
+   * are ignored; color-array-v1 and tensor-description-v1 metadata are
+   * validated. Unresolved identities
    * fail admission. New set metadata uses the source set's retained root.
    * @return Owning subset or InvalidArgument/ResourceExhausted. No payload I/O.
    * @throws std::bad_alloc On diagnostic allocation. Thread-safe.

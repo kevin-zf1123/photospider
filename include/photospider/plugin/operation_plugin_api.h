@@ -66,7 +66,10 @@ typedef enum ps_operation_element_type_v9 {
   PS_OPERATION_ELEMENT_UINT8_V9 = 1,
   PS_OPERATION_ELEMENT_INT64_V9 = 2,
   PS_OPERATION_ELEMENT_FLOAT64_V9 = 3,
-  PS_OPERATION_ELEMENT_FLOAT32_V9 = 4
+  PS_OPERATION_ELEMENT_FLOAT32_V9 = 4,
+  PS_OPERATION_ELEMENT_INT8_V9 = 5,
+  PS_OPERATION_ELEMENT_UINT16_V9 = 6,
+  PS_OPERATION_ELEMENT_INT16_V9 = 7
 } ps_operation_element_type_v9;
 
 /** @brief Closed source-parameter type values for operation ABI v9. */

@@ -49,7 +49,8 @@ Package 0.19 采用唯一图像内存契约，见
 `PlanarImage` 是 rank-2／rank-3 通用张量的物理 owner，携带显式图像轴、分量组、
 facets 和 resources，不是 RGB／Layer 特殊语义载体，也不执行颜色运算。
 每张图像预留一段连续虚拟地址。连续平面和采用 DAG 尺寸的分块平面均保持行内
-样本连续。分块存储的右边缘补齐到 tile 宽度，底部只保留有效行，每个 tile 起点页对齐。
+样本连续。分块存储的右边缘补齐到 tile 宽度，底部只保留有效行，每个 tile 起点页对齐。tile 高宽必须分别为正的 2 次幂；
+规划和图像创建拒绝非 2 次幂几何。图像及 ROI 尺寸无需是 2 次幂，边缘规则见存储契约。
 
 虚拟预留、页 backing、metadata 容量和有效样本分别管理。算子访问前显式准备并
 准入页面；只有成功发布才使精确样本范围有效，同页未产生样本仍不能通过 API 读取。
@@ -57,7 +58,9 @@ facets 和 resources，不是 RGB／Layer 特殊语义载体，也不执行颜�
 超预算不会驱逐存活页或回放 producer。
 
 `PlanarImage::import_value` 是显式交错／strided 导入边界。`acquire` 提供保留
-owner 的精确读取窗口及有界 `row_run`；`read` 显式把请求区域复制到调用方 packed
+owner 的精确读取窗口及有界 `row_run`；`rectangle_run` 提供带显式字节步长的多行区域，
+同时受 ROI 和物理 tile 边界约束，padding 不可访问。FMT-01 使用这些矩形分摊坐标
+校验开销并按 tile 顺序复制。`read` 显式把请求区域复制到调用方 packed
 存储。宿主准备的事务写窗口只提供获准输出行段，操作成功时提交，失败时回滚未发布
 资源。完整预留地址绝不作为可无条件读取的 ByteView；raw 数值解释也不能绕过物理
 访问规则。

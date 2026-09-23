@@ -5859,7 +5859,7 @@ bool planar_required(const ExecutionPlan& plan) {
         structural_image_facets(input.descriptor, input.facets))
       return true;
   for (const auto& step : plan.steps())
-    if (step.traits.planar_storage_capable ||
+    if (step.traits.outputs[0].planar_layout ||
         structural_image_facets(step.output_descriptor, step.output_facets))
       return true;
   return false;
@@ -5883,6 +5883,51 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
   if (cancellation.cancelled())
     return Result<ExecutionResult>(
         Status::failure(ErrorCode::Cancelled, "planar execution cancelled"));
+  if (plan.outputs().size() > 1) {
+    ExecutionResult combined;
+    combined.diagnostics.plan_digest = plan.digest().value;
+    for (const auto& named : plan.outputs()) {
+      auto isolated =
+          plan.tile_plan(named.first, plan.output_regions().at(named.first));
+      if (!isolated.ok())
+        return Result<ExecutionResult>(isolated.status());
+      auto run = execute_planar(isolated.value(), bindings, cancellation, {});
+      if (!run.ok())
+        return run;
+      auto child = run.take_value();
+      if (child.images.count(named.first))
+        combined.images.emplace(named.first,
+                                std::move(child.images.at(named.first)));
+      else
+        combined.values.emplace(named.first,
+                                std::move(child.values.at(named.first)));
+      auto& total = combined.diagnostics;
+      const auto& part = child.diagnostics;
+      total.operation_timings.insert(total.operation_timings.end(),
+                                     part.operation_timings.begin(),
+                                     part.operation_timings.end());
+      total.selected_backends.insert(part.selected_backends.begin(),
+                                     part.selected_backends.end());
+      total.source_read_count += part.source_read_count;
+      total.source_read_bytes += part.source_read_bytes;
+      total.result_copy_bytes += part.result_copy_bytes;
+      total.tile_count += part.tile_count;
+      total.retained_input_bytes =
+          std::max(total.retained_input_bytes, part.retained_input_bytes);
+      total.peak_live_bytes =
+          std::max(total.peak_live_bytes, part.peak_live_bytes);
+      total.planned_peak_bytes =
+          std::max(total.planned_peak_bytes, part.planned_peak_bytes);
+      total.peak_active_tasks =
+          std::max(total.peak_active_tasks, part.peak_active_tasks);
+      total.managed_resources = part.managed_resources;
+    }
+    combined.diagnostics.execute_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count());
+    return Result<ExecutionResult>(std::move(combined));
+  }
   auto observation = std::make_shared<execution_internal::MemoryObservation>();
   auto page_budget = std::make_shared<PlanarPageBudget>(
       impl_->maximum_live_bytes,
@@ -5900,14 +5945,27 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
   ExecutionDiagnostics diagnostics;
   diagnostics.plan_digest = plan.digest().value;
   for (const auto& step : plan.steps())
-    if (!step.traits.planar_storage_capable || step.output_result_schema ||
-        step.backend != Backend::Cpu)
+    if (((step.traits.outputs[0].planar_layout ||
+          structural_image_facets(step.output_descriptor,
+                                  step.output_facets)) &&
+         !step.traits.planar_storage_capable) ||
+        step.output_result_schema || step.backend != Backend::Cpu)
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch,
           "image operation has not migrated to planar storage"));
   if (bindings.inputs.size() != plan.input_declarations().size())
     return Result<ExecutionResult>(Status::failure(
         ErrorCode::InvalidArgument, "planar binding count mismatch"));
+  auto retained_inputs = retain_managed_inputs(&bindings.inputs, impl_->budget);
+  if (!retained_inputs.ok())
+    return Result<ExecutionResult>(retained_inputs);
+  auto admitted_resources =
+      impl_->budget->resources()
+          ? plan.resources().reference(*impl_->budget->resources())
+          : Result<ResourceBindings>(plan.resources());
+  if (!admitted_resources.ok())
+    return Result<ExecutionResult>(admitted_resources.status());
+  const auto resources = admitted_resources.take_value();
   std::map<std::string, const ExecutionBinding*> named;
   for (const auto& binding : bindings.inputs) {
     if (!input_internal::valid_input_name(binding.name) ||
@@ -5915,6 +5973,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::InvalidArgument, "invalid planar binding names"));
   }
+  std::vector<Value> generic_sources;
   std::vector<PlanarImage> sources;
   sources.reserve(plan.input_declarations().size());
   std::set<const void*> retained_sources;
@@ -5926,6 +5985,26 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       return Result<ExecutionResult>(Status::failure(ErrorCode::InvalidArgument,
                                                      "missing planar binding"));
     const auto& binding = *found->second;
+    if (!declaration.planar_layout) {
+      if (!binding.value.valid() || binding.image || binding.source ||
+          binding.snapshot ||
+          binding.value.descriptor().shape != declaration.descriptor.shape ||
+          binding.value.descriptor().element_type !=
+              declaration.descriptor.element_type ||
+          !input_internal::same_facets(binding.value.facets(),
+                                       declaration.facets))
+        return Result<ExecutionResult>(
+            Status{ErrorCode::TypeMismatch,
+                   "invalid generic binding in planar graph"});
+      auto status =
+          input_internal::validate_binding(declaration, binding.value);
+      if (!status.ok())
+        return Result<ExecutionResult>(status);
+      generic_sources.push_back(binding.value);
+      sources.emplace_back();
+      continue;
+    }
+    generic_sources.emplace_back();
     if (!binding.image || !binding.image->valid() || binding.value.valid() ||
         binding.source || binding.snapshot)
       return Result<ExecutionResult>(
@@ -6055,17 +6134,117 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     }
   }
   std::vector<PlanarImage> produced(plan.steps().size());
+  std::vector<Value> tensor_outputs(plan.steps().size());
   for (std::size_t index = 0; index < plan.steps().size(); ++index) {
     if (cancellation.cancelled() || !plan.current())
       return Result<ExecutionResult>(Status::failure(
           cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
           "planar execution stopped"));
     const auto& step = plan.steps()[index];
-    if (step.inputs.empty() || step.inputs.size() != step.input_demands.size())
+    if (step.inputs.size() != step.input_demands.size())
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch, "unsupported planar operation arity"));
+    std::vector<Value> generic_inputs;
+    bool all_generic =
+        !step.traits.outputs[0].planar_layout &&
+        !structural_image_facets(step.output_descriptor, step.output_facets);
+    for (const auto& input : step.inputs) {
+      const Value* value = nullptr;
+      if (const auto* external = std::get_if<PlanWorkflowInput>(&input))
+        value = &generic_sources.at(external->declaration_index);
+      else
+        value = &tensor_outputs.at(std::get<PlanStepInput>(input).step_index);
+      if (!value->valid()) {
+        all_generic = false;
+        break;
+      }
+      generic_inputs.push_back(*value);
+    }
+    if (all_generic) {
+      WorkflowDocument document;
+      WorkflowNode node;
+      node.id = 1;
+      node.operation = step.operation;
+      node.parameters = step.parameters;
+      ExecutionBindings child_bindings;
+      for (std::size_t port = 0; port < generic_inputs.size(); ++port) {
+        const auto& value = generic_inputs[port];
+        const auto name = std::string("input") + std::to_string(port);
+        auto dense = input_internal::dense_metadata(value.descriptor());
+        if (!dense.ok())
+          return Result<ExecutionResult>(dense.status());
+        auto layout = dense.take_value().layout;
+        document.inputs.push_back({port + 1, name, value.descriptor(),
+                                   Region::whole(value.descriptor().shape),
+                                   layout, value.facets()});
+        node.inputs.push_back(WorkflowInputReference{port + 1});
+        auto source = std::make_shared<RegionalSource>();
+        source->descriptor = value.descriptor();
+        source->facets = value.facets();
+        source->resources = value.resources();
+        source->read =
+            [value](const Region& region, std::uint8_t* target, std::uint64_t,
+                    const BufferAllocator&,
+                    const CancellationToken& cancellation) -> Result<Region> {
+          auto view = value.view(region);
+          if (!view.ok())
+            return Result<Region>(view.status());
+          auto count = region.element_count();
+          if (!count.ok())
+            return Result<Region>(count.status());
+          std::vector<std::uint64_t> at;
+          for (const auto& dim : region.dimensions())
+            at.push_back(dim.offset);
+          const auto width =
+              Value::element_size(value.descriptor().element_type);
+          for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
+            if (cancellation.cancelled())
+              return Result<Region>(
+                  Status{ErrorCode::Cancelled, "generic bridge cancelled"});
+            auto address = value.byte_address(at);
+            if (!address.ok())
+              return Result<Region>(address.status());
+            std::memcpy(target + sample * width,
+                        value.bytes().data() + address.value(), width);
+            for (std::size_t axis = at.size(); axis-- > 0;) {
+              const auto dim = region.dimensions()[axis];
+              if (++at[axis] < dim.offset + dim.extent)
+                break;
+              at[axis] = dim.offset;
+            }
+          }
+          return Result<Region>(region);
+        };
+        child_bindings.inputs.push_back({name, {}, source});
+      }
+      document.nodes.push_back(std::move(node));
+      document.outputs = {{"output", 1, step.traits.outputs[0].key}};
+      GraphContext graph(document);
+      PlanningOptions options;
+      options.output_regions = {{"output", step.output_demand}};
+      Compiler compiler(impl_->operation_registry);
+      auto compiled = compiler.compile(graph, options, resources);
+      if (!compiled.ok())
+        return Result<ExecutionResult>(compiled.status());
+      auto child = execute(compiled.value().plan, std::move(child_bindings),
+                           cancellation);
+      if (!child.ok())
+        return child;
+      tensor_outputs[index] = std::move(child.value().values.at("output"));
+      for (auto timing : child.value().diagnostics.operation_timings) {
+        timing.output = step.result_ref();
+        diagnostics.operation_timings.push_back(std::move(timing));
+      }
+      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+      continue;
+    }
+    if (step.inputs.empty())
+      return Result<ExecutionResult>(Status{
+          ErrorCode::TypeMismatch, "unsupported planar operation arity"});
     std::vector<PlanarImageReadWindow> windows;
+    std::vector<const PlanarImage*> source_images;
     windows.reserve(step.inputs.size());
+    source_images.reserve(step.inputs.size());
     for (std::size_t port = 0; port < step.inputs.size(); ++port) {
       const PlanarImage* source = nullptr;
       if (const auto* external =
@@ -6082,10 +6261,28 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
               ErrorCode::Internal, "planar producer is unavailable"));
         source = &produced[producer.step_index];
       }
+      const bool extraction =
+          step.operation.compare(0, 22, "channel.extract_index_") == 0 ||
+          step.operation.compare(0, 22, "channel.extract_named_") == 0;
+      if (extraction &&
+          std::get<std::string>(step.parameters.at("layout")) == "view") {
+        const auto axis = source->config().channel_axis;
+        const auto& map = step.traits.outputs[0]
+                              .static_dependency_pieces->front()
+                              .inputs[0]
+                              .axes;
+        if (!axis || map[*axis].observation_axis != -1)
+          return Result<ExecutionResult>(Status{
+              ErrorCode::InvalidArgument,
+              "ViewUnavailable: spatial selection requires materialization",
+              FailureReason::InvalidDomain,
+              {FailureOrigin::Domain, FailureScope::Run}});
+      }
       auto window = source->acquire(step.input_demands[port], cancellation);
       if (!window.ok())
         return Result<ExecutionResult>(window.status());
       windows.push_back(window.take_value());
+      source_images.push_back(source);
       if (std::holds_alternative<PlanWorkflowInput>(step.inputs[port])) {
         auto count = step.input_demands[port].element_count();
         if (!count.ok() ||
@@ -6100,9 +6297,117 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
             Value::element_size(source->descriptor().element_type);
       }
     }
+    const bool channel_extract =
+        step.operation.compare(0, 22, "channel.extract_index_") == 0 ||
+        step.operation.compare(0, 22, "channel.extract_named_") == 0;
+    if (channel_extract && !step.traits.outputs[0].planar_layout) {
+      const auto& axes = step.traits.outputs[0]
+                             .static_dependency_pieces->front()
+                             .inputs[0]
+                             .axes;
+      const auto count = step.output_demand.element_count();
+      if (!count.ok())
+        return Result<ExecutionResult>(count.status());
+      const auto width =
+          Value::element_size(step.output_descriptor.element_type);
+      auto reserved =
+          impl_->budget->reserve(count.value() * width, {}, observation);
+      if (!reserved.ok())
+        return Result<ExecutionResult>(reserved.status());
+      auto reservation = reserved.take_value();
+      auto allocated = MutableValue::allocate(
+          step.output_descriptor, step.output_demand, reservation->allocator());
+      if (!allocated.ok())
+        return Result<ExecutionResult>(allocated.status());
+      auto output = allocated.take_value();
+      std::vector<std::uint64_t> at;
+      for (const auto& dim : step.output_demand.dimensions())
+        at.push_back(dim.offset);
+      std::vector<std::uint64_t> source_at(axes.size());
+      for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
+        if (cancellation.cancelled())
+          return Result<ExecutionResult>(
+              Status{ErrorCode::Cancelled, "channel extraction cancelled"});
+        for (std::size_t axis = 0; axis < axes.size(); ++axis)
+          source_at[axis] = axes[axis].observation_axis < 0
+                                ? axes[axis].fixed.offset
+                                : at[axes[axis].observation_axis];
+        auto read = windows[0].row_run(source_at);
+        if (!read.ok())
+          return Result<ExecutionResult>(read.status());
+        std::memcpy(output.data() + sample * width, read.value().data, width);
+        for (std::size_t axis = at.size(); axis-- > 0;) {
+          const auto dim = step.output_demand.dimensions()[axis];
+          if (++at[axis] < dim.offset + dim.extent)
+            break;
+          at[axis] = dim.offset;
+        }
+      }
+      auto output_resources = source_images[0]->resources().unite(resources);
+      if (!output_resources.ok())
+        return Result<ExecutionResult>(output_resources.status());
+      auto published = std::move(output).publish(step.output_facets,
+                                                 output_resources.take_value());
+      reservation->seal();
+      if (!published.ok())
+        return Result<ExecutionResult>(published.status());
+      tensor_outputs[index] = published.take_value();
+      diagnostics.result_copy_bytes += count.value() * width;
+      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+      diagnostics.peak_active_tasks = 1;
+      continue;
+    }
+    const auto source_channel_axis = source_images[0]->config().channel_axis;
+    const auto& pieces = step.traits.outputs[0].static_dependency_pieces;
+    const bool structural_selection =
+        channel_extract && source_channel_axis && pieces &&
+        pieces->front().inputs[0].axes[*source_channel_axis].observation_axis ==
+            -1;
+    if (structural_selection &&
+        std::get<std::string>(step.parameters.at("layout")) != "materialize") {
+      const auto& mapping = step.traits.outputs[0].static_dependency_pieces;
+      if (!mapping || mapping->size() != 1 || mapping->front().inputs.empty() ||
+          !source_images[0]->config().channel_axis)
+        return Result<ExecutionResult>(Status::failure(
+            ErrorCode::Internal, "channel view mapping is missing"));
+      const auto channel_axis = *source_images[0]->config().channel_axis;
+      const auto& axes = mapping->front().inputs[0].axes;
+      if (channel_axis >= axes.size() ||
+          axes[channel_axis].observation_axis != -1 ||
+          axes[channel_axis].fixed.extent != 1)
+        return Result<ExecutionResult>(Status::failure(
+            ErrorCode::Internal, "channel view mapping is invalid"));
+      auto view = source_images[0]->channel_view(
+          axes[channel_axis].fixed.offset,
+          std::get<bool>(step.parameters.at("keepdims")), step.output_demand,
+          step.output_facets, page_budget, cancellation, resources);
+      if (!view.ok())
+        return Result<ExecutionResult>(view.status());
+      auto available = view.value().acquire(step.output_demand, cancellation);
+      if (!available.ok())
+        return Result<ExecutionResult>(available.status());
+      auto alias = view.take_value();
+      if (!input_admissions.empty()) {
+        auto retained = std::make_shared<std::vector<std::shared_ptr<void>>>(
+            input_admissions);
+        alias.retain_execution_admission(retained);
+      }
+      produced[index] = std::move(alias);
+      OperationTiming timing;
+      timing.output = step.result_ref();
+      timing.backend = Backend::Cpu;
+      timing.outcome = ErrorCode::Ok;
+      auto count = step.output_demand.element_count();
+      if (count.ok())
+        timing.computed_elements = count.value();
+      diagnostics.operation_timings.push_back(std::move(timing));
+      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+      diagnostics.peak_active_tasks = 1;
+      continue;
+    }
     if (!step.traits.outputs[0].planar_layout)
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::TypeMismatch, "missing planar output layout"));
+      return Result<ExecutionResult>(
+          Status{ErrorCode::TypeMismatch, "missing planar output layout"});
     const auto& declared = *step.traits.outputs[0].planar_layout;
     PlanarImageConfig config;
     config.order = declared.order;
@@ -6116,7 +6421,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     config.aggregate_budget = page_budget;
     config.maximum_backed_bytes = page_budget->maximum_bytes();
     auto output = PlanarImage::create(step.output_descriptor, config,
-                                      step.output_facets, plan.resources());
+                                      step.output_facets, resources);
     if (!output.ok())
       return Result<ExecutionResult>(output.status());
     auto image = output.take_value();
@@ -6154,8 +6459,11 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
                   "planar execution stopped before callback");
               return;
             }
+            auto parameters = step.parameters;
+            if (channel_extract)
+              parameters["layout"] = std::string("materialize");
             completion->status = impl_->operation_registry->invoke_planar(
-                step.operation, windows, step.input_demands, step.parameters,
+                step.operation, windows, step.input_demands, parameters,
                 step.output_demand, image, cancellation);
           } catch (const std::bad_alloc&) {
             completion->status = Status{ErrorCode::ResourceExhausted, {}};
@@ -6200,6 +6508,14 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
   }
   ExecutionResult result;
   for (const auto& named_output : plan.outputs()) {
+    if (tensor_outputs[named_output.second].valid()) {
+      auto value = tensor_outputs[named_output.second].view(
+          plan.output_regions().at(named_output.first));
+      if (!value.ok())
+        return Result<ExecutionResult>(value.status());
+      result.values.emplace(named_output.first, value.take_value());
+      continue;
+    }
     auto image = produced[named_output.second];
     auto window = image.acquire(plan.output_regions().at(named_output.first),
                                 cancellation);

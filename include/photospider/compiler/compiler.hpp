@@ -316,8 +316,8 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * optimized IR.
    */
   std::map<std::string, Region> output_regions;
-  /** @brief Positive spatial tile extents; changing them only replans optimized
-   * IR. */
+  /** @brief Spatial tile extents must each be a positive power of two
+   * (including 1); changing them only replans optimized IR. */
   std::uint64_t tile_height = 128;
   std::uint64_t tile_width = 128;
 };

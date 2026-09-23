@@ -61,7 +61,9 @@ RGB/Layer semantic carrier and imposes no color arithmetic. Each image reserves
 one continuous virtual address range. Continuous planes and DAG-sized tiled
 planes both store contiguous row samples. In tiled storage, right edges pad to
 tile width, bottom edges retain only valid rows, and every block starts on a host
-page boundary.
+page boundary. Tile height and width must each be a positive power of two;
+non-power-of-two geometry is rejected by planning and image creation. Image/ROI
+extents need not be powers of two. See the storage contract for edge rules.
 
 Virtual reservation, page backing, metadata capacity and valid samples are
 separate. Pages are explicitly prepared and admitted before operator access.
@@ -72,6 +74,9 @@ owner retires; budget exhaustion does not evict live pages or replay producers.
 
 `PlanarImage::import_value` is the explicit interleaved/strided import boundary.
 `acquire` provides a retained exact read window with bounded `row_run` spans.
+`rectangle_run` provides multiple authorized rows with explicit byte stride,
+bounded by both ROI and physical tile; padding remains excluded. FMT-01 uses
+these rectangles to amortize coordinate validation and copy in tile order.
 `read` explicitly copies a requested region into caller-owned packed storage.
 A host-prepared transactional write window supplies only authorized output
 spans. It commits on successful operation completion or rolls back unpublished

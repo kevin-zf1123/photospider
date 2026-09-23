@@ -313,7 +313,11 @@ const std::shared_ptr<const CpuStorage>& Value::storage() const {
 std::size_t Value::element_size(ElementType type) {
   switch (type) {
     case ElementType::UInt8:
+    case ElementType::Int8:
       return 1U;
+    case ElementType::UInt16:
+    case ElementType::Int16:
+      return 2U;
     case ElementType::Float32:
       return 4U;
     case ElementType::Int64:

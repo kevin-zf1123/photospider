@@ -39,6 +39,94 @@ ps::Status copy_region(const ps::PlanarOperationInvocation& call) {
       }
   return ps::Status::success();
 }
+int rectangle_bounds() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  // Permuted axes, partial final tiles and padded rows.
+  const ValueDescriptor descriptor{ElementType::UInt16, {11, 2, 7}};
+  const Region roi({{2, 8}, {1, 1}, {1, 6}});
+  std::vector<std::uint16_t> values(48);
+  for (std::size_t i = 0; i < values.size(); ++i)
+    values[i] = static_cast<std::uint16_t>(i * 17 + 3);
+  for (auto order : {ImagePlaneOrder::Continuous, ImagePlaneOrder::Tiled}) {
+    PlanarImageConfig config;
+    config.order = order;
+    config.width_axis = 0;
+    config.channel_axis = 1;
+    config.height_axis = 2;
+    config.tile_width = 4;
+    config.tile_height = 4;
+    config.row_pitch_bytes = order == ImagePlaneOrder::Continuous ? 32 : 0;
+    auto invalid_config = config;
+    invalid_config.tile_width = 5;
+    PS_CHECK(PlanarImage::create(descriptor, invalid_config).status().code ==
+             ErrorCode::InvalidArgument);
+    invalid_config = config;
+    invalid_config.tile_height = 3;
+    PS_CHECK(PlanarImage::create(descriptor, invalid_config).status().code ==
+             ErrorCode::InvalidArgument);
+    auto image = PlanarImage::create(descriptor, config).take_value();
+    {
+      auto writer = image.begin_write(roi).take_value();
+      auto block = writer.rectangle_run({2, 1, 1}).take_value();
+      PS_CHECK(block.row.samples == (order == ImagePlaneOrder::Tiled ? 2 : 8));
+      PS_CHECK(block.rows == (order == ImagePlaneOrder::Tiled ? 3 : 6));
+      PS_CHECK(block.row_stride_bytes ==
+               (order == ImagePlaneOrder::Tiled ? 8 : 32));
+      PS_CHECK(!writer.rectangle_run({1, 1, 1}).ok());
+      // Destruction rolls the unpublished preparation back.
+    }
+    PS_CHECK(image.valid_samples() == 0);
+    PS_CHECK(image
+                 .publish(roi,
+                          reinterpret_cast<const std::uint8_t*>(values.data()),
+                          values.size() * sizeof(std::uint16_t))
+                 .ok());
+    auto window = image.acquire(roi).take_value();
+    for (std::uint64_t x = 2; x < 10; ++x)
+      for (std::uint64_t y = 1; y < 7; ++y) {
+        auto block = window.rectangle_run({x, 1, y}).take_value();
+        PS_CHECK(block.row.samples ==
+                 (order == ImagePlaneOrder::Tiled
+                      ? std::min<std::uint64_t>(10 - x, 4 - x % 4)
+                      : 10 - x));
+        PS_CHECK(block.rows == (order == ImagePlaneOrder::Tiled
+                                    ? std::min<std::uint64_t>(7 - y, 4 - y % 4)
+                                    : 7 - y));
+        for (std::uint64_t dy = 0; dy < block.rows; ++dy)
+          for (std::uint64_t dx = 0; dx < block.row.samples; ++dx) {
+            std::uint16_t actual = 0;
+            std::memcpy(&actual,
+                        block.row.data + dy * block.row_stride_bytes + dx * 2,
+                        2);
+            PS_CHECK(actual == values[(x + dx - 2) * 6 + y + dy - 1]);
+          }
+      }
+    PS_CHECK(!window.rectangle_run({10, 1, 1}).ok());
+    PS_CHECK(!window.rectangle_run({2, 0, 1}).ok());
+    PS_CHECK(!window.rectangle_run({2, 1}).ok());
+    auto alias =
+        image.channel_view(1, false, Region({{2, 8}, {1, 6}})).take_value();
+    auto alias_window = alias.acquire(Region({{2, 8}, {1, 6}})).take_value();
+    auto block = alias_window.rectangle_run({2, 1}).take_value();
+    PS_CHECK(block.row_stride_bytes ==
+             (order == ImagePlaneOrder::Tiled ? 8 : 32));
+    std::uint16_t second_row = 0;
+    std::memcpy(&second_row, block.row.data + block.row_stride_bytes, 2);
+    PS_CHECK(second_row == values[1]);
+  }
+  Compiler compiler(make_default_operation_registry());
+  PlanningOptions invalid_options;
+  invalid_options.tile_width = 3;
+  PS_CHECK(compiler.plan(OptimizedGraphIR{}, invalid_options).status().code ==
+           ErrorCode::InvalidArgument);
+  invalid_options.tile_width = 128;
+  invalid_options.tile_height = 6;
+  PS_CHECK(compiler.plan(OptimizedGraphIR{}, invalid_options).status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(!PlanarImageReadWindow{}.rectangle_run({0, 0}).ok());
+  PS_CHECK(!PlanarImageWriteWindow{}.rectangle_run({0, 0}).ok());
+  return 0;
+}
 int workflow() {
   using namespace ps;  // NOLINT(build/namespaces)
   constexpr std::uint64_t height = 130, width = 200, channels = 4;
@@ -763,5 +851,7 @@ int workflow() {
 }  // namespace
 
 int main() {
+  if (rectangle_bounds())
+    return 1;
   return workflow();
 }

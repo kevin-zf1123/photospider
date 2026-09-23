@@ -26,6 +26,9 @@ enum class ElementType : std::uint32_t {
   Float64 = 3,
   /** @brief IEEE-754 binary32; generic Values preserve all bit patterns. */
   Float32 = 4,
+  Int8 = 5,
+  UInt16 = 6,
+  Int16 = 7,
 };
 
 /**
