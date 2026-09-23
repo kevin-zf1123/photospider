@@ -18,6 +18,7 @@
 #include "photospider/data/icc_profile.hpp"
 #include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/layer.hpp"
+#include "photospider/data/planar_image.hpp"
 #include "photospider/data/quality.hpp"
 #include "photospider/data/region.hpp"
 #include "photospider/data/representation.hpp"

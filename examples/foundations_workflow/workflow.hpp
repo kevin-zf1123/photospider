@@ -123,13 +123,9 @@ inline Parameters indices(std::initializer_list<std::uint32_t> list) {
   return {{"indices", take(ps::channel_indices_parameter(list))}};
 }
 void numeric();
-void channels();
-void alpha_color();
 void expressions();
 void generator_gain();
 void components();
-void basic_curves();
 void basic_masks();
 void basic_filters();
-void basic_fields();
 }  // namespace foundations

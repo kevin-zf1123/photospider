@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <functional>
@@ -80,6 +81,11 @@ Result<Value> OperationRegistry::invoke_dependency_current(
         return failure(Status{ErrorCode::TypeMismatch,
                               "projected input metadata mismatch"});
     }
+    if (std::any_of(metadata.begin(), metadata.end(),
+                    input_internal::structural_image_metadata))
+      return failure(Status::failure(
+          ErrorCode::TypeMismatch,
+          "legacy image dependency input requires planar storage"));
     auto resources = invocation.resources;
     for (const auto& input : invocation.inputs) {
       auto joined = resources.unite(input.resources());
@@ -98,6 +104,10 @@ Result<Value> OperationRegistry::invoke_dependency_current(
                                            invocation.parameters);
     if (!inferred.ok())
       return failure(inferred.status());
+    if (input_internal::structural_image_metadata(inferred.value()))
+      return failure(Status::failure(
+          ErrorCode::TypeMismatch,
+          "legacy image dependency output requires planar storage"));
     auto admitted_resources = plugin_internal::admit_operation_resources(
         resources, metadata, inferred.value());
     if (!admitted_resources.ok())

@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderFoundationsWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.16 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.20 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_foundations_workflow
-  main.cpp numeric.cpp color.cpp generators.cpp components.cpp basic.cpp)
+  main.cpp numeric.cpp generators.cpp components.cpp basic.cpp)
 target_link_libraries(photospider_foundations_workflow PRIVATE Photospider::kernel)
 target_compile_features(photospider_foundations_workflow PRIVATE cxx_std_17)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

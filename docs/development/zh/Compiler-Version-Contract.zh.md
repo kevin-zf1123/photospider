@@ -290,3 +290,31 @@ backing 也必须满足输出上界。直接调用已经逐输入提供单个 Va
 C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。
 canonical framing14、document2、C operation ABI9 和 provider ABI1 不变；
 traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。
+
+
+## Package 0.19.0：planar 图像存储
+
+Package 0.19.0 为结构图像存储、workflow declaration、operation metadata／traits／
+callback 和执行结果引入 breaking C++ 布局。消费方须针对 0.19 重编译，拒绝 0.18
+包请求。WorkflowDocument schema **3** 拒绝 schema 2；document 仍是 C++ 编译输入，
+不新增持久文件格式或双 reader。OperationTraits 为 **17**。semantic、physical-plan
+和 plan-cache framing 分别使用 `semantic-graph-ir-v15`、`physical-plan-v15`、
+`plan-cache-key-v15`；优化规则仍为 `optimizer-v5-canonical-noop`。C operation ABI
+保持 **9**、provider ABI 保持 **1**，继续要求 C++17；未改变的 C 表不赋予 planar
+算子能力。
+
+`WorkflowInputDeclaration.planar_layout` 声明显式图像轴、存储模式、行 pitch 和
+分量组，其仿射 layout 为空。planar 能力和输出布局进入 operation identity，source
+声明和边推导携带结构布局。DAG 统一 tile 几何仍为进入 physical identity 的规划选择。
+VM 地址、页 owner、预算身份和驻留状态不进入 semantic identity。
+
+`PlanarImage` 提供唯一 CPU 图像存储契约：整图虚拟地址预留、按需页 backing、
+平面行／tile 寻址、精确有效覆盖，以及保留 owner 的读写窗口。成功图像输出使用
+`ExecutionResult.images`，packed 区域导出须显式执行。通用数值 Value 保留仿射存储。
+交错图像输入必须显式导入转换；旧图像 snapshot、Value fragments 和 callback 不作为
+兼容实现。不支持的图像算子或入口明确失败，后续需迁移或退休，不增加旧数值语义回退。
+
+公开[存储契约](../../kernel-specs/Tensor-Storage-and-Region-Access.md)定义 CPU 回调支持
+子集、资源／生命周期规则和可运行 workflow 验收。安装消费检查覆盖结构图像 workflow、
+C SDK／头文件消费和通用执行能力。前面的版本段落记录各自交付契约，不在 0.19 中
+恢复已退休的图像执行路径。

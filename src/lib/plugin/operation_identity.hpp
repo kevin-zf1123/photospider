@@ -46,6 +46,7 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
  */
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
+  digest->integer(traits.planar_storage_capable);
   digest->integer(traits.requires_metadata_specialization);
   digest->integer(traits.share_blocks_across_outputs);
   digest->integer(traits.joint_contract);
@@ -63,6 +64,23 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
     return;
   }
   const auto& output = traits.outputs[0];
+  digest->integer(output.planar_layout.has_value());
+  if (output.planar_layout) {
+    const auto& layout = *output.planar_layout;
+    digest->integer(static_cast<std::uint32_t>(layout.order));
+    digest->integer(layout.height_axis);
+    digest->integer(layout.width_axis);
+    digest->integer(layout.channel_axis.has_value());
+    if (layout.channel_axis)
+      digest->integer(*layout.channel_axis);
+    digest->integer(layout.row_pitch_bytes);
+    digest->integer(layout.groups.size());
+    for (const auto& group : layout.groups) {
+      digest->text(group.role);
+      digest->integer(group.first_channel);
+      digest->integer(group.channel_count);
+    }
+  }
   digest->integer(output.result_schema.has_value());
   if (output.result_schema)
     digest->text(output.result_schema->canonical());

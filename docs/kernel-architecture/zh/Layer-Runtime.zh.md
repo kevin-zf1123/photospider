@@ -1,4 +1,10 @@
-# Layer、emission 与加权运行时
+# 已退休的 Layer、emission 与加权运行时
+
+Package 0.19 在 schema 验证时以 TypeMismatch 拒绝下表六类旧 schema，以及含有
+`photospider.layer` key 的 Result metadata。ResultBuilder 透传该拒绝，旧算子定义
+不能注册为备选图像内存路径。下文记录原运行时，供迁移参考，不授权继续采用其数值
+语义或执行命令。普通非图像 Result schema 保留。当前 planar 存储契约见
+[张量存储与区域访问](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)。
 
 英文权威文档：[Layer-Runtime.md](../Layer-Runtime.md)。本文件为对应中文说明。
 

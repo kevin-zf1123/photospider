@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "photospider/numeric/arrays.hpp"
+#include "photospider/numeric/sequences.hpp"
 #include "photospider/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
@@ -62,18 +63,18 @@ inline Result<WorkflowNodeOutput> linear(
         {id, "core.constant", {}, {{"value", static_cast<double>(i)}}});
     constants[i] = {id, "value"};
   }
-  // Only exact 0/1 literals pass through the existing scalar cast. Constant
-  // views, bound broadcasts and remap all select the requested CPU profile.
+  // Generate exact Float32 0/1 singletons with the existing sequence primitive.
+  // This is literal construction, not a replacement format-conversion API.
   if (narrow) {
     for (auto& constant : constants) {
       const auto id = ids.value()[next++];
-      nodes.push_back({id,
-                       "numeric.cast",
-                       {constant},
-                       {{"dtype", std::string("float32")},
-                        {"rounding", std::string("ties_even")},
-                        {"overflow", std::string("reject")}}});
-      constant = {id, "value"};
+      const SequenceInput scalar{constant, {ElementType::Float64, {1}}};
+      auto generated =
+          linspace_node(id, scalar, scalar, 1, ElementType::Float32, profile);
+      if (!generated.ok())
+        return Answer(generated.status());
+      nodes.push_back(generated.take_value());
+      constant = {id, "values"};
     }
   }
   const auto remap = std::string("numeric.remap_range") + selected;

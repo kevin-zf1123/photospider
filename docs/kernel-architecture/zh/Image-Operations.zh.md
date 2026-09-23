@@ -1,4 +1,10 @@
-# Float32 图像算子
+# 已退休的 Float32 图像算子契约
+
+Package 0.19 已退休下述 packed 图像执行契约。以下声明、数值规则和 S1–S4 命令
+仅供迁移参考，不是当前可执行图像 API。图像算子必须显式具备 planar 存储能力；
+不支持的旧调用明确失败，不提供兼容回退。当前 CPU 接口和可运行 workflow 见
+[张量存储与区域访问](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)。
+通用标量和非图像张量能力继续遵循各自契约。
 
 默认 registry 包含 CPU 算子，实现位于
 [`plugins/ops/README.md`](../../../plugins/ops/README.md)。

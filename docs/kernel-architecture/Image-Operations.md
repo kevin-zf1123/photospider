@@ -1,4 +1,12 @@
-# Float32 Image Operations
+# Retired Float32 image operation contract
+
+Package 0.19 retires the packed image execution contract described below.
+These declarations, numerical rules and S1–S4 commands are migration reference,
+not the current executable image API. Image operations require explicit planar
+storage capability; unsupported legacy calls fail without compatibility fallback.
+Use [Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md)
+for the current CPU interfaces and runnable workflow. Generic scalar and
+non-image tensor facilities remain supported under their own contracts.
 
 The default registry includes CPU operations implemented in
 [`plugins/ops/README.md`](../../plugins/ops/README.md).

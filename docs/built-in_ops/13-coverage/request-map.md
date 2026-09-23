@@ -37,7 +37,7 @@
 | 曲线、渐变映射、LUT | [调色](../07-grade/adjustments.md)、[曲线](../01-numeric/curves.md) | LUT 生成/应用、标量导出、颜色插值、3D耦合映射 |
 | 色阶、白平衡 | [调色](../07-grade/adjustments.md) | levels 与 camera WB/chromatic adaptation 分开 |
 | 黑白 | [调色](../07-grade/adjustments.md) | 提取 L*、线性 luminance、可调混色 monochrome 独立 |
-| 色调分离（原清单两次） | [调色](../07-grade/adjustments.md) | 合并 posterize；补独立 threshold/dither/halftone |
+| 色调分离（原清单两次） | [调色](../07-grade/adjustments.md) | posterize 归 GRD-13，threshold 按现有目录；dither/halftone 分别归 GRD-29/30（成员及算法待澄清） |
 | 曝光 | [调色](../07-grade/adjustments.md) | EV 转 gain=2^EV；已有 gain op 的输入范围不可忽略 |
 | 高光/暗部，阈值/影响范围 | [调色](../07-grade/adjustments.md) | tonal-zone 与含邻域的局部 tone mapping 分开 |
 | 通道混合、色彩平衡、反转 | [调色](../07-grade/adjustments.md) | 矩阵、tone-zone偏移与显式pivot反转 |

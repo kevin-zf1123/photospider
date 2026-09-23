@@ -1,5 +1,10 @@
 # 当前实现与规格前置条件
 
+2026-09-23 更新：package 0.20.0 [移除 13 个旧格式／颜色接口](../02-format-color/op_specs/FMT_legacy_retirement.md)。
+下方历史交付表保留溯源；旧 typed 图像节点的注册不代表已迁移到 planar 执行。
+新 FMT 规格保持 Proposed/未实现。
+
+
 核对日期：2026-09-13。基线为本地 `ops@66b16339`；当前文档工作分支
 `ops-specs@6e429e4b` 包含该基线，并额外实现 PNT-05A。项目版本为 **0.10.0**，
 C operation ABI 为 **9**。来源为合并记录、当前注册代码、公开头文件和实现文档；
@@ -28,14 +33,13 @@ PNT-05A 的 `05f81347` 规格和 `6e429e4b` 实现属于当前 `ops-specs` 的�
 
 | 能力 | 已实现 key | 实现契约 |
 | --- | --- | --- |
-| 数值与统计 | `numeric.cast`, `numeric.encode_range`, `numeric.add/subtract/multiply/divide`, `numeric.clamp`, `numeric.mean/variance`, `numeric.minimum/maximum/abs`, `numeric.ordered_scan` | [Numeric](../../kernel-architecture/Numeric-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md)、[ordered scan 源码](../../../plugins/ops/01-numeric/numeric_ordered_scan.cpp) |
-| 通道与颜色 | `channel.extract/swizzle/merge`, `alpha.associate/unassociate`, `color.assign`, `color.rgb_to_xyz/xyz_to_rgb/xyz_to_lab/lab_to_xyz` | [Channel and color](../../kernel-architecture/Channel-and-Color-Operations.md) |
+| 数值与统计 | `numeric.add/subtract/multiply/divide`, `numeric.clamp`, `numeric.mean/variance`, `numeric.minimum/maximum/abs`, `numeric.ordered_scan` | [Numeric](../../kernel-architecture/Numeric-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md)、[ordered scan 源码](../../../plugins/ops/01-numeric/numeric_ordered_scan.cpp) |
 | 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.coordinate`, `field.constant`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | mask 与旧标签 | `mask.threshold/components/invert/combine/dilate/erode`, `component.count/area/bbox` | [Components](../../kernel-architecture/Component-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | 滤镜与分析 | `field.box_mean/gaussian_blur/convolve/correlate`, `analysis.histogram`, `analysis.histogram_out_of_range`, `grade.levels` | [Basic](../../kernel-architecture/Basic-Operations.md)；`field.convolve` 已升级 staged regional，correlate/旧直方图等仍 Whole |
 | 原有 RGBA/mask 链路与 mix | `image.exposure_gain/opacity/gaussian_blur/mask/source_over/downsample_box/brush_circle`, `mask.downsample_box`, `image.mix` | [Image](../../kernel-architecture/Image-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | 动态依赖采样 | `image.stmap`, `numeric.radius_gather`, `numeric.radius_scatter` | [Dependency sampling](../../kernel-architecture/Dependency-Sampling.md)；STMap 是明确边界模式的 bilinear 子集 |
-| 命名多输出 | `color.rgb_to_ycbcr420` → `y/cb/cr`；`image.split_horizontal` → `full/left/right`；`image.convolve_channels` → `r/g/b`；`image.gaussian_blur_with_kernel` → `image/kernel` | [Multi-output](../../kernel-architecture/Multi-Output-Operations.md)；端口独立请求，joint 为可选 CPU 优化 |
+| 命名多输出 | `image.split_horizontal` → `full/left/right`；`image.convolve_channels` → `r/g/b`；`image.gaussian_blur_with_kernel` → `image/kernel` | [Multi-output](../../kernel-architecture/Multi-Output-Operations.md)；端口独立请求，joint 为可选 CPU 优化 |
 | 当前分支局部修复 | `image.local_inpaint_navier_stokes_native_apple_silicon`；可选 `image.local_inpaint_navier_stokes_openCV` | [PNT-05A 实现](../09-composite/inpaint-ns-implementation.md)；Whole、opaque RGBA、binary mask，OpenCV adapter 需构建开关 |
 
 原有 8 项有可选 Metal 后端；新增 CPU 算子、joint 与 structured Result 不因此获得 GPU 支持。

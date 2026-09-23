@@ -877,6 +877,7 @@ struct ExecutionContext::Impl final {
         gpu_available(native_device && native_device->available()),
 #endif
         maximum_waiting_callbacks(requested.maximum_queued_tasks),
+        maximum_live_bytes(requested.maximum_live_bytes),
         operation_registry(std::move(operations)),
         budget(std::make_shared<MemoryBudget>(
             requested.maximum_live_bytes,
@@ -942,10 +943,26 @@ struct ExecutionContext::Impl final {
   const bool gpu_available;
   /** @brief Context-wide maximum callbacks waiting across all lanes. */
   const std::uint32_t maximum_waiting_callbacks;
+  const std::uint64_t maximum_live_bytes;
   /** @brief Frozen operation registry retained beyond all callbacks. */
   std::shared_ptr<OperationRegistry> operation_registry;
   /** @brief Shared exact modeled-byte capacity. */
   std::shared_ptr<MemoryBudget> budget;
+  struct ForeignPlanarAdmission final {
+    PlanarImage owner;
+    std::shared_ptr<void> pin;
+    std::shared_ptr<void> lease;
+    std::uint64_t resident_bytes = 0;
+    std::uint32_t active_runs = 0;
+    bool retiring = false;
+  };
+  struct ForeignPlanarTable final {
+    std::timed_mutex mutex;
+    std::condition_variable_any changed;
+    std::map<const void*, std::shared_ptr<ForeignPlanarAdmission>> entries;
+  };
+  std::shared_ptr<ForeignPlanarTable> planar_foreign_sources =
+      std::make_shared<ForeignPlanarTable>();
   /** @brief Shared CPU/GPU waiting-callback admission owner. */
   WaitingAdmission waiting_admission;
   /** @brief Required fixed CPU callback pool. */
@@ -5362,12 +5379,20 @@ Result<DemandQuery> changed_inputs(const ExecutionBindings& before,
 }
 }  // namespace
 
+namespace {
+bool planar_required(const ExecutionPlan& plan);
+}
+
 Result<FrozenExecution> ExecutionContext::freeze(
     const ExecutionPlan& plan, ExecutionBindings bindings) const {
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock().get() != impl_->operation_registry.get())
     return Result<FrozenExecution>(
         Status::failure(ErrorCode::Stale, "invalid stale or foreign plan"));
+  if (planar_required(plan))
+    return Result<FrozenExecution>(Status::failure(
+        ErrorCode::TypeMismatch,
+        "planar image freeze requires structural capture migration"));
   for (auto& binding : bindings.inputs) {
     if (binding.source)
       return Result<FrozenExecution>(Status::failure(
@@ -5403,6 +5428,10 @@ Result<DemandResult> ExecutionContext::execute_fragments(
       frozen.operations_ != impl_->operation_registry)
     return Result<DemandResult>(
         Status{ErrorCode::Stale, "invalid or foreign frozen demand"});
+  if (planar_required(frozen.plan_))
+    return Result<DemandResult>(Status::failure(
+        ErrorCode::TypeMismatch,
+        "planar image fragment demand requires structural output"));
   const auto stop = [&] {
     if (options.dependencies.sets.cancellation.cancelled())
       return ErrorCode::Cancelled;
@@ -5498,6 +5527,10 @@ Result<DemandResult> ExecutionContext::execute_fragments(
 Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
                                                    ExecutionBindings bindings,
                                                    DemandConfig config) {
+  if (planar_required(plan))
+    return Result<DemandHandle>(Status::failure(
+        ErrorCode::TypeMismatch,
+        "planar image demand handle requires structural output"));
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<DemandHandle>(
@@ -5802,9 +5835,406 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   return Result<DemandUpdate>(std::move(update));
 }
 
+namespace {
+bool structural_image_facets(const ValueDescriptor& descriptor,
+                             const std::vector<ValueFacet>& facets) {
+  for (const auto& facet : facets) {
+    if (facet.key == "photospider.image")
+      return true;
+    if (facet.key == "photospider.color-array" && descriptor.shape.size() >= 3)
+      return true;
+    if (facet.key == "photospider.semantic") {
+      auto semantic = decode_semantic(facet);
+      if (semantic.ok() && (semantic.value().kind == SemanticKind::Image ||
+                            semantic.value().kind == SemanticKind::ImagePlane ||
+                            semantic.value().kind == SemanticKind::Mask))
+        return true;
+    }
+  }
+  return false;
+}
+bool planar_required(const ExecutionPlan& plan) {
+  for (const auto& input : plan.input_declarations())
+    if (input.planar_layout ||
+        structural_image_facets(input.descriptor, input.facets))
+      return true;
+  for (const auto& step : plan.steps())
+    if (step.traits.planar_storage_capable ||
+        structural_image_facets(step.output_descriptor, step.output_facets))
+      return true;
+  return false;
+}
+}  // namespace
+
+Result<ExecutionResult> ExecutionContext::execute_planar(
+    const ExecutionPlan& plan, ExecutionBindings bindings,
+    const CancellationToken& cancellation, const ExecutionOptions&) {
+  const auto started = std::chrono::steady_clock::now();
+  const auto elapsed_us = [](std::chrono::steady_clock::time_point begin) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin)
+            .count());
+  };
+  if (!impl_ || !plan.current() ||
+      plan.operation_registry_.lock().get() != impl_->operation_registry.get())
+    return Result<ExecutionResult>(Status::failure(
+        ErrorCode::Stale, "invalid or foreign planar execution plan"));
+  if (cancellation.cancelled())
+    return Result<ExecutionResult>(
+        Status::failure(ErrorCode::Cancelled, "planar execution cancelled"));
+  auto observation = std::make_shared<execution_internal::MemoryObservation>();
+  auto page_budget = std::make_shared<PlanarPageBudget>(
+      impl_->maximum_live_bytes,
+      [memory = impl_->budget,
+       observation](std::uint64_t bytes) -> Result<std::shared_ptr<void>> {
+        auto reserved = memory->reserve(bytes, {}, observation);
+        if (!reserved.ok())
+          return Result<std::shared_ptr<void>>(reserved.status());
+        auto reservation = reserved.take_value();
+        auto lease = reservation->reserve_external(bytes);
+        reservation->seal();
+        return lease;
+      },
+      impl_->budget);
+  ExecutionDiagnostics diagnostics;
+  diagnostics.plan_digest = plan.digest().value;
+  for (const auto& step : plan.steps())
+    if (!step.traits.planar_storage_capable || step.output_result_schema ||
+        step.backend != Backend::Cpu)
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::TypeMismatch,
+          "image operation has not migrated to planar storage"));
+  if (bindings.inputs.size() != plan.input_declarations().size())
+    return Result<ExecutionResult>(Status::failure(
+        ErrorCode::InvalidArgument, "planar binding count mismatch"));
+  std::map<std::string, const ExecutionBinding*> named;
+  for (const auto& binding : bindings.inputs) {
+    if (!input_internal::valid_input_name(binding.name) ||
+        !named.emplace(binding.name, &binding).second)
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::InvalidArgument, "invalid planar binding names"));
+  }
+  std::vector<PlanarImage> sources;
+  sources.reserve(plan.input_declarations().size());
+  std::set<const void*> retained_sources;
+  std::vector<std::shared_ptr<void>> input_pins;
+  std::vector<std::shared_ptr<void>> input_admissions;
+  for (const auto& declaration : plan.input_declarations()) {
+    const auto found = named.find(declaration.name);
+    if (found == named.end())
+      return Result<ExecutionResult>(Status::failure(ErrorCode::InvalidArgument,
+                                                     "missing planar binding"));
+    const auto& binding = *found->second;
+    if (!binding.image || !binding.image->valid() || binding.value.valid() ||
+        binding.source || binding.snapshot)
+      return Result<ExecutionResult>(
+          Status::failure(ErrorCode::TypeMismatch,
+                          "image input requires explicit planar import"));
+    const auto& image = *binding.image;
+    if (image.descriptor().shape != declaration.descriptor.shape ||
+        image.descriptor().element_type !=
+            declaration.descriptor.element_type ||
+        !input_internal::same_facets(image.facets(), declaration.facets) ||
+        !declaration.planar_layout ||
+        image.config().order != declaration.planar_layout->order ||
+        image.config().height_axis != declaration.planar_layout->height_axis ||
+        image.config().width_axis != declaration.planar_layout->width_axis ||
+        image.config().channel_axis !=
+            declaration.planar_layout->channel_axis ||
+        image.config().row_pitch_bytes !=
+            declaration.planar_layout->row_pitch_bytes ||
+        image.config().groups.size() !=
+            declaration.planar_layout->groups.size() ||
+        image.config().tile_height != plan.tile_height() ||
+        image.config().tile_width != plan.tile_width())
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::TypeMismatch,
+          "planar image declaration or DAG tile geometry mismatch"));
+    for (std::size_t i = 0; i < image.config().groups.size(); ++i) {
+      const auto& actual = image.config().groups[i];
+      const auto& expected = declaration.planar_layout->groups[i];
+      if (actual.role != expected.role ||
+          actual.first_channel != expected.first_channel ||
+          actual.channel_count != expected.channel_count)
+        return Result<ExecutionResult>(Status::failure(
+            ErrorCode::TypeMismatch, "planar component groups mismatch"));
+    }
+    sources.push_back(image);
+    if (retained_sources.insert(image.owner_token()).second) {
+      if (image.config().aggregate_budget->accounting_domain() ==
+          impl_->budget.get()) {
+        auto pinned = image.pin_for_execution(cancellation);
+        if (!pinned.ok())
+          return Result<ExecutionResult>(pinned.status());
+        input_pins.push_back(pinned.take_value());
+        diagnostics.retained_input_bytes += image.resident_bytes();
+      } else {
+        const auto table = impl_->planar_foreign_sources;
+        std::unique_lock<std::timed_mutex> held(table->mutex, std::defer_lock);
+        while (!held.try_lock_for(std::chrono::milliseconds(2)))
+          if (cancellation.cancelled())
+            return Result<ExecutionResult>(Status::failure(
+                ErrorCode::Cancelled, "planar source admission cancelled"));
+        const auto token = image.owner_token();
+        auto known = table->entries.find(token);
+        while (known != table->entries.end() && known->second->retiring) {
+          if (cancellation.cancelled())
+            return Result<ExecutionResult>(Status::failure(
+                ErrorCode::Cancelled, "planar source retirement cancelled"));
+          table->changed.wait_for(held, std::chrono::milliseconds(2));
+          known = table->entries.find(token);
+        }
+        auto admission =
+            known == table->entries.end() ? nullptr : known->second;
+        if (!admission) {
+          admission = std::make_shared<Impl::ForeignPlanarAdmission>();
+          admission->owner = image;
+          auto pinned = image.pin_for_execution(cancellation);
+          if (!pinned.ok())
+            return Result<ExecutionResult>(pinned.status());
+          admission->pin = pinned.take_value();
+          admission->resident_bytes = image.resident_bytes();
+          const auto overhead = sizeof(Impl::ForeignPlanarAdmission) + 128;
+          auto charge = checked_add(admission->resident_bytes, overhead);
+          if (!charge.ok())
+            return Result<ExecutionResult>(charge.status());
+          if (charge.value()) {
+            auto reserved =
+                impl_->budget->reserve(charge.value(), {}, observation);
+            if (!reserved.ok())
+              return Result<ExecutionResult>(reserved.status());
+            auto reservation = reserved.take_value();
+            auto lease = reservation->reserve_external(charge.value());
+            reservation->seal();
+            if (!lease.ok())
+              return Result<ExecutionResult>(lease.status());
+            admission->lease = lease.take_value();
+          }
+          try {
+            table->entries.emplace(token, admission);
+          } catch (const std::bad_alloc&) {
+            held.unlock();
+            return Result<ExecutionResult>(Status::failure(
+                ErrorCode::ResourceExhausted,
+                "planar source admission metadata allocation failed"));
+          }
+        }
+        if (admission->active_runs == UINT32_MAX)
+          return Result<ExecutionResult>(
+              Status::failure(ErrorCode::ResourceExhausted,
+                              "too many concurrent planar source references"));
+        ++admission->active_runs;
+        held.unlock();
+        auto run_admission = std::shared_ptr<void>(
+            admission.get(), [table, admission, token](void*) {
+              bool last = false;
+              {
+                std::lock_guard<std::timed_mutex> lock(table->mutex);
+                last = --admission->active_runs == 0;
+                if (last)
+                  admission->retiring = true;
+              }
+              if (!last)
+                return;
+              admission->lease.reset();
+              admission->pin.reset();
+              admission->owner = {};
+              {
+                std::lock_guard<std::timed_mutex> lock(table->mutex);
+                const auto current = table->entries.find(token);
+                if (current != table->entries.end() &&
+                    current->second.get() == admission.get())
+                  table->entries.erase(current);
+              }
+              table->changed.notify_all();
+            });
+        input_admissions.push_back(std::move(run_admission));
+        diagnostics.retained_input_bytes += admission->resident_bytes;
+      }
+    }
+  }
+  std::vector<PlanarImage> produced(plan.steps().size());
+  for (std::size_t index = 0; index < plan.steps().size(); ++index) {
+    if (cancellation.cancelled() || !plan.current())
+      return Result<ExecutionResult>(Status::failure(
+          cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
+          "planar execution stopped"));
+    const auto& step = plan.steps()[index];
+    if (step.inputs.empty() || step.inputs.size() != step.input_demands.size())
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::TypeMismatch, "unsupported planar operation arity"));
+    std::vector<PlanarImageReadWindow> windows;
+    windows.reserve(step.inputs.size());
+    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
+      const PlanarImage* source = nullptr;
+      if (const auto* external =
+              std::get_if<PlanWorkflowInput>(&step.inputs[port])) {
+        if (external->declaration_index >= sources.size())
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::Internal, "planar declaration index out of bounds"));
+        source = &sources[external->declaration_index];
+      } else {
+        const auto producer = std::get<PlanStepInput>(step.inputs[port]);
+        if (producer.step_index >= index ||
+            !produced[producer.step_index].valid())
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::Internal, "planar producer is unavailable"));
+        source = &produced[producer.step_index];
+      }
+      auto window = source->acquire(step.input_demands[port], cancellation);
+      if (!window.ok())
+        return Result<ExecutionResult>(window.status());
+      windows.push_back(window.take_value());
+      if (std::holds_alternative<PlanWorkflowInput>(step.inputs[port])) {
+        auto count = step.input_demands[port].element_count();
+        if (!count.ok() ||
+            count.value() > UINT64_MAX / Value::element_size(
+                                             source->descriptor().element_type))
+          return Result<ExecutionResult>(
+              Status::failure(ErrorCode::ResourceExhausted,
+                              "planar source read accounting overflow"));
+        ++diagnostics.source_read_count;
+        diagnostics.source_read_bytes +=
+            count.value() *
+            Value::element_size(source->descriptor().element_type);
+      }
+    }
+    if (!step.traits.outputs[0].planar_layout)
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::TypeMismatch, "missing planar output layout"));
+    const auto& declared = *step.traits.outputs[0].planar_layout;
+    PlanarImageConfig config;
+    config.order = declared.order;
+    config.height_axis = declared.height_axis;
+    config.width_axis = declared.width_axis;
+    config.channel_axis = declared.channel_axis;
+    config.row_pitch_bytes = declared.row_pitch_bytes;
+    config.groups = declared.groups;
+    config.tile_height = plan.tile_height();
+    config.tile_width = plan.tile_width();
+    config.aggregate_budget = page_budget;
+    config.maximum_backed_bytes = page_budget->maximum_bytes();
+    auto output = PlanarImage::create(step.output_descriptor, config,
+                                      step.output_facets, plan.resources());
+    if (!output.ok())
+      return Result<ExecutionResult>(output.status());
+    auto image = output.take_value();
+    struct Completion final {
+      Status status{ErrorCode::Internal, "planar callback did not run"};
+      std::mutex mutex;
+      std::condition_variable changed;
+      bool done = false;
+      std::uint64_t callback_us = 0;
+      ResourceLease lease;
+    };
+    auto completion = std::make_shared<Completion>();
+    if (const auto& resources = impl_->budget->resources()) {
+      auto capacity =
+          ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
+      capacity[ResourceKind::Queue] = 1;
+      capacity[ResourceKind::Entries] = 1;
+      auto admitted = resources->reserve(capacity);
+      if (!admitted.ok())
+        return Result<ExecutionResult>(admitted.status());
+      completion->lease = admitted.take_value();
+    }
+    auto admission = impl_->waiting_admission.try_acquire();
+    if (!admission)
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::ResourceExhausted, "planar callback queue is full"));
+    QueuedCallback callback{
+        [&, completion] {
+          const auto callback_started = std::chrono::steady_clock::now();
+          try {
+            if (cancellation.cancelled() || !plan.current()) {
+              completion->status = Status::failure(
+                  cancellation.cancelled() ? ErrorCode::Cancelled
+                                           : ErrorCode::Stale,
+                  "planar execution stopped before callback");
+              return;
+            }
+            completion->status = impl_->operation_registry->invoke_planar(
+                step.operation, windows, step.input_demands, step.parameters,
+                step.output_demand, image, cancellation);
+          } catch (const std::bad_alloc&) {
+            completion->status = Status{ErrorCode::ResourceExhausted, {}};
+          } catch (...) {
+            completion->status = Status{ErrorCode::OperationFailed, {}};
+          }
+          completion->callback_us = elapsed_us(callback_started);
+        },
+        std::move(*admission),
+        [completion] {
+          {
+            std::lock_guard<std::mutex> lock(completion->mutex);
+            completion->done = true;
+          }
+          completion->changed.notify_one();
+        },
+        completion->lease};
+    if (!impl_->cpu_pool.submit(std::move(callback)))
+      return Result<ExecutionResult>(Status::failure(
+          ErrorCode::ResourceExhausted, "planar callback queue stopped"));
+    std::unique_lock<std::mutex> completion_lock(completion->mutex);
+    completion->changed.wait(completion_lock, [&] { return completion->done; });
+    auto status = std::move(completion->status);
+    if (cancellation.cancelled() || !plan.current())
+      status = Status::failure(
+          cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
+          "planar execution stopped after callback");
+    OperationTiming timing;
+    timing.output = step.result_ref();
+    timing.backend = Backend::Cpu;
+    timing.duration_us = completion->callback_us;
+    timing.outcome = status.code;
+    auto count = step.output_demand.element_count();
+    if (count.ok())
+      timing.computed_elements = count.value();
+    diagnostics.operation_timings.push_back(std::move(timing));
+    if (!status.ok())
+      return Result<ExecutionResult>(status);
+    produced[index] = std::move(image);
+    diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+    diagnostics.peak_active_tasks = 1;
+  }
+  ExecutionResult result;
+  for (const auto& named_output : plan.outputs()) {
+    auto image = produced[named_output.second];
+    auto window = image.acquire(plan.output_regions().at(named_output.first),
+                                cancellation);
+    if (!window.ok())
+      return Result<ExecutionResult>(window.status());
+    result.images.emplace(named_output.first, std::move(image));
+    const auto& output = result.images.at(named_output.first);
+    const auto& request = plan.output_regions().at(named_output.first);
+    const auto y = request.dimensions()[output.config().height_axis];
+    const auto x = request.dimensions()[output.config().width_axis];
+    diagnostics.tile_count += ((y.offset + y.extent - 1) / plan.tile_height() -
+                               y.offset / plan.tile_height() + 1) *
+                              ((x.offset + x.extent - 1) / plan.tile_width() -
+                               x.offset / plan.tile_width() + 1);
+  }
+  if (cancellation.cancelled() || !plan.current())
+    return Result<ExecutionResult>(Status::failure(
+        cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
+        "planar result publication stopped"));
+  const auto peaks = impl_->budget->peaks(observation);
+  diagnostics.peak_live_bytes = peaks.first;
+  diagnostics.planned_peak_bytes = peaks.second;
+  diagnostics.execute_us = elapsed_us(started);
+  if (impl_->budget->resources())
+    diagnostics.managed_resources = impl_->budget->resources()->statistics();
+  result.diagnostics = std::move(diagnostics);
+  return Result<ExecutionResult>(std::move(result));
+}
+
 Result<ExecutionResult> ExecutionContext::execute(
     const FrozenExecution& frozen, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
+  if (planar_required(frozen.plan_))
+    return execute_planar(frozen.plan_, frozen.bindings_, cancellation,
+                          options);
   if (frozen.plan_.structured_network())
     return execute_regions(frozen.plan_, frozen.bindings_, nullptr,
                            cancellation, options, false, UINT64_MAX,
@@ -5814,6 +6244,10 @@ Result<ExecutionResult> ExecutionContext::execute(
 Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
     const FrozenExecution& frozen, const ExecutionSink& sink,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (planar_required(frozen.plan_))
+    return Result<ExecutionDiagnostics>(
+        Status::failure(ErrorCode::TypeMismatch,
+                        "planar image stream requires structural sink"));
   if (frozen.plan_.structured_network()) {
     auto result =
         execute_regions(frozen.plan_, frozen.bindings_, &sink, cancellation,
@@ -5830,6 +6264,8 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
 Result<ExecutionResult> ExecutionContext::execute(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
+  if (planar_required(plan))
+    return execute_planar(plan, std::move(bindings), cancellation, options);
   if (plan.dependency_network())
     return execute_regions(plan, std::move(bindings), nullptr, cancellation,
                            options);
@@ -5972,6 +6408,10 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const ExecutionSink& sink, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
+  if (planar_required(plan))
+    return Result<ExecutionDiagnostics>(
+        Status::failure(ErrorCode::TypeMismatch,
+                        "planar image stream requires structural sink"));
   auto result =
       execute_regions(plan, std::move(bindings), &sink, cancellation, options);
   if (!result.ok())
@@ -5983,6 +6423,10 @@ Result<ExecutionResult> ExecutionContext::execute_atoms(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const DemandQuery& requested, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
+  if (planar_required(plan))
+    return Result<ExecutionResult>(
+        Status::failure(ErrorCode::TypeMismatch,
+                        "planar image atoms require structural output"));
   auto root = resource_budget();
   if (!root.ok())
     return Result<ExecutionResult>(root.status());
@@ -6000,6 +6444,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     const ExecutionOptions& options, bool shared_producer,
     std::uint64_t producer_epoch, const std::string& snapshot_identity,
     bool atom_outcomes, const DemandQuery* requested) {
+  if (planar_required(plan))
+    return Result<ExecutionResult>(
+        Status::failure(ErrorCode::TypeMismatch,
+                        "legacy regional image storage is unavailable"));
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<ExecutionResult>(Status::failure(

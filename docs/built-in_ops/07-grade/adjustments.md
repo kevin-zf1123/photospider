@@ -21,7 +21,7 @@
 | GRD-09 `grade.lch` / `oklch` | common-white RGB→RGB；ΔL=0,Cscale=1,Δh=0 | 先明确转换，再修改L/C/h，gamut策略独立；E | 只改h时目标空间L/C保持至gamut前 |
 | GRD-10 `grade.lab` | Lab→Lab；Lscale=1,a/b offset=0 | 独立修改L*,a*,b*；与HSL不共享“饱和度”标度；E | neutral轴偏移产生预期色向 |
 | GRD-11 `grade.white_balance` | linear camera/working RGB→RGB；source/target white必填 | camera gains或chromatic adaptation，temperature/tint须指定映射；E | 单位gains/同白点identity、灰卡中性；是否已应用WB依赖宿主处理阶段，不能仅从像素推断 |
-| GRD-12 `grade.monochrome` | RGB→gray或同灰RGB | modes: linear_Y、Lab_L、channel_weights；weights默认用空间Y矩阵行 | Lab L*数值不能原样当linear灰；w和是否归一显式 |
+| GRD-12 `grade.monochrome` | RGB→gray或同灰RGB | modes: linear_Y、Lab_L、channel_weights；weights默认用空间Y矩阵行 | 归一化 Lab l=L*/100 不能原样当linear灰；w和是否归一显式 |
 | GRD-13 `grade.posterize` | feature/channel→同形；levels=8,levels≥2 | 建议`round(x*(n-1))/(n-1)`，域[0,1]；clip/round显式；E | ties-even时n=2、x=.5输出0，不能与>=.5阈值混同 |
 | GRD-14 `grade.threshold` | scalar→binary mask；t=.5 | `x>=t`，硬边；局部adaptive threshold另H/W | t端点归属明确 |
 | GRD-15 `grade.channel_mixer` | RGB/C通道→目标C | matrix+bias，默认identity；monochrome可输出1通道；E | swap R/B、row weights已知结果 |
@@ -38,6 +38,8 @@
 | GRD-26 `grade.vignette` | RGB+coordinate field→RGB | 椭圆距离→soft profile→曝光；center/roundness/feather明确 | center增益、角点增益解析；可组合mask实现 |
 | GRD-27 `grade.asc_cdl` | RGB→RGB；slope=1,offset=0,power=1,saturation=1 | 按CLF指定Fwd/Rev/FwdNoClamp/RevNoClamp与顺序；E | identity、负值/逆分支；FwdNoClamp的负slope-offset值跳过power，不冒充signed-power |
 | GRD-28 `grade.color_warper` | RGB+颜色域二维网格`[Nu,Nv,2]`→RGB | hue/chroma或chroma/lightness网格位移；basis、hue周期、边界pins显式；D2 | identity网格、控制点、折叠/过冲；不同于一维feature_curve和已有3D LUT应用 |
+| GRD-29 抖动族（dither） | 端口及成员待澄清 | 由 [FMT-07 退休分配](../02-format-color/op_specs/FMT-07_retired.md)承接；噪声源按需复用 NOI-01/07，基础类型／区间映射复用 FMT-06 | 仅确定归属，未选择有序／随机／误差扩散等具体算法；坐标、seed、通道、ROI／tile 规则需独立定义 |
+| GRD-30 半色调族（halftone） | 端口及成员待澄清 | 由 [FMT-07 退休分配](../02-format-color/op_specs/FMT-07_retired.md)承接；与 posterize、threshold、dither 分开定义 | 仅确定归属，图样／网点／采样与数值规则待澄清；文件位打包归独立 input/output codec |
 
 曲线/LUT分离参照CLF的1D/3D与处理节点语义。[^clf] Adobe官方文档确认Levels/Curves、Shadow/Highlight的Radius/Tonal Width等控制存在，不能由控件名称推出其内部公式。[^levels][^shadow] Resolve官方Color页提供curves、qualifiers、HDR工具等功能锚点，具体重现仍以本篇公式或另行黑盒证据为准。[^resolve]
 
@@ -45,7 +47,7 @@
 
 Levels规范候选：`u=(x-black)/(white-black)`；bounded模式先clip到[0,1]，`y=out0+(out1-out0)*u^(1/gamma)`，gamma>0。若提供signed/HDR扩展，另命名、另定义幂函数；已实现 `grade.levels` 的参数名为 `out_min/out_max`，具体稳定算术与失败规则见基础算子契约。输入曲线控制点x必须严格递增，禁止重复x含糊处理。
 
-Monochrome是本清单易混淆的一项。线性RGB的Y来自当前原色矩阵；Lab L*是对Y/Yn的感知编码，提取后若要显示中性灰，应先按Lab逆变换或明确的L*→Y映射重建。可调channel mixer属于艺术黑白，不保证物理luminance。统一使用“黑白”名称却让下游猜输出尺度会影响阈值和示波器。
+Monochrome是本清单易混淆的一项。线性RGB的Y来自当前原色矩阵；Lab 存储 l=L*/100，是对Y/Yn的感知编码，提取后若要显示中性灰，应先按Lab逆变换或明确的 l→Y 映射重建。可调channel mixer属于艺术黑白，不保证物理luminance。统一使用“黑白”名称却让下游猜输出尺度会影响阈值和示波器。
 
 Hue-vs-X统一为`feature_curve`但保留明确操作模式：Hue-vs-Hue输出角度增量；Hue-vs-Sat/Chroma输出乘数或增量，二者不可混用；Hue-vs-Luma输出EV/加性L*等指定量；Luma-vs-Sat、Sat-vs-Sat、Sat-vs-Luma使用非周期source。建议首版周期piecewise-linear曲线并首尾连接，避免无意样条overshoot；hue在achromatic点采用固定不变策略。
 

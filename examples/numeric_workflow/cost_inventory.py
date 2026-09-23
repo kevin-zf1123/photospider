@@ -38,7 +38,7 @@ GROUPS = {
     'CRV-10': ('curve_inverse.cpp', 'O(K) topology plus Q times bracket/refinement work', 'signal_benchmark'),
     'CRV-11': ('lowpass_uniform.cpp / lowpass_nonuniform.cpp', 'O(Q*T) uniform, certified coefficients reused; nonuniform geometry/polynomials may dominate', 'signal_benchmark'),
 }
-legacy = ['numeric.cast','numeric.encode_range','numeric.add','numeric.subtract',
+legacy = ['numeric.add','numeric.subtract',
           'numeric.multiply','numeric.divide','numeric.clamp','numeric.mean',
           'numeric.ordered_scan','numeric.variance','numeric.minimum','numeric.maximum',
           'numeric.abs','field.apply_lut_1d','field.smoothstep','math.add',

@@ -47,6 +47,25 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets);
 /** @brief Exact canonical facet comparison without coercion. */
 bool same_facets(const std::vector<ValueFacet>& left,
                  const std::vector<ValueFacet>& right) noexcept;
+/** @brief Detects structural image metadata independent of port kind. */
+inline bool structural_image_metadata(const OperationMetadata& metadata) {
+  if (metadata.planar_layout)
+    return true;
+  for (const auto& facet : metadata.facets) {
+    if (facet.key == "photospider.image" ||
+        (facet.key == "photospider.color-array" &&
+         metadata.descriptor.shape.size() >= 3))
+      return true;
+    if (facet.key == "photospider.semantic") {
+      auto semantic = decode_semantic(facet);
+      if (semantic.ok() && (semantic.value().kind == SemanticKind::Image ||
+                            semantic.value().kind == SemanticKind::ImagePlane ||
+                            semantic.value().kind == SemanticKind::Mask))
+        return true;
+    }
+  }
+  return false;
+}
 /** @brief Tests exact whole logical coverage without allocation. */
 bool whole_region(const Region& region,
                   const std::vector<std::uint64_t>& shape) noexcept;

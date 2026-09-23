@@ -5,13 +5,43 @@ kind: shared_data_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented
+implementation_status: implemented_subset
 clarification_status: complete
 repository_branch: ops-specs
 repository_commit: 6617c78c
 ---
 
 # FMT-COLOR: generic color-array description
+
+## Selected category target and current implementation
+
+The 2026-09-23 [relative-coordinate revision](FMT_relative_coordinate_scale.md)
+requires l=L*/100 for target CIELAB/CIELCh storage. Existing v1 bytes and runtime
+evidence below retain their historical implicit L* scale until explicit
+migration. This is not a compatibility mode or permission to mix the meanings.
+
+The 2026-09-22 [FMT shared specification](FMT_common_contract.md) selects generic
+tensors/tensor collections with composable metadata and consumer-declared
+semantic validation, including raw computation and explicit call-local override.
+It supersedes the Image/Layer coexistence direction for the future category
+target. The codec, shape restrictions and automatic validation described below
+remain current implementation facts pending migration. Reuse their color-science
+definitions where applicable; metadata presence alone will no longer impose a
+complete-color validation obligation on ordinary numeric consumers. This note
+does not change existing v1 bytes or claim that migration has been implemented.
+
+The subsequent [kernel storage target](../../../kernel-specs/Tensor-Storage-and-Region-Access.md)
+requires planar images in one full-image virtual range with explicit page backing.
+The new metadata target may group non-RGB color and an independent alpha plane
+within one tensor, including Lab plus alpha. The RGB-only alpha restriction below
+still describes the current v1 codec; it is not the selected future group model.
+
+The 2026-09-23 shared decision additionally requires canonical straight images
+with any alpha in the same tensor. The straight/premultiplied options, default
+premultiplied ramp output and association codec tags described below record the
+v1 contract pending migration. They do not permit ordinary premultiplied images
+or persistent external alpha bindings in the selected new target. Their encoded
+bytes are not silently changed by this specification update.
 
 ## Confirmed need and scope
 
@@ -50,6 +80,17 @@ legacy semantic enum at runtime, or claim an existing assign/convert operation
 accepts this new representation.
 
 ## Maintained implementation and validation
+
+The later [FMT-12 target](FMT-12_icc_transform_contract.md) additionally requires
+complete profile-defined RGB/Gray/CMYK/XYZ/Lab spaces and explicit analytic
+endpoint bindings. Arbitrary ICC LUTs need not decompose into analytic fields.
+These target forms, broad v2/v4 profile admission and the CMM itself are not
+implemented by the v1 codec/resource facilities described in this section.
+
+[FMT-13](FMT-13_ocio_transform_contract.md) likewise introduces a future
+config-defined three-coordinate interpretation, identified by frozen OCIO
+resources/context and canonical space or explicit endpoints. It does not infer
+native model units from a name or extend the existing v1 codec implicitly.
 
 The `ops-impl` branch now provides the independent public
 [`ColorArrayDescriptor` codec](../../../../include/photospider/data/color_array.hpp),
@@ -135,8 +176,10 @@ Absolute luminance and white-Y=100 data require explicit conversion. XYZ ramp,
 same-model 3D LUT application and baking carry this description; no RGB transfer
 or primaries are implied by an XYZ value. Initial color tuples have no alpha.
 
-CIELAB uses L*,a*,b* and an explicit reference white, default D50. CIELCh(ab)
-uses the same L* and white with nonnegative C* and hue. OKLab and OKLCh use
+Target CIELAB uses l=L*/100,a*,b* and an explicit reference white, default D50
+in existing ramp authoring. Target CIELCh(ab) uses the same l and white with
+nonnegative C* and hue. The v1 runtime still describes unscaled L* and requires
+migration. OKLab and OKLCh use
 their own coordinate scales and fixed D65; arbitrary white replacement is not
 accepted. These four initial ramp models have three channels and no alpha.
 All lightness and Cartesian opponent components may be finite extended values;
@@ -199,8 +242,8 @@ irrelevant fields are absent, not silently interpreted as defaults.
 | --- | --- | --- |
 | rgb | R,G,B or R,G,B,A | Primaries xy, white xy, transfer; finite signed/HDR RGB; alpha rules above |
 | xyz | X,Y,Z | White xy, relative white-Y=1; finite signed/HDR |
-| cielab | L*,a*,b* | White xy; finite extensions, nominal L*=0..100 |
-| cielch | L*,C*,h | White xy, floating hue unit; finite L*, C*>=0, finite original hue |
+| cielab | l,a*,b* | Revised target: l=L*/100, nominal l=0..1, finite extensions; white xy; v1 units pending migration |
+| cielch | l,C*,h | Revised target: l=L*/100; white xy, floating hue unit; finite l, C*>=0, finite original hue; v1 units pending migration |
 | oklab | L,a,b | Fixed D65; finite extensions, nominal L=0..1 |
 | oklch | L,C,h | Fixed D65, floating hue unit; finite L, C>=0, finite original hue |
 | hsl | H,S,L | Underlying RGB primaries/white/transfer, floating hue unit; all finite extensions |
@@ -252,6 +295,11 @@ Source coordinates: [W3C CSS Color 4 predefined spaces](https://www.w3.org/TR/20
 These identify preset data, not adoption of CSS interpolation or an ACES transform.
 
 ## Canonical encoding and authoring helpers
+
+This section records the existing v1 codec, whose CIELAB/CIELCh units are old
+unscaled L*. It does not encode the revised normalized-lightness target above.
+That target requires an explicitly distinguishable semantic schema before use;
+the model tag alone must not acquire a second implicit interpretation.
 
 Proposed ValueFacet key is photospider.color-array, version 1, with canonical
 bounded payload <=4096 bytes. Provide owned encode/decode/parameter helpers

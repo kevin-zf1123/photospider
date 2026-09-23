@@ -11,7 +11,7 @@ individual operation callbacks/specializations.
 | --- | --- |
 | `00-foundation` | Core execution probes, generic host/addressing helpers |
 | `01-numeric` | Array arithmetic, curves, expressions, LUTs and smoothstep |
-| `02-format-color` | Channel routing, alpha association and color models |
+| `02-format-color` (implementation removed) | Replacement channel, encoding and color specs are Proposed; see [retirement record](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md) |
 | `03-generation` | Coordinate and constant fields |
 | `04-mask-morphology` | Coverage Boolean, morphology, connected components and attributes |
 | `05-filter` | Field/image spatial filters and fixed-kernel algorithms |

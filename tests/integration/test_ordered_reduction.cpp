@@ -216,43 +216,9 @@ int typed_channels_and_cancellation() {
                              plain.copy_bytes(),
                              {encode_semantic(rgba_semantics()).take_value()})
                    .take_value();
-  for (auto block : {1, 5, 7}) {
-    auto doc = document(image, "numeric.variance", block);
-    GraphContext graph(doc);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
-    auto source = std::make_shared<RegionalSource>();
-    source->descriptor = image.descriptor();
-    source->facets = image.facets();
-    unsigned reads = 0;
-    bool bad_tail = false;
-    source->read = [&](const Region& region, std::uint8_t* destination,
-                       std::uint64_t bytes, const BufferAllocator&,
-                       const CancellationToken&) {
-      if (region.dimensions()[2].offset || region.dimensions()[2].extent != 4)
-        return Result<Region>(
-            Status{ErrorCode::OperationFailed, "partial image channel read"});
-      ++reads;
-      for (std::uint64_t i = 0; i < bytes / 4; ++i) {
-        float value = static_cast<float>(numbers[i % 4]);
-        if (bad_tail && region.dimensions()[0].offset == 1 && i % 4 == 3)
-          value = 2;
-        std::memcpy(destination + i * 4, &value, 4);
-      }
-      return Result<Region>(region);
-    };
-    ExecutionContext context(registry, {1, false, 8, 1024});
-    auto result = context.execute(plan, {{{"x", {}, source}}});
-    PS_CHECK(result.ok() &&
-             result.value().values.at("result").as_float64().value() == 1.25);
-    const auto successful_reads = reads;
-    reads = 0;
-    bad_tail = true;
-    PS_CHECK(context.execute(plan, {{{"x", {}, source}}}).status().code ==
-             ErrorCode::OperationFailed);
-    // Failure happens in global typed validation, before either arithmetic
-    // pass.
-    PS_CHECK(reads <= successful_reads / 3);
-  }
+  GraphContext rejected_graph(document(image, "numeric.variance", 1));
+  PS_CHECK(Compiler(registry).compile(rejected_graph).status().code ==
+           ErrorCode::InvalidArgument);
   const auto value = input({256}, std::vector<double>(256, 1));
   GraphContext graph(document(value, "numeric.variance", 64));
   auto plan = Compiler(registry).compile(graph).take_value().plan;
