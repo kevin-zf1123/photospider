@@ -22,7 +22,7 @@ not implement FMT-01 or preserve the retired image memory/numeric contracts.
 
 | Topic | Selected target |
 | --- | --- |
-| Image layout | Every image is planar. Interleaved imports require explicit layout conversion. |
+| Image layout | Every image is planar. Interleaved imports require explicit I/O codec layout conversion before entering the kernel. |
 | Graph tile policy | One DAG-wide tile size; operators cannot choose different output tile sizes. Examples are 64x64, 128x128 and 256x256, not an exhaustive accepted size list. |
 | Plane organization | Continuous planar storage remains available; when tiled, all tiled image planes follow the DAG geometry, with no per-plane size override. |
 | Backing | Reserve one full-image continuous virtual address span; provide backing by page as needed. Plane/tile access retains the shared image address-space owner, rather than unrelated image allocations. |
@@ -39,6 +39,13 @@ Image/Layer as special semantic carrier types.
 Generic tensor shape/dtype, explicit structural layout, color groups and consumed
 metadata remain separate. Raw/override does not change actual storage addresses
 or turn an interleaved import into a planar image by relabeling it.
+
+The 2026-09-23 [codec-boundary clarification](../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
+requires same-size, co-sited color/alpha planes within an image, including
+full-resolution Y/Cb/Cr. External chroma subsampling and physical layout/packing
+belong to input/output codecs; FMT-16/17 are retired. This clarifies the image
+boundary and does not claim a codec implementation or change the storage
+addressing formulas below.
 
 ## Logical coordinates and layout
 

@@ -15,6 +15,12 @@ clarification_status: selected_storage_policy_complete
 定义。下文明确 CPU 接口支持范围与迁移边界；本次不实现 FMT-01，也不保留
 已退休图像的内存或数值契约。
 
+2026-09-23 的[codec 边界澄清](../../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
+要求同一图像的颜色／alpha 平面同尺寸、同采样网格，包括全分辨率 Y/Cb/Cr。
+外部色度子采样及布局／位打包归 input/output codec，FMT-16/17 已退休。
+Interleaved 导入须经 codec 转为 planar 后进入内核。这是图像边界澄清，
+不宣称 codec 已实现，也不改变下方存储寻址公式。
+
 ## 已确认决定
 
 | 主题 | 目标 |
