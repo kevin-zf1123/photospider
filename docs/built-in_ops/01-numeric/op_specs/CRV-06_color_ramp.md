@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented
+implementation_status: implemented_subset
 implementation_branch: numeric-optimize
 implementation_base_commit: eb0e90c8
 implementation_updated: 2026-09-21
@@ -15,6 +15,17 @@ repository_commit: 6617c78c
 ---
 
 # CRV-06: color-ramp family
+
+## Revised lightness coordinate and implementation boundary
+
+The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
+LUT input axes and output table coordinates. Finite values outside 0..1 remain
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
+ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
+and consumers need explicit migration before this revised target is implemented.
+Historical implementation/test evidence below does not establish that migration;
+no silent old/new unit alias or sample-magnitude inference is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared

@@ -8,7 +8,7 @@ category: 01-numeric
 kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented
+implementation_status: implemented_subset
 implementation_branch: numeric-optimize
 implementation_base_commit: eb0e90c8
 implementation_updated: 2026-09-21
@@ -18,6 +18,17 @@ repository_commit: 6617c78c
 ---
 
 # CRV-06D: color_ramp_cielch
+
+## Revised lightness coordinate and implementation boundary
+
+The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
+LUT input axes and output table coordinates. Finite values outside 0..1 remain
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
+ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
+and consumers need explicit migration before this revised target is implemented.
+Historical implementation/test evidence below does not establish that migration;
+no silent old/new unit alias or sample-magnitude inference is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -33,7 +44,7 @@ input-representation mode. The three primitives are implemented separately.
 
 ## Coordinates and unnormalized hue
 
-Channels are L*, C*, h. L* accepts finite extensions, C* is finite and nonnegative,
+Channels are l=L*/100, C*, h. l accepts finite extensions, C* is finite and nonnegative,
 and white is explicit, default D50. No alpha is present. Hue uses floating radians,
 floating pi multiples or exact Int64 p/q*pi. Denominators are positive; unreduced
 fractions are valid. Preserve the original hue value, its sign and winding count;
@@ -155,8 +166,8 @@ unit pair and source float dtype. Include negative and multi-turn hue, huge fini
 values, cancellation, INT64_MIN, equivalent unreduced fractions and C=0. A rounded
 floating pi input is interpreted as its actual binary value, not exact pi.
 
-With stops=[0,1], pi-multiple colors=[[20,2,0],[80,4,4]], query=0.5 returns
-[[50,3,2]]. For hues 1.75 and 0.25 the midpoint is 1; for hues -3 and 5 it is 1.
+With stops=[0,1], pi-multiple colors=[[0.25,2,0],[0.75,4,4]], query=0.5 returns
+[[0.5,3,2]]. For hues 1.75 and 0.25 the midpoint is 1; for hues -3 and 5 it is 1.
 Rational hues 7/4 and 1/4 yield the same midpoint as those exact floating values.
 Equal endpoints remain constant; neither same direction modulo a turn nor C=0
 changes the formula. A hit at hue=4 retains 4 in pi units. No hue_path parameter
