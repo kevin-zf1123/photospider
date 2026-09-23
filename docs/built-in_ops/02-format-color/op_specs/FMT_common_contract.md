@@ -24,6 +24,12 @@ neither an ADR nor a separate glossary.
 
 ## Inherited baseline
 
+The later [relative-coordinate scale decision](FMT_relative_coordinate_scale.md)
+sets native CIELAB/CIELCh lightness storage to l=L*/100 across NUM/CRV/FMT.
+It supersedes old L*=0..100 storage wording while retaining finite extensions,
+other coordinate scales and explicit absolute units. Its semantic migration is
+pending; no existing ColorArray v1 payload is silently reinterpreted.
+
 The maintainer explicitly selected the numerical semantics of
 [NUM-common](../../01-numeric/op_specs/NUM_common_contract.md) and
 [NUM-acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md) as the
@@ -64,15 +70,15 @@ does not automatically define every future color conversion's policy.
 | RGB primaries / gamut | Primary coordinates and white define the RGB basis; nominal representable gamut also depends on channel limits. |
 | Transfer function | Explicit linear/encoded relationship. A gamma exponent alone does not describe every transfer. |
 | Alpha association | Independent of color model and dtype; RGBA is RGB with an alpha channel. |
-| Numeric encoding | Storage dtype, represented interval, offset/scale and quantization. Casting alone does not rescale. |
+| Numeric encoding | Storage dtype, represented interval, offset/scale and quantization. Pure cast preserves numeric values; FMT-06 defaults to combined dtype/interval conversion with an explicit pure-cast option. |
 | Sampling and layout | Chroma sampling/siting and physical packing/strides are distinct from color coordinates. |
 | File format | PNG/JPEG/TIFF/EXR and similar host/codec concerns; not the meaning of model conversion. |
 
 ## Functional coverage audit
 
 The original proposal groups extraction, alpha conversion, gamut conversion,
-model conversion and dtype/range conversion. The existing category already lists
-FMT-01 through FMT-18. The maintainer confirmed full specification coverage,
+model conversion and dtype/range conversion. The category initially listed
+FMT-01 through FMT-18. The maintainer confirmed full functional coverage,
 including missing functions and composable primitives. Catalog coverage does
 not mean individual operator acceptance or implementation completion.
 
@@ -85,15 +91,15 @@ distinct ports, formulas and acceptance. An ID does not impose one registry key.
 | --- | --- | --- |
 | Channel structure | FMT-01/02/03 | Extract plus merge/append, reorder/replace and constant channels; preserve meaningful roles. |
 | Alpha | FMT-04/05 | Association plus add/set/extract/remove; explicit background composition and hidden-color behavior. |
-| Numeric encoding | FMT-06/07 | Separate cast from interval encoding; unsigned types, bit depth and per-channel intervals. |
+| Numeric encoding | FMT-06; FMT-07 retired | A combines dtype/interval conversion; later FMT-06 members own legal codes/effective bits. GRD-29/30 own dither/halftone; FMT-05B owns opaque-code generation. |
 | Assign interpretation | FMT-08 | Explicit source description for untagged data; distinguish relabeling from transforming samples. |
 | Transfer | FMT-09 | Decode/encode separately from primary transforms; extended HDR/log support needs explicit units. |
 | Primary/white transform | FMT-10 | Explicit chromatic adaptation, potentially a separately addressable primitive; method belongs to its later spec. |
 | Models | FMT-11 | Add explicit gray and xyY coverage; HSV/HSB naming, Lab/LCh variants and inverse paths need individual definitions. |
 | Profiles and configuration | FMT-12/13 | ICC and OCIO have different resource/transform semantics; neither is a generic pair of gamut names. |
 | Output rendering | FMT-14/15/18 | Gamut mapping, tone/view transforms, proofing and gamut masks are separate observable functions. |
-| Chroma sampling | FMT-16 | Matrix conversion plus full/limited encoding and 4:4:4/4:2:2/4:2:0 resampling must be distinguished. |
-| Layout | FMT-17 | Planar/interleaved conversion and tensor layout/metadata transformations; explicit color interpretation must survive where applicable. |
+| Chroma sampling | Input/output codec | Internal Y/Cb/Cr planes are same-size and co-sited; external subsampling/reconstruction belongs to the codec boundary. RGB/YCbCr mathematics remains FMT-11. |
+| External layout / packing | Input/output codec and kernel storage | All kernel images are planar; external packing/layout is handled at I/O. Logical tensor/channel transforms keep their NUM/FMT responsibilities. |
 
 The existing category boundaries provide the following allocation for detailed
 specification work: model-defined gray conversion belongs to
@@ -103,9 +109,10 @@ gray conversion with [threshold/mask operations](../../04-mask-morphology/masks.
 and explicit encoding. Dither/halftone requires its own algorithm/support
 contract; one-bit file packing belongs to the codec boundary. Existing Layer
 flatten/over owns background composition. These references establish composition
-dependencies; they create no new registered aliases. The later FMT-07
-clarification must explicitly allocate dither/halftone primitives or cross-category
-dependencies instead of treating either as ordinary rounding.
+dependencies; they create no new registered aliases. The subsequent
+[FMT-07 retirement](FMT-07_retired.md) assigns dither to GRD-29 and halftone to
+GRD-30 in the grade catalog, with reusable NOI-01/07 sources where appropriate.
+Their algorithms remain to be clarified; neither is ordinary rounding.
 
 The required gap coverage includes explicit forward/inverse conversions where
 mathematically defined; unavailable inverses and lossy paths must be identified.
@@ -130,14 +137,10 @@ Inspected at the commit recorded above:
   HSV or xyY model; alpha is currently RGB-only. Transfer is linear/sRGB/gamma.
   Integer-coded colors and additional models cannot use unchanged v1 metadata
   while claiming validation under the current contract.
-- Existing [channel and color nodes](../../../kernel-architecture/Channel-and-Color-Operations.md)
-  have their documented typed HWC/Whole subset. Their names do not prove generic
-  ColorArray or regional support. Existing
-  [numeric.cast](../../../../plugins/ops/01-numeric/numeric_cast.cpp) is registered
-  from 01-numeric; FMT-06 must reconcile this actual key rather than duplicate it.
-- [color.rgb_to_ycbcr420](../../../../plugins/ops/02-format-color/color_rgb_to_ycbcr420.cpp)
-  already supplies a specific multi-output conversion. Its fixed semantics do
-  not establish every FMT-16 sampling mode.
+- Package 0.20.0 [removes the old channel/color and numeric-format operations](FMT_legacy_retirement.md),
+  including numeric.cast, numeric.encode_range and color.rgb_to_ycbcr420.
+  Their inspected HWC/Whole and fixed 420 behavior is historical; it does not
+  implement the clarified FMT contracts. No compatibility aliases remain.
 - ICC byte validation/ownership for CMYK ramps is implemented. This is not an
   implementation of an ICC color transform or arbitrary profile-class admission.
 
@@ -153,11 +156,11 @@ Confirmation does not imply implementation completion.
 
 | ID | Shared decision | Selected contract | Status |
 | --- | --- | --- | --- |
-| C01 | Category scope and operator granularity | Cover FMT-01..18 as composable primitives and fill gaps; classify wrappers explicitly. | Confirmed 2026-09-22 |
+| C01 | Category scope and operator granularity | Cover the functional catalog with explicit primitives/wrappers; FMT-07, FMT-16 and FMT-17 are subsequently retired with responsibilities allocated; other IDs retain their numbers. | Confirmed 2026-09-22; FMT-07/16/17 retirement confirmed subsequently |
 | C02 | Primary representation | Generic tensors/tensor collections with composable metadata; remove special Image/Layer semantic types from the target. Migrate existing interfaces explicitly. | Confirmed 2026-09-22; supersedes initial C02 |
 | C03 | Default source metadata authority | Attached description is authoritative without explicit override; untagged inputs need an explicit interpretation through assign or call-local override; ordinary source assertions must match. | Confirmed, refined by C09 |
 | C04 | Conversion stage boundaries | Explicit transfer, basis/white, model, rendering and quantization stages; no implicit clipping or appearance rendering, and no new unified automatic converter in this scope. | Confirmed 2026-09-22 |
-| C05 | Alpha across models | Alpha has independent semantics but may share a tensor with a color group, including L*,a*,b*,Alpha. Separate alpha tensors also remain representable; non-RGB alpha is not forced into another tensor. | Revised and confirmed 2026-09-22 |
+| C05 | Alpha across models | Complete color images use straight coordinates; any alpha is an independent plane in the same tensor, including normalized l,a*,b*,Alpha. Separate planes/scalars may be explicit operator inputs, but no persistent external alpha association is allowed. | Revised and confirmed 2026-09-23 |
 | C06 | Numeric storage scope | UInt8/UInt16/Int8/Int16/Float32/Float64 plus existing Int64; native missing widths are implementation dependencies, separate from floating color computation. | Confirmed 2026-09-22 |
 | C07 | External-engine conformance | Define versioned ICC/OCIO adapter contracts separately from native mathematical primitives; individual precision/determinism guarantees remain to be established. | Confirmed 2026-09-22 |
 | C08 | Raw output metadata | Retain applicable descriptions without inherited validity guarantees; remove or rebuild inapplicable descriptions. | Confirmed 2026-09-22 |
@@ -201,11 +204,13 @@ layouts will be specified before migration. A tensor collection must retain
 explicit correspondence between related components. A metadata string alone
 cannot replace actual storage/resource ownership.
 
-This is a target shared-contract change. Existing SemanticKind, Image facets,
-ColorArray codec and Layer Result schemas remain implemented until a coherent
-migration changes their consumers. Existing v1 bytes cannot silently acquire
-new meanings. Their migration is a prerequisite, not an implicit adapter layer
-or an implementation performed by these documentation changes.
+The generic metadata design is a target shared-contract change. Shared
+SemanticKind vocabulary and the ColorArray codec remain for maintained consumers.
+Legacy Image invocation paths and Layer Result schemas are already rejected by
+the planar migration gates; their retained declarations do not provide a usable
+compatibility path. Existing v1 bytes cannot silently acquire new meanings.
+Implementing the new metadata consumers is a prerequisite, not an implicit
+adapter layer or an implementation performed by these documentation changes.
 
 Without explicit override, the attached description is the source of truth.
 An ordinary supplied source declaration asserts agreement; conflicts fail before
@@ -214,9 +219,14 @@ for that call and validates the resulting effective description. Untagged data
 can obtain an explicit interpretation through assign or a complete call-local
 override. Neither path guesses missing required fields.
 
-Assign publishes a new tensor interpretation with unchanged samples; its spec
-must distinguish attaching a description from requesting sample validation under
-that description. Call-local override changes neither the input metadata nor
+[FMT-08 assign/remove](FMT-08_metadata_assignment_contract.md) publishes a new
+immutable tensor interpretation with unchanged samples. Static patch/replacement
+and deletion validate the final description's structure, references and owned
+resources, not its pixel-domain validity. Independent component descriptions are
+allowed; declared complete groups must be structurally complete. Explicit cascade
+can remove dependent descriptions but not samples, and unknown annotations remain
+opaque unless explicitly edited. Shared backing never means shared mutable metadata.
+Call-local override changes neither the input metadata nor
 another consumer's interpretation. A conversion publishes its actual destination
 description, not the old source label. Do not infer a profile, alpha role, white
 or transfer from dtype, channel count or a filename.
@@ -274,33 +284,91 @@ operations with observable effects. A reference label alone never requests
 exposure or scene-to-display rendering. No generic converter silently inserts
 these decisions in this scope.
 
-Non-RGB color and alpha have independent semantics and may occupy different
-planes of the same tensor. For example, [L*,a*,b*,Alpha] describes a Lab color
-group plus an independent alpha plane; alpha is not a Lab coordinate. Separate
-alpha tensors and explicit split/join remain possible but are not required merely
-because the model is non-RGB. This supersedes the earlier mandatory sidecar rule.
+### Canonical straight images and internal alpha
 
-For an RGBA to Lab to RGBA workflow, restore straight RGB when required, convert
-the declared color group and carry alpha unchanged through its declared path,
-then explicitly associate RGB if requested. Alpha does not pass through transfer
-or color-model formulas. Operations declare which groups/planes they consume and
-produce, including the correspondence for alpha. Hidden colors at zero alpha and
-tiny alpha arithmetic remain FMT-04/05 questions. This defines no premultiplied
-Lab/CMYK coordinates or implicit Layer emission handling.
+Confirmed 2026-09-23: a complete color image uses straight (unassociated) color
+coordinates. RGB, Gray and non-RGB models do not offer a per-image
+straight/premultiplied choice in the ordinary computation graph. Any alpha is an
+independent plane in the same tensor, identified explicitly by group metadata;
+it is not required to be the last channel. Images without alpha remain legal.
+For example, [l,a*,b*,Alpha], with l=L*/100, has a Lab group and a separate alpha plane, with no
+multiplication of Lab coordinates by alpha.
+
+A standalone alpha tensor or explicit scalar can be connected as an operator
+input, extracted as data, or processed independently. It must be assembled into
+the result image when establishing image alpha. Do not store a persistent alpha
+owner, snapshot or cross-tensor sample binding in image metadata. Group-to-alpha
+references are indices into that same logical tensor. Multiple groups may share
+an internal alpha plane subject to each operation's explicit editing rules.
+Ordinary owner retention for views and declared DAG dependencies is still
+required; it does not establish a semantic external alpha relation.
+
+A partial result retains the full logical channel structure and exact produced
+coverage. An unproduced alpha region is missing, never implicitly opaque/zero
+and never resolved through a hidden metadata reference to another tensor.
+A consumer needing alpha must request that channel through the declared graph
+or receive valid published samples. This does not force alpha production for
+an observation that does not require its samples.
+
+Semantic image operators publish straight image outputs. They may use
+premultiplied working values internally where their formulas require them, but
+must actually restore the public representation before publication. Temporary
+premultiplication, rounding stages, zero-alpha handling and internal fusion are
+part of each operator's numerical contract; a default label cannot replace
+conversion. Alpha association does not select a transfer function, working
+color space or blending color space.
+
+Straight samples may retain finite hidden colors at alpha=0. Merely setting or
+removing alpha does not erase those colors or reconstruct colors already lost
+in another operation. A transform, composite or filter must specify its own
+zero-alpha output rule. Alpha is not transformed as a color coordinate or
+transfer-encoded implicitly. Independent emission/AOVs are not alpha-weighted
+without an explicit operator contract.
+
+For RGBA -> Lab+alpha -> RGBA, convert the declared straight color group and
+carry its internal alpha plane through the operation. No associate/unassociate
+stage is required merely to enter or leave Lab. Import/export or external-engine
+adaptation of premultiplied samples is an explicit representation boundary;
+FMT-04 supplies explicit shape-preserving adapters with internal alpha in both
+input and output tensors; it does not add a second canonical image state.
+
+Raw numeric operations retain applicable descriptions without sample-validity
+certificates, as in C08/C10. They do not establish a second canonical image
+association state. A call-local override may reinterpret source fields but may
+not bypass a semantic image operator's straight output requirement. Explicit
+premultiplied representation payloads, if exposed at an adapter boundary, are
+ordinary numeric tensors with a boundary interpretation, not complete canonical
+images. Relabeling P as C is not unassociation unless the caller explicitly
+requests a numerical reinterpretation rather than preservation of color.
+
+This decision supersedes earlier FMT-04/05 permissions for persistent external
+alpha bindings and ordinary premultiplied image results. The v1 ColorArray
+codec and existing numeric ramp association options remain implementation and
+migration facts, not exceptions to the new category target. Their migration
+must be explicit; this specification change does not implement it.
 
 ### Computation and storage encoding
 
-Floating color coordinates retain native model units. Quantized storage is an
-explicit encoding boundary. Numeric cast changes dtype without implicit interval
-rescaling; encode/decode_range specifies the represented intervals separately.
+Native floating color coordinates retain model units. Encoded storage has an
+explicit decoder and does not become native merely because its dtype is floating.
+The [FMT-06 specification](FMT-06_numeric_conversion_contract.md) now combines
+dtype and interval conversion by default, using full integer ranges and floating
+[0,1], with explicit shared/per-channel overrides. Explicit rescale=false performs
+pure cast without changing numeric values. This supersedes the initial separate-
+only cast/range allocation and the old catalog defaults. Respect rejects conflicts
+between a declared source encoding and the selected source range. The operation
+updates encoding correspondence rather than silently changing color-model units.
 UInt8 covers 0..255 and UInt16 covers 0..65535; Int8 and Int16 represent signed
 integer values. The proposed native widths must be implemented before claiming
 those storage types at public ports. Float16/Int32/UInt32/UInt64 are outside this
 selected expansion. Existing Int64 remains supported.
 
 An integer output cannot retain the existing Float32/64-only ColorArray facet.
-FMT-06/07 must specify how its encoding description retains the information needed
-to reconstruct color interpretation, including per-channel scales where applicable.
+FMT-06 defines the required per-channel decoder propagation; its generic encoding
+metadata and extended native dtypes remain implementation dependencies. Later
+FMT-06 members must define legal code/effective-bit conventions; FMT-07 is retired.
+FMT-05B now specifies opaque generation through explicit or dtype-default alpha
+encoding, requiring a legal exactly representable code for coverage one.
 Quantizing alpha, limited-range YCbCr codes, packed 10/12-bit storage and dithering
 need explicit individual contracts; none follows from selecting UInt16.
 
@@ -315,6 +383,26 @@ not inherit native strict or four-ULP guarantees by name. This exception changes
 no host resource, cancellation, ownership, metadata or failure obligations.
 Selecting an engine-based contract here selects no particular engine/version,
 rendering intent, precision tolerance or backend implementation.
+
+The later [FMT-12 ICC contract](FMT-12_icc_transform_contract.md) selects Little
+CMS 2.19.1 CPU with explicit optimized/reference configurations and native-unit
+adapters. It adds complete profile-defined RGB/Gray/CMYK/XYZ/Lab spaces plus
+explicit profile-to-analytic endpoint bindings. Arbitrary profile LUTs do not
+imply decomposable primaries/transfer; ICC PCS D50 is not silently equated with
+an analytic white preset. These generic metadata additions are unimplemented
+and do not reinterpret ColorArray v1 bytes.
+
+[FMT-13](FMT-13_ocio_transform_contract.md) separately fixes OpenColorIO v2.5.2
+CPU for configured spaces, display/view, Looks, NamedTransform, files and
+declarative trees. Config-native three-coordinate descriptions use frozen
+resource/context identity with explicit analytic bindings; space names do not
+infer units. Selected Float64 colors pass through RN32/F32/widen while alpha
+and AOVs bypass. Config/file resources and property snapshots are static;
+explicit reference-bridge and alpha-effect admission apply. These descriptors
+and engine integrations remain unimplemented. [FMT-18](FMT-18_softproof_contract.md)
+separately specifies proof colors and sampled gamut alarms on the LCMS foundation,
+including an identified source-domain gamut-table correction. It does not infer
+proofing from an OCIO display/view label.
 
 ## Migration dependencies and acceptance cases
 
@@ -347,15 +435,19 @@ The later implementation requires at least these independent checks:
 
 These are required future acceptance cases, not tests run in this session.
 
-## Deferred operator-local questions
+## Completed member scope and future extensions
 
-Extraction index/name and rank removal; merge arity; swizzle constants; alpha
-zero/tiny values and hidden colors; chromatic-adaptation method; exact Gray/HSV/
-xyY formula and degenerate cases; ICC intent/BPC/profile-class support; OCIO
-context/view contract; gamut/tone methods; dither and quantization details;
-chroma filters/siting/odd dimensions; layout ownership and each operation's
-exact Data/Control/Validation/dirty support belong to the later individual
-clarifications. None is resolved merely by this scope audit.
+Current members of FMT-01..06, FMT-08..15 and FMT-18 are now specified in their
+family/member documents. [FMT-14](FMT-14_gamut_mapping_contract.md) fixes native
+mapping and geometric masks; [FMT-15](FMT-15_tone_view_contract.md) fixes native
+luminance/unit mapping and explicit view composition. FMT-14/15/18 decisions
+were delegated by the maintainer on 2026-09-24. Their Proposed status and
+not_implemented state remain distinct from completed design.
+
+Further FMT-06 code constraints, BT.2020 CL, GRD-29/30, external codec
+filters/siting/packing and additional appearance algorithms remain separate
+extensions. They do not create implicit behavior in a completed member. All
+runtime metadata, exact-demand and external-engine acceptance gates still apply.
 
 ## Sources and verification boundary
 
@@ -372,3 +464,14 @@ These are reference material,
 not automatic adoption of CSS rendering behavior or a fixed OCIO implementation.
 No operator execution or numerical acceptance test is performed by this
 documentation-only clarification.
+
+## Same-size color planes and codec boundary (2026-09-23)
+
+The maintainer confirmed that internal color planes, including Y/Cb/Cr, retain
+same-size 1:1:1 sampling, with alpha in the same tensor. External chroma
+subsampling/reconstruction and physical import/export layout belong to separate
+input/output codecs. Every kernel image operator obeys planar storage, including
+raw/override calls. See the [boundary contract](FMT_codec_boundary.md).
+The maintainer also confirmed the basis-pair/explicit-composition direction in
+[model conversion coverage](FMT_model_conversion_coverage.md). It separates model descriptions, explicit conversion pairs and composable routes;
+named model entries alone do not establish complete support.
