@@ -15,6 +15,13 @@ Internal semantic/optimized/plan representations are not public serialization
 formats. The package does not promise that an internal IR from another build
 can be decoded or executed. The daemon never places internal IR on local IPC.
 
+Package 0.20.0 removes 13 legacy format/color registry keys, including
+`numeric.cast` and `numeric.encode_range`; see the
+[retirement record](../built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md).
+This is a breaking operation-surface change. C ABI, WorkflowDocument and trait
+schema versions are unchanged. The installed consumer rejects a 0.19 package
+request and verifies removed-key lookup, invocation and compilation failures.
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and

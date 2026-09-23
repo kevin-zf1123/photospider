@@ -60,7 +60,9 @@ CompactMinOrder 按最小位置编为1..K。校验精确计数、顺序、完整
 不以此证明任意导入 labels 的连通性。当前 validator 使用计费扫描/二分，work 不足时
 有限失败。四连通 union recipe 和独立 BFS 由 labels/area/filter workflow 另外验证。
 
-YCbCr420 沿用既有 color.rgb_to_ycbcr420：BT.709 transfer/matrix、sRGB D65 primaries、
+YCbCr420 v1 数据 schema 保留旧转换的固定表示。包 0.20.0 已移除 color.rgb_to_ycbcr420；
+此 schema 不构成 I/O codec 实现。FMT-16 已退休，内核图像平面保持同尺寸 planar；
+旧 schema 不允许将异尺寸平面作为 canonical 内核图像。历史字段为：BT.709 transfer/matrix、sRGB D65 primaries、
 scene/display reference、Float32 full-range Y∈[0,1]、Cb/Cr∈[-.5,.5]。角色、重建和
 box-clipped boundary 固定于 schema 版本。Chroma 为 ceil(H/2)×ceil(W/2)，名义
 origin=(.5,.5)、step=(2,2) 与真实 clipped support 分开。3×5 最末名义中心(2.5,4.5)，

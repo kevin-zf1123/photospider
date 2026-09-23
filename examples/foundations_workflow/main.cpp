@@ -10,9 +10,9 @@ int main(int argc, char** argv) {
     std::string scenario = "all";
     if (argc == 2 && std::string(argv[1]) == "--help") {
       std::cout << "--scenario "
-                   "all|cast-range|channels|alpha-color|expression-lut|"
-                   "generator-gain|components|basic-curves|basic-masks|basic-"
-                   "filters|basic-fields\n";
+                   "all|numeric|expression-lut|"
+                   "generator-gain|components|basic-masks|basic-"
+                   "filters\n";
       return 0;
     }
     if (argc != 1) {
@@ -21,19 +21,18 @@ int main(int argc, char** argv) {
       scenario = argv[2];
     }
     const std::vector<std::pair<std::string, void (*)()>> scenes = {
-        {"cast-range", foundations::numeric},
-        {"channels", foundations::channels},
-        {"alpha-color", foundations::alpha_color},
+        {"numeric", foundations::numeric},
         {"expression-lut", foundations::expressions},
         {"generator-gain", foundations::generator_gain},
         {"components", foundations::components},
-        {"basic-curves", foundations::basic_curves},
         {"basic-masks", foundations::basic_masks},
-        {"basic-filters", foundations::basic_filters},
-        {"basic-fields", foundations::basic_fields}};
+        {"basic-filters", foundations::basic_filters}};
     unsigned ran = 0;
     for (const auto& scene : scenes)
-      if (scenario == "all" || scenario == scene.first) {
+      if ((scenario == "all" &&
+           (scene.first == "numeric" || scene.first == "expression-lut" ||
+            scene.first == "basic-filters")) ||
+          scenario == scene.first) {
         scene.second();
         ++ran;
       }

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.19.0
+  VERSION 0.20.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -116,10 +116,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/math_add.cpp
   plugins/ops/01-numeric/numeric_abs.cpp
   plugins/ops/01-numeric/numeric_add.cpp
-  plugins/ops/01-numeric/numeric_cast.cpp
   plugins/ops/01-numeric/numeric_clamp.cpp
   plugins/ops/01-numeric/numeric_divide.cpp
-  plugins/ops/01-numeric/numeric_encode_range.cpp
   plugins/ops/01-numeric/numeric_maximum.cpp
   plugins/ops/01-numeric/numeric_mean.cpp
   plugins/ops/01-numeric/numeric_ordered_scan.cpp
@@ -159,17 +157,6 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
-  plugins/ops/02-format-color/alpha_associate.cpp
-  plugins/ops/02-format-color/alpha_unassociate.cpp
-  plugins/ops/02-format-color/channel_extract.cpp
-  plugins/ops/02-format-color/channel_merge.cpp
-  plugins/ops/02-format-color/channel_swizzle.cpp
-  plugins/ops/02-format-color/color_assign.cpp
-  plugins/ops/02-format-color/color_lab_to_xyz.cpp
-  plugins/ops/02-format-color/color_rgb_to_xyz.cpp
-  plugins/ops/02-format-color/color_rgb_to_ycbcr420.cpp
-  plugins/ops/02-format-color/color_xyz_to_lab.cpp
-  plugins/ops/02-format-color/color_xyz_to_rgb.cpp
   plugins/ops/03-generation/field_constant.cpp
   plugins/ops/03-generation/field_coordinate.cpp
   plugins/ops/04-mask-morphology/component_area.cpp
@@ -646,7 +633,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_generic_binding_identity Photospider::kernel tests/unit/test_generic_binding_identity.cpp)
   target_include_directories(test_generic_binding_identity PRIVATE examples)
 
-  foreach(_scenario cast-range expression-lut basic-filters)
+  foreach(_scenario numeric expression-lut basic-filters)
     add_test(NAME test_foundations_${_scenario} COMMAND photospider_foundations_workflow --scenario ${_scenario})
   endforeach()
   photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
@@ -658,7 +645,7 @@ if(BUILD_TESTING)
   set_target_properties(expression_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
   target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
   add_dependencies(test_expression_operations expression_contract_fixture)
-  photospider_add_test(test_generic_color_operations Photospider::kernel tests/integration/test_generic_color_operations.cpp)
+  photospider_add_test(test_format_color_retirement Photospider::kernel tests/integration/test_format_color_retirement.cpp)
   photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_matrix_certificate photospider_test_kernel tests/unit/test_matrix_certificate.cpp)

@@ -663,8 +663,15 @@ int workflow() {
       inferred_registry->register_operation(std::move(inferred_mask)).ok());
   OperationDefinition inferred_image;
   inferred_image.key = "test.inferred_image";
-  inferred_image.traits =
-      base_operations->find_traits("channel.merge").take_value();
+  inferred_image.traits.input_count = 1;
+  inferred_image.traits.input_schema.resize(1);
+  auto& inferred_output = inferred_image.traits.outputs[0];
+  inferred_output.shape_rule = OperationShapeRule::PreserveFirstInput;
+  inferred_output.output_dtype_rule = OperationDtypeRule::Input;
+  inferred_output.output_semantic_rule = OperationSemanticRule::Parameter;
+  inferred_output.output_semantic_parameter = "semantic";
+  inferred_image.traits.parameter_schema = {
+      {"semantic", OperationParameterType::String, true}};
   inferred_image.callback = [&](const OperationInvocation& call) {
     ++legacy_callbacks;
     return Result<Value>(call.inputs[0]);
@@ -690,14 +697,14 @@ int workflow() {
           .status()
           .code == ErrorCode::TypeMismatch);
   auto generic_field =
-      Value::create({ElementType::Float32, {1, 1}}, Region::whole({1, 1}),
-                    {0, {4, 4}}, std::vector<std::uint8_t>(4))
+      Value::create({ElementType::Float32, {1, 1, 3}}, Region::whole({1, 1, 3}),
+                    {0, {12, 12, 4}}, std::vector<std::uint8_t>(12))
           .take_value();
   auto rgb_description = rgba_semantics();
   rgb_description.channels.pop_back();
   rgb_description.association = "none";
-  const std::vector<Value> color_inputs(3, generic_field);
-  const std::vector<Region> color_demands(3, generic_field.region());
+  const std::vector<Value> color_inputs{generic_field};
+  const std::vector<Region> color_demands{generic_field.region()};
   const std::map<std::string, ParameterValue> image_parameter{
       {"semantic", semantic_parameter(rgb_description).take_value()}};
   PS_CHECK(inferred_registry

@@ -1,51 +1,19 @@
 # Multi-output operations
 
-Package 0.9 / operation ABI 9 exposes named compile-time results. A workflow edge
+The multi-output API exposes named compile-time results. A workflow edge
 selects a name through `WorkflowNodeOutput{node, port}`; a root uses
 `WorkflowOutput{name, node, port}`. These are implemented public APIs. Pure
 unrequested ports do not execute. `ExecutionOptions::enable_joint` controls the
 optional CPU physical optimization; it does not change numeric semantics.
 
-## `color.rgb_to_ycbcr420`
+## Current support boundary
 
-One Float32 HWC Image input, with linear sRGB D65 semantics and no alpha. Channel
-roles may be reordered; scene/display reference is preserved. Every actually
-read RGB sample must be finite and in [0,1]. There are no parameters or implicit
-range/alpha conversions. The named Float32 results are:
-
-| Port | Shape | Role | Nominal source-pixel center (Y,X) | Step (Y,X) |
-| --- | --- | --- | --- | --- |
-| `y` | `{H,W}` | luma Y′, [0,1] | `{0,0}` | `{1,1}` |
-| `cb` | `{ceil(H/2),ceil(W/2)}` | signed blue difference, nominal [-0.5,0.5] | `{0.5,0.5}` | `{2,2}` |
-| `cr` | `{ceil(H/2),ceil(W/2)}` | signed red difference, nominal [-0.5,0.5] | `{0.5,0.5}` | `{2,2}` |
-
-For each linear sample L, transfer is `4.5 L` below 0.018 and
-`1.099 L^0.45 - 0.099` otherwise. For the transferred RGB values:
-
-```text
-Y′ = 0.2126 R′ + 0.7152 G′ + 0.0722 B′
-Cb = (B′ - Y′) / 1.8556
-Cr = (R′ - Y′) / 1.5748
-```
-
-These coefficients and transfer follow [ITU-R BT.709-6](https://www.itu.int/dms_pubrec/itu-r/rec/bt/r-rec-bt.709-6-201506-i!!pdf-e.pdf).
-The project's 420 contract averages each centered 2×2 chroma block after transfer
-and matrix calculation, in row-major binary64 arithmetic. Odd right/bottom edges
-average only their valid samples. Final samples are Float32. No studio-range
-integer offsets or scaling are applied.
-
-Y reads one complete source pixel; each chroma observation reads its own valid
-2×2 source block. Data and Validation associations remain per output. Joint
-execution reuses transformed pixels across ready outputs; each member still
-performs its authorized reads and range checks. Named outputs can request
-different Regions or be consumed independently.
-
-`SemanticKind::ImagePlane` is a Float32 HW color plane. Its canonical
-`photospider.semantic` v1 payload includes the plane role, BT.709 transfer, sRGB
-primaries, reference white and reference, plus `plane_origin`/`plane_step` in Y,X
-order. Sampling positions are nominal metadata, independent from exact source
-support in dependency certificates. Existing image-v2 remains complete-pixel
-Float32 HWC. Plane metadata does not turn a partial HWC image into a valid image.
+Package 0.20.0 removes `color.rgb_to_ycbcr420`. FMT-16 is retired; external
+chroma subsampling/reconstruction belongs to the separate input/output codec boundary.
+The image operations and `test_multi_output_ops.cpp` described below remain
+migration source references. Their legacy typed image paths are subject to the
+planar gate, and that test is not currently registered in CTest. These sections
+do not claim new planar image execution support. Generic named-output APIs remain.
 
 ## `image.split_horizontal`
 
@@ -83,8 +51,8 @@ non-symmetric kernels are supported without normalization or bias.
 
 `field.convolve` retains the public input order, same-dtype Float32/Float64 HW
 kernel, and required `anchor_y`, `anchor_x`, `boundary` parameters. It now accepts
-regional staged requests and also consumes ImagePlane inputs. Output is a generic
-HW field. `field.correlate` retains its existing Whole implementation.
+regional staged requests for generic fields. The old ImagePlane path needs
+planar migration. Output is a generic HW field. `field.correlate` retains its existing Whole implementation.
 
 Both convolution paths compute, in fixed kernel row-major order and binary64
 accumulation, `sum K[ky,kx] * I[y+anchor_y-ky,x+anchor_x-kx]`. Zero extends with
@@ -117,8 +85,8 @@ radii and handles the smallest positive sigma without a center division error.
 
 Kernel coefficients are rounded to Float32 once. Image convolution uses these
 same coefficients, row-major kernel order and binary64 accumulation, so a
-`channel.extract` → `field.convolve` graph can independently reproduce each
-stored channel exactly. Image samples and results must be finite/representable.
+separately bound reference plane can be passed to `field.convolve` for
+independent recomputation. The example supplies R explicitly. Image samples and results must be finite/representable.
 Each image observation reads its clipped radius neighborhood with Data and
 Validation roles. Kernel observations use static parameters and descriptor
 metadata only; requesting the kernel never reads image samples. Parameters are
@@ -137,19 +105,12 @@ original parameter semantics.
 invalid parameters, kernel-only zero source reads, and exact public
 `field.convolve` recomputation with both boundaries and joint modes.
 
-## Current executable validation
+## Migration examples
 
-```sh
-cmake --build build/issue257-static --target test_multi_output_ops -j 8
-ctest --test-dir build/issue257-static -R '^test_multi_output_ops$' --output-on-failure
-```
-
-The public-API integration test constructs a 3×5 RGB workflow, checks all three
-ports against an independent long-double oracle, compares joint/singleton bits,
-checks odd edges and dirty support, requests Y alone, rejects bad sample domains
-and alpha, and verifies channel ordering and reference metadata. The installed
-[four-scenario example](../../examples/multi_output_workflow/README.md) exposes
-editable graphs, actual source read sets and independent oracles.
+The [three remaining image scenarios](../../examples/multi_output_workflow/README.md)
+are buildable migration sources, not active planar runtime acceptance. Removed
+420 behavior is no longer exposed. Their future migration must add executable
+planar coverage before restoring runtime acceptance claims.
 
 Convolution and Gaussian coefficient generation establish the default
 round-to-nearest/gradual-underflow environment and restore the caller's prior
