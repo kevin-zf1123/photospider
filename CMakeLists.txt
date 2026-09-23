@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.20.0
+  VERSION 0.21.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -109,6 +109,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
   plugins/ops/00-foundation/core_identity.cpp
   plugins/ops/02-format-color/channel_extraction.cpp
+  plugins/ops/02-format-color/channel_assembly.cpp
   plugins/ops/01-numeric/curve_sample_linear.cpp
   plugins/ops/01-numeric/curve_sample_monotone.cpp
   plugins/ops/01-numeric/field_apply_lut_1d.cpp
@@ -480,6 +481,7 @@ add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
@@ -649,6 +651,8 @@ if(BUILD_TESTING)
   target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
   add_dependencies(test_expression_operations expression_contract_fixture)
   photospider_add_test(test_format_color_retirement Photospider::kernel tests/integration/test_format_color_retirement.cpp)
+  photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
+  target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)
   photospider_add_test(test_channel_extraction Photospider::kernel tests/integration/test_channel_extraction.cpp)
   target_include_directories(test_channel_extraction PRIVATE examples/numeric_workflow)
   photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)

@@ -644,11 +644,11 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
                          .descriptor;
       auto demand = input_internal::derive_input_demand(
           step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[port].kind);
+          descriptor.shape, step.traits.input_schema[port].kind, port);
       if (!demand.ok())
         return Result<ExecutionPlan>(demand.status());
       step.input_demands.push_back(demand.value());
-      if (producer) {
+      if (producer && !demand.value().empty()) {
         auto& prior = demands[producer->step_index];
         if (prior) {
           auto merged = merge_regions(*prior, demand.value(), descriptor.shape);
@@ -1458,11 +1458,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                          .descriptor;
       auto input_demand = input_internal::derive_input_demand(
           step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[input_position].kind);
+          descriptor.shape, step.traits.input_schema[input_position].kind,
+          input_position);
       if (!input_demand.ok())
         return Result<ExecutionPlan>(input_demand.status());
       step.input_demands.push_back(input_demand.value());
-      if (!producer)
+      if (!producer || input_demand.value().empty())
         continue;
       const std::size_t producer_index = producer->step_index;
       if (demand_by_step[producer_index].has_value()) {

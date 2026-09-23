@@ -1089,7 +1089,9 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   if (dual_planar &&
       (definition.callback || definition.start_result ||
        definition.start_joint || definition.validate_dependency ||
-       definition.specialize_metadata || definition.traits.input_count != 1 ||
+       definition.specialize_metadata ||
+       (definition.traits.input_count == 0 &&
+        !definition.traits.repeated_maximum) ||
        definition.traits.outputs.size() != 1 ||
        definition.traits.outputs[0].planar_layout ||
        definition.traits.outputs[0].output_schema.kind !=
@@ -2362,8 +2364,11 @@ Status OperationRegistry::invoke_planar(
       !definition->planar_callback)
     return Status::failure(ErrorCode::TypeMismatch,
                            "operation lacks structural planar storage support");
-  if (inputs.size() != definition->traits.input_count ||
-      input_demands.size() != inputs.size() || !output.valid())
+  auto expanded =
+      resolve_operation_traits(definition->traits, inputs.size(), parameters);
+  if (!expanded.ok())
+    return expanded.status();
+  if (input_demands.size() != inputs.size() || !output.valid())
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid planar operation invocation");
   if (cancellation.cancelled())
@@ -2406,7 +2411,7 @@ Status OperationRegistry::invoke_planar(
       return Status::failure(ErrorCode::TypeMismatch,
                              "planar graph geometry mismatch");
     status = input_internal::validate_port_metadata(
-        definition->traits.input_schema[i], input.descriptor(), input.facets());
+        expanded.value().input_schema[i], input.descriptor(), input.facets());
     if (!status.ok())
       return status;
   }
@@ -2468,7 +2473,7 @@ Status OperationRegistry::invoke_planar(
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     auto required = input_internal::derive_input_demand(
         resolved_traits, output_region, output.descriptor().shape,
-        inputs[i].descriptor().shape, resolved_traits.input_schema[i].kind);
+        inputs[i].descriptor().shape, resolved_traits.input_schema[i].kind, i);
     if (!required.ok())
       return required.status();
     const auto& actual = input_demands[i].dimensions();
@@ -2523,7 +2528,8 @@ Result<Value> OperationRegistry::invoke_current(
     }
     definition = iterator->second;
   }
-  if (definition->traits.planar_storage_capable)
+  if (definition->traits.planar_storage_capable &&
+      !definition->start_dependency)
     return Result<Value>(Status::failure(
         ErrorCode::TypeMismatch,
         "planar image operation requires structural image invocation"));

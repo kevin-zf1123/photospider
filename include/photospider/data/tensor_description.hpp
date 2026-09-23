@@ -11,12 +11,23 @@
 
 namespace ps {
 
+/** @brief Descriptive color provenance, never a sample-validity certificate.
+ * Empty fields carry no assertion. Profiles are immutable owned resources.
+ */
+struct PHOTOSPIDER_API TensorInterpretation final {
+  std::string model, primaries, transfer, reference, association;
+  std::optional<std::array<double, 2>> white;
+  std::optional<std::array<double, 6>> primaries_xy;
+  std::optional<ColorProfileIdentity> profile;
+};
+
 /** @brief One declared component; fields describe stored samples but certify
  * no sample-domain property. Empty fields are allowed. */
 struct PHOTOSPIDER_API TensorChannelDescription final {
   std::string name;
   std::string role;
   std::string unit;
+  std::optional<TensorInterpretation> interpretation = {};
 };
 
 /** @brief One logical axis description, independent of physical layout. */
@@ -27,7 +38,20 @@ struct PHOTOSPIDER_API TensorAxisDescription final {
   double step = 1;
 };
 
-/** @brief Composable tensor interpretation carried by the version-one
+/** @brief Explicit complete color group. components correspond to indices;
+ * alpha, when present, is an internal index outside the color components.
+ * Group fields and explicitly supplied channel fields must agree. No sample
+ * validation or numerical conversion is implied by this description.
+ */
+struct PHOTOSPIDER_API TensorColorGroup final {
+  std::string name;
+  std::vector<std::uint64_t> indices;
+  std::vector<TensorChannelDescription> components;
+  TensorInterpretation interpretation;
+  std::optional<std::uint64_t> alpha;
+};
+
+/** @brief Composable tensor interpretation carried by the version-two
  * photospider.tensor-description facet. The facet does not establish sample
  * validity, color completeness, or image storage. A channel table, when
  * present, is ordered by the declared channel axis. A component describes
@@ -52,6 +76,7 @@ struct PHOTOSPIDER_API TensorDescription final {
   std::optional<std::array<double, 2>> white;
   std::optional<std::array<double, 6>> primaries_xy;
   std::optional<ColorProfileIdentity> profile;
+  std::vector<TensorColorGroup> groups;
 };
 
 /** @brief Encode a bounded canonical tensor description. Returns
@@ -59,7 +84,7 @@ struct PHOTOSPIDER_API TensorDescription final {
  * allocation failure. Pure and thread-safe. */
 PHOTOSPIDER_API Result<ValueFacet> encode_tensor_description(
     const TensorDescription& description);
-/** @brief Decode only the canonical version-one facet. Returns
+/** @brief Decode only the canonical version-two facet. Returns
  * InvalidArgument for old, malformed or noncanonical bytes. */
 PHOTOSPIDER_API Result<TensorDescription> decode_tensor_description(
     const ValueFacet& facet);

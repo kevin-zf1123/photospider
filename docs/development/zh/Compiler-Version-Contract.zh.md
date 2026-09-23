@@ -318,3 +318,16 @@ VM 地址、页 owner、预算身份和驻留状态不进入 semantic identity�
 子集、资源／生命周期规则和可运行 workflow 验收。安装消费检查覆盖结构图像 workflow、
 C SDK／头文件消费和通用执行能力。前面的版本段落记录各自交付契约，不在 0.19 中
 恢复已退休的图像执行路径。
+
+
+## 0.21.0 FMT-02 与 tensor-description v2
+
+0.21.0 新增 FMT-02，并将 tensor-description v1 替换为 v2/TDM2，增加逐分量解释
+和显式完整颜色组。v1 payload 与 0.20 安装包请求明确拒绝，不提供兼容 shim。
+调用者使用公开 codec 重新编码来源描述和 override，并重新构建 C++ consumer。
+现有 ColorArray payload、WorkflowDocument schema、operation C ABI 和
+OperationTraits 版本保持原有含义。规范化 facet/参数字节已参与图 identity。
+安装后的 FMT-02 consumer 验证新 helper、元数据和共享 owner view 边界。
+
+GraphSnapshot 改为直接保留原子 revision 状态，context 析构仍使其失效；私有 C++
+成员表示发生变化，旧对象代码必须重新编译，不能与新库混用。

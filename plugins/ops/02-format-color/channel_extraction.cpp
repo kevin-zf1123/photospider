@@ -76,6 +76,15 @@ TensorDescription project_description(TensorDescription description,
       description.component = description.channels[selected.index];
       description.channels = {description.channels[selected.index]};
     }
+    for (const auto& group : description.groups)
+      for (std::size_t i = 0; i < group.indices.size(); ++i)
+        if (group.indices[i] == selected.index) {
+          if (!description.component)
+            description.component = group.components[i];
+          description.component->interpretation = group.interpretation;
+          description.channels = {*description.component};
+        }
+    description.groups.clear();
     if (!selected.keepdims) {
       description.channel_axis.reset();
       description.channels.clear();

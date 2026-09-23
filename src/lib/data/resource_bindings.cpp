@@ -148,7 +148,17 @@ Result<ResourceBindings> ResourceBindings::select(
           auto description = decode_tensor_description(facet);
           if (!description.ok())
             return Result<ResourceBindings>(description.status());
-          if (description.value().profile)
+          const auto& d = description.value();
+          bool has_profile = d.profile.has_value();
+          for (const auto& c : d.channels)
+            has_profile =
+                has_profile || (c.interpretation && c.interpretation->profile);
+          if (d.component && d.component->interpretation)
+            has_profile =
+                has_profile || d.component->interpretation->profile.has_value();
+          for (const auto& g : d.groups)
+            has_profile = has_profile || g.interpretation.profile.has_value();
+          if (has_profile)
             return Result<ResourceBindings>(
                 invalid("unresolved ICC profile identity"));
         }
@@ -161,6 +171,7 @@ Result<ResourceBindings> ResourceBindings::select(
       auto status = impl_->resources.consume({1 + facet.payload.size()});
       if (!status.ok())
         return Result<ResourceBindings>(status);
+      std::vector<ColorProfileIdentity> identities;
       std::optional<ColorProfileIdentity> identity;
       if (facet.key == "photospider.color-array") {
         auto description = decode_color_array(facet);
@@ -172,15 +183,30 @@ Result<ResourceBindings> ResourceBindings::select(
         if (!description.ok())
           return Result<ResourceBindings>(description.status());
         identity = description.value().profile;
+        const auto& d = description.value();
+        for (const auto& c : d.channels)
+          if (c.interpretation && c.interpretation->profile)
+            identities.push_back(*c.interpretation->profile);
+        if (d.component && d.component->interpretation &&
+            d.component->interpretation->profile)
+          identities.push_back(*d.component->interpretation->profile);
+        for (const auto& g : d.groups)
+          if (g.interpretation.profile)
+            identities.push_back(*g.interpretation.profile);
       }
-      if (!identity)
-        continue;
-      auto profile = icc_profile(*identity);
-      if (!profile.ok())
-        return Result<ResourceBindings>(profile.status());
-      matched = true;
-      if (impl_->profiles.size() != 1)
-        selected.push_back(profile.take_value());
+      if (identity)
+        identities.push_back(*identity);
+      for (const auto& id : identities) {
+        identity = id;
+        if (!identity)
+          continue;
+        auto profile = icc_profile(*identity);
+        if (!profile.ok())
+          return Result<ResourceBindings>(profile.status());
+        matched = true;
+        if (impl_->profiles.size() != 1)
+          selected.push_back(profile.take_value());
+      }
     }
     if (matched && impl_->profiles.size() == 1)
       return Result<ResourceBindings>(*this);

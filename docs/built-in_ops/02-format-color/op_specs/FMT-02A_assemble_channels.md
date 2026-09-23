@@ -7,9 +7,9 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
-proposed_operation_keys:
+implemented_operation_keys:
   - channel.assemble_strict
   - channel.assemble_accelerated_apple_silicon
   - channel.assemble_accelerated_x86_64
@@ -19,8 +19,16 @@ inspection_commit: 1b403fb9
 
 # FMT-02A: assemble single components along a new channel axis
 
+Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
+mapping, tensor-description v2, canonical static parameters, and legal retained
+views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
+and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
+Decision status remains Proposed; implementation facts below supersede the
+historical inspection's missing-runtime statements.
+
+
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
-The proposed keys target the default registry; they are not registered aliases.
+The implemented keys are separate default-registry primitives.
 This member assembles ordered equal-shape, same-dtype single-component inputs.
 Inputs have no effective existing channel axis. Required static `axis` inserts
 the output channel dimension without squeezing any input dimension. Complete
@@ -83,8 +91,7 @@ j[a], removes that axis and compares element bytes using a separate source
 address evaluator. It must not call the production assembly mapper.
 
 The conceptual workflow is `FMT-01 split -> independent component processing ->
-FMT-02A -> named tensor`. Actual executable commands and public workflow results
-belong to implementation delivery. No runtime tests were run for this draft.
+FMT-02A -> named tensor`. Executable commands and independently checked runtime fixtures are linked above.
 For n=1 and X0=[7,9], axis=1 yields shape [2,1] with samples [[7],[9]].
 Extracting that singleton channel with keepdims=false recovers [7,9] exactly.
 Full split/reassemble identity also requires original ordering and explicit

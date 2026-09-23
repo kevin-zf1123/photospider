@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -13,10 +13,17 @@ inspection_commit: 1b403fb9
 
 # FMT-02: channel assembly and concatenation family
 
+Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
+mapping, tensor-description v2, canonical static parameters, and legal retained
+views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
+and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
+Decision status remains Proposed; implementation facts below supersede the
+historical inspection's missing-runtime statements.
+
+
 Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
 Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. This target remains
-Proposed and unimplemented.
+those keys and pixel callbacks are no longer available. The old registration remains retired; the new FMT-02 family is implemented separately.
 
 This is the operator-local clarification for the Proposed FMT-02 family. Inherit
 [FMT-common](FMT_common_contract.md), the NUM numerical/resource conventions
@@ -78,7 +85,7 @@ assembly a consumer of pixel-domain color or alpha constraints. A later semantic
 consumer validates the samples it actually uses. Assembly grants no new
 sample-validity certificate merely because a complete output description exists.
 
-## Current implementation and explicit migration boundary
+## Historical inspection and explicit migration boundary
 
 At the inspected commit, the legacy
 `channel.merge`
@@ -89,11 +96,10 @@ not the proposed FMT-02 family. Package 0.19's
 image outputs before their callbacks; generic non-image uses remain separate.
 No compatibility with its former image numerical rules is selected here.
 
-The kernel now implements a physical PlanarImage owner and bounded page windows.
-Its current CPU operation subset does not establish arbitrary channel assembly:
-the FMT metadata codec, missing integer dtypes, shape-changing region mapping,
-and actual member registrations still require implementation work. Existing
-Whole or Elementwise support is not evidence of an exact FMT-02 mapping.
+At that inspection, PlanarImage storage alone did not establish FMT-02 support.
+Package 0.21.0 supplies the metadata codec, native dtypes, shape-changing exact
+mapping and A/B/C registrations documented in the implementation link above.
+Whole or Elementwise behavior does not replace that exact relation.
 
 ## Clarification decisions
 
@@ -229,8 +235,8 @@ channel prefix sums use checked arithmetic and the inherited 2^40-element bound.
 C specializes the static mapping/selection interface in its member specification.
 
 All parameters below are static. The types specify logical authoring values;
-ordered optional axes and indexed override descriptions require a canonical
-shared encoding before implementation. They are not undocumented encodings in
+ordered optional axes and indexed override descriptions use the canonical v1
+String records documented in the public API guide. They are not undocumented encodings in
 the old `semantic` String parameter or new working runtime parameter kinds.
 
 | Parameter | Type / range | Default and conditions |
@@ -445,12 +451,10 @@ metadata/staging peak and retained owners. No throughput guarantee is inferred.
 Repository contracts and source links above establish the inspected baseline.
 The byte-copy and index equations are specified directly; no external commercial
 pixel-compatibility claim is made (U: unverified under the template's convention).
-No operator-local behavior question remains open. Public encoding of shared
-metadata, optional axis lists and indexed overrides, missing native dtypes,
-shape-changing exact dependency/publication support, legal result views and the
-concrete member registrations remain implementation dependencies. Runtime and
-performance results must be supplied by that delivery, not inferred from this
-Proposed specification. This clarification changes documentation only.
+No operator-local behavior question remains open. The package 0.21.0 implementation supplies shared metadata v2, optional-axis and
+indexed-override encodings, native dtypes, exact dependency/publication support,
+legal views and the member registrations. Runtime results and platform limits
+are recorded in the linked implementation and performance guides.
 
 Documentation-level verification compared independent coordinate scatter and
 gather equations for 105 A cases, 141 B cases and 204 C cases across legal ranks

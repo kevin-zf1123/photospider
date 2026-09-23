@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,9 +24,26 @@ bool valid_text(const std::string& text) {
   return text.size() <= 128 &&
          (text.empty() || plugin_internal::valid_utf8_key(text));
 }
+bool valid_interpretation(const TensorInterpretation& v) {
+  for (const auto* text :
+       {&v.model, &v.primaries, &v.transfer, &v.reference, &v.association})
+    if (!valid_text(*text))
+      return false;
+  if (v.white)
+    for (auto number : *v.white)
+      if (!std::isfinite(number))
+        return false;
+  if (v.primaries_xy)
+    for (auto number : *v.primaries_xy)
+      if (!std::isfinite(number))
+        return false;
+  return true;
+}
 bool valid_channel(const TensorChannelDescription& channel) {
   return valid_text(channel.name) && valid_text(channel.role) &&
-         valid_text(channel.unit);
+         valid_text(channel.unit) &&
+         (!channel.interpretation ||
+          valid_interpretation(*channel.interpretation));
 }
 Status validate_structure(const TensorDescription& value) {
   if ((value.channel_axis && *value.channel_axis >= 8) ||
@@ -44,6 +63,97 @@ Status validate_structure(const TensorDescription& value) {
                             &value.reference, &value.association})
     if (!valid_text(*field))
       return invalid("invalid tensor interpretation text");
+  if (value.groups.size() > 128)
+    return invalid("too many color groups");
+  for (const auto& group : value.groups) {
+    if (!valid_text(group.name) || group.name.empty() ||
+        group.indices.empty() ||
+        group.indices.size() != group.components.size() ||
+        group.indices.size() > 64 ||
+        !valid_interpretation(group.interpretation) ||
+        group.interpretation.model.empty() ||
+        (!group.interpretation.association.empty() &&
+         group.interpretation.association != "straight"))
+      return invalid("invalid explicit color group");
+    const std::map<std::string, std::vector<std::string>> roles{
+        {"rgb", {"red", "green", "blue"}},
+        {"xyz", {"x", "y", "z"}},
+        {"cielab", {"l", "a", "b"}},
+        {"cielch", {"l", "c", "h"}},
+        {"oklab", {"l", "a", "b"}},
+        {"oklch", {"l", "c", "h"}},
+        {"hsl", {"hue", "saturation", "lightness"}},
+        {"hsv", {"hue", "saturation", "value"}},
+        {"ycbcr", {"y", "cb", "cr"}},
+        {"xyy", {"x", "y", "luminance"}},
+        {"cmyk", {"cyan", "magenta", "yellow", "black"}},
+        {"gray", {"gray"}},
+        {"black_white", {"gray"}}};
+    const auto expected = roles.find(group.interpretation.model);
+    if (expected == roles.end() ||
+        expected->second.size() != group.components.size())
+      return invalid("unknown or incomplete color-group model");
+    std::set<std::string> actual_roles;
+    for (const auto& c : group.components)
+      actual_roles.insert(c.role);
+    if (actual_roles !=
+        std::set<std::string>(expected->second.begin(), expected->second.end()))
+      return invalid("incomplete color-group roles");
+    const auto& interpretation = group.interpretation;
+    if ((interpretation.model == "rgb" &&
+         (interpretation.transfer.empty() ||
+          (interpretation.primaries.empty() &&
+           (!interpretation.primaries_xy || !interpretation.white)))) ||
+        ((interpretation.model == "cielab" ||
+          interpretation.model == "cielch" || interpretation.model == "xyz") &&
+         !interpretation.white) ||
+        (interpretation.model == "cmyk" && !interpretation.profile))
+      return invalid("incomplete color-group interpretation");
+    std::set<std::uint64_t> seen;
+    for (std::size_t i = 0; i < group.indices.size(); ++i)
+      if (!seen.insert(group.indices[i]).second ||
+          !valid_channel(group.components[i]) ||
+          group.components[i].interpretation ||
+          (group.alpha && *group.alpha == group.indices[i]))
+        return invalid("invalid group component indices");
+  }
+  const auto compatible_text = [](const std::string& a, const std::string& b) {
+    return a.empty() || b.empty() || a == b;
+  };
+  const auto compatible_interpretation = [&](const TensorInterpretation& a,
+                                             const TensorInterpretation& b) {
+    return compatible_text(a.model, b.model) &&
+           compatible_text(a.primaries, b.primaries) &&
+           compatible_text(a.transfer, b.transfer) &&
+           compatible_text(a.reference, b.reference) &&
+           compatible_text(a.association, b.association) &&
+           (!a.white || !b.white || *a.white == *b.white) &&
+           (!a.primaries_xy || !b.primaries_xy ||
+            *a.primaries_xy == *b.primaries_xy) &&
+           (!a.profile || !b.profile || *a.profile == *b.profile);
+  };
+  std::map<std::uint64_t, TensorChannelDescription> assertions;
+  for (std::size_t i = 0; i < value.channels.size(); ++i)
+    assertions[i] = value.channels[i];
+  for (const auto& group : value.groups)
+    for (std::size_t i = 0; i < group.indices.size(); ++i) {
+      auto c = group.components[i];
+      c.interpretation = group.interpretation;
+      auto& old = assertions[group.indices[i]];
+      if (!compatible_text(old.name, c.name) ||
+          !compatible_text(old.role, c.role) ||
+          !compatible_text(old.unit, c.unit) ||
+          (old.interpretation &&
+           !compatible_interpretation(*old.interpretation, *c.interpretation)))
+        return invalid("group conflicts with channel or overlapping group");
+      if (!c.name.empty())
+        old.name = c.name;
+      if (!c.role.empty())
+        old.role = c.role;
+      if (!c.unit.empty())
+        old.unit = c.unit;
+      old.interpretation = c.interpretation;
+    }
   return Status::success();
 }
 void put_u16(std::vector<std::uint8_t>* bytes, std::uint16_t value) {
@@ -63,11 +173,34 @@ void put_text(std::vector<std::uint8_t>* bytes, const std::string& value) {
   bytes->push_back(static_cast<std::uint8_t>(value.size()));
   bytes->insert(bytes->end(), value.begin(), value.end());
 }
+void put_interpretation(std::vector<std::uint8_t>* bytes,
+                        const TensorInterpretation& v) {
+  for (const auto* text :
+       {&v.model, &v.primaries, &v.transfer, &v.reference, &v.association})
+    put_text(bytes, *text);
+  bytes->push_back(v.white ? 1 : 0);
+  if (v.white)
+    for (auto n : *v.white)
+      put_f64(bytes, n);
+  bytes->push_back(v.primaries_xy ? 1 : 0);
+  if (v.primaries_xy)
+    for (auto n : *v.primaries_xy)
+      put_f64(bytes, n);
+  bytes->push_back(v.profile ? 1 : 0);
+  if (v.profile) {
+    put_u64(bytes, v.profile->byte_length);
+    bytes->insert(bytes->end(), v.profile->sha256.begin(),
+                  v.profile->sha256.end());
+  }
+}
 void put_channel(std::vector<std::uint8_t>* bytes,
                  const TensorChannelDescription& value) {
   put_text(bytes, value.name);
   put_text(bytes, value.role);
   put_text(bytes, value.unit);
+  bytes->push_back(value.interpretation ? 1 : 0);
+  if (value.interpretation)
+    put_interpretation(bytes, *value.interpretation);
 }
 struct Reader final {
   const std::vector<std::uint8_t>& bytes;
@@ -108,8 +241,51 @@ struct Reader final {
     offset += size;
     return valid_text(*value);
   }
+  bool interpretation(TensorInterpretation* v) {
+    for (auto* t : {&v->model, &v->primaries, &v->transfer, &v->reference,
+                    &v->association})
+      if (!text(t))
+        return false;
+    std::uint8_t present = 0;
+    if (!byte(&present) || present > 1)
+      return false;
+    if (present) {
+      v->white.emplace();
+      for (auto& n : *v->white)
+        if (!f64(&n))
+          return false;
+    }
+    if (!byte(&present) || present > 1)
+      return false;
+    if (present) {
+      v->primaries_xy.emplace();
+      for (auto& n : *v->primaries_xy)
+        if (!f64(&n))
+          return false;
+    }
+    if (!byte(&present) || present > 1)
+      return false;
+    if (present) {
+      v->profile.emplace();
+      if (!u64(&v->profile->byte_length))
+        return false;
+      for (auto& n : v->profile->sha256)
+        if (!byte(&n))
+          return false;
+    }
+    return valid_interpretation(*v);
+  }
   bool channel(TensorChannelDescription* value) {
-    return text(&value->name) && text(&value->role) && text(&value->unit);
+    std::uint8_t present = 0;
+    if (!text(&value->name) || !text(&value->role) || !text(&value->unit) ||
+        !byte(&present) || present > 1)
+      return false;
+    if (present) {
+      value->interpretation.emplace();
+      if (!interpretation(&*value->interpretation))
+        return false;
+    }
+    return true;
   }
 };
 }  // namespace
@@ -121,9 +297,9 @@ Result<ValueFacet> encode_tensor_description(
     return Result<ValueFacet>(status);
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 1;
+  facet.version = 2;
   auto& bytes = facet.payload;
-  bytes.insert(bytes.end(), {'T', 'D', 'M', '1'});
+  bytes.insert(bytes.end(), {'T', 'D', 'M', '2'});
   bytes.push_back(description.channel_axis
                       ? static_cast<std::uint8_t>(*description.channel_axis)
                       : 255);
@@ -158,6 +334,19 @@ Result<ValueFacet> encode_tensor_description(
     bytes.insert(bytes.end(), description.profile->sha256.begin(),
                  description.profile->sha256.end());
   }
+  put_u16(&bytes, static_cast<std::uint16_t>(description.groups.size()));
+  for (const auto& group : description.groups) {
+    put_text(&bytes, group.name);
+    put_u16(&bytes, static_cast<std::uint16_t>(group.indices.size()));
+    for (std::size_t i = 0; i < group.indices.size(); ++i) {
+      put_u64(&bytes, group.indices[i]);
+      put_channel(&bytes, group.components[i]);
+    }
+    put_interpretation(&bytes, group.interpretation);
+    bytes.push_back(group.alpha ? 1 : 0);
+    if (group.alpha)
+      put_u64(&bytes, *group.alpha);
+  }
   if (bytes.size() > 4096)
     return Result<ValueFacet>(
         invalid("tensor description exceeds facet bound"));
@@ -166,10 +355,10 @@ Result<ValueFacet> encode_tensor_description(
 
 Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   using Answer = Result<TensorDescription>;
-  if (facet.key != kKey || facet.version != 1 || facet.payload.size() < 9 ||
+  if (facet.key != kKey || facet.version != 2 || facet.payload.size() < 9 ||
       facet.payload.size() > 4096 || facet.payload[0] != 'T' ||
       facet.payload[1] != 'D' || facet.payload[2] != 'M' ||
-      facet.payload[3] != '1')
+      facet.payload[3] != '2')
     return Answer(invalid("invalid tensor description facet"));
   Reader reader{facet.payload, 4};
   TensorDescription value;
@@ -231,6 +420,29 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
       if (!reader.byte(&byte))
         return Answer(invalid("truncated tensor profile identity"));
   }
+  std::uint16_t group_count = 0;
+  if (!reader.u16(&group_count) || group_count > 128)
+    return Answer(invalid("invalid group count"));
+  value.groups.resize(group_count);
+  for (auto& group : value.groups) {
+    std::uint16_t count = 0;
+    if (!reader.text(&group.name) || !reader.u16(&count) || count > 64)
+      return Answer(invalid("invalid group header"));
+    group.indices.resize(count);
+    group.components.resize(count);
+    for (std::size_t i = 0; i < count; ++i)
+      if (!reader.u64(&group.indices[i]) ||
+          !reader.channel(&group.components[i]))
+        return Answer(invalid("invalid group components"));
+    if (!reader.interpretation(&group.interpretation) ||
+        !reader.byte(&present) || present > 1)
+      return Answer(invalid("invalid group interpretation"));
+    if (present) {
+      group.alpha.emplace();
+      if (!reader.u64(&*group.alpha))
+        return Answer(invalid("invalid group alpha"));
+    }
+  }
   if (reader.offset != facet.payload.size() || !validate_structure(value).ok())
     return Answer(invalid("noncanonical tensor description"));
   auto canonical = encode_tensor_description(value);
@@ -260,7 +472,7 @@ Result<TensorDescription> tensor_description_from_parameter(
     return Result<TensorDescription>(invalid("invalid tensor override length"));
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 1;
+  facet.version = 2;
   facet.payload.reserve(parameter.size() / 2);
   const auto nibble = [](char digit) -> int {
     if (digit >= '0' && digit <= '9')
@@ -295,6 +507,17 @@ Status validate_tensor_description(const TensorDescription& description,
             "tensor channel table length disagrees with shape",
             FailureReason::None,
             {FailureOrigin::Schema, FailureScope::Unspecified}};
+  std::set<std::string> names;
+  for (const auto& group : description.groups) {
+    if (!description.channel_axis || !names.insert(group.name).second)
+      return invalid("group requires channel axis and unique name");
+    const auto count = descriptor.shape[*description.channel_axis];
+    for (auto index : group.indices)
+      if (index >= count)
+        return invalid("group index exceeds channel count");
+    if (group.alpha && *group.alpha >= count)
+      return invalid("group alpha exceeds channel count");
+  }
   return Status::success();
 }
 }  // namespace ps

@@ -321,7 +321,8 @@ Status validate_port_schema(const OperationTraits& traits) {
 Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind,
+    std::uint32_t input_port) {
   if (traits.outputs[0].region_rule == OperationRegionRule::Dependency &&
       !(traits.planar_storage_capable &&
         traits.outputs[0].static_dependency_pieces))
@@ -376,52 +377,71 @@ Result<Region> derive_input_demand(
         input_shape, input_shape, OperationPortKind::Value);
   }
   switch (traits.outputs[0].region_rule) {
-    case OperationRegionRule::Dependency:
-      if (traits.planar_storage_capable && traits.input_count == 1 &&
-          traits.outputs[0].static_dependency_pieces &&
-          traits.outputs[0].static_dependency_pieces->size() == 1) {
-        const auto& piece = traits.outputs[0].static_dependency_pieces->front();
-        for (const auto& map : piece.inputs) {
-          if (map.port != 0 ||
-              map.roles != static_cast<std::uint32_t>(DependencyRole::Data) ||
-              map.axes.size() != input_shape.size())
-            continue;
-          std::vector<RegionDimension> mapped;
-          mapped.reserve(map.axes.size());
-          for (std::size_t axis = 0; axis < map.axes.size(); ++axis) {
-            const auto& relation = map.axes[axis];
-            if (relation.observation_axis < 0) {
-              mapped.push_back(relation.fixed);
-            } else {
-              if (static_cast<std::size_t>(relation.observation_axis) >=
-                  output_demand.rank())
-                return Result<Region>(
-                    failure(ErrorCode::InvalidArgument,
-                            "invalid static planar dependency axis"));
-              const auto source =
-                  output_demand.dimensions()[static_cast<std::size_t>(
-                      relation.observation_axis)];
-              const auto offset =
-                  static_cast<__int128>(source.offset) + relation.translation;
-              if (offset < 0 || offset > UINT64_MAX)
-                return Result<Region>(
-                    failure(ErrorCode::InvalidArgument,
-                            "static planar dependency translation overflows"));
-              mapped.push_back(
-                  {static_cast<std::uint64_t>(offset), source.extent});
+    case OperationRegionRule::Dependency: {
+      if (!traits.outputs[0].static_dependency_pieces)
+        return Result<Region>(
+            failure(ErrorCode::InvalidArgument,
+                    "static dependency relation is unresolved"));
+      std::optional<Region> envelope;
+      for (const auto& piece : *traits.outputs[0].static_dependency_pieces) {
+        for (const auto& box : piece.coverage.boxes()) {
+          auto clipped = output_demand.dimensions();
+          bool hit = true;
+          for (std::size_t a = 0; a < clipped.size(); ++a) {
+            const auto part = box.dimensions()[a];
+            const auto begin = std::max(part.offset, clipped[a].offset);
+            const auto end = std::min(part.offset + part.extent,
+                                      clipped[a].offset + clipped[a].extent);
+            if (begin >= end) {
+              hit = false;
+              break;
             }
+            clipped[a] = {begin, end - begin};
           }
-          Region demand(std::move(mapped));
-          if (!demand.validate(input_shape).ok())
-            return Result<Region>(
-                failure(ErrorCode::InvalidArgument,
-                        "static planar dependency exceeds input"));
-          return Result<Region>(std::move(demand));
+          if (!hit)
+            continue;
+          for (const auto& map : piece.inputs) {
+            if (map.port != input_port || map.axes.empty())
+              continue;
+            std::vector<RegionDimension> mapped;
+            for (const auto& relation : map.axes) {
+              if (relation.observation_axis < 0) {
+                mapped.push_back(relation.fixed);
+              } else {
+                const auto source = clipped.at(relation.observation_axis);
+                const auto offset =
+                    static_cast<__int128>(source.offset) + relation.translation;
+                if (offset < 0 || offset > UINT64_MAX)
+                  return Result<Region>(
+                      failure(ErrorCode::InvalidArgument,
+                              "dependency translation overflow"));
+                mapped.push_back(
+                    {static_cast<std::uint64_t>(offset), source.extent});
+              }
+            }
+            Region region(mapped);
+            if (!region.validate(input_shape).ok())
+              return Result<Region>(failure(ErrorCode::InvalidArgument,
+                                            "dependency exceeds input"));
+            if (envelope) {
+              for (std::size_t a = 0; a < mapped.size(); ++a) {
+                const auto old = envelope->dimensions()[a];
+                const auto first = std::min(old.offset, mapped[a].offset);
+                const auto last = std::max(old.offset + old.extent,
+                                           mapped[a].offset + mapped[a].extent);
+                mapped[a] = {first, last - first};
+              }
+            }
+            envelope = Region(std::move(mapped));
+          }
         }
       }
-      return Result<Region>(
-          failure(ErrorCode::InvalidArgument,
-                  "runtime dependency relation is unresolved"));
+      if (envelope)
+        return Result<Region>(std::move(*envelope));
+      auto dimensions = Region::whole(input_shape).dimensions();
+      dimensions[0].extent = 0;
+      return Result<Region>(Region(std::move(dimensions)));
+    }
     case OperationRegionRule::Shrink:
       break;
     case OperationRegionRule::Whole:

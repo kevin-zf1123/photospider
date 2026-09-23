@@ -3,13 +3,13 @@
 2026-09-23：package 0.20.0 移除旧 02-format-color 全部实现，以及历史放在
 01-numeric 的 `numeric.cast`／`numeric.encode_range`。完整清单、保留的共享设施
 和公开回归见[退休记录](op_specs/FMT_legacy_retirement.md)。FMT-01A/B 的 CPU 注册与 FMT-01C helper 已实现，运行方式见
-[公开 workflow](../../kernel-architecture/Channel-and-Color-Operations.md#fmt-01-channel-extraction)；其余新规格仍待实现。
+[公开 workflow](../../kernel-architecture/Channel-and-Color-Operations.md#fmt-01-channel-extraction)；FMT-02 A/B/C 也已实现；其余新规格仍待实现。
 历史 ADR 中的 typed Image/Layer 行为不再作为新 FMT 的实现契约。
 
 [FMT-09～18 范围审查](op_specs/FMT-09-18_scope_review.md)记录已完成的成员设计及实现前置条件。
 FMT-14/15/18 按维护者 2026-09-24 的委托完成设计；规格仍保持 Proposed。
 
-状态 Proposed。已完成设计的 FMT-01～18 活跃成员以各自 D1 spec 为准，均不据此声称实现；FMT-07 已退休。ICC/OCIO 使用独立外部引擎契约，Float64 端口不代表完整 Float64 内部精度。FMT-01 使用新的 tensor-description v1；其余各族运行时实现、完整 metadata 迁移与外部引擎集成仍待完成。整数主要用于输入输出编码；跨通道 shape、资源输入与当前端口的限制见 G1..G5。
+状态 Proposed。已完成设计的 FMT-01～18 活跃成员以各自 D1 spec 为准，均不据此声称实现；FMT-07 已退休。ICC/OCIO 使用独立外部引擎契约，Float64 端口不代表完整 Float64 内部精度。FMT-01/FMT-02 使用新的 tensor-description v2；其余各族运行时实现、完整 metadata 迁移与外部引擎集成仍待完成。整数主要用于输入输出编码；跨通道 shape、资源输入与当前端口的限制见 G1..G5。
 
 ## 算子目录
 
@@ -32,8 +32,8 @@ CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contra
 
 | ID / 提议操作 | 输入 → 输出 | 关键参数和建议默认 | 实现/支持与验收 |
 | --- | --- | --- | --- |
-| [FMT-01 通道提取族](op_specs/FMT-01_channel_extraction_contract.md) | 任意显式通道轴张量→单分量张量／独立输出引用 | A 静态索引；B 静态名称／角色；C 编译期拆分；keepdims=false，rank-1 要求 true | 精确区域请求；auto/view/materialize；保留分量解释；CPU A/B/C 已实现，使用 tensor-description v1；旧 `channel.extract` 已移除 |
-| [FMT-02 通道组装与拼接族](op_specs/FMT-02_channel_assembly_contract.md) | A 单分量插轴组装；B 通道轴拼接；C 显式映射组装 | 非通道 shape 严格相同；A/B 顺序固定，C 源可复用；三者均支持目标通道／颜色组语义重解释且逐位复制 | 澄清完成，Proposed/未实现；精确请求与失效映射；auto/view/materialize；旧 `channel.merge` 不构成新规格实现 |
+| [FMT-01 通道提取族](op_specs/FMT-01_channel_extraction_contract.md) | 任意显式通道轴张量→单分量张量／独立输出引用 | A 静态索引；B 静态名称／角色；C 编译期拆分；keepdims=false，rank-1 要求 true | 精确区域请求；auto/view/materialize；保留分量解释；CPU A/B/C 已实现，使用 tensor-description v2；旧 `channel.extract` 已移除 |
+| [FMT-02 通道组装与拼接族](op_specs/FMT-02_channel_assembly_contract.md) | A 单分量插轴组装；B 通道轴拼接；C 显式映射组装 | 非通道 shape 严格相同；A/B 顺序固定，C 源可复用；三者均支持目标通道／颜色组语义重解释且逐位复制 | CPU A/B/C 已实现，决策状态保持 Proposed；精确请求与失效映射；auto/view/materialize；参见公开 workflow 与性能结果 |
 | [FMT-03 通道重排与替换族](op_specs/FMT-03_channel_editing_contract.md) | A 重排／子集／重复／常量槽位；B 定点替换，其他槽位直通 | A 语义随来源，B 保留目标语义；同 dtype 标量及有类型字面量；原输入同时取值 | 澄清完成，Proposed/未实现；编译期组合复用 FMT-02C；精确请求与失效映射，auto/view/materialize |
 | [FMT-04 alpha 边界适配族](op_specs/FMT-04_alpha_association_contract.md) | A straight 图像→预乘数值；B 预乘数值→straight 图像 | 语义适配输入输出均含内置 alpha，shape／通道位置不变；预乘结果仅用于显式边界 | 澄清完成，Proposed/未实现；保留 NUM 乘除与零 alpha 数学规则，不保留外部持久关联 |
 | [FMT-05 alpha 编辑族](op_specs/FMT-05_alpha_editing_contract.md) | A 设置／添加内置 alpha；B 提取；C 移除 | 颜色逐位保留，零 alpha 不清除隐藏 straight 颜色；共享通道局部编辑 | 澄清完成，Proposed/未实现；A 浮点原生、B/C 保留 dtype 的编译期组合；auto/view/materialize，无外部持久关联 |

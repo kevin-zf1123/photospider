@@ -22,6 +22,17 @@ This is a breaking operation-surface change. C ABI, WorkflowDocument and trait
 schema versions are unchanged. The installed consumer rejects a 0.19 package
 request and verifies removed-key lookup, invocation and compilation failures.
 
+Package 0.21.0 adds FMT-02 and replaces tensor-description v1 with v2 (`TDM2`).
+The v2 payload adds explicit per-component interpretations and complete color
+groups; v1 payloads and 0.20 installed-package requests reject without a shim.
+Re-encode source descriptions and overrides through the public codec and rebuild
+C++ consumers. GraphSnapshot now retains its atomic revision token directly;
+context teardown still invalidates it, but old C++ object code must not be mixed
+with the new private member representation. Existing ColorArray bytes, WorkflowDocument schema, operation C
+ABI and OperationTraits version remain unchanged. Canonical facet/parameter bytes
+already participate in graph identities. The installed FMT-02 consumer covers
+the new helper, metadata and common-owner view boundary.
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and

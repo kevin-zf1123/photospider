@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,7 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "data/whole_input_view.hpp"
+#include "execution/channel_assembly.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -6133,9 +6135,100 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       }
     }
   }
+  // A generic ancestor requested by a planar assembly keeps the ordinary
+  // dependency executor. Rebuild only its reachable subgraph, so unrelated
+  // image declarations do not force a rectangular bridge or destroy aliases.
+  if (plan.outputs().size() == 1) {
+    std::vector<bool> needed(plan.steps().size(), false);
+    needed[plan.outputs().begin()->second] = true;
+    bool generic = true;
+    std::set<std::size_t> declarations;
+    for (std::size_t i = needed.size(); i-- > 0;) {
+      if (!needed[i])
+        continue;
+      const auto& step = plan.steps()[i];
+      if (step.traits.outputs[0].planar_layout || step.output_result_schema)
+        generic = false;
+      for (const auto& edge : step.inputs) {
+        if (const auto* input = std::get_if<PlanWorkflowInput>(&edge)) {
+          declarations.insert(input->declaration_index);
+          if (plan.input_declarations()[input->declaration_index].planar_layout)
+            generic = false;
+        } else {
+          needed[std::get<PlanStepInput>(edge).step_index] = true;
+        }
+      }
+    }
+    if (generic) {
+      WorkflowDocument document;
+      ExecutionBindings selected_bindings;
+      for (auto index : declarations) {
+        const auto& declaration = plan.input_declarations()[index];
+        document.inputs.push_back(declaration);
+        for (const auto& binding : bindings.inputs)
+          if (binding.name == declaration.name)
+            selected_bindings.inputs.push_back(binding);
+      }
+      std::set<std::uint64_t> nodes;
+      for (std::size_t i = 0; i < needed.size(); ++i) {
+        if (!needed[i])
+          continue;
+        const auto& step = plan.steps()[i];
+        if (!nodes.insert(step.node_id).second)
+          continue;
+        WorkflowNode node;
+        node.id = step.node_id;
+        node.operation = step.operation;
+        node.parameters = step.parameters;
+        for (const auto& edge : step.inputs) {
+          if (const auto* input = std::get_if<PlanWorkflowInput>(&edge)) {
+            node.inputs.push_back(WorkflowInputReference{
+                plan.input_declarations()[input->declaration_index].id});
+          } else {
+            const auto& producer =
+                plan.steps()[std::get<PlanStepInput>(edge).step_index];
+            node.inputs.push_back(WorkflowNodeOutput{
+                producer.node_id, producer.traits.outputs[0].key});
+          }
+        }
+        document.nodes.push_back(std::move(node));
+      }
+      const auto& root = *plan.outputs().begin();
+      const auto& step = plan.steps()[root.second];
+      document.outputs = {
+          {root.first, step.node_id, step.traits.outputs[0].key}};
+      GraphContext graph(document);
+      Compiler compiler(impl_->operation_registry);
+      PlanningOptions planning;
+      planning.output_regions = plan.output_regions();
+      auto compiled = compiler.compile(graph, planning, plan.resources());
+      if (!compiled.ok())
+        return Result<ExecutionResult>(compiled.status());
+      auto result = execute(compiled.value().plan, std::move(selected_bindings),
+                            cancellation);
+      if (!plan.current())
+        return Result<ExecutionResult>(
+            Status{ErrorCode::Stale, "assembly source plan changed"});
+      return result;
+    }
+  }
+  // Assembly resolves its ancestors per exact piece. Do not eagerly execute
+  // unselected ports or rectangular scheduling envelopes across channel gaps.
+  std::vector<bool> active(plan.steps().size(), false);
+  for (const auto& root : plan.outputs())
+    active[root.second] = true;
+  for (std::size_t i = active.size(); i-- > 0;)
+    if (active[i] &&
+        !(execution_internal::channel_assembly(plan.steps()[i].operation) &&
+          plan.steps()[i].traits.outputs[0].planar_layout))
+      for (const auto& input : plan.steps()[i].inputs)
+        if (const auto* producer = std::get_if<PlanStepInput>(&input))
+          active[producer->step_index] = true;
   std::vector<PlanarImage> produced(plan.steps().size());
   std::vector<Value> tensor_outputs(plan.steps().size());
   for (std::size_t index = 0; index < plan.steps().size(); ++index) {
+    if (!active[index])
+      continue;
     if (cancellation.cancelled() || !plan.current())
       return Result<ExecutionResult>(Status::failure(
           cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
@@ -6144,6 +6237,249 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     if (step.inputs.size() != step.input_demands.size())
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch, "unsupported planar operation arity"));
+    if (execution_internal::channel_assembly(step.operation) &&
+        step.traits.outputs[0].planar_layout) {
+      const auto& layout = *step.traits.outputs[0].planar_layout;
+      const auto width =
+          Value::element_size(step.output_descriptor.element_type);
+      struct Part final {
+        Region output;
+        Region input;
+        DependencyMappedNeed map;
+        PlanarImage image;
+        Value value;
+      };
+      const auto own_started = std::chrono::steady_clock::now();
+      std::uint64_t child_us = 0;
+      const auto capacity =
+          step.traits.outputs[0].static_dependency_pieces->size();
+      auto admitted = impl_->budget->reserve(
+          4096 + capacity * (sizeof(Part) + 2048), {}, observation);
+      if (!admitted.ok())
+        return Result<ExecutionResult>(admitted.status());
+      auto scratch = admitted.take_value();
+      auto scratch_owner =
+          scratch->reserve_external(4096 + capacity * (sizeof(Part) + 2048));
+      scratch->seal();
+      if (!scratch_owner.ok())
+        return Result<ExecutionResult>(scratch_owner.status());
+      if (const auto& root = impl_->budget->resources()) {
+        const auto samples = step.output_demand.element_count();
+        if (!samples.ok())
+          return Result<ExecutionResult>(samples.status());
+        auto status = root->consume(
+            {samples.value() * (step.output_descriptor.shape.size() + width) +
+             capacity * 32});
+        if (!status.ok())
+          return Result<ExecutionResult>(status);
+      }
+      std::vector<Part> parts;
+      parts.reserve(capacity);
+      std::unordered_map<std::string, std::size_t> selected_parts;
+      ResourceBindings owned = resources;
+      for (const auto& piece :
+           *step.traits.outputs[0].static_dependency_pieces) {
+        for (const auto& box : piece.coverage.boxes()) {
+          if (cancellation.cancelled() || !plan.current())
+            return Result<ExecutionResult>(Status{cancellation.cancelled()
+                                                      ? ErrorCode::Cancelled
+                                                      : ErrorCode::Stale,
+                                                  "assembly mapping stopped"});
+          auto dims = step.output_demand.dimensions();
+          bool hit = true;
+          for (std::size_t d = 0; d < dims.size(); ++d) {
+            const auto p = box.dimensions()[d];
+            const auto first = std::max(p.offset, dims[d].offset);
+            const auto last =
+                std::min(p.offset + p.extent, dims[d].offset + dims[d].extent);
+            if (first >= last) {
+              hit = false;
+              break;
+            }
+            dims[d] = {first, last - first};
+          }
+          if (!hit)
+            continue;
+          const auto& map = piece.inputs.front();
+          std::vector<RegionDimension> mapped;
+          for (const auto& axis : map.axes) {
+            if (axis.observation_axis < 0) {
+              mapped.push_back(axis.fixed);
+            } else {
+              auto dim = dims[axis.observation_axis];
+              dim.offset = static_cast<std::uint64_t>(
+                  static_cast<__int128>(dim.offset) + axis.translation);
+              mapped.push_back(dim);
+            }
+          }
+          Part part{Region(dims), Region(mapped), map, {}, {}};
+          std::string source_key = std::to_string(map.port);
+          for (const auto& dim : mapped)
+            source_key += ":" + std::to_string(dim.offset) + ":" +
+                          std::to_string(dim.extent);
+          const auto previous = selected_parts.find(source_key);
+          const bool reused = previous != selected_parts.end();
+          if (reused) {
+            part.image = parts[previous->second].image;
+            part.value = parts[previous->second].value;
+          } else {
+            selected_parts.emplace(std::move(source_key), parts.size());
+          }
+          if (!reused) {
+            const auto& edge = step.inputs[map.port];
+            if (const auto* external = std::get_if<PlanWorkflowInput>(&edge)) {
+              part.image = sources[external->declaration_index];
+              part.value = generic_sources[external->declaration_index];
+              auto count = part.input.element_count();
+              if (!count.ok())
+                return Result<ExecutionResult>(count.status());
+              ++diagnostics.source_read_count;
+              diagnostics.source_read_bytes += count.value() * width;
+            } else {
+              const auto producer = std::get<PlanStepInput>(edge).step_index;
+              ExecutionPlan selected = plan;
+              selected.outputs_ = {{"assembly_source", producer}};
+              selected.output_regions_ = {
+                  {"assembly_source",
+                   Region::whole(
+                       plan.steps()[producer].output_descriptor.shape)}};
+              auto subplan = selected.tile_plan("assembly_source", part.input);
+              if (!subplan.ok())
+                return Result<ExecutionResult>(subplan.status());
+              const auto producer_started = std::chrono::steady_clock::now();
+              auto run =
+                  execute_planar(subplan.value(), bindings, cancellation, {});
+              child_us += elapsed_us(producer_started);
+              if (!run.ok())
+                return run;
+              if (run.value().images.count("assembly_source"))
+                part.image = run.value().images.at("assembly_source");
+              else
+                part.value = run.value().values.at("assembly_source");
+              const auto& child = run.value().diagnostics;
+              diagnostics.peak_live_bytes =
+                  std::max(diagnostics.peak_live_bytes, child.peak_live_bytes);
+              diagnostics.planned_peak_bytes = std::max(
+                  diagnostics.planned_peak_bytes, child.planned_peak_bytes);
+              diagnostics.source_read_count += child.source_read_count;
+              diagnostics.source_read_bytes += child.source_read_bytes;
+              diagnostics.result_copy_bytes += child.result_copy_bytes;
+              diagnostics.operation_timings.insert(
+                  diagnostics.operation_timings.end(),
+                  child.operation_timings.begin(),
+                  child.operation_timings.end());
+            }
+          }
+          auto united =
+              owned.unite(part.image.valid() ? part.image.resources()
+                                             : part.value.resources());
+          if (!united.ok())
+            return Result<ExecutionResult>(united.status());
+          owned = united.take_value();
+          parts.push_back(std::move(part));
+        }
+      }
+      if (parts.empty())
+        return Result<ExecutionResult>(
+            Status{ErrorCode::Internal, "assembly has no requested pieces"});
+      const auto policy = std::get<std::string>(step.parameters.at("layout"));
+      bool viewed = false;
+      if (policy != "materialize") {
+        std::vector<PlanarImage> planes;
+        std::vector<std::uint64_t> channels, channel_counts;
+        bool images_only = true;
+        for (const auto& part : parts) {
+          if (!part.image.valid()) {
+            images_only = false;
+            break;
+          }
+          const auto axis = part.image.config().channel_axis;
+          const auto input_c =
+              axis ? part.input.dimensions()[*axis] : RegionDimension{0, 1};
+          planes.push_back(part.image);
+          channels.push_back(input_c.offset);
+          channel_counts.push_back(input_c.extent);
+        }
+        if (images_only) {
+          auto alias = PlanarImage::assemble_view(
+              planes, channels, channel_counts, step.output_descriptor, layout,
+              step.output_demand, step.output_facets, page_budget, cancellation,
+              owned);
+          if (alias.ok()) {
+            auto image = alias.take_value();
+            image.retain_execution_admission(
+                std::make_shared<std::vector<std::shared_ptr<void>>>(
+                    input_admissions));
+            produced[index] = std::move(image);
+            viewed = true;
+          } else if (policy == "view" ||
+                     alias.status().message.find("ViewUnavailable:") != 0) {
+            return Result<ExecutionResult>(alias.status());
+          }
+        } else if (policy == "view") {
+          return Result<ExecutionResult>(
+              Status{ErrorCode::InvalidArgument,
+                     "ViewUnavailable: mixed generic/planar owners",
+                     FailureReason::InvalidDomain});
+        }
+      }
+      if (!viewed) {
+        PlanarImageConfig config;
+        config.order = layout.order;
+        config.height_axis = layout.height_axis;
+        config.width_axis = layout.width_axis;
+        config.channel_axis = layout.channel_axis;
+        config.row_pitch_bytes = layout.row_pitch_bytes;
+        config.groups = layout.groups;
+        config.tile_height = plan.tile_height();
+        config.tile_width = plan.tile_width();
+        config.aggregate_budget = page_budget;
+        config.maximum_backed_bytes = page_budget->maximum_bytes();
+        auto created = PlanarImage::create(step.output_descriptor, config,
+                                           step.output_facets, owned);
+        if (!created.ok())
+          return Result<ExecutionResult>(created.status());
+        auto image = created.take_value();
+        auto write = image.begin_write(step.output_demand, cancellation);
+        if (!write.ok())
+          return Result<ExecutionResult>(write.status());
+        auto writer = write.take_value();
+        for (const auto& part : parts) {
+          std::optional<PlanarImageReadWindow> read;
+          if (part.image.valid()) {
+            auto window = part.image.acquire(part.input, cancellation);
+            if (!window.ok())
+              return Result<ExecutionResult>(window.status());
+            read = window.take_value();
+          }
+          auto copied = execution_internal::copy_channel_piece(
+              part.output, part.map, read ? &*read : nullptr,
+              part.value.valid() ? &part.value : nullptr, writer, layout, width,
+              cancellation, [&plan] { return plan.current(); });
+          if (!copied.ok())
+            return Result<ExecutionResult>(copied);
+          if (!plan.current())
+            return Result<ExecutionResult>(
+                Status{ErrorCode::Stale, "assembly plan changed"});
+          diagnostics.result_copy_bytes +=
+              part.output.element_count().value() * width;
+        }
+        auto published = writer.commit(cancellation);
+        if (!published.ok())
+          return Result<ExecutionResult>(published);
+        produced[index] = std::move(image);
+      }
+      OperationTiming timing;
+      timing.output = step.result_ref();
+      timing.backend = Backend::Cpu;
+      timing.outcome = ErrorCode::Ok;
+      timing.duration_us = elapsed_us(own_started) - child_us;
+      timing.computed_elements = step.output_demand.element_count().value();
+      diagnostics.operation_timings.push_back(timing);
+      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+      diagnostics.peak_active_tasks = 1;
+      continue;
+    }
     std::vector<Value> generic_inputs;
     bool all_generic =
         !step.traits.outputs[0].planar_layout &&
@@ -6536,8 +6872,10 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
         cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
         "planar result publication stopped"));
   const auto peaks = impl_->budget->peaks(observation);
-  diagnostics.peak_live_bytes = peaks.first;
-  diagnostics.planned_peak_bytes = peaks.second;
+  diagnostics.peak_live_bytes =
+      std::max(diagnostics.peak_live_bytes, peaks.first);
+  diagnostics.planned_peak_bytes =
+      std::max(diagnostics.planned_peak_bytes, peaks.second);
   diagnostics.execute_us = elapsed_us(started);
   if (impl_->budget->resources())
     diagnostics.managed_resources = impl_->budget->resources()->statistics();

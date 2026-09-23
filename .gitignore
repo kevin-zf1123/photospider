@@ -185,3 +185,9 @@ __pycache__/
 !examples/channel_extraction_performance/*.py
 !examples/channel_extraction_performance/*.md
 !examples/channel_extraction_performance/CMakeLists.txt
+
+!examples/channel_assembly_performance/
+!examples/channel_assembly_performance/*.cpp
+!examples/channel_assembly_performance/*.py
+!examples/channel_assembly_performance/*.md
+!examples/channel_assembly_performance/CMakeLists.txt

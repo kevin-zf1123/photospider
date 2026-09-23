@@ -848,9 +848,52 @@ int workflow() {
   }
   return 0;
 }
+int page_run_rollback() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  PlanarImageConfig config;
+  config.channel_axis.reset();
+  config.order = ImagePlaneOrder::Continuous;
+  auto probe = PlanarImage::create({ElementType::UInt8, {1, 1}}, config);
+  PS_CHECK(probe.ok());
+  const auto width = probe.value().page_size() * 1027;
+  auto created = PlanarImage::create({ElementType::UInt8, {2, width}}, config);
+  PS_CHECK(created.ok());
+  auto image = created.take_value();
+  const std::uint8_t first = 123, second = 211;
+  PS_CHECK(image.publish(Region({{0, 1}, {0, 1}}), &first, 1).ok());
+  PS_CHECK(image.publish(Region({{1, 1}, {0, 1}}), &second, 1).ok());
+  const auto before = image.resident_bytes();
+  const Region requested({{0, 2}, {1, width - 1}});
+  {
+    auto prepared = image.begin_write(requested);
+    PS_CHECK(prepared.ok());
+    auto window = prepared.take_value();
+    auto last = window.row_run({1, width - 1});
+    PS_CHECK(last.ok());
+    last.value().data[0] = 99;
+    // Two old backed pages split fresh runs; each new run crosses the
+    // 1024-page batching limit. Destruction rolls back only fresh backing.
+  }
+  PS_CHECK(image.resident_bytes() == before);
+  PS_CHECK(image.backed_bytes() == 2 * image.page_size());
+  std::uint8_t observed = 0;
+  PS_CHECK(image.read(Region({{0, 1}, {0, 1}}), &observed, 1).ok());
+  PS_CHECK(observed == first);
+  PS_CHECK(image.read(Region({{1, 1}, {0, 1}}), &observed, 1).ok());
+  PS_CHECK(observed == second);
+  PS_CHECK(!image.acquire(Region({{1, 1}, {width - 1, 1}})).ok());
+  CancellationSource stop;
+  stop.cancel();
+  PS_CHECK(image.begin_write(requested, stop.token()).status().code ==
+           ErrorCode::Cancelled);
+  PS_CHECK(image.resident_bytes() == before);
+  return 0;
+}
 }  // namespace
 
 int main() {
+  if (page_run_rollback())
+    return 1;
   if (rectangle_bounds())
     return 1;
   return workflow();

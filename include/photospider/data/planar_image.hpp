@@ -194,6 +194,7 @@ class PHOTOSPIDER_API PlanarImageWriteWindow final {
  private:
   friend class PlanarImage;
   friend class OperationRegistry;
+  friend class ExecutionContext;
   explicit PlanarImageWriteWindow(std::unique_ptr<Impl> impl);
   Status commit(const CancellationToken& cancellation = {});
   std::unique_ptr<Impl> impl_;
@@ -262,6 +263,24 @@ class PHOTOSPIDER_API PlanarImage final {
       std::shared_ptr<PlanarPageBudget> metadata_budget = {},
       const CancellationToken& cancellation = {},
       const ResourceBindings& resources = {}) const;
+
+  /** @brief Prove a read-only assembly alias from ordered source planes.
+   * All entries must map to consecutive physical planes of one root owner,
+   * with identical spatial maps. Each source must authorize its corresponding
+   * requested region. Unrelated/reordered/duplicate owners return
+   * InvalidArgument with ViewUnavailable; all other errors are preserved.
+   * The alias retains root storage, resources and exact coverage. No sample
+   * payload is copied. Immutable reads are concurrent-safe; no cache is used.
+   */
+  static Result<PlanarImage> assemble_view(
+      const std::vector<PlanarImage>& sources,
+      const std::vector<std::uint64_t>& channels,
+      const std::vector<std::uint64_t>& channel_counts,
+      ValueDescriptor descriptor, PlanarImageLayout layout,
+      const Region& requested, std::vector<ValueFacet> facets = {},
+      std::shared_ptr<PlanarPageBudget> metadata_budget = {},
+      const CancellationToken& cancellation = {},
+      const ResourceBindings& resources = {});
 
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
