@@ -141,6 +141,20 @@ void release_address(void* address, std::size_t size) noexcept {
   munmap(address, size);
 #endif
 }
+
+template <std::size_t Width>
+void import_row(std::uint8_t* destination, const std::uint8_t* source,
+                std::int64_t stride, std::uint64_t samples) {
+  if (stride == Width) {
+    std::memcpy(destination, source, samples * Width);
+    return;
+  }
+  // Fixed-size memcpy preserves every bit and supports unaligned storage.
+  // Value construction already proves all addressed samples are in bounds.
+  for (std::uint64_t x = 0; x < samples; ++x)
+    std::memcpy(destination + x * Width,
+                source + static_cast<std::int64_t>(x) * stride, Width);
+}
 }  // namespace
 
 struct PlanarImage::Impl final {
@@ -390,23 +404,55 @@ Result<PlanarImage> PlanarImage::import_value(
     return Result<PlanarImage>(writer.status());
   auto window = writer.take_value();
   std::vector<std::uint64_t> at(value.descriptor().shape.size(), 0);
-  for (std::uint64_t i = 0; i < image.impl_->sample_count; ++i) {
-    if ((i & 4095U) == 0 && cancellation.cancelled())
-      return Result<PlanarImage>(
-          Status::failure(ErrorCode::Cancelled, "image import cancelled"));
-    const auto offset = value.byte_address(at);
-    if (!offset.ok())
-      return Result<PlanarImage>(offset.status());
-    const auto target = image.impl_->offset(at[image.impl_->config.height_axis],
-                                            at[image.impl_->config.width_axis],
-                                            image.impl_->channel_of(at));
-    std::memcpy(image.impl_->base + target,
-                value.bytes().data() + offset.value(),
-                image.impl_->scalar_width);
-    for (std::size_t axis = at.size(); axis-- > 0;) {
-      if (++at[axis] < value.descriptor().shape[axis])
-        break;
-      at[axis] = 0;
+  const auto& storage = *image.impl_;
+  const auto& layout = storage.config;
+  const auto stride = value.layout().byte_strides[layout.width_axis];
+  const auto row_stride = value.layout().byte_strides[layout.height_axis];
+  const auto* source = value.bytes().data();
+  // Traverse bounded physical rectangles: each source tile stays hot while
+  // its channels are separated. Continuous storage uses short row bands.
+  const auto band_height =
+      layout.order == ImagePlaneOrder::Tiled ? layout.tile_height : 32;
+  const auto band_width = layout.order == ImagePlaneOrder::Tiled
+                              ? std::min<std::uint64_t>(layout.tile_width, 4096)
+                              : 4096;
+  for (std::uint64_t y = 0; y < storage.height; y += band_height) {
+    const auto rows = std::min(band_height, storage.height - y);
+    for (std::uint64_t x = 0; x < storage.width; x += band_width) {
+      const auto samples = std::min(band_width, storage.width - x);
+      at[layout.width_axis] = x;
+      for (std::uint64_t c = 0; c < storage.channels; ++c) {
+        if (layout.channel_axis)
+          at[*layout.channel_axis] = c;
+        at[layout.height_axis] = y;
+        const auto offset = value.byte_address(at);
+        if (!offset.ok())
+          return Result<PlanarImage>(offset.status());
+        auto* rectangle = storage.base + storage.offset(y, x, c);
+        const auto* input_rectangle = source + offset.value();
+        for (std::uint64_t dy = 0; dy < rows; ++dy) {
+          if (cancellation.cancelled())
+            return Result<PlanarImage>(Status::failure(
+                ErrorCode::Cancelled, "image import cancelled"));
+          auto* target = rectangle + dy * storage.row_pitch;
+          const auto* input =
+              input_rectangle + static_cast<std::int64_t>(dy) * row_stride;
+          switch (storage.scalar_width) {
+            case 1:
+              import_row<1>(target, input, stride, samples);
+              break;
+            case 2:
+              import_row<2>(target, input, stride, samples);
+              break;
+            case 4:
+              import_row<4>(target, input, stride, samples);
+              break;
+            case 8:
+              import_row<8>(target, input, stride, samples);
+              break;
+          }
+        }
+      }
     }
   }
   auto status = window.commit(cancellation);
