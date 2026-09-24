@@ -20,8 +20,9 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-struct ExpWorkspace final {
+struct FloatMathWorkspace final {
   static constexpr std::size_t kCount = 64;
+  static_assert(kCount <= 64);  // One rejection-mask bit per lane.
   std::array<float, kCount> input{}, output{};
   std::array<std::uint32_t, kCount> bits{};
 };
@@ -32,7 +33,7 @@ struct MathBatchWorkspace final {
   std::array<bool, kCount> eligible{};
 };
 inline bool sleef_batch_kind(CertifiedKind kind) {
-  return (kind >= CertifiedKind::Ln && kind <= CertifiedKind::Tan) ||
+  return (kind >= CertifiedKind::Exp && kind <= CertifiedKind::Tan) ||
          kind == CertifiedKind::Pow || kind == CertifiedKind::Atan2;
 }
 // One admitted arithmetic workspace and one complete packed result per
@@ -62,13 +63,18 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
   if (!allocated.ok())
     return Answer(allocated.status());
   auto output = allocated.take_value();
+  auto* const output_data = output.data();
   std::size_t extra = 0;
   if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
-    if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict)
-      extra = sizeof(ExpWorkspace);
+    if (profile != SequenceProfile::Strict &&
+        (kind == CertifiedKind::Exp ||
+         trig_simd_kind(static_cast<unsigned>(kind))))
+      extra = std::max(
+          sizeof(FloatMathWorkspace),
+          sleef_batch_kind(kind) ? sizeof(MathBatchWorkspace) : std::size_t{0});
     else if (sleef_batch_kind(kind) && profile != SequenceProfile::Strict)
       extra = sizeof(MathBatchWorkspace);
-    static_assert(sizeof(Arithmetic) % alignof(ExpWorkspace) == 0);
+    static_assert(sizeof(Arithmetic) % alignof(FloatMathWorkspace) == 0);
     static_assert(sizeof(Arithmetic) % alignof(MathBatchWorkspace) == 0);
   }
   auto storage = call.allocator.allocate(sizeof(Arithmetic) + extra);
@@ -86,6 +92,7 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
   const auto count = call.output_region.element_count().value();
   std::vector<std::uint64_t> coordinate(shape.size(), 0);
   std::array<const std::uint8_t*, 2> packed{};
+  bool all_packed = true;
   for (std::size_t port = 0; port < call.inputs.size(); ++port) {
     const auto& input = call.inputs[port];
     std::uint64_t stride = source_width;
@@ -102,69 +109,89 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
         return Answer(address.status());
       packed[port] = input.bytes().data() + address.value();
     }
+    all_packed = all_packed && dense;
   }
+  const auto advance_coordinate = [&] {
+    if (!all_packed) {
+      for (std::size_t axis = shape.size(); axis; --axis) {
+        if (++coordinate[axis - 1] < shape[axis - 1])
+          break;
+        coordinate[axis - 1] = 0;
+      }
+    }
+  };
+  const auto indexing_work = call.inputs.size() * shape.size() + 1;
   std::optional<input_internal::Float32Environment> environment;
   environment.emplace();
   if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
-    if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict &&
+    if ((kind == CertifiedKind::Exp ||
+         trig_simd_kind(static_cast<unsigned>(kind))) &&
+        profile != SequenceProfile::Strict &&
         descriptor.element_type == ElementType::Float32 &&
         accelerated_math_available()) {
       if (environment->active()) {
-        auto* block = new (scratch.data() + sizeof(Arithmetic)) ExpWorkspace;
+        const auto eligible = [kind](std::uint32_t bits) {
+          return kind == CertifiedKind::Exp
+                     ? (bits & UINT32_C(0x7fffffff)) <= UINT32_C(0x42a00000)
+                     : trig_simd_domain(static_cast<unsigned>(kind), bits);
+        };
+        auto* block =
+            new (scratch.data() + sizeof(Arithmetic)) FloatMathWorkspace;
         for (std::uint64_t offset = 0; offset < count;
-             offset += ExpWorkspace::kCount) {
-          const auto size =
-              std::min<std::uint64_t>(ExpWorkspace::kCount, count - offset);
+             offset += FloatMathWorkspace::kCount) {
+          const auto size = std::min<std::uint64_t>(FloatMathWorkspace::kCount,
+                                                    count - offset);
           // Charge indexing here; arithmetic admission is charged exactly once
           // per lane, either below for a SIMD lane or by evaluate on fallback.
-          status = consume(size * (call.inputs.size() * shape.size() + 1));
+          status = consume(size * indexing_work);
           if (!status.ok())
             return Answer(status);
-          std::uint64_t fast_count = 0;
-          for (std::size_t lane = 0; lane < size; ++lane) {
+          if (packed[0]) {
+            std::memcpy(block->bits.data(), packed[0] + offset * 4, size * 4);
+          } else {
             const auto& input = call.inputs[0];
-            const auto* data = packed[0];
-            if (data) {
-              data += (offset + lane) * source_width;
-            } else {
+            const auto* const source = input.bytes().data();
+            for (std::size_t lane = 0; lane < size; ++lane) {
               auto address = input.byte_address(coordinate);
               if (!address.ok())
                 return Answer(address.status());
-              data = input.bytes().data() + address.value();
+              std::memcpy(&block->bits[lane], source + address.value(), 4);
+              advance_coordinate();
             }
-            std::memcpy(&block->bits[lane], data, 4);
+          }
+          std::memcpy(block->input.data(), block->bits.data(), size * 4);
+          std::uint64_t rejected = 0;
+          std::uint64_t fast_count = size;
+          for (std::size_t lane = 0; lane < size; ++lane) {
             // Classify by bits before any FP instruction, including sNaN.
-            const auto magnitude = block->bits[lane] & UINT32_C(0x7fffffff);
-            const auto safe = magnitude <= UINT32_C(0x42a00000)
-                                  ? block->bits[lane]
-                                  : UINT32_C(0);
-            fast_count += magnitude <= UINT32_C(0x42a00000);
-            std::memcpy(&block->input[lane], &safe, 4);
-            for (std::size_t axis = shape.size(); axis; --axis) {
-              if (++coordinate[axis - 1] < shape[axis - 1])
-                break;
-              coordinate[axis - 1] = 0;
+            if (!eligible(block->bits[lane])) {
+              rejected |= UINT64_C(1) << lane;
+              --fast_count;
+              block->input[lane] = 0;
             }
           }
           status = consume(fast_count * DirectedInterval::kSlots *
                            DirectedInterval::kWords);
           if (!status.ok())
             return Answer(status);
-          exp_simd_f32(block->input.data(), block->output.data(), size);
-          for (std::size_t lane = 0; lane < size; ++lane) {
-            const auto magnitude = block->bits[lane] & UINT32_C(0x7fffffff);
-            std::uint32_t word;
-            if (magnitude <= UINT32_C(0x42a00000)) {
-              std::memcpy(&word, &block->output[lane], 4);
-            } else {
-              auto calculated = arithmetic->evaluate(
-                  kind, descriptor.element_type, block->bits[lane], 0, consume,
-                  [] { return Status::success(); });
-              if (!calculated.ok())
-                return Answer(calculated.status());
-              word = static_cast<std::uint32_t>(calculated.value());
-            }
-            std::memcpy(output.data() + (offset + lane) * 4, &word, 4);
+          if (kind == CertifiedKind::Exp)
+            exp_simd_f32(block->input.data(), block->output.data(), size);
+          else
+            trig_simd_f32(static_cast<unsigned>(kind), block->input.data(),
+                          block->output.data(), size);
+          // Preserve the admission/cancellation boundary at each block. The
+          // output is unpublished until every rejected lane has been repaired.
+          std::memcpy(output_data + offset * 4, block->output.data(), size * 4);
+          while (rejected) {
+            const auto lane = static_cast<unsigned>(__builtin_ctzll(rejected));
+            rejected &= rejected - 1;
+            auto calculated = arithmetic->evaluate(
+                kind, descriptor.element_type, block->bits[lane], 0, consume,
+                [] { return Status::success(); }, true);
+            if (!calculated.ok())
+              return Answer(calculated.status());
+            const auto word = static_cast<std::uint32_t>(calculated.value());
+            std::memcpy(output_data + (offset + lane) * 4, &word, 4);
           }
         }
         status = consume(1);
@@ -182,7 +209,7 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
            offset += MathBatchWorkspace::kCount) {
         const auto size =
             std::min<std::uint64_t>(MathBatchWorkspace::kCount, count - offset);
-        status = consume(size * (call.inputs.size() * shape.size() + 1));
+        status = consume(size * indexing_work);
         if (!status.ok())
           return Answer(status);
         for (std::size_t lane = 0; lane < size; ++lane) {
@@ -214,11 +241,7 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
               accelerated_math_domain(static_cast<unsigned>(kind), a, b);
           block->a[lane] = block->eligible[lane] ? a : 1;
           block->b[lane] = block->eligible[lane] ? b : 1;
-          for (std::size_t axis = shape.size(); axis; --axis) {
-            if (++coordinate[axis - 1] < shape[axis - 1])
-              break;
-            coordinate[axis - 1] = 0;
-          }
+          advance_coordinate();
         }
         status =
             consume(size * DirectedInterval::kSlots * DirectedInterval::kWords);
@@ -241,7 +264,7 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
           if (!calculated.ok())
             return Answer(calculated.status());
           const auto word = calculated.value();
-          std::memcpy(output.data() + (offset + lane) * output_width, &word,
+          std::memcpy(output_data + (offset + lane) * output_width, &word,
                       output_width);
         }
       }
@@ -250,7 +273,7 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
     }
   }
   for (std::uint64_t i = 0; i < count; ++i) {
-    status = consume(call.inputs.size() * shape.size() + 1);
+    status = consume(indexing_work);
     if (!status.ok())
       return Answer(status);
     std::array<std::uint64_t, 2> bits{};
@@ -292,18 +315,14 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
       return Answer(failure);
     }
     const auto word = calculated.value();
-    auto* destination = output.data() + i * output_width;
+    auto* destination = output_data + i * output_width;
     if (output_width == 8)
       std::memcpy(destination, &word, 8);
     else if (output_width == 4)
       std::memcpy(destination, &word, 4);
     else
       *destination = static_cast<std::uint8_t>(word);
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (++coordinate[axis - 1] < shape[axis - 1])
-        break;
-      coordinate[axis - 1] = 0;
-    }
+    advance_coordinate();
   }
   status = consume(1);
   return status.ok() ? std::move(output).publish() : Answer(status);
@@ -330,8 +349,12 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
   output.requires_dense_output = true;
   traits.workspace_bytes = sizeof(Arithmetic);
   if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
-    if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict)
-      traits.workspace_bytes += sizeof(ExpWorkspace);
+    if (profile != SequenceProfile::Strict &&
+        (kind == CertifiedKind::Exp ||
+         trig_simd_kind(static_cast<unsigned>(kind))))
+      traits.workspace_bytes += std::max(
+          sizeof(FloatMathWorkspace),
+          sleef_batch_kind(kind) ? sizeof(MathBatchWorkspace) : std::size_t{0});
     else if (sleef_batch_kind(kind) && profile != SequenceProfile::Strict)
       traits.workspace_bytes += sizeof(MathBatchWorkspace);
   }

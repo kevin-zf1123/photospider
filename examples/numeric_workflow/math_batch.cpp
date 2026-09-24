@@ -45,6 +45,22 @@ ps::Value input(const std::vector<std::uint64_t>& bits, bool narrow,
                       : static_cast<std::int64_t>(width)}},
       std::move(buffer).freeze()));
 }
+ps::Value matrix_input(const std::vector<std::uint64_t>& bits, bool narrow,
+                       bool transposed) {
+  const unsigned width = narrow ? 4 : 8;
+  auto buffer = take(ps::BufferAllocator{}.allocate(64 * width + 1));
+  for (unsigned i = 0; i < 64; ++i) {
+    const unsigned offset = transposed ? (i % 16) * 4 + i / 16 : i;
+    std::memcpy(buffer.data() + 1 + offset * width, &bits[i], width);
+  }
+  return take(ps::Value::from_storage(
+      {narrow ? ps::ElementType::Float32 : ps::ElementType::Float64, {4, 16}},
+      ps::Region::whole({4, 16}),
+      {1,
+       {static_cast<std::int64_t>((transposed ? 1 : 16) * width),
+        static_cast<std::int64_t>((transposed ? 4 : 1) * width)}},
+      std::move(buffer).freeze()));
+}
 #if defined(__aarch64__)
 constexpr auto kProfile = n::SequenceProfile::AppleSilicon;
 #else
@@ -61,7 +77,7 @@ ps::Result<ps::Value> batch(
 }
 std::vector<std::uint64_t> words(const ps::Value& value) {
   const auto width = ps::Value::element_size(value.descriptor().element_type);
-  std::vector<std::uint64_t> out(value.descriptor().shape[0]);
+  std::vector<std::uint64_t> out(value.region().element_count().value());
   for (std::size_t i = 0; i < out.size(); ++i)
     std::memcpy(&out[i], value.bytes().data() + i * width, width);
   return out;
@@ -70,10 +86,12 @@ std::vector<std::uint64_t> words(const ps::Value& value) {
 int main(int argc, char** argv) {
   try {
     const bool timing = argc > 1 && std::string(argv[1]) == "time";
-    const unsigned size = timing ? 262144 : 257;
+    const unsigned size =
+        timing ? (argc > 2 ? std::stoul(argv[2]) : 262144) : 257;
+    require(size > 0, "nonempty workload");
     std::mt19937 rng(405);
     std::cout << "kind,dtype,N,scalar_math_us,batch_callback_us\n";
-    for (unsigned kind : {1U, 2U, 3U, 4U, 10U, 11U}) {
+    for (unsigned kind : {0U, 1U, 2U, 3U, 4U, 10U, 11U}) {
       for (bool narrow : {true, false}) {
         const auto dtype =
             narrow ? ps::ElementType::Float32 : ps::ElementType::Float64;
@@ -101,6 +119,18 @@ int main(int argc, char** argv) {
             if (binary)
               b[i + special.size()] = special[i];
           }
+          if (kind == 0) {
+            for (unsigned i = 0; i < 2; ++i) {
+              const auto edge = n::numeric_bits(i ? 80 : -80, narrow);
+              a[16 + 3 * i] = edge - 1;
+              a[17 + 3 * i] = edge;
+              a[18 + 3 * i] = edge + 1;
+            }
+            a[22] = n::numeric_bits(-90, narrow);
+            a[23] = n::numeric_bits(100, narrow);
+            a[24] = n::numeric_bits(1 + 0x1p-30, narrow);
+            a[25] = n::numeric_bits(1, narrow);
+          }
         }
         n::CertifiedMath scalar(kProfile);
         std::uint64_t work = 2 + size * (binary ? 3 : 2);
@@ -122,6 +152,9 @@ int main(int argc, char** argv) {
           if (repeat)
             scalar_times.push_back(elapsed);
         }
+        if (!timing && kind == 0 && !narrow)
+          require(expected[24] != expected[25],
+                  "exp retains binary64 input precision");
         std::sort(scalar_times.begin(), scalar_times.end());
         std::vector<double> times;
         for (unsigned layout = 0; layout < (timing ? 1U : 3U); ++layout) {
@@ -161,6 +194,17 @@ int main(int argc, char** argv) {
         std::fesetround(FE_TONEAREST);
         std::feclearexcept(FE_ALL_EXCEPT);
         if (!timing) {
+          // Mixed packed/transposed binary ports still need shared coordinates;
+          // all-packed multidimensional inputs may skip coordinate increments.
+          for (bool transposed : {false, true}) {
+            std::vector<ps::Value> inputs{matrix_input(a, narrow, transposed)};
+            if (binary)
+              inputs.push_back(matrix_input(b, narrow, !transposed));
+            const auto actual =
+                words(take(batch(static_cast<n::CertifiedKind>(kind), inputs)));
+            for (unsigned i = 0; i < 64; ++i)
+              require(actual[i] == expected[i], "matrix layout identity");
+          }
           for (unsigned chunk : {1U, 3U, 7U, 64U, 65U}) {
             for (unsigned offset = 0; offset < size; offset += chunk) {
               const auto end = std::min(size, offset + chunk);

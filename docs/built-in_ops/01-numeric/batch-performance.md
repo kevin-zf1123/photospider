@@ -1,5 +1,10 @@
 # NUM/CRV batch execution update, 2026-09-24
 
+This report records the batch-only state at `6786cb93`. The subsequent
+[trigonometric update](trig-performance.md) replaces eligible Float32 sin/cos
+and pi/sinc calculations with certified polynomial kernels; the historical
+batch timings below remain specific to this first commit.
+
 NUM-04/05 accelerated ln, sin, cos, tan, pow and atan2 now gather up to 64
 Float32/Float64 operands and call the existing binary64 SLEEF adapter once per
 block. The original bit-level special cases, exact power/angle landmarks,

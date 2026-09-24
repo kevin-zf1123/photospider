@@ -133,13 +133,17 @@ ps::WorkflowNode authored(bool continuous, unsigned kernel,
                      profile));
 }
 void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
-               const std::string& filter) {
+               const std::string& filter, bool inverse_float32,
+               unsigned repetitions) {
+  require(repetitions > 0, "positive repetitions");
   std::cout << "operation,profile,input_shape,requested,dtype,region,workers,"
                "cache,repetitions,median_us,max_us,output_bytes,peak_payload,"
                "peak_metadata,retained_payload,retained_metadata,source_"
                "elements,evaluated,fallbacks\n";
   for (unsigned operation = 0; operation < 12; ++operation)
     for (unsigned count : {1, 256}) {
+      const bool narrow = inverse_float32 && operation < 2;
+      const unsigned width = narrow ? 4 : 8;
       std::vector<ps::Value> inputs;
       ps::WorkflowNode node;
       std::vector<ps::Region> regions;
@@ -160,7 +164,8 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
         node = take((operation ? ps::numeric::invert_pchip_node
                                : ps::numeric::invert_linear_node)(
             1, ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2},
-            ps::WorkflowInputReference{3}, ps::ElementType::Float64,
+            ps::WorkflowInputReference{3},
+            narrow ? ps::ElementType::Float32 : ps::ElementType::Float64,
             ps::numeric::CurveDomain::Reject, profile));
         size = count;
         regions = {ps::Region({{0, count}})};
@@ -218,7 +223,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
         options.maximum_dependency_work = UINT64_C(64) * 1024 * 1024 * 1024;
         options.dependencies.maximum_work = UINT64_C(32) * 1024 * 1024 * 1024;
         options.maximum_dependency_cache_work = 0;
-        for (unsigned repeat = 0; repeat < 8; ++repeat) {
+        for (unsigned repeat = 0; repeat <= repetitions; ++repeat) {
           retained = {};
           const auto start = std::chrono::steady_clock::now();
           auto result = take(context.execute_fragments(
@@ -234,9 +239,19 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
           for (unsigned i = 0; i < count; ++i) {
             std::uint64_t bits = 0;
             require(result.values.at("result")
-                            .read({operation < 2 ? i : 4 * i + 2}, &bits, 8)
-                            .ok() &&
-                        numeric_accuracy(bits, expected[i], profile),
+                        .read({operation < 2 ? i : 4 * i + 2}, &bits, width)
+                        .ok(),
+                    "benchmark read");
+            if (narrow) {
+              const auto word = static_cast<std::uint32_t>(bits);
+              float value;
+              std::memcpy(&value, &word, 4);
+              bits = raw(static_cast<double>(value));
+            }
+            // The collinear inverse queries are exactly representable in
+            // Float32; require exact equality for this analytic fixture.
+            require(narrow ? bits == expected[i]
+                           : numeric_accuracy(bits, expected[i], profile),
                     "independent analytic benchmark bits");
           }
           retained = result.values.at("result");
@@ -245,9 +260,11 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
       std::sort(times.begin(), times.end());
       const auto stats = budget.statistics();
       std::cout << node.operation << ',' << selected << ','
-                << (operation < 2 ? 33 : size) << ',' << count << ",Float64,"
-                << (operation < 2 ? "Whole" : "disjoint") << ",1,off,7,"
-                << times[3] << ',' << times[6] << ',' << count * 8 << ','
+                << (operation < 2 ? 33 : size) << ',' << count
+                << (narrow ? ",Float32," : ",Float64,")
+                << (operation < 2 ? "Whole" : "disjoint") << ",1,off,"
+                << repetitions << ',' << times[times.size() / 2] << ','
+                << times.back() << ',' << count * width << ','
                 << stats.peak[ps::ResourceKind::Payload] << ','
                 << stats.peak[ps::ResourceKind::Metadata] << ','
                 << stats.live[ps::ResourceKind::Payload] << ','
@@ -268,7 +285,9 @@ int main(int argc, char** argv) {
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon
                              : ps::CpuNumericProfile::X86Avx2;
-    benchmark(profile, selected, argc > 2 ? argv[2] : "");
+    benchmark(profile, selected, argc > 2 ? argv[2] : "",
+              argc > 3 && std::string(argv[3]) == "float32",
+              argc > 4 ? std::stoul(argv[4]) : 7);
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

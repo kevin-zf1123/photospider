@@ -107,6 +107,8 @@ registration; MPFR is used only by the independent Python oracle.
 
 The 2026-09-24 implementation additionally admits Float32 [-80,80] to the
 IQK-derived NEON/AVX2 batch polynomial, with an exact-rational error certificate.
-Direct SLEEF exp is removed. Float64 and out-of-domain inputs use strict
-evaluation; the Float32 certificate does not admit narrowed Float64 arguments. See the
+The 2026-09-25 update restores SLEEF binary64 exp for Float64 inputs in [-80,80],
+with conservative enclosure and the existing final-result acceptance guard.
+Other inputs retain strict evaluation; the Float32 certificate does not admit
+narrowed Float64 arguments. See the [adapter update](../adapter-performance.md) and
 [exp implementation, validation and performance report](../exp-performance.md).

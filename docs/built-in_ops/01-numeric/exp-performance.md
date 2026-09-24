@@ -3,19 +3,21 @@
 The performance tables below record the initial A/B experiment. On promotion,
 the selectable SLEEF exp comparison paths and the benchmark-only FP32 SLEEF
 source adapter were removed. The maintained driver now runs IQK only; the
-comparison CSV files remain historical measurements. The SLEEF exp adapter
-entry was also removed: Float64 exp and NUM-01 AST exp now use strict replay.
-Those workloads can be substantially slower; no Float64 input is narrowed to
-fit the Float32 polynomial. Removing comparison-only
-arrays reduces the production batch workspace from 1,792 to 768 bytes.
+comparison CSV files remain historical measurements. The initial promotion also
+removed the binary64 SLEEF entry. The subsequent
+[adapter/FP64 update](adapter-performance.md) restores certified SLEEF binary64
+exp and NUM-01 AST exp, while Float32 NUM-04 retains IQK. No Float64 input is
+narrowed to fit the Float32 polynomial. The current exp callback reserves the
+larger of the Float32 and binary64 batch workspaces; the 768-byte Float32-only
+workspace below describes the initial promotion.
 
 Measured 2026-09-24 from `ops-impl` based on `4138e804`, with the local changes
 in this report. Specification status remains Proposed. The maintained
 `numeric.exp_accelerated_apple_silicon` and `numeric.exp_accelerated_x86_64`
 callbacks now use a 64-sample batch and an IQK-derived normal-range SIMD expf.
 Strict and other NUM-04/05 functions retain their arithmetic paths. The initial
-A/B experiment retained Float64 SLEEF exp; final promotion removes it as stated
-above.
+A/B experiment retained Float64 SLEEF exp; its later removal and restoration are
+separate implementation changes, not additional measurements in these tables.
 
 ## Algorithm and correctness boundary
 

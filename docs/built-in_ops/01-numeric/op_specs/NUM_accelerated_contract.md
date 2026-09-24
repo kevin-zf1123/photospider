@@ -228,8 +228,21 @@ not constitute exhaustive parameter/platform or all-input refinement coverage.
 Float32 exp in [-80,80] now uses the IQK-derived NEON/AVX2 polynomial with an
 exact-rational whole-domain certificate for this admitted interval. It satisfies
 the existing final-output rule without evaluating a runtime SLEEF enclosure.
-Direct SLEEF exp is removed. Float64 exp, range/classification fallbacks, and
-NUM-01 AST exp now use strict evaluation. The Float32 certificate cannot be
-used as a binary64 expression enclosure; these paths can be substantially
-slower than the historical SLEEF measurements above. See the [exp implementation report](../exp-performance.md) for the
+The 2026-09-25 update restores SLEEF binary64 exp for Float64 NUM-04 and NUM-01
+AST intervals in [-80,80], using the binary64 enclosure and final-result guard.
+The Float32 IQK certificate is not used as a binary64 expression enclosure.
+Range/classification uncertainty retains strict evaluation. See the
+[adapter update](../adapter-performance.md) and [exp implementation report](../exp-performance.md) for the
 coefficient source, proof, per-lane consistency and measured platform scope.
+
+#### NUM-04 trigonometric implementation update (2026-09-24)
+
+Float32 sin/cos/sinc now use certified explicit-FMA polynomials on [-1,1];
+sinpi/cospi use [-1/4,1/4] with exact quarter-turn landmarks kept in the
+algebraic path. Tiny nonzero sine results retain the existing fallback.
+Float32 sincpi uses exact integer-unit reduction over its complete finite
+domain, a binary64 SIMD central polynomial and hardware division before
+Float32 rounding. Its explicit residual factor preserves integer zeros.
+The certificate applies to final primitive outputs; it is not substituted for
+NUM-01 RN64 AST enclosures or propagated independently through CRV tap sums.
+See [trigonometric proof and measurements](../trig-performance.md).

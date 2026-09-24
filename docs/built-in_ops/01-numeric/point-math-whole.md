@@ -155,3 +155,8 @@ workspace. Fixed indexing and arithmetic admission precede SIMD; the scalar
 semantic layer still resolves exact landmarks, special values and uncertified
 lanes. All certified point callbacks lend one nearest/gradual environment to
 nested helpers. See [batch validation and timings](batch-performance.md).
+
+The subsequent [trigonometric kernels](trig-performance.md) reuse the Float32
+batch adapter. Sin/cos retain the 2,624-byte maximum workspace for the Float64
+branch; sinpi/cospi/sinc/sincpi add a 768-byte fixed Float32 block. Fixed-domain
+proofs replace runtime enclosures only for admitted primitive outputs.
