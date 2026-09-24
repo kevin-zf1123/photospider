@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_package_0_23_0
 clarification_status: current_member_complete_extensions_pending
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -13,15 +13,19 @@ inspection_commit: 1b403fb9
 
 # FMT-06: numerical dtype and interval conversion
 
-Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
+Implementation update: package 0.23.0 registers FMT-06A under the single
+`numeric.convert_format_strict` key. The runtime uses the typed String endpoint codec and TDM4
+exact decoder endpoints described in
+[the implementation record](../../../kernel-architecture/Channel-and-Color-Operations.md).
+Package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
 Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. This target remains
-Proposed and unimplemented.
+those keys and pixel callbacks are no longer available. The specification
+status remains Proposed while the runtime implementation is separately recorded.
 
 Inherit [FMT-common](FMT_common_contract.md), the NUM numerical baseline and
 [kernel storage](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
 The single member is [A convert numeric format](FMT-06A_convert_numeric_format.md),
-a proposed native primitive. The maintainer revised the original pure-cast scope:
+now registered as a native primitive. The maintainer revised the original pure-cast scope:
 by default, change both dtype and numeric interval, choosing intervals from dtype.
 Explicitly disabling scaling gives pure numerical cast. No bitcast member is
 included. This document registers no operation or compatibility alias.
@@ -177,16 +181,16 @@ by 29 on widening or right by 29 on narrowing, and set the target quiet bit.
 Same-width nonidentity mapping preserves payload/sign and sets the quiet bit.
 Never round discarded payload bits. If all retained payload bits vanish, the
 set quiet bit still produces NaN. Same-dtype static identity copies every bit,
-including signaling NaN, without quieting. Mapping is exact across profiles.
+including signaling NaN, without quieting. Mapping is exact across CPU implementations.
 
-Pure dtype casts use correctly rounded conversion across all CPU profiles.
-Strict affine transforms round the exact expression once; accelerated floating
-affine transforms use NUM's named accelerated error bound, with strict
-fallback where needed. Integer outputs, discrete choices, exact endpoint/copy
-rules and reject/clip/nonfinite classifications must equal strict. An approximate
-path cannot introduce a different overflow decision or publish infinity when the
-strict checked result is finite; use fallback. Preserve the caller's floating
-environment and report actual fallback via existing diagnostics.
+Pure dtype casts use correctly rounded conversion. Affine transforms round the
+exact expression once. The strict key may select SIMD instructions when their
+results satisfy these rules exactly; there are no separate accelerated keys.
+Integer outputs, discrete choices, endpoint/copy rules, NaN payloads and
+reject/clip/nonfinite classifications are identical across implementations.
+Lanes outside a proven SIMD domain use the exact scalar path. Preserve the
+caller's floating environment. ISA dispatch is an implementation detail of the
+strict operation and does not relax its numerical contract.
 
 ## Metadata authority and propagation
 
@@ -285,7 +289,9 @@ metadata/layout identity, source dependencies and exact output coverage.
 Clip publishes the appropriate target dtype endpoint rather than adding a warning
 output. Diagnostics identify the member, dtype pair, range/channel and global
 coordinate for sample failures. Static errors have no invented pixel position.
-CPU strict/Apple Silicon/x86-64 profiles are proposed; no GPU conformance claimed.
+The portable CPU strict key is registered, with internal AArch64 NEON and
+runtime-checked amd64 AVX2 paths;
+no GPU conformance is claimed.
 
 ## Acceptance and implementation requirements
 
@@ -305,7 +311,8 @@ this behavior. Benchmark [4096,4096,4] UInt8<->Float32, Float64->Float32 and
 Int64->UInt8 with full, one-channel and tile-crossing ROI requests; record layout,
 profile/ISA/build, source/page state, times, source/output bytes, backing and
 scratch/retained-owner peaks. Gate performance on numeric and error correctness.
-No runtime implementation or benchmark result is claimed by this specification.
+The implementation and benchmark results are recorded in the linked runtime
+documentation and benchmark, not established by this proposed contract alone.
 
 Documentation-level verification covered 245 exact-rational cases across all
 49 dtype pairs and separate endpoint, post-rounding overflow, subnormal,

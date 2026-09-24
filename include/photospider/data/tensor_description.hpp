@@ -12,9 +12,24 @@
 
 namespace ps {
 
-/** @brief Exact finite endpoint: integers never pass through double. Binary64
- * values retain their represented bits, including signed zero. */
-using TensorEndpoint = std::variant<std::int64_t, double>;
+/** @brief Finite exact rational endpoint in reduced binary limbs.
+ * Numerator and denominator use nonempty little-endian base-2^32 words with
+ * no high zero word; denominator is positive and the two magnitudes are
+ * coprime. Zero has numerator {0}, denominator {1} and negative=false.
+ * The owning vectors are immutable after descriptor publication. This value
+ * changes the public C++ ABI of TensorEndpoint and its facet codec; all
+ * producers and consumers must use a matching installed kernel version.
+ */
+struct TensorRationalEndpoint final {
+  std::vector<std::uint32_t> numerator{0};
+  std::vector<std::uint32_t> denominator{1};
+  bool negative = false;
+};
+/** @brief Exact finite endpoint. Integers never pass through double; binary64
+ * retains represented bits, including signed zero. Non-dyadic decoded
+ * endpoints use a reduced rational without numerical approximation. */
+using TensorEndpoint =
+    std::variant<std::int64_t, double, TensorRationalEndpoint>;  // NOLINT(whitespace/indent_namespace)
 /** @brief Affine interpretation of stored codes. stored[0] < stored[1];
  * decoded endpoints differ and may descend. D(x) = decoded[0] +
  * (x-stored[0])*(decoded[1]-decoded[0])/(stored[1]-stored[0]). No clipping or
@@ -107,7 +122,7 @@ struct PHOTOSPIDER_API TensorColorGroup final {
   std::optional<std::uint64_t> alpha;
 };
 
-/** @brief Composable tensor interpretation carried by the version-three
+/** @brief Composable tensor interpretation carried by the version-four
  * photospider.tensor-description facet. The facet does not establish sample
  * validity, color completeness, or image storage. A channel table, when
  * present, is ordered by the declared channel axis. A component describes
@@ -145,7 +160,7 @@ struct PHOTOSPIDER_API TensorDescription final {
  * allocation failure. Pure and thread-safe. */
 PHOTOSPIDER_API Result<ValueFacet> encode_tensor_description(
     const TensorDescription& description);
-/** @brief Decode only the canonical version-three facet. Returns
+/** @brief Decode only the canonical version-four facet. Returns
  * InvalidArgument for old, malformed or noncanonical bytes. */
 PHOTOSPIDER_API Result<TensorDescription> decode_tensor_description(
     const ValueFacet& facet);

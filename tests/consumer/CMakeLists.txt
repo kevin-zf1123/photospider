@@ -55,13 +55,13 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.21 CONFIG QUIET COMPONENTS kernel)
+find_package(Photospider 0.22 CONFIG QUIET COMPONENTS kernel)
 if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.22 must reject a 0.21 consumer")
+  message(FATAL_ERROR "Photospider 0.23 must reject a 0.22 consumer")
 endif()
 
 find_package(
-  Photospider 0.22 CONFIG REQUIRED
+  Photospider 0.23 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -169,6 +169,12 @@ target_include_directories(photospider_channel_extraction_consumer PRIVATE .. ..
 target_link_libraries(photospider_channel_extraction_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_channel_extraction_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_channel_extraction_consumer PRIVATE ${_photospider_consumer_link_options})
+
+add_executable(photospider_numeric_conversion_consumer ../integration/test_numeric_conversion.cpp)
+target_include_directories(photospider_numeric_conversion_consumer PRIVATE ..)
+target_link_libraries(photospider_numeric_conversion_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_numeric_conversion_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_numeric_conversion_consumer PRIVATE ${_photospider_consumer_link_options})
 
 add_library(photospider_expression_contract MODULE ../fixtures/expression_contract_fixture.c)
 target_link_libraries(photospider_expression_contract PRIVATE Photospider::operation_sdk)
@@ -308,6 +314,7 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_ordered_reduction_consumer>"
   COMMAND "$<TARGET_FILE:photospider_format_retirement_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_extraction_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_numeric_conversion_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_assembly_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_editing_consumer>"
   COMMAND "$<TARGET_FILE:photospider_metadata_consumer>"
@@ -316,7 +323,7 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_basic_consumer>"
   COMMAND "$<TARGET_FILE:photospider_planar_consumer>"
   COMMAND "$<TARGET_FILE:photospider_semantic_consumer>"
-  DEPENDS photospider_metadata_consumer photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_planar_consumer photospider_foundations_workflow photospider_channel_extraction_consumer photospider_channel_assembly_consumer photospider_channel_editing_consumer photospider_format_retirement_consumer photospider_expression_consumer photospider_component_consumer photospider_semantic_consumer photospider_consumer
+  DEPENDS photospider_metadata_consumer photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_planar_consumer photospider_foundations_workflow photospider_channel_extraction_consumer photospider_numeric_conversion_consumer photospider_channel_assembly_consumer photospider_channel_editing_consumer photospider_format_retirement_consumer photospider_expression_consumer photospider_component_consumer photospider_semantic_consumer photospider_consumer
   USES_TERMINAL
   VERBATIM)
 

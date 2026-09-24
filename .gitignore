@@ -185,6 +185,10 @@ __pycache__/
 !examples/channel_extraction_performance/*.py
 !examples/channel_extraction_performance/*.md
 !examples/channel_extraction_performance/CMakeLists.txt
+!examples/numeric_conversion_performance/
+!examples/numeric_conversion_performance/*.cpp
+!examples/numeric_conversion_performance/*.md
+!examples/numeric_conversion_performance/CMakeLists.txt
 
 !examples/codec_performance/
 !examples/codec_performance/*.cpp

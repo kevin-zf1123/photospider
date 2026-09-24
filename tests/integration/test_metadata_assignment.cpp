@@ -531,7 +531,7 @@ void schema_and_resources() {
   e.decoded = {-0.0, 1.0};
   d.component->encoding = e;
   auto facet = take(encode_tensor_description(d));
-  require(facet.version == 3, "v3 discriminator");
+  require(facet.version == 4, "v4 discriminator");
   auto roundtrip = take(decode_tensor_description(facet));
   require(*roundtrip.component->encoding == e,
           "exact Int64 endpoint and signed zero roundtrip");

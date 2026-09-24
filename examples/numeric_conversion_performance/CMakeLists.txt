@@ -1,0 +1,3 @@
+add_executable(photospider_numeric_conversion_performance main.cpp)
+target_link_libraries(photospider_numeric_conversion_performance PRIVATE Photospider::kernel)
+target_compile_features(photospider_numeric_conversion_performance PRIVATE cxx_std_17)

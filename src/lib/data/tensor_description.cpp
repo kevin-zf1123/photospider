@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "data/exact_numeric.hpp"
 #include "plugin/utf8_validation.hpp"
 
 namespace ps {
@@ -25,28 +26,41 @@ bool valid_text(const std::string& text) {
   return text.size() <= 128 &&
          (text.empty() || plugin_internal::valid_utf8_key(text));
 }
-bool endpoint_less(const TensorEndpoint& a, const TensorEndpoint& b) {
-  if (a.index() == b.index())
-    return a.index() ? std::get<double>(a) < std::get<double>(b)
-                     : std::get<std::int64_t>(a) < std::get<std::int64_t>(b);
-  const auto integer_less = [](std::int64_t i, double d) {
-    if (d >= 0x1p63)
-      return true;
-    if (d < -0x1p63)
-      return false;
-    const auto whole = static_cast<std::int64_t>(d);
-    return i < whole || (i == whole && d > static_cast<double>(whole));
-  };
-  if (auto* i = std::get_if<std::int64_t>(&a))
-    return integer_less(*i, std::get<double>(b));
-  auto d = std::get<double>(a);
-  auto i = std::get<std::int64_t>(b);
-  if (d < -0x1p63)
-    return true;
-  if (d >= 0x1p63)
+using data_internal::format_numeric::Natural;
+using data_internal::format_numeric::Rational;
+Natural natural(const std::vector<std::uint32_t>& words) {
+  Natural value;
+  value.words.assign(words.begin(), words.end());
+  value.trim();
+  return value;
+}
+Rational rational_endpoint(const TensorEndpoint& value) {
+  if (const auto* integer = std::get_if<std::int64_t>(&value))
+    return Rational::integer(*integer);
+  if (const auto* number = std::get_if<double>(&value)) {
+    std::uint64_t bits;
+    std::memcpy(&bits, number, 8);
+    return Rational::binary(bits, false);
+  }
+  const auto& exact = std::get<TensorRationalEndpoint>(value);
+  return {natural(exact.numerator), natural(exact.denominator), exact.negative,
+          false};
+}
+bool valid_rational(const TensorRationalEndpoint& value) {
+  if (value.numerator.empty() || value.denominator.empty() ||
+      value.numerator.size() > 128 || value.denominator.size() > 128 ||
+      (value.numerator.size() > 1 && !value.numerator.back()) ||
+      (value.denominator.size() > 1 && !value.denominator.back()) ||
+      (value.denominator.size() == 1 && !value.denominator[0]))
     return false;
-  const auto whole = static_cast<std::int64_t>(d);
-  return whole < i || (whole == i && d < static_cast<double>(whole));
+  if (value.numerator.size() == 1 && !value.numerator[0])
+    return !value.negative && value.denominator.size() == 1 &&
+           value.denominator[0] == 1;
+  return Natural::gcd(natural(value.numerator), natural(value.denominator))
+             .compare(Natural(1)) == 0;
+}
+bool endpoint_less(const TensorEndpoint& a, const TensorEndpoint& b) {
+  return rational_endpoint(a).compare(rational_endpoint(b)) < 0;
 }
 bool valid_encoding(const std::optional<TensorEncoding>& encoding) {
   if (!encoding)
@@ -54,6 +68,9 @@ bool valid_encoding(const std::optional<TensorEncoding>& encoding) {
   for (const auto* pair : {&encoding->stored, &encoding->decoded})
     for (const auto& n : *pair)
       if (auto* f = std::get_if<double>(&n); f && !std::isfinite(*f))
+        return false;
+      else if (auto* r = std::get_if<TensorRationalEndpoint>(&n);
+               r && !valid_rational(*r))
         return false;
   return endpoint_less(encoding->stored[0], encoding->stored[1]) &&
          (endpoint_less(encoding->decoded[0], encoding->decoded[1]) ||
@@ -311,6 +328,10 @@ void put_u64(std::vector<std::uint8_t>* bytes, std::uint64_t value) {
   for (unsigned i = 0; i < 8; ++i)
     bytes->push_back(static_cast<std::uint8_t>(value >> (8 * i)));
 }
+void put_u32(std::vector<std::uint8_t>* bytes, std::uint32_t value) {
+  for (unsigned i = 0; i < 4; ++i)
+    bytes->push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+}
 void put_f64(std::vector<std::uint8_t>* bytes, double value) {
   std::uint64_t bits = 0;
   std::memcpy(&bits, &value, sizeof(bits));
@@ -333,10 +354,19 @@ void put_encoding(std::vector<std::uint8_t>* bytes,
   for (const auto* pair : {&e->stored, &e->decoded})
     for (const auto& n : *pair) {
       bytes->push_back(static_cast<std::uint8_t>(n.index()));
-      if (auto* i = std::get_if<std::int64_t>(&n))
+      if (auto* i = std::get_if<std::int64_t>(&n)) {
         put_u64(bytes, static_cast<std::uint64_t>(*i));
-      else
-        put_f64(bytes, std::get<double>(n));
+      } else if (auto* f = std::get_if<double>(&n)) {
+        put_f64(bytes, *f);
+      } else {
+        const auto& exact = std::get<TensorRationalEndpoint>(n);
+        bytes->push_back(exact.negative ? 1 : 0);
+        for (const auto* words : {&exact.numerator, &exact.denominator}) {
+          put_u16(bytes, static_cast<std::uint16_t>(words->size()));
+          for (const auto word : *words)
+            put_u32(bytes, word);
+        }
+      }
     }
 }
 void put_sampling(std::vector<std::uint8_t>* bytes,
@@ -430,6 +460,14 @@ struct Reader final {
     *value = static_cast<std::uint16_t>(low | (high << 8));
     return true;
   }
+  bool u32(std::uint32_t* value) {
+    if (bytes.size() - offset < 4)
+      return false;
+    *value = 0;
+    for (unsigned i = 0; i < 4; ++i)
+      *value |= static_cast<std::uint32_t>(bytes[offset++]) << (8 * i);
+    return true;
+  }
   bool f64(double* value) {
     std::uint64_t bits = 0;
     if (!u64(&bits))
@@ -472,10 +510,30 @@ struct Reader final {
     for (auto* pair : {&(*out)->stored, &(*out)->decoded})
       for (auto& n : *pair) {
         std::uint8_t kind = 0;
-        std::uint64_t bits = 0;
-        if (!marker(&kind) || !u64(&bits))
+        if (!byte(&kind) || kind > 2)
           return false;
-        if (kind) {
+        if (kind == 2) {
+          TensorRationalEndpoint exact;
+          std::uint8_t sign = 0;
+          if (!marker(&sign))
+            return false;
+          exact.negative = sign;
+          for (auto* words : {&exact.numerator, &exact.denominator}) {
+            std::uint16_t count = 0;
+            if (!u16(&count) || !count || count > 128)
+              return false;
+            words->resize(count);
+            for (auto& word : *words)
+              if (!u32(&word))
+                return false;
+          }
+          n = std::move(exact);
+          continue;
+        }
+        std::uint64_t bits = 0;
+        if (!u64(&bits))
+          return false;
+        if (kind == 1) {
           double v;
           std::memcpy(&v, &bits, 8);
           n = v;
@@ -614,9 +672,15 @@ bool operator==(const TensorEncoding& a, const TensorEncoding& b) {
       if (auto* v = std::get_if<std::int64_t>(&x)) {
         if (*v != std::get<std::int64_t>(y))
           return false;
-      } else {
-        auto l = std::get<double>(x), r = std::get<double>(y);
+      } else if (auto* v = std::get_if<double>(&x)) {
+        auto l = *v, r = std::get<double>(y);
         if (std::memcmp(&l, &r, 8))
+          return false;
+      } else {
+        const auto& l = std::get<TensorRationalEndpoint>(x);
+        const auto& r = std::get<TensorRationalEndpoint>(y);
+        if (l.negative != r.negative || l.numerator != r.numerator ||
+            l.denominator != r.denominator)
           return false;
       }
     }
@@ -645,9 +709,9 @@ Result<ValueFacet> encode_tensor_description(
     return Result<ValueFacet>(status);
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 3;
+  facet.version = 4;
   auto& bytes = facet.payload;
-  bytes.insert(bytes.end(), {'T', 'D', 'M', '3'});
+  bytes.insert(bytes.end(), {'T', 'D', 'M', '4'});
   bytes.push_back(description.channel_axis
                       ? static_cast<std::uint8_t>(*description.channel_axis)
                       : 255);
@@ -707,10 +771,10 @@ Result<ValueFacet> encode_tensor_description(
 
 Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   using Answer = Result<TensorDescription>;
-  if (facet.key != kKey || facet.version != 3 || facet.payload.size() < 9 ||
+  if (facet.key != kKey || facet.version != 4 || facet.payload.size() < 9 ||
       facet.payload.size() > 4096 || facet.payload[0] != 'T' ||
       facet.payload[1] != 'D' || facet.payload[2] != 'M' ||
-      facet.payload[3] != '3')
+      facet.payload[3] != '4')
     return Answer(invalid("invalid tensor description facet"));
   Reader reader{facet.payload, 4};
   TensorDescription value;
@@ -828,7 +892,7 @@ Result<TensorDescription> tensor_description_from_parameter(
     return Result<TensorDescription>(invalid("invalid tensor override length"));
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 3;
+  facet.version = 4;
   facet.payload.reserve(parameter.size() / 2);
   const auto nibble = [](char digit) -> int {
     if (digit >= '0' && digit <= '9')

@@ -341,3 +341,9 @@ v3 明确相对坐标约定，新增精确类型化数值编码、同位采样�
 重新编写描述并重新构建 C++ 消费者。旧 ColorArray v1 保持独立约定，不能与 v3
 附在同一个 Value 上。WorkflowDocument、operation/provider C ABI 版本不变。
 详见[元数据约定](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。
+
+包 0.23.0 增加 FMT-06 数值转换，将 tensor-description v3 替换为 v4（`TDM4`）。
+公开 `TensorEndpoint` 增加约分后的精确有理数端点，用于组合数值解码；C++ ABI
+随之变化，0.22 消费者必须重新构建，SameMinorVersion 会拒绝旧包版本请求。
+旧 v1-v3 tensor facet 与 override 字节明确拒绝。v4 保持 4096 字节 facet 上限
+与规范化小端编码。WorkflowDocument、operation C ABI、provider C ABI 版本不变。

@@ -91,7 +91,7 @@ layout 和输出轴。B 的 input_axes 使用 `v1;axis;_;axis`；C 的 input_str
 output_description 与 component 描述由公开 codec 编码。所有 String 仍受 8192
 字节参数上限约束。来源选择独立于目标语义赋值。
 
-当前 0.22 元数据为 tensor-description v3/TDM3；v1/v2 明确拒绝，调用者重新编码后消费。
+当前 0.23 元数据为 tensor-description v4/TDM4；v1-v3 明确拒绝，调用者重新编码后消费。
 新增逐分量 TensorInterpretation 和显式 TensorColorGroup，包含通道索引、对应
 分量、解释及内部 alpha 索引。完整颜色组校验模型分量与所需结构字段，组与通道
 同字段冲突失败。输出目标字段允许局部重解释；未重定义的适用字段继续按 respect
@@ -165,6 +165,39 @@ canonical image 不能别名 scalar storage。planar 映射路径预留完整输
 记录 FP32 128x128、4096x4096 continuous/tiled、稀疏请求、布局、复制与 backing
 统计及优化效果。实现事实与规格 Proposed 决策状态分别记录。
 
+
+## FMT-06 数值格式转换
+
+包 0.23.0 注册 `numeric.convert_format_strict`，接收一个 `input` 张量，
+发布同形状、同坐标需求的 `values` 张量。必需的 `dtype` String 可选 `uint8`、
+`uint16`、`int8`、`int16`、`int64`、`float32`、`float64`；七种类型的两个方向
+均可组合。
+
+默认 `rescale=true` 按 dtype 选择区间：无符号为 `[0,max]`，有符号为
+`[min,max]`，浮点为 `[0,1]`。`rescale=false` 执行数值 cast，且拒绝区间与轴参数。
+可选的 `source_range`、`target_range` 使用有类型端点 String：`i:<有符号十进制>`
+或 `f64:<16位小写十六进制位>`；两个端点用逗号组成一对，完整通道表用分号连接。
+出现通道表时必须给出非负 Int64 `axis`。来源下界必须小于上界；目标端点可以
+倒序但不能相等。未请求通道的表项也在静态阶段检查。来源区间外按公式外推；
+算子不改变 transfer、颜色模型或 alpha 关联。
+
+可选 `rounding` 只接受 `ties_even`；`overflow` 为 `reject`（默认）或 `clip`。
+`metadata_mode` 为 `respect`（默认）、附带 `metadata_override` 的 `override`、
+或 `raw`。`layout` 为 `auto`（默认）、`view` 或 `materialize`；仅能对静态证明
+的同 dtype 恒等映射及合法通用 Value owner 使用 view。平面图像物化请求页。
+编码与 decoder 元数据随映射更新；不能用二进制浮点精确表示的 decoder 端点
+使用 TDM4 有理数。只有被请求的样本会触发样本域错误。恒等复制保留 NaN 与
+有符号零位；非恒等 NaN 遵循 FMT-06 payload 规则。
+strict 实现在符合条件的连续平面区段内使用 AArch64 NEON 或运行时检查的
+amd64 AVX2，覆盖 UInt8→Float32、
+Float32→UInt8 和 Float64→Float32。异常样本及缩窄至次正规数的样本使用精确
+标量路径。Int64→UInt8 使用精确整数区段内核。ISA 选择保持 strict 数值结果，
+不单独注册 accelerated 入口。不支持 AVX2 的 amd64 CPU 使用可移植标量实现。
+
+公开 workflow 与字节/元数据检查见
+[`test_numeric_conversion.cpp`](../../../tests/integration/test_numeric_conversion.cpp)；
+全图、单通道与跨 tile 性能复现见
+[`numeric conversion benchmark`](../../../examples/numeric_conversion_performance/README.md)。
 
 ## FMT-08 元数据赋值与删除
 

@@ -10,10 +10,10 @@ FMT-08B 是事务式公开 helper `format::remove_metadata`，展开为没有 se
 
 ## 版本与解释
 
-`photospider.tensor-description` 只接受运行时版本 **3** 和 `TDM3` 标识。
-拒绝 v1/v2；消费者必须重新编译并显式重新编写元数据，不会给旧字节自动赋新单位。
+`photospider.tensor-description` 只接受运行时版本 **4** 和 `TDM4` 标识。
+拒绝 v1-v3；消费者必须重新编译并显式重新编写元数据，不会给旧字节自动赋新单位。
 WorkflowDocument 和 operation/provider C ABI 版本不变。canonical facet 与静态
-编辑参数参与编译身份。旧 ColorArray v1 保持独立的旧坐标消费约定，不能与 v3
+编辑参数参与编译身份。旧 ColorArray v1 保持独立的旧坐标消费约定，不能与 v4
 共存于一个 Value。FMT-08 拒绝旧 typed facet。其他 FMT 数值与外部引擎算子的
 实现状态仍以各自规范为准。
 
@@ -23,7 +23,10 @@ WorkflowDocument 和 operation/provider C ABI 版本不变。canonical facet 与
 
 `TensorDescription` 的 canonical 编码上限为 4096 字节。文本为最长 128 字节
 的严格 UTF-8；最多 128 个完整组，每组最多 64 个分量。整数与 IEEE binary64
-按小端字节编码，presence 为 0/1，通道/轴表有序，资源身份显式。解码后重编码
+按小端字节编码，presence 为 0/1，通道/轴表有序，资源身份显式。v4 另用有界的
+小端 base-2^32 分子和正分母 limbs 编码约分后的有符号精确有理数端点；该变体
+改变安装包 C++ ABI，并在整数或 binary64 不能表示组合 decoder 端点时保留精确值。
+解码后重编码
 核对 canonical 字节并拒绝尾随数据。opaque annotation 使用独立 `ValueFacet`，
 不是语义字段，遵循宿主最多 64 个 facet、每个 64 KiB、总计 1 MiB 的限制。
 
@@ -101,7 +104,7 @@ annotation；patch 禁止 description。未知选项、路径、类型、重叠�
 remove 和可选 description。树编码为 `kind+十进制长度或条目数+':'+内容`；o 为
 有序 map、s 为字符串、u/i 为无符号/精确有符号整数、d 为 8 字节小端 Float64、
 b 为不透明字节。解码限制为 4096 字节、1024 节点、深度 12，String 上限 8192。
-事务编码与发布的 TDM3 编码独立，推荐使用公开的类型化 helper。
+事务编码与发布的 TDM4 编码独立，推荐使用公开的类型化 helper。
 
 Cascade 依照封闭 schema 依赖处理：channel axis 关联通道表和组；encoding/
 sampling/configured/profile 关联包含它们的解释单元；完整组关联必需字段、引用

@@ -19,7 +19,7 @@
 namespace ps::metadata_internal {
 namespace {
 // This bounded tree is a transaction representation, not a second Value codec.
-// Published semantics always use the canonical tensor-description-v3 facet.
+// Published semantics always use the canonical tensor-description-v4 facet.
 struct Tree final {
   char kind = 'o';
   std::string bytes;
@@ -65,6 +65,18 @@ Tree tree(double value) {
     bytes[i] = static_cast<char>(bits >> (i * 8));
   }
   return {'d', std::move(bytes), {}};
+}
+Tree tree(const TensorRationalEndpoint& value) {
+  std::string bytes(1, value.negative ? '\1' : '\0');
+  for (const auto* words : {&value.numerator, &value.denominator}) {
+    const auto count = static_cast<std::uint16_t>(words->size());
+    bytes.push_back(static_cast<char>(count));
+    bytes.push_back(static_cast<char>(count >> 8));
+    for (const auto word : *words)
+      for (unsigned i = 0; i < 4; ++i)
+        bytes.push_back(static_cast<char>(word >> (8 * i)));
+  }
+  return {'r', std::move(bytes), {}};
 }
 template <std::size_t N>
 Tree tree(const std::array<double, N>& values);
@@ -355,6 +367,35 @@ TensorEncoding encoding(const Tree& t) {
           throw Invalid("invalid exact signed endpoint");
         }
         (*p.second)[i] = v;
+      } else if (n.kind == 'r') {
+        TensorRationalEndpoint exact;
+        std::size_t at = 0;
+        if (n.bytes.empty() || (n.bytes[0] != 0 && n.bytes[0] != 1))
+          throw Invalid("invalid rational endpoint sign");
+        exact.negative = n.bytes[at++] != 0;
+        for (auto* words : {&exact.numerator, &exact.denominator}) {
+          if (n.bytes.size() - at < 2)
+            throw Invalid("short rational endpoint");
+          const auto count = static_cast<std::uint16_t>(
+              static_cast<std::uint8_t>(n.bytes[at]) |
+              (static_cast<std::uint16_t>(
+                   static_cast<std::uint8_t>(n.bytes[at + 1]))
+               << 8));
+          at += 2;
+          if (!count || count > 128 || n.bytes.size() - at < count * 4)
+            throw Invalid("invalid rational endpoint limbs");
+          words->resize(count);
+          for (auto& word : *words) {
+            word = 0;
+            for (unsigned shift = 0; shift < 4; ++shift)
+              word |= static_cast<std::uint32_t>(
+                          static_cast<std::uint8_t>(n.bytes[at++]))
+                      << (8 * shift);
+          }
+        }
+        if (at != n.bytes.size())
+          throw Invalid("trailing rational endpoint bytes");
+        (*p.second)[i] = std::move(exact);
       } else {
         (*p.second)[i] = real(n);
       }
@@ -564,7 +605,7 @@ Tree decode(const std::string& bytes, std::size_t* at, unsigned depth,
   }
   Tree t;
   t.kind = bytes[(*at)++];
-  if (std::string("osiudb").find(t.kind) == std::string::npos) {
+  if (std::string("osiudbr").find(t.kind) == std::string::npos) {
     throw Invalid("unknown edit value type");
   }
   auto colon = bytes.find(':', *at);
@@ -940,8 +981,8 @@ void static_value(const std::vector<std::string>& p, const Tree& value) {
     encoding(e);
   } else if (p.size() > 2 &&
              (p[p.size() - 2] == "stored" || p[p.size() - 2] == "decoded")) {
-    if (value.kind != 'i' && value.kind != 'd') {
-      throw Invalid("endpoint must be exact Int64 or Float64");
+    if (value.kind != 'i' && value.kind != 'd' && value.kind != 'r') {
+      throw Invalid("endpoint must be exact Int64, Float64 or rational");
     }
   } else if (leaf == "roles" || leaf == "units") {
     sequence(value, string);

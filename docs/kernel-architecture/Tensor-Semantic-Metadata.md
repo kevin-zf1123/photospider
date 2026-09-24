@@ -11,13 +11,13 @@ identical sample bits. There is no native removal key or sample-only result cach
 
 ## Version and interpretation
 
-The only accepted `photospider.tensor-description` runtime version is **3**,
-with the `TDM3` payload discriminator. Versions 1 and 2 are rejected. Rebuild C++
+The only accepted `photospider.tensor-description` runtime version is **4**,
+with the `TDM4` payload discriminator. Versions 1 through 3 are rejected. Rebuild C++
 consumers and explicitly re-author metadata; no old bytes are silently assigned
 new units. WorkflowDocument and the operation/provider C ABI versions do not
 change. Canonical facet bytes and static edit parameters enter compiler identity.
 Legacy ColorArray v1 remains a separate old-coordinate consumer contract and
-cannot coexist with v3 on one Value. FMT-08 rejects legacy typed facets rather
+cannot coexist with v4 on one Value. FMT-08 rejects legacy typed facets rather
 than reinterpret their implied units. The other FMT arithmetic/engine families
 remain separately implemented or Proposed as recorded in their specifications.
 
@@ -31,7 +31,11 @@ The public `TensorDescription` codec is bounded to 4096 bytes. Strings are stric
 UTF-8, at most 128 bytes; complete groups are bounded to 128, each with at most
 64 components. The canonical binary codec uses little-endian integer and IEEE
 binary64 bit fields, presence bytes 0/1, ordered channel/axis tables and explicit
-resource identities. Decoding re-encodes to reject noncanonical/trailing bytes.
+resource identities. V4 additionally encodes reduced signed rational endpoints
+as bounded little-endian base-2^32 numerator and positive denominator limbs.
+The new endpoint variant changes the installed C++ ABI; it carries exact
+composed decoders when an integer or binary64 endpoint cannot represent them.
+Decoding re-encodes to reject noncanonical/trailing bytes.
 Opaque annotations are separate `ValueFacet`s, not semantic fields. They retain
 normal host facet limits (64 facets, 64 KiB each, 1 MiB total).
 
@@ -127,7 +131,7 @@ records use `kind + decimal-length-or-count + ':' + contents`; `o` is an ordered
 map with string keys, `s` string, `u` unsigned integer, `i` exact signed integer,
 `d` eight little-endian Float64 bits, and `b` opaque bytes. The decoded bound is
 4096 bytes, 1024 nodes and depth 12; the String bound is 8192. This transaction
-codec is separate from the published TDM3 codec. Prefer the typed public helper.
+codec is separate from the published TDM4 codec. Prefer the typed public helper.
 
 Cascade follows the closed schema dependencies: channel axis to channel tables
 and groups; encoding/sampling/configured/profile fields to their containing

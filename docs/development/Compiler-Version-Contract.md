@@ -42,6 +42,14 @@ separate and cannot coexist with v3 on a Value. WorkflowDocument, operation C AB
 and provider C ABI versions are unchanged. See the
 [metadata contract](../kernel-architecture/Tensor-Semantic-Metadata.md).
 
+Package 0.23.0 adds FMT-06 numerical conversion and replaces tensor-description
+v3 with v4 (`TDM4`). The public `TensorEndpoint` variant gains reduced exact
+rational endpoints for composed numeric decoders. This changes the C++ ABI;
+0.22 consumers must rebuild, and SameMinorVersion rejects their package
+request. V1-v3 tensor facets and old override bytes reject. The v4 codec keeps
+the 4096-byte facet bound and canonical little-endian representation. Workflow
+document, operation C ABI and provider C ABI versions do not change.
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and

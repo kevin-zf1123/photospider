@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.22.0
+  VERSION 0.23.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -109,6 +109,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
   plugins/ops/00-foundation/core_identity.cpp
   plugins/ops/02-format-color/channel_extraction.cpp
+  plugins/ops/02-format-color/numeric_conversion.cpp
   plugins/ops/02-format-color/metadata_assignment.cpp
   plugins/ops/02-format-color/channel_assembly.cpp
   plugins/ops/01-numeric/curve_sample_linear.cpp
@@ -483,6 +484,7 @@ add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/numeric_conversion_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/codec_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
@@ -664,6 +666,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
   target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)
   photospider_add_test(test_channel_extraction Photospider::kernel tests/integration/test_channel_extraction.cpp)
+  photospider_add_test(test_numeric_conversion Photospider::kernel tests/integration/test_numeric_conversion.cpp)
   target_include_directories(test_channel_extraction PRIVATE examples/numeric_workflow)
   photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)

@@ -4,6 +4,7 @@ namespace ps::plugin_internal {
 Status register_builtin_operations(OperationRegistry* registry) {
   for (const auto function : {register_numeric_ranges,
                               register_channel_extraction,
+                              register_numeric_conversion,
                               register_channel_assembly,
                               register_metadata_assignment,
                               register_numeric_interpolation,

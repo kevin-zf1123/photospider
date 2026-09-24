@@ -118,8 +118,8 @@ All structured parameters use existing String values, bounded by the shared
 | `input_axes` (B, optional) | `v1;axis;_;axis`, one entry per input. `_` resolves metadata; raw requires every axis. Integers are unsigned decimal without leading zeros. |
 | `input_structure` (C, required) | `v1;c;h2;h_`. `c` is component with no effective channel axis; `hN` asserts channel axis N; `h_` resolves metadata. |
 | `input_overrides` | `v1;ordinal:description_hex;...`, strictly increasing unique valid ordinals. Required nonempty exactly in override mode. Each replaces one input's effective description for this call. |
-| `output_description` | `tensor_description_parameter(description)`, canonical lowercase hex of TDM3. Shape/channel-axis/group assertions must agree with inference. |
-| `mapping` (C) | `v1;input,match,selector_hex,destination,component_hex;...`. Match is `index`, `name`, or `role`. Selector is strict UTF-8 encoded as lowercase hex, including decimal index text. Component is `_` or a TDM3 description containing only `component`. |
+| `output_description` | `tensor_description_parameter(description)`, canonical lowercase hex of TDM4. Shape/channel-axis/group assertions must agree with inference. |
+| `mapping` (C) | `v1;input,match,selector_hex,destination,component_hex;...`. Match is `index`, `name`, or `role`. Selector is strict UTF-8 encoded as lowercase hex, including decimal index text. Component is `_` or a TDM4 description containing only `component`. |
 
 C validates every destination exactly once and evaluates in destination order;
 record order never introduces overwrite precedence. Name/role resolution is
@@ -265,6 +265,46 @@ for FP32 128x128, 4096x4096 continuous/tiled, sparse requests, representation,
 copy/backing accounting and the measured optimization. Runtime observations are
 separate from the retained Proposed specification decision status.
 
+
+## FMT-06 numeric format conversion
+
+Package 0.23.0 registers `numeric.convert_format_strict`. It takes one `input` tensor and
+publishes one `values` tensor with the same shape and coordinate demand. The
+required `dtype` String is one of `uint8`, `uint16`, `int8`, `int16`, `int64`,
+`float32`, `float64`. Both conversion directions support all seven types.
+
+`rescale=true` by default maps dtype-selected intervals (`[0,max]` for unsigned,
+`[min,max]` for signed, `[0,1]` for floating). `rescale=false` makes a numerical
+cast and rejects range/axis parameters. Optional `source_range` and
+`target_range` are typed endpoint Strings: an entry is `i:<signed decimal>` or
+`f64:<16 lowercase hex bits>`, two entries form `lower,upper`, and a complete
+channel table joins pairs with `;`. Supply `axis` as nonnegative Int64 exactly
+when a table is present. The source pair must increase; target endpoints may be
+reversed but must differ. All table entries are checked before reading samples.
+The source is extrapolated outside the selected interval. No transfer, model or
+alpha-association conversion occurs.
+
+Optional `rounding` accepts only `ties_even`; `overflow` accepts `reject`
+(default) or `clip`. `metadata_mode` is `respect` (default), `override` with a
+`metadata_override` produced by `tensor_description_parameter`, or `raw`.
+`layout` is `auto` (default), `view` or `materialize`; a view is available only
+for a statically proven same-dtype identity with a legal generic Value owner.
+Planar images materialize requested pages. The codec updates encoding and
+decoder metadata; non-dyadic exact decoder endpoints use TDM4 rational values.
+Only requested samples can cause sample-domain failure. Identity copies retain
+NaN and signed-zero bits; nonidentity NaNs follow the FMT-06 payload rule.
+The strict implementation uses AArch64 NEON or runtime-checked amd64 AVX2
+for eligible contiguous planar
+UInt8→Float32, Float32→UInt8 and Float64→Float32 spans. Exceptional lanes and
+narrowing to subnormal values use the exact scalar path. Int64→UInt8 uses an
+exact integer span kernel. ISA selection preserves strict numerical results
+and has no separate accelerated registration. amd64 CPUs without AVX2 use
+the portable scalar implementation.
+
+Run the public workflow and byte/metadata checks in
+[`test_numeric_conversion.cpp`](../../tests/integration/test_numeric_conversion.cpp),
+then reproduce full, channel and cross-tile measurements with the
+[`numeric conversion benchmark`](../../examples/numeric_conversion_performance/README.md).
 
 ## FMT-08 metadata assignment and removal
 
