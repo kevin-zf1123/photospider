@@ -300,6 +300,18 @@ narrowing to subnormal values use the exact scalar path. Int64→UInt8 uses an
 exact integer span kernel. ISA selection preserves strict numerical results
 and has no separate accelerated registration. amd64 CPUs without AVX2 use
 the portable scalar implementation.
+On Apple arm64 with compiler ACLE support, SME/SME_F64F64 and 64-byte streaming
+vectors, Float32→UInt8 additionally batches fully requested contiguous rectangles
+of 4,096–65,536 samples in one streaming call. It admits the whole rectangle
+using integer bits before storing results, then multiplies exactly in binary64
+and rounds ties-even. Rejected rectangles use the existing exact path; partial-width
+or padded rectangles remain on the row path. Work is charged before admission,
+and a failed attempt plus its fallback are both charged. An internal borrowed
+view of the host's monotonic cancellation flags polls at most every 64 samples
+without leaving streaming mode. Output is published only after host success
+and cancellation/currentness checks. `PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME`
+can disable this candidate; it defaults on for Apple arm64 when compilation is
+supported. Other conversion pairs retain NEON/AVX2.
 
 Run the public workflow and byte/metadata checks in
 [`test_numeric_conversion.cpp`](../../tests/integration/test_numeric_conversion.cpp),

@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "execution/cancellation_poll.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
@@ -20,6 +21,17 @@ struct CancellationToken::State {
               ResourceAllocator<std::shared_ptr<const State>>>
       sources;
 };
+execution_internal::CancellationPoll
+execution_internal::CancellationPoll::borrow(
+    const CancellationToken& token) noexcept {
+  CancellationPoll result;
+  if (token.state_) {
+    result.flags[result.size++] = &token.state_->flag;
+    for (const auto& source : token.state_->sources)
+      result.flags[result.size++] = &source->flag;
+  }
+  return result;
+}
 bool CancellationToken::cancelled() const noexcept {
   if (!state_)
     return false;

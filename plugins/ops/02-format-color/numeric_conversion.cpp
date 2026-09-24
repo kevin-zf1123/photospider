@@ -19,18 +19,46 @@
 #include <immintrin.h>
 #endif
 
+#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
+#include <sys/sysctl.h>
+
+#include "execution/cancellation_poll.hpp"
+#endif
+
 #include "01-numeric/array_publication.hpp"
 #include "data/exact_numeric.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
+#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
+namespace format_numeric {
+std::uint64_t sme_conversion_vector_bytes();
+std::uint64_t sme_f32_u8_tile(const std::uint8_t*, std::uint8_t*, std::uint64_t,
+                              const execution_internal::CancellationPoll&);
+}  // namespace format_numeric
+#endif
 namespace {
 using data_internal::format_numeric::ExactWorkFailure;
 using data_internal::format_numeric::ExactWorkScope;
 using data_internal::format_numeric::Natural;
 using data_internal::format_numeric::Rational;
 using Parameters = std::map<std::string, ParameterValue>;
+#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
+bool sme_conversion_available() {
+  static const bool available = [] {
+    for (const auto* name :
+         {"hw.optional.arm.FEAT_SME", "hw.optional.arm.FEAT_SME_F64F64"}) {
+      int value = 0;
+      std::size_t bytes = sizeof(value);
+      if (sysctlbyname(name, &value, &bytes, nullptr, 0) != 0 || !value)
+        return false;
+    }
+    return format_numeric::sme_conversion_vector_bytes() == 64;
+  }();
+  return available;
+}
+#endif
 struct FloatingEnvironment final {
   fenv_t saved{};
   FloatingEnvironment() {
@@ -1241,6 +1269,34 @@ Status planar(const PlanarOperationInvocation& call) {
         const auto rows = std::min({src.rows, dst.rows, advanced_rows});
         advanced_rows = std::min(advanced_rows, rows);
         const auto samples = std::min(src.row.samples, dst.row.samples);
+#if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
+        // A bounded, fully requested contiguous rectangle can be admitted and
+        // converted in one streaming scope. Partial-width/padded windows retain
+        // the row path. Failed admission writes nothing and uses exact
+        // fallback.
+        const auto tile_samples = rows * samples;
+        if (state.fast_f32_u8 && tile_samples >= 4096 &&
+            tile_samples <= 65536 && src.row_stride_bytes == samples * 4 &&
+            dst.row_stride_bytes == samples && sme_conversion_available()) {
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, "numeric conversion cancelled"};
+          if (const auto* budget = resource_internal::metadata_budget()) {
+            auto charged = budget->consume({tile_samples});
+            if (!charged.ok())
+              return charged;
+          }
+          const auto polling =
+              execution_internal::CancellationPoll::borrow(call.cancellation);
+          const auto used = format_numeric::sme_f32_u8_tile(
+              src.row.data, dst.row.data, tile_samples, polling);
+          if (call.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, "numeric conversion cancelled"};
+          if (used == tile_samples) {
+            column += samples;
+            continue;
+          }
+        }
+#endif
         for (std::uint64_t dy = 0; dy < rows; ++dy) {
           at[height] = row + dy;
           const auto* source = src.row.data + dy * src.row_stride_bytes;

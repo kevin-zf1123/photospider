@@ -10,6 +10,9 @@
 
 namespace ps {
 class ResourceBudget;
+namespace execution_internal {
+struct CancellationPoll;
+}  // namespace execution_internal
 /** @brief Read-only cooperative cancellation. Copies share monotonic flags.
  * Observation never allocates or recursively traverses groups. Tokens from
  * managed sources retain their root capacity through the final token owner.
@@ -39,6 +42,7 @@ class PHOTOSPIDER_API CancellationToken final {
 
  private:
   friend class CancellationSource;
+  friend struct execution_internal::CancellationPoll;
   struct State;
   static Result<CancellationToken> combine_impl(const CancellationToken* tokens,
                                                 std::size_t count,

@@ -35,6 +35,9 @@ int main(int argc, char** argv) try {
   const std::string pair = argc > 2 ? argv[2] : "u8-f32";
   const std::string coverage = argc > 3 ? argv[3] : "full";
   const unsigned repetitions = argc > 4 ? std::stoul(argv[4]) : 3;
+  const std::uint64_t tile_extent = argc > 5 ? std::stoull(argv[5]) : 128;
+  if (tile_extent != 128 && tile_extent != 256)
+    throw std::runtime_error("tile extent must be 128 or 256");
   if (size < 128 || size > 4096 || repetitions == 0)
     throw std::runtime_error("size must be 128..4096 and repetitions positive");
   ElementType source_type = ElementType::UInt8;
@@ -54,6 +57,7 @@ int main(int argc, char** argv) try {
   const ValueDescriptor descriptor{source_type, {size, size, 4}};
   PlanarImageConfig config;
   config.order = ImagePlaneOrder::Tiled;
+  config.tile_height = config.tile_width = tile_extent;
   config.maximum_backed_bytes = 1024ULL * 1024 * 1024;
   auto source = checked(PlanarImage::create(descriptor, config));
   std::vector<std::uint8_t> plane(size * size * width);
@@ -91,13 +95,18 @@ int main(int argc, char** argv) try {
        {{"dtype", destination}, {"metadata_mode", std::string("raw")}}}};
   document.outputs = {{"converted", 1, "values"}};
   PlanningOptions options;
+  options.tile_height = options.tile_width = tile_extent;
   Region region = Region::whole(descriptor.shape);
-  if (coverage == "channel")
+  if (coverage == "channel") {
     region = Region({{0, size}, {0, size}, {1, 1}});
-  else if (coverage == "tile")
-    region = Region({{127, 3}, {127, 3}, {1, 1}});
-  else if (coverage != "full")
+  } else if (coverage == "tile") {
+    if (size < tile_extent + 2)
+      throw std::runtime_error(
+          "cross-tile ROI requires size >= tile extent + 2");
+    region = Region({{tile_extent - 1, 3}, {tile_extent - 1, 3}, {1, 1}});
+  } else if (coverage != "full") {
     throw std::runtime_error("unknown coverage");
+  }
   options.output_regions = {{"converted", region}};
   auto registry = make_default_operation_registry();
   Compiler compiler(registry);
@@ -112,9 +121,10 @@ int main(int argc, char** argv) try {
   binding.image = std::make_shared<const PlanarImage>(source);
   ExecutionBindings bindings;
   bindings.inputs.push_back(binding);
-  std::cout << "size,pair,coverage,source_backed,first_ms,repeat_ms,"
-               "output_backed,output_reserved,output_metadata,"
-               "source_read_bytes,peak_live_bytes\n";
+  std::cout
+      << "size,pair,coverage,tile_extent,source_backed,first_ms,repeat_ms,"
+         "output_backed,output_reserved,output_metadata,"
+         "source_read_bytes,peak_live_bytes\n";
   double first = 0, repeated = 0;
   std::uint64_t output_backed = 0, output_reserved = 0, output_metadata = 0;
   std::uint64_t source_read_bytes = 0, peak_live_bytes = 0;
@@ -136,8 +146,8 @@ int main(int argc, char** argv) try {
     peak_live_bytes =
         std::max(peak_live_bytes, result.diagnostics.peak_live_bytes);
   }
-  std::cout << size << ',' << pair << ',' << coverage << ','
-            << source.backed_bytes() << ',' << first << ','
+  std::cout << size << ',' << pair << ',' << coverage << ',' << tile_extent
+            << ',' << source.backed_bytes() << ',' << first << ','
             << (repetitions > 1 ? repeated / (repetitions - 1) : 0) << ','
             << output_backed << ',' << output_reserved << ',' << output_metadata
             << ',' << source_read_bytes << ',' << peak_live_bytes << '\n';

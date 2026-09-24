@@ -290,7 +290,7 @@ Clip publishes the appropriate target dtype endpoint rather than adding a warnin
 output. Diagnostics identify the member, dtype pair, range/channel and global
 coordinate for sample failures. Static errors have no invented pixel position.
 The portable CPU strict key is registered, with internal AArch64 NEON and
-runtime-checked amd64 AVX2 paths;
+runtime-checked amd64 AVX2 paths and eligible Apple SME Float32→UInt8 tiles;
 no GPU conformance is claimed.
 
 ## Acceptance and implementation requirements

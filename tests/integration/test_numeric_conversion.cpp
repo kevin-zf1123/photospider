@@ -81,10 +81,12 @@ Result<ExecutionResult> run(ElementType source_type,
 Result<ExecutionResult> run_planar(
     ElementType source_type, std::uint64_t samples,
     const std::vector<std::uint8_t>& bytes,
-    std::map<std::string, ParameterValue> parameters) {
-  const ValueDescriptor descriptor{source_type, {1, samples, 1}};
+    std::map<std::string, ParameterValue> parameters, std::uint64_t rows = 1,
+    std::optional<Region> roi = {}, std::uint64_t tile_extent = 128) {
+  const ValueDescriptor descriptor{source_type, {rows, samples, 1}};
   PlanarImageConfig config;
   config.order = ImagePlaneOrder::Tiled;
+  config.tile_height = config.tile_width = tile_extent;
   auto created = PlanarImage::create(descriptor, config);
   if (!created.ok())
     return Result<ExecutionResult>(created.status());
@@ -109,7 +111,11 @@ Result<ExecutionResult> run_planar(
   auto registry = make_default_operation_registry();
   Compiler compiler(registry);
   GraphContext graph(document);
-  auto plan = compiler.compile(graph);
+  PlanningOptions options;
+  options.tile_height = options.tile_width = tile_extent;
+  if (roi)
+    options.output_regions = {{"converted", *roi}};
+  auto plan = compiler.compile(graph, options);
   if (!plan.ok())
     return Result<ExecutionResult>(plan.status());
   ExecutionBinding binding;
@@ -561,6 +567,80 @@ int planar_vector_oracles() {
   PS_CHECK(bits[9] == UINT32_C(0x80000001));
   return 0;
 }
+int planar_tile_oracle(std::uint64_t side) {
+  const auto count = side * side;
+  std::vector<float> samples(count);
+  std::vector<std::uint8_t> expected(count), actual(count);
+  std::uint32_t random = UINT32_C(0x243f6a88);
+  for (std::uint64_t i = 0; i < count; ++i) {
+    random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+    const auto bits = random % UINT32_C(0x3f800001);
+    std::memcpy(&samples[i], &bits, 4);
+    const double exact = static_cast<double>(samples[i]) * 255;
+    const auto floor = static_cast<unsigned>(exact);
+    const auto fraction = exact - floor;
+    expected[i] = static_cast<std::uint8_t>(
+        floor + (fraction > 0.5 || (fraction == 0.5 && (floor & 1))));
+  }
+  // Include each quantization threshold and its adjacent binary32 values.
+  for (unsigned i = 0; i < 255; ++i) {
+    const auto value = static_cast<float>((i + 0.5) / 255.0);
+    const float values[] = {std::nextafter(value, 0.0f), value,
+                            std::nextafter(value, 1.0f)};
+    for (unsigned j = 0; j < 3; ++j) {
+      samples[i * 3 + j] = values[j];
+      const double exact = static_cast<double>(values[j]) * 255;
+      const auto floor = static_cast<unsigned>(exact);
+      const double fraction = exact - floor;
+      expected[i * 3 + j] = static_cast<std::uint8_t>(
+          floor + (fraction > 0.5 || (fraction == 0.5 && (floor & 1))));
+    }
+  }
+  const std::map<std::string, ParameterValue> parameters{
+      {"dtype", std::string("uint8")},
+      {"metadata_mode", std::string("raw")}};
+  auto converted = run_planar(ElementType::Float32, side, pack(samples),
+                              parameters, side, {}, side);
+  PS_CHECK(converted.ok());
+  PS_CHECK(
+      converted.value()
+          .images.at("converted")
+          .read(Region::whole({side, side, 1}), actual.data(), actual.size())
+          .ok());
+  PS_CHECK(actual == expected);
+  samples.back() = std::numeric_limits<float>::quiet_NaN();
+  auto rejected = run_planar(ElementType::Float32, side, pack(samples),
+                             parameters, side, {}, side);
+  PS_CHECK(!rejected.ok());
+  PS_CHECK(rejected.status().reason == FailureReason::InvalidDomain);
+  samples.back() = 1.5f;
+  auto clipping = parameters;
+  clipping["overflow"] = std::string("clip");
+  auto clipped = run_planar(ElementType::Float32, side, pack(samples), clipping,
+                            side, {}, side);
+  PS_CHECK(clipped.ok());
+  PS_CHECK(
+      clipped.value()
+          .images.at("converted")
+          .read(Region::whole({side, side, 1}), actual.data(), actual.size())
+          .ok());
+  expected.back() = 255;
+  PS_CHECK(actual == expected);
+  samples.back() = std::numeric_limits<float>::quiet_NaN();
+  const Region roi({{32, 64}, {32, 64}, {0, 1}});
+  auto partial = run_planar(ElementType::Float32, side, pack(samples),
+                            parameters, side, roi, side);
+  PS_CHECK(partial.ok());
+  std::vector<std::uint8_t> region_bytes(64 * 64);
+  PS_CHECK(partial.value()
+               .images.at("converted")
+               .read(roi, region_bytes.data(), region_bytes.size())
+               .ok());
+  for (unsigned y = 0; y < 64; ++y)
+    for (unsigned x = 0; x < 64; ++x)
+      PS_CHECK(region_bytes[y * 64 + x] == expected[(y + 32) * side + x + 32]);
+  return 0;
+}
 int randomized_i64_oracle() {
   constexpr std::uint64_t count = 1024;
   std::vector<std::int64_t> samples(count);
@@ -836,6 +916,8 @@ int main() {
   if (planar_cross_tile())
     return 1;
   if (planar_vector_oracles())
+    return 1;
+  if (planar_tile_oracle(128) || planar_tile_oracle(256))
     return 1;
   if (randomized_i64_oracle())
     return 1;

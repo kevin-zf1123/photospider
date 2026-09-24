@@ -193,6 +193,15 @@ amd64 AVX2，覆盖 UInt8→Float32、
 Float32→UInt8 和 Float64→Float32。异常样本及缩窄至次正规数的样本使用精确
 标量路径。Int64→UInt8 使用精确整数区段内核。ISA 选择保持 strict 数值结果，
 不单独注册 accelerated 入口。不支持 AVX2 的 amd64 CPU 使用可移植标量实现。
+在编译器支持 ACLE、运行时具备 SME/SME_F64F64 且流式向量为 64 字节的 Apple
+arm64 上，Float32→UInt8 还会将完全位于请求区域内的连续矩形（4,096～65,536
+样本）合并为一次 streaming 调用。整数位检查确认整个矩形合法后，再用
+binary64 精确乘法与 ties-even 舍入生成输出。检查拒绝时使用既有精确路径；
+非整行或带行间 padding 的矩形保留逐行路径。工作预算在检查前计入，失败尝试
+及其回退均计账。内部借用宿主的单调取消标志，至多每 64 样本用原子读取
+检查一次，期间保持 streaming mode。宿主成功并完成取消/currentness 检查后
+才发布输出。`PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME` 可关闭此候选；
+Apple arm64 且编译支持时默认启用。其他转换对继续使用 NEON/AVX2。
 
 公开 workflow 与字节/元数据检查见
 [`test_numeric_conversion.cpp`](../../../tests/integration/test_numeric_conversion.cpp)；
