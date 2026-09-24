@@ -222,3 +222,14 @@ only `Photospider::kernel` and run the expression workflow; the SLEEF license is
 installed. ClangFormat 21 and cpplint passed for 51 changed C++ files. Independent
 code and contract review findings were corrected and checked. These checks do
 not constitute exhaustive parameter/platform or all-input refinement coverage.
+
+#### NUM-04 exp implementation update (2026-09-24)
+
+Float32 exp in [-80,80] now uses the IQK-derived NEON/AVX2 polynomial with an
+exact-rational whole-domain certificate for this admitted interval. It satisfies
+the existing final-output rule without evaluating a runtime SLEEF enclosure.
+Direct SLEEF exp is removed. Float64 exp, range/classification fallbacks, and
+NUM-01 AST exp now use strict evaluation. The Float32 certificate cannot be
+used as a binary64 expression enclosure; these paths can be substantially
+slower than the historical SLEEF measurements above. See the [exp implementation report](../exp-performance.md) for the
+coefficient source, proof, per-lane consistency and measured platform scope.

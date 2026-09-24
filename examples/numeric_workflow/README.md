@@ -2035,3 +2035,30 @@ Large dense association sets remain expensive, particularly sequence/remap,
 sort and prefix/integration requests. These measurements complement the sparse,
 streamed, resource-limit and independent numerical acceptance cases; they do not
 justify a production throughput promise.
+
+### NUM-04 exp SIMD implementation
+
+The formal Float32 accelerated exp helpers use a certified normal-range NEON or
+AVX2/FMA batch kernel. Float64 exp and NUM-01 expression exp use strict
+evaluation after removal of direct SLEEF exp, without narrowing their inputs. The
+[implementation and performance report](../../docs/built-in_ops/01-numeric/exp-performance.md)
+provides scope, accuracy, platform results and profiler limitations.
+
+```sh
+mkdir -p build/num04-exp
+cmake --build build --target photospider_numeric_exp_benchmark -j8
+python3 examples/numeric_workflow/exp_bound.py
+python3 examples/numeric_workflow/exp_oracle.py build/num04-exp/oracle.bin
+build/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
+python3 examples/numeric_workflow/exp_measure.py build/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/timings.csv
+```
+
+The corpus generator requires independent MPFR 4.2+. Expected acceptance output
+reports 20,503 cases, six partitions, maximum distance at most four, and passing
+layout/fenv/resource/cancellation checks. The benchmark is a manual target available with `BUILD_TESTING=ON`; it uses public workflow
+execution for its `public` layer. Append a Linux CPU number to `exp_measure.py`
+for `taskset` affinity. The maintained driver measures the production IQK
+implementation only, at `public`, direct-callback `core` and `raw` layers.
+For example, `photospider_numeric_exp_benchmark public 262144 10 7` measures
+seven public runs after one warmup. Core/raw memory peaks are unavailable.
+The SLEEF comparison backends were removed after the recorded A/B evaluation.

@@ -24,8 +24,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 file(WRITE "${PROJECT_BINARY_DIR}/generated/sleef-config.h"
   "/* Binary64-only private build; no quad arithmetic enabled. */\n")
 add_library(photospider_numeric_math OBJECT
-  "${PROJECT_SOURCE_DIR}/third_party/photospider_sleef.c")
+  "${PROJECT_SOURCE_DIR}/third_party/photospider_sleef.c"
+  "${PROJECT_SOURCE_DIR}/plugins/ops/01-numeric/exp_simd.cpp")
 target_include_directories(photospider_numeric_math PRIVATE
+  "${PROJECT_SOURCE_DIR}/plugins/ops"
   "${PROJECT_BINARY_DIR}/generated"
   "${_sleef_root}/src/common" "${_sleef_root}/src/arch" "${_sleef_root}/src/libm")
 target_compile_options(photospider_numeric_math PRIVATE

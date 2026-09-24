@@ -118,7 +118,7 @@ successful resolution for all possible Float64/rational inputs.
 
 The private SLEEF 3.9.0 binary64 u10 kernels, compiled from the
 [builder-supplied source](../../../third_party/SLEEF.md), provide explicit
-AdvSIMD and AVX2/FMA implementations for ordinary exp, ln, sin, cos, tan, pow and
+AdvSIMD and AVX2/FMA implementations for ordinary ln, sin, cos, tan, pow and
 atan2. Float64 inputs are never narrowed. `accelerated_math.hpp` admits bounded
 ordinary argument ranges, expands kernel results to conservative binary64
 intervals and checks the final output against the shared FP32 budget. Domain,
@@ -1583,3 +1583,14 @@ per line and output, and writes dense offsets without changing stable order or
 source witnesses. Prefix and cumulative integral scans request up to 64 source
 samples per stage, while each published observation retains only its actual
 prefix support. No private thread pool is used.
+
+### NUM-04 Float32 exp batch update (2026-09-24)
+
+Accelerated Float32 exp now uses an IQK-derived NEON/AVX2 polynomial on [-80,80],
+with one callback floating-environment guard, a fixed batch workspace and a
+proved four-step error bound. Direct SLEEF exp and the comparison backends
+have been removed. Float64 exp and NUM-01 expression exp now use strict
+evaluation, with their original input precision and success/failure semantics.
+This removes their former SLEEF acceleration and can substantially increase
+execution time. The [exp report](exp-performance.md) records both platform oracles,
+scalar/batched-SLEEF/IQK comparisons and the limits of the profiler evidence.

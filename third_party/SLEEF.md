@@ -46,6 +46,16 @@ The project checks ISA availability before dispatch. No upstream dispatcher,
 thread pool, allocator hook, generated installed header or configure-time
 network dependency is used. The kernel archive contains the adapter object.
 
-Only the u10 functions selected in the adapter are called. Trigonometric fast
+Only ln, sin, cos, tan, pow and atan2 u10 entry points are selected in the
+adapter. There is no direct SLEEF exp entry point. Trigonometric fast
 paths restrict arguments to the common small-argument reduction so lane grouping
 cannot select a different reduction. Unverified domains use strict evaluation.
+
+NUM-04 Float32 exp additionally uses a normal-range SIMD polynomial adapted from
+ik_llama.cpp `dad2cb3e55138cbdd7df988c66c0c3c54f6d34ad`, implemented in
+`plugins/ops/01-numeric/exp_simd.cpp`. Its MIT notice is retained in
+`IK_LLAMA_LICENSE.txt` and installed alongside SLEEF's license. It has no new
+source-download prerequisite. Direct SLEEF exp and its comparison backends have been removed. Float64 exp
+and NUM-01 expression exp use strict evaluation; the Float32 IQK certificate
+does not justify narrowing their binary64 inputs. The [exp implementation and measured scope](../docs/built-in_ops/01-numeric/exp-performance.md)
+include the rational error certificate, fallback domain and reproduction.

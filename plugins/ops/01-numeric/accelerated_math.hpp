@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 
+#include "01-numeric/exp_simd.hpp"
 #include "data/input_validation.hpp"
 
 extern "C" void photospider_sleef_evaluate(unsigned kind, const double* a,
@@ -102,8 +103,6 @@ inline bool accelerated_math_domain(unsigned kind, double a, double b) {
   if (!accelerated_math_available() || !std::isfinite(a) || !std::isfinite(b))
     return false;
   switch (kind) {
-    case 0:
-      return a >= -80 && a <= 80;
     case 1:
       return a >= 0x1p-100 && a <= 0x1p100;
     case 2:
@@ -138,6 +137,17 @@ inline std::optional<std::uint64_t> accelerated_math(unsigned kind,
   if (!environment.active())
     return {};
   const double x = numeric_double(a, narrow), y = numeric_double(b, narrow);
+  if (kind == 0) {
+    // IQK is certified only for binary32 arguments. Float64, expression
+    // intervals and unsupported inputs retain the strict exp implementation.
+    if (!narrow || !accelerated_math_available() || !std::isfinite(x) ||
+        x < -80 || x > 80)
+      return {};
+    const float input = static_cast<float>(x);
+    float output = 0;
+    exp_simd_f32(&input, &output, 1);
+    return numeric_bits(output, true);
+  }
   if (!accelerated_math_domain(kind, x, y))
     return {};
   double result = 0;

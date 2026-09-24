@@ -28,7 +28,6 @@ void photospider_sleef_evaluate(unsigned kind, const double *a,
     }
     vdouble x = vloadu_vd_p(left), y = vloadu_vd_p(right), z;
     switch (kind) {
-      case 0: z = xexp(x); break;
       case 1: z = xlog_u1(x); break;
       case 2: z = xsin_u1(x); break;
       case 3: z = xcos_u1(x); break;

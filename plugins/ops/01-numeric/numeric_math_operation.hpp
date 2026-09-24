@@ -15,10 +15,16 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/certified_math.hpp"
 #include "01-numeric/exact_elementary.hpp"
+#include "01-numeric/exp_simd.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
+struct ExpWorkspace final {
+  static constexpr std::size_t kCount = 64;
+  std::array<float, kCount> input{}, output{};
+  std::array<std::uint32_t, kCount> bits{};
+};
 // One admitted arithmetic workspace and one complete packed result per
 // callback. The registry validates full typed inputs before entering this
 // function.
@@ -46,7 +52,13 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
   if (!allocated.ok())
     return Answer(allocated.status());
   auto output = allocated.take_value();
-  auto storage = call.allocator.allocate(sizeof(Arithmetic));
+  std::size_t extra = 0;
+  if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
+    if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict)
+      extra = sizeof(ExpWorkspace);
+    static_assert(sizeof(Arithmetic) % alignof(ExpWorkspace) == 0);
+  }
+  auto storage = call.allocator.allocate(sizeof(Arithmetic) + extra);
   if (!storage.ok())
     return Answer(storage.status());
   auto scratch = storage.take_value();
@@ -81,6 +93,74 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
   std::optional<input_internal::Float32Environment> environment;
   if constexpr (std::is_same_v<Arithmetic, ExactElementary>)
     environment.emplace();
+  if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
+    if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict &&
+        descriptor.element_type == ElementType::Float32 &&
+        accelerated_math_available()) {
+      environment.emplace();
+      if (environment->active()) {
+        auto* block = new (scratch.data() + sizeof(Arithmetic)) ExpWorkspace;
+        for (std::uint64_t offset = 0; offset < count;
+             offset += ExpWorkspace::kCount) {
+          const auto size =
+              std::min<std::uint64_t>(ExpWorkspace::kCount, count - offset);
+          // Charge indexing here; arithmetic admission is charged exactly once
+          // per lane, either below for a SIMD lane or by evaluate on fallback.
+          status = consume(size * (call.inputs.size() * shape.size() + 1));
+          if (!status.ok())
+            return Answer(status);
+          std::uint64_t fast_count = 0;
+          for (std::size_t lane = 0; lane < size; ++lane) {
+            const auto& input = call.inputs[0];
+            const auto* data = packed[0];
+            if (data) {
+              data += (offset + lane) * source_width;
+            } else {
+              auto address = input.byte_address(coordinate);
+              if (!address.ok())
+                return Answer(address.status());
+              data = input.bytes().data() + address.value();
+            }
+            std::memcpy(&block->bits[lane], data, 4);
+            // Classify by bits before any FP instruction, including sNaN.
+            const auto magnitude = block->bits[lane] & UINT32_C(0x7fffffff);
+            const auto safe = magnitude <= UINT32_C(0x42a00000)
+                                  ? block->bits[lane]
+                                  : UINT32_C(0);
+            fast_count += magnitude <= UINT32_C(0x42a00000);
+            std::memcpy(&block->input[lane], &safe, 4);
+            for (std::size_t axis = shape.size(); axis; --axis) {
+              if (++coordinate[axis - 1] < shape[axis - 1])
+                break;
+              coordinate[axis - 1] = 0;
+            }
+          }
+          status = consume(fast_count * DirectedInterval::kSlots *
+                           DirectedInterval::kWords);
+          if (!status.ok())
+            return Answer(status);
+          exp_simd_f32(block->input.data(), block->output.data(), size);
+          for (std::size_t lane = 0; lane < size; ++lane) {
+            const auto magnitude = block->bits[lane] & UINT32_C(0x7fffffff);
+            std::uint32_t word;
+            if (magnitude <= UINT32_C(0x42a00000)) {
+              std::memcpy(&word, &block->output[lane], 4);
+            } else {
+              auto calculated = arithmetic->evaluate(
+                  kind, descriptor.element_type, block->bits[lane], 0, consume,
+                  [] { return Status::success(); });
+              if (!calculated.ok())
+                return Answer(calculated.status());
+              word = static_cast<std::uint32_t>(calculated.value());
+            }
+            std::memcpy(output.data() + (offset + lane) * 4, &word, 4);
+          }
+        }
+        status = consume(1);
+        return status.ok() ? std::move(output).publish() : Answer(status);
+      }
+    }
+  }
   for (std::uint64_t i = 0; i < count; ++i) {
     status = consume(call.inputs.size() * shape.size() + 1);
     if (!status.ok())
@@ -160,6 +240,10 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
   output.region_rule = OperationRegionRule::Whole;
   output.requires_dense_output = true;
   traits.workspace_bytes = sizeof(Arithmetic);
+  if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
+    if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict)
+      traits.workspace_bytes += sizeof(ExpWorkspace);
+  }
   operation.specialize_metadata = [profile, rational](const auto& inputs,
                                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {

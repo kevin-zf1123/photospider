@@ -104,3 +104,9 @@ and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration
 registration; MPFR is used only by the independent Python oracle.
+
+The 2026-09-24 implementation additionally admits Float32 [-80,80] to the
+IQK-derived NEON/AVX2 batch polynomial, with an exact-rational error certificate.
+Direct SLEEF exp is removed. Float64 and out-of-domain inputs use strict
+evaluation; the Float32 certificate does not admit narrowed Float64 arguments. See the
+[exp implementation, validation and performance report](../exp-performance.md).

@@ -178,6 +178,7 @@ __pycache__/
 !third_party/
 !third_party/SLEEF.md
 !third_party/photospider_sleef.c
+!third_party/IK_LLAMA_LICENSE.txt
 /third_party/sleef/
 
 !examples/channel_extraction_performance/

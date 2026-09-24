@@ -924,5 +924,7 @@ endif()
 
 install(FILES plugins/ops/09-composite/inpaint_ns_license.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
 
+install(FILES third_party/IK_LLAMA_LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
 install(FILES third_party/sleef/LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider RENAME SLEEF.txt)

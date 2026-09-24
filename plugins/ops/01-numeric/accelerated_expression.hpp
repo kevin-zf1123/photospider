@@ -127,6 +127,11 @@ struct AcceleratedExpression final {
             value = std::max(u, v);
             bound = {std::max(a.low, b.low), std::max(a.high, b.high)};
             break;
+          case K::Exp:
+            // The Float32 IQK primitive is not a binary64 AST enclosure.
+            // Replay the original expression strictly instead of narrowing.
+            accepted[lane] = false;
+            break;
           default:
             accepted[lane] = accelerated_math_domain(kind, a.low, b.low) &&
                              accelerated_math_domain(kind, a.high, b.high) &&
