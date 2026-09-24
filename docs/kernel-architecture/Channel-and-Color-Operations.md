@@ -11,7 +11,7 @@ The [format/color catalog](../built-in_ops/02-format-color/representation.md) an
 [FMT common contract](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
 define the replacement direction. FMT-01A/B now have CPU implementations and
 FMT-01C has a public authoring helper. Their specifications retain Proposed
-decision status. FMT-02A/B/C are also implemented. FMT-03..08 remain unimplemented; FMT-07 is retired. Complete images use planar storage and straight color with
+decision status. FMT-02A/B/C are also implemented. FMT-03A/B have public composition helpers. FMT-04..08 remain unimplemented; FMT-07 is retired. Complete images use planar storage and straight color with
 alpha inside the tensor. New operators must implement their own exact demand,
 metadata, numerical and layout contracts. Historical typed HWC behavior does
 not constitute a subset implementation of these new specifications.
@@ -204,3 +204,63 @@ The installed target `photospider_channel_assembly_consumer` runs the same publi
 fixture using only the installed kernel target. Measured CPU latency, backing,
 Instruments hotspots and Linux/x64 validation are in the
 [performance guide](../../examples/channel_assembly_performance/README.md).
+
+
+## FMT-03 channel editing
+
+`format::swizzle_channels` and `format::replace_channels` are exported in
+`photospider/format/channel_editing.hpp`. Both lower transactionally to
+`channel.assemble_mapped_<profile>`; no native swizzle/replace operation or legacy
+alias is introduced. The [minimal public workflow](../../examples/channel_editing/README.md)
+executes an offset ROI and verifies `[8,21,31,0.5]` byte-for-byte.
+
+Each input includes actual inferred metadata and explicit channel/component/scalar
+structure. Input zero is the base channel tensor, whose axis and nonchannel grid
+fix the output. A selects, repeats, omits or fills slots. B replaces distinct
+original destination selectors simultaneously and leaves all unlisted samples
+and semantics intact. Named selectors use exact unique name/role matches; raw
+uses explicit axes and indices. All seven dtypes and positive rank 1..8 preserve
+sample bits, including NaN payloads and signed zeros. Literal dtype and bytes are
+explicit, with no Float64 intermediate. No alpha arithmetic is performed.
+
+A propagates source component meaning and keeps only uniquely remapped complete
+groups and companions. B computes complete destination descriptions, preventing
+replacement-source metadata from leaking into unspecified destination fields.
+Explicit groups replace overlapping or same-name groups; unaffected valid groups
+survive. Raw drops descriptions incompatible with the explicitly selected axis.
+Override remains invocation-local. Coordinate compatibility applies to every
+connected spatial input, including unused ones; no implicit resampling occurs.
+
+The FMT-03 lowerer fuses generic scalar fills into C's internal `s` source records.
+A scalar maps every selected output coordinate to its sole index zero; ordinary
+FMT-02C's public `ChannelSourceStructure` remains component/channels only. Generated
+C nodes carry `authoring_member`, lossless bounded `expected_inputs` assertions and
+`output_description_complete`. These internal records preserve the supplied
+Descriptor checks while enabling exact fixed-coordinate Data/dirty mappings.
+They participate in the normal compiler invocation identity. The public FMT-03
+helper validates original declarations and compilation rechecks producer metadata.
+All-constant output retains base Descriptor support without base Data reads.
+
+Equivalent typed literals share one `channel.scalar_literal_<profile>` provider
+with Int64 `dtype` (one of the seven ElementType values) and lowercase String
+`bits` (exact native-order bytes). It returns generic shape `[1]`, port `values`,
+with empty facets and scalar-sized owned storage. It has no inputs and uses
+Whole semantics over one sample. Invalid dtype/width/hex fails preflight. A/B
+introduce one C node plus the actual unique literal providers, with collision-aware
+IDs and a 65536-node limit. Scalar fills add no spatial temporary allocation.
+
+Generic single-owner affine results can retain zero-stride scalar views; independent
+owners require materialization. Canonical images cannot alias scalar storage.
+The mapped planar path reserves the whole output virtual span and backs only
+requested pages. Exact source demand and valid coverage remain independent of
+page/tile rounding. The optimized scalar copy doubles initialized byte prefixes
+inside blocks of at most 1024 samples, with cancellation/currentness checks and
+one atomic output publication. It performs no floating arithmetic or unrequested
+neighbor reads. No private worker pool or completed-result cache is added.
+
+Build `test_channel_editing` and run its focused CTest for the full integration
+fixture; `photospider_channel_editing_consumer` runs it against an installed public
+package. See [performance results](../../examples/channel_editing_performance/README.md)
+for FP32 128x128, 4096x4096 continuous/tiled, sparse requests, representation,
+copy/backing accounting and the measured optimization. Runtime observations are
+separate from the retained Proposed specification decision status.

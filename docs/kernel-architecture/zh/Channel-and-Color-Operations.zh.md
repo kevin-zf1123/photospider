@@ -8,7 +8,7 @@
 [目录](../../built-in_ops/02-format-color/representation.md)及
 [FMT 公共规格](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
 定义后续方向。FMT-01A/B 已有 CPU 实现，FMT-01C 提供公开 authoring helper；
-规格决策状态仍为 Proposed。FMT-03..08 尚未实现，FMT-07 已退休。完整图像使用
+规格决策状态仍为 Proposed。FMT-02A/B/C 及 FMT-03A/B 组合接口已实现，FMT-04..08 尚未实现，FMT-07 已退休。完整图像使用
 planar 存储、straight 颜色和同张量内的 alpha。新算子须实现各自的精确请求、
 metadata、数值和布局契约；旧 typed HWC 行为不构成新规格的子集实现。
 
@@ -119,3 +119,48 @@ ICC 引用必须有真实资源 owner，并由结果保留。raw 保留可投影
 安装消费目标 `photospider_channel_assembly_consumer` 使用相同公开测试源码。
 性能复现、Xcode Instruments 和 WSL Linux/x64 结果见
 [性能工作流](../../../examples/channel_assembly_performance/README.md)。
+
+
+## FMT-03 通道编辑
+
+`photospider/format/channel_editing.hpp` 导出 `format::swizzle_channels` 和
+`format::replace_channels`。两者事务式展开为 `channel.assemble_mapped_<profile>`，
+不注册独立 swizzle/replace key，也不恢复旧别名。
+[最小公开 workflow](../../../examples/channel_editing/README.md)运行偏移 ROI，
+逐字节检查结果 `[8,21,31,0.5]`。
+
+每个输入包含实际推导 metadata 和显式 channel/component/scalar 结构。输入 0
+是 base，确定输出通道轴及非通道网格。A 支持选择、重复、遗漏和填充；B 同时读取
+原始输入，替换唯一目标，保留未列出的样本和语义。name/role 精确区分大小写且
+唯一；raw 要求显式轴和 index。七种 dtype、rank 1..8 均逐位保留，包括 NaN
+payload 和负零。literal 显式携带 dtype 与字节，不经过 Float64，不执行 alpha 算术。
+
+A 投影来源组件含义，仅保留唯一完整映射的组及 companion。B 计算完整目标描述，
+避免 replacement 的额外源字段泄漏。显式组替换重叠或同名组，其余适用组保留。
+raw 丢弃与新通道轴不相容的描述，override 仅影响本次调用。全部连接的空间输入
+均检查坐标兼容性，包括未读取样本的输入；不隐式重采样。
+
+FMT-03 lowerer 将 generic scalar fill 融合到 C 的内部 `s` 来源记录，每个被选择
+输出坐标映射至 `V[0]`。普通 FMT-02C 的公开 `ChannelSourceStructure` 仍只接受
+component/channels。生成节点携带 `authoring_member`、有界无损
+`expected_inputs` 断言及 `output_description_complete`，参加正常编译身份计算。
+helper 验证输入声明，编译时重新核验 producer metadata。全常量输出仍保留 base
+Descriptor 检查，但不读取 base Data。
+
+相同 typed literal 共用一个 `channel.scalar_literal_<profile>` provider。
+其 Int64 `dtype` 必须是七种有效 ElementType，String `bits` 是精确本机字节序的
+小写 hex。provider 无输入，输出 generic `[1]`、端口 `values`、空 facets，
+使用单样本 Whole 语义和标量大小的独立 storage。非法 dtype/宽度/hex 在预检拒绝。
+扩图按实际唯一 provider 加一个 C 节点计数，使用防冲突 ID，节点上限 65536；
+标量填充不分配空间中间张量。
+
+generic 的单 owner affine 结果可保留零步幅 scalar view；独立 owner 需物化，
+canonical image 不能别名 scalar storage。planar 映射路径预留完整输出虚拟跨度，
+只提供请求页，逻辑 Data 和 valid coverage 不随页或 tile 取整扩大。优化后的标量
+复制在最多 1024 样本的块内倍增已初始化字节前缀，保留取消/currentness 检查和
+原子发布，无浮点算术、未请求邻接读取、私有线程池或完成结果缓存。
+
+`test_channel_editing` 为集成回归；`photospider_channel_editing_consumer` 针对
+安装公共包运行同一 fixture。[性能结果](../../../examples/channel_editing_performance/README.md)
+记录 FP32 128x128、4096x4096 continuous/tiled、稀疏请求、布局、复制与 backing
+统计及优化效果。实现事实与规格 Proposed 决策状态分别记录。

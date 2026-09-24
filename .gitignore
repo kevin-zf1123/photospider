@@ -191,3 +191,13 @@ __pycache__/
 !examples/channel_assembly_performance/*.py
 !examples/channel_assembly_performance/*.md
 !examples/channel_assembly_performance/CMakeLists.txt
+
+!examples/channel_editing/
+!examples/channel_editing/*.cpp
+!examples/channel_editing/*.md
+!examples/channel_editing/CMakeLists.txt
+!examples/channel_editing_performance/
+!examples/channel_editing_performance/*.cpp
+!examples/channel_editing_performance/*.py
+!examples/channel_editing_performance/*.md
+!examples/channel_editing_performance/CMakeLists.txt

@@ -15,7 +15,7 @@ inline bool channel_assembly(const std::string& key) {
 }
 // The caller owns exact preparation/publication. Rectangles stop at both
 // physical tile edges and authorized coverage; padding is never copied.
-inline Status copy_channel_piece(
+inline Status copy_spatial_channel_piece(
     const Region& region, const DependencyMappedNeed& map,
     const PlanarImageReadWindow* image, const Value* value,
     const PlanarImageWriteWindow& output, const PlanarImageLayout& layout,
@@ -113,5 +113,82 @@ inline Status copy_channel_piece(
     }
   }
   return Status::success();
+}
+
+// Scalar broadcast has no spatial source stride. Keep its fill traversal
+// separate so spatial copies retain the established FMT-02 hot loop.
+inline Status fill_scalar_channel_piece(
+    const Region& region, const DependencyMappedNeed& map, const Value& value,
+    const PlanarImageWriteWindow& output, const PlanarImageLayout& layout,
+    std::uint64_t width, const CancellationToken& cancellation,
+    const std::function<bool()>& current) {
+  auto address = value.byte_address({map.axes[0].fixed.offset});
+  if (!address.ok())
+    return address.status();
+  const auto* scalar = value.bytes().data() + address.value();
+  std::vector<std::uint64_t> at;
+  for (const auto& dim : region.dimensions())
+    at.push_back(dim.offset);
+  const auto y = region.dimensions()[layout.height_axis];
+  const auto x = region.dimensions()[layout.width_axis];
+  const auto channels = region.dimensions()[*layout.channel_axis];
+  std::uint64_t since_check = 1024;
+  for (auto c = channels.offset; c < channels.offset + channels.extent; ++c) {
+    at[*layout.channel_axis] = c;
+    for (auto row = y.offset; row < y.offset + y.extent;) {
+      at[layout.height_axis] = row;
+      auto rows = y.offset + y.extent - row;
+      for (auto column = x.offset; column < x.offset + x.extent;) {
+        if (cancellation.cancelled())
+          return {ErrorCode::Cancelled, "channel fill cancelled"};
+        at[layout.width_axis] = column;
+        auto write = output.rectangle_run(at);
+        if (!write.ok())
+          return write.status();
+        const auto& rectangle = write.value();
+        rows = std::min(rows, rectangle.rows);
+        const auto samples =
+            std::min(x.offset + x.extent - column, rectangle.row.samples);
+        for (std::uint64_t dy = 0; dy < rows; ++dy) {
+          for (std::uint64_t dx = 0; dx < samples;) {
+            if (cancellation.cancelled())
+              return {ErrorCode::Cancelled, "channel fill cancelled"};
+            if (since_check >= 1024) {
+              if (current && !current())
+                return {ErrorCode::Stale, "channel fill plan changed"};
+              since_check = 0;
+            }
+            const auto count = std::min(1024 - since_check, samples - dx);
+            since_check += count;
+            auto* to = rectangle.row.data + dy * rectangle.row_stride_bytes +
+                       dx * width;
+            std::memcpy(to, scalar, width);
+            for (std::uint64_t filled = 1; filled < count;) {
+              const auto more = std::min(filled, count - filled);
+              std::memcpy(to + filled * width, to, more * width);
+              filled += more;
+            }
+            dx += count;
+          }
+        }
+        column += samples;
+      }
+      row += rows;
+    }
+  }
+  return Status::success();
+}
+inline Status copy_channel_piece(
+    const Region& region, const DependencyMappedNeed& map,
+    const PlanarImageReadWindow* image, const Value* value,
+    const PlanarImageWriteWindow& output, const PlanarImageLayout& layout,
+    std::uint64_t width, const CancellationToken& cancellation,
+    const std::function<bool()>& current = {}) {
+  if (!image && value && map.axes.size() == 1 &&
+      map.axes[0].observation_axis < 0 && map.axes[0].fixed.extent == 1)
+    return fill_scalar_channel_piece(region, map, *value, output, layout, width,
+                                     cancellation, current);
+  return copy_spatial_channel_piece(region, map, image, value, output, layout,
+                                    width, cancellation, current);
 }
 }  // namespace ps::execution_internal

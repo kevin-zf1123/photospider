@@ -1,4 +1,4 @@
-#include "photospider/format/channel_assembly.hpp"
+#include "execution/channel_assembly.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -14,7 +14,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "execution/channel_assembly.hpp"
+#include "photospider/format/channel_editing.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/utf8_validation.hpp"
 
@@ -42,6 +42,7 @@ struct Assembly final {
   std::uint32_t axis = 0;
   std::vector<std::optional<std::uint32_t>> axes;
   std::vector<Span> spans;
+  std::vector<bool> scalars;
   std::string layout;
 };
 bool number(const std::string& text, std::uint64_t* value) {
@@ -182,6 +183,26 @@ TensorChannelDescription component(const std::optional<TensorDescription>& d,
   }
   return out;
 }
+// A bounded, lossless descriptor assertion. It is part of invocation identity
+// and catches stale authoring hints on producer edges without evaluating them.
+std::string input_assertion(const std::vector<OperationMetadata>& inputs) {
+  std::string out = "v1";
+  for (const auto& input : inputs) {
+    out += ";" +
+           std::to_string(static_cast<unsigned>(input.descriptor.element_type));
+    for (auto extent : input.descriptor.shape)
+      out += "," + std::to_string(extent);
+    out += ":" + format::detail::assembly_hex(
+                     format::detail::layout_assertion(input.planar_layout));
+    for (const auto& f : input.facets) {
+      out += ":" + format::detail::assembly_hex(f.key) + "," +
+             std::to_string(f.version) + ",";
+      out += format::detail::assembly_hex(
+          std::string(f.payload.begin(), f.payload.end()));
+    }
+  }
+  return out;
+}
 Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Params& p, int member,
     SequenceProfile profile) {
@@ -189,6 +210,10 @@ Result<OperationPreparation> prepare(
   auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok())
     return Answer(available);
+  if (p.count("expected_inputs") &&
+      std::get<std::string>(p.at("expected_inputs")) != input_assertion(inputs))
+    return Answer(
+        invalid("FMT-03 authoring descriptors disagree with inference"));
   if (inputs.empty())
     return Answer(invalid("assembly requires at least one input"));
   const auto mode = std::get<std::string>(p.at("metadata_mode"));
@@ -267,13 +292,16 @@ Result<OperationPreparation> prepare(
         description.reset();
       }
     }
+    bool scalar = member == 2 && axis_records.value()[i] == "s";
+    if (scalar && (!p.count("authoring_member") || !p.count("expected_inputs")))
+      return Answer(invalid("scalar fill is an internal FMT-03 lowering"));
     bool single = member == 0;
     std::optional<std::uint32_t> axis;
     if (member != 0) {
       std::string field =
           axis_records.value().empty() ? "_" : axis_records.value()[i];
       if (member == 2) {
-        single = field == "c";
+        single = field == "c" || scalar;
         if (!single) {
           if (field.empty() || field[0] != 'h')
             return Answer(invalid(where + "structure must be c or h<axis>"));
@@ -287,7 +315,10 @@ Result<OperationPreparation> prepare(
         axis = number_axis;
       }
     }
-    if (single) {
+    if (scalar) {
+      if (dimensions != std::vector<std::uint64_t>{1} || input.planar_layout)
+        return Answer(mismatch(where + "scalar requires generic shape [1]"));
+    } else if (single) {
       if (dimensions.size() > 7 ||
           (mode != "raw" && description && description->channel_axis))
         return Answer(invalid(
@@ -308,10 +339,13 @@ Result<OperationPreparation> prepare(
     auto nonchannel = dimensions;
     if (axis)
       nonchannel.erase(nonchannel.begin() + *axis);
-    if (i == 0)
+    if (i == 0) {
+      if (scalar)
+        return Answer(invalid("first source must establish the spatial grid"));
       shape = nonchannel;
-    else if (shape != nonchannel)
+    } else if (!scalar && shape != nonchannel) {
       return Answer(mismatch(where + "nonchannel extents differ"));
+    }
     if (input.planar_layout) {
       any_image = true;
       auto structural = *input.planar_layout;
@@ -334,6 +368,7 @@ Result<OperationPreparation> prepare(
         image_layout = structural;
     }
     assembly.axes.push_back(axis);
+    assembly.scalars.push_back(scalar);
     descriptions.push_back(std::move(description));
   }
   const auto output_axis =
@@ -457,6 +492,8 @@ Result<OperationPreparation> prepare(
   std::optional<std::vector<TensorAxisDescription>> common_axes;
   bool all_axes = true;
   for (std::size_t i = 0; i < descriptions.size(); ++i) {
+    if (assembly.scalars[i])
+      continue;
     if (mode == "raw" || !descriptions[i] || descriptions[i]->axes.empty()) {
       all_axes = false;
       continue;
@@ -503,6 +540,10 @@ Result<OperationPreparation> prepare(
     }
     result.axes = target->axes;
   }
+  const bool complete = p.count("output_description_complete") &&
+                        std::get<bool>(p.at("output_description_complete"));
+  if (complete && !target)
+    return Answer(invalid("complete output description is absent"));
   bool semantic = target.has_value() || !mapped_targets.empty();
   for (const auto& d : descriptions)
     semantic =
@@ -517,8 +558,10 @@ Result<OperationPreparation> prepare(
     for (const auto& span : assembly.spans) {
       for (std::uint64_t j = 0; j < span.count; ++j) {
         const auto k = span.destination + j;
-        auto value = component(descriptions[span.port], span.source + j,
-                               assembly.axes[span.port].has_value());
+        auto value = complete
+                         ? TensorChannelDescription{}
+                         : component(descriptions[span.port], span.source + j,
+                                     assembly.axes[span.port].has_value());
         TensorChannelDescription assignment;
         if (target) {
           auto global = interpretation(*target);
@@ -616,7 +659,10 @@ Result<OperationPreparation> prepare(
     const auto rank = inputs[span.port].descriptor.shape.size();
     for (std::size_t a = 0; a < rank; ++a) {
       DependencyAxis axis;
-      if (source_axis && a == *source_axis) {
+      if (assembly.scalars[span.port]) {
+        axis.observation_axis = -1;
+        axis.fixed = {0, 1};
+      } else if (source_axis && a == *source_axis) {
         axis.observation_axis = assembly.axis;
         axis.translation = static_cast<std::int64_t>(span.source) -
                            static_cast<std::int64_t>(span.destination);
@@ -663,7 +709,10 @@ Result<ValueFragments> evaluate(const DependencyPhase& phase,
         std::vector<std::uint64_t> source_at(source.region().rank());
         std::vector<std::int64_t> strides(descriptor.shape.size(), 0);
         bool intersects = true;
-        for (std::size_t i = 0; i < source_at.size(); ++i) {
+        if (a.scalars[span.port])
+          source_at[0] = 0;
+        for (std::size_t i = 0; !a.scalars[span.port] && i < source_at.size();
+             ++i) {
           const auto input = source.region().dimensions()[i];
           std::size_t target;
           std::int64_t shift = 0;
@@ -867,7 +916,10 @@ OperationDefinition definition(const std::string& key, int member,
       {"input_overrides", OperationParameterType::String, false},
       {"layout", OperationParameterType::String},
       {"metadata_mode", OperationParameterType::String},
-      {"output_description", OperationParameterType::String, false}};
+      {"output_description", OperationParameterType::String, false},
+      {"output_description_complete", OperationParameterType::Bool, false},
+      {"expected_inputs", OperationParameterType::String, false},
+      {"authoring_member", OperationParameterType::String, false}};
   if (member == 0)
     t.parameter_schema.push_back({"axis", OperationParameterType::Int64});
   else
@@ -941,6 +993,456 @@ OperationDefinition definition(const std::string& key, int member,
   };
   return op;
 }
+Result<std::vector<std::uint8_t>> literal_bytes(const Params& params) {
+  using Answer = Result<std::vector<std::uint8_t>>;
+  const auto raw_type = std::get<std::int64_t>(params.at("dtype"));
+  if (raw_type < 0 || raw_type > UINT32_MAX)
+    return Answer(invalid("unsupported typed literal dtype"));
+  const auto type = static_cast<ElementType>(raw_type);
+  if (type != ElementType::UInt8 && type != ElementType::Int8 &&
+      type != ElementType::UInt16 && type != ElementType::Int16 &&
+      type != ElementType::Int64 && type != ElementType::Float32 &&
+      type != ElementType::Float64)
+    return Answer(invalid("unsupported typed literal dtype"));
+  const auto width = Value::element_size(type);
+  const auto& bits = std::get<std::string>(params.at("bits"));
+  if (!width || bits.size() != width * 2)
+    return Answer(invalid("typed literal dtype/bit width mismatch"));
+  std::vector<std::uint8_t> result;
+  for (std::size_t i = 0; i < bits.size(); i += 2) {
+    unsigned byte = 0;
+    for (unsigned j = 0; j < 2; ++j) {
+      const auto c = bits[i + j];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+        return Answer(invalid("typed literal requires lowercase hex bytes"));
+      byte = byte * 16 + (c <= '9' ? c - '0' : c - 'a' + 10);
+    }
+    result.push_back(byte);
+  }
+  return Answer(std::move(result));
+}
+OperationDefinition scalar_literal(const std::string& key,
+                                   SequenceProfile profile) {
+  OperationDefinition op;
+  op.key = key;
+  auto& t = op.traits;
+  t.input_count = 0;
+  t.requires_metadata_specialization = true;
+  t.cacheable = false;
+  t.parameter_schema = {{"dtype", OperationParameterType::Int64},
+                        {"bits", OperationParameterType::String}};
+  auto& out = t.outputs[0];
+  out.key = "values";
+  out.shape_rule = OperationShapeRule::Fixed;
+  out.fixed_output_shape = {1};
+  out.region_rule = OperationRegionRule::Whole;
+  op.specialize_metadata = [profile](const auto&, const auto& parameters) {
+    using Answer = Result<std::vector<OperationOutputSpecialization>>;
+    auto status = numeric_ops::sequence_profile_available(profile);
+    if (!status.ok())
+      return Answer(status);
+    auto bytes = literal_bytes(parameters);
+    if (!bytes.ok())
+      return Answer(bytes.status());
+    OperationOutputSpecialization result;
+    result.metadata.descriptor = {
+        static_cast<ElementType>(
+            std::get<std::int64_t>(parameters.at("dtype"))),
+        {1}};
+    return Answer(std::vector<OperationOutputSpecialization>{result});
+  };
+  op.callback = [](const OperationInvocation& call) {
+    using Answer = Result<Value>;
+    if (call.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, "literal cancelled"});
+    auto bytes = literal_bytes(call.parameters);
+    if (!bytes.ok())
+      return Answer(bytes.status());
+    const ValueDescriptor descriptor{
+        static_cast<ElementType>(
+            std::get<std::int64_t>(call.parameters.at("dtype"))),
+        {1}};
+    auto allocated =
+        MutableValue::allocate(descriptor, call.output_region, call.allocator);
+    if (!allocated.ok())
+      return Answer(allocated.status());
+    auto writer = allocated.take_value();
+    std::memcpy(writer.data(), bytes.value().data(), bytes.value().size());
+    return std::move(writer).publish();
+  };
+  return op;
+}
+Result<std::optional<TensorDescription>> edit_description(
+    const OperationMetadata& metadata, std::uint32_t port,
+    const format::ChannelAssemblyOptions& options) {
+  using Answer = Result<std::optional<TensorDescription>>;
+  std::optional<TensorDescription> result;
+  if (options.input_overrides.count(port)) {
+    result = options.input_overrides.at(port);
+  } else {
+    for (const auto& f : metadata.facets)
+      if (f.key == "photospider.tensor-description") {
+        auto decoded = decode_tensor_description(f);
+        if (!decoded.ok()) {
+          if (options.metadata_mode != "raw")
+            return Answer(decoded.status());
+        } else {
+          result = decoded.take_value();
+        }
+      }
+  }
+  if (result) {
+    auto valid = validate_tensor_description(*result, metadata.descriptor);
+    if (!valid.ok()) {
+      if (options.metadata_mode != "raw")
+        return Answer(valid);
+      result.reset();
+    }
+  }
+  return Answer(std::move(result));
+}
+Result<std::uint64_t> edit_select(const format::ChannelSelector& selector,
+                                  std::uint64_t count,
+                                  const std::optional<TensorDescription>& desc,
+                                  bool channels, bool raw) {
+  using Answer = Result<std::uint64_t>;
+  std::uint64_t selected = 0;
+  if (selector.match == "index") {
+    if (!number(selector.value, &selected) || selected >= count)
+      return Answer(invalid("FMT-03 index outside source/destination"));
+    return Answer(selected);
+  }
+  if (raw || (selector.match != "name" && selector.match != "role") ||
+      selector.value.empty() || selector.value.size() > 128 || !desc ||
+      (channels ? desc->channels.size() != count : !desc->component))
+    return Answer(invalid("FMT-03 invalid name/role selector"));
+  bool found = false;
+  for (std::uint64_t i = 0; i < count; ++i) {
+    const auto& c = channels ? desc->channels[i] : *desc->component;
+    if ((selector.match == "name" ? c.name : c.role) == selector.value) {
+      if (found)
+        return Answer(invalid("FMT-03 ambiguous name/role selector"));
+      selected = i;
+      found = true;
+    }
+  }
+  return found ? Answer(selected) : Answer(invalid("FMT-03 selector absent"));
+}
+Result<WorkflowNodeOutput> edit_channels(
+    WorkflowDocument& document, std::vector<format::ChannelEditInput> inputs,
+    const std::vector<format::ChannelEditSource>& slots,
+    const std::vector<format::ChannelReplacement>* replacements,
+    const format::ChannelAssemblyOptions& options) {
+  using Answer = Result<WorkflowNodeOutput>;
+  if (inputs.empty() || inputs.size() > 1024 || inputs[0].structure.component ||
+      inputs[0].structure.scalar ||
+      (options.metadata_mode != "respect" && options.metadata_mode != "raw" &&
+       options.metadata_mode != "override") ||
+      (options.metadata_mode == "override") != !options.input_overrides.empty())
+    return Answer(invalid("FMT-03 invalid base/metadata mode/arity"));
+  if (!replacements) {
+    for (std::size_t i = 1; i < inputs.size(); ++i)
+      if (!inputs[i].structure.scalar)
+        return Answer(
+            invalid("FMT-03A external inputs must be explicit scalars"));
+  }
+  for (const auto& entry : options.input_overrides)
+    if (entry.first >= inputs.size())
+      return Answer(invalid("FMT-03 override input ordinal is absent"));
+  const auto base = inputs[0].metadata;
+  const auto dtype = base.descriptor.element_type;
+  if (dtype != ElementType::UInt8 && dtype != ElementType::Int8 &&
+      dtype != ElementType::UInt16 && dtype != ElementType::Int16 &&
+      dtype != ElementType::Int64 && dtype != ElementType::Float32 &&
+      dtype != ElementType::Float64)
+    return Answer(mismatch("FMT-03 unsupported base dtype"));
+  if (base.result_schema || base.descriptor.shape.empty() ||
+      base.descriptor.shape.size() > 8)
+    return Answer(mismatch("FMT-03 base requires positive rank 1..8"));
+  auto base_description = edit_description(base, 0, options);
+  if (!base_description.ok())
+    return Answer(base_description.status());
+  auto axis = inputs[0].structure.axis;
+  auto desc = base_description.take_value();
+  if (options.metadata_mode != "raw" && desc && desc->channel_axis) {
+    if (axis && axis != desc->channel_axis)
+      return Answer(invalid("FMT-03 base axis disagrees with metadata"));
+    axis = desc->channel_axis;
+  }
+  if (!axis || *axis >= base.descriptor.shape.size())
+    return Answer(invalid("FMT-03 base axis required/in range"));
+  if (options.metadata_mode == "raw" && desc && desc->channel_axis != axis)
+    desc.reset();
+  inputs[0].structure.axis = axis;
+  const auto count = base.descriptor.shape[*axis];
+  const auto output_count = replacements ? count : slots.size();
+  if (!output_count || output_count > 1024 || count > (1ULL << 40))
+    return Answer(invalid("FMT-03 empty slots or mapping capacity exceeded"));
+  std::vector<format::ChannelEditSource> effective = slots;
+  std::set<std::uint64_t> changed;
+  if (replacements) {
+    effective.resize(count);
+    for (std::uint64_t i = 0; i < count; ++i)
+      effective[i].selector.value = std::to_string(i);
+    for (const auto& r : *replacements) {
+      auto destination = edit_select(r.destination, count, desc, true,
+                                     options.metadata_mode == "raw");
+      if (!destination.ok())
+        return Answer(destination.status());
+      if (!changed.insert(destination.value()).second)
+        return Answer(invalid("FMT-03B duplicate destination"));
+      effective[destination.value()] = r.source;
+    }
+  }
+  WorkflowDocument staged = document;
+  std::vector<WorkflowInput> references;
+  for (const auto& input : inputs)
+    references.push_back(input.input);
+  std::set<std::vector<std::uint8_t>> unique_literals;
+  for (const auto& e : effective)
+    if (e.literal)
+      unique_literals.insert(e.literal->bytes);
+  auto ids = numeric::available_workflow_node_ids(
+      document, static_cast<unsigned>(1 + unique_literals.size()), references);
+  if (!ids.ok())
+    return Answer(ids.status());
+  unsigned next_id = 0;
+  std::map<std::string, std::uint32_t> literals;
+  for (auto& e : effective) {
+    if (!e.literal)
+      continue;
+    const auto& literal = *e.literal;
+    if (literal.dtype != base.descriptor.element_type)
+      return Answer(mismatch("FMT-03 literal dtype differs from base"));
+    const auto width = Value::element_size(literal.dtype);
+    if (!width || literal.bytes.size() != width)
+      return Answer(invalid("FMT-03 malformed typed literal"));
+    const auto bits = format::detail::assembly_hex(
+        std::string(literal.bytes.begin(), literal.bytes.end()));
+    if (!literals.count(bits)) {
+      const auto id = ids.value()[next_id++];
+      staged.nodes.push_back(
+          {id,
+           "channel.scalar_literal_" + options.profile,
+           {},
+           {{"dtype", static_cast<std::int64_t>(literal.dtype)},
+            {"bits", bits}}});
+      format::ChannelEditInput input;
+      input.input = WorkflowNodeOutput{id, "values"};
+      input.metadata.descriptor = {literal.dtype, {1}};
+      input.structure.scalar = true;
+      literals[bits] = inputs.size();
+      inputs.push_back(std::move(input));
+    }
+    e.input = literals.at(bits);
+    e.selector = {};
+  }
+  if (inputs.size() > 1024)
+    return Answer(invalid("FMT-03 expanded input capacity exceeded"));
+  std::vector<OperationMetadata> metadata;
+  std::vector<format::ChannelEditStructure> structures;
+  references.clear();
+  for (const auto& input : inputs) {
+    if ((input.structure.component && input.structure.axis) ||
+        (input.structure.scalar &&
+         (input.structure.component || input.structure.axis)))
+      return Answer(invalid("FMT-03 conflicting source structure"));
+    if (input.metadata.result_schema)
+      return Answer(mismatch("FMT-03 requires tensor inputs"));
+    // Supplied declaration metadata is checked before committing the expansion.
+    if (const auto* ref = std::get_if<WorkflowInputReference>(&input.input)) {
+      bool found = false;
+      for (const auto& declaration : document.inputs)
+        if (declaration.id == ref->input_id) {
+          OperationMetadata actual;
+          actual.descriptor = declaration.descriptor;
+          actual.facets = declaration.facets;
+          actual.planar_layout = declaration.planar_layout;
+          if (input_assertion({actual}) != input_assertion({input.metadata}))
+            return Answer(
+                invalid("FMT-03 descriptor disagrees with declaration"));
+          found = true;
+        }
+      if (!found)
+        return Answer(invalid("FMT-03 input declaration absent"));
+    }
+    metadata.push_back(input.metadata);
+    references.push_back(input.input);
+    structures.push_back(input.structure);
+  }
+  std::vector<format::ChannelMapping> mapping;
+  std::vector<std::optional<std::uint64_t>> base_selection(output_count);
+  TensorDescription target;
+  target.channel_axis = axis;
+  target.channels.resize(output_count);
+  if (desc && !desc->axes.empty() && options.metadata_mode != "raw")
+    target.axes = desc->axes;
+  for (std::size_t k = 0; k < effective.size(); ++k) {
+    const auto& e = effective[k];
+    if (e.input >= inputs.size() ||
+        (!replacements && e.input != 0 && !inputs[e.input].structure.scalar))
+      return Answer(invalid("FMT-03A source must be base or scalar"));
+    auto d = edit_description(metadata[e.input], e.input, options);
+    if (!d.ok())
+      return Answer(d.status());
+    const auto& structure = structures[e.input];
+    auto a = structure.axis;
+    if (options.metadata_mode != "raw" && d.value() &&
+        d.value()->channel_axis && !structure.scalar && !structure.component)
+      a = d.value()->channel_axis;
+    const auto& shape = metadata[e.input].descriptor.shape;
+    if (shape.empty() || (a && *a >= shape.size()))
+      return Answer(mismatch("FMT-03 source rank/axis mismatch"));
+    const auto n = a ? shape[*a] : 1;
+    auto selected = edit_select(e.selector, n, d.value(), a.has_value(),
+                                options.metadata_mode == "raw");
+    if (!selected.ok())
+      return Answer(selected.status());
+    mapping.push_back(
+        {e.input, "index", std::to_string(selected.value()), k, {}});
+    if (e.input == 0)
+      base_selection[k] = selected.value();
+    target.channels[k] = replacements ? component(desc, k, true)
+                         : e.input == 0
+                             ? component(desc, selected.value(), true)
+                             : TensorChannelDescription{};
+  }
+  if (desc) {
+    for (auto group : desc->groups) {
+      bool keep = true;
+      const auto remap = [&](std::uint64_t source, std::uint64_t* destination) {
+        if (replacements) {
+          *destination = source;
+          return true;
+        }
+        unsigned matches = 0;
+        for (std::size_t k = 0; k < base_selection.size(); ++k)
+          if (base_selection[k] == source) {
+            *destination = k;
+            ++matches;
+          }
+        return matches == 1;
+      };
+      for (auto& index : group.indices)
+        keep = remap(index, &index) && keep;
+      if (group.alpha)
+        keep = remap(*group.alpha, &*group.alpha) && keep;
+      if (keep)
+        target.groups.push_back(std::move(group));
+    }
+  }
+  if (options.output_description) {
+    const auto& explicit_target = *options.output_description;
+    auto shape = base.descriptor;
+    shape.shape[*axis] = output_count;
+    auto valid = validate_tensor_description(explicit_target, shape);
+    if (!valid.ok())
+      return Answer(valid);
+    if (explicit_target.component ||
+        (explicit_target.channel_axis && explicit_target.channel_axis != axis))
+      return Answer(invalid("FMT-03 output channel structure mismatch"));
+    for (std::size_t k = 0; k < output_count; ++k) {
+      auto assigned = target.channels[k];
+      auto global = interpretation(explicit_target);
+      if (!empty(global)) {
+        if (!assigned.interpretation)
+          assigned.interpretation.emplace();
+        auto status = overlay(&*assigned.interpretation, global, false);
+        if (!status.ok())
+          return Answer(status);
+      }
+      if (!explicit_target.channels.empty()) {
+        auto status = overlay(&assigned, explicit_target.channels[k], false);
+        if (!status.ok())
+          return Answer(status);
+      }
+      for (const auto& group : explicit_target.groups)
+        for (std::size_t j = 0; j < group.indices.size(); ++j)
+          if (group.indices[j] == k) {
+            auto status = overlay(&assigned, group.components[j], false);
+            if (!status.ok())
+              return Answer(status);
+            if (!assigned.interpretation)
+              assigned.interpretation.emplace();
+            status =
+                overlay(&*assigned.interpretation, group.interpretation, false);
+            if (!status.ok())
+              return Answer(status);
+          }
+      TensorDescription before, after;
+      before.component = target.channels[k];
+      after.component = assigned;
+      if (replacements && !changed.count(k) &&
+          tensor_description_parameter(before).value() !=
+              tensor_description_parameter(after).value())
+        return Answer(invalid("FMT-03B target changes an unlisted component"));
+      target.channels[k] = std::move(assigned);
+    }
+    if (!explicit_target.axes.empty())
+      target.axes = explicit_target.axes;
+    std::vector<TensorColorGroup> retained;
+    for (const auto& group : target.groups) {
+      TensorDescription trial = target;
+      trial.groups = {group};
+      if (encode_tensor_description(trial).ok())
+        retained.push_back(group);
+    }
+    // Explicit groups replace overlapping/namesake groups only. Independent
+    // complete groups retain their original interpretation.
+    target.groups.clear();
+    for (const auto& old : retained) {
+      bool replaced = false;
+      for (const auto& fresh : explicit_target.groups) {
+        replaced = replaced || old.name == fresh.name;
+        for (auto index : old.indices)
+          replaced =
+              replaced || std::find(fresh.indices.begin(), fresh.indices.end(),
+                                    index) != fresh.indices.end();
+      }
+      if (!replaced)
+        target.groups.push_back(old);
+    }
+    target.groups.insert(target.groups.end(), explicit_target.groups.begin(),
+                         explicit_target.groups.end());
+  }
+  auto lowered_options = options;
+  lowered_options.output_description = target;
+  std::vector<format::ChannelSourceStructure> primitive_structures;
+  std::string fused_structure = "v1";
+  for (const auto& structure : structures) {
+    primitive_structures.push_back({structure.component, structure.axis});
+    fused_structure +=
+        structure.scalar ? ";s"
+        : structure.component
+            ? ";c"
+            : ";h" + (structure.axis ? std::to_string(*structure.axis) : "_");
+  }
+  auto output = format::assemble_mapped_channels(staged, references, *axis,
+                                                 primitive_structures, mapping,
+                                                 lowered_options);
+  if (!output.ok())
+    return Answer(output.status());
+  auto& node = staged.nodes.back();
+  node.parameters["input_structure"] = fused_structure;
+  node.parameters["output_description_complete"] = true;
+  node.parameters["expected_inputs"] = input_assertion(metadata);
+  node.parameters["authoring_member"] =
+      std::string(replacements ? "FMT-03B" : "FMT-03A");
+  for (const auto& n : staged.nodes)
+    for (const auto& p : n.parameters)
+      if (const auto* value = std::get_if<std::string>(&p.second);
+          value && value->size() > 8192)
+        return Answer(invalid("FMT-03 parameter capacity exceeded"));
+  const auto profile = options.profile == "strict" ? SequenceProfile::Strict
+                       : options.profile == "accelerated_apple_silicon"
+                           ? SequenceProfile::AppleSilicon
+                           : SequenceProfile::X86Avx2;
+  auto checked = prepare(metadata, node.parameters, 2, profile);
+  if (!checked.ok())
+    return Answer(checked.status());
+  document = std::move(staged);
+  return output;
+}
 }  // namespace
 Status register_channel_assembly(OperationRegistry* registry) {
   for (const auto& p :
@@ -948,6 +1450,10 @@ Status register_channel_assembly(OperationRegistry* registry) {
         std::make_pair("accelerated_apple_silicon",
                        SequenceProfile::AppleSilicon),
         std::make_pair("accelerated_x86_64", SequenceProfile::X86Avx2)}) {
+    auto literal_status = registry->register_operation(scalar_literal(
+        std::string("channel.scalar_literal_") + p.first, p.second));
+    if (!literal_status.ok())
+      return literal_status;
     int member = 0;
     for (const auto* name : {"assemble", "concatenate", "assemble_mapped"}) {
       auto status = registry->register_operation(definition(
@@ -959,3 +1465,20 @@ Status register_channel_assembly(OperationRegistry* registry) {
   return Status::success();
 }
 }  // namespace ps::plugin_internal
+
+namespace ps::format {
+Result<WorkflowNodeOutput> swizzle_channels(
+    WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,
+    const std::vector<ChannelEditSource>& slots,
+    const ChannelAssemblyOptions& options) {
+  return plugin_internal::edit_channels(document, inputs, slots, nullptr,
+                                        options);
+}
+Result<WorkflowNodeOutput> replace_channels(
+    WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,
+    const std::vector<ChannelReplacement>& replacements,
+    const ChannelAssemblyOptions& options) {
+  return plugin_internal::edit_channels(document, inputs, {}, &replacements,
+                                        options);
+}
+}  // namespace ps::format

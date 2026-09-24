@@ -7,13 +7,21 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
 ---
 
 # FMT-03A: reorder, select and fill channel slots
+
+Runtime update: FMT-03A/B are implemented as transactional public authoring
+helpers over FMT-02C. Scalar fills are fused into its internal mapped dependency
+plan under the fusion permission below; ordinary FMT-02C authoring still accepts
+only component/channel sources. Typed literals use exact-bit scalar providers.
+See [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-03-channel-editing)
+and the [measured CPU performance](../../../../examples/channel_editing_performance/README.md).
+Proposed remains the specification decision status.
 
 Inherit the complete [FMT-03 family contract](FMT-03_channel_editing_contract.md),
 including its support matrix through FMT-02, resource/error rules and scalar-fill
@@ -103,4 +111,4 @@ independently evaluated source expression; separately enumerate its Data and
 dirty sets. Validate lowered graphs against these results. The conceptual public
 workflow is `base + scalar -> swizzle_channels expansion -> named values`.
 Implementation must provide actual compile/execute commands, a partial channel
-request and checked output. No runtime or benchmark is claimed by this spec.
+request and checked output. Runtime and benchmark evidence is linked above.

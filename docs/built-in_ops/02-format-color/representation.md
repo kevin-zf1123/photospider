@@ -34,7 +34,7 @@ CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contra
 | --- | --- | --- | --- |
 | [FMT-01 通道提取族](op_specs/FMT-01_channel_extraction_contract.md) | 任意显式通道轴张量→单分量张量／独立输出引用 | A 静态索引；B 静态名称／角色；C 编译期拆分；keepdims=false，rank-1 要求 true | 精确区域请求；auto/view/materialize；保留分量解释；CPU A/B/C 已实现，使用 tensor-description v2；旧 `channel.extract` 已移除 |
 | [FMT-02 通道组装与拼接族](op_specs/FMT-02_channel_assembly_contract.md) | A 单分量插轴组装；B 通道轴拼接；C 显式映射组装 | 非通道 shape 严格相同；A/B 顺序固定，C 源可复用；三者均支持目标通道／颜色组语义重解释且逐位复制 | CPU A/B/C 已实现，决策状态保持 Proposed；精确请求与失效映射；auto/view/materialize；参见公开 workflow 与性能结果 |
-| [FMT-03 通道重排与替换族](op_specs/FMT-03_channel_editing_contract.md) | A 重排／子集／重复／常量槽位；B 定点替换，其他槽位直通 | A 语义随来源，B 保留目标语义；同 dtype 标量及有类型字面量；原输入同时取值 | 澄清完成，Proposed/未实现；编译期组合复用 FMT-02C；精确请求与失效映射，auto/view/materialize |
+| [FMT-03 通道重排与替换族](op_specs/FMT-03_channel_editing_contract.md) | A 重排／子集／重复／常量槽位；B 定点替换，其他槽位直通 | A 语义随来源，B 保留目标语义；同 dtype 标量及有类型字面量；原输入同时取值 | CPU 已实现，规格仍 Proposed；公开编译期组合复用 FMT-02C，融合标量填充；精确请求与失效映射，auto/view/materialize |
 | [FMT-04 alpha 边界适配族](op_specs/FMT-04_alpha_association_contract.md) | A straight 图像→预乘数值；B 预乘数值→straight 图像 | 语义适配输入输出均含内置 alpha，shape／通道位置不变；预乘结果仅用于显式边界 | 澄清完成，Proposed/未实现；保留 NUM 乘除与零 alpha 数学规则，不保留外部持久关联 |
 | [FMT-05 alpha 编辑族](op_specs/FMT-05_alpha_editing_contract.md) | A 设置／添加内置 alpha；B 提取；C 移除 | 颜色逐位保留，零 alpha 不清除隐藏 straight 颜色；共享通道局部编辑 | 澄清完成，Proposed/未实现；A 浮点原生、B/C 保留 dtype 的编译期组合；auto/view/materialize，无外部持久关联 |
 | [FMT-06 数值类型与区间转换](op_specs/FMT-06_numeric_conversion_contract.md) | A 张量→统一目标 dtype，shape／通道顺序不变 | 默认按 dtype 区间缩放，可显式关闭；支持逐通道区间；舍入后 reject/clip | A 澄清完成，Proposed/未实现；合法码值／有效位数约束分配给后续成员待澄清；静态恒等才可 view |

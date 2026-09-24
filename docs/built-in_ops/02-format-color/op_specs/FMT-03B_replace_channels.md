@@ -7,13 +7,21 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
 ---
 
 # FMT-03B: replace selected channel slots
+
+Runtime update: FMT-03A/B are implemented as transactional public authoring
+helpers over FMT-02C. Scalar fills are fused into its internal mapped dependency
+plan under the fusion permission below; ordinary FMT-02C authoring still accepts
+only component/channel sources. Typed literals use exact-bit scalar providers.
+See [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-03-channel-editing)
+and the [measured CPU performance](../../../../examples/channel_editing_performance/README.md).
+Proposed remains the specification decision status.
 
 Inherit the complete [FMT-03 family contract](FMT-03_channel_editing_contract.md).
 The proposed authoring helper `replace_channels` takes a graph, `base`, any
@@ -118,5 +126,4 @@ The oracle independently evaluates all source expressions against the original
 inputs and enumerates Data/dirty support, including overwritten-value nonreads.
 The conceptual public workflow is `base + external plane + scalar ->
 replace_channels expansion -> named values`. Implementation must supply actual
-public commands and checked partial-region output. No runtime or benchmark is
-claimed by this Proposed specification.
+public commands and checked partial-region output. Runtime and benchmark evidence is linked above.

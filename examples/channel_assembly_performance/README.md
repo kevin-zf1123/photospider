@@ -238,3 +238,11 @@ Package 0.21.0 replaces tensor-description v1 with v2 and changes the private C+
 snapshot-state representation. **Rebuild C++ consumers and re-encode old tensor
 descriptions/overrides.** Operation C ABI and WorkflowDocument versions retain
 their existing contracts. This work is a local implementation/validation delivery.
+
+
+## FMT-03 follow-up regression check
+
+The [FMT-03 regression report](FMT03-regression.md) records contemporary
+alternating before/after measurements for all 24 FMT-02 cases, the isolated
+scalar/spatial copy correction, repeated outlier checks and unchanged memory
+accounting. The original results above remain the initial FMT-02 delivery record.

@@ -36,6 +36,7 @@
 #include "photospider/execution/resources.hpp"
 #include "photospider/format/channel.hpp"
 #include "photospider/format/channel_assembly.hpp"
+#include "photospider/format/channel_editing.hpp"
 #include "photospider/plugin/component_operation.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/fft_operation.hpp"
