@@ -75,14 +75,15 @@ struct UniformLowpassMath {
       return Result<bool>(status);
     }
   }
-  static std::optional<std::uint64_t> fast(const LowpassParameters& parameters,
-                                           unsigned radius,
-                                           const std::uint64_t* samples,
-                                           bool narrow,
-                                           const FastInterval* coefficients,
-                                           FastInterval normalizer) {
-    input_internal::Float32Environment environment;
-    if (!environment.active())
+  static std::optional<std::uint64_t> fast(
+      const LowpassParameters& parameters, unsigned radius,
+      const std::uint64_t* samples, bool narrow,
+      const FastInterval* coefficients, FastInterval normalizer,
+      bool normalized_environment = false) {
+    std::optional<input_internal::Float32Environment> environment;
+    if (!normalized_environment)
+      environment.emplace();
+    if (!normalized_environment && !environment->active())
       return {};
     FastInterval numerator = FastInterval::point(0);
     double candidate = 0, divisor = 0;

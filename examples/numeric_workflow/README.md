@@ -2062,3 +2062,9 @@ implementation only, at `public`, direct-callback `core` and `raw` layers.
 For example, `photospider_numeric_exp_benchmark public 262144 10 7` measures
 seven public runs after one warmup. Core/raw memory peaks are unavailable.
 The SLEEF comparison backends were removed after the recorded A/B evaluation.
+
+`photospider_numeric_math_batch` checks scalar/batch equivalence, partition and
+layout invariance, floating-environment restoration, and exact managed work and
+capacity thresholds. Its `time` mode reports scalar mathematical-core and batch
+callback medians; these are different measurement boundaries. See
+[the NUM/CRV batch report](../../docs/built-in_ops/01-numeric/batch-performance.md).

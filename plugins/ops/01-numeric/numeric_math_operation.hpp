@@ -25,6 +25,16 @@ struct ExpWorkspace final {
   std::array<float, kCount> input{}, output{};
   std::array<std::uint32_t, kCount> bits{};
 };
+struct MathBatchWorkspace final {
+  static constexpr std::size_t kCount = 64;
+  std::array<double, kCount> a{}, b{}, output{};
+  std::array<std::array<std::uint64_t, 2>, kCount> bits{};
+  std::array<bool, kCount> eligible{};
+};
+inline bool sleef_batch_kind(CertifiedKind kind) {
+  return (kind >= CertifiedKind::Ln && kind <= CertifiedKind::Tan) ||
+         kind == CertifiedKind::Pow || kind == CertifiedKind::Atan2;
+}
 // One admitted arithmetic workspace and one complete packed result per
 // callback. The registry validates full typed inputs before entering this
 // function.
@@ -56,7 +66,10 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
   if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
     if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict)
       extra = sizeof(ExpWorkspace);
+    else if (sleef_batch_kind(kind) && profile != SequenceProfile::Strict)
+      extra = sizeof(MathBatchWorkspace);
     static_assert(sizeof(Arithmetic) % alignof(ExpWorkspace) == 0);
+    static_assert(sizeof(Arithmetic) % alignof(MathBatchWorkspace) == 0);
   }
   auto storage = call.allocator.allocate(sizeof(Arithmetic) + extra);
   if (!storage.ok())
@@ -91,13 +104,11 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
     }
   }
   std::optional<input_internal::Float32Environment> environment;
-  if constexpr (std::is_same_v<Arithmetic, ExactElementary>)
-    environment.emplace();
+  environment.emplace();
   if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
     if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict &&
         descriptor.element_type == ElementType::Float32 &&
         accelerated_math_available()) {
-      environment.emplace();
       if (environment->active()) {
         auto* block = new (scratch.data() + sizeof(Arithmetic)) ExpWorkspace;
         for (std::uint64_t offset = 0; offset < count;
@@ -161,6 +172,83 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
       }
     }
   }
+  if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
+    if (sleef_batch_kind(kind) && profile != SequenceProfile::Strict &&
+        environment->active() && accelerated_math_available()) {
+      auto* block =
+          new (scratch.data() + sizeof(Arithmetic)) MathBatchWorkspace;
+      const bool narrow = descriptor.element_type == ElementType::Float32;
+      for (std::uint64_t offset = 0; offset < count;
+           offset += MathBatchWorkspace::kCount) {
+        const auto size =
+            std::min<std::uint64_t>(MathBatchWorkspace::kCount, count - offset);
+        status = consume(size * (call.inputs.size() * shape.size() + 1));
+        if (!status.ok())
+          return Answer(status);
+        for (std::size_t lane = 0; lane < size; ++lane) {
+          block->bits[lane] = {};
+          bool finite = true;
+          for (std::size_t port = 0; port < call.inputs.size(); ++port) {
+            const auto& input = call.inputs[port];
+            const auto* data = packed[port];
+            if (data) {
+              data += (offset + lane) * source_width;
+            } else {
+              auto address = input.byte_address(coordinate);
+              if (!address.ok())
+                return Answer(address.status());
+              data = input.bytes().data() + address.value();
+            }
+            std::memcpy(&block->bits[lane][port], data, source_width);
+            const auto parts =
+                BinaryParts::decode(block->bits[lane][port], narrow);
+            finite = finite && !parts.nan && !parts.infinite;
+          }
+          // Never convert a signaling NaN or feed a rejected domain to SIMD.
+          const auto a =
+              finite ? numeric_double(block->bits[lane][0], narrow) : 1;
+          const auto b =
+              finite ? numeric_double(block->bits[lane][1], narrow) : 1;
+          block->eligible[lane] =
+              finite &&
+              accelerated_math_domain(static_cast<unsigned>(kind), a, b);
+          block->a[lane] = block->eligible[lane] ? a : 1;
+          block->b[lane] = block->eligible[lane] ? b : 1;
+          for (std::size_t axis = shape.size(); axis; --axis) {
+            if (++coordinate[axis - 1] < shape[axis - 1])
+              break;
+            coordinate[axis - 1] = 0;
+          }
+        }
+        status =
+            consume(size * DirectedInterval::kSlots * DirectedInterval::kWords);
+        if (!status.ok())
+          return Answer(status);
+        photospider_sleef_evaluate(static_cast<unsigned>(kind), block->a.data(),
+                                   block->b.data(), block->output.data(), size);
+        for (std::size_t lane = 0; lane < size; ++lane) {
+          std::optional<std::uint64_t> candidate;
+          if (block->eligible[lane])
+            candidate = accelerated_math_enclosure(block->output[lane])
+                            .accepted(block->output[lane], narrow);
+          // evaluate retains all exact landmarks, special values, admission
+          // and strict refinement; fixed arithmetic admission is precharged
+          // before SIMD, so evaluate only checks cancellation at that point.
+          auto calculated = arithmetic->evaluate(
+              kind, descriptor.element_type, block->bits[lane][0],
+              block->bits[lane][1], consume, [] { return Status::success(); },
+              true, &candidate, true);
+          if (!calculated.ok())
+            return Answer(calculated.status());
+          const auto word = calculated.value();
+          std::memcpy(output.data() + (offset + lane) * output_width, &word,
+                      output_width);
+        }
+      }
+      status = consume(1);
+      return status.ok() ? std::move(output).publish() : Answer(status);
+    }
+  }
   for (std::uint64_t i = 0; i < count; ++i) {
     status = consume(call.inputs.size() * shape.size() + 1);
     if (!status.ok())
@@ -186,13 +274,14 @@ Result<Value> execute_point_math(const OperationInvocation& call, Kind kind,
         bits[port] = *data;
     }
     Result<std::uint64_t> calculated = [&] {
-      if constexpr (std::is_same_v<Arithmetic, CertifiedMath>)
-        return arithmetic->evaluate(kind, descriptor.element_type, bits[0],
-                                    bits[1], consume,
-                                    [] { return Status::success(); });
-      else
+      if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
+        return arithmetic->evaluate(
+            kind, descriptor.element_type, bits[0], bits[1], consume,
+            [] { return Status::success(); }, environment->active());
+      } else {
         return arithmetic->evaluate(kind, descriptor.element_type, bits[0],
                                     bits[1], consume, &*environment);
+      }
     }();
     if (!calculated.ok()) {
       auto failure = calculated.status();
@@ -243,6 +332,8 @@ OperationDefinition point_math_operation(const std::string& key, Kind kind,
   if constexpr (std::is_same_v<Arithmetic, CertifiedMath>) {
     if (kind == CertifiedKind::Exp && profile != SequenceProfile::Strict)
       traits.workspace_bytes += sizeof(ExpWorkspace);
+    else if (sleef_batch_kind(kind) && profile != SequenceProfile::Strict)
+      traits.workspace_bytes += sizeof(MathBatchWorkspace);
   }
   operation.specialize_metadata = [profile, rational](const auto& inputs,
                                                       const auto& parameters)

@@ -329,7 +329,8 @@ class ExactCurve final {
       const std::array<std::uint64_t, 4>& x,
       const std::array<std::uint64_t, 4>& y, bool narrow,
       const std::function<Status(std::uint64_t)>& consume,
-      const std::function<Status()>& strict_fallback = {}) {
+      const std::function<Status()>& strict_fallback = {},
+      bool normalized_environment = false) {
     using Answer = Result<std::uint64_t>;
     used_ = 0;
     status_ = Status::success();
@@ -344,8 +345,10 @@ class ExactCurve final {
       }
     } end{consume_, ratio_.profile, ratio_.profile};
     if (selected < 0 && narrow && ratio_.profile != SequenceProfile::Strict) {
-      input_internal::Float32Environment environment;
-      if (environment.active()) {
+      std::optional<input_internal::Float32Environment> environment;
+      if (!normalized_environment)
+        environment.emplace();
+      if (normalized_environment || environment->active()) {
         const auto j = segment - first;
         double lower = numeric_double(x[j]), upper = numeric_double(x[j + 1]);
         const double target = numeric_double(query);

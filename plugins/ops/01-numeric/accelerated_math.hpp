@@ -129,12 +129,13 @@ inline FastInterval accelerated_math_enclosure(double result) {
   }
   return {low, high};
 }
-inline std::optional<std::uint64_t> accelerated_math(unsigned kind,
-                                                     std::uint64_t a,
-                                                     std::uint64_t b,
-                                                     bool narrow) {
-  input_internal::Float32Environment environment;
-  if (!environment.active())
+inline std::optional<std::uint64_t> accelerated_math(
+    unsigned kind, std::uint64_t a, std::uint64_t b, bool narrow,
+    bool normalized_environment = false) {
+  std::optional<input_internal::Float32Environment> environment;
+  if (!normalized_environment)
+    environment.emplace();
+  if (!normalized_environment && !environment->active())
     return {};
   const double x = numeric_double(a, narrow), y = numeric_double(b, narrow);
   if (kind == 0) {

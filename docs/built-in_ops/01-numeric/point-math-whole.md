@@ -146,3 +146,12 @@ build/clang21-numeric/examples/numeric_workflow/photospider_numeric_unary apple 
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_binary apple benchmark
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_math_benchmark apple
 ```
+
+## Batched certified arithmetic (2026-09-24)
+
+Accelerated ln, sin, cos, tan, pow and atan2 use 64-lane gather blocks for
+Float32 and Float64. Their 2,624-byte fixed scratch is included in the declared
+workspace. Fixed indexing and arithmetic admission precede SIMD; the scalar
+semantic layer still resolves exact landmarks, special values and uncertified
+lanes. All certified point callbacks lend one nearest/gradual environment to
+nested helpers. See [batch validation and timings](batch-performance.md).

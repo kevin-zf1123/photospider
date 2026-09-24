@@ -113,6 +113,9 @@ struct UniformState {
     for (auto extent : shape)
       count *= extent;
     std::vector<std::uint64_t> coordinate(shape.size()), at(shape.size());
+    std::optional<input_internal::Float32Environment> environment;
+    if (coefficients_ready)
+      environment.emplace();
     for (std::uint64_t row = 0; row < count; ++row) {
       at = coordinate;
       for (int offset = -static_cast<int>(radius);
@@ -142,7 +145,8 @@ struct UniformState {
         if (!status.ok())
           return Answer(status);
         fast = arithmetic.fast(parameters, radius, samples.data(), narrow,
-                               coefficients.data(), normalizer);
+                               coefficients.data(), normalizer,
+                               environment && environment->active());
       }
       auto value = fast ? Result<std::uint64_t>(*fast)
                         : arithmetic.evaluate(parameters, radius,
