@@ -9,9 +9,10 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::execution_internal {
-inline bool channel_assembly(const std::string& key) {
+inline bool planar_mapped_copy(const std::string& key) {
   return key.compare(0, 17, "channel.assemble_") == 0 ||
-         key.compare(0, 20, "channel.concatenate_") == 0;
+         key.compare(0, 20, "channel.concatenate_") == 0 ||
+         key.compare(0, 16, "metadata.assign_") == 0;
 }
 // The caller owns exact preparation/publication. Rectangles stop at both
 // physical tile edges and authorized coverage; padding is never copied.
@@ -26,7 +27,9 @@ inline Status copy_spatial_channel_piece(
     at.push_back(dim.offset);
   const auto y = region.dimensions()[layout.height_axis];
   const auto x = region.dimensions()[layout.width_axis];
-  const auto channels = region.dimensions()[*layout.channel_axis];
+  const auto channels = layout.channel_axis
+                            ? region.dimensions()[*layout.channel_axis]
+                            : RegionDimension{0, 1};
   std::uint64_t since_current_check = 1024;
   std::size_t source_x = 0;
   for (std::size_t d = 0; d < map.axes.size(); ++d)
@@ -34,7 +37,8 @@ inline Status copy_spatial_channel_piece(
         static_cast<std::int32_t>(layout.width_axis))
       source_x = d;
   for (auto c = channels.offset; c < channels.offset + channels.extent; ++c) {
-    at[*layout.channel_axis] = c;
+    if (layout.channel_axis)
+      at[*layout.channel_axis] = c;
     for (auto row = y.offset; row < y.offset + y.extent;) {
       at[layout.height_axis] = row;
       auto rows = y.offset + y.extent - row;
@@ -79,32 +83,57 @@ inline Status copy_spatial_channel_piece(
           input = value->bytes().data() + address.value();
           input_x_stride = value->layout().byte_strides[source_x];
         }
-        for (std::uint64_t dy = 0; dy < rows; ++dy) {
-          for (std::uint64_t dx = 0; dx < samples;) {
+        // A full-width rectangle with matching row strides has no padding or
+        // tile gap. Copy across its row boundaries in bounded blocks, retaining
+        // the same 1024-sample stop/currentness interval as the row path.
+        if (layout.order == ImagePlaneOrder::Tiled && rows > 1 &&
+            input_x_stride == static_cast<std::int64_t>(width) &&
+            input_row_stride == samples * width &&
+            destination.row_stride_bytes == samples * width) {
+          const auto total = rows * samples;
+          for (std::uint64_t offset = 0; offset < total;) {
             if (cancellation.cancelled())
-              return {ErrorCode::Cancelled, "channel assembly cancelled"};
+              return {ErrorCode::Cancelled, "channel copy cancelled"};
             if (current && since_current_check >= 1024) {
               if (!current())
-                return {ErrorCode::Stale, "channel assembly plan changed"};
+                return {ErrorCode::Stale, "channel copy plan changed"};
               since_current_check = 0;
             }
             const auto count = std::min<std::uint64_t>(
-                1024 - (since_current_check % 1024), samples - dx);
+                1024 - (since_current_check % 1024), total - offset);
             since_current_check += count;
-            auto* to = destination.row.data +
-                       dy * destination.row_stride_bytes + dx * width;
-            const auto* from = input + dy * input_row_stride +
-                               static_cast<std::int64_t>(dx) * input_x_stride;
-            if (input_x_stride == static_cast<std::int64_t>(width)) {
-              std::memcpy(to, from, count * width);
-            } else {
-              for (std::uint64_t i = 0; i < count; ++i)
-                std::memcpy(
-                    to + i * width,
-                    from + static_cast<std::int64_t>(i) * input_x_stride,
-                    width);
+            std::memcpy(destination.row.data + offset * width,
+                        input + offset * width, count * width);
+            offset += count;
+          }
+        } else {
+          for (std::uint64_t dy = 0; dy < rows; ++dy) {
+            for (std::uint64_t dx = 0; dx < samples;) {
+              if (cancellation.cancelled())
+                return {ErrorCode::Cancelled, "channel assembly cancelled"};
+              if (current && since_current_check >= 1024) {
+                if (!current())
+                  return {ErrorCode::Stale, "channel assembly plan changed"};
+                since_current_check = 0;
+              }
+              const auto count = std::min<std::uint64_t>(
+                  1024 - (since_current_check % 1024), samples - dx);
+              since_current_check += count;
+              auto* to = destination.row.data +
+                         dy * destination.row_stride_bytes + dx * width;
+              const auto* from = input + dy * input_row_stride +
+                                 static_cast<std::int64_t>(dx) * input_x_stride;
+              if (input_x_stride == static_cast<std::int64_t>(width)) {
+                std::memcpy(to, from, count * width);
+              } else {
+                for (std::uint64_t i = 0; i < count; ++i)
+                  std::memcpy(
+                      to + i * width,
+                      from + static_cast<std::int64_t>(i) * input_x_stride,
+                      width);
+              }
+              dx += count;
             }
-            dx += count;
           }
         }
         column += samples;
@@ -131,10 +160,13 @@ inline Status fill_scalar_channel_piece(
     at.push_back(dim.offset);
   const auto y = region.dimensions()[layout.height_axis];
   const auto x = region.dimensions()[layout.width_axis];
-  const auto channels = region.dimensions()[*layout.channel_axis];
+  const auto channels = layout.channel_axis
+                            ? region.dimensions()[*layout.channel_axis]
+                            : RegionDimension{0, 1};
   std::uint64_t since_check = 1024;
   for (auto c = channels.offset; c < channels.offset + channels.extent; ++c) {
-    at[*layout.channel_axis] = c;
+    if (layout.channel_axis)
+      at[*layout.channel_axis] = c;
     for (auto row = y.offset; row < y.offset + y.extent;) {
       at[layout.height_axis] = row;
       auto rows = y.offset + y.extent - row;

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "data/content_digest.hpp"
@@ -224,6 +225,20 @@ ByteView IccProfile::bytes() const {
   if (!impl_)
     throw std::logic_error("invalid ICC resource");
   return impl_->storage->bytes();
+}
+std::string IccProfile::model() const {
+  auto data = bytes();
+  const std::string signature(reinterpret_cast<const char*>(data.data() + 16),
+                              4);
+  if (signature == "RGB ")
+    return "rgb";
+  if (signature == "GRAY")
+    return "gray";
+  if (signature == "XYZ ")
+    return "xyz";
+  if (signature == "Lab ")
+    return "cielab";
+  return "cmyk";
 }
 const std::shared_ptr<const CpuStorage>& IccProfile::storage() const {
   if (!impl_)

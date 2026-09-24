@@ -93,22 +93,26 @@ Result<std::string> unhex(const std::string& text) {
   return Result<std::string>(std::move(out));
 }
 TensorInterpretation interpretation(const TensorDescription& d) {
-  return {d.model,       d.primaries, d.transfer,     d.reference,
-          d.association, d.white,     d.primaries_xy, d.profile};
+  return {d.model,       d.primaries,  d.transfer,        d.reference,
+          d.association, d.white,      d.primaries_xy,    d.profile,
+          d.convention,  d.configured, d.analytic_binding};
 }
 bool empty(const TensorInterpretation& d) {
   return d.model.empty() && d.primaries.empty() && d.transfer.empty() &&
          d.reference.empty() && d.association.empty() && !d.white &&
-         !d.primaries_xy && !d.profile;
+         !d.primaries_xy && !d.profile && !d.configured && !d.analytic_binding;
 }
 Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
                bool assertion) {
+  const bool described = !empty(*value);
   if (!assertion && !target.model.empty() && target.model != value->model) {
     value->primaries.clear();
     value->transfer.clear();
     value->white.reset();
     value->primaries_xy.reset();
     value->profile.reset();
+    value->configured.reset();
+    value->analytic_binding.reset();
     value->association.clear();
   }
   const auto text = [assertion](std::string* a, const std::string& b) {
@@ -125,6 +129,11 @@ Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
       !text(&value->reference, target.reference) ||
       !text(&value->association, target.association))
     return invalid("conflicting component interpretation");
+  if (!empty(target)) {
+    if (assertion && described && value->convention != target.convention)
+      return invalid("conflicting coordinate conventions");
+    value->convention = target.convention;
+  }
   const auto field = [assertion](auto* a, const auto& b) {
     if (!b)
       return true;
@@ -135,7 +144,9 @@ Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
   };
   if (!field(&value->white, target.white) ||
       !field(&value->primaries_xy, target.primaries_xy) ||
-      !field(&value->profile, target.profile))
+      !field(&value->profile, target.profile) ||
+      !field(&value->configured, target.configured) ||
+      !field(&value->analytic_binding, target.analytic_binding))
     return invalid("conflicting component reference");
   return Status::success();
 }
@@ -149,6 +160,16 @@ Status overlay(TensorChannelDescription* value,
     if (assertion && !pair.first->empty() && *pair.first != *pair.second)
       return invalid("conflicting destination component field");
     *pair.first = *pair.second;
+  }
+  if (target.encoding) {
+    if (assertion && value->encoding && !(*value->encoding == *target.encoding))
+      return invalid("conflicting component encoding");
+    value->encoding = target.encoding;
+  }
+  if (target.sampling) {
+    if (assertion && value->sampling && !(*value->sampling == *target.sampling))
+      return invalid("conflicting component sampling");
+    value->sampling = target.sampling;
   }
   if (target.interpretation) {
     if (!value->interpretation)
@@ -166,6 +187,10 @@ TensorChannelDescription component(const std::optional<TensorDescription>& d,
     out = d->channels[index];
   else if (!channels && d->component)
     out = *d->component;
+  if (!out.encoding)
+    out.encoding = d->encoding;
+  if (!out.sampling)
+    out.sampling = d->sampling;
   auto global = interpretation(*d);
   if (out.interpretation)
     overlay(&global, *out.interpretation, false);

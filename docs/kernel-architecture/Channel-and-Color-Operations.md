@@ -118,8 +118,8 @@ All structured parameters use existing String values, bounded by the shared
 | `input_axes` (B, optional) | `v1;axis;_;axis`, one entry per input. `_` resolves metadata; raw requires every axis. Integers are unsigned decimal without leading zeros. |
 | `input_structure` (C, required) | `v1;c;h2;h_`. `c` is component with no effective channel axis; `hN` asserts channel axis N; `h_` resolves metadata. |
 | `input_overrides` | `v1;ordinal:description_hex;...`, strictly increasing unique valid ordinals. Required nonempty exactly in override mode. Each replaces one input's effective description for this call. |
-| `output_description` | `tensor_description_parameter(description)`, canonical lowercase hex of TDM2. Shape/channel-axis/group assertions must agree with inference. |
-| `mapping` (C) | `v1;input,match,selector_hex,destination,component_hex;...`. Match is `index`, `name`, or `role`. Selector is strict UTF-8 encoded as lowercase hex, including decimal index text. Component is `_` or a TDM2 description containing only `component`. |
+| `output_description` | `tensor_description_parameter(description)`, canonical lowercase hex of TDM3. Shape/channel-axis/group assertions must agree with inference. |
+| `mapping` (C) | `v1;input,match,selector_hex,destination,component_hex;...`. Match is `index`, `name`, or `role`. Selector is strict UTF-8 encoded as lowercase hex, including decimal index text. Component is `_` or a TDM3 description containing only `component`. |
 
 C validates every destination exactly once and evaluates in destination order;
 record order never introduces overwrite precedence. Name/role resolution is
@@ -264,3 +264,17 @@ package. See [performance results](../../examples/channel_editing_performance/RE
 for FP32 128x128, 4096x4096 continuous/tiled, sparse requests, representation,
 copy/backing accounting and the measured optimization. Runtime observations are
 separate from the retained Proposed specification decision status.
+
+
+## FMT-08 metadata assignment and removal
+
+Package 0.22.0 implements native `metadata.assign_<profile>` and transactional
+`format::remove_metadata`. All samples and logical coordinates stay unchanged;
+patch/replace/cascade publish an independent immutable description. Image inputs
+and outputs remain planar; generic paths serve non-image numeric tensors.
+The [v3 schema and runtime contract](Tensor-Semantic-Metadata.md) specifies typed
+encoding, sampling, profiles/configured resources, paths, ownership and errors.
+The [public example](../../examples/metadata_workflow/README.md) verifies exact
+special-value bits and source immutability. The
+[performance guide](../../examples/metadata_performance/README.md) reports planar
+full/one-channel/tile-crossing measurements and bounded copy optimization.

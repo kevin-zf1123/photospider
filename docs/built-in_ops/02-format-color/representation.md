@@ -39,7 +39,7 @@ CRV-06 已触发[通用颜色数组描述](op_specs/FMT-COLOR_color_array_contra
 | [FMT-05 alpha 编辑族](op_specs/FMT-05_alpha_editing_contract.md) | A 设置／添加内置 alpha；B 提取；C 移除 | 颜色逐位保留，零 alpha 不清除隐藏 straight 颜色；共享通道局部编辑 | 澄清完成，Proposed/未实现；A 浮点原生、B/C 保留 dtype 的编译期组合；auto/view/materialize，无外部持久关联 |
 | [FMT-06 数值类型与区间转换](op_specs/FMT-06_numeric_conversion_contract.md) | A 张量→统一目标 dtype，shape／通道顺序不变 | 默认按 dtype 区间缩放，可显式关闭；支持逐通道区间；舍入后 reject/clip | A 澄清完成，Proposed/未实现；合法码值／有效位数约束分配给后续成员待澄清；静态恒等才可 view |
 | [FMT-07 已退休](op_specs/FMT-07_retired.md) | 不再定义本族成员 | 数值编码约束归 FMT-06 后续成员；抖动／半色调归 GRD-29/30；opaque 补值规则归 FMT-05B | 保留编号，不新增运行时接口；旧 `numeric.encode_range` 已移除 |
-| [FMT-08 语义描述赋予／移除](op_specs/FMT-08_metadata_assignment_contract.md) | A 原子赋予／重解释；B 删除，样本与逻辑结构不变 | patch 默认、replace 显式；依赖默认报错，可 cascade；missing 默认报错，可 ignore；auto/view/materialize | 澄清完成，Proposed/未实现；A 原生、B 编译期组合；不扫描样本语义，不替代数值／存储转换 |
+| [FMT-08 语义描述赋予／移除](op_specs/FMT-08_metadata_assignment_contract.md) | A 原子赋予／重解释；B 删除，样本与逻辑结构不变 | patch 默认、replace 显式；依赖默认报错，可 cascade；missing 默认报错，可 ignore；auto/view/materialize | CPU 已实现；A 原生、B 编译期组合；v3 schema 与资源快照，不扫描样本，不替代数值／存储转换 |
 | [FMT-09 transfer 编码／解码](op_specs/FMT-09_transfer_contract.md) | A 解码、B 编码；同 dtype／shape 的单 RGB/Gray 组 | 十类静态曲线；PQ/1886 为绝对 nits；其他 reference／定义域依曲线明确 | 澄清完成，Proposed/未实现；精确逐分量；alpha 直通；静态恒等才可 view；HLG 公布端点行为保留 |
 | [FMT-10 RGB 基底／XYZ／白点适应](op_specs/FMT-10_rgb_basis_contract.md) | A RGB→XYZ、B XYZ→RGB、C 适应；D 编译期组合 | 七预设＋自定义 xy；四种完全适应；显式 preserve_xyz／adapt；相对／绝对尺度不隐式换算 | 澄清完成，Proposed/未实现；非恒等行读取三分量；原生精确 I 可复制；D 保留逐节点舍入与失败 |
 | [FMT-11 颜色模型转换族](op_specs/FMT-11_model_conversion_contract.md) | A～P 八组方向对；Q/R Gray 提取／中性重建；S/T 二值化／两级展开 | 原生浮点、精确分量依赖；Lab/LCh 使用 l=L*/100；NCL YCbCr，显式路径 | 澄清完成，Proposed/未实现；19 个原生成员＋S 组合；CMYK 归 FMT-12，CL 留后续独立成员 |

@@ -7,13 +7,23 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
 ---
 
 # FMT-08B: remove selected semantic descriptions or annotations
+
+Runtime update (package 0.22.0): FMT-08A/B are implemented with canonical
+TensorDescription v3, typed encoding/sampling/ICC/OCIO resource descriptions,
+opaque annotations, atomic edits and exact planar/generic-numeric regional
+execution. See the [runtime schema and interfaces](../../../kernel-architecture/Tensor-Semantic-Metadata.md),
+[minimal public workflow](../../../../examples/metadata_workflow/README.md)
+and [measured performance](../../../../examples/metadata_performance/README.md).
+Proposed remains the specification decision status; external FMT-12/13 transform
+engines are not claimed by the metadata/resource implementation.
+
 
 Inherit the complete [FMT-08 contract](FMT-08_metadata_assignment_contract.md).
 The proposed authoring helper `remove_metadata` takes a graph, input edge,
@@ -103,5 +113,4 @@ metadata tree and byte-identical input at all requested coordinates. Check all
 layouts, partial/tile-crossing requests, resource lifetimes after context release,
 missing coverage, graph rollback, low budgets and cancellation. Conceptual graph:
 input -> B -> generic/component processing -> explicit A when a new interpretation
-is needed. Runnable public workflow evidence belongs to implementation; none is
-claimed by this Proposed specification.
+is needed. Runnable public workflow evidence is linked in the runtime update above.

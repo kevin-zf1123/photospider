@@ -304,7 +304,7 @@ void mapped_and_metadata() {
               decoded.channels[0].interpretation->model == "rgb",
           "explicit RGB group");
   auto encoded = take(encode_tensor_description(rgb));
-  require(encoded.version == 2, "version discriminator");
+  require(encoded.version == 3, "version discriminator");
   encoded.version = 1;
   require(!decode_tensor_description(encoded).ok(), "old version rejection");
 }

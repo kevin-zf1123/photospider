@@ -357,10 +357,15 @@ Result<std::uint64_t> ValueFragments::retained_bytes() const {
       count += bytes;
     }
   for (std::size_t i = 0; i < resources_.size(); ++i) {
-    const auto profile = resources_.profile_at(i).take_value();
-    if (!owners.insert(profile.storage().get()).second)
+    const auto storage =
+        i < resources_.profile_count()
+            ? resources_.profile_at(i).take_value().storage()
+            : resources_.config_at(i - resources_.profile_count())
+                  .take_value()
+                  .storage();
+    if (!owners.insert(storage.get()).second)
       continue;
-    const auto bytes = profile.storage()->capacity();
+    const auto bytes = storage->capacity();
     if (bytes > UINT64_MAX - count)
       return Result<std::uint64_t>(Status::failure(
           ErrorCode::ResourceExhausted, "fragment resource sum overflow"));

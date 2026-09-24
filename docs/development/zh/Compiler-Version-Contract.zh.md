@@ -331,3 +331,13 @@ OperationTraits 版本保持原有含义。规范化 facet/参数字节已参与
 
 GraphSnapshot 改为直接保留原子 revision 状态，context 析构仍使其失效；私有 C++
 成员表示发生变化，旧对象代码必须重新编译，不能与新库混用。
+
+
+## 0.22 元数据版本边界
+
+包 0.22.0 增加 FMT-08，并将 tensor-description v2 替换为 v3（`TDM3`）。
+v3 明确相对坐标约定，新增精确类型化数值编码、同位采样、ICC/配置端点绑定及
+冻结的 OCIO 资源快照。拒绝旧 v1/v2 tensor facet 与 0.21 安装包消费者；需要
+重新编写描述并重新构建 C++ 消费者。旧 ColorArray v1 保持独立约定，不能与 v3
+附在同一个 Value 上。WorkflowDocument、operation/provider C ABI 版本不变。
+详见[元数据约定](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。

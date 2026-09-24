@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -24,11 +25,118 @@ bool valid_text(const std::string& text) {
   return text.size() <= 128 &&
          (text.empty() || plugin_internal::valid_utf8_key(text));
 }
+bool endpoint_less(const TensorEndpoint& a, const TensorEndpoint& b) {
+  if (a.index() == b.index())
+    return a.index() ? std::get<double>(a) < std::get<double>(b)
+                     : std::get<std::int64_t>(a) < std::get<std::int64_t>(b);
+  const auto integer_less = [](std::int64_t i, double d) {
+    if (d >= 0x1p63)
+      return true;
+    if (d < -0x1p63)
+      return false;
+    const auto whole = static_cast<std::int64_t>(d);
+    return i < whole || (i == whole && d > static_cast<double>(whole));
+  };
+  if (auto* i = std::get_if<std::int64_t>(&a))
+    return integer_less(*i, std::get<double>(b));
+  auto d = std::get<double>(a);
+  auto i = std::get<std::int64_t>(b);
+  if (d < -0x1p63)
+    return true;
+  if (d >= 0x1p63)
+    return false;
+  const auto whole = static_cast<std::int64_t>(d);
+  return whole < i || (whole == i && d < static_cast<double>(whole));
+}
+bool valid_encoding(const std::optional<TensorEncoding>& encoding) {
+  if (!encoding)
+    return true;
+  for (const auto* pair : {&encoding->stored, &encoding->decoded})
+    for (const auto& n : *pair)
+      if (auto* f = std::get_if<double>(&n); f && !std::isfinite(*f))
+        return false;
+  return endpoint_less(encoding->stored[0], encoding->stored[1]) &&
+         (endpoint_less(encoding->decoded[0], encoding->decoded[1]) ||
+          endpoint_less(encoding->decoded[1], encoding->decoded[0]));
+}
+bool valid_sampling(const std::optional<TensorSampling>& sampling) {
+  return !sampling || (valid_text(sampling->grid) && !sampling->grid.empty() &&
+                       sampling->scale == std::array<double, 2>{1, 1} &&
+                       sampling->offset == std::array<double, 2>{0, 0});
+}
+bool valid_extended(const std::string& convention,
+                    const std::optional<TensorConfiguredSpace>& configured,
+                    const std::optional<TensorAnalyticBinding>& binding,
+                    bool profile) {
+  if (convention != "relative-v1" && convention != "icc-native" &&
+      convention != "ocio-native")
+    return false;
+  if ((convention == "ocio-native") != configured.has_value() ||
+      (convention == "icc-native" && !profile) || (configured && profile))
+    return false;
+  if (configured &&
+      (configured->config.byte_length == 0 || !valid_text(configured->space) ||
+       configured->space.empty() ||
+       (configured->reference_space != "scene" &&
+        configured->reference_space != "display")))
+    return false;
+  if (binding) {
+    if ((!profile && !configured) || binding->convention != "relative-v1" ||
+        binding->roles.empty() || binding->roles.size() > 64 ||
+        binding->roles.size() != binding->units.size()) {
+      return false;
+    }
+    for (const auto* t : {&binding->model, &binding->primaries,
+                          &binding->transfer, &binding->reference}) {
+      if (!valid_text(*t)) {
+        return false;
+      }
+    }
+    for (const auto* list : {&binding->roles, &binding->units}) {
+      for (const auto& t : *list) {
+        if (!valid_text(t) || t.empty()) {
+          return false;
+        }
+      }
+    }
+    if (binding->white) {
+      for (auto n : *binding->white) {
+        if (!std::isfinite(n)) {
+          return false;
+        }
+      }
+    }
+    if (binding->primaries_xy) {
+      for (auto n : *binding->primaries_xy) {
+        if (!std::isfinite(n)) {
+          return false;
+        }
+      }
+    }
+    if (binding->model == "rgb") {
+      if (binding->transfer.empty() ||
+          (binding->primaries.empty() &&
+           (!binding->white || !binding->primaries_xy))) {
+        return false;
+      }
+    } else if (binding->model == "xyz" || binding->model == "cielab" ||
+               binding->model == "cielch") {
+      if (!binding->white) {
+        return false;
+      }
+    } else if (binding->model != "gray" && binding->model != "oklab" &&
+               binding->model != "oklch") {
+      return false;
+    }
+  }
+  return true;
+}
 bool valid_interpretation(const TensorInterpretation& v) {
   for (const auto* text :
-       {&v.model, &v.primaries, &v.transfer, &v.reference, &v.association})
+       {&v.model, &v.primaries, &v.transfer, &v.reference, &v.association}) {
     if (!valid_text(*text))
       return false;
+  }
   if (v.white)
     for (auto number : *v.white)
       if (!std::isfinite(number))
@@ -37,15 +145,21 @@ bool valid_interpretation(const TensorInterpretation& v) {
     for (auto number : *v.primaries_xy)
       if (!std::isfinite(number))
         return false;
-  return true;
+  return valid_extended(v.convention, v.configured, v.analytic_binding,
+                        v.profile.has_value());
 }
 bool valid_channel(const TensorChannelDescription& channel) {
-  return valid_text(channel.name) && valid_text(channel.role) &&
+  return valid_encoding(channel.encoding) && valid_sampling(channel.sampling) &&
+         valid_text(channel.name) && valid_text(channel.role) &&
          valid_text(channel.unit) &&
          (!channel.interpretation ||
           valid_interpretation(*channel.interpretation));
 }
 Status validate_structure(const TensorDescription& value) {
+  if (!valid_encoding(value.encoding) || !valid_sampling(value.sampling) ||
+      !valid_extended(value.convention, value.configured,
+                      value.analytic_binding, value.profile.has_value()))
+    return invalid("invalid encoding, sampling or configured interpretation");
   if ((value.channel_axis && *value.channel_axis >= 8) ||
       value.channels.size() > 65535 || value.axes.size() > 8 ||
       (!value.channel_axis && !value.channels.empty()) ||
@@ -100,15 +214,38 @@ Status validate_structure(const TensorDescription& value) {
         std::set<std::string>(expected->second.begin(), expected->second.end()))
       return invalid("incomplete color-group roles");
     const auto& interpretation = group.interpretation;
-    if ((interpretation.model == "rgb" &&
+    if ((interpretation.model == "rgb" && !interpretation.profile &&
+         !interpretation.configured &&
          (interpretation.transfer.empty() ||
           (interpretation.primaries.empty() &&
            (!interpretation.primaries_xy || !interpretation.white)))) ||
         ((interpretation.model == "cielab" ||
           interpretation.model == "cielch" || interpretation.model == "xyz") &&
+         !interpretation.profile && !interpretation.configured &&
          !interpretation.white) ||
         (interpretation.model == "cmyk" && !interpretation.profile))
       return invalid("incomplete color-group interpretation");
+    if (interpretation.analytic_binding) {
+      const auto& b = *interpretation.analytic_binding;
+      if (b.model != interpretation.model ||
+          b.roles.size() != group.components.size())
+        return invalid("analytic binding model/order mismatch");
+      for (std::size_t i = 0; i < b.roles.size(); ++i)
+        if (b.roles[i] != group.components[i].role ||
+            (!group.components[i].unit.empty() &&
+             b.units[i] != group.components[i].unit))
+          return invalid("analytic binding component units mismatch");
+    }
+    std::optional<TensorSampling> sampling = value.sampling;
+    for (std::size_t i = 0; i < group.components.size(); ++i) {
+      auto current = group.components[i].sampling;
+      if (!current && group.indices[i] < value.channels.size())
+        current = value.channels[group.indices[i]].sampling;
+      if (sampling && current && sampling->grid != current->grid)
+        return invalid("group sampling grids disagree");
+      if (current)
+        sampling = current;
+    }
     std::set<std::uint64_t> seen;
     for (std::size_t i = 0; i < group.indices.size(); ++i)
       if (!seen.insert(group.indices[i]).second ||
@@ -130,7 +267,11 @@ Status validate_structure(const TensorDescription& value) {
            (!a.white || !b.white || *a.white == *b.white) &&
            (!a.primaries_xy || !b.primaries_xy ||
             *a.primaries_xy == *b.primaries_xy) &&
-           (!a.profile || !b.profile || *a.profile == *b.profile);
+           (!a.profile || !b.profile || *a.profile == *b.profile) &&
+           a.convention == b.convention &&
+           (!a.configured || !b.configured || *a.configured == *b.configured) &&
+           (!a.analytic_binding || !b.analytic_binding ||
+            *a.analytic_binding == *b.analytic_binding);
   };
   std::map<std::uint64_t, TensorChannelDescription> assertions;
   for (std::size_t i = 0; i < value.channels.size(); ++i)
@@ -140,7 +281,9 @@ Status validate_structure(const TensorDescription& value) {
       auto c = group.components[i];
       c.interpretation = group.interpretation;
       auto& old = assertions[group.indices[i]];
-      if (!compatible_text(old.name, c.name) ||
+      if ((old.encoding && c.encoding && !(*old.encoding == *c.encoding)) ||
+          (old.sampling && c.sampling && !(*old.sampling == *c.sampling)) ||
+          !compatible_text(old.name, c.name) ||
           !compatible_text(old.role, c.role) ||
           !compatible_text(old.unit, c.unit) ||
           (old.interpretation &&
@@ -152,6 +295,10 @@ Status validate_structure(const TensorDescription& value) {
         old.role = c.role;
       if (!c.unit.empty())
         old.unit = c.unit;
+      if (c.encoding)
+        old.encoding = c.encoding;
+      if (c.sampling)
+        old.sampling = c.sampling;
       old.interpretation = c.interpretation;
     }
   return Status::success();
@@ -173,6 +320,68 @@ void put_text(std::vector<std::uint8_t>* bytes, const std::string& value) {
   bytes->push_back(static_cast<std::uint8_t>(value.size()));
   bytes->insert(bytes->end(), value.begin(), value.end());
 }
+void put_identity(std::vector<std::uint8_t>* bytes,
+                  const ColorProfileIdentity& p) {
+  put_u64(bytes, p.byte_length);
+  bytes->insert(bytes->end(), p.sha256.begin(), p.sha256.end());
+}
+void put_encoding(std::vector<std::uint8_t>* bytes,
+                  const std::optional<TensorEncoding>& e) {
+  bytes->push_back(e ? 1 : 0);
+  if (!e)
+    return;
+  for (const auto* pair : {&e->stored, &e->decoded})
+    for (const auto& n : *pair) {
+      bytes->push_back(static_cast<std::uint8_t>(n.index()));
+      if (auto* i = std::get_if<std::int64_t>(&n))
+        put_u64(bytes, static_cast<std::uint64_t>(*i));
+      else
+        put_f64(bytes, std::get<double>(n));
+    }
+}
+void put_sampling(std::vector<std::uint8_t>* bytes,
+                  const std::optional<TensorSampling>& s) {
+  bytes->push_back(s ? 1 : 0);
+  if (!s)
+    return;
+  put_text(bytes, s->grid);
+  for (auto n : s->scale)
+    put_f64(bytes, n);
+  for (auto n : s->offset)
+    put_f64(bytes, n);
+}
+void put_extended_space(std::vector<std::uint8_t>* bytes,
+                        const std::string& convention,
+                        const std::optional<TensorConfiguredSpace>& configured,
+                        const std::optional<TensorAnalyticBinding>& binding) {
+  put_text(bytes, convention);
+  bytes->push_back(configured ? 1 : 0);
+  if (configured) {
+    put_identity(bytes, configured->config);
+    put_text(bytes, configured->space);
+    put_text(bytes, configured->reference_space);
+  }
+  bytes->push_back(binding ? 1 : 0);
+  if (binding) {
+    for (const auto* t :
+         {&binding->model, &binding->primaries, &binding->transfer,
+          &binding->reference, &binding->convention})
+      put_text(bytes, *t);
+    bytes->push_back(binding->white ? 1 : 0);
+    if (binding->white)
+      for (auto n : *binding->white)
+        put_f64(bytes, n);
+    bytes->push_back(binding->primaries_xy ? 1 : 0);
+    if (binding->primaries_xy)
+      for (auto n : *binding->primaries_xy)
+        put_f64(bytes, n);
+    for (const auto* strings : {&binding->roles, &binding->units}) {
+      put_u16(bytes, static_cast<std::uint16_t>(strings->size()));
+      for (const auto& t : *strings)
+        put_text(bytes, t);
+    }
+  }
+}
 void put_interpretation(std::vector<std::uint8_t>* bytes,
                         const TensorInterpretation& v) {
   for (const auto* text :
@@ -192,6 +401,7 @@ void put_interpretation(std::vector<std::uint8_t>* bytes,
     bytes->insert(bytes->end(), v.profile->sha256.begin(),
                   v.profile->sha256.end());
   }
+  put_extended_space(bytes, v.convention, v.configured, v.analytic_binding);
 }
 void put_channel(std::vector<std::uint8_t>* bytes,
                  const TensorChannelDescription& value) {
@@ -201,6 +411,8 @@ void put_channel(std::vector<std::uint8_t>* bytes,
   bytes->push_back(value.interpretation ? 1 : 0);
   if (value.interpretation)
     put_interpretation(bytes, *value.interpretation);
+  put_encoding(bytes, value.encoding);
+  put_sampling(bytes, value.sampling);
 }
 struct Reader final {
   const std::vector<std::uint8_t>& bytes;
@@ -241,6 +453,106 @@ struct Reader final {
     offset += size;
     return valid_text(*value);
   }
+  bool marker(std::uint8_t* v) { return byte(v) && *v <= 1; }
+  bool identity(ColorProfileIdentity* p) {
+    if (!u64(&p->byte_length))
+      return false;
+    for (auto& b : p->sha256)
+      if (!byte(&b))
+        return false;
+    return true;
+  }
+  bool encoding(std::optional<TensorEncoding>* out) {
+    std::uint8_t present = 0;
+    if (!marker(&present))
+      return false;
+    if (!present)
+      return true;
+    out->emplace();
+    for (auto* pair : {&(*out)->stored, &(*out)->decoded})
+      for (auto& n : *pair) {
+        std::uint8_t kind = 0;
+        std::uint64_t bits = 0;
+        if (!marker(&kind) || !u64(&bits))
+          return false;
+        if (kind) {
+          double v;
+          std::memcpy(&v, &bits, 8);
+          n = v;
+        } else {
+          std::int64_t v;
+          std::memcpy(&v, &bits, 8);
+          n = v;
+        }
+      }
+    return true;
+  }
+  bool sampling(std::optional<TensorSampling>* out) {
+    std::uint8_t present = 0;
+    if (!marker(&present))
+      return false;
+    if (!present)
+      return true;
+    out->emplace();
+    if (!text(&(*out)->grid))
+      return false;
+    for (auto& n : (*out)->scale)
+      if (!f64(&n))
+        return false;
+    for (auto& n : (*out)->offset)
+      if (!f64(&n))
+        return false;
+    return true;
+  }
+  bool extended_space(std::string* convention,
+                      std::optional<TensorConfiguredSpace>* configured,
+                      std::optional<TensorAnalyticBinding>* binding) {
+    std::uint8_t present = 0;
+    if (!text(convention) || !marker(&present))
+      return false;
+    if (present) {
+      configured->emplace();
+      if (!identity(&(*configured)->config) || !text(&(*configured)->space) ||
+          !text(&(*configured)->reference_space))
+        return false;
+    }
+    if (!marker(&present))
+      return false;
+    if (present) {
+      binding->emplace();
+      auto& b = **binding;
+      for (auto* t :
+           {&b.model, &b.primaries, &b.transfer, &b.reference, &b.convention})
+        if (!text(t))
+          return false;
+      if (!marker(&present))
+        return false;
+      if (present) {
+        b.white.emplace();
+        for (auto& n : *b.white)
+          if (!f64(&n))
+            return false;
+      }
+      if (!marker(&present))
+        return false;
+      if (present) {
+        b.primaries_xy.emplace();
+        for (auto& n : *b.primaries_xy)
+          if (!f64(&n))
+            return false;
+      }
+      for (auto* strings : {&b.roles, &b.units}) {
+        std::uint16_t count = 0;
+        if (!u16(&count) || count > 64)
+          return false;
+        strings->resize(count);
+        for (auto& t : *strings)
+          if (!text(&t))
+            return false;
+      }
+    }
+    return true;
+  }
   bool interpretation(TensorInterpretation* v) {
     for (auto* t : {&v->model, &v->primaries, &v->transfer, &v->reference,
                     &v->association})
@@ -273,7 +585,9 @@ struct Reader final {
         if (!byte(&n))
           return false;
     }
-    return valid_interpretation(*v);
+    return extended_space(&v->convention, &v->configured,
+                          &v->analytic_binding) &&
+           valid_interpretation(*v);
   }
   bool channel(TensorChannelDescription* value) {
     std::uint8_t present = 0;
@@ -285,10 +599,44 @@ struct Reader final {
       if (!interpretation(&*value->interpretation))
         return false;
     }
-    return true;
+    return encoding(&value->encoding) && sampling(&value->sampling);
   }
 };
 }  // namespace
+
+bool operator==(const TensorEncoding& a, const TensorEncoding& b) {
+  for (unsigned p = 0; p < 2; ++p)
+    for (unsigned i = 0; i < 2; ++i) {
+      const auto& x = p ? a.decoded[i] : a.stored[i];
+      const auto& y = p ? b.decoded[i] : b.stored[i];
+      if (x.index() != y.index())
+        return false;
+      if (auto* v = std::get_if<std::int64_t>(&x)) {
+        if (*v != std::get<std::int64_t>(y))
+          return false;
+      } else {
+        auto l = std::get<double>(x), r = std::get<double>(y);
+        if (std::memcmp(&l, &r, 8))
+          return false;
+      }
+    }
+  return true;
+}
+bool operator==(const TensorSampling& a, const TensorSampling& b) {
+  return a.grid == b.grid && a.scale == b.scale && a.offset == b.offset;
+}
+bool operator==(const TensorConfiguredSpace& a,
+                const TensorConfiguredSpace& b) {
+  return a.config == b.config && a.space == b.space &&
+         a.reference_space == b.reference_space;
+}
+bool operator==(const TensorAnalyticBinding& a,
+                const TensorAnalyticBinding& b) {
+  return std::tie(a.model, a.primaries, a.transfer, a.reference, a.white,
+                  a.primaries_xy, a.roles, a.units, a.convention) ==
+         std::tie(b.model, b.primaries, b.transfer, b.reference, b.white,
+                  b.primaries_xy, b.roles, b.units, b.convention);
+}
 
 Result<ValueFacet> encode_tensor_description(
     const TensorDescription& description) {
@@ -297,9 +645,9 @@ Result<ValueFacet> encode_tensor_description(
     return Result<ValueFacet>(status);
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 2;
+  facet.version = 3;
   auto& bytes = facet.payload;
-  bytes.insert(bytes.end(), {'T', 'D', 'M', '2'});
+  bytes.insert(bytes.end(), {'T', 'D', 'M', '3'});
   bytes.push_back(description.channel_axis
                       ? static_cast<std::uint8_t>(*description.channel_axis)
                       : 255);
@@ -347,6 +695,10 @@ Result<ValueFacet> encode_tensor_description(
     if (group.alpha)
       put_u64(&bytes, *group.alpha);
   }
+  put_encoding(&bytes, description.encoding);
+  put_sampling(&bytes, description.sampling);
+  put_extended_space(&bytes, description.convention, description.configured,
+                     description.analytic_binding);
   if (bytes.size() > 4096)
     return Result<ValueFacet>(
         invalid("tensor description exceeds facet bound"));
@@ -355,10 +707,10 @@ Result<ValueFacet> encode_tensor_description(
 
 Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   using Answer = Result<TensorDescription>;
-  if (facet.key != kKey || facet.version != 2 || facet.payload.size() < 9 ||
+  if (facet.key != kKey || facet.version != 3 || facet.payload.size() < 9 ||
       facet.payload.size() > 4096 || facet.payload[0] != 'T' ||
       facet.payload[1] != 'D' || facet.payload[2] != 'M' ||
-      facet.payload[3] != '2')
+      facet.payload[3] != '3')
     return Answer(invalid("invalid tensor description facet"));
   Reader reader{facet.payload, 4};
   TensorDescription value;
@@ -443,6 +795,10 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
         return Answer(invalid("invalid group alpha"));
     }
   }
+  if (!reader.encoding(&value.encoding) || !reader.sampling(&value.sampling) ||
+      !reader.extended_space(&value.convention, &value.configured,
+                             &value.analytic_binding))
+    return Answer(invalid("invalid v3 extended descriptions"));
   if (reader.offset != facet.payload.size() || !validate_structure(value).ok())
     return Answer(invalid("noncanonical tensor description"));
   auto canonical = encode_tensor_description(value);
@@ -472,7 +828,7 @@ Result<TensorDescription> tensor_description_from_parameter(
     return Result<TensorDescription>(invalid("invalid tensor override length"));
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 2;
+  facet.version = 3;
   facet.payload.reserve(parameter.size() / 2);
   const auto nibble = [](char digit) -> int {
     if (digit >= '0' && digit <= '9')
@@ -507,6 +863,61 @@ Status validate_tensor_description(const TensorDescription& description,
             "tensor channel table length disagrees with shape",
             FailureReason::None,
             {FailureOrigin::Schema, FailureScope::Unspecified}};
+  const auto integer_dtype = descriptor.element_type != ElementType::Float32 &&
+                             descriptor.element_type != ElementType::Float64;
+  TensorEndpoint low = std::int64_t{0}, high = std::int64_t{255};
+  switch (descriptor.element_type) {
+    case ElementType::UInt8:
+      break;
+    case ElementType::UInt16:
+      high = std::int64_t{65535};
+      break;
+    case ElementType::Int8:
+      low = std::int64_t{-128};
+      high = std::int64_t{127};
+      break;
+    case ElementType::Int16:
+      low = std::int64_t{-32768};
+      high = std::int64_t{32767};
+      break;
+    case ElementType::Int64:
+      low = INT64_MIN;
+      high = INT64_MAX;
+      break;
+    case ElementType::Float32:
+      low = -static_cast<double>(std::numeric_limits<float>::max());
+      high = static_cast<double>(std::numeric_limits<float>::max());
+      break;
+    case ElementType::Float64:
+      low = -std::numeric_limits<double>::max();
+      high = std::numeric_limits<double>::max();
+      break;
+  }
+  const auto compatible_encoding = [&](const std::optional<TensorEncoding>& e) {
+    return !e || (!endpoint_less(e->stored[0], low) &&
+                  !endpoint_less(high, e->stored[1]));
+  };
+  if (!compatible_encoding(description.encoding))
+    return {ErrorCode::TypeMismatch, "encoding interval exceeds dtype"};
+  for (const auto& c : description.channels)
+    if (!compatible_encoding(c.encoding))
+      return {ErrorCode::TypeMismatch, "channel encoding exceeds dtype"};
+  if (description.component &&
+      !compatible_encoding(description.component->encoding))
+    return {ErrorCode::TypeMismatch, "component encoding exceeds dtype"};
+  for (const auto& g : description.groups)
+    for (std::size_t i = 0; i < g.components.size(); ++i) {
+      auto e = g.components[i].encoding;
+      if (!e && g.indices[i] < description.channels.size())
+        e = description.channels[g.indices[i]].encoding;
+      if (!e)
+        e = description.encoding;
+      if (!compatible_encoding(e))
+        return {ErrorCode::TypeMismatch, "group encoding exceeds dtype"};
+      if (integer_dtype && !e)
+        return invalid(
+            "complete integer color group requires explicit decoder");
+    }
   std::set<std::string> names;
   for (const auto& group : description.groups) {
     if (!description.channel_axis || !names.insert(group.name).second)

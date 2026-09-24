@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/tensor_description.hpp"
 #include "plugin/dense_layout_validation.hpp"
 
 namespace ps::input_internal {
@@ -117,6 +118,7 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
   std::set<std::string> keys;
   std::size_t total = 0;
   unsigned typed_count = 0;
+  bool tensor_description = false;
   for (const auto& facet : *facets) {
     if (facet.key.empty() || facet.key.size() > 256 || facet.version == 0 ||
         std::any_of(
@@ -139,8 +141,18 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
       if (!status.ok())
         return status;
     }
+    if (facet.key == "photospider.tensor-description") {
+      auto decoded = decode_tensor_description(facet);
+      if (!decoded.ok())
+        return decoded.status();
+      tensor_description = true;
+    }
     total += facet.payload.size();
   }
+  if (tensor_description && typed_count)
+    return failure(
+        ErrorCode::InvalidArgument,
+        "tensor-description v3 cannot mix legacy typed coordinate conventions");
   std::sort(
       facets->begin(), facets->end(),
       [](const ValueFacet& a, const ValueFacet& b) { return a.key < b.key; });
@@ -533,6 +545,15 @@ Status validate_port_metadata(const OperationPortConstraint& port,
        !(port.element_type_mask & (1U << (element - 1)))))
     return failure(ErrorCode::TypeMismatch, "port dtype/rank mismatch");
   for (const auto& facet : facets) {
+    if (facet.key == "photospider.tensor-description") {
+      auto decoded = decode_tensor_description(facet);
+      if (!decoded.ok())
+        return decoded.status();
+      auto status = validate_tensor_description(decoded.value(), descriptor);
+      if (!status.ok())
+        return status;
+      continue;
+    }
     if (facet.key == "photospider.color-array") {
       auto color = decode_color_array(facet);
       if (!color.ok())

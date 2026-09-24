@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "photospider/data/color_profile_identity.hpp"
@@ -9,7 +10,7 @@
 
 namespace ps {
 /**
- * @brief Immutable, validated ICC v2/v4 CMYK output-device resource.
+ * @brief Immutable, validated ICC v2/v4 RGB/Gray/CMYK/XYZ/Lab resource.
  * @note Copies share accepted bytes and accounting. Identity is SHA-256 plus
  * length; paths, addresses and the ICC MD5 Profile ID are not resource
  * identity. Structural admission does not execute a CMM or certify print
@@ -45,6 +46,9 @@ class PHOTOSPIDER_API IccProfile final {
    * @throws std::logic_error For an invalid handle.
    */
   ByteView bytes() const;
+  /** @brief Canonical model from the admitted ICC header, never a name guess.
+   */
+  std::string model() const;
   /** @brief Actual immutable allocation; owners may outlive this handle.
    * @throws std::logic_error For an invalid handle. No copy of payload bytes.
    */

@@ -58,10 +58,21 @@ class Parser {
     work(128);
     if (source_.bytes.size() < 132 || source_.bytes.size() > UINT32_MAX ||
         source_.integer(0) != source_.bytes.size() ||
-        source_.integer(36) != signature("acsp") ||
-        source_.integer(12) != signature("prtr") ||
-        source_.integer(16) != signature("CMYK"))
-      invalid("ICC requires exact size and CMYK output-device header");
+        source_.integer(36) != signature("acsp"))
+      invalid("ICC requires exact size and profile signature");
+    const auto model = source_.integer(16);
+    const auto profile_class = source_.integer(12);
+    const bool cmyk = model == signature("CMYK");
+    if ((cmyk && profile_class != signature("prtr")) ||
+        (!cmyk && profile_class != signature("prtr") &&
+         profile_class != signature("mntr") &&
+         profile_class != signature("scnr") &&
+         profile_class != signature("spac") &&
+         profile_class != signature("abst")) ||
+        (profile_class == signature("abst")) ||
+        (!cmyk && model != signature("RGB ") && model != signature("GRAY") &&
+         model != signature("XYZ ") && model != signature("Lab ")))
+      invalid("unsupported ICC profile class/model");
     major_ = source_.integer(8, 1);
     minor_ = source_.integer(9, 1) >> 4;
     if ((major_ != 2 && major_ != 4) || minor_ > 9 ||
@@ -124,18 +135,76 @@ class Parser {
     auto white = required(signature("wtpt"));
     if (white.bytes.size() != 20 || white.integer(0) != signature("XYZ "))
       invalid("ICC media white requires one XYZNumber");
-    for (auto key : {signature("A2B0"), signature("A2B1"), signature("A2B2")})
-      lut(required(key), 4, 3, true);
-    for (auto key : {signature("B2A0"), signature("B2A1"), signature("B2A2")})
-      lut(required(key), 3, 4, false);
-    lut(required(signature("gamt")), 3, 1, false);
-    for (const auto& tag : tags_)
+    if (cmyk) {
+      for (auto key : {signature("A2B0"), signature("A2B1"), signature("A2B2")})
+        lut(required(key), 4, 3, true);
+      for (auto key : {signature("B2A0"), signature("B2A1"), signature("B2A2")})
+        lut(required(key), 3, 4, false);
+      lut(required(signature("gamt")), 3, 1, false);
+    } else {
+      const auto has = [&](std::uint32_t key) {
+        return std::any_of(tags_.begin(), tags_.end(),
+                           [&](const auto& t) { return t.key == key; });
+      };
+      const bool output_color =
+          profile_class == signature("prtr") && model != signature("GRAY");
+      const bool bidirectional = profile_class == signature("spac") ||
+                                 profile_class == signature("mntr");
+      if (model == signature("GRAY") && profile_class != signature("spac"))
+        curve(required(signature("kTRC")));
+      if (profile_class == signature("spac") || output_color ||
+          has(signature("A2B0"))) {
+        const unsigned channels = model == signature("GRAY") ? 1 : 3;
+        required(signature("A2B0"));
+        if ((bidirectional && model != signature("GRAY")) ||
+            profile_class == signature("spac") || output_color)
+          required(signature("B2A0"));
+        if (output_color) {
+          for (auto key : {signature("A2B1"), signature("A2B2"),
+                           signature("B2A1"), signature("B2A2")})
+            required(key);
+          lut(required(signature("gamt")), 3, 1, false);
+        }
+        for (auto key :
+             {signature("A2B0"), signature("A2B1"), signature("A2B2")}) {
+          if (has(key)) {
+            lut(required(key), channels, 3, true);
+          }
+        }
+        for (auto key :
+             {signature("B2A0"), signature("B2A1"), signature("B2A2")}) {
+          if (has(key)) {
+            lut(required(key), 3, channels, false);
+          }
+        }
+      } else if (model == signature("RGB ")) {
+        if (pcs_ != signature("XYZ "))
+          invalid("matrix/TRC ICC profile requires XYZ PCS");
+        for (auto key :
+             {signature("rXYZ"), signature("gXYZ"), signature("bXYZ")}) {
+          auto xyz = required(key);
+          if (xyz.bytes.size() != 20 || xyz.integer(0) != signature("XYZ ")) {
+            invalid("invalid ICC colorant XYZ");
+          }
+        }
+        for (auto key :
+             {signature("rTRC"), signature("gTRC"), signature("bTRC")}) {
+          curve(required(key));
+        }
+      } else if (model == signature("GRAY")) {
+        curve(required(signature("kTRC")));
+      } else {
+        invalid("profile-defined XYZ/Lab requires an explicit LUT");
+      }
+    }
+    for (const auto& tag : tags_) {
       if (tag.key == signature("chad")) {
         auto matrix = source_.sub(tag.offset, tag.size);
         if (tag.size != 44 || matrix.integer(0) != signature("sf32"))
           invalid(
               "ICC adaptation tag requires nine fixed-point matrix entries");
       }
+    }
     std::sort(tags_.begin(), tags_.end(), [&](const auto& a, const auto& b) {
       work(1);
       return a.offset != b.offset ? a.offset < b.offset : a.size < b.size;
@@ -337,13 +406,35 @@ class Parser {
         if (grid)
           invalid("nonzero unused ICC CLUT dimension");
       } else {
-        if (grid < 2 || bytes > r.bytes.size() / grid)
+        if (grid < 2 || bytes > r.bytes.size() / grid) {
           invalid("ICC CLUT size exceeds resource");
+        }
         bytes *= grid;
       }
     }
     zeros(r, clut + 17, 3);
     append(clut, 20 + bytes, false);
+  }
+  void curve(const Reader& r) {
+    work(16);
+    const auto type = r.integer(0);
+    std::uint64_t size = 0;
+    if (type == signature("curv")) {
+      size = 12ULL + 2ULL * r.integer(8);
+    } else if (type == signature("para") && major_ == 4) {
+      constexpr std::array<unsigned, 5> parameters{1, 3, 4, 5, 7};
+      const auto function = r.integer(8, 2);
+      if (function > 4) {
+        invalid("invalid ICC parametric TRC");
+      }
+      zeros(r, 10, 2);
+      size = 12 + 4 * parameters[function];
+    } else {
+      invalid("invalid ICC TRC type");
+    }
+    if (r.bytes.size() != size) {
+      invalid("invalid ICC TRC length");
+    }
   }
   void lut(const Reader& r, unsigned inputs, unsigned outputs, bool forward) {
     work(64);

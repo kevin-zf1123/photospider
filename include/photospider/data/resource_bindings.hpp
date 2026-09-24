@@ -5,16 +5,18 @@
 #include <vector>
 
 #include "photospider/data/icc_profile.hpp"
+#include "photospider/data/ocio_config_resource.hpp"
 
 namespace ps {
 struct ValueFacet;
 /**
  * @brief Immutable content-addressed compilation/Value resources.
- * @note Currently contains validated ICC profiles. It is separate from runtime
- * numeric inputs and static preparation payloads. Copies retain owners and may
- * outlive compilation or execution contexts. No mutable path or global lookup.
- * Same-content profiles share one canonical owner within a set; a claimed
- * duplicate identity with different actual bytes is rejected.
+ * @note Contains structurally validated ICC profiles and explicit frozen OCIO
+ * snapshots. It is separate from runtime numeric inputs and static preparation
+ * payloads. Copies retain owners and may outlive compilation or execution
+ * contexts. No mutable path or global lookup. Same-content profiles share one
+ * canonical owner within a set; a claimed duplicate identity with different
+ * actual bytes is rejected.
  */
 class PHOTOSPIDER_API ResourceBindings final {
  public:
@@ -34,8 +36,21 @@ class PHOTOSPIDER_API ResourceBindings final {
       const std::vector<IccProfile>& profiles, const ResourceBudget& resources,
       const CancellationToken& cancellation = {},
       std::uint64_t maximum_work = 64 * 1024 * 1024);
-  /** @brief Number of canonical profiles; allocation-free and thread-safe. */
+  /** @brief Admit profiles plus frozen OCIO manifests under one root. Same
+   * cancellation/work/failure rules as the ICC-only overload. */
+  static Result<ResourceBindings> create(
+      const std::vector<IccProfile>& profiles,
+      const std::vector<OcioConfigResource>& configs,
+      const ResourceBudget& resources,
+      const CancellationToken& cancellation = {},
+      std::uint64_t maximum_work = 64 * 1024 * 1024);
+  /** @brief Number of canonical resources; allocation-free and thread-safe. */
   std::size_t size() const noexcept;
+  std::size_t profile_count() const noexcept;
+  std::size_t config_count() const noexcept;
+  Result<OcioConfigResource> ocio_config(
+      const ColorProfileIdentity& identity) const;
+  Result<OcioConfigResource> config_at(std::size_t index) const;
   /** @brief Resolves an identity to an independently owning immutable handle.
    * @return Validated profile or InvalidArgument/InvalidDomain if unresolved.
    * @throws std::bad_alloc On diagnostic allocation. No I/O or mutation.
@@ -43,7 +58,7 @@ class PHOTOSPIDER_API ResourceBindings final {
   Result<IccProfile> icc_profile(const ColorProfileIdentity& identity) const;
   /** @brief Restricts ownership to ICC identities named by the given facets.
    * @note A facet list may combine declarations/outputs. Irrelevant facet keys
-   * are ignored; color-array-v1 and tensor-description-v1 metadata are
+   * are ignored; color-array-v1 and tensor-description-v3 metadata are
    * validated. Unresolved identities
    * fail admission. New set metadata uses the source set's retained root.
    * @return Owning subset or InvalidArgument/ResourceExhausted. No payload I/O.
@@ -72,7 +87,8 @@ class PHOTOSPIDER_API ResourceBindings final {
   static Result<ResourceBindings> create_view(
       const IccProfile* profiles, std::size_t count,
       const ResourceBudget& resources, const CancellationToken& cancellation,
-      std::uint64_t maximum_work);
+      std::uint64_t maximum_work, const OcioConfigResource* configs = nullptr,
+      std::size_t config_count = 0);
   explicit ResourceBindings(std::shared_ptr<const Impl> impl)
       : impl_(std::move(impl)) {}
   std::shared_ptr<const Impl> impl_;

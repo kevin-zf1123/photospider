@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.21.0
+  VERSION 0.22.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -109,6 +109,7 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
   plugins/ops/00-foundation/core_identity.cpp
   plugins/ops/02-format-color/channel_extraction.cpp
+  plugins/ops/02-format-color/metadata_assignment.cpp
   plugins/ops/02-format-color/channel_assembly.cpp
   plugins/ops/01-numeric/curve_sample_linear.cpp
   plugins/ops/01-numeric/curve_sample_monotone.cpp
@@ -236,6 +237,7 @@ set(
   src/lib/data/color_array.cpp
   src/lib/data/icc_profile.cpp
   src/lib/data/icc_validation.cpp
+  src/lib/data/ocio_config_resource.cpp
   src/lib/data/resource_bindings.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
@@ -485,6 +487,8 @@ add_subdirectory(examples/codec_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing EXCLUDE_FROM_ALL)
+add_subdirectory(examples/metadata_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/metadata_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
@@ -654,6 +658,8 @@ if(BUILD_TESTING)
   target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
   add_dependencies(test_expression_operations expression_contract_fixture)
   photospider_add_test(test_format_color_retirement Photospider::kernel tests/integration/test_format_color_retirement.cpp)
+  photospider_add_test(test_metadata_assignment Photospider::kernel tests/integration/test_metadata_assignment.cpp)
+  target_include_directories(test_metadata_assignment PRIVATE examples/numeric_workflow)
   photospider_add_test(test_channel_editing Photospider::kernel tests/integration/test_channel_editing.cpp)
   photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
   target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)

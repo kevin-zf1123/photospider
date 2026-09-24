@@ -82,6 +82,10 @@ TensorDescription project_description(TensorDescription description,
           if (!description.component)
             description.component = group.components[i];
           description.component->interpretation = group.interpretation;
+          if (group.components[i].encoding)
+            description.component->encoding = group.components[i].encoding;
+          if (group.components[i].sampling)
+            description.component->sampling = group.components[i].sampling;
           description.channels = {*description.component};
         }
     description.groups.clear();

@@ -91,7 +91,7 @@ layout 和输出轴。B 的 input_axes 使用 `v1;axis;_;axis`；C 的 input_str
 output_description 与 component 描述由公开 codec 编码。所有 String 仍受 8192
 字节参数上限约束。来源选择独立于目标语义赋值。
 
-元数据迁移为 tensor-description v2/TDM2；v1 明确拒绝，调用者重新编码后消费。
+当前 0.22 元数据为 tensor-description v3/TDM3；v1/v2 明确拒绝，调用者重新编码后消费。
 新增逐分量 TensorInterpretation 和显式 TensorColorGroup，包含通道索引、对应
 分量、解释及内部 alpha 索引。完整颜色组校验模型分量与所需结构字段，组与通道
 同字段冲突失败。输出目标字段允许局部重解释；未重定义的适用字段继续按 respect
@@ -164,3 +164,15 @@ canonical image 不能别名 scalar storage。planar 映射路径预留完整输
 安装公共包运行同一 fixture。[性能结果](../../../examples/channel_editing_performance/README.md)
 记录 FP32 128x128、4096x4096 continuous/tiled、稀疏请求、布局、复制与 backing
 统计及优化效果。实现事实与规格 Proposed 决策状态分别记录。
+
+
+## FMT-08 元数据赋值与删除
+
+包 0.22.0 实现原生 `metadata.assign_<profile>` 和事务式
+`format::remove_metadata`。样本与逻辑坐标保持不变，patch/replace/cascade
+发布独立不可变描述。图像输入输出保持 planar；generic 路径用于非图像数值张量。
+[v3 schema 与运行时约定](Tensor-Semantic-Metadata.zh.md) 说明类型化数值编码、
+采样、profile/配置资源、路径、所有权和错误。
+[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊浮点位模式和源不可变性；
+[性能说明](../../../examples/metadata_performance/README.md) 报告 planar 全图、单通道、
+跨 tile 区域测量及有界复制优化。

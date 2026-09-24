@@ -206,3 +206,13 @@ __pycache__/
 !examples/channel_editing_performance/*.py
 !examples/channel_editing_performance/*.md
 !examples/channel_editing_performance/CMakeLists.txt
+
+!examples/metadata_performance/
+!examples/metadata_performance/*.cpp
+!examples/metadata_performance/*.py
+!examples/metadata_performance/*.md
+!examples/metadata_performance/CMakeLists.txt
+!examples/metadata_workflow/
+!examples/metadata_workflow/*.cpp
+!examples/metadata_workflow/*.md
+!examples/metadata_workflow/CMakeLists.txt

@@ -22,12 +22,75 @@ void check(Status status) {
   if (!status.ok())
     throw Stop{std::move(status)};
 }
+template <class T, class Work>
+void admit(const T* values, std::size_t count, ResourceVector<T>* out,
+           const ResourceBudget& resources, Work work) {
+  if (count && !values)
+    throw Stop{invalid("null resource handles")};
+  out->reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    work(1);
+    if (!values[i].valid())
+      throw Stop{invalid("invalid resource handle")};
+    out->push_back(values[i]);
+  }
+  std::sort(out->begin(), out->end(), [&](const auto& a, const auto& b) {
+    work(1);
+    return a.identity() < b.identity();
+  });
+  std::size_t unique = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    work(1);
+    const auto& incoming = (*out)[i];
+    if (unique && incoming.identity() == (*out)[unique - 1].identity()) {
+      const auto& prior = (*out)[unique - 1];
+      if (prior.storage().get() != incoming.storage().get()) {
+        auto a = prior.storage()->bytes(), b = incoming.storage()->bytes();
+        if (a.size() != b.size())
+          throw Stop{invalid("resource identity collision")};
+        for (std::size_t offset = 0; offset < a.size();) {
+          const auto n = std::min<std::size_t>(1024, a.size() - offset);
+          work(n);
+          if (std::memcmp(a.data() + offset, b.data() + offset, n))
+            throw Stop{invalid("resource identity collision")};
+          offset += n;
+        }
+      }
+      continue;
+    }
+    if (unique != i)
+      (*out)[unique] = incoming;
+    ++unique;
+  }
+  out->resize(unique);
+  for (auto& value : *out) {
+    work(1);
+    auto ref = value.reference(resources);
+    if (!ref.ok())
+      throw Stop{ref.status()};
+    value = ref.take_value();
+  }
+}
+template <class T>
+Result<T> lookup(const ResourceVector<T>& values,
+                 const ColorProfileIdentity& id) {
+  const auto i = std::lower_bound(values.begin(), values.end(), id,
+                                  [](const auto& value, const auto& key) {
+                                    return value.identity() < key;
+                                  });
+  if (i == values.end() || !(i->identity() == id))
+    return Result<T>(invalid("unresolved immutable resource identity"));
+  return Result<T>(*i);
+}
 }  // namespace
 struct ResourceBindings::Impl {
   ResourceBudget resources;
   ResourceVector<IccProfile> profiles;
+  ResourceVector<OcioConfigResource> configs;
   explicit Impl(const ResourceBudget& root)
-      : resources(root), profiles(ResourceAllocator<IccProfile>(root)) {}
+      : resources(root),
+        profiles(ResourceAllocator<IccProfile>(root)),
+        configs(ResourceAllocator<OcioConfigResource>(root)) {}
 };
 Result<ResourceBindings> ResourceBindings::create(
     const std::vector<IccProfile>& profiles, const ResourceBudget& resources,
@@ -35,223 +98,185 @@ Result<ResourceBindings> ResourceBindings::create(
   return create_view(profiles.data(), profiles.size(), resources, cancellation,
                      maximum_work);
 }
+Result<ResourceBindings> ResourceBindings::create(
+    const std::vector<IccProfile>& profiles,
+    const std::vector<OcioConfigResource>& configs,
+    const ResourceBudget& resources, const CancellationToken& cancellation,
+    std::uint64_t maximum_work) {
+  return create_view(profiles.data(), profiles.size(), resources, cancellation,
+                     maximum_work, configs.data(), configs.size());
+}
 Result<ResourceBindings> ResourceBindings::create_view(
     const IccProfile* profiles, std::size_t count,
     const ResourceBudget& resources, const CancellationToken& cancellation,
-    std::uint64_t maximum_work) {
-  try {
-    const auto work = [&](std::uint64_t amount) {
-      if (cancellation.cancelled())
-        throw Stop{{ErrorCode::Cancelled, {}}};
-      if (amount > maximum_work)
-        throw Stop{{ErrorCode::ResourceExhausted, "resource binding work limit",
-                    FailureReason::WorkLimit}};
-      maximum_work -= amount;
-      check(resources.consume({amount}));
-    };
-    work(0);
-    if (!count)
-      return Result<ResourceBindings>(ResourceBindings{});
-    if (!profiles)
-      return Result<ResourceBindings>(invalid("null resource binding handles"));
-    auto impl = std::allocate_shared<Impl>(ResourceAllocator<Impl>(resources),
-                                           resources);
-    impl->profiles.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-      work(1);
-      if (!profiles[i].valid())
-        return Result<ResourceBindings>(invalid("invalid ICC binding handle"));
-      impl->profiles.push_back(profiles[i]);
-    }
-    std::sort(impl->profiles.begin(), impl->profiles.end(),
-              [&](const auto& a, const auto& b) {
-                work(1);
-                return a.identity() < b.identity();
-              });
-    std::size_t unique = 0;
-    for (std::size_t i = 0; i < count; ++i) {
-      work(1);
-      const auto& incoming = impl->profiles[i];
-      if (unique &&
-          incoming.identity() == impl->profiles[unique - 1].identity()) {
-        const auto& prior = impl->profiles[unique - 1];
-        if (prior.storage().get() != incoming.storage().get()) {
-          for (std::size_t offset = 0; offset < incoming.bytes().size();) {
-            const auto n =
-                std::min<std::size_t>(65536, incoming.bytes().size() - offset);
-            work(n);
-            if (std::memcmp(prior.bytes().data() + offset,
-                            incoming.bytes().data() + offset, n))
-              return Result<ResourceBindings>(
-                  invalid("conflicting ICC bytes for resource identity"));
-            offset += n;
-          }
-        }
-        continue;
-      }
-      if (unique != i)
-        impl->profiles[unique] = incoming;
-      ++unique;
-    }
-    impl->profiles.resize(unique);
-    for (auto& profile : impl->profiles) {
-      work(1);
-      auto admitted = profile.reference(resources);
-      if (!admitted.ok())
-        return Result<ResourceBindings>(admitted.status());
-      profile = admitted.take_value();
-    }
-    work(1);
-    return Result<ResourceBindings>(ResourceBindings(std::move(impl)));
-  } catch (const Stop& stop) {
-    return Result<ResourceBindings>(stop.status);
-  } catch (const std::bad_alloc&) {
-    return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted,
-                                           "resource binding metadata capacity",
-                                           FailureReason::CapacityLimit});
-  }
+    std::uint64_t maximum_work, const OcioConfigResource* configs,
+    std::size_t config_count) try {
+  const auto work = [&](std::uint64_t n) {
+    if (cancellation.cancelled())
+      throw Stop{{ErrorCode::Cancelled, {}}};
+    if (n > maximum_work)
+      throw Stop{{ErrorCode::ResourceExhausted, "resource binding work limit",
+                  FailureReason::WorkLimit}};
+    maximum_work -= n;
+    check(resources.consume({n}));
+  };
+  work(0);
+  if (!count && !config_count)
+    return Result<ResourceBindings>(ResourceBindings{});
+  auto impl =
+      std::allocate_shared<Impl>(ResourceAllocator<Impl>(resources), resources);
+  admit(profiles, count, &impl->profiles, resources, work);
+  admit(configs, config_count, &impl->configs, resources, work);
+  work(1);
+  return Result<ResourceBindings>(ResourceBindings(std::move(impl)));
+} catch (const Stop& stop) {
+  return Result<ResourceBindings>(stop.status);
+} catch (const std::bad_alloc&) {
+  return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted,
+                                         "resource binding metadata capacity",
+                                         FailureReason::CapacityLimit});
 }
 std::size_t ResourceBindings::size() const noexcept {
+  return profile_count() + config_count();
+}
+std::size_t ResourceBindings::profile_count() const noexcept {
   return impl_ ? impl_->profiles.size() : 0;
 }
+std::size_t ResourceBindings::config_count() const noexcept {
+  return impl_ ? impl_->configs.size() : 0;
+}
 Result<IccProfile> ResourceBindings::icc_profile(
-    const ColorProfileIdentity& identity) const {
-  if (impl_) {
-    const auto found =
-        std::lower_bound(impl_->profiles.begin(), impl_->profiles.end(),
-                         identity, [](const auto& profile, const auto& key) {
-                           return profile.identity() < key;
-                         });
-    if (found != impl_->profiles.end() && found->identity() == identity)
-      return Result<IccProfile>(*found);
-  }
-  return Result<IccProfile>(invalid("unresolved ICC profile identity"));
+    const ColorProfileIdentity& id) const {
+  return impl_ ? lookup(impl_->profiles, id)
+               : Result<IccProfile>(invalid("unresolved ICC profile identity"));
+}
+Result<OcioConfigResource> ResourceBindings::ocio_config(
+    const ColorProfileIdentity& id) const {
+  return impl_ ? lookup(impl_->configs, id)
+               : Result<OcioConfigResource>(
+                     invalid("unresolved OCIO config identity"));
 }
 Result<IccProfile> ResourceBindings::profile_at(std::size_t index) const {
-  if (index >= size())
-    return Result<IccProfile>(invalid("resource binding index outside set"));
+  if (index >= profile_count())
+    return Result<IccProfile>(invalid("profile index outside set"));
   return Result<IccProfile>(impl_->profiles[index]);
 }
+Result<OcioConfigResource> ResourceBindings::config_at(
+    std::size_t index) const {
+  if (index >= config_count())
+    return Result<OcioConfigResource>(invalid("config index outside set"));
+  return Result<OcioConfigResource>(impl_->configs[index]);
+}
 Result<ResourceBindings> ResourceBindings::select(
-    const std::vector<ValueFacet>& facets) const {
-  try {
-    if (!impl_) {
-      for (const auto& facet : facets)
-        if (facet.key == "photospider.color-array") {
-          auto description = decode_color_array(facet);
-          if (!description.ok())
-            return Result<ResourceBindings>(description.status());
-          if (description.value().profile)
-            return Result<ResourceBindings>(
-                invalid("unresolved ICC profile identity"));
-        } else if (facet.key == "photospider.tensor-description") {
-          auto description = decode_tensor_description(facet);
-          if (!description.ok())
-            return Result<ResourceBindings>(description.status());
-          const auto& d = description.value();
-          bool has_profile = d.profile.has_value();
-          for (const auto& c : d.channels)
-            has_profile =
-                has_profile || (c.interpretation && c.interpretation->profile);
-          if (d.component && d.component->interpretation)
-            has_profile =
-                has_profile || d.component->interpretation->profile.has_value();
-          for (const auto& g : d.groups)
-            has_profile = has_profile || g.interpretation.profile.has_value();
-          if (has_profile)
-            return Result<ResourceBindings>(
-                invalid("unresolved ICC profile identity"));
-        }
-      return Result<ResourceBindings>(ResourceBindings{});
+    const std::vector<ValueFacet>& facets) const try {
+  // No global/default resource root is created by an empty lookup.
+  ResourceVector<IccProfile> selected{
+      impl_ ? ResourceAllocator<IccProfile>(impl_->resources)
+            : ResourceAllocator<IccProfile>{}};
+  ResourceVector<OcioConfigResource> configs{
+      impl_ ? ResourceAllocator<OcioConfigResource>(impl_->resources)
+            : ResourceAllocator<OcioConfigResource>{}};
+  const auto profile = [&](const std::optional<ColorProfileIdentity>& id) {
+    if (!id)
+      return;
+    auto value = icc_profile(*id);
+    if (!value.ok())
+      throw Stop{value.status()};
+    selected.push_back(value.take_value());
+  };
+  const auto configured =
+      [&](const std::optional<TensorConfiguredSpace>& description) {
+        if (!description)
+          return;
+        auto value = ocio_config(description->config);
+        if (!value.ok())
+          throw Stop{value.status()};
+        check(value.value().validate_space(description->space,
+                                           description->reference_space));
+        configs.push_back(value.take_value());
+      };
+  const auto interpretation = [&](const TensorInterpretation& d) {
+    profile(d.profile);
+    configured(d.configured);
+    if (d.profile && !d.model.empty() && selected.back().model() != d.model)
+      throw Stop{invalid("ICC header model disagrees with interpretation")};
+  };
+  for (const auto& facet : facets) {
+    if (impl_)
+      check(impl_->resources.consume({1 + facet.payload.size()}));
+    if (facet.key == "photospider.color-array") {
+      auto d = decode_color_array(facet);
+      if (!d.ok())
+        throw Stop{d.status()};
+      profile(d.value().profile);
+      if (d.value().profile && selected.back().model() != "cmyk")
+        throw Stop{invalid("legacy CMYK facet requires a CMYK profile")};
+    } else if (facet.key == "photospider.tensor-description") {
+      auto result = decode_tensor_description(facet);
+      if (!result.ok())
+        throw Stop{result.status()};
+      const auto& d = result.value();
+      interpretation({d.model, d.primaries, d.transfer, d.reference,
+                      d.association, d.white, d.primaries_xy, d.profile,
+                      d.convention, d.configured, d.analytic_binding});
+      for (const auto& c : d.channels)
+        if (c.interpretation)
+          interpretation(*c.interpretation);
+      if (d.component && d.component->interpretation)
+        interpretation(*d.component->interpretation);
+      for (const auto& g : d.groups)
+        interpretation(g.interpretation);
     }
-    ResourceVector<IccProfile> selected{
-        ResourceAllocator<IccProfile>(impl_->resources)};
-    bool matched = false;
-    for (const auto& facet : facets) {
-      auto status = impl_->resources.consume({1 + facet.payload.size()});
-      if (!status.ok())
-        return Result<ResourceBindings>(status);
-      std::vector<ColorProfileIdentity> identities;
-      std::optional<ColorProfileIdentity> identity;
-      if (facet.key == "photospider.color-array") {
-        auto description = decode_color_array(facet);
-        if (!description.ok())
-          return Result<ResourceBindings>(description.status());
-        identity = description.value().profile;
-      } else if (facet.key == "photospider.tensor-description") {
-        auto description = decode_tensor_description(facet);
-        if (!description.ok())
-          return Result<ResourceBindings>(description.status());
-        identity = description.value().profile;
-        const auto& d = description.value();
-        for (const auto& c : d.channels)
-          if (c.interpretation && c.interpretation->profile)
-            identities.push_back(*c.interpretation->profile);
-        if (d.component && d.component->interpretation &&
-            d.component->interpretation->profile)
-          identities.push_back(*d.component->interpretation->profile);
-        for (const auto& g : d.groups)
-          if (g.interpretation.profile)
-            identities.push_back(*g.interpretation.profile);
-      }
-      if (identity)
-        identities.push_back(*identity);
-      for (const auto& id : identities) {
-        identity = id;
-        if (!identity)
-          continue;
-        auto profile = icc_profile(*identity);
-        if (!profile.ok())
-          return Result<ResourceBindings>(profile.status());
-        matched = true;
-        if (impl_->profiles.size() != 1)
-          selected.push_back(profile.take_value());
-      }
-    }
-    if (matched && impl_->profiles.size() == 1)
-      return Result<ResourceBindings>(*this);
-    return create_view(selected.data(), selected.size(), impl_->resources, {},
-                       UINT64_MAX);
-  } catch (const std::bad_alloc&) {
-    return Result<ResourceBindings>(Status{
-        ErrorCode::ResourceExhausted, "resource selection metadata capacity",
-        FailureReason::CapacityLimit});
   }
+  if (!impl_)
+    return Result<ResourceBindings>(ResourceBindings{});
+  if (selected.empty() && configs.empty())
+    return Result<ResourceBindings>(ResourceBindings{});
+  // Common one-resource result keeps the sealed set and its charge.
+  if (size() == 1)
+    return Result<ResourceBindings>(*this);
+  return create_view(selected.data(), selected.size(), impl_->resources, {},
+                     UINT64_MAX, configs.data(), configs.size());
+} catch (const Stop& stop) {
+  return Result<ResourceBindings>(stop.status);
+} catch (const std::bad_alloc&) {
+  return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted,
+                                         "resource selection metadata capacity",
+                                         FailureReason::CapacityLimit});
 }
 Result<ResourceBindings> ResourceBindings::reference(
     const ResourceBudget& resources) const {
   if (!impl_)
     return Result<ResourceBindings>(ResourceBindings{});
   return create_view(impl_->profiles.data(), impl_->profiles.size(), resources,
-                     {}, UINT64_MAX);
+                     {}, UINT64_MAX, impl_->configs.data(),
+                     impl_->configs.size());
 }
 Result<ResourceBindings> ResourceBindings::unite(
-    const ResourceBindings& other) const {
+    const ResourceBindings& other) const try {
   if (!impl_)
     return Result<ResourceBindings>(other);
   if (!other.impl_ || impl_ == other.impl_)
     return Result<ResourceBindings>(*this);
-  try {
-    ResourceVector<IccProfile> profiles{
-        ResourceAllocator<IccProfile>(impl_->resources)};
-    if (other.size() > SIZE_MAX - size())
-      return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted,
-                                             "resource union size overflow",
-                                             FailureReason::CapacityLimit});
-    profiles.reserve(size() + other.size());
-    auto status = impl_->resources.consume({size() + other.size()});
-    if (!status.ok())
-      return Result<ResourceBindings>(status);
-    profiles.insert(profiles.end(), impl_->profiles.begin(),
-                    impl_->profiles.end());
-    profiles.insert(profiles.end(), other.impl_->profiles.begin(),
-                    other.impl_->profiles.end());
-    return create_view(profiles.data(), profiles.size(), impl_->resources, {},
-                       UINT64_MAX);
-  } catch (const std::bad_alloc&) {
-    return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted,
-                                           "resource union metadata capacity",
-                                           FailureReason::CapacityLimit});
-  }
+  ResourceVector<IccProfile> profiles{
+      ResourceAllocator<IccProfile>(impl_->resources)};
+  ResourceVector<OcioConfigResource> configs{
+      ResourceAllocator<OcioConfigResource>(impl_->resources)};
+  check(impl_->resources.consume({size() + other.size()}));
+  profiles.insert(profiles.end(), impl_->profiles.begin(),
+                  impl_->profiles.end());
+  profiles.insert(profiles.end(), other.impl_->profiles.begin(),
+                  other.impl_->profiles.end());
+  configs.insert(configs.end(), impl_->configs.begin(), impl_->configs.end());
+  configs.insert(configs.end(), other.impl_->configs.begin(),
+                 other.impl_->configs.end());
+  return create_view(profiles.data(), profiles.size(), impl_->resources, {},
+                     UINT64_MAX, configs.data(), configs.size());
+} catch (const Stop& stop) {
+  return Result<ResourceBindings>(stop.status);
+} catch (const std::bad_alloc&) {
+  return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted,
+                                         "resource union metadata capacity",
+                                         FailureReason::CapacityLimit});
 }
 }  // namespace ps

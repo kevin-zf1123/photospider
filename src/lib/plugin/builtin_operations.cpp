@@ -5,6 +5,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
   for (const auto function : {register_numeric_ranges,
                               register_channel_extraction,
                               register_channel_assembly,
+                              register_metadata_assignment,
                               register_numeric_interpolation,
                               register_numeric_layouts,
                               register_numeric_indexing,

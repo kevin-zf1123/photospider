@@ -6219,7 +6219,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     active[root.second] = true;
   for (std::size_t i = active.size(); i-- > 0;)
     if (active[i] &&
-        !(execution_internal::channel_assembly(plan.steps()[i].operation) &&
+        !(execution_internal::planar_mapped_copy(plan.steps()[i].operation) &&
           plan.steps()[i].traits.outputs[0].planar_layout))
       for (const auto& input : plan.steps()[i].inputs)
         if (const auto* producer = std::get_if<PlanStepInput>(&input))
@@ -6237,7 +6237,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     if (step.inputs.size() != step.input_demands.size())
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch, "unsupported planar operation arity"));
-    if (execution_internal::channel_assembly(step.operation) &&
+    if (execution_internal::planar_mapped_copy(step.operation) &&
         step.traits.outputs[0].planar_layout) {
       const auto& layout = *step.traits.outputs[0].planar_layout;
       const auto width =
@@ -6382,7 +6382,10 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       if (parts.empty())
         return Result<ExecutionResult>(
             Status{ErrorCode::Internal, "assembly has no requested pieces"});
-      const auto policy = std::get<std::string>(step.parameters.at("layout"));
+      const auto layout_parameter = step.parameters.find("layout");
+      const auto policy = layout_parameter == step.parameters.end()
+                              ? std::string("auto")
+                              : std::get<std::string>(layout_parameter->second);
       bool viewed = false;
       if (policy != "materialize") {
         std::vector<PlanarImage> planes;

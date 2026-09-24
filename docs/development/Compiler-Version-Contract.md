@@ -33,6 +33,15 @@ ABI and OperationTraits version remain unchanged. Canonical facet/parameter byte
 already participate in graph identities. The installed FMT-02 consumer covers
 the new helper, metadata and common-owner view boundary.
 
+Package 0.22.0 adds FMT-08 and replaces tensor-description v2 with v3 (`TDM3`).
+V3 fixes the relative-coordinate convention and adds exact typed numeric
+encoding, co-sited sampling, ICC/configured endpoint bindings and frozen OCIO
+resource snapshots. V1/v2 tensor facets and 0.21 installed-package requests
+reject. Re-author metadata and rebuild C++ consumers. Legacy ColorArray v1 stays
+separate and cannot coexist with v3 on a Value. WorkflowDocument, operation C ABI
+and provider C ABI versions are unchanged. See the
+[metadata contract](../kernel-architecture/Tensor-Semantic-Metadata.md).
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and

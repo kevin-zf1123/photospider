@@ -565,9 +565,9 @@ Result<PlanarImage> PlanarImage::assemble_view(
     return invalid(
         "ViewUnavailable: assembly has no canonical common-owner mapping");
   };
-  if (!layout.channel_axis || !validate_layout(descriptor, layout).ok() ||
-      requested.empty() || !requested.validate(descriptor.shape).ok() ||
-      sources.empty() || sources.size() != channels.size() ||
+  if (!validate_layout(descriptor, layout).ok() || requested.empty() ||
+      !requested.validate(descriptor.shape).ok() || sources.empty() ||
+      sources.size() != channels.size() ||
       sources.size() != channel_counts.size())
     return Answer(unavailable());
   auto first = sources[0].impl_;
@@ -576,11 +576,16 @@ Result<PlanarImage> PlanarImage::assemble_view(
   auto root = first->view_source ? first->view_source : first;
   const auto start =
       first->view_source ? first->view_channel + channels[0] : channels[0];
-  const auto output_first = requested.dimensions()[*layout.channel_axis].offset;
+  const auto requested_channels =
+      layout.channel_axis ? requested.dimensions()[*layout.channel_axis]
+                          : RegionDimension{0, 1};
+  const auto output_channels =
+      layout.channel_axis ? descriptor.shape[*layout.channel_axis] : 1;
+  const auto output_first = requested_channels.offset;
   if (start < output_first)
     return Answer(unavailable());
   const auto base_channel = start - output_first;
-  if (descriptor.shape[*layout.channel_axis] > root->channels - base_channel)
+  if (output_channels > root->channels - base_channel)
     return Answer(unavailable());
   ResourceBindings owned = resources;
   std::uint64_t traversed = 0;
@@ -598,8 +603,7 @@ Result<PlanarImage> PlanarImage::assemble_view(
     if (owner != root || plane != start + traversed ||
         channels[i] >= source.channels || channel_counts[i] == 0 ||
         channel_counts[i] > source.channels - channels[i] ||
-        channel_counts[i] >
-            requested.dimensions()[*layout.channel_axis].extent - traversed ||
+        channel_counts[i] > requested_channels.extent - traversed ||
         source.height != descriptor.shape[layout.height_axis] ||
         source.width != descriptor.shape[layout.width_axis] ||
         source.descriptor.element_type != descriptor.element_type ||
@@ -623,7 +627,7 @@ Result<PlanarImage> PlanarImage::assemble_view(
       admissions->push_back(source.execution_admission);
     traversed += channel_counts[i];
   }
-  if (traversed != requested.dimensions()[*layout.channel_axis].extent)
+  if (traversed != requested_channels.extent)
     return Answer(unavailable());
   auto status = input_internal::canonicalize_facets(&facets);
   if (!status.ok())
@@ -646,7 +650,7 @@ Result<PlanarImage> PlanarImage::assemble_view(
   alias->config.groups = std::move(layout.groups);
   alias->height = root->height;
   alias->width = root->width;
-  alias->channels = alias->descriptor.shape[*layout.channel_axis];
+  alias->channels = output_channels;
   alias->scalar_width = root->scalar_width;
   alias->page = root->page;
   alias->plane_step = root->plane_step;
