@@ -405,13 +405,27 @@ Result<OperationMetadata> infer_operation_output(
       return Result<OperationMetadata>(invalid("missing bitwise mapping"));
     const auto& layout = *output.planar_layout;
     for (const auto& piece : *output.static_dependency_pieces) {
-      if (piece.inputs.size() != 1 ||
+      if (piece.inputs.empty() ||
           piece.coverage.shape() != result.descriptor.shape)
         return Result<OperationMetadata>(
             invalid("bitwise piece needs one source"));
+      // Exactly one value source stays first. Additional needs may carry
+      // descriptor tags only; they authorize no sample copy or read.
+      for (std::size_t j = 1; j < piece.inputs.size(); ++j) {
+        const auto& descriptor = piece.inputs[j];
+        if (descriptor.port >= inputs.size() || !descriptor.axes.empty() ||
+            descriptor.tags.empty() ||
+            descriptor.roles !=
+                static_cast<std::uint32_t>(DependencyRole::Descriptor))
+          return Result<OperationMetadata>(
+              invalid("bitwise extra need is not descriptor-only"));
+      }
       const auto& map = piece.inputs[0];
+      const auto data = static_cast<std::uint32_t>(DependencyRole::Data);
+      const auto validation =
+          static_cast<std::uint32_t>(DependencyRole::Validation);
       if (map.port >= inputs.size() ||
-          map.roles != static_cast<std::uint32_t>(DependencyRole::Data) ||
+          (map.roles != data && map.roles != (data | validation)) ||
           !map.tags.empty())
         return Result<OperationMetadata>(
             invalid("invalid bitwise source role"));

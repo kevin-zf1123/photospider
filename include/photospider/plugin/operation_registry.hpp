@@ -600,6 +600,22 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
 using PlanarOperationCallback = std::function<Status(
     const PlanarOperationInvocation&)>;  // NOLINT(whitespace/indent_namespace)
 
+/** @brief Read-only validation for one exact source piece of a planar mapped
+ * copy/view. The host calls this only for a Data|Validation mapped need, before
+ * publishing either an alias or a copied owner. No writable output is exposed.
+ * The bounded input window is the sole sample-read authority. Preparation and
+ * definition are immutable; callbacks may run concurrently. C ABI unchanged.
+ */
+struct PHOTOSPIDER_API PlanarMappedValidationInvocation final {
+  const PlanarImageReadWindow& input;
+  std::uint32_t input_port = 0;
+  const Region& output_region;
+  CancellationToken cancellation;
+  std::shared_ptr<const PreparedOperation> prepared;
+};
+using PlanarMappedValidationCallback = std::function<Status(
+    const PlanarMappedValidationInvocation&)>;  // NOLINT(whitespace/indent_namespace)
+
 /** @brief Owned per-node Value or structured Result metadata.
  * Result specialization requires protocol 2 and preserves the registered schema
  * id/version and Result port kind. It may resolve fields/domain/semantic
@@ -715,6 +731,11 @@ struct PHOTOSPIDER_API OperationDefinition final {
   OperationPreparer prepare_static = {};
   /** @brief Exclusive structural image callback when planar_storage_capable. */
   PlanarOperationCallback planar_callback = {};
+  /** @brief Optional read-only validation for mapped planar Data|Validation
+   * pieces. Requires dual generic/planar static preparation. Such mappings
+   * without this callback are rejected during preparation, never trusted.
+   */
+  PlanarMappedValidationCallback validate_planar_mapped = {};
 };
 
 /**
@@ -944,6 +965,11 @@ class PHOTOSPIDER_API OperationRegistry final {
                        const BufferAllocator& allocator = BufferAllocator(),
                        std::shared_ptr<const PreparedOperation> prepared = {},
                        const std::function<bool()>& current = {}) const;
+  Status invoke_planar_mapped_validation(
+      std::shared_ptr<const PreparedOperation> prepared,
+      const PlanarImageReadWindow& input, std::uint32_t input_port,
+      const Region& output_region, const CancellationToken& cancellation,
+      const std::function<bool()>& current) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

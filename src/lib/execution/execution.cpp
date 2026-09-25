@@ -5944,6 +5944,100 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
         return lease;
       },
       impl_->budget);
+  // All plugin planar entry points, including validation-only mapped
+  // operations, share context-wide waiting admission and the CPU worker lane.
+  // Waiting for retirement keeps references captured by body alive.
+  const auto dispatch_planar_callback =
+      [&](const std::function<Status()>& body,
+          std::uint64_t* callback_us) -> Status {
+    struct Completion final {
+      Status status{ErrorCode::Internal, "planar callback did not run"};
+      std::mutex mutex;
+      std::condition_variable changed;
+      bool done = false;
+      std::uint64_t callback_us = 0;
+      ResourceLease lease;
+    };
+    auto completion = std::make_shared<Completion>();
+    if (const auto& resources = impl_->budget->resources()) {
+      auto capacity =
+          ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
+      capacity[ResourceKind::Queue] = 1;
+      capacity[ResourceKind::Entries] = 1;
+      auto admitted = resources->reserve(capacity);
+      if (!admitted.ok())
+        return admitted.status();
+      completion->lease = admitted.take_value();
+    }
+    auto admission = impl_->waiting_admission.try_acquire();
+    if (!admission)
+      return Status::failure(ErrorCode::ResourceExhausted,
+                             "planar callback queue is full");
+    if (const auto& resources = impl_->budget->resources()) {
+      auto issued = resources->consume({0, 0, 0, 1});
+      if (!issued.ok())
+        return issued;
+    }
+    QueuedCallback callback{
+        [&, completion] {
+          const auto callback_started = std::chrono::steady_clock::now();
+          try {
+            if (cancellation.cancelled() || !plan.current()) {
+              completion->status = Status::failure(
+                  cancellation.cancelled() ? ErrorCode::Cancelled
+                                           : ErrorCode::Stale,
+                  "planar execution stopped before callback");
+              return;
+            }
+            completion->status = body();
+          } catch (const std::bad_alloc&) {
+            completion->status = Status{ErrorCode::ResourceExhausted, {}};
+          } catch (...) {
+            completion->status = Status{ErrorCode::OperationFailed, {}};
+          }
+          completion->callback_us = elapsed_us(callback_started);
+        },
+        std::move(*admission),
+        [completion] {
+          {
+            std::lock_guard<std::mutex> lock(completion->mutex);
+            completion->done = true;
+          }
+          completion->changed.notify_one();
+        },
+        completion->lease};
+    if (!impl_->cpu_pool.submit(std::move(callback)))
+      return Status::failure(ErrorCode::ResourceExhausted,
+                             "planar callback queue stopped");
+    std::unique_lock<std::mutex> completion_lock(completion->mutex);
+    completion->changed.wait(completion_lock, [&] { return completion->done; });
+    auto status = std::move(completion->status);
+    if (cancellation.cancelled() || !plan.current())
+      status = Status::failure(
+          cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
+          "planar execution stopped after callback");
+    if (callback_us)
+      *callback_us = completion->callback_us;
+    return status;
+  };
+  const auto run_planar_callback = [&](const std::function<Status()>& body,
+                                       std::uint64_t* callback_us) -> Status {
+    Status status;
+    try {
+      status = dispatch_planar_callback(body, callback_us);
+    } catch (const std::bad_alloc&) {
+      status = Status{ErrorCode::ResourceExhausted, {}};
+    } catch (...) {
+      status = Status{ErrorCode::OperationFailed, {}};
+    }
+    // Admission and queue submission failures obey the same post-entry
+    // priority as callback completion, without allocating a diagnostic.
+    if (cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    if (!plan.current())
+      return Status{ErrorCode::Stale, {}};
+    return status;
+  };
   ExecutionDiagnostics diagnostics;
   diagnostics.plan_digest = plan.digest().value;
   for (const auto& step : plan.steps())
@@ -6393,6 +6487,42 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
                            b.output.dimensions()[axis].offset;
                   });
       }
+      // Copy/view metadata is not a finite-sample certificate. Validate only
+      // the exact mapped pieces carrying Validation, before publishing an
+      // alias OR materialized output. Bypass pieces must never be scanned.
+      const auto validation_role =
+          static_cast<std::uint32_t>(DependencyRole::Validation);
+      const bool needs_validation =
+          std::any_of(parts.begin(), parts.end(), [&](const auto& part) {
+            return (part.map.roles & validation_role) != 0;
+          });
+      if (needs_validation) {
+        // One queue entry for the bounded piece set, not one per channel.
+        auto status = run_planar_callback(
+            [&]() -> Status {
+              for (const auto& part : parts) {
+                if (!(part.map.roles & validation_role))
+                  continue;
+                if (!part.image.valid())
+                  return Status{ErrorCode::TypeMismatch,
+                                "mapped validation requires a planar owner"};
+                auto acquired = part.image.acquire(part.input, cancellation);
+                if (!acquired.ok())
+                  return acquired.status();
+                auto validated =
+                    impl_->operation_registry->invoke_planar_mapped_validation(
+                        step.prepared, acquired.value(), part.map.port,
+                        part.output, cancellation,
+                        [&plan] { return plan.current(); });
+                if (!validated.ok())
+                  return validated;
+              }
+              return Status::success();
+            },
+            nullptr);
+        if (!status.ok())
+          return Result<ExecutionResult>(status);
+      }
       const auto policy = step.traits.outputs[0].data_movement_view_policy;
       bool viewed = false;
       if (policy != DataMovementViewPolicy::Materialize) {
@@ -6463,8 +6593,12 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
               return Result<ExecutionResult>(window.status());
             read = window.take_value();
           }
+          // Validation is already complete. Pass a data-only projection to
+          // the copy primitive; do not weaken its public mapping contract.
+          auto copy_map = part.map;
+          copy_map.roles &= ~validation_role;
           auto copied = copy_planar_region(
-              part.output, part.map, read ? &*read : nullptr,
+              part.output, copy_map, read ? &*read : nullptr,
               part.value.valid() ? &part.value : nullptr, writer, layout, width,
               cancellation, [&plan] { return plan.current(); });
           if (!copied.ok())
@@ -6772,75 +6906,20 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     if (!output.ok())
       return Result<ExecutionResult>(output.status());
     auto image = output.take_value();
-    struct Completion final {
-      Status status{ErrorCode::Internal, "planar callback did not run"};
-      std::mutex mutex;
-      std::condition_variable changed;
-      bool done = false;
-      std::uint64_t callback_us = 0;
-      ResourceLease lease;
-    };
-    auto completion = std::make_shared<Completion>();
-    if (const auto& resources = impl_->budget->resources()) {
-      auto capacity =
-          ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
-      capacity[ResourceKind::Queue] = 1;
-      capacity[ResourceKind::Entries] = 1;
-      auto admitted = resources->reserve(capacity);
-      if (!admitted.ok())
-        return Result<ExecutionResult>(admitted.status());
-      completion->lease = admitted.take_value();
-    }
-    auto admission = impl_->waiting_admission.try_acquire();
-    if (!admission)
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::ResourceExhausted, "planar callback queue is full"));
-    QueuedCallback callback{
-        [&, completion] {
-          const auto callback_started = std::chrono::steady_clock::now();
-          try {
-            if (cancellation.cancelled() || !plan.current()) {
-              completion->status = Status::failure(
-                  cancellation.cancelled() ? ErrorCode::Cancelled
-                                           : ErrorCode::Stale,
-                  "planar execution stopped before callback");
-              return;
-            }
-            completion->status = impl_->operation_registry->invoke_planar(
-                step.operation, windows, step.input_demands, step.parameters,
-                step.output_demand, image, cancellation,
-                impl_->budget->on_demand_allocator(observation), step.prepared,
-                [&plan] { return plan.current(); });
-          } catch (const std::bad_alloc&) {
-            completion->status = Status{ErrorCode::ResourceExhausted, {}};
-          } catch (...) {
-            completion->status = Status{ErrorCode::OperationFailed, {}};
-          }
-          completion->callback_us = elapsed_us(callback_started);
+    std::uint64_t callback_us = 0;
+    auto status = run_planar_callback(
+        [&] {
+          return impl_->operation_registry->invoke_planar(
+              step.operation, windows, step.input_demands, step.parameters,
+              step.output_demand, image, cancellation,
+              impl_->budget->on_demand_allocator(observation), step.prepared,
+              [&plan] { return plan.current(); });
         },
-        std::move(*admission),
-        [completion] {
-          {
-            std::lock_guard<std::mutex> lock(completion->mutex);
-            completion->done = true;
-          }
-          completion->changed.notify_one();
-        },
-        completion->lease};
-    if (!impl_->cpu_pool.submit(std::move(callback)))
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::ResourceExhausted, "planar callback queue stopped"));
-    std::unique_lock<std::mutex> completion_lock(completion->mutex);
-    completion->changed.wait(completion_lock, [&] { return completion->done; });
-    auto status = std::move(completion->status);
-    if (cancellation.cancelled() || !plan.current())
-      status = Status::failure(
-          cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
-          "planar execution stopped after callback");
+        &callback_us);
     OperationTiming timing;
     timing.output = step.result_ref();
     timing.backend = Backend::Cpu;
-    timing.duration_us = completion->callback_us;
+    timing.duration_us = callback_us;
     timing.outcome = status.code;
     auto count = step.output_demand.element_count();
     if (count.ok())
