@@ -66,6 +66,14 @@ SameMinorVersion gate accepts 0.25 and rejects a 0.24 request. OperationTraits18
 stage identity domains, C operation ABI9, planar C extension v1, provider ABI1,
 WorkflowDocument schema3 and TDM4 are unchanged.
 
+Package 0.26.0 changes the planar `consume_work` callback to return a borrowed
+`const Status&` and adds `ResourceBudget::try_consume`. Success leaves the
+caller's failure object unchanged and admits all work dimensions atomically.
+The returned checkpoint status is valid until the next checkpoint or callback
+return; copy a failure before retaining it. Native C++ callbacks and consumers
+must rebuild together. The installed gate accepts 0.26 and rejects 0.25.
+The C ABI and identity/schema domains listed above remain unchanged.
+
 ## Digests
 
 The planar preparation and mapped-movement extension changes C++ layouts in

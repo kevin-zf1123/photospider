@@ -86,6 +86,8 @@ class StrictMathStorage final {
   std::array<bool, Program::kNodes> valid_{};
   const Program* cached_ = nullptr;
   unsigned cached_precision_ = 0;
+  std::array<std::optional<Rational>, Program::kNodes> algebraic_values_;
+  const Program* algebraic_program_ = nullptr;
   struct Special {
     std::uint64_t bits;
   };
@@ -93,13 +95,20 @@ class StrictMathStorage final {
   // Whole-program rational fallback also resolves exact midpoint ties in toes,
   // squares and sqrt(3*x); no binary64 intermediate is introduced.
   std::uint64_t algebraic(const Program& p, double x, bool narrow,
-                          const std::function<Status(std::uint64_t)>& consume) {
-    std::array<Rational, Program::kNodes> values;
+                          const execution_internal::WorkConsumer& consume) {
+    auto& values = algebraic_values_;
+    if (algebraic_program_ != &p) {
+      for (auto& value : values)
+        value.reset();
+      algebraic_program_ = &p;
+    }
     for (unsigned i = 0; i < p.size; ++i) {
       const auto& n = p.nodes[i];
-      auto status = consume(1);
+      const auto& status = consume(1);
       if (!status.ok())
         throw status;
+      if (!n.varying && values[i])
+        continue;
       auto& out = values[i];
       switch (n.code) {
         case Code::Input:
@@ -114,22 +123,22 @@ class StrictMathStorage final {
           out = Rational::binary(n.bits, false);
           break;
         case Code::Add:
-          out = Rational::add(values[n.a], values[n.b]);
+          out = Rational::add(*values[n.a], *values[n.b]);
           break;
         case Code::Subtract:
-          out = Rational::subtract(values[n.a], values[n.b]);
+          out = Rational::subtract(*values[n.a], *values[n.b]);
           break;
         case Code::Multiply:
-          out = Rational::multiply(values[n.a], values[n.b]);
+          out = Rational::multiply(*values[n.a], *values[n.b]);
           break;
         case Code::Divide:
-          out = Rational::divide(values[n.a], values[n.b]);
+          out = Rational::divide(*values[n.a], *values[n.b]);
           break;
         case Code::MaxZero:
-          out = values[n.a].negative ? rational(0) : values[n.a];
+          out = values[n.a]->negative ? rational(0) : *values[n.a];
           break;
         case Code::Sqrt: {
-          const auto& value = values[n.a];
+          const auto& value = *values[n.a];
           if (value.negative && !value.n.words.empty())
             return nan_bits(narrow);
           if (value.n.words.size() > 2 * Math::kWords ||
@@ -154,7 +163,7 @@ class StrictMathStorage final {
           throw std::logic_error("nonrational FMT-09 algebraic branch");
       }
     }
-    auto value = values[p.result];
+    auto& value = *values[p.result];
     // Formula-intrinsic exact zeros are +0, except separately restored signs.
     if (value.n.words.empty())
       value.negative = value.negative_zero = false;
@@ -275,7 +284,7 @@ class StrictMathStorage final {
   explicit StrictMathStorage(SequenceProfile profile) : functions_(profile) {}
   Result<std::uint64_t> evaluate(
       const Program& p, double x, bool narrow,
-      const std::function<Status(std::uint64_t)>& consume) {
+      const execution_internal::WorkConsumer& consume) {
     using R = Result<std::uint64_t>;
     auto& m = functions_.functions.math;
     m.consume = &consume;
@@ -287,7 +296,8 @@ class StrictMathStorage final {
       }
     } end{m};
     try {
-      if (p.final_sqrt || !std::isfinite(x)) {
+      if (p.final_sqrt || !std::isfinite(x) ||
+          (p.rational && std::abs(x) < 0x1p-128)) {
         if constexpr (Math::kWords < 192)
           throw numeric_ops::DirectedCapacityRetry{};
         return R(algebraic(p, x, narrow, consume));
@@ -346,8 +356,8 @@ class StrictMathStorage final {
   }
 };
 using StrictMath = StrictMathStorage<>;
-// 1024-bit storage at 128/256-bit working precision. Exact endpoint agreement
+// 512-bit storage at 128/256-bit working precision. Exact endpoint agreement
 // is still required; only internal capacity/rounding uncertainty retries the
 // original 12288-bit storage, up to 4096-bit working precision.
-using CompactMath = StrictMathStorage<numeric_ops::DirectedIntervalStorage<16>>;
+using CompactMath = StrictMathStorage<numeric_ops::DirectedIntervalStorage<8>>;
 }  // namespace ps::plugin_internal::transfer_ops

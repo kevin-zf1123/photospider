@@ -1,6 +1,7 @@
 #include "photospider/execution/resources.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -78,6 +79,19 @@ struct ResourceBudget::Impl {
   std::mutex mutex;
   ResourceLimits limits;
   ResourceStatistics stats;
+  std::atomic<std::uint64_t> issued_work{0};
+  bool admit_work(std::uint64_t amount) {
+    if (!amount)
+      return true;
+    auto prior = issued_work.load(std::memory_order_relaxed);
+    do {
+      if (amount > limits.maximum_work - prior)
+        return false;
+    } while (!issued_work.compare_exchange_weak(prior, prior + amount,
+                                                std::memory_order_relaxed,
+                                                std::memory_order_relaxed));
+    return true;
+  }
   bool fits(const ResourceCapacity& c) const {
     for (std::size_t i = 0; i < c.values.size(); ++i)
       if (c.values[i] > limits.capacity.values[i] -
@@ -244,33 +258,47 @@ void ResourceLease::settle_quarantine() noexcept {
   }
 }
 Status ResourceBudget::consume(ResourceWork work) const {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  auto& issued = impl_->stats.issued;
-  const auto& limit = impl_->limits;
-  if (work.work > limit.maximum_work - issued.work ||
-      work.io_bytes > limit.maximum_io_bytes - issued.io_bytes ||
-      work.io_requests > limit.maximum_io_requests - issued.io_requests ||
-      work.stages > limit.maximum_stages - issued.stages) {
+  Status result;
+  try_consume(work, result);
+  return result;
+}
+bool ResourceBudget::try_consume(ResourceWork work, Status& failure) const {
+  auto failed = [&](bool work_limit) {
     resource_internal::metadata_failure(*this, ErrorCode::ResourceExhausted);
-    const bool work_limit =
-        work.work > limit.maximum_work - issued.work ||
-        work.io_bytes > limit.maximum_io_bytes - issued.io_bytes ||
-        work.io_requests > limit.maximum_io_requests - issued.io_requests;
-    return Status{
+    failure = Status{
         ErrorCode::ResourceExhausted,
         work_limit ? "managed resource work exhausted"
                    : "managed resource stages exhausted",
         work_limit ? FailureReason::WorkLimit : FailureReason::StageLimit};
-  }
-  issued.work += work.work;
+    return false;
+  };
+  if (!work.io_bytes && !work.io_requests && !work.stages)
+    return impl_->admit_work(work.work) || failed(true);
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  auto& issued = impl_->stats.issued;
+  const auto& limit = impl_->limits;
+  const bool work_limit =
+      work.work > limit.maximum_work -
+                      impl_->issued_work.load(std::memory_order_relaxed) ||
+      work.io_bytes > limit.maximum_io_bytes - issued.io_bytes ||
+      work.io_requests > limit.maximum_io_requests - issued.io_requests;
+  if (work_limit || work.stages > limit.maximum_stages - issued.stages)
+    return failed(work_limit);
+  // All other dimensions are locked and validated. After this CAS no failure
+  // or throwing operation occurs before committing their counters.
+  if (!impl_->admit_work(work.work))
+    return failed(true);
   issued.io_bytes += work.io_bytes;
   issued.io_requests += work.io_requests;
   issued.stages += work.stages;
-  return Status::success();
+  return true;
 }
+
 ResourceStatistics ResourceBudget::statistics() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  return impl_->stats;
+  auto result = impl_->stats;
+  result.issued.work = impl_->issued_work.load(std::memory_order_relaxed);
+  return result;
 }
 Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
     std::shared_ptr<const CpuStorage> storage) const {

@@ -54,10 +54,11 @@ class Workspace final {
     return Result<T*>(value_);
   }
 };
-inline Status validate_sample(const Preparation& state, std::uint64_t bits) {
+inline const char* sample_problem(const Preparation& state,
+                                  std::uint64_t bits) {
   const auto p = numeric_ops::BinaryParts::decode(bits, state.narrow);
   if (p.nan || p.infinite) {
-    return sample_error("nonfinite participating sample");
+    return "nonfinite participating sample";
   }
   const auto& c = state.program;
   const double x = numeric_double(bits, state.narrow);
@@ -72,16 +73,15 @@ inline Status validate_sample(const Preparation& state, std::uint64_t bits) {
       hi = 10000;
     }
   } else if (c.definition.curve != TransferCurve::HlgOetf) {
-    return Status::success();
+    return nullptr;
   }
-  return x >= lo && x <= hi
-             ? Status::success()
-             : sample_error("participating sample outside native domain");
+  return x >= lo && x <= hi ? nullptr
+                            : "participating sample outside native domain";
 }
 class Runner final {
   const Preparation& state_;
   const BufferAllocator& allocator_;
-  const std::function<Status(std::uint64_t)>& consume_;
+  const execution_internal::WorkConsumer& consume_;
   bool environment_active_;
   Workspace<StrictMath> strict_;
   Workspace<CompactMath> compact_;
@@ -91,7 +91,7 @@ class Runner final {
   NumericDiagnostics diagnostics;
   std::uint64_t failed_lane = 0;
   Runner(const Preparation& state, const BufferAllocator& allocator,
-         const std::function<Status(std::uint64_t)>& consume, bool active)
+         const execution_internal::WorkConsumer& consume, bool active)
       : state_(state),
         allocator_(allocator),
         consume_(consume),
@@ -103,7 +103,7 @@ class Runner final {
                               : CpuNumericProfile::X86Avx2;
     std::snprintf(
         diagnostics.implementation.data(), diagnostics.implementation.size(),
-        "FMT09/2;real-DAG;SLEEF-3.9.0/"
+        "FMT09/3;real-DAG;compact-words=8;SLEEF-3.9.0/"
         "u10;filter=%d;compact=%d;gamma2-simd=%d;%s",
         PHOTOSPIDER_TRANSFER_FAST_MATH, PHOTOSPIDER_TRANSFER_COMPACT_MATH,
         PHOTOSPIDER_TRANSFER_GAMMA2_SIMD,
@@ -133,24 +133,69 @@ class Runner final {
       return Status::success();
     }
     const auto& curve = state_.program;
+    if (curve.identity) {
+      unsigned bad = count;
+      if (state_.semantic) {
+        if (stride == width && PHOTOSPIDER_TRANSFER_GAMMA2_SIMD &&
+            numeric_ops::accelerated_math_available()) {
+          bad = first_nonfinite(source, count, state_.narrow);
+        } else {
+          for (unsigned i = 0; i < count; ++i) {
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, source + static_cast<std::int64_t>(i) * stride,
+                        width);
+            if ((bits & ~sign_mask(state_.narrow)) >=
+                infinity_bits(state_.narrow)) {
+              bad = i;
+              break;
+            }
+          }
+        }
+      }
+      diagnostics.evaluated_values += bad == count ? count : bad + 1;
+      if (bad != count) {
+        failed_lane = bad;
+        return sample_error("nonfinite participating sample");
+      }
+      if (target) {
+        if (stride == width) {
+          std::memcpy(target, source, count * width);
+        } else {
+          for (unsigned i = 0; i < count; ++i)
+            std::memcpy(target + i * width,
+                        source + static_cast<std::int64_t>(i) * stride, width);
+        }
+        diagnostics.copied_elements += count;
+      } else {
+        diagnostics.view_elements += count;
+      }
+      return Status::success();
+    }
     // No DAG arrays, branch gathering or workspace for exact gamma=2. This
     // path still validates every participating semantic sample before SIMD.
     if (curve.definition.curve == TransferCurve::PowerGamma &&
         *curve.definition.gamma == 2 && environment_active_) {
       if (state_.semantic) {
-        for (unsigned i = 0; i < count; ++i) {
-          failed_lane = i;
-          std::uint64_t bits = 0;
-          std::memcpy(&bits, source + static_cast<std::int64_t>(i) * stride,
-                      width);
-          ++diagnostics.evaluated_values;
-          // Power-gamma has no bounded native input interval. Avoid creating
-          // and assigning the owning Status object for every valid sample.
-          const auto infinity = state_.narrow ? UINT64_C(0x7f800000)
-                                              : UINT64_C(0x7ff0000000000000);
-          if ((bits & ~sign_mask(state_.narrow)) >= infinity) {
-            return sample_error("nonfinite participating sample");
+        unsigned bad = count;
+        if (stride == width && PHOTOSPIDER_TRANSFER_GAMMA2_SIMD &&
+            numeric_ops::accelerated_math_available()) {
+          bad = first_nonfinite(source, count, state_.narrow);
+        } else {
+          const auto inf = infinity_bits(state_.narrow);
+          for (unsigned i = 0; i < count; ++i) {
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, source + static_cast<std::int64_t>(i) * stride,
+                        width);
+            if ((bits & ~sign_mask(state_.narrow)) >= inf) {
+              bad = i;
+              break;
+            }
           }
+        }
+        diagnostics.evaluated_values += bad == count ? count : bad + 1;
+        if (bad != count) {
+          failed_lane = bad;
+          return sample_error("nonfinite participating sample");
         }
       } else {
         diagnostics.evaluated_values += count;
@@ -162,16 +207,11 @@ class Runner final {
         if (state_.semantic && !curve.encode) {
           // Signed power-gamma accepts finite values outside [0,1]. Squaring
           // such a value may overflow; semantic output must remain finite.
-          const auto infinity = state_.narrow ? UINT64_C(0x7f800000)
-                                              : UINT64_C(0x7ff0000000000000);
-          for (unsigned i = 0; i < count; ++i) {
-            failed_lane = i;
-            std::uint64_t bits = 0;
-            std::memcpy(&bits, target + i * width, width);
-            if ((bits & ~sign_mask(state_.narrow)) >= infinity) {
-              return sample_error("nonfinite rounded result",
-                                  FailureReason::ArithmeticOverflow);
-            }
+          const auto bad = first_nonfinite(target, count, state_.narrow);
+          if (bad != count) {
+            failed_lane = bad;
+            return sample_error("nonfinite rounded result",
+                                FailureReason::ArithmeticOverflow);
           }
         }
         return Status::success();
@@ -219,9 +259,8 @@ class Runner final {
                   width);
       ++diagnostics.evaluated_values;
       if (state_.semantic) {
-        status = validate_sample(state_, bits[i]);
-        if (!status.ok()) {
-          return status;
+        if (const auto* problem = sample_problem(state_, bits[i])) {
+          return sample_error(problem);
         }
       }
       if (c.identity) {
@@ -249,15 +288,15 @@ class Runner final {
       branches[i] = c.branch(input[i]);
     }
     for (unsigned branch = 0; branch < c.branch_count; ++branch) {
-      std::array<unsigned, 4> indices{};
-      std::array<double, 4> operands{};
+      std::array<unsigned, FastMath::kLanes> indices{};
+      std::array<double, FastMath::kLanes> operands{};
       unsigned lanes = 0;
       auto batch = [&]() -> Status {
         if (!lanes) {
           return Status::success();
         }
-        std::array<std::uint64_t, 4> computed{};
-        std::array<bool, 4> accepted{};
+        std::array<std::uint64_t, FastMath::kLanes> computed{};
+        std::array<bool, FastMath::kLanes> accepted{};
         if (PHOTOSPIDER_TRANSFER_FAST_MATH && environment_active_ &&
             numeric_ops::accelerated_math_available()) {
           auto w = fast_.get(allocator_);
@@ -499,7 +538,8 @@ struct Continuation final {
       return phase.consume_work(n);
     };
     ExactWorkScope exact(&consume, &phase.query.cancellation);
-    Runner runner(*state, phase.allocator, consume, environment.active());
+    execution_internal::WorkConsumer checkpoint(consume);
+    Runner runner(*state, phase.allocator, checkpoint, environment.active());
     auto result = [&]() -> Result<ValueFragments> {
       try {
         return publish(phase, *state, runner);
@@ -569,7 +609,11 @@ Status planar_run(const PlanarOperationInvocation& call,
               state.selected(state.axis ? at[*state.axis] : 0);
           // Copies need no DAG lane arrays. Amortize host checkpoints over at
           // most 1024 authorized entries, retaining the contract's stop bound.
-          const unsigned batch = !split_selection && !selected ? 1024 : 64;
+          const bool simple =
+              !selected || state.program.identity ||
+              (state.program.definition.curve == TransferCurve::PowerGamma &&
+               *state.program.definition.gamma == 2);
+          const unsigned batch = !split_selection && simple ? 1024 : 64;
           for (std::uint64_t dx = 0; dx < samples; dx += batch) {
             at[width_axis] = column + dx;
             const auto n = static_cast<unsigned>(
@@ -615,7 +659,7 @@ Status planar(const PlanarOperationInvocation& call) {
   if (!call.consume_work) {
     return Status{ErrorCode::Internal, "FMT-09 planar work service missing"};
   }
-  const auto& consume = call.consume_work;
+  const execution_internal::WorkConsumer consume(call.consume_work);
   ExactWorkScope exact(&consume, &call.cancellation);
   Runner runner(state, call.allocator, consume, environment.active());
   Status result;

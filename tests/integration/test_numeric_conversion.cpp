@@ -1042,8 +1042,26 @@ int direct_limits() {
                         {"target_range", std::string("i:0,i:1")},
                         {"metadata_mode", std::string("raw")}};
   request.snapshot_identity = "fmt06-limits";
-  request.limits.maximum_work = 150;
+  request.limits.maximum_work = UINT64_MAX;
   auto registry = make_default_operation_registry();
+  // Derive the limit from a completed execution: the exact integer algorithm
+  // may legitimately eliminate work, so a fixed historical threshold is not
+  // a resource contract. One unit below completion must still fail.
+  auto measured =
+      registry->start_dependency("numeric.convert_format_strict", request);
+  PS_CHECK(measured.ok());
+  auto reference = measured.take_value();
+  PS_CHECK(reference->poll().ok());
+  auto reference_fragments =
+      ValueFragments::create(input.descriptor(), input.facets(),
+                             Footprint::all({1}).take_value(), {input});
+  PS_CHECK(reference_fragments.ok());
+  PS_CHECK(reference->supply({reference_fragments.take_value()}, "fmt06-limits")
+               .ok());
+  PS_CHECK(reference->poll().ok());
+  const auto complete_work = reference->consumed_work();
+  PS_CHECK(complete_work > 1);
+  request.limits.maximum_work = complete_work - 1;
   auto started =
       registry->start_dependency("numeric.convert_format_strict", request);
   PS_CHECK(started.ok());
@@ -1058,7 +1076,8 @@ int direct_limits() {
   auto second = session->poll();
   PS_CHECK(!second.ok());
   PS_CHECK(second.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(session->consumed_work() > 100);
+  PS_CHECK(session->consumed_work() > 0 &&
+           session->consumed_work() < complete_work);
   CancellationSource cancellation;
   request.limits.maximum_work = 1048576;
   request.cancellation = cancellation.token();
@@ -1074,9 +1093,11 @@ int direct_limits() {
   CancellationSource midflight;
   request.cancellation = midflight.token();
   std::uint64_t work = 0;
+  unsigned evaluation_checks = 0;
+  bool evaluating = false;
   auto charging = [&](std::uint64_t amount) {
     work += amount;
-    if (work > 200)
+    if (evaluating && amount && ++evaluation_checks == 2)
       midflight.cancel();
     return Status::success();
   };
@@ -1090,10 +1111,11 @@ int direct_limits() {
                              Footprint::all({1}).take_value(), {input});
   PS_CHECK(mid_fragments.ok());
   PS_CHECK(active->supply({mid_fragments.take_value()}, "fmt06-limits").ok());
+  evaluating = true;
   auto interrupted = active->poll();
   PS_CHECK(!interrupted.ok());
   PS_CHECK(interrupted.status().code == ErrorCode::Cancelled);
-  PS_CHECK(work > 200);
+  PS_CHECK(work > 0 && evaluation_checks == 2);
   return 0;
 }
 }  // namespace

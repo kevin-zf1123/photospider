@@ -546,6 +546,43 @@ void planar_cases() {
     }
   }
 }
+void span_failure_locations() {
+  for (bool narrow : {false, true})
+    for (bool gamma : {false, true})
+      for (unsigned bad : {1023U, 1024U, 1029U}) {
+        TransferDefinition definition;
+        definition.curve =
+            gamma ? TransferCurve::PowerGamma : TransferCurve::Linear;
+        if (gamma)
+          definition.gamma = 2.;
+        auto metadata = gray(take(encode_transfer_definition(definition)));
+        PlanarImageConfig config;
+        config.order = ImagePlaneOrder::Continuous;
+        config.channel_axis.reset();
+        const ValueDescriptor descriptor{
+            narrow ? ElementType::Float32 : ElementType::Float64,
+            {1, 1030}};
+        auto image = take(PlanarImage::create(
+            descriptor, config, {take(encode_tensor_description(metadata))}));
+        auto bytes = narrow ? pack<float>(std::vector<float>(1030, .5f))
+                            : pack<double>(std::vector<double>(1030, .5));
+        const auto bits =
+            narrow ? UINT64_C(0x7f800001) : UINT64_C(0x7ff0000000000001);
+        const auto width = narrow ? 4U : 8U;
+        std::memcpy(bytes.data() + bad * width, &bits, width);
+        const auto whole = Region::whole(descriptor.shape);
+        take(image.publish(whole, bytes.data(), bytes.size()));
+        auto result =
+            planar_run(image, {{"group", std::string("Y")}}, false, whole);
+        require(
+            !result.ok() && result.status().code == ErrorCode::OperationFailed,
+            "batched semantic nonfinite must fail");
+        require(result.status().message.find("coordinate=[0," +
+                                             std::to_string(bad) + "]") !=
+                    std::string::npos,
+                "batched failure lost first failing coordinate");
+      }
+}
 void gamma2_semantic_overflow() {
   TransferDefinition definition;
   definition.curve = TransferCurve::PowerGamma;
@@ -882,6 +919,7 @@ int main() {
     std::cerr << "special values\n";
     special_values();
     gamma2_semantic_overflow();
+    span_failure_locations();
     std::cerr << "planar axes/pitch/reporting\n";
     planar_axis_and_pitch();
     planar_numeric_reporting();

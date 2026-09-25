@@ -7,6 +7,9 @@ namespace ps::plugin_internal::transfer_ops {
 // environment with gradual underflow, and count authorized contiguous values.
 // Signed gamma=2 square/sqrt. Integer masks quiet NaNs preserving payload/sign;
 // no signaling NaN is used as a floating operand. Never reads a padded lane.
+// Returns count if all values are finite, otherwise the first failing lane.
+unsigned first_nonfinite(const std::uint8_t* input, unsigned count,
+                         bool narrow);
 void gamma2_simd(const std::uint8_t* input, std::uint8_t* output,
                  unsigned count, bool narrow, bool encode);
 }  // namespace ps::plugin_internal::transfer_ops

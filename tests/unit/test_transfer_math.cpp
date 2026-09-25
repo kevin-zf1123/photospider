@@ -3,11 +3,13 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <tuple>
 #include <vector>
 
 #include "02-format-color/transfer_fast.hpp"
 #include "02-format-color/transfer_math.hpp"
+#include "fixtures/fmt09_division.hpp"
 #include "fixtures/fmt09_sweep.hpp"
 #include "support/test_support.hpp"
 
@@ -23,6 +25,99 @@ int main() {
     return Status::success();
   };
   data_internal::format_numeric::ExactWorkScope scope(&consume, nullptr);
+  {
+    ps::plugin_internal::numeric_ops::DirectedIntervalStorage<8> division(
+        SequenceProfile::Strict);
+    division.consume = &consume;
+    for (const auto& row : fmt09_test::division) {
+      decltype(division)::Integer n{}, d{}, q{}, r{};
+      std::copy_n(row[0], 8, n.words.begin());
+      std::copy_n(row[1], 8, d.words.begin());
+      division.divide_unsigned(q, r, n, d);
+      PS_CHECK(std::equal(q.words.begin(), q.words.end(), row[2]));
+      PS_CHECK(std::equal(r.words.begin(), r.words.end(), row[3]));
+    }
+  }
+  for (const auto code :
+       {ErrorCode::Cancelled, ErrorCode::Stale, ErrorCode::ResourceExhausted}) {
+    ps::plugin_internal::numeric_ops::DirectedIntervalStorage<8> divider(
+        SequenceProfile::Strict);
+    unsigned digits = 0;
+    const std::function<Status(std::uint64_t)> stop =
+        [&](std::uint64_t amount) {
+          if (amount == 32 && ++digits == 2)
+            return Status{code, "word division stop"};
+          return Status::success();
+        };
+    divider.consume = &stop;
+    decltype(divider)::Integer n{}, d{}, q{}, r{};
+    n.words.fill(UINT64_MAX);
+    d.words[2] = 1;
+    d.words[0] = 7;
+    bool failed = false;
+    try {
+      divider.divide_unsigned(q, r, n, d);
+    } catch (const Status& status) {
+      failed = status.code == code;
+    }
+    PS_CHECK(failed && digits == 2);
+  }
+  // Direct integer oracle covers aliasing/carry in the reused remainder.
+  std::mt19937_64 random(90926);
+  for (unsigned i = 0; i < 2000; ++i) {
+    const auto n = random(), d = random() | 1;
+    const auto qr = Natural::divide(Natural(n), Natural(d));
+    PS_CHECK(qr.first.low64() == n / d);
+    PS_CHECK(qr.second.low64() == n % d);
+    Natural shifted(n);
+    for (unsigned bits : {0U, 1U, 31U, 32U, 33U, 64U, 1074U}) {
+      auto value = shifted;
+      value.shift_left(bits);
+      value.shift_right(bits);
+      PS_CHECK(value.compare(shifted) == 0);
+    }
+  }
+  {
+    Natural d(13), q(1), rem(7);
+    d.shift_left(1074);
+    q.shift_left(127);
+    const auto n = Natural::add(Natural::multiply(d, q), rem);
+    const auto divided = Natural::divide(n, d);
+    PS_CHECK(divided.first.compare(q) == 0);
+    PS_CHECK(divided.second.compare(rem) == 0);
+    Natural boundary(1);
+    boundary.shift_left(32 * 254);
+    PS_CHECK(boundary.words.size() == 255);
+    bool limited = false;
+    try {
+      boundary.shift_left(32);
+    } catch (const std::bad_alloc&) {
+      limited = true;
+    }
+    PS_CHECK(limited);
+  }
+  for (const auto code :
+       {ErrorCode::Cancelled, ErrorCode::Stale, ErrorCode::ResourceExhausted}) {
+    unsigned polls = 0;
+    const std::function<Status(std::uint64_t)> stop = [&](std::uint64_t) {
+      if (++polls == 3)
+        return Status{code, "division stop"};
+      return Status::success();
+    };
+    bool failed = false;
+    try {
+      data_internal::format_numeric::ExactWorkScope inner(&stop, nullptr);
+      Natural n(1), d(1);
+      n.shift_left(4000);
+      d = Natural(3);
+      d.set_bit(64);
+      static_cast<void>(Natural::divide(n, d));
+    } catch (const data_internal::format_numeric::ExactWorkFailure& e) {
+      failed = e.status.code == code;
+    }
+    PS_CHECK(failed);
+    PS_CHECK(polls == 3);
+  }
   std::unique_ptr<CurveProgram> program;
   std::unique_ptr<StrictMath> math;
   std::unique_ptr<CompactMath> compact;

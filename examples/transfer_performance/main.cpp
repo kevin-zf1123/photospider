@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -107,7 +108,8 @@ int main(int argc, char** argv) try {
       (coverage != "full" && coverage != "r" && coverage != "alpha" &&
        coverage != "roi") ||
       (mode != "respect" && mode != "raw") ||
-      (corpus != "palette" && corpus != "sweep") ||
+      (corpus != "palette" && corpus != "sweep" &&
+       corpus.rfind("file:", 0) != 0) ||
       (budget_mode != "unmanaged" && budget_mode != "managed")) {
     throw std::runtime_error(
         "usage: [size 1..4096] [curve] [encode|decode] [f32|f64] "
@@ -178,11 +180,27 @@ int main(int argc, char** argv) try {
   if (encode && kind == 6) {
     hi = 10000;
   }
-  const auto* corpus_begin = corpus == "palette"
+  std::vector<fmt09_test::Case> external;
+  const bool nonrepeating = corpus.rfind("file:", 0) == 0;
+  if (nonrepeating) {
+    std::ifstream stream(corpus.substr(5));
+    if (!stream)
+      throw std::runtime_error("cannot open oracle table");
+    fmt09_test::Case item{};
+    while (stream >> item.curve >> item.encode >> item.narrow >> item.gamma >>
+           item.variant >> item.black >> item.white >> item.input >>
+           item.expected)
+      external.push_back(item);
+    if (!stream.eof())
+      throw std::runtime_error("invalid oracle table");
+  }
+  const auto* corpus_begin = nonrepeating ? external.data()
+                             : corpus == "palette"
                                  ? std::begin(fmt09_test::golden)
                                  : std::begin(fmt09_test::sweep);
-  const auto* corpus_end = corpus == "palette" ? std::end(fmt09_test::golden)
-                                               : std::end(fmt09_test::sweep);
+  const auto* corpus_end = nonrepeating ? external.data() + external.size()
+                           : corpus == "palette" ? std::end(fmt09_test::golden)
+                                                 : std::end(fmt09_test::sweep);
   for (auto it = corpus_begin; it != corpus_end; ++it) {
     const auto& t = *it;
     if (t.curve != kind || t.encode != encode || t.narrow != narrow ||
@@ -198,13 +216,17 @@ int main(int argc, char** argv) try {
   if (palette.empty()) {
     throw std::runtime_error("no independent golden palette");
   }
+  if (nonrepeating && palette.size() < size * size * 3)
+    throw std::runtime_error("oracle table too short for nonrepeating RGB");
   auto sample = [&](std::uint64_t y, std::uint64_t x, std::uint64_t c,
                     bool expected) {
     if (c == 3) {
       return narrow ? UINT64_C(0x7f800055)
                     : UINT64_C(0x7ff0000000000055);  // unselected sNaN
     }
-    const auto& t = palette[(y * 17 + x * 13 + c * 7) % palette.size()];
+    const auto& t =
+        palette[nonrepeating ? (y * size + x) * 3 + c
+                             : (y * 17 + x * 13 + c * 7) % palette.size()];
     return expected ? t.expected : t.input;
   };
   const ValueDescriptor descriptor{

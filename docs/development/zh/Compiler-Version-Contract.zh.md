@@ -360,3 +360,9 @@ PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证�
 C++ 对象文件或共享库。SameMinorVersion 安装门禁接受 0.25，拒绝 0.24 请求。
 OperationTraits18、各阶段 identity domain、C operation ABI9、planar C 扩展 v1、
 provider ABI1、WorkflowDocument schema3 与 TDM4 保持不变。
+
+包版本 0.26.0 将 planar `consume_work` 改为返回借用的 `const Status&`，并新增
+`ResourceBudget::try_consume`。成功时不修改调用者的失败对象，所有 work 维度
+在同一个事务中准入。借用状态有效期截止下次 checkpoint 或 callback 返回；
+需要保留的失败必须复制。C++ callback 与消费者必须一起重新编译。
+安装门禁接受 0.26、拒绝 0.25；C ABI、identity 与 schema 域保持不变。

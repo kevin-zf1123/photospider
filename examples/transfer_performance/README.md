@@ -97,9 +97,9 @@ planar root's zero-work result as an equivalent managed-performance control.
 Three independent build flags default to ON:
 
 - `PHOTOSPIDER_TRANSFER_FAST_MATH`: existing certified SLEEF interval filter.
-- `PHOTOSPIDER_TRANSFER_COMPACT_MATH`: 16-word strict enclosure tier; capacity or
+- `PHOTOSPIDER_TRANSFER_COMPACT_MATH`: 8-word strict enclosure tier; capacity or
   unresolved rounding retries the retained 192-word evaluator, not an estimate.
-- `PHOTOSPIDER_TRANSFER_GAMMA2_SIMD`: signed square/sqrt vector kernel. OFF retains
+- `PHOTOSPIDER_TRANSFER_GAMMA2_SIMD`: signed square/sqrt and IEEE bit-classification vector kernels. OFF retains
   the allocation-free scalar span specialization and exact hardware arithmetic.
 
 For a wide/scalar algorithm control, keep FAST_MATH=ON and set the other two
@@ -136,3 +136,29 @@ unchanged: it only checked its first execution and has no corpus/work columns.
 The supplied results record exact commands, raw stdout/stderr, process exits,
 per-execution samples and the environment; no baseline performance is inferred
 from another OS or machine.
+
+## Hotspot optimization measurements
+
+`fmt09_sweep.py --samples 512 --table out/oracle.txt` generates a larger external
+180/360-digit oracle table. Pass `file:out/oracle.txt` as the corpus argument:
+RGB uses consecutive distinct entries and rejects tables shorter than the image.
+Alpha remains a repeated bypass payload. Input construction and table parsing
+are outside execute timing. `compare.py --all-curves --corpus-table out/oracle.txt`
+compares all 13 supported parameter selections, both directions and dtypes,
+and strict/native profiles. Add `--managed` for root accounting and `--workers`
+for worker scaling; use a workload with multiple tiles for actual parallelism.
+
+The current compact tier has 512-bit storage with the same certified endpoint
+agreement and wide fallback. Per-callback rational scratch and constants are
+reused; long division skips a prefix that cannot contribute quotient bits.
+Planar checkpoints borrow the host status and pure-work admissions use a bounded
+atomic CAS. Mixed work/I/O/stage admissions remain one transaction. No deferred
+accounting or speculative work credit is used.
+
+General interval filtering gathers up to 16 same-branch lanes. Strict lanes
+retain independent exact refinement and share per-callback constants/scratch.
+The small tier divides normalized base-2^64 words with exact trial-quotient
+correction; the wide tier retains bitwise division. Rational fallback removes
+common binary factors, reuses remainder storage, and handles single-word
+denominators directly. The independent Python `divmod` fixtures are reproduced
+with `python3 tests/oracles/fmt09_division.py --check`.

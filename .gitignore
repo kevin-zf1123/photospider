@@ -130,6 +130,7 @@
 !tests/**/*.cpp
 !tests/**/*.h
 !tests/**/*.hpp
+!tests/oracles/fmt09_division.py
 !tests/**/CMakeLists.txt
 # Exact long-lived manual-fuzz seeds; generated corpus mutations stay ignored.
 !tests/fuzz/corpus/operation_contract_ir/malformed-schema

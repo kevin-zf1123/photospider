@@ -8,6 +8,7 @@
 
 #include "01-numeric/exact_product.hpp"
 #include "01-numeric/math_constants.hpp"
+#include "execution/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Fixed-capacity signed dyadic enclosures. The full pool is owned/admitted as
@@ -36,7 +37,7 @@ struct DirectedIntervalStorage final {
   Workspace rounding;
   std::size_t used = 0;
   unsigned precision = 128;
-  const std::function<Status(std::uint64_t)>* consume = nullptr;
+  execution_internal::WorkConsumer consume;
   explicit DirectedIntervalStorage(SequenceProfile profile)
       : rounding(profile) {}
   struct Frame {
@@ -46,11 +47,7 @@ struct DirectedIntervalStorage final {
         : context(owner), saved(owner.used) {}
     ~Frame() { context.used = saved; }
   };
-  void work(std::uint64_t amount) const {
-    const auto status = (*consume)(amount);
-    if (!status.ok())
-      throw status;
-  }
+  void work(std::uint64_t amount) const { consume.check(amount); }
   [[noreturn]] static void capacity() {
     if constexpr (Words < 192)
       throw DirectedCapacityRetry{};
@@ -66,8 +63,14 @@ struct DirectedIntervalStorage final {
     return result;
   }
   Interval interval() {
-    auto& low = number();
-    auto& high = number();
+    if (used + 2 > pool.size())
+      capacity();
+    work(2 * kWords);
+    auto& low = pool[used++];
+    auto& high = pool[used++];
+    low.magnitude.words.fill(0);
+    high.magnitude.words.fill(0);
+    low.negative = high.negative = false;
     return {low, high};
   }
   void clear(Number& value) const {
@@ -80,8 +83,9 @@ struct DirectedIntervalStorage final {
     output = value;
   }
   void copy(Interval output, Interval value) const {
-    copy(output.low, value.low);
-    copy(output.high, value.high);
+    work(2 * kWords);
+    output.low = value.low;
+    output.high = value.high;
   }
   int top(const Number& value) const { return Workspace::top(value.magnitude); }
   void normalize(Number& value) const {
@@ -115,13 +119,22 @@ struct DirectedIntervalStorage final {
     }
     const auto bits = static_cast<unsigned>(-shift), whole = bits / 64,
                tail = bits % 64;
-    output.words.fill(0);
-    for (std::size_t j = whole; j < kWords; ++j) {
-      output.words[j - whole] |= value.words[j] >> tail;
-      if (tail && j > whole)
-        output.words[j - whole - 1] |= value.words[j] << (64 - tail);
+    if (whole >= kWords) {
+      output.words.fill(0);
+      return;
     }
+    const auto count = kWords - whole;
+    if (!tail) {
+      std::copy_n(value.words.begin() + whole, count, output.words.begin());
+    } else {
+      for (std::size_t i = 0; i + 1 < count; ++i)
+        output.words[i] = (value.words[i + whole] >> tail) |
+                          (value.words[i + whole + 1] << (64 - tail));
+      output.words[count - 1] = value.words[kWords - 1] >> tail;
+    }
+    std::fill(output.words.begin() + count, output.words.end(), 0);
   }
+
   bool discarded(const Integer& value, unsigned bits) const {
     const auto whole = std::min<std::size_t>(bits / 64, kWords);
     const auto tail = bits % 64;
@@ -232,17 +245,17 @@ struct DirectedIntervalStorage final {
     if (a.negative == b.negative) {
       if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64))
         capacity();
-      copy(temporary, a);
-      work(kWords);
+      work(3 * kWords);
+      temporary = a;
       temporary.magnitude.add(b.magnitude);
     } else {
       const auto order = compare_unsigned(a.magnitude, b.magnitude);
-      copy(temporary, order >= 0 ? a : b);
-      work(kWords);
+      work(3 * kWords);
+      temporary = order >= 0 ? a : b;
       temporary.magnitude.subtract(order >= 0 ? b.magnitude : a.magnitude);
     }
     normalize(temporary);
-    copy(output, temporary);
+    output = temporary;
   }
   void negate(Interval output, Interval value) {
     Frame frame(*this);
@@ -316,8 +329,118 @@ struct DirectedIntervalStorage final {
     copy(output, result);
   }
   // All outputs/scratch are distinct from both immutable inputs.
+  // Base-2^64 long division. Normalization bounds the trial quotient error
+  // to two; an overestimate after subtraction is repaired by one add-back.
+  // Only the small tier uses this path; each digit is charged before mutation.
+  void divide_words(Integer& quotient, Integer& remainder,
+                    const Integer& numerator, const Integer& denominator) {
+    Frame frame(*this);
+    const auto n = static_cast<unsigned>((Workspace::top(numerator) + 64) / 64);
+    const auto d =
+        static_cast<unsigned>((Workspace::top(denominator) + 64) / 64);
+    if (!d)
+      capacity();
+    work(2 * kWords);
+    quotient.words.fill(0);
+    remainder = numerator;
+    if (n < d)
+      return;
+    if (d == 1) {
+      work(4 * n);
+      std::uint64_t rest = 0;
+      for (unsigned i = n; i; --i) {
+        const auto value = (static_cast<unsigned __int128>(rest) << 64) |
+                           numerator.words[i - 1];
+        quotient.words[i - 1] =
+            static_cast<std::uint64_t>(value / denominator.words[0]);
+        rest = static_cast<std::uint64_t>(value % denominator.words[0]);
+      }
+      remainder.words.fill(0);
+      remainder.words[0] = rest;
+      return;
+    }
+    auto& u = number().magnitude;
+    auto& v = number().magnitude;
+    work(2 * (n + d));
+    const unsigned shift =
+        static_cast<unsigned>(__builtin_clzll(denominator.words[d - 1]));
+    std::uint64_t extra = 0;
+    for (unsigned i = 0; i < n; ++i)
+      u.words[i] = (numerator.words[i] << shift) |
+                   (shift && i ? numerator.words[i - 1] >> (64 - shift) : 0);
+    if (shift)
+      extra = numerator.words[n - 1] >> (64 - shift);
+    if (n < kWords) {
+      u.words[n] = extra;
+      extra = 0;
+    }
+    for (unsigned i = 0; i < d; ++i)
+      v.words[i] = (denominator.words[i] << shift) |
+                   (shift && i ? denominator.words[i - 1] >> (64 - shift) : 0);
+    auto upper = [&](unsigned i) -> std::uint64_t& {
+      return i == kWords ? extra : u.words[i];
+    };
+    for (unsigned digit = n - d + 1; digit; --digit) {
+      const unsigned j = digit - 1;
+      work(8 * d + 8);
+      const auto high = upper(j + d), low = u.words[j + d - 1];
+      const auto leading = v.words[d - 1];
+      std::uint64_t q, r;
+      bool overflow = false;
+      if (high == leading) {
+        q = UINT64_MAX;
+        r = low + leading;
+        overflow = r < low;
+      } else {
+        const auto value = (static_cast<unsigned __int128>(high) << 64) | low;
+        q = static_cast<std::uint64_t>(value / leading);
+        r = static_cast<std::uint64_t>(value % leading);
+      }
+      while (!overflow && static_cast<unsigned __int128>(q) * v.words[d - 2] >
+                              ((static_cast<unsigned __int128>(r) << 64) |
+                               u.words[j + d - 2])) {
+        --q;
+        const auto prior = r;
+        r += leading;
+        overflow = r < prior;
+      }
+      std::uint64_t carry = 0;
+      for (unsigned i = 0; i < d; ++i) {
+        const auto product =
+            static_cast<unsigned __int128>(q) * v.words[i] + carry;
+        const auto lower = static_cast<std::uint64_t>(product);
+        carry = static_cast<std::uint64_t>(product >> 64) +
+                (u.words[j + i] < lower);
+        u.words[j + i] -= lower;
+      }
+      const bool negative = upper(j + d) < carry;
+      upper(j + d) -= carry;
+      if (negative) {
+        --q;
+        carry = 0;
+        for (unsigned i = 0; i < d; ++i) {
+          const auto sum = static_cast<unsigned __int128>(u.words[j + i]) +
+                           v.words[i] + carry;
+          u.words[j + i] = static_cast<std::uint64_t>(sum);
+          carry = static_cast<std::uint64_t>(sum >> 64);
+        }
+        upper(j + d) += carry;
+      }
+      quotient.words[j] = q;
+    }
+    work(kWords);
+    remainder.words.fill(0);
+    for (unsigned i = 0; i < d; ++i)
+      remainder.words[i] =
+          (u.words[i] >> shift) |
+          (shift && i + 1 < d ? u.words[i + 1] << (64 - shift) : 0);
+  }
   void divide_unsigned(Integer& quotient, Integer& remainder,
                        const Integer& numerator, const Integer& denominator) {
+    if constexpr (kWords <= 16) {
+      divide_words(quotient, remainder, numerator, denominator);
+      return;
+    }
     Frame frame(*this);
     auto& shifted = number();
     if (Workspace::top(denominator) < 0)

@@ -100,14 +100,14 @@ void mid_refinement() {
     op.planar_callback = [&](const PlanarOperationInvocation& call) {
       require(static_cast<bool>(call.consume_work), "missing host checkpoint");
       auto instrumented = call;
-      instrumented.consume_work = [&](std::uint64_t amount) {
+      instrumented.consume_work = [&](std::uint64_t amount) -> const Status& {
         if (++checkpoints == 256) {
           if (mode != 0)
             stop.cancel();
           if (mode != 1)
             static_cast<void>(graph->replace(doc));
         }
-        const auto status = call.consume_work(amount);
+        const auto& status = call.consume_work(amount);
         if (!status.ok())
           inner = status.code;
         return status;

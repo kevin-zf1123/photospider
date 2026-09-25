@@ -82,6 +82,10 @@ def main():
     parser.add_argument('--include-4k', action='store_true')
     parser.add_argument('--managed', action='store_true', help='Both inputs must contain the fixed planar budget service')
     parser.add_argument('--case', action='append', help='Run only a named case; may be repeated')
+    parser.add_argument('--all-curves', action='store_true')
+    parser.add_argument('--corpus-table', type=Path)
+    parser.add_argument('--workers', type=int, default=1)
+    parser.add_argument('--size', type=int)
     args = parser.parse_args()
     if not 1 <= args.repeats <= 1000:
         parser.error('repeats must be in 1..1000')
@@ -107,6 +111,18 @@ def main():
             'note': 'Shared-host observations; no claim of locked frequency, cache flushing or idle system.'}
     (args.output / 'environment.json').write_text(json.dumps(meta, indent=2))
     cases = workloads(args.profile, args.repeats, args.include_4k)
+    if args.all_curves:
+        cases = []
+        for curve in ('linear', 'power_gamma', 'power_gamma2', 'srgb', 'bt709',
+                      'bt2020', 'bt2020_10', 'bt2020_12', 'bt1886', 'pq',
+                      'hlg_oetf', 'acescc', 'acescct'):
+            for direction in ('encode', 'decode'):
+                for dtype in ('f32', 'f64'):
+                    for numeric in ('strict', args.profile):
+                        name = f'{curve}-{direction}-{dtype}-{numeric}'
+                        cases.append((name, ['8', curve, direction, dtype, numeric,
+                            'tiled', 'full', str(args.repeats), '128', '1',
+                            'respect', 'sweep', 'unmanaged']))
     if args.case:
         available = {name for name, _ in cases}
         unknown = set(args.case) - available
@@ -115,6 +131,11 @@ def main():
         cases = [(name, c) for name, c in cases if name in args.case]
     runs, samples, comparisons = [], [], []
     for case, arguments in cases:
+        arguments[9] = str(args.workers)
+        if args.size is not None:
+            arguments[0] = str(args.size)
+        if args.corpus_table:
+            arguments[-2] = 'file:' + str(args.corpus_table.resolve())
         if args.managed:
             arguments[-1] = 'managed'
         group = {'before': [], 'after': []}

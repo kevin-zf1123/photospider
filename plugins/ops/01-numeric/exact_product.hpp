@@ -4,6 +4,7 @@
 #include <functional>
 
 #include "01-numeric/exact_ratio.hpp"
+#include "execution/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Inputs may alias each other; output must be distinct. Every stored word and
@@ -12,15 +13,15 @@ namespace ps::plugin_internal::numeric_ops {
 template <std::size_t Words>
 Status multiply_fixed(const FixedInteger<Words>& a,
                       const FixedInteger<Words>& b, FixedInteger<Words>* output,
-                      const std::function<Status(std::uint64_t)>& consume) {
-  auto status = consume(4 * Words);
+                      const execution_internal::WorkConsumer& consume) {
+  const auto& status = consume(4 * Words);
   if (!status.ok())
     return status;
   output->words.fill(0);
   const auto a_size = (ExactRatioWorkspace<Words>::top(a) + 64) / 64;
   const auto b_size = (ExactRatioWorkspace<Words>::top(b) + 64) / 64;
   for (int i = 0; i < a_size; ++i) {
-    status = consume(16 * b_size + 1);
+    const auto& status = consume(16 * b_size + 1);
     if (!status.ok())
       return status;
     unsigned __int128 carry = 0;

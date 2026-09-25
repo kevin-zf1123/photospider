@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.25.0
+  VERSION 0.26.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -106,7 +106,7 @@ endif()
 option(PHOTOSPIDER_TRANSFER_FAST_MATH "Enable certified FMT-09 SIMD interval filter" ON)
 add_compile_definitions(PHOTOSPIDER_TRANSFER_FAST_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_FAST_MATH}>)
 option(PHOTOSPIDER_TRANSFER_COMPACT_MATH "Enable FMT-09 compact strict enclosure tier" ON)
-option(PHOTOSPIDER_TRANSFER_GAMMA2_SIMD "Enable FMT-09 exact square/sqrt SIMD" ON)
+option(PHOTOSPIDER_TRANSFER_GAMMA2_SIMD "Enable FMT-09 exact arithmetic and bit-classification SIMD" ON)
 add_compile_definitions(
   PHOTOSPIDER_TRANSFER_COMPACT_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_COMPACT_MATH}>
   PHOTOSPIDER_TRANSFER_GAMMA2_SIMD=$<BOOL:${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD}>)

@@ -606,8 +606,10 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
    * sticky at host entry, including failures ignored by a plugin. Poll during
    * long inner/refinement loops, not only before publication. Borrowed for the
    * callback lifetime; call serially on the callback thread, never retain it.
+   * @return Status borrowed until the next checkpoint or callback return.
+   * Copy failures that must outlive that interval. Success is allocation-free.
    */
-  std::function<Status(std::uint64_t)> consume_work = {};
+  std::function<const Status&(std::uint64_t)> consume_work = {};
 };
 /** @brief Callback writes only the requested output window; host publishes
  * that coverage after successful return and cancellation/current checks.

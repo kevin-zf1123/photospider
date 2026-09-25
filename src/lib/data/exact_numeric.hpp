@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "execution/work_consumer.hpp"
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 
@@ -15,16 +16,18 @@ namespace ps::data_internal::format_numeric {
 struct ExactWorkFailure final {
   Status status;
 };
-inline thread_local const std::function<Status(std::uint64_t)>*
-    exact_work_charge = nullptr;  // NOLINT(whitespace/indent_namespace)
+inline thread_local const execution_internal::WorkConsumer* exact_work_charge =
+    nullptr;  // NOLINT(whitespace/indent_namespace)
 inline thread_local const CancellationToken* exact_work_cancellation = nullptr;
 class ExactWorkScope final {
  public:
-  ExactWorkScope(const std::function<Status(std::uint64_t)>* charge,
+  template <class Charge>
+  ExactWorkScope(const Charge* charge,
                  const CancellationToken* cancellation) noexcept
-      : previous_(exact_work_charge),
+      : charge_(charge),
+        previous_(exact_work_charge),
         previous_cancellation_(exact_work_cancellation) {
-    exact_work_charge = charge;
+    exact_work_charge = charge ? &charge_ : nullptr;
     exact_work_cancellation = cancellation;
   }
   ~ExactWorkScope() noexcept {
@@ -33,7 +36,8 @@ class ExactWorkScope final {
   }
 
  private:
-  const std::function<Status(std::uint64_t)>* previous_;
+  execution_internal::WorkConsumer charge_;
+  const execution_internal::WorkConsumer* previous_;
   const CancellationToken* previous_cancellation_;
 };
 // Exact binary rational arithmetic for one bounded scalar conversion. The
@@ -48,9 +52,11 @@ class Natural final {
       throw ExactWorkFailure{
           Status{ErrorCode::Cancelled, "numeric conversion cancelled"}};
     if (exact_work_charge) {
-      auto result = (*exact_work_charge)(amount);
-      if (!result.ok())
-        throw ExactWorkFailure{result};
+      try {
+        exact_work_charge->check(amount);
+      } catch (const Status& status) {
+        throw ExactWorkFailure{status};
+      }
       return;
     }
     if (const auto* budget = resource_internal::metadata_budget()) {
@@ -124,20 +130,40 @@ class Natural final {
       words.resize(b / 32 + 1);
     words[b / 32] |= 1U << (b % 32);
   }
-  Natural shift(unsigned b) const {
+  // In-place, high-to-low writes permit reuse without alias temporaries.
+  void shift_left(unsigned b) {
     if (zero())
-      return {};
-    if (words.size() + b / 32 + 1 > maximum_words)
+      return;
+    const auto size = words.size();
+    const unsigned whole = b / 32, tail = b % 32;
+    if (size + whole + 1 > maximum_words)
       throw std::bad_alloc();
-    Natural out;
-    out.words.assign(words.size() + b / 32 + 1, 0);
-    for (std::size_t i = 0; i < words.size(); ++i) {
-      out.words[i + b / 32] |= words[i] << (b % 32);
-      if (b % 32)
-        out.words[i + b / 32 + 1] |= words[i] >> (32 - b % 32);
+    words.resize(size + whole + (tail != 0));
+    for (std::size_t j = words.size(); j > whole; --j) {
+      const auto i = j - 1 - whole;
+      const auto lo = i < size ? words[i] : 0U;
+      const auto hi = tail && i ? words[i - 1] >> (32 - tail) : 0U;
+      words[j - 1] = (lo << tail) | hi;
     }
-    out.trim();
+    std::fill_n(words.begin(), whole, 0U);
+    trim();
+  }
+  Natural shift(unsigned b) const {
+    Natural out = *this;
+    out.shift_left(b);
     return out;
+  }
+  // a >= b; subtracting into a does not invalidate any later source limb.
+  void subtract_assign(const Natural& b) {
+    work(words.size());
+    std::uint64_t borrow = 0;
+    for (std::size_t i = 0; i < words.size(); ++i) {
+      const std::uint64_t sub = (i < b.words.size() ? b.words[i] : 0) + borrow;
+      const auto original = words[i];
+      words[i] = static_cast<std::uint32_t>(original - sub);
+      borrow = original < sub;
+    }
+    trim();
   }
   static Natural add(const Natural& a, const Natural& b) {
     if (std::max(a.words.size(), b.words.size()) + 1 > maximum_words)
@@ -202,28 +228,77 @@ class Natural final {
       b.shift_right(b.trailing_zeros());
       if (a.compare(b) > 0)
         std::swap(a, b);
-      b = subtract(b, a);
+      b.subtract_assign(a);
     } while (!b.zero());
-    return a.shift(common);
+    a.shift_left(common);
+    return a;
   }
   static std::pair<Natural, Natural> divide(const Natural& n,
                                             const Natural& d) {
     if (d.zero())
       throw std::logic_error("zero exact denominator");
+    if (n.words.size() > maximum_words || d.words.size() > maximum_words)
+      throw std::bad_alloc();
     work(std::max<std::size_t>(1, n.bits()) *
          std::max<std::size_t>(1, d.words.size()));
-    Natural q, r;
-    for (unsigned i = n.bits(); i; --i) {
-      r = r.shift(1);
-      if (n.bit(i - 1))
-        r = add(r, Natural(1));
+    const auto common = std::min(n.trailing_zeros(), d.trailing_zeros());
+    if (common && d.words.size() < maximum_words) {
+      Natural reduced_n = n, reduced_d = d;
+      reduced_n.shift_right(common);
+      reduced_d.shift_right(common);
+      auto qr = divide_reduced(reduced_n, reduced_d);
+      qr.second.shift_left(common);
+      return qr;
+    }
+    return divide_reduced(n, d);
+  }
+
+ private:
+  // The public divide() has already admitted the full original work bound.
+  static std::pair<Natural, Natural> divide_reduced(const Natural& n,
+                                                    const Natural& d) {
+    Natural q, r = n;
+    if (d.words.size() == 1) {
+      // At most 256 word steps, within one 1024-entry checkpoint interval.
+      q.words.resize(n.words.size());
+      std::uint64_t remainder = 0;
+      for (std::size_t i = n.words.size(); i; --i) {
+        const auto value = (remainder << 32) | n.words[i - 1];
+        q.words[i - 1] = static_cast<std::uint32_t>(value / d.words[0]);
+        remainder = value % d.words[0];
+      }
+      q.trim();
+      r.words.assign(remainder ? 1 : 0, static_cast<std::uint32_t>(remainder));
+      return {std::move(q), std::move(r)};
+    }
+    if (n.bits() < d.bits())
+      return {std::move(q), std::move(r)};
+    // Prefix shorter than d cannot produce a quotient bit. Load it once;
+    // only the quotient-width suffix needs serial shift/subtract iterations.
+    const auto quotient_bits = n.bits() - d.bits() + 1;
+    r.shift_right(quotient_bits);
+    for (unsigned i = quotient_bits; i; --i) {
+      if ((i & 255U) == 0)
+        work(0);
+      r.shift_left(1);
+      if (n.bit(i - 1)) {
+        if (std::max<std::size_t>(1, r.words.size()) + 1 > maximum_words)
+          throw std::bad_alloc();
+        work(std::max<std::size_t>(1, r.words.size()) + 1);
+        if (r.zero())
+          r.words.push_back(1);
+        else
+          r.words[0] |= 1U;
+      }
       if (r.compare(d) >= 0) {
-        r = subtract(r, d);
+        r.subtract_assign(d);
         q.set_bit(i - 1);
       }
     }
     return {std::move(q), std::move(r)};
   }
+
+ public:
   std::uint64_t low64() const {
     return (words.empty() ? 0 : words[0]) |
            (words.size() < 2 ? 0 : static_cast<std::uint64_t>(words[1]) << 32);
@@ -255,13 +330,18 @@ struct Rational final {
     r.negative_zero = r.negative && !exponent && !mantissa;
     if (exponent)
       mantissa |= static_cast<std::uint64_t>(1) << fraction;
-    const int shift = static_cast<int>(exponent ? exponent : 1) -
-                      (binary32 ? 127 : 1023) - static_cast<int>(fraction);
+    int shift = static_cast<int>(exponent ? exponent : 1) -
+                (binary32 ? 127 : 1023) - static_cast<int>(fraction);
+    if (!mantissa)
+      return r;
+    const auto zeros = static_cast<unsigned>(__builtin_ctzll(mantissa));
+    mantissa >>= zeros;
+    shift += static_cast<int>(zeros);
     r.n = Natural(mantissa);
     if (shift >= 0)
-      r.n = r.n.shift(static_cast<unsigned>(shift));
+      r.n.shift_left(static_cast<unsigned>(shift));
     else
-      r.d = r.d.shift(static_cast<unsigned>(-shift));
+      r.d.shift_left(static_cast<unsigned>(-shift));
     return r;
   }
   static Rational add(const Rational& a, const Rational& b) {
@@ -333,12 +413,12 @@ struct Rational final {
     const int scale = std::max(exponent, minimum) - static_cast<int>(fraction);
     Rational scaled = *this;
     if (scale >= 0)
-      scaled.d = scaled.d.shift(static_cast<unsigned>(scale));
+      scaled.d.shift_left(static_cast<unsigned>(scale));
     else
-      scaled.n = scaled.n.shift(static_cast<unsigned>(-scale));
+      scaled.n.shift_left(static_cast<unsigned>(-scale));
     Natural rounded = scaled.rounded_magnitude();
     if (rounded.bits() > fraction + 1) {
-      rounded = Natural::divide(rounded, Natural(2)).first;
+      rounded.shift_right(1);
       ++exponent;
     }
     if (exponent < minimum && rounded.bits() > fraction)

@@ -58,6 +58,19 @@ int main() {
         inf - 1,
         (inf - 1) | sign,
         narrow ? UINT64_C(0x00800000) : UINT64_C(0x0010000000000000)};
+    for (unsigned count = 0; count <= 1031; count += 7) {
+      std::vector<std::uint8_t> input(3 + count * width, 0);
+      PS_CHECK(transfer_ops::first_nonfinite(input.data() + 3, count, narrow) ==
+               count);
+      for (unsigned lane = 0; lane < count; ++lane) {
+        for (auto bits : {inf, inf | sign, inf + 1, inf + sign + 5}) {
+          std::memcpy(input.data() + 3 + lane * width, &bits, width);
+          PS_CHECK(transfer_ops::first_nonfinite(input.data() + 3, count,
+                                                 narrow) == lane);
+        }
+        std::memset(input.data() + 3 + lane * width, 0, width);
+      }
+    }
     for (bool encode : {false, true})
       for (unsigned count = 0; count <= 65; ++count) {
         // Four distinct misalignments; exact-size input allocations let ASan

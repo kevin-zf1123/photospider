@@ -10,6 +10,66 @@
 #endif
 
 namespace ps::plugin_internal::transfer_ops {
+unsigned first_nonfinite(const std::uint8_t* input, unsigned count,
+                         bool narrow) {
+  unsigned i = 0;
+  if (narrow) {
+#if defined(__aarch64__)
+    const auto mask = vdupq_n_u32(0x7f800000);
+    for (; i + 4 <= count; i += 4) {
+      uint32x4_t bits;
+      std::memcpy(&bits, input + i * 4, sizeof(bits));
+      if (vmaxvq_u32(vceqq_u32(vandq_u32(bits, mask), mask)))
+        break;
+    }
+#elif defined(__AVX2__)
+    const auto mask = _mm256_set1_epi32(0x7f800000);
+    for (; i + 8 <= count; i += 8) {
+      const auto bits =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input + i * 4));
+      const auto failed =
+          _mm256_cmpeq_epi32(_mm256_and_si256(bits, mask), mask);
+      const auto lanes = _mm256_movemask_ps(_mm256_castsi256_ps(failed));
+      if (lanes)
+        return i + static_cast<unsigned>(__builtin_ctz(lanes));
+    }
+#endif
+  } else {
+#if defined(__aarch64__)
+    const auto mask = vdupq_n_u64(UINT64_C(0x7ff0000000000000));
+    for (; i + 2 <= count; i += 2) {
+      uint64x2_t bits;
+      std::memcpy(&bits, input + i * 8, sizeof(bits));
+      const auto failed = vceqq_u64(vandq_u64(bits, mask), mask);
+      if (vgetq_lane_u64(failed, 0))
+        return i;
+      if (vgetq_lane_u64(failed, 1))
+        return i + 1;
+    }
+#elif defined(__AVX2__)
+    const auto mask = _mm256_set1_epi64x(INT64_C(0x7ff0000000000000));
+    for (; i + 4 <= count; i += 4) {
+      const auto bits =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(input + i * 8));
+      const auto failed =
+          _mm256_cmpeq_epi64(_mm256_and_si256(bits, mask), mask);
+      const auto lanes = _mm256_movemask_pd(_mm256_castsi256_pd(failed));
+      if (lanes)
+        return i + static_cast<unsigned>(__builtin_ctz(lanes));
+    }
+#endif
+  }
+  const unsigned width = narrow ? 4 : 8;
+  const auto mask =
+      narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+  for (; i < count; ++i) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, input + i * width, width);
+    if ((bits & mask) == mask)
+      return i;
+  }
+  return count;
+}
 void gamma2_simd(const std::uint8_t* input, std::uint8_t* output,
                  unsigned count, bool narrow, bool encode) {
   unsigned i = 0;

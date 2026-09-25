@@ -2609,18 +2609,19 @@ Status OperationRegistry::invoke_planar(
       return numeric_status;
     };
     Status work_status = Status::success();
-    const auto consume_work = [&](std::uint64_t amount) {
+    const auto consume_work = [&](std::uint64_t amount) -> const Status& {
       // Cancellation wins even if a previous checkpoint observed Stale/fuel.
       if (cancellation.cancelled())
         work_status =
             Status{ErrorCode::Cancelled, "planar operation cancelled"};
       if (!work_status.ok())
         return work_status;
-      if (current && !current())
+      if (current && !current()) {
         work_status =
             Status{ErrorCode::Stale, "planar plan changed in callback"};
-      else if (resources && amount)
-        work_status = resources->consume({amount});
+      } else if (resources && amount) {
+        resources->try_consume({amount}, work_status);
+      }
       return work_status;
     };
     const PlanarOperationInvocation invocation{
