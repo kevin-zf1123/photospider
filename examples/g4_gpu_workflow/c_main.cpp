@@ -37,7 +37,7 @@ int check(bool value, const char* message) {
 int main(int argc, char** argv) {
   auto registry = std::make_shared<OperationRegistry>();
   const auto status =
-      registry->load_plugin(argc > 1 ? argv[1] : PS_G4_C_GPU_PLUGIN);
+      registry->load_plugin(argc > 1 ? argv[1] : PS_GPU_DEPENDENCY_PLUGIN);
   if (!status.ok())
     std::cerr << status.message << '\n';
   if (check(status.ok() && registry->freeze().ok(), "C plugin load failed"))

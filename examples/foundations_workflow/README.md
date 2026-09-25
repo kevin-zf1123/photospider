@@ -14,13 +14,13 @@ unimplemented. The default `all` runs the three maintained generic scenarios:
 ```sh
 cmake --build build --target photospider_foundations_workflow -j 8
 build/examples/foundations_workflow/photospider_foundations_workflow --scenario all
-ctest --test-dir build -R '^test_foundations_(numeric|expression-lut|basic-filters)$' --output-on-failure
+ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut|filter_histogram)$' --output-on-failure
 ```
 
 Success ends with `Foundations scenarios=3 oracle=passed backend=cpu`.
 Use `--scenario numeric`, `expression-lut` or `basic-filters` to run one graph.
 
-For an existing installed 0.20 package, configure this directory with
+For an existing installed 0.24 package, configure this directory with
 `cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install`,
 then build that directory. It consumes only `Photospider::kernel`.
 

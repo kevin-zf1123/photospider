@@ -85,6 +85,8 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   if (output.result_schema)
     digest->text(output.result_schema->canonical());
   digest->text(output.key);
+  digest->integer(static_cast<std::uint32_t>(output.data_movement));
+  digest->integer(static_cast<std::uint32_t>(output.data_movement_view_policy));
   digest->integer(output.regional_atomic);
   digest->integer(output.preserve_output_views);
   digest->integer(output.requires_input_views);

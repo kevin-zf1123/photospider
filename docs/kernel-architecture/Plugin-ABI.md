@@ -409,5 +409,29 @@ output metadata. Workspace declarations bound aggregate live scratch; allocation
 share the output's root execution budget. Pure metadata specialization must
 preserve the planar protocol and cannot introduce generic views or projections.
 These C++ layouts and symbols changed: installed C++ consumers must rebuild for
-0.24. The persistent OperationTraits version remains 17 because existing traits
-already encode planar capability, workspace, specialization and output layout.
+0.24. This original extension used OperationTraits 17.
+
+The subsequent C++ planar preparation extension uses OperationTraits **18** and
+requires rebuilding C++ consumers. `PlanarOperationInvocation::prepared` borrows
+an immutable owning preparation: the registry checks definition/key identity,
+parameter variants and exact floating bits, descriptors/facets, result schema,
+atomic axes, and complete planar layout before callback entry. Preparation state
+is destroyed before its definition and DSO lease. Cancellation and currentness
+are checked before writer creation and after the callback, before publication.
+
+`BitwiseMapped` separately promises output bits equal the static source mapping.
+Identity read dependencies alone do not grant this capability. Validated v1
+pieces each have one same-dtype Data source, spatial identity, and partition
+output channels; a fixed rank-one scalar can broadcast. The host validates the
+complete coverage, sorts pieces by destination channel, and honors Auto,
+RequireView, or Materialize. Views retain source owners and output facet resource
+bindings. Native plugins remain responsible for the truth of their declared
+value relation; structural checks are not a semantic oracle or sandbox.
+
+The public `visit_value_runs`, `copy_value_region`, and `copy_planar_region`
+utilities preserve logical sample bits and leave publication to the caller.
+Generic copy requires a disjoint dense destination; planar copy requires the
+whole mapped source ROI and permits different tile geometries. The DAG executor
+still requires one uniform geometry. Failure can leave an unpublished prefix.
+These C++ services do not change C operation ABI **9** or add a C service table.
+Semantic/physical identities use v16; the optimizer is still the v5 no-op.

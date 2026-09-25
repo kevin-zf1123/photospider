@@ -14,10 +14,10 @@ build/examples/multi_output_workflow/photospider_multi_output_workflow --help
 不再调用已退休的通道提取。`all|split|channels|gaussian`、`--joint on|off`、
 `--radius`、`--sigma` 参数保留供迁移使用；成功执行图像仍需完成迁移。
 
-独立构建消费已安装的 Photospider 0.20：
+独立构建消费已安装的 Photospider 0.24：
 `cmake -S examples/multi_output_workflow -B build/multi-output-consumer -DCMAKE_PREFIX_PATH=/path/to/install`。
-安装消费测试构建此示例，但不将它列作通过的图像运行测试，另行运行
-[格式退休回归](../../tests/integration/test_format_color_retirement.cpp)。
+安装消费 CTest target 不构建或执行此可选迁移源码。当前多输出正确性由
+`test_multi_output_execution` 与 planar workflow 测试覆盖。
 
 支持边界见[多输出说明](../../docs/kernel-architecture/zh/Multi-Output-Operations.zh.md)，
 删除范围见[FMT 退休记录](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md)。

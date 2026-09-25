@@ -99,7 +99,7 @@ ROI/Whole、特殊视图、执行绑定变化、浮点环境恢复、取消、sc
 
 ```sh
 cmake --build build/issue257-static --target test_basic_operations photospider_foundations_workflow -j 8
-ctest --test-dir build/issue257-static -R '^(test_basic_operations|test_foundations_basic.*)$' --output-on-failure
+ctest --test-dir build/issue257-static -R '^(test_basic_operations|test_workflow_filter_histogram)$' --output-on-failure
 ```
 
 [源码目录](../../../plugins/ops/README.md) 使用与文档相同的分类。每个已注册 C++

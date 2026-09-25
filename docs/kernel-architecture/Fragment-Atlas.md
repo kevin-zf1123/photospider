@@ -103,7 +103,9 @@ and CPU use fail. Native buffer acquisition and execution are fenced and sticky;
 ignored failures cannot publish success. The host keeps all acquired native
 views until the synchronous callback drains. Caller and auxiliary set
 cancellation are combined for ordinary, streamed and frozen dependency Runs;
-cancellation wins over an earlier native service error.
+cancellation wins over ordinary callback/backend failures. An already detected
+Protocol violation, including an unauthorized native-buffer request, retains its
+Protocol status even when cancellation follows.
 
 Each atlas has a separate nonblocking MemoryBudget reservation for the exact
 native payload and directory capacities. Stage output bytes round each requested
@@ -113,7 +115,7 @@ outputs remain charged until their last owner retires. A stage that cannot fit
 with its retained owners fails finitely. Atlas leases never authorize additional
 input samples, batching or changes to per-output certificates.
 
-The public [G4 GPU workflow](../../examples/g4_gpu_workflow/main.cpp) reads one
+The public [GPU fragment workflow](../../examples/g4_gpu_workflow/main.cpp) reads one
 Int64 control per observation on the host, declares 65 isolated Float32 samples,
 and performs a real Metal atlas sum with three bindings. Independent arithmetic
 requires results 2145, 4290 and 2145. Two observations dispatch; the third reuses
@@ -121,12 +123,12 @@ a pure block with identical incoming control/state and currently supplied data,
 while preserving its own control `{2}` evidence. The shader explicitly checks
 missing samples before numerical publication. Additional runs verify the exact
 33079/33080-byte failed/successful stage reservation frontier and owner reuse,
-plus ordinary streaming cancellation after a native service error.
+plus ordinary streaming cancellation and Protocol-before-cancellation priority.
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_gpu_workflow test_dependency_gpu -j 8
-ctest --test-dir build/issue257-static -R '^(test_dependency_gpu|photospider_g4_gpu_workflow)$' --output-on-failure
-build/issue257-static/photospider_g4_gpu_workflow
+cmake --build build/issue257-static --target test_gpu_fragment_execution test_dependency_gpu -j 8
+ctest --test-dir build/issue257-static -R '^(test_dependency_gpu|test_gpu_fragment_execution)$' --output-on-failure
+build/issue257-static/test_gpu_fragment_execution
 ```
 
 `test_dependency_gpu` uses explicitly nonnative mocks for protocol-only service
@@ -170,8 +172,8 @@ failed case is followed by a real uncached retry in the same tight-budget contex
 so an old cached output cannot hide retained failure-path allocations.
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_c_gpu_workflow -j 8
-build/issue257-static/photospider_g4_c_gpu_workflow
+cmake --build build/issue257-static --target test_gpu_c_abi_execution -j 8
+build/issue257-static/test_gpu_c_abi_execution
 ```
 
 The standalone example CMake project and static/shared installed consumers also
@@ -225,6 +227,6 @@ frozen execution. A portable record test preserves an independently shared
 ancestor/child DAG across local rollback and reimport.
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_sync_gpu_workflow -j 4
-build/issue257-static/photospider_g4_sync_gpu_workflow
+cmake --build build/issue257-static --target test_gpu_sync_fallback -j 4
+build/issue257-static/test_gpu_sync_fallback
 ```

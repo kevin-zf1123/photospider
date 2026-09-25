@@ -1,108 +1,99 @@
 # Current Development Program
 
-- Snapshot date: 2026-09-12
-- Audited starting baseline: `ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458`, package 0.8.0 / ABI 8
-- Implemented milestone: [independent results and Atomic joint execution #302](https://github.com/kevin-zf1123/photospider/issues/302)
-- Delivery record: [PR #314](https://github.com/kevin-zf1123/photospider/pull/314) into `ops`; no main or daemon delivery
-- Live CI, bot review, merge, Issue settlement and branch cleanup: [#302](https://github.com/kevin-zf1123/photospider/issues/302)
+- Snapshot date: 2026-09-25.
+- Audited remote baseline: `ops@61517151c0d0d2a2c0a70f52965350130eeda3a0`,
+  package 0.24.0. This snapshot does not audit or change `main`.
+- Local reviewed implementation: `99cc11126759a59deeb91f55c56c3443ce1bd28a`,
+  not pushed at this audit. The CTest maintenance described below is an
+  additional local working-tree change, not a remote delivery claim.
+- GitHub Issues own delivery status; Projects mirror their remaining scope.
+  [Task Collaboration](Task-Collaboration.md) defines the authorization boundary.
+  [ADR 0015](../adr/0015-breaking-product-boundary-scope-reset.md) retains product
+  authority. Accepted specifications are not implementation evidence.
 
-## Authority and current state
+## Implemented baseline and local delta
 
-GitHub Issues own live delivery status. [ADR 0021](../adr/0021-independent-node-results.md)
-records the maintainer-approved target; acceptance does not establish implementation.
-The baseline contains the operation foundations and G4 execution capabilities.
-Earlier main@fba06270 / ops-foundations snapshots describe historical milestones.
-This snapshot does not audit or change main. ADR 0015 retains product authority.
+The remote baseline contains the typed public compile/plan/execute pipeline,
+independent outputs and Atomic joint execution, CPU regional and staged
+execution, local derived caches, native Metal storage/dispatch and planar image
+storage. Maintained format operations include channel extraction/assembly,
+channel-editing composition, strict numeric conversion and metadata assignment.
 
-## Ordered implementation leaves
+The independent-results milestone [#302](https://github.com/kevin-zf1123/photospider/issues/302)
+and leaves #303–#313 are closed. [PR #314](https://github.com/kevin-zf1123/photospider/pull/314)
+merged into `ops` at `575a424d`; that milestone's review/CI/merge procedure is
+historical completion evidence, not a new per-task workflow requirement.
 
-| Order | Issue | Acceptance |
-| --- | --- | --- |
-| M0 | [#303](https://github.com/kevin-zf1123/photospider/issues/303) | Research/contracts |
-| M1 | [#304](https://github.com/kevin-zf1123/photospider/issues/304) | Output traits and ABI 9 |
-| M2 | [#305](https://github.com/kevin-zf1123/photospider/issues/305) | Multi-output compilation and planning |
-| M3 | [#306](https://github.com/kevin-zf1123/photospider/issues/306) | Per-output execution/dependencies/caches |
-| M4 | [#307](https://github.com/kevin-zf1123/photospider/issues/307) | Per-observation C/C++ outcomes |
-| M5 | [#308](https://github.com/kevin-zf1123/photospider/issues/308) | Atomic joint scheduling |
-| M6 | [#309](https://github.com/kevin-zf1123/photospider/issues/309) | Plane semantics and 420 |
-| M7 | [#310](https://github.com/kevin-zf1123/photospider/issues/310) | Horizontal crop outputs |
-| M8 | [#311](https://github.com/kevin-zf1123/photospider/issues/311) | Independent channel convolutions |
-| M9 | [#312](https://github.com/kevin-zf1123/photospider/issues/312) | Fractional-radius Gaussian image/kernel |
-| M10 | [#313](https://github.com/kevin-zf1123/photospider/issues/313) | Installed workflows and combined acceptance |
+Local `99cc1112` adds sealed planar preparation reuse, explicit BitwiseMapped
+value relations, public run/copy helpers and existing-SIMD generic conversion.
+Its version axes are independent: OperationTraits 18, semantic/physical v16,
+C operation ABI 9, provider ABI 1, WorkflowDocument 3 and TDM4. Package remains
+0.24.0 and C++ consumers must rebuild together. The optimizer is still
+`optimizer-v5-canonical-noop`; these runtime optimizations do not implement
+cross-node fusion or incremental compilation. See
+[Compiler Version Contract](Compiler-Version-Contract.md).
 
-Each leaf depends on the preceding slice and has a separate validated commit.
-Implementation commits M0–M9 are `fd796975` through `9193d9ac`. M10 adds the
-[installed public workflow](../../examples/multi_output_workflow/README.md),
-its joint on/off consumer gate, and shared-view compaction for parameter-sized
-kernels. The local static/shared builds, thirteen focused tests per linkage,
-and installed consumers passed on 2026-09-12; M10's final thirteen-check runs per linkage also passed after
-the compaction fix. The installed static maximum-radius workflow produced the
-complete 129×129 matrix, matched the independent kernel/convolution oracles,
-and recorded zero image reads for its kernel-only run. Fresh comprehensive review found four contract gaps (input permutation,
-projected Region checks, graph-independent staged cache identity and floating
-environment). Those and the follow-up cache-clone budget boundary are fixed;
-targeted independent rereview has no remaining blocker/required. Static/shared
-14-check suites and installed consumers passed, followed by the new owner-split
-cache regression. This repository snapshot records implemented behavior and local verification;
-PR #314 and #302 own the live delivery state. The full-CI seed fixture was
-migrated to ABI 9, with an explicit traits-v8 rejection regression. Final delivery requires a
-fresh independent comprehensive review, required fixes, one PR to ops, all six
-existing CI jobs and Codex bot review on the final HEAD, a merge commit, explicit
-Issue settlement, local ops synchronization and task-branch cleanup. Only the
-kernel repository is in scope. Dynamic outputs, RequestRecord joint execution,
-new Metal algorithms, daemon migration and #206 channel pruning remain separate.
+## Correctness inventory audit
 
-## Active backlog outside the milestone
+All 79 previously registered default CTests and the conditional SME test were
+reviewed by behavior. The default inventory now has 78 entries:
 
-- [#246](https://github.com/kevin-zf1123/photospider/issues/246) retains only a
-  reusable operation starter, external consumer example, and concise usage
-  guide; existing positive and negative DSO fixtures are the baseline.
-- [#247](https://github.com/kevin-zf1123/photospider/issues/247) retains only a
-  reusable data-provider starter, external consumer example, and concise usage
-  guide; existing provider ABI fixtures are the baseline.
-- [#248](https://github.com/kevin-zf1123/photospider/issues/248) remains an
-  optional embedding-owned operation-set manifest. Its former dependency on
-  WorkflowDocument definition is complete, so the Issue is unblocked and
-  awaits prioritization.
-- [#148](https://github.com/kevin-zf1123/photospider/issues/148) retains the
-  structured explain and remaining explicit IR/plan-validator delta.
-- [#149](https://github.com/kevin-zf1123/photospider/issues/149) and
-  [#203](https://github.com/kevin-zf1123/photospider/issues/203) follow S1 with
-  trait-proven optimization and disposable incremental recompilation.
-- [#151](https://github.com/kevin-zf1123/photospider/issues/151) and #152
-  retain cost/calibration work for S5; S4's explicit placement does not depend
-  on #209 and does not close these broader parents.
-- MED work is activated only by the semantic needs of a selected operation
-  vertical.
+- Retire the historical 13-key format-deletion checklist, preserving synthetic
+  unknown-operation lookup/invoke/compile rejection in `test_compiler`.
+- Rename five G4-labelled and three foundations-labelled registrations by their
+  actual dependency, GPU, numeric, expression and filter behavior.
+- Retire the invalid generic-image STMap fixture and its timing mode; retain the
+  other sparse/dependency/cache workflows. Planar STMap remains unimplemented.
+- Correct the GPU fixture to test ordinary cancellation and prior Protocol
+  failure separately. Keep zero-publication assertions in both cases.
+- Build every registered executable by default; record unavailable SME as a
+  skip. Installed runtime coverage is limited to the nested run target's actual
+  commands, not all optional consumer targets.
 
-## Issue execution contract
+After these local changes, the complete static CTest suite records macOS
+77 passed / 1 failed and FreeBSD 70 passed / 1 failed / 7 Metal skips, each out
+of 78. The conditional SME test actually executes and passes on the local
+Apple M5. These are local results, not remote CI status. The remaining
+`test_execution` failure is dynamic opaque-facet propagation: generic Drop and
+its PreserveInput chain are allowed by the cache contract, while invocation
+validation compares runtime facets to static metadata. The test remains active;
+its assertion was not weakened or removed. See
+[Testing and Validation](Testing-and-Validation.md) for current entry points.
 
-An executable leaf Issue records its audited baseline commit, remaining delta,
-governing public document, public/API/schema impact, start dependency,
-integration dependency, completion gate, named fixture or vertical, exact
-tests and oracle, non-goals, and expected completion evidence. Parent Issues
-are indexes and closure aggregators and do not carry `ready-for-agent`.
+The earlier `99cc1112` native static/shared and sanitizer audit also recorded
+baseline failures and a FreeBSD `__thr_calloc` TSan report reproducible without
+Photospider. A narrow suppression is not an unfiltered TSan pass. LeakSanitizer
+was unsupported. This CTest maintenance task does not reclassify those platform
+limitations or claim a new sanitizer matrix.
 
-For task status, authorization endpoints and decision/implementation completion,
-see [Task Collaboration](Task-Collaboration.md).
+## Remaining kernel programs
+
+- Foundations [#139](https://github.com/kevin-zf1123/photospider/issues/139):
+  operation/provider starter tooling and optional manifests under #143,
+  #246/#247/#248 remain. Current correctness failures still require repair.
+- Compiler [#145](https://github.com/kevin-zf1123/photospider/issues/145),
+  [#147](https://github.com/kevin-zf1123/photospider/issues/147): #148 structured
+  explain/validator delta, then #149 conservative passes, then #203 disposable
+  incremental recompilation. S1 input-contract acceptance is already complete;
+  #148 requires triage of its remaining implementation, not renewed S1 approval.
+  #150 remains a later explicitly scoped transform program.
+- Heterogeneous execution [#151](https://github.com/kevin-zf1123/photospider/issues/151),
+  [#152](https://github.com/kevin-zf1123/photospider/issues/152): CPU regional
+  leaves and #153/#154/#156 native residency, execution and diagnostics are
+  delivered. #209 cost units and planner-consumed machine profiles remain.
+- Calibration [#155](https://github.com/kevin-zf1123/photospider/issues/155):
+  #212/#213 remain. Native raw measurements are available, but do not establish
+  calibrated profiles or automatic placement. No optimization/calibration
+  parent is closed because of generic SIMD throughput results.
+
+Daemon Session/Job, IPC and WebUI delivery remain in their own repositories and
+were not re-audited by this kernel test-inventory task. Historical G/S milestone
+labels do not define current CTest names or restore retired image contracts.
 
 ## Update rule
 
-Update this snapshot when the audited baseline, current milestone, critical
-path, or blocked reason changes. Ordinary implementation details remain in the
-owning Issue and tests. Every status claim must cite completed code and tests;
-an unchecked item does not define current behavior.
-
-## Accepted development direction, 2026-09-05
-
-The maintainer explicitly accepted the adjusted direction in this task:
-[S1 images/ordinary parameters, S2 CPU regions, S3 cache/interaction, S4 native
-GPU and S5 measured optimization](Refactor-Development-Plan.md). Float32 is an
-accepted S1 goal. Daemon features are demand-driven; compatibility maintenance
-continues. Decision delivery is tracked by
-[#256](https://github.com/kevin-zf1123/photospider/issues/256).
-
-ADR 0016 remains the S1 source/binding/profile contract. ADR 0017 replaces its
-whole-storage/output, whole-image scan and modeled-budget clauses for S2.
-Daemon compatibility maintenance consumes installed 0.6; new bindings and bulk
-transport remain demand-driven work in the daemon repository.
+Refresh this snapshot when the audited baseline, current milestone, critical
+path or blocker changes. Cite actual code, tests and delivery location. Issues
+retain their scope and history; Projects reflect their status. Do not infer
+implementation from an accepted proposal or mark local-only work remotely
+complete. Normal implementation details belong in the owning Issue and tests.

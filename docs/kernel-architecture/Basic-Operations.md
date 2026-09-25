@@ -123,7 +123,7 @@ scenarios are included in the isolated installed-consumer gate.
 
 ```sh
 cmake --build build/issue257-static --target test_basic_operations photospider_foundations_workflow -j 8
-ctest --test-dir build/issue257-static -R '^(test_basic_operations|test_foundations_basic.*)$' --output-on-failure
+ctest --test-dir build/issue257-static -R '^(test_basic_operations|test_workflow_filter_histogram)$' --output-on-failure
 ```
 
 Source organization follows [the operation directory guide](../../plugins/ops/README.md).

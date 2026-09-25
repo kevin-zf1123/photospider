@@ -15,6 +15,7 @@
 #include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
+#include "photospider/execution/data_movement.hpp"
 #include "photospider/plugin/dependency_program.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 #include "photospider/plugin/result_program.hpp"
@@ -344,6 +345,13 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * do not describe a placeholder Value. Requires structured protocol 2.
    */
   std::optional<SchemaTemplate> result_schema = {};
+  /** @brief Explicit bitwise value relation; never inferred from read needs.
+   * V1 is CPU planar, with complete static pieces and spatial identity maps.
+   * The registry validates shape/dtype/maps before compiler publication.
+   */
+  DataMovementKind data_movement = DataMovementKind::None;
+  DataMovementViewPolicy data_movement_view_policy =
+      DataMovementViewPolicy::Auto;
 };
 
 /**
@@ -397,7 +405,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 17U;
+  std::uint32_t version = 18U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -580,6 +588,11 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
   BufferAllocator allocator;
   /** @brief Resolved, validated output metadata borrowed for this call. */
   const OperationMetadata& output_metadata;
+  /** @brief Registry-validated immutable preparation; nonnull at host entry.
+   * Borrow state only during this call. The handle retains the definition/DSO.
+   * This is a C++ API addition; the C operation ABI is unchanged.
+   */
+  std::shared_ptr<const PreparedOperation> prepared = {};
 };
 /** @brief Callback writes only the requested output window; host publishes
  * that coverage after successful return and cancellation/current checks.
@@ -609,6 +622,9 @@ struct OperationOutputSpecialization final {
    * enter existing compiler identities and drive demand and typed validation.
    */
   std::optional<std::vector<std::uint32_t>> input_indices;
+  DataMovementKind data_movement = DataMovementKind::None;
+  DataMovementViewPolicy data_movement_view_policy =
+      DataMovementViewPolicy::Auto;
 };
 /** @brief Pure, deterministic metadata inference with no Value or I/O access.
  * Input descriptors and static parameters are validated first. Return one
@@ -919,13 +935,15 @@ class PHOTOSPIDER_API OperationRegistry final {
   /** @brief Host-only structural callback entry after plan/binding validation.
    * The registry still checks exact window authorization and parameters before
    * preparing output pages or invoking the callback. */
-  Status invoke_planar(
-      const std::string& key, const std::vector<PlanarImageReadWindow>& inputs,
-      const std::vector<Region>& input_demands,
-      const std::map<std::string, ParameterValue>& parameters,
-      const Region& output_region, PlanarImage& output,
-      const CancellationToken& cancellation = {},
-      const BufferAllocator& allocator = BufferAllocator()) const;
+  Status invoke_planar(const std::string& key,
+                       const std::vector<PlanarImageReadWindow>& inputs,
+                       const std::vector<Region>& input_demands,
+                       const std::map<std::string, ParameterValue>& parameters,
+                       const Region& output_region, PlanarImage& output,
+                       const CancellationToken& cancellation = {},
+                       const BufferAllocator& allocator = BufferAllocator(),
+                       std::shared_ptr<const PreparedOperation> prepared = {},
+                       const std::function<bool()>& current = {}) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

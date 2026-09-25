@@ -12,7 +12,8 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "execution/channel_assembly.hpp"
+#include "photospider/data/region_runs.hpp"
+#include "photospider/execution/data_movement.hpp"
 #include "photospider/format/metadata.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -1443,6 +1444,14 @@ Result<OperationPreparation> prepare(
   if (output.preserve_output_views) {
     output.maximum_output_payload_bytes = 0;
   }
+  if (output.metadata.planar_layout) {
+    output.data_movement = DataMovementKind::BitwiseMapped;
+    const auto policy = option(params, "layout", "auto");
+    output.data_movement_view_policy =
+        policy == "materialize" ? DataMovementViewPolicy::Materialize
+        : policy == "view"      ? DataMovementViewPolicy::RequireView
+                                : DataMovementViewPolicy::Auto;
+  }
   OperationPreparation prepared;
   prepared.outputs.push_back(std::move(output));
   return Answer(std::move(prepared));
@@ -1501,79 +1510,14 @@ Result<ValueFragments> evaluate(const DependencyPhase& phase,
           return Answer(allocated.status());
         }
         auto writer = allocated.take_value();
-        // Coalesce only provably contiguous trailing axes. The admitted
-        // fragment already validates every address in this rectangle; each run
-        // stays inside its intersection with the requested coverage. Generic
-        // reversed/broadcast rows keep their signed stride without converting
-        // samples or touching padding. One host stop/work check per <=1024
-        // copied samples replaces per-element heap-backed coordinate visits.
-        std::size_t first = dims.size();
-        std::uint64_t run = 1;
-        for (std::size_t axis = dims.size(); axis-- > 0;) {
-          if (dims[axis].extent != 1 &&
-              value.layout().byte_strides[axis] !=
-                  static_cast<std::int64_t>(run * width)) {
-            break;
-          }
-          run *= dims[axis].extent;
-          first = axis;
-        }
-        std::int64_t stride = width;
-        if (first == dims.size()) {
-          first = dims.size() - 1;
-          run = dims.back().extent;
-          stride = value.layout().byte_strides.back();
-        }
-        std::vector<std::uint64_t> at;
-        for (const auto& d : dims) {
-          at.push_back(d.offset);
-        }
-        const auto count = region.element_count();
-        if (!count.ok()) {
-          return Answer(count.status());
-        }
-        std::uint64_t written = 0;
-        for (std::uint64_t row = 0; row < count.value() / run; ++row) {
-          auto address = value.byte_address(at);
-          if (!address.ok()) {
-            return Answer(address.status());
-          }
-          const auto* source = value.bytes().data() + address.value();
-          for (std::uint64_t x = 0; x < run;) {
-            const auto n = std::min<std::uint64_t>(1024, run - x);
-            status = phase.consume_work(n * (dims.size() + width));
-            if (!status.ok()) {
-              return Answer(status);
-            }
-            auto* destination = writer.data() + written * width;
-            const auto* from = source + static_cast<std::int64_t>(x) * stride;
-            if (stride == static_cast<std::int64_t>(width)) {
-              std::memcpy(destination, from, n * width);
-            } else if (stride == 0) {
-              std::memcpy(destination, from, width);
-              for (std::uint64_t filled = 1; filled < n;) {
-                const auto more = std::min(filled, n - filled);
-                std::memcpy(destination + filled * width, destination,
-                            more * width);
-                filled += more;
-              }
-            } else {
-              for (std::uint64_t i = 0; i < n; ++i) {
-                std::memcpy(destination + i * width,
-                            from + static_cast<std::int64_t>(i) * stride,
-                            width);
-              }
-            }
-            written += n;
-            x += n;
-          }
-          for (std::size_t axis = first; axis-- > 0;) {
-            if (++at[axis] < dims[axis].offset + dims[axis].extent) {
-              break;
-            }
-            at[axis] = dims[axis].offset;
-          }
-        }
+        status = copy_value_region(
+            value, region, region, writer.data(),
+            region.element_count().value() * width, phase.query.cancellation,
+            [&](std::uint64_t n) {
+              return phase.consume_work(n * (region.rank() + width));
+            });
+        if (!status.ok())
+          return Answer(status);
         auto published =
             std::move(writer).publish(out.facets, phase.query.resources);
         if (!published.ok()) {
@@ -1651,7 +1595,7 @@ OperationDefinition definition(
       axis.observation_axis = static_cast<std::int32_t>(a);
       map.axes.push_back(axis);
     }
-    return execution_internal::copy_channel_piece(
+    return copy_planar_region(
         call.output_region, map, &call.inputs[0], nullptr, call.output, layout,
         Value::element_size(call.inputs[0].descriptor().element_type),
         call.cancellation);

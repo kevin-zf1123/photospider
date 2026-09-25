@@ -1,4 +1,4 @@
-# G4 staged GPU workflow
+# Staged GPU fragment workflow
 
 This public C++ example registers a staged operation, compiles a workflow and
 executes exact requests through `ExecutionContext::execute_fragments`. A CPU
@@ -9,21 +9,23 @@ Expected results are `2145,4290,2145`: two native dispatches and one pure block
 cache hit, with the third observation retaining its own control evidence. Native
 cached output/state storage totals 36 bytes. The example also checks a finite
 33079-byte admission failure, 33080-byte success and owner reuse, and ordinary
-streaming cancellation after a native service failure.
+streaming cancellation after an ordinary callback error. A separate case proves
+that an earlier unauthorized native-buffer request retains its Protocol error
+even when cancellation follows; neither case publishes a result.
 
 Build in the repository:
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_gpu_workflow -j 8
-build/issue257-static/photospider_g4_gpu_workflow
+cmake --build build/issue257-static --target test_gpu_fragment_execution -j 8
+build/issue257-static/test_gpu_fragment_execution
 ```
 
-Or build against an installed Photospider 0.9 package:
+Or build against an installed Photospider 0.24 package:
 
 ```sh
 cmake -S examples/g4_gpu_workflow -B build/g4-gpu-consumer -DCMAKE_PREFIX_PATH=/path/to/photospider/install
 cmake --build build/g4-gpu-consumer -j 8
-build/g4-gpu-consumer/photospider_g4_gpu_workflow
+build/g4-gpu-consumer/test_gpu_fragment_execution
 ```
 
 Exit 77 means native Metal is unavailable; the CPU oracle still runs. It does
@@ -34,10 +36,10 @@ bounded GPU discovery is provided by the additional workflow below. The C staged
 The same project builds a C11 plugin and its public workflow loader:
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_c_gpu_workflow -j 8
-build/issue257-static/photospider_g4_c_gpu_workflow
+cmake --build build/issue257-static --target test_gpu_c_abi_execution -j 8
+build/issue257-static/test_gpu_c_abi_execution
 # Standalone installed-package build also includes these targets:
-build/g4-gpu-consumer/photospider_g4_c_gpu_workflow
+build/g4-gpu-consumer/test_gpu_c_abi_execution
 ```
 
 The C version returns `2145,2145` with one native dispatch, one block hit and
@@ -53,10 +55,10 @@ The discovery C11 module and loader exercise GPU-generated requests followed by
 host supply and native computation:
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_discovery_workflow -j 8
-build/issue257-static/photospider_g4_discovery_workflow
+cmake --build build/issue257-static --target test_gpu_discovery_workflow -j 8
+build/issue257-static/test_gpu_discovery_workflow
 # Also available in the standalone installed-package build:
-build/g4-gpu-consumer/photospider_g4_discovery_workflow
+build/g4-gpu-consumer/test_gpu_discovery_workflow
 ```
 
 Expected values are 8 and 24 with four actual dispatches. A control edit changes
@@ -70,8 +72,8 @@ format, resource limits and protocol tests.
 Existing synchronous GPU producers and CPU fallback are exercised by:
 
 ```sh
-cmake --build build/issue257-static --target photospider_g4_sync_gpu_workflow -j 4
-build/issue257-static/photospider_g4_sync_gpu_workflow
+cmake --build build/issue257-static --target test_gpu_sync_fallback -j 4
+build/issue257-static/test_gpu_sync_fallback
 # The standalone installed-package build includes the same target.
 ```
 

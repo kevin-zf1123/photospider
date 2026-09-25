@@ -1,7 +1,9 @@
 #include <cmath>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "photospider/compiler/compiler.hpp"
 #include "support/test_support.hpp"
@@ -40,6 +42,23 @@ int main() {
 
   auto operations = make_default_operation_registry();
   Compiler compiler(operations);
+  // Unknown operations reject consistently without retaining historical keys.
+  const std::string unknown_key = "test.unknown_operation";
+  const std::vector<ps::Value> no_inputs;
+  const std::vector<ps::Region> no_demands;
+  const std::map<std::string, ps::ParameterValue> no_parameters;
+  PS_CHECK(operations->find_traits(unknown_key).status().code ==
+           ErrorCode::NotFound);
+  PS_CHECK(
+      operations->invoke(unknown_key, {no_inputs, no_demands, no_parameters})
+          .status()
+          .code == ErrorCode::NotFound);
+  WorkflowDocument unknown_operation;
+  unknown_operation.nodes = {{1, unknown_key, {}, {}}};
+  unknown_operation.outputs = {{"result", 1, "value"}};
+  GraphContext unknown_graph(std::move(unknown_operation));
+  PS_CHECK(compiler.compile(unknown_graph).status().code ==
+           ErrorCode::NotFound);
   GraphContext first(ps::test::addition_document(2.0, 3.0));
   auto compiled = compiler.compile(first);
   PS_CHECK(compiled.ok());
@@ -127,17 +146,18 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical framing v15 with semantic OperationTraits v17.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "886a424258d7f889");
+  // Canonical framing v16 with semantic OperationTraits v18 and movement
+  // fields.
+  PS_CHECK(positive_zero.value().semantic.digest().value == "b1586c491d42f45f");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "c8b181bc86e6281d");
-  PS_CHECK(positive_zero.value().plan.digest().value == "59d7797d7401d693");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "43ab18f16399b3ea");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "99417e4e0de27409");
+           "0fde913682f1a931");
+  PS_CHECK(positive_zero.value().plan.digest().value == "32328bccf894ef02");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "dd8bce11d31b7c92");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "c6576141b2004fdf");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "0cd4385e5362a25d");
-  PS_CHECK(negative_zero.value().plan.digest().value == "6b1a21a74c34c4d5");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "59bf57a92f43fff1");
+           "7f62e2bf6b6cb759");
+  PS_CHECK(negative_zero.value().plan.digest().value == "337f8de7a806b929");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "ac07cbd40e83ebe8");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=

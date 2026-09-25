@@ -56,7 +56,8 @@ backend 表示实现及数值契约；dispatch/submission/device-time 和 poll t
 同一 poll 重复调用复用相同 atlas。未供给端口及 CPU 调用失败。native buffer/execute
 服务错误和异常 sticky，忽略错误也不能发布成功。宿主持有 native view 直到同步 callback
 完成 drain。普通、stream 和 frozen Run 合并 caller 与 sets cancellation；取消优先于
-此前 native service 错误。
+普通 callback/backend 错误。此前已检测到的 Protocol 违规（包括未授权 native buffer
+请求）保持 Protocol 状态，不被随后取消覆盖。
 
 每个 atlas 的 payload/目录按分别取整后的真实 native capacity 执行独立非阻塞 reservation。
 stage 输出按各矩形分别取整，workspace 声明包含每次 native 分配的真实 capacity。
@@ -68,7 +69,7 @@ seal 只释放未用 reservation；atlas、state、scratch/output 活跃 owner �
 2145、4290、2145；前两个观察 dispatch，第三个复用相同 incoming/control 和当前 data
 的 pure block，并保留自己的 control `{2}` 证据。shader 检查缺失样本后才允许数值发布。
 另验 33079/33080 字节 stage reservation 失败/成功临界值及 owner 复用，以及普通 stream
-在 native service 错误后的辅助取消优先级。运行命令见英文文档。
+普通 callback 错误后的辅助取消，以及 Protocol 先于取消的优先级。运行命令见英文文档。
 
 `test_dependency_gpu` 使用明确非 native 的 mock，验证服务缺失、CPU 误用、异常、忽略
 错误、先计工作后分配和 atlas 复用/退休；不构成 native 证据。static/shared 安装 consumer

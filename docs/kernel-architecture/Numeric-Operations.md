@@ -113,8 +113,7 @@ ctest --test-dir build -R '^test_numeric_operations$' --output-on-failure
 ```
 
 The [foundations example](../../examples/foundations_workflow/README.md) runs
-maintained generic numeric, expression/LUT and field-filter workflows. The
-[retirement regression](../../tests/integration/test_format_color_retirement.cpp)
-checks that removed format keys cannot compile and demonstrates a minimal bound
-`numeric.add_strict` graph with result 0.5. New format conversion specifications
-are not runtime interfaces.
+maintained generic numeric, expression/LUT and field-filter workflows. Unknown operation lookup, invocation and compilation rejection is covered by
+`test_compiler` using a synthetic key; historical removed-key lists are not
+runtime correctness gates. Format conversion implementation is documented in
+[Channel and Color Operations](Channel-and-Color-Operations.md).

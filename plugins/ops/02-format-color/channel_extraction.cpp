@@ -10,6 +10,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "photospider/data/region_runs.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/format/channel.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -457,27 +458,18 @@ Result<ValueFragments> publish_copies(const DependencyPhase& phase,
       }
       if (!intersects)
         continue;
-      auto points = Footprint::from_regions(
-          descriptor.shape, {Region(std::move(overlap))}, phase.sets);
-      if (!points.ok())
-        return Output(points.status());
-      auto status = points.value().visit(
-          [&](const auto& at) {
-            auto charged = phase.consume_work(at.size() + width);
-            if (!charged.ok())
-              return charged;
-            std::uint64_t linear = 0;
-            for (std::size_t axis = 0; axis < at.size(); ++axis)
-              linear = linear * box.dimensions()[axis].extent + at[axis] -
-                       box.dimensions()[axis].offset;
-            auto address = fragment.byte_address(at);
-            if (!address.ok())
-              return address.status();
-            std::memcpy(writer.data() + linear * width,
-                        fragment.bytes().data() + address.value(), width);
+      auto status = copy_value_region(
+          fragment, Region(std::move(overlap)), box, writer.data(),
+          box.element_count().value() * width, phase.query.cancellation,
+          [&](std::uint64_t n) {
+            // Retain the original sample-by-sample fuel settlement on failure.
+            for (std::uint64_t i = 0; i < n; ++i) {
+              auto charged = phase.consume_work(box.rank() + width);
+              if (!charged.ok())
+                return charged;
+            }
             return Status::success();
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
+          });
       if (!status.ok())
         return Output(status);
     }
@@ -561,24 +553,15 @@ OperationDefinition extraction(const std::string& key, bool named,
     return DependencyContinuation::make<ChannelState>(allocator,
                                                       prepared->selection);
   };
-  definition.planar_callback = [named, profile](
-                                   const PlanarOperationInvocation& call) {
-    OperationMetadata metadata;
-    metadata.descriptor = call.inputs[0].descriptor();
-    metadata.facets = call.inputs[0].facets();
-    const auto& config = call.inputs[0].config();
-    metadata.planar_layout = PlanarImageLayout{
-        config.order,        config.height_axis,     config.width_axis,
-        config.channel_axis, config.row_pitch_bytes, config.groups};
-    auto prepared =
-        prepare_extraction({metadata}, call.parameters, named, profile);
-    if (!prepared.ok())
-      return prepared.status();
+  definition.planar_callback = [](const PlanarOperationInvocation& call) {
+    if (!call.prepared || !call.prepared->state())
+      return Status{ErrorCode::Internal,
+                    "channel extraction preparation absent"};
     const auto& selected =
-        static_cast<const Preparation*>(prepared.value().state.get())
-            ->selection;
-    const auto width = Value::element_size(metadata.descriptor.element_type);
-    const auto& layout = *prepared.value().outputs[0].metadata.planar_layout;
+        static_cast<const Preparation*>(call.prepared->state())->selection;
+    const auto& descriptor = call.inputs[0].descriptor();
+    const auto width = Value::element_size(descriptor.element_type);
+    const auto& layout = *call.output_metadata.planar_layout;
     const auto y = call.output_region.dimensions()[layout.height_axis];
     const auto x = call.output_region.dimensions()[layout.width_axis];
     const auto channels =
@@ -586,7 +569,7 @@ OperationDefinition extraction(const std::string& key, bool named,
             ? call.output_region.dimensions()[*layout.channel_axis]
             : RegionDimension{0, 1};
     std::vector<std::uint64_t> at(call.output_region.rank(), 0);
-    std::vector<std::uint64_t> source(metadata.descriptor.shape.size());
+    std::vector<std::uint64_t> source(descriptor.shape.size());
     for (std::size_t axis = 0; axis < at.size(); ++axis)
       at[axis] = call.output_region.dimensions()[axis].offset;
     // A window certifies its ROI once. Reuse coordinates and copy contiguous

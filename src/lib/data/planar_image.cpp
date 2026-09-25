@@ -1008,6 +1008,16 @@ const Region& PlanarImageWriteWindow::region() const {
     throw std::logic_error("invalid image write window");
   return impl_->region;
 }
+const ValueDescriptor& PlanarImageWriteWindow::descriptor() const {
+  if (!impl_)
+    throw std::logic_error("invalid image write window");
+  return impl_->image->descriptor;
+}
+const PlanarImageConfig& PlanarImageWriteWindow::config() const {
+  if (!impl_)
+    throw std::logic_error("invalid image write window");
+  return impl_->image->config;
+}
 Result<PlanarMutableRowRun> PlanarImageWriteWindow::row_run(
     const std::vector<std::uint64_t>& coordinate) const {
   if (!impl_ || coordinate.size() != impl_->region.rank())

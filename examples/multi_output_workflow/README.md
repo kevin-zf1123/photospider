@@ -17,11 +17,11 @@ it no longer calls the retired channel-extraction operation. The selectors
 `all|split|channels|gaussian`, `--joint on|off`, `--radius` and `--sigma` remain
 available for migration work, but successful image execution requires migration.
 
-Standalone configuration consumes installed Photospider 0.20:
+Standalone configuration consumes installed Photospider 0.24:
 `cmake -S examples/multi_output_workflow -B build/multi-output-consumer -DCMAKE_PREFIX_PATH=/path/to/install`.
-The installed consumer builds this example without treating it as a passing
-image-runtime test. It separately runs the
-[format retirement regression](../../tests/integration/test_format_color_retirement.cpp).
+This optional migration source is not built or executed by the installed-consumer
+CTest target. Current multi-output correctness is covered by
+`test_multi_output_execution` and the planar workflow tests.
 
 See [multi-output contracts and support boundary](../../docs/kernel-architecture/Multi-Output-Operations.md)
 and the [FMT retirement record](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md).

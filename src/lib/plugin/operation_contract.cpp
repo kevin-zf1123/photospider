@@ -45,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 17)
+  if (count > 1024 || traits.version != 18)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -399,6 +399,78 @@ Result<OperationMetadata> infer_operation_output(
     if (!layout_status.ok())
       return Result<OperationMetadata>(layout_status);
   }
+  if (t.outputs[0].data_movement == DataMovementKind::BitwiseMapped) {
+    const auto& output = t.outputs[0];
+    if (!output.planar_layout || !output.static_dependency_pieces)
+      return Result<OperationMetadata>(invalid("missing bitwise mapping"));
+    const auto& layout = *output.planar_layout;
+    for (const auto& piece : *output.static_dependency_pieces) {
+      if (piece.inputs.size() != 1 ||
+          piece.coverage.shape() != result.descriptor.shape)
+        return Result<OperationMetadata>(
+            invalid("bitwise piece needs one source"));
+      const auto& map = piece.inputs[0];
+      if (map.port >= inputs.size() ||
+          map.roles != static_cast<std::uint32_t>(DependencyRole::Data) ||
+          !map.tags.empty())
+        return Result<OperationMetadata>(
+            invalid("invalid bitwise source role"));
+      const auto& input = inputs[map.port];
+      if (input.result_schema ||
+          input.descriptor.element_type != result.descriptor.element_type ||
+          map.axes.size() != input.descriptor.shape.size())
+        return Result<OperationMetadata>(
+            invalid("bitwise source dtype/rank differs"));
+      const bool scalar =
+          !input.planar_layout &&
+          input.descriptor.shape == std::vector<std::uint64_t>{1} &&
+          map.axes[0].observation_axis == -1 && map.axes[0].fixed.offset == 0 &&
+          map.axes[0].fixed.extent == 1 && map.axes[0].translation == 0;
+      std::vector<bool> seen(result.descriptor.shape.size(), false);
+      for (const auto& axis : map.axes) {
+        if (axis.observation_axis < -1 ||
+            axis.observation_axis >= static_cast<std::int32_t>(seen.size()))
+          return Result<OperationMetadata>(
+              invalid("bitwise axis outside rank"));
+        if (axis.observation_axis < 0) {
+          if (axis.fixed.extent != 1 || axis.translation)
+            return Result<OperationMetadata>(
+                invalid("invalid fixed bitwise axis"));
+        } else {
+          if (seen[axis.observation_axis])
+            return Result<OperationMetadata>(invalid("duplicate bitwise axis"));
+          seen[axis.observation_axis] = true;
+          if ((axis.observation_axis ==
+                   static_cast<std::int32_t>(layout.height_axis) ||
+               axis.observation_axis ==
+                   static_cast<std::int32_t>(layout.width_axis)) &&
+              axis.translation != 0)
+            return Result<OperationMetadata>(
+                invalid("bitwise v1 spatial translation"));
+        }
+      }
+      if (!scalar && (!seen[layout.height_axis] || !seen[layout.width_axis]))
+        return Result<OperationMetadata>(
+            invalid("bitwise spatial mapping incomplete"));
+      if (input.planar_layout) {
+        const auto& source = *input.planar_layout;
+        if (!PlanarImage::validate_layout(input.descriptor, source).ok() ||
+            map.axes[source.height_axis].observation_axis !=
+                static_cast<std::int32_t>(layout.height_axis) ||
+            map.axes[source.width_axis].observation_axis !=
+                static_cast<std::int32_t>(layout.width_axis))
+          return Result<OperationMetadata>(
+              invalid("bitwise planar axes differ"));
+      }
+      for (const auto& box : piece.coverage.boxes()) {
+        for (auto axis : {layout.height_axis, layout.width_axis})
+          if (box.dimensions()[axis].offset != 0 ||
+              box.dimensions()[axis].extent != result.descriptor.shape[axis])
+            return Result<OperationMetadata>(
+                invalid("bitwise v1 pieces partition channels only"));
+      }
+    }
+  }
   return Result<OperationMetadata>(std::move(result));
 }
 Result<std::vector<OperationMetadata>> infer_operation_outputs(
@@ -422,6 +494,24 @@ Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return invalid("select one output contract");
   const auto& selected = t.outputs[0];
+  if (selected.data_movement != DataMovementKind::None &&
+      selected.data_movement != DataMovementKind::BitwiseMapped)
+    return invalid("unknown data movement kind");
+  if (selected.data_movement_view_policy != DataMovementViewPolicy::Auto &&
+      selected.data_movement_view_policy !=
+          DataMovementViewPolicy::RequireView &&
+      selected.data_movement_view_policy != DataMovementViewPolicy::Materialize)
+    return invalid("unknown data movement view policy");
+  if (selected.data_movement == DataMovementKind::None) {
+    if (selected.data_movement_view_policy != DataMovementViewPolicy::Auto)
+      return invalid("view policy requires a data movement relation");
+  } else if (!t.planar_storage_capable || !selected.planar_layout ||
+             !selected.static_dependency_pieces || !selected.regional_atomic ||
+             selected.atomic_trailing_axes || selected.input_indices ||
+             selected.result_schema ||
+             selected.failure_delivery != FailureDelivery::RequestFailureOnly) {
+    return invalid("bitwise mapped v1 requires complete CPU planar pieces");
+  }
   const bool staged_atomic =
       selected.region_rule == OperationRegionRule::Dependency &&
       selected.dependency_version == 1;

@@ -25,14 +25,14 @@ int main(int argc, char** argv) {
     std::size_t size = sizeof(available);
     if (sysctlbyname(name, &available, &size, nullptr, 0) || !available) {
       std::cout << "SME unavailable: skipped\n";
-      return 0;
+      return 77;
     }
   }
   if (ps::plugin_internal::format_numeric::sme_conversion_vector_bytes() !=
       64) {
     std::cout
         << "SVL differs from 64 bytes: production fallback, test skipped\n";
-    return 0;
+    return 77;
   }
   using ps::plugin_internal::format_numeric::sme_f32_u8_tile;
   std::atomic<bool> primary{false}, secondary{false};
