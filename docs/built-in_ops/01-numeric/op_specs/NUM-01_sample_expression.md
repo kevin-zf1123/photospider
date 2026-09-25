@@ -471,7 +471,10 @@ interval and neighbor validation. Mixed Float32 inputs widen by IEEE fields,
 and final Float32 conversion rounds once. The strict evaluator uses the shared exact
 and certified mathematical backend at each Float64 primitive. Every intermediate
 is checked before its parent executes. Accelerated evaluation batches four consecutive samples and propagates RN64
-reference enclosures through the AST, using SLEEF 3.9.0 on admitted domains.
+reference enclosures through the AST, using SLEEF 3.9.0 on admitted domains
+for ln, sin, cos, tan and power. Exp replays through the strict RN64 evaluator
+after removal of direct SLEEF exp; the Float32 IQK primitive is not used for
+these binary64 intermediates.
 Rejected samples replay through the strict evaluator when the final bound is not certified. See
 [mathematical implementation](../math-implementation.md) for rounding proofs and
 fixed-refinement resource limits.

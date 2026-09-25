@@ -552,6 +552,12 @@ bool ExecutionPlan::structured_network() const noexcept {
 }
 
 bool ExecutionPlan::dependency_network() const noexcept {
+  for (const auto& input : input_declarations_)
+    if (input.planar_layout)
+      return false;
+  for (const auto& step : steps_)
+    if (step.traits.outputs[0].planar_layout)
+      return false;
   if (dependency_protocol_)
     return true;
   for (const auto& step : steps_)
@@ -638,11 +644,11 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
                          .descriptor;
       auto demand = input_internal::derive_input_demand(
           step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[port].kind);
+          descriptor.shape, step.traits.input_schema[port].kind, port);
       if (!demand.ok())
         return Result<ExecutionPlan>(demand.status());
       step.input_demands.push_back(demand.value());
-      if (producer) {
+      if (producer && !demand.value().empty()) {
         auto& prior = demands[producer->step_index];
         if (prior) {
           auto merged = merge_regions(*prior, demand.value(), descriptor.shape);
@@ -954,7 +960,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
           }
         }
       }
-      if (node.traits.planar_storage_capable != planar_layout.has_value())
+      if ((!node.traits.planar_storage_capable && planar_layout) ||
+          (node.traits.planar_storage_capable && !planar_layout &&
+           !node.traits.outputs[0].dependency_version))
         return Result<SemanticGraphIR>(Status::failure(
             ErrorCode::TypeMismatch,
             "operation and input disagree on planar image storage"));
@@ -1148,9 +1156,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       options.execution_mode != ExecutionMode::MetalFp32)
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument, "unknown execution numeric mode"));
-  if (options.tile_height == 0 || options.tile_width == 0)
-    return Result<ExecutionPlan>(Status::failure(
-        ErrorCode::InvalidArgument, "tile extents must be positive"));
+  if (options.tile_height == 0 || options.tile_width == 0 ||
+      (options.tile_height & (options.tile_height - 1)) != 0 ||
+      (options.tile_width & (options.tile_width - 1)) != 0)
+    return Result<ExecutionPlan>(
+        Status::failure(ErrorCode::InvalidArgument,
+                        "tile extents must be positive powers of two"));
   const auto source_operations = optimized.operation_registry_.lock();
   if (optimized.revision() == 0U || optimized.nodes().empty() ||
       optimized.digest().value.empty() || !optimized.current() ||
@@ -1447,11 +1458,12 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                          .descriptor;
       auto input_demand = input_internal::derive_input_demand(
           step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[input_position].kind);
+          descriptor.shape, step.traits.input_schema[input_position].kind,
+          input_position);
       if (!input_demand.ok())
         return Result<ExecutionPlan>(input_demand.status());
       step.input_demands.push_back(input_demand.value());
-      if (!producer)
+      if (!producer || input_demand.value().empty())
         continue;
       const std::size_t producer_index = producer->step_index;
       if (demand_by_step[producer_index].has_value()) {

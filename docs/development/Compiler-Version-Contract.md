@@ -22,6 +22,41 @@ This is a breaking operation-surface change. C ABI, WorkflowDocument and trait
 schema versions are unchanged. The installed consumer rejects a 0.19 package
 request and verifies removed-key lookup, invocation and compilation failures.
 
+Package 0.21.0 adds FMT-02 and replaces tensor-description v1 with v2 (`TDM2`).
+The v2 payload adds explicit per-component interpretations and complete color
+groups; v1 payloads and 0.20 installed-package requests reject without a shim.
+Re-encode source descriptions and overrides through the public codec and rebuild
+C++ consumers. GraphSnapshot now retains its atomic revision token directly;
+context teardown still invalidates it, but old C++ object code must not be mixed
+with the new private member representation. Existing ColorArray bytes, WorkflowDocument schema, operation C
+ABI and OperationTraits version remain unchanged. Canonical facet/parameter bytes
+already participate in graph identities. The installed FMT-02 consumer covers
+the new helper, metadata and common-owner view boundary.
+
+Package 0.22.0 adds FMT-08 and replaces tensor-description v2 with v3 (`TDM3`).
+V3 fixes the relative-coordinate convention and adds exact typed numeric
+encoding, co-sited sampling, ICC/configured endpoint bindings and frozen OCIO
+resource snapshots. V1/v2 tensor facets and 0.21 installed-package requests
+reject. Re-author metadata and rebuild C++ consumers. Legacy ColorArray v1 stays
+separate and cannot coexist with v3 on a Value. WorkflowDocument, operation C ABI
+and provider C ABI versions are unchanged. See the
+[metadata contract](../kernel-architecture/Tensor-Semantic-Metadata.md).
+
+Package 0.23.0 adds FMT-06 numerical conversion and replaces tensor-description
+v3 with v4 (`TDM4`). The public `TensorEndpoint` variant gains reduced exact
+rational endpoints for composed numeric decoders. This changes the C++ ABI;
+0.22 consumers must rebuild, and SameMinorVersion rejects their package
+request. V1-v3 tensor facets and old override bytes reject. The v4 codec keeps
+the 4096-byte facet bound and canonical little-endian representation. Workflow
+document, operation C ABI and provider C ABI versions do not change.
+
+Package 0.24.0 adds the independently versioned planar C operation extension v1,
+loaded through the existing operation ABI v9 module entry. The public C++ planar
+invocation gains accounted scratch and resolved output metadata; installed C++
+consumers must rebuild. Base operation/provider ABI, WorkflowDocument, TDM4 and
+OperationTraits17 remain unchanged. The independent PixelOE plugin and workflow
+are built with `find_package(Photospider 0.24)` and exercise the new boundary.
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and

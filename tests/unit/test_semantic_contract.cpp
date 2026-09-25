@@ -300,7 +300,7 @@ int dtype_masks() {
     return Result<Value>(call.inputs[0]);
   };
   OperationRegistry malformed;
-  definition.traits.input_schema[0].element_type_mask = 16;
+  definition.traits.input_schema[0].element_type_mask = 1U << 7;
   PS_CHECK(!malformed.register_operation(definition).ok());
   definition.traits.input_schema[0].element_type_mask = 12;
   definition.traits.input_schema[0].element_type = 3;

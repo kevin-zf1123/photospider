@@ -23,7 +23,8 @@ struct GraphSnapshot::State final {
  * @copydetails GraphSnapshot::GraphSnapshot
  */
 GraphSnapshot::GraphSnapshot(std::shared_ptr<const WorkflowDocument> document,
-                             std::uint64_t revision, std::weak_ptr<State> state)
+                             std::uint64_t revision,
+                             std::shared_ptr<State> state)
     : document_(std::move(document)), revision_(revision) {
   state_ = std::move(state);
 }
@@ -55,8 +56,8 @@ std::uint64_t GraphSnapshot::revision() const {
  * @copydetails GraphSnapshot::current
  */
 bool GraphSnapshot::current() const noexcept {
-  const std::shared_ptr<State> state = state_.lock();
-  return state && state->revision.load(std::memory_order_acquire) == revision_;
+  return state_ &&
+         state_->revision.load(std::memory_order_acquire) == revision_;
 }
 
 /**

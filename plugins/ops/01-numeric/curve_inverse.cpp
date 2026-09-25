@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -166,6 +167,9 @@ struct InverseState {
     if (!allocated.ok())
       return Answer(allocated.status());
     auto output = allocated.take_value();
+    std::optional<input_internal::Float32Environment> environment;
+    if (profile != SequenceProfile::Strict)
+      environment.emplace();
     for (std::uint64_t row = 0; row < count; ++row) {
       InversePoint point;
       point.row = row;
@@ -177,10 +181,11 @@ struct InverseState {
         x[i] = xs[point.first + i];
         y[i] = ys[point.first + i];
       }
-      auto computed =
-          arithmetic.inverse(pchip, xs.size(), point.first, point.count,
-                             point.segment, point.selected, point.query, x, y,
-                             narrow, consume, [] { return Status::success(); });
+      auto computed = arithmetic.inverse(
+          pchip, xs.size(), point.first, point.count, point.segment,
+          point.selected, point.query, x, y, narrow, consume,
+          [] { return Status::success(); },
+          environment && environment->active());
       if (!computed.ok())
         return Answer(computed.status());
       const auto bits = computed.value();

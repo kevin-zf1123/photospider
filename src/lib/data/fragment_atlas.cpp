@@ -305,7 +305,7 @@ Result<std::uint64_t> FragmentAtlas::address(
     const std::vector<std::uint64_t>& at) const {
   if (at.empty() || at.size() > 8 ||
       static_cast<std::uint32_t>(descriptor.element_type) < 1 ||
-      static_cast<std::uint32_t>(descriptor.element_type) > 4 ||
+      static_cast<std::uint32_t>(descriptor.element_type) > 7 ||
       at.size() != descriptor.shape.size() || tile_shape.size() != at.size() ||
       !payload.valid() || !directory.valid() || !slot_count ||
       (slot_count & (slot_count - 1)) ||

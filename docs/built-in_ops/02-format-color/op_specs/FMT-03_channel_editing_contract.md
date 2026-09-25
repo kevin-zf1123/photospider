@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -13,10 +13,17 @@ inspection_commit: 1b403fb9
 
 # FMT-03: channel reordering and replacement
 
+Runtime update: FMT-03A/B are implemented as transactional public authoring
+helpers over FMT-02C. Scalar fills are fused into its internal mapped dependency
+plan under the fusion permission below; ordinary FMT-02C authoring still accepts
+only component/channel sources. Typed literals use exact-bit scalar providers.
+See [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-03-channel-editing)
+and the [measured CPU performance](../../../../examples/channel_editing_performance/README.md).
+Proposed remains the specification decision status.
+
 Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
 Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. This target remains
-Proposed and unimplemented.
+those keys and pixel callbacks are no longer available. The target decision remains Proposed; the CPU implementation is recorded above.
 
 This operator-local draft inherits [FMT-common](FMT_common_contract.md), its
 NUM numerical baseline and the accepted
@@ -333,7 +340,7 @@ Implementation delivery must include an actual public compile/execute example
 with checked output, commands and an offset channel ROI. FMT-02C, canonical
 metadata/map encodings, missing integer widths, conforming generic constant
 sources and scalar-plus-planar dependency/publication support are prerequisites.
-The current CPU planar callback subset does not implement this composition.
+The CPU implementation uses the kernel mapped-planar path for this composition.
 
 Benchmark Float32 [4096,4096,4] base data for A BGR reorder, subset plus repeated
 source, and opaque-alpha insertion; for B one external-plane replacement and
@@ -344,8 +351,8 @@ latency statistics, source/copied bytes, virtual span, backing, metadata and
 retained peaks. Correctness gates timing; no measured speed claim follows.
 
 No user-facing behavior question remains open. The specifications remain
-Proposed/not implemented; old runtime tests or kernel page-window tests alone
-cannot establish conformance. No runtime or benchmark result is claimed here.
+Proposed; old runtime tests or kernel page-window tests alone
+cannot establish conformance. The current CPU evidence is linked above.
 
 During clarification, an independent byte-coordinate scatter/gather check passed
 164 rank/axis/map combinations, including scalar-only source support, overwritten

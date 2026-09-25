@@ -8,6 +8,8 @@
 #include <limits>
 #include <optional>
 
+#include "01-numeric/exp_simd.hpp"
+#include "01-numeric/trig_simd.hpp"
 #include "data/input_validation.hpp"
 
 extern "C" void photospider_sleef_evaluate(unsigned kind, const double* a,
@@ -130,14 +132,33 @@ inline FastInterval accelerated_math_enclosure(double result) {
   }
   return {low, high};
 }
-inline std::optional<std::uint64_t> accelerated_math(unsigned kind,
-                                                     std::uint64_t a,
-                                                     std::uint64_t b,
-                                                     bool narrow) {
-  input_internal::Float32Environment environment;
-  if (!environment.active())
+inline std::optional<std::uint64_t> accelerated_math(
+    unsigned kind, std::uint64_t a, std::uint64_t b, bool narrow,
+    bool normalized_environment = false) {
+  std::optional<input_internal::Float32Environment> environment;
+  if (!normalized_environment)
+    environment.emplace();
+  if (!normalized_environment && !environment->active())
     return {};
+  if (narrow && accelerated_math_available() &&
+      trig_simd_domain(kind, static_cast<std::uint32_t>(a))) {
+    float input, output;
+    const auto bits = static_cast<std::uint32_t>(a);
+    std::memcpy(&input, &bits, 4);
+    trig_simd_f32(kind, &input, &output, 1);
+    return numeric_bits(output, true);
+  }
   const double x = numeric_double(a, narrow), y = numeric_double(b, narrow);
+  if (kind == 0 && narrow) {
+    // IQK is certified only for binary32 arguments. Binary64 arguments use
+    // the SLEEF enclosure below without narrowing their input or result.
+    if (!accelerated_math_available() || !std::isfinite(x) || x < -80 || x > 80)
+      return {};
+    const float input = static_cast<float>(x);
+    float output = 0;
+    exp_simd_f32(&input, &output, 1);
+    return numeric_bits(output, true);
+  }
   if (!accelerated_math_domain(kind, x, y))
     return {};
   double result = 0;

@@ -12,8 +12,8 @@ clarification_status: selected_storage_policy_complete
 [英文版本](../Tensor-Storage-and-Region-Access.md)为权威。本文
 负责物理布局、tile 几何、区域访问和存储所有权；颜色与 alpha 解释由
 [FMT 公共规格](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
-定义。下文明确 CPU 接口支持范围与迁移边界；本次不实现 FMT-01，也不保留
-已退休图像的内存或数值契约。
+定义。下文明确 CPU 接口支持范围与迁移边界；不保留已退休图像的内存或数值契约。
+已实现的 FMT-01 家族见[通道与颜色算子](../../kernel-architecture/zh/Channel-and-Color-Operations.zh.md)。
 
 2026-09-23 的[codec 边界澄清](../../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
 要求同一图像的颜色／alpha 平面同尺寸、同采样网格，包括全分辨率 Y/Cb/Cr。
@@ -26,7 +26,7 @@ Interleaved 导入须经 codec 转为 planar 后进入内核。这是图像边�
 | 主题 | 目标 |
 | --- | --- |
 | 图像布局 | 所有图像必须 planar；交错图像导入时显式转换布局。 |
-| DAG tile 策略 | 同一 DAG 统一 tile 尺寸，各算子不能独立决定输出 tile 尺寸。64×64、128×128、256×256 是示例，不是已确定的完整尺寸白名单。 |
+| DAG tile 策略 | 同一 DAG 统一 tile 尺寸，各算子不能独立决定输出 tile 尺寸。高宽必须分别为正的 2 次幂（包括 1），不支持非 2 次幂 tile。64×64、128×128、256×256 是示例。 |
 | 平面组织 | 保留连续平面模式；采用 tile 时，所有分块图像平面服从 DAG 配置，不提供逐平面尺寸覆盖。 |
 | backing | 预留整图连续虚拟地址范围，按需提供页 backing；平面／tile 访问共享图像地址空间 owner，不另建互不相关的图像分配。 |
 | 行 | 平面／tile 的行内样本连续，允许行尾 padding。 |
@@ -104,6 +104,11 @@ sample_offset(y,x) = tile_offset + (y mod Th)*Tw*d + (x mod Tw)*d
 块数为 ceil(H/Th)*ceil(W/Tw)，有效范围裁剪至 H,W。padding 不是有效样本、隐式
 零像素或滤波边界规则，不影响颜色结果、样本身份或 dirty 映射。字节量、pitch、
 偏移、对齐取整和 shape 乘积必须在按规模分配前检查溢出。
+
+**tile 高度和宽度必须分别为正的 2 次幂，不支持非 2 次幂 tile。**
+`Compiler::plan` 和 `PlanarImage::create` 以 InvalidArgument 拒绝不符合的几何，
+continuous 存储附带的 tile 几何同样受此约束。图像和 ROI 的有效尺寸可为任意正值；
+不足整 tile 的边缘保持实际有效范围。校验后的几何允许用移位和掩码计算地址。
 
 tile 大小是 DAG 策略，不是算子参数。128×128 默认值保留且可配置，不
 限制为唯一尺寸。halo 与跨 tile ROI 可以超过一块，但不改变输出块几何。无图像
@@ -189,7 +194,11 @@ rank-3 显式声明全部三个轴。当前物理 dtype 为 UInt8、Int64、Floa
 `PlanarImage::create` 预留整图，但不使样本有效。`import_value` 显式将完整的交错／
 strided 外部 Value 复制到声明的 planar 布局，不另建整图 packed 缓冲区。
 `publish` 以事务方式复制精确 packed 区域；`acquire` 返回保留 owner 的读取窗口，
-`row_run` 在获准 ROI 或 tile 边界停止。`read` 是显式 packed 区域导出。
+`row_run` 在获准 ROI 或 tile 边界停止。
+`rectangle_run` 返回带显式字节行步长的多行区域，两轴均受 ROI 和物理 tile 边界约束。
+每行只授权其样本范围，行间 padding 和 tile 间隙不可访问。读取指针有效至窗口释放，
+写入指针有效至发布或窗口销毁；事务写窗口提供相同的有界矩形访问。
+调用方负责写入同步，并在长时间复制期间检查取消。`read` 是显式 packed 区域导出。
 没有接口将完整预留地址暴露为可无条件读取的 ByteView。缺失覆盖返回 NotFound；
 重复发布既有样本失败，不修改已发布区域。
 

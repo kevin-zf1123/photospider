@@ -318,3 +318,38 @@ VM 地址、页 owner、预算身份和驻留状态不进入 semantic identity�
 子集、资源／生命周期规则和可运行 workflow 验收。安装消费检查覆盖结构图像 workflow、
 C SDK／头文件消费和通用执行能力。前面的版本段落记录各自交付契约，不在 0.19 中
 恢复已退休的图像执行路径。
+
+
+## 0.21.0 FMT-02 与 tensor-description v2
+
+0.21.0 新增 FMT-02，并将 tensor-description v1 替换为 v2/TDM2，增加逐分量解释
+和显式完整颜色组。v1 payload 与 0.20 安装包请求明确拒绝，不提供兼容 shim。
+调用者使用公开 codec 重新编码来源描述和 override，并重新构建 C++ consumer。
+现有 ColorArray payload、WorkflowDocument schema、operation C ABI 和
+OperationTraits 版本保持原有含义。规范化 facet/参数字节已参与图 identity。
+安装后的 FMT-02 consumer 验证新 helper、元数据和共享 owner view 边界。
+
+GraphSnapshot 改为直接保留原子 revision 状态，context 析构仍使其失效；私有 C++
+成员表示发生变化，旧对象代码必须重新编译，不能与新库混用。
+
+
+## 0.22 元数据版本边界
+
+包 0.22.0 增加 FMT-08，并将 tensor-description v2 替换为 v3（`TDM3`）。
+v3 明确相对坐标约定，新增精确类型化数值编码、同位采样、ICC/配置端点绑定及
+冻结的 OCIO 资源快照。拒绝旧 v1/v2 tensor facet 与 0.21 安装包消费者；需要
+重新编写描述并重新构建 C++ 消费者。旧 ColorArray v1 保持独立约定，不能与 v3
+附在同一个 Value 上。WorkflowDocument、operation/provider C ABI 版本不变。
+详见[元数据约定](../../kernel-architecture/zh/Tensor-Semantic-Metadata.zh.md)。
+
+包 0.23.0 增加 FMT-06 数值转换，将 tensor-description v3 替换为 v4（`TDM4`）。
+公开 `TensorEndpoint` 增加约分后的精确有理数端点，用于组合数值解码；C++ ABI
+随之变化，0.22 消费者必须重新构建，SameMinorVersion 会拒绝旧包版本请求。
+旧 v1-v3 tensor facet 与 override 字节明确拒绝。v4 保持 4096 字节 facet 上限
+与规范化小端编码。WorkflowDocument、operation C ABI、provider C ABI 版本不变。
+
+包版本 0.24.0 增加独立版本的 planar C operation 扩展 v1，通过现有 ABI v9
+模块加载入口发现。公开 C++ planar invocation 增加受计账约束的 scratch
+以及已验证输出元数据，安装包 C++ 消费者需要重新编译。基础 operation/provider
+C ABI、WorkflowDocument、TDM4 和 OperationTraits17 保持不变。
+PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证此边界。

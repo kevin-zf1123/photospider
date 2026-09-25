@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.20.0
+  VERSION 0.24.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -108,6 +108,10 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_delay.cpp
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
   plugins/ops/00-foundation/core_identity.cpp
+  plugins/ops/02-format-color/channel_extraction.cpp
+  plugins/ops/02-format-color/numeric_conversion.cpp
+  plugins/ops/02-format-color/metadata_assignment.cpp
+  plugins/ops/02-format-color/channel_assembly.cpp
   plugins/ops/01-numeric/curve_sample_linear.cpp
   plugins/ops/01-numeric/curve_sample_monotone.cpp
   plugins/ops/01-numeric/field_apply_lut_1d.cpp
@@ -228,11 +232,13 @@ set(
   src/lib/execution/resources.cpp
   src/lib/execution/cancellation.cpp
   src/lib/data/value.cpp
+  src/lib/data/tensor_description.cpp
   src/lib/data/planar_image.cpp
   src/lib/data/semantic.cpp
   src/lib/data/color_array.cpp
   src/lib/data/icc_profile.cpp
   src/lib/data/icc_validation.cpp
+  src/lib/data/ocio_config_resource.cpp
   src/lib/data/resource_bindings.cpp
   src/lib/plugin/dependency_plugin.cpp
   src/lib/plugin/dependency_program.cpp
@@ -254,6 +260,7 @@ set(
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
   src/lib/plugin/operation_registry.cpp
+  src/lib/plugin/planar_plugin.cpp
   src/lib/plugin/utf8_validation.cpp)
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_metal.mm)
@@ -301,6 +308,33 @@ if(PHOTOSPIDER_ENABLE_MATRIX_SME)
     COMPILE_OPTIONS "-march=armv8-a+sme+sme-f64f64;-fno-fast-math;-frounding-math;-ffp-contract=off")
   set_property(SOURCE plugins/ops/01-numeric/accelerated_matrix_apple.cpp APPEND PROPERTY
     COMPILE_DEFINITIONS PHOTOSPIDER_HAS_MATRIX_SME=1)
+endif()
+set(_numeric_conversion_sme_default OFF)
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  set(_numeric_conversion_sme_default ON)
+endif()
+option(PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME "Enable runtime-dispatched SME numeric conversion tiles" ${_numeric_conversion_sme_default})
+if(PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME)
+  if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    message(FATAL_ERROR "Numeric conversion SME requires Apple arm64")
+  endif()
+  include(CheckCXXCompilerFlag)
+  include(CheckCXXSourceCompiles)
+  set(_conversion_required_flags "${CMAKE_REQUIRED_FLAGS}")
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -march=armv8-a+sme+sme-f64f64")
+  check_cxx_source_compiles("#include <arm_sme.h>
+__arm_locally_streaming unsigned probe() { return svcntb(); }
+int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
+  set(CMAKE_REQUIRED_FLAGS "${_conversion_required_flags}")
+  if(PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
+    list(APPEND PHOTOSPIDER_KERNEL_SOURCES plugins/ops/02-format-color/numeric_conversion_sme.cpp)
+    set_source_files_properties(plugins/ops/02-format-color/numeric_conversion_sme.cpp PROPERTIES
+      COMPILE_OPTIONS "-march=armv8-a+sme+sme-f64f64;-fno-fast-math;-frounding-math;-ffp-contract=off")
+    set_property(SOURCE plugins/ops/02-format-color/numeric_conversion.cpp APPEND PROPERTY
+      COMPILE_DEFINITIONS PHOTOSPIDER_HAS_CONVERSION_SME=1)
+  else()
+    message(STATUS "Compiler lacks SME support; numeric conversion retains NEON")
+  endif()
 endif()
 include(cmake/NumericMath.cmake)
 
@@ -477,6 +511,14 @@ add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/numeric_conversion_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/codec_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/channel_editing EXCLUDE_FROM_ALL)
+add_subdirectory(examples/metadata_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/metadata_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 
@@ -616,6 +658,19 @@ if(BUILD_TESTING)
   target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
   add_dependencies(test_multi_output_execution multi_output_fixture)
   photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
+  photospider_add_test(test_planar_plugin photospider_test_kernel tests/integration/test_planar_plugin.cpp)
+  foreach(_variant planar bad_planar projected_planar)
+    add_library(${_variant}_fixture MODULE tests/fixtures/planar_operation_fixture.c)
+    target_link_libraries(${_variant}_fixture PRIVATE Photospider::operation_sdk)
+    set_target_properties(${_variant}_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  endforeach()
+  target_compile_definitions(bad_planar_fixture PRIVATE PS_BAD_PLANAR)
+  target_compile_definitions(projected_planar_fixture PRIVATE PS_PROJECT_PLANAR)
+  target_compile_definitions(test_planar_plugin PRIVATE
+    PS_PLANAR_FIXTURE="$<TARGET_FILE:planar_fixture>"
+    PS_BAD_PLANAR_FIXTURE="$<TARGET_FILE:bad_planar_fixture>"
+    PS_PROJECTED_PLANAR_FIXTURE="$<TARGET_FILE:projected_planar_fixture>")
+  add_dependencies(test_planar_plugin planar_fixture bad_planar_fixture projected_planar_fixture)
   add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
   set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -646,6 +701,22 @@ if(BUILD_TESTING)
   target_compile_definitions(test_expression_operations PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:expression_contract_fixture>")
   add_dependencies(test_expression_operations expression_contract_fixture)
   photospider_add_test(test_format_color_retirement Photospider::kernel tests/integration/test_format_color_retirement.cpp)
+  photospider_add_test(test_metadata_assignment Photospider::kernel tests/integration/test_metadata_assignment.cpp)
+  target_include_directories(test_metadata_assignment PRIVATE examples/numeric_workflow)
+  photospider_add_test(test_channel_editing Photospider::kernel tests/integration/test_channel_editing.cpp)
+  photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
+  target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)
+  photospider_add_test(test_channel_extraction Photospider::kernel tests/integration/test_channel_extraction.cpp)
+  photospider_add_test(test_numeric_conversion Photospider::kernel tests/integration/test_numeric_conversion.cpp)
+  if(PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME AND PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
+    add_executable(test_numeric_conversion_sme tests/unit/test_numeric_conversion_sme.cpp plugins/ops/02-format-color/numeric_conversion_sme.cpp)
+    target_include_directories(test_numeric_conversion_sme PRIVATE include src/lib tests)
+    target_compile_features(test_numeric_conversion_sme PRIVATE cxx_std_17)
+    target_link_libraries(test_numeric_conversion_sme PRIVATE Threads::Threads)
+    add_test(NAME test_numeric_conversion_sme COMMAND test_numeric_conversion_sme)
+  endif()
+
+  target_include_directories(test_channel_extraction PRIVATE examples/numeric_workflow)
   photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_matrix_certificate photospider_test_kernel tests/unit/test_matrix_certificate.cpp)
@@ -708,6 +779,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_fragment_atlas Photospider::kernel tests/unit/test_fragment_atlas.cpp)
   photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
   photospider_add_test(test_planar_image_workflow Photospider::kernel tests/integration/test_planar_image_workflow.cpp)
+  photospider_add_test(test_planar_import Photospider::kernel tests/unit/test_planar_import.cpp)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
@@ -866,5 +938,7 @@ endif()
 
 install(FILES plugins/ops/09-composite/inpaint_ns_license.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
 
+install(FILES third_party/IK_LLAMA_LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)
 install(FILES third_party/sleef/LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider RENAME SLEEF.txt)

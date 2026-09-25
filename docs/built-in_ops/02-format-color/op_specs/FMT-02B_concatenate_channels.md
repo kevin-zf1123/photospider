@@ -7,9 +7,9 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
-proposed_operation_keys:
+implemented_operation_keys:
   - channel.concatenate_strict
   - channel.concatenate_accelerated_apple_silicon
   - channel.concatenate_accelerated_x86_64
@@ -19,8 +19,16 @@ inspection_commit: 1b403fb9
 
 # FMT-02B: concatenate existing channel axes
 
+Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
+mapping, tensor-description v2, canonical static parameters, and legal retained
+views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
+and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
+Decision status remains Proposed; implementation facts below supersede the
+historical inspection's missing-runtime statements.
+
+
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
-The proposed keys target the default registry; they are not registered aliases.
+The implemented keys are separate default-registry primitives.
 This member concatenates ordered same-dtype channel blocks. Input axes may
 differ; resolve each from effective metadata or explicit parameters. After
 removing each channel axis, remaining dimensions must match in order and extent.
@@ -79,8 +87,7 @@ order and each input's internal order must both be checked.
 
 The conceptual workflow is `described color block + independent alpha block ->
 FMT-02B -> explicitly grouped result`. Joining alpha copies it; it does not
-associate the color values. Public executable commands and measured outcomes
-remain implementation requirements. No runtime tests were run for this draft.
+associate the color values. Public executable commands and measured outcomes are linked above.
 For rank-one inputs [7,9] and [11], axes are 0 and output is [7,9,11]. One input
 [7,9] gives exact identity. An empty nonchannel shape does not introduce a
 rank-zero output. Arbitrary source/destination mapping belongs to FMT-02C;

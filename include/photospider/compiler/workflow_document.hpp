@@ -186,22 +186,22 @@ class PHOTOSPIDER_API GraphSnapshot final {
   struct State;
 
   /**
-   * @brief Captures a document/revision and weak currentness state.
+   * @brief Captures a document/revision and retained atomic currentness state.
    * @param document Immutable copied source document.
    * @param revision Nonzero captured revision.
-   * @param state Weak reference to the graph revision state.
+   * @param state Shared revision token, set to zero by context teardown.
    * @throws std::bad_alloc If shared document storage allocation fails.
    * @note Only GraphContext constructs valid snapshots.
    */
   GraphSnapshot(std::shared_ptr<const WorkflowDocument> document,
-                std::uint64_t revision, std::weak_ptr<State> state);
+                std::uint64_t revision, std::shared_ptr<State> state);
 
   /** @brief Shared immutable source document. */
   std::shared_ptr<const WorkflowDocument> document_;
   /** @brief Nonzero captured revision, or zero for default state. */
   std::uint64_t revision_ = 0;
-  /** @brief Weak liveness/currentness state of the owning graph context. */
-  std::weak_ptr<State> state_;
+  /** @brief Retained revision token; does not retain the graph context. */
+  std::shared_ptr<State> state_;
 };
 
 /**
@@ -285,7 +285,7 @@ class PHOTOSPIDER_API GraphContext final {
   [[nodiscard]] std::uint64_t revision() const noexcept;
 
  private:
-  /** @brief Shared currentness state retained weakly by snapshots. */
+  /** @brief Shared atomic currentness token retained by snapshots. */
   std::shared_ptr<GraphSnapshot::State> state_;
   /** @brief Serializes document/revision capture and replacement. */
   mutable std::mutex mutex_;

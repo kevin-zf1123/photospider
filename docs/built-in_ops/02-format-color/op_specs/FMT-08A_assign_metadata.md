@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 proposed_operation_keys:
   - metadata.assign_strict
@@ -18,6 +18,16 @@ inspection_commit: 1b403fb9
 ---
 
 # FMT-08A: atomically assign or reinterpret metadata
+
+Runtime update (package 0.22.0): FMT-08A/B are implemented with canonical
+TensorDescription v3, typed encoding/sampling/ICC/OCIO resource descriptions,
+opaque annotations, atomic edits and exact planar/generic-numeric regional
+execution. See the [runtime schema and interfaces](../../../kernel-architecture/Tensor-Semantic-Metadata.md),
+[minimal public workflow](../../../../examples/metadata_workflow/README.md)
+and [measured performance](../../../../examples/metadata_performance/README.md).
+Proposed remains the specification decision status; external FMT-12/13 transform
+engines are not claimed by the metadata/resource implementation.
+
 
 Inherit the complete [FMT-08 contract](FMT-08_metadata_assignment_contract.md).
 These are proposed native registry keys, not aliases for legacy color.assign.
@@ -113,5 +123,4 @@ Conceptual graph: tensor -> A -> consumers using the assigned interpretation,
 with a second consumer still reading the original tensor. Implementation must
 provide runnable public compile/execute examples and independent byte/descriptor
 checks, partial requests, all layouts, proof/cache separation, resource lifetime,
-low budgets and transactional failures. No runtime implementation or benchmark
-result is claimed by this Proposed specification.
+low budgets and transactional failures. The implementation and benchmark evidence are linked in the runtime update above.

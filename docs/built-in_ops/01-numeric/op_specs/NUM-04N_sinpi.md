@@ -87,3 +87,13 @@ and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration
 registration; MPFR is used only by the independent Python oracle.
+
+### SIMD polynomial update (2026-09-24)
+
+Float32 accelerated sinpi uses a polynomial in the original binary argument for `2^-120 <= |x| < 1/4`, with exact signed zero handling. Coefficients include pi powers; no rounded `pi*x` input is substituted. Exact quarter-turn roots retain the algebraic path.
+
+The maintained analytic certificate includes coefficient, arithmetic and final
+reference rounding errors under the existing four-step contract. Float64
+arguments retain their existing implementation. Nonfinite values and inputs
+outside the polynomial admission use the existing semantic/fallback layer. See
+[the proof, validation and performance report](../trig-performance.md).

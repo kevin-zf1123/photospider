@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/data/tensor_description.hpp"
 #include "plugin/dense_layout_validation.hpp"
 
 namespace ps::input_internal {
@@ -35,8 +36,8 @@ bool valid_constraint(const OperationPortConstraint& port) {
   }
   if (!port.result_schema_id.empty() || port.result_schema_version)
     return false;
-  if (port.rank > 8 || port.element_type > 4 || port.semantic_kind > 10 ||
-      (port.element_type_mask & ~UINT32_C(15)) ||
+  if (port.rank > 8 || port.element_type > 7 || port.semantic_kind > 10 ||
+      (port.element_type_mask & ~UINT32_C(127)) ||
       (port.element_type && port.element_type_mask))
     return false;
   if (port.kind != OperationPortKind::Typed &&
@@ -117,6 +118,7 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
   std::set<std::string> keys;
   std::size_t total = 0;
   unsigned typed_count = 0;
+  bool tensor_description = false;
   for (const auto& facet : *facets) {
     if (facet.key.empty() || facet.key.size() > 256 || facet.version == 0 ||
         std::any_of(
@@ -139,8 +141,18 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
       if (!status.ok())
         return status;
     }
+    if (facet.key == "photospider.tensor-description") {
+      auto decoded = decode_tensor_description(facet);
+      if (!decoded.ok())
+        return decoded.status();
+      tensor_description = true;
+    }
     total += facet.payload.size();
   }
+  if (tensor_description && typed_count)
+    return failure(
+        ErrorCode::InvalidArgument,
+        "tensor-description v3 cannot mix legacy typed coordinate conventions");
   std::sort(
       facets->begin(), facets->end(),
       [](const ValueFacet& a, const ValueFacet& b) { return a.key < b.key; });
@@ -321,8 +333,11 @@ Status validate_port_schema(const OperationTraits& traits) {
 Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind) {
-  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency)
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind,
+    std::uint32_t input_port) {
+  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency &&
+      !(traits.planar_storage_capable &&
+        traits.outputs[0].static_dependency_pieces))
     return Result<Region>(
         Status::failure(ErrorCode::InvalidArgument,
                         "dependency program requires runtime resolution"));
@@ -374,10 +389,71 @@ Result<Region> derive_input_demand(
         input_shape, input_shape, OperationPortKind::Value);
   }
   switch (traits.outputs[0].region_rule) {
-    case OperationRegionRule::Dependency:
-      return Result<Region>(
-          failure(ErrorCode::InvalidArgument,
-                  "runtime dependency relation is unresolved"));
+    case OperationRegionRule::Dependency: {
+      if (!traits.outputs[0].static_dependency_pieces)
+        return Result<Region>(
+            failure(ErrorCode::InvalidArgument,
+                    "static dependency relation is unresolved"));
+      std::optional<Region> envelope;
+      for (const auto& piece : *traits.outputs[0].static_dependency_pieces) {
+        for (const auto& box : piece.coverage.boxes()) {
+          auto clipped = output_demand.dimensions();
+          bool hit = true;
+          for (std::size_t a = 0; a < clipped.size(); ++a) {
+            const auto part = box.dimensions()[a];
+            const auto begin = std::max(part.offset, clipped[a].offset);
+            const auto end = std::min(part.offset + part.extent,
+                                      clipped[a].offset + clipped[a].extent);
+            if (begin >= end) {
+              hit = false;
+              break;
+            }
+            clipped[a] = {begin, end - begin};
+          }
+          if (!hit)
+            continue;
+          for (const auto& map : piece.inputs) {
+            if (map.port != input_port || map.axes.empty())
+              continue;
+            std::vector<RegionDimension> mapped;
+            for (const auto& relation : map.axes) {
+              if (relation.observation_axis < 0) {
+                mapped.push_back(relation.fixed);
+              } else {
+                const auto source = clipped.at(relation.observation_axis);
+                const auto offset =
+                    static_cast<__int128>(source.offset) + relation.translation;
+                if (offset < 0 || offset > UINT64_MAX)
+                  return Result<Region>(
+                      failure(ErrorCode::InvalidArgument,
+                              "dependency translation overflow"));
+                mapped.push_back(
+                    {static_cast<std::uint64_t>(offset), source.extent});
+              }
+            }
+            Region region(mapped);
+            if (!region.validate(input_shape).ok())
+              return Result<Region>(failure(ErrorCode::InvalidArgument,
+                                            "dependency exceeds input"));
+            if (envelope) {
+              for (std::size_t a = 0; a < mapped.size(); ++a) {
+                const auto old = envelope->dimensions()[a];
+                const auto first = std::min(old.offset, mapped[a].offset);
+                const auto last = std::max(old.offset + old.extent,
+                                           mapped[a].offset + mapped[a].extent);
+                mapped[a] = {first, last - first};
+              }
+            }
+            envelope = Region(std::move(mapped));
+          }
+        }
+      }
+      if (envelope)
+        return Result<Region>(std::move(*envelope));
+      auto dimensions = Region::whole(input_shape).dimensions();
+      dimensions[0].extent = 0;
+      return Result<Region>(Region(std::move(dimensions)));
+    }
     case OperationRegionRule::Shrink:
       break;
     case OperationRegionRule::Whole:
@@ -450,7 +526,7 @@ Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
                               const std::vector<ValueFacet>& facets) {
   const auto element = static_cast<std::uint32_t>(descriptor.element_type);
-  if (element < 1 || element > 4 || descriptor.shape.empty() ||
+  if (element < 1 || element > 7 || descriptor.shape.empty() ||
       descriptor.shape.size() > 8 ||
       std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
                   [](auto n) { return n == 0; }))
@@ -469,6 +545,15 @@ Status validate_port_metadata(const OperationPortConstraint& port,
        !(port.element_type_mask & (1U << (element - 1)))))
     return failure(ErrorCode::TypeMismatch, "port dtype/rank mismatch");
   for (const auto& facet : facets) {
+    if (facet.key == "photospider.tensor-description") {
+      auto decoded = decode_tensor_description(facet);
+      if (!decoded.ok())
+        return decoded.status();
+      auto status = validate_tensor_description(decoded.value(), descriptor);
+      if (!status.ok())
+        return status;
+      continue;
+    }
     if (facet.key == "photospider.color-array") {
       auto color = decode_color_array(facet);
       if (!color.ok())

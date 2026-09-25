@@ -7,9 +7,9 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
-proposed_operation_keys:
+implemented_operation_keys:
   - channel.assemble_mapped_strict
   - channel.assemble_mapped_accelerated_apple_silicon
   - channel.assemble_mapped_accelerated_x86_64
@@ -19,12 +19,19 @@ inspection_commit: 1b403fb9
 
 # FMT-02C: assemble explicitly mapped components
 
+Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
+mapping, tensor-description v2, canonical static parameters, and legal retained
+views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
+and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
+Decision status remains Proposed; implementation facts below supersede the
+historical inspection's missing-runtime statements.
+
+
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md) for
 exact copying, same dtype, spatial agreement, metadata modes, planar storage,
 auto/view/materialize, CPU support, resource accounting and failures. This
 member independently selects sources and destination slots, including deliberate
-output-component reinterpretation. Its proposed default-registry keys are not
-implemented operations or aliases of the legacy `channel.merge`.
+output-component reinterpretation. Its default-registry keys are independent of the retired `channel.merge`.
 
 ## Inputs and static interface
 

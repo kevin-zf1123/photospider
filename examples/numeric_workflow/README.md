@@ -2035,3 +2035,72 @@ Large dense association sets remain expensive, particularly sequence/remap,
 sort and prefix/integration requests. These measurements complement the sparse,
 streamed, resource-limit and independent numerical acceptance cases; they do not
 justify a production throughput promise.
+
+### NUM-04 exp SIMD implementation
+
+The formal Float32 accelerated exp helpers use a certified normal-range NEON or
+AVX2/FMA batch kernel. Float64 exp and NUM-01 expression exp use certified
+SLEEF binary64 enclosures in [-80,80], without narrowing their inputs. The
+[implementation and performance report](../../docs/built-in_ops/01-numeric/exp-performance.md)
+provides scope, accuracy, platform results and profiler limitations.
+
+```sh
+mkdir -p build/num04-exp
+cmake --build build --target photospider_numeric_exp_benchmark -j8
+python3 examples/numeric_workflow/exp_bound.py
+python3 examples/numeric_workflow/exp_oracle.py build/num04-exp/oracle.bin
+build/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
+python3 examples/numeric_workflow/exp_measure.py build/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/timings.csv
+```
+
+The corpus generator requires independent MPFR 4.2+. Expected acceptance output
+reports 20,503 cases, six partitions, maximum distance at most four, and passing
+layout/fenv/resource/cancellation checks. The benchmark is a manual target available with `BUILD_TESTING=ON`; it uses public workflow
+execution for its `public` layer. Append a Linux CPU number to `exp_measure.py`
+for `taskset` affinity. The maintained driver measures the production IQK
+implementation only, at `public`, direct-callback `core` and `raw` layers.
+For example, `photospider_numeric_exp_benchmark public 262144 10 7` measures
+seven public runs after one warmup. Core/raw memory peaks are unavailable.
+The SLEEF comparison backends were removed after the recorded A/B evaluation.
+`exp64_oracle.py UNARY_EXECUTABLE [strict|apple|x86]` separately checks Float64
+exp against independent MPFR, including admission boundaries, strict special /
+range handling and inputs that cannot be represented in Float32.
+
+`photospider_numeric_math_batch` checks scalar/batch equivalence, partition and
+layout invariance, floating-environment restoration, and exact managed work and
+capacity thresholds. Its `time` mode reports scalar mathematical-core and batch
+callback medians; these are different measurement boundaries. See
+[the NUM/CRV batch report](../../docs/built-in_ops/01-numeric/batch-performance.md).
+The [packed adapter and FP64 exp update](../../docs/built-in_ops/01-numeric/adapter-performance.md)
+records the newer CPU-instruction reductions, Apple/FreeBSD paired measurements,
+and added exp/binary64/multidimensional-layout checks.
+
+`trig_bound.py` analytically certifies the actual SIMD coefficients and rounding
+graph. `trig_oracle.py OUTPUT_DIRECTORY` generates independent MPFR corpora;
+`photospider_numeric_trig_benchmark check FUNCTION CORPUS` checks each corpus
+through six batch partitions, layouts, floating modes and resource/cancellation
+fixtures. `trig_measure.py CURRENT [BASELINE]` reports comparable public/core
+measurements and current raw-kernel timings. See [the trig report](../../docs/built-in_ops/01-numeric/trig-performance.md).
+
+For the extended FreeBSD campaign, explicitly build both current and baseline
+with Clang 22 and the same C++ runtime, then run:
+
+```sh
+cpuset -l 2 python3.12 examples/numeric_workflow/freebsd_analysis.py \
+  build/examples/numeric_workflow/photospider_numeric_trig_benchmark \
+  baseline-build/examples/numeric_workflow/photospider_numeric_trig_benchmark \
+  build/examples/numeric_workflow/photospider_numeric_exp_benchmark timing-final.csv
+```
+
+The trig timing CLI accepts `FUNCTION LAYER N SPAN REPETITIONS
+[profile|measure] [normal|mixed|outside|landmark|tiny] [LAYOUT]`. Layout 0/1/2/3
+selects unaligned/reverse/broadcast/dense; non-dense layouts require `core`.
+`profile` retains a warmup output check and skips repeated checks for sampling;
+use `measure` for latency campaigns. `math_batch time [N]` selects its array size.
+The signal benchmark accepts `PROFILE FILTER [float32|float64] [REPETITIONS]`;
+the dtype option applies only to inverse output, while lowpass remains Float64.
+
+See [the full scoped FreeBSD analysis](../../docs/built-in_ops/01-numeric/freebsd-full-analysis.md)
+for the 721 timing rows, additional CRV commands/artifacts, profiling boundaries,
+correctness checks and observed regressions. `freebsd_plot.py DATA_DIR OUTPUT.png`
+generates a PNG and SVG overview from these CSVs and requires optional matplotlib.

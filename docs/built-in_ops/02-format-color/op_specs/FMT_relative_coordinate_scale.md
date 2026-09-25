@@ -5,7 +5,7 @@ kind: shared_data_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_metadata
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -16,8 +16,9 @@ inspection_commit: 1b403fb9
 Confirmed on 2026-09-23 during FMT-11 clarification. This target revises the
 CIELAB/CIELCh lightness coordinate used by NUM/CRV/FMT descriptions. It supersedes
 earlier native L*=0..100 storage statements, including earlier FMT-11 decisions.
-Ordinary NUM rounding, arithmetic, demand and precision are unchanged. This
-documentation change does not implement a metadata/runtime migration.
+Ordinary NUM rounding, arithmetic, demand and precision are unchanged. Package 0.22.0 implements the explicit v3 metadata convention described in the
+[runtime contract](../../../kernel-architecture/Tensor-Semantic-Metadata.md);
+individual arithmetic consumers retain their separate implementation status.
 
 ## Canonical relative coordinates
 
@@ -70,7 +71,7 @@ sample magnitudes. The new generic semantic schema must identify the revised
 coordinate convention; complete-group validation, authoring, caches, LUT axes,
 tables, sample fixtures and consuming operations must migrate together.
 Old payloads require explicit import conversion or retirement, not a silent
-compatibility alias. No new persisted schema/version number is selected here.
+compatibility alias. The selected runtime discriminator is now tensor-description v3 (`TDM3`).
 Closing the [shared representation implementation gate](FMT_common_contract.md#shared-representation-implementation-gate)
 is mandatory before registering consumers or persisting the revised descriptions.
 The document front matter's `spec_schema_version: 1` versions the specification

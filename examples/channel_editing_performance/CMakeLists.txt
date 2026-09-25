@@ -1,0 +1,3 @@
+add_executable(photospider_channel_editing_performance main.cpp)
+target_link_libraries(photospider_channel_editing_performance PRIVATE Photospider::kernel)
+target_compile_features(photospider_channel_editing_performance PRIVATE cxx_std_17)

@@ -39,6 +39,94 @@ ps::Status copy_region(const ps::PlanarOperationInvocation& call) {
       }
   return ps::Status::success();
 }
+int rectangle_bounds() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  // Permuted axes, partial final tiles and padded rows.
+  const ValueDescriptor descriptor{ElementType::UInt16, {11, 2, 7}};
+  const Region roi({{2, 8}, {1, 1}, {1, 6}});
+  std::vector<std::uint16_t> values(48);
+  for (std::size_t i = 0; i < values.size(); ++i)
+    values[i] = static_cast<std::uint16_t>(i * 17 + 3);
+  for (auto order : {ImagePlaneOrder::Continuous, ImagePlaneOrder::Tiled}) {
+    PlanarImageConfig config;
+    config.order = order;
+    config.width_axis = 0;
+    config.channel_axis = 1;
+    config.height_axis = 2;
+    config.tile_width = 4;
+    config.tile_height = 4;
+    config.row_pitch_bytes = order == ImagePlaneOrder::Continuous ? 32 : 0;
+    auto invalid_config = config;
+    invalid_config.tile_width = 5;
+    PS_CHECK(PlanarImage::create(descriptor, invalid_config).status().code ==
+             ErrorCode::InvalidArgument);
+    invalid_config = config;
+    invalid_config.tile_height = 3;
+    PS_CHECK(PlanarImage::create(descriptor, invalid_config).status().code ==
+             ErrorCode::InvalidArgument);
+    auto image = PlanarImage::create(descriptor, config).take_value();
+    {
+      auto writer = image.begin_write(roi).take_value();
+      auto block = writer.rectangle_run({2, 1, 1}).take_value();
+      PS_CHECK(block.row.samples == (order == ImagePlaneOrder::Tiled ? 2 : 8));
+      PS_CHECK(block.rows == (order == ImagePlaneOrder::Tiled ? 3 : 6));
+      PS_CHECK(block.row_stride_bytes ==
+               (order == ImagePlaneOrder::Tiled ? 8 : 32));
+      PS_CHECK(!writer.rectangle_run({1, 1, 1}).ok());
+      // Destruction rolls the unpublished preparation back.
+    }
+    PS_CHECK(image.valid_samples() == 0);
+    PS_CHECK(image
+                 .publish(roi,
+                          reinterpret_cast<const std::uint8_t*>(values.data()),
+                          values.size() * sizeof(std::uint16_t))
+                 .ok());
+    auto window = image.acquire(roi).take_value();
+    for (std::uint64_t x = 2; x < 10; ++x)
+      for (std::uint64_t y = 1; y < 7; ++y) {
+        auto block = window.rectangle_run({x, 1, y}).take_value();
+        PS_CHECK(block.row.samples ==
+                 (order == ImagePlaneOrder::Tiled
+                      ? std::min<std::uint64_t>(10 - x, 4 - x % 4)
+                      : 10 - x));
+        PS_CHECK(block.rows == (order == ImagePlaneOrder::Tiled
+                                    ? std::min<std::uint64_t>(7 - y, 4 - y % 4)
+                                    : 7 - y));
+        for (std::uint64_t dy = 0; dy < block.rows; ++dy)
+          for (std::uint64_t dx = 0; dx < block.row.samples; ++dx) {
+            std::uint16_t actual = 0;
+            std::memcpy(&actual,
+                        block.row.data + dy * block.row_stride_bytes + dx * 2,
+                        2);
+            PS_CHECK(actual == values[(x + dx - 2) * 6 + y + dy - 1]);
+          }
+      }
+    PS_CHECK(!window.rectangle_run({10, 1, 1}).ok());
+    PS_CHECK(!window.rectangle_run({2, 0, 1}).ok());
+    PS_CHECK(!window.rectangle_run({2, 1}).ok());
+    auto alias =
+        image.channel_view(1, false, Region({{2, 8}, {1, 6}})).take_value();
+    auto alias_window = alias.acquire(Region({{2, 8}, {1, 6}})).take_value();
+    auto block = alias_window.rectangle_run({2, 1}).take_value();
+    PS_CHECK(block.row_stride_bytes ==
+             (order == ImagePlaneOrder::Tiled ? 8 : 32));
+    std::uint16_t second_row = 0;
+    std::memcpy(&second_row, block.row.data + block.row_stride_bytes, 2);
+    PS_CHECK(second_row == values[1]);
+  }
+  Compiler compiler(make_default_operation_registry());
+  PlanningOptions invalid_options;
+  invalid_options.tile_width = 3;
+  PS_CHECK(compiler.plan(OptimizedGraphIR{}, invalid_options).status().code ==
+           ErrorCode::InvalidArgument);
+  invalid_options.tile_width = 128;
+  invalid_options.tile_height = 6;
+  PS_CHECK(compiler.plan(OptimizedGraphIR{}, invalid_options).status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(!PlanarImageReadWindow{}.rectangle_run({0, 0}).ok());
+  PS_CHECK(!PlanarImageWriteWindow{}.rectangle_run({0, 0}).ok());
+  return 0;
+}
 int workflow() {
   using namespace ps;  // NOLINT(build/namespaces)
   constexpr std::uint64_t height = 130, width = 200, channels = 4;
@@ -622,7 +710,7 @@ int workflow() {
   unsupported_workspace.planar_callback = copy_region;
   PS_CHECK(invalid_planar_registry
                .register_operation(std::move(unsupported_workspace))
-               .code == ErrorCode::InvalidArgument);
+               .ok());
   OperationDefinition unsupported_multiplier;
   unsupported_multiplier.key = "test.planar_workspace_multiplier";
   unsupported_multiplier.traits = failure_traits;
@@ -630,7 +718,7 @@ int workflow() {
   unsupported_multiplier.planar_callback = copy_region;
   PS_CHECK(invalid_planar_registry
                .register_operation(std::move(unsupported_multiplier))
-               .code == ErrorCode::InvalidArgument);
+               .ok());
   OperationDefinition unsupported_port;
   unsupported_port.key = "test.planar_old_image_port";
   unsupported_port.traits = failure_traits;
@@ -760,8 +848,129 @@ int workflow() {
   }
   return 0;
 }
+int planar_workspace_contract() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  const ValueDescriptor descriptor{ElementType::Float32, {1, 1, 1}};
+  const auto whole = Region::whole(descriptor.shape);
+  auto image = PlanarImage::create(descriptor, {}).take_value();
+  const float value = 0.75f;
+  PS_CHECK(
+      image.publish(whole, reinterpret_cast<const uint8_t*>(&value), 4).ok());
+  auto registry = std::make_shared<OperationRegistry>();
+  for (int mode = 0; mode < 3; ++mode) {
+    OperationDefinition op;
+    op.key = "test.planar_scratch_" + std::to_string(mode);
+    op.traits.planar_storage_capable = true;
+    op.traits.input_count = 1;
+    op.traits.input_schema.resize(1);
+    op.traits.workspace_bytes = 32;
+    op.traits.outputs[0].output_element_type = ElementType::Float32;
+    op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+    op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+    op.traits.outputs[0].planar_layout = PlanarImageLayout{};
+    op.planar_callback = [mode](const PlanarOperationInvocation& call) {
+      auto bytes = call.allocator.allocate(mode == 1 ? 33 : 32);
+      if (mode == 1)
+        return Status::success();  // Ignored failure must stay sticky.
+      if (!bytes.ok())
+        return bytes.status();
+      if (mode == 2) {
+        auto second = call.allocator.allocate(1);  // Aggregate live bound.
+        (void)second;
+        return Status::success();
+      }
+      return copy_region(call);
+    };
+    PS_CHECK(registry->register_operation(std::move(op)).ok());
+  }
+  OperationDefinition bad;
+  bad.key = "test.planar_missing_layout";
+  bad.traits = registry->find_traits("test.planar_scratch_0").take_value();
+  bad.traits.requires_metadata_specialization = true;
+  bad.planar_callback = copy_region;
+  bad.specialize_metadata = [descriptor](const auto&, const auto&) {
+    OperationOutputSpecialization result;
+    result.metadata.descriptor = descriptor;
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{result});
+  };
+  PS_CHECK(registry->register_operation(std::move(bad)).ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument document;
+  document.inputs = {
+      {1, "image", descriptor, whole, {}, {}, PlanarImageLayout{}}};
+  document.outputs = {{"result", 1, "value"}};
+  ExecutionBindings bindings;
+  bindings.inputs.push_back(
+      {"image", {}, {}, {}, std::make_shared<const PlanarImage>(image)});
+  ExecutionContext context(registry, {1, false, 8, 4 * 1024 * 1024});
+  for (int mode = 0; mode < 3; ++mode) {
+    document.nodes = {{1,
+                       "test.planar_scratch_" + std::to_string(mode),
+                       {WorkflowInputReference{1}},
+                       {}}};
+    GraphContext graph(document);
+    auto compiled = Compiler(registry).compile(graph);
+    PS_CHECK(compiled.ok());
+    auto result = context.execute(compiled.value().plan, bindings);
+    PS_CHECK(mode == 0 ? result.ok()
+                       : result.status().code == ErrorCode::ResourceExhausted);
+  }
+  document.nodes[0].operation = "test.planar_missing_layout";
+  GraphContext graph(document);
+  PS_CHECK(Compiler(registry).compile(graph).status().code ==
+           ErrorCode::TypeMismatch);
+  return 0;
+}
+int page_run_rollback() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  PlanarImageConfig config;
+  config.channel_axis.reset();
+  config.order = ImagePlaneOrder::Continuous;
+  auto probe = PlanarImage::create({ElementType::UInt8, {1, 1}}, config);
+  PS_CHECK(probe.ok());
+  const auto width = probe.value().page_size() * 1027;
+  auto created = PlanarImage::create({ElementType::UInt8, {2, width}}, config);
+  PS_CHECK(created.ok());
+  auto image = created.take_value();
+  const std::uint8_t first = 123, second = 211;
+  PS_CHECK(image.publish(Region({{0, 1}, {0, 1}}), &first, 1).ok());
+  PS_CHECK(image.publish(Region({{1, 1}, {0, 1}}), &second, 1).ok());
+  const auto before = image.resident_bytes();
+  const Region requested({{0, 2}, {1, width - 1}});
+  {
+    auto prepared = image.begin_write(requested);
+    PS_CHECK(prepared.ok());
+    auto window = prepared.take_value();
+    auto last = window.row_run({1, width - 1});
+    PS_CHECK(last.ok());
+    last.value().data[0] = 99;
+    // Two old backed pages split fresh runs; each new run crosses the
+    // 1024-page batching limit. Destruction rolls back only fresh backing.
+  }
+  PS_CHECK(image.resident_bytes() == before);
+  PS_CHECK(image.backed_bytes() == 2 * image.page_size());
+  std::uint8_t observed = 0;
+  PS_CHECK(image.read(Region({{0, 1}, {0, 1}}), &observed, 1).ok());
+  PS_CHECK(observed == first);
+  PS_CHECK(image.read(Region({{1, 1}, {0, 1}}), &observed, 1).ok());
+  PS_CHECK(observed == second);
+  PS_CHECK(!image.acquire(Region({{1, 1}, {width - 1, 1}})).ok());
+  CancellationSource stop;
+  stop.cancel();
+  PS_CHECK(image.begin_write(requested, stop.token()).status().code ==
+           ErrorCode::Cancelled);
+  PS_CHECK(image.resident_bytes() == before);
+  return 0;
+}
 }  // namespace
 
 int main() {
+  if (planar_workspace_contract())
+    return 1;
+  if (page_run_rollback())
+    return 1;
+  if (rectangle_bounds())
+    return 1;
   return workflow();
 }

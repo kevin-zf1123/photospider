@@ -7,12 +7,10 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_package_0_23_0
 clarification_status: complete
 proposed_operation_keys:
   - numeric.convert_format_strict
-  - numeric.convert_format_accelerated_apple_silicon
-  - numeric.convert_format_accelerated_x86_64
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
 ---
@@ -20,7 +18,7 @@ inspection_commit: 1b403fb9
 # FMT-06A: convert tensor dtype and numeric interval
 
 Inherit the complete [FMT-06 contract](FMT-06_numeric_conversion_contract.md).
-This is a proposed native primitive, not a compatibility alias or automatic
+This is now a native primitive, not a compatibility alias or automatic
 upgrade of unsuffixed numeric.cast or numeric.encode_range. Its default scales
 numeric intervals while converting dtype. Explicit rescale=false gives pure cast.
 
@@ -95,8 +93,8 @@ optional-cache restrictions, backend/profile precision and error attribution.
 For same-dtype identity, include -0, +/-Inf, multiple NaN payloads and valid
 negative/zero-stride generic inputs. For nonidentity transforms use independent
 exact rational rounding plus NUM's endpoint/zero reference; pure casts never
-route Int64 through Float64. For accelerated floating affine output, verify the
-shared NUM bound and exact exceptions instead of claiming unrestricted bit identity.
+route Int64 through Float64. SIMD implementations inside the strict key must
+match the same exact result, including tails and exceptional lanes.
 
 ## Metadata and channel-range fixtures
 
@@ -128,5 +126,6 @@ commands and independently check output bytes, shape, metadata and regions.
 Exercise full/offset/disjoint/cross-tile requests, arbitrary channel-axis tables,
 unrequested invalid samples, static invalid bounds, same-type identity views,
 forced-view rejection, low budgets, cancellation and context-independent result
-lifetime. This document claims no runtime registration, passing operator tests
-or measured performance.
+lifetime. Runtime registration, focused passing tests and measured performance
+are recorded in the linked implementation record and benchmark rather than
+being implied by this proposed specification.

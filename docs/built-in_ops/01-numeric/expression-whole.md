@@ -104,3 +104,13 @@ and core CSVs, `expression-core.cpp`, `expression-profile.cpp`, both `.trace`
 captures and exported XML/sample JSON, oracle/manual logs and focused test logs.
 The public `benchmark_quick` command reproduces N=65536 full/three-point timing;
 other sizes in `benchmark` are not claimed as measured for this change.
+
+## Exp backend update (2026-09-24)
+
+Direct SLEEF exp has been removed. The accelerated AST rejects `Exp` from its
+fast interval evaluator and replays that sample through the original strict
+RN64 AST evaluator, preserving input precision and success/failure behavior.
+The NUM-04 IQK exp certificate only covers binary32 primitive arguments; it is
+not an enclosure for these binary64 intermediates. Expressions containing exp
+can therefore be substantially slower than the historical timings above.
+Other admitted mathematical functions retain their SLEEF paths.

@@ -141,7 +141,7 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
   std::uint32_t rank = 0;
   /** @brief Allowed dtype set, bit (element code - 1); zero adds no
    * restriction.
-   * @note Only low four bits are valid; nonzero element_type is mutually
+   * @note Only low seven bits are valid; nonzero element_type is mutually
    * exclusive.
    */
   std::uint32_t element_type_mask = 0;
@@ -576,6 +576,10 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
   const Region& output_region;
   const PlanarImageWriteWindow& output;
   CancellationToken cancellation;
+  /** @brief Host scratch allocator with the declared aggregate live bound. */
+  BufferAllocator allocator;
+  /** @brief Resolved, validated output metadata borrowed for this call. */
+  const OperationMetadata& output_metadata;
 };
 /** @brief Callback writes only the requested output window; host publishes
  * that coverage after successful return and cancellation/current checks.
@@ -915,12 +919,13 @@ class PHOTOSPIDER_API OperationRegistry final {
   /** @brief Host-only structural callback entry after plan/binding validation.
    * The registry still checks exact window authorization and parameters before
    * preparing output pages or invoking the callback. */
-  Status invoke_planar(const std::string& key,
-                       const std::vector<PlanarImageReadWindow>& inputs,
-                       const std::vector<Region>& input_demands,
-                       const std::map<std::string, ParameterValue>& parameters,
-                       const Region& output_region, PlanarImage& output,
-                       const CancellationToken& cancellation = {}) const;
+  Status invoke_planar(
+      const std::string& key, const std::vector<PlanarImageReadWindow>& inputs,
+      const std::vector<Region>& input_demands,
+      const std::map<std::string, ParameterValue>& parameters,
+      const Region& output_region, PlanarImage& output,
+      const CancellationToken& cancellation = {},
+      const BufferAllocator& allocator = BufferAllocator()) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

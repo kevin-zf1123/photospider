@@ -315,9 +315,12 @@ struct CertifiedMath final {
   std::optional<std::uint64_t> accelerated_reduced(
       CertifiedKind kind, const BinaryParts& input, std::uint64_t raw,
       std::uint64_t other, std::uint64_t numerator, std::uint64_t denominator,
-      bool narrow) {
-    input_internal::Float32Environment environment;
-    if (!environment.active() || !accelerated_math_available())
+      bool narrow, bool normalized_environment = false) {
+    std::optional<input_internal::Float32Environment> environment;
+    if (!normalized_environment)
+      environment.emplace();
+    if ((!normalized_environment && !environment->active()) ||
+        !accelerated_math_available())
       return {};
     const auto pi = FastInterval{numeric_down(0x1.921fb54442d18p1),
                                  numeric_up(0x1.921fb54442d18p1)};
@@ -410,7 +413,10 @@ struct CertifiedMath final {
   Result<std::uint64_t> evaluate(
       CertifiedKind kind, ElementType dtype, std::uint64_t a, std::uint64_t b,
       const std::function<Status(std::uint64_t)>& work,
-      const std::function<Status()>& strict_fallback) {
+      const std::function<Status()>& strict_fallback,
+      bool normalized_environment = false,
+      const std::optional<std::uint64_t>* batch_candidate = nullptr,
+      bool admission_charged = false) {
     using Answer = Result<std::uint64_t>;
     auto& math = functions.math;
     struct Binding {
@@ -422,7 +428,9 @@ struct CertifiedMath final {
     } binding{math};
     math.consume = &work;
     try {
-      auto admitted = work(DirectedInterval::kSlots * DirectedInterval::kWords);
+      auto admitted = work(admission_charged ? 0
+                                             : DirectedInterval::kSlots *
+                                                   DirectedInterval::kWords);
       if (!admitted.ok())
         return Answer(admitted);
       const bool narrow = dtype == ElementType::Float32;
@@ -543,15 +551,18 @@ struct CertifiedMath final {
         }
       }
       if (profile != SequenceProfile::Strict && !is_rational) {
-        auto fast = accelerated_math(static_cast<unsigned>(kind), a, b, narrow);
+        auto fast = batch_candidate
+                        ? *batch_candidate
+                        : accelerated_math(static_cast<unsigned>(kind), a, b,
+                                           narrow, normalized_environment);
         if (fast)
           return Answer(*fast);
       }
       if (profile != SequenceProfile::Strict &&
           (pi_function(kind) || kind == CertifiedKind::Sinc ||
            kind == CertifiedKind::Atan2pi)) {
-        auto fast =
-            accelerated_reduced(kind, x, a, b, numerator, denominator, narrow);
+        auto fast = accelerated_reduced(kind, x, a, b, numerator, denominator,
+                                        narrow, normalized_environment);
         if (fast)
           return Answer(*fast);
       }

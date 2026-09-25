@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented
 clarification_status: complete
 proposed_operation_keys:
   - channel.extract_index_strict
@@ -19,6 +19,12 @@ inspection_commit: d49d1840
 ---
 
 # FMT-01A: extract a channel by index
+
+Runtime update: the CPU registrations and public split helper are implemented.
+See the [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-01-channel-extraction)
+for current storage behavior, validation commands and the measured performance scope.
+Proposed is retained as the specification decision status.
+
 
 Inherit the complete [FMT-01 family contract](FMT-01_channel_extraction_contract.md)
 for ports, shape inference, metadata modes, exact mapping, regional support,

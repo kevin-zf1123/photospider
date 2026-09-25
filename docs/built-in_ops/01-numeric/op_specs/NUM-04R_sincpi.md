@@ -95,3 +95,13 @@ and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
 local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
 record the scope and limitations. Manual targets have no CTest/integration
 registration; MPFR is used only by the independent Python oracle.
+
+### SIMD polynomial update (2026-09-24)
+
+Float32 accelerated sincpi covers all finite binary32 inputs using exact integer-unit reduction. For `n = round_even(abs(x))` and `r = abs(x)-n`, it evaluates a central sincpi polynomial and reconstructs `(-1)^n*(r/abs(x))*sincpi(r)`. The central polynomial, hardware division and multiply use SIMD binary64 intermediates before final Float32 rounding. The `n=0` branch uses the central polynomial directly; zero returns one, nonzero integers return positive zero, and finite magnitudes at least `2^23` are all integers.
+
+The maintained analytic certificate includes coefficient, arithmetic and final
+reference rounding errors under the existing four-step contract. Float64
+arguments retain their existing implementation. Nonfinite values and inputs
+outside the polynomial admission use the existing semantic/fallback layer. See
+[the proof, validation and performance report](../trig-performance.md).

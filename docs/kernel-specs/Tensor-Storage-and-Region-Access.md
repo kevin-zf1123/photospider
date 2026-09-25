@@ -16,14 +16,15 @@ It owns physical layout, tile geometry, region access and storage ownership;
 [FMT-common](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
 owns the associated color/alpha interpretation. The supported CPU interfaces
 and explicit migration boundaries are described below. This implementation does
-not implement FMT-01 or preserve the retired image memory/numeric contracts.
+not preserve the retired image memory/numeric contracts. The implemented FMT-01
+family is documented in [Channel and color operations](../kernel-architecture/Channel-and-Color-Operations.md).
 
 ## Confirmed decisions
 
 | Topic | Selected target |
 | --- | --- |
 | Image layout | Every image is planar. Interleaved imports require explicit I/O codec layout conversion before entering the kernel. |
-| Graph tile policy | One DAG-wide tile size; operators cannot choose different output tile sizes. Examples are 64x64, 128x128 and 256x256, not an exhaustive accepted size list. |
+| Graph tile policy | One DAG-wide tile size; operators cannot choose different output tile sizes. Both extents must be positive powers of two (including 1); non-power-of-two tiles are unsupported. Examples include 64x64, 128x128 and 256x256. |
 | Plane organization | Continuous planar storage remains available; when tiled, all tiled image planes follow the DAG geometry, with no per-plane size override. |
 | Backing | Reserve one full-image continuous virtual address span; provide backing by page as needed. Plane/tile access retains the shared image address-space owner, rather than unrelated image allocations. |
 | Rows | Samples within a plane/tile row are contiguous; row-end padding is permitted. |
@@ -135,7 +136,12 @@ Byte count, pitch, offset, alignment rounding and shape products use checked
 arithmetic before proportional allocation.
 
 Tile size is a graph policy rather than an operator parameter. The 128x128
-planning default remains configurable, not a restriction to one size.
+planning default remains configurable. **Tile height and width must each be a
+positive power of two. Non-power-of-two tile geometry is unsupported** and is
+rejected with InvalidArgument by `Compiler::plan` and `PlanarImage::create`,
+including geometry attached to continuous storage. Image and ROI extents may be
+arbitrary positive sizes; incomplete edge tiles retain their actual valid extent.
+Validated geometry permits shift/mask address calculation.
 Halo reads and cross-tile ROIs may exceed a tile; they do not change stored output
 tile geometry. Tileless numeric tensors are not assigned fictitious image axes.
 Incoming image storage that does not match the required planar/tiling layout
@@ -252,6 +258,12 @@ intervals, with at most 64 groups and a nonempty role of at most 128 bytes.
 into the declared planar layout without an additional full-image packed buffer.
 `publish` copies an exact packed region transactionally. `acquire` returns an
 owner-retaining read window; `row_run` stops at the authorized ROI or tile edge.
+`rectangle_run` returns multiple authorized rows with an explicit byte row stride,
+bounded in both axes by the ROI and physical tile. Each row authorizes only its
+sample span; inter-row padding and tile gaps remain excluded. Read pointers live
+until the window retires; writable pointers live until publication or destruction.
+The transactional writer exposes the same bounded rectangle access. Callers
+synchronize writes and check cancellation during long copies.
 `read` is an explicit packed-region export. No API publishes the whole reserved
 address span as an unconditional ByteView. Missing coverage returns NotFound;
 overlapping publication fails rather than mutating published samples.

@@ -14,6 +14,18 @@
  * @note Behavioral failures otherwise return nonzero through `PS_CHECK`.
  */
 int main() {
+  ps::GraphSnapshot retained_revision;
+  {
+    ps::GraphContext revision_owner(ps::test::addition_document(1.0, 2.0));
+    retained_revision = revision_owner.snapshot();
+    PS_CHECK(retained_revision.current());
+    revision_owner.replace(ps::test::addition_document(3.0, 4.0));
+    PS_CHECK(!retained_revision.current());
+    retained_revision = revision_owner.snapshot();
+    PS_CHECK(retained_revision.current());
+  }
+  PS_CHECK(!retained_revision.current());
+
   using ps::Backend;
   using ps::Compiler;
   using ps::ErrorCode;

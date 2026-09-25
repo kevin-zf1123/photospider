@@ -21,11 +21,14 @@ class ArrayPublication final {
   std::shared_ptr<const dependency_internal::MetadataOwner> metadata_;
 
  public:
-  ArrayPublication(std::uint64_t boxes, std::uint64_t rank) {
+  ArrayPublication(std::uint64_t boxes, std::uint64_t rank,
+                   std::uint64_t facet_bytes = 0) {
     const auto per_box = 4 * (sizeof(Value) + rank * 40 + sizeof(Owner)) +
                          sizeof(Region) + rank * sizeof(RegionDimension);
     dependency_internal::MetadataBytes bytes;
     bytes.add(4096);
+    if (facet_bytes)
+      bytes.add(4 * (boxes + 1), facet_bytes);
     bytes.add(boxes, per_box);
     metadata_ = dependency_internal::metadata_owner(bytes.bytes);
   }

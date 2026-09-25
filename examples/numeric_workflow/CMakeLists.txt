@@ -166,3 +166,33 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/accelera
   target_compile_options(photospider_numeric_matrix_kernel_benchmark PRIVATE
     -fno-fast-math -frounding-math -ffp-contract=off)
 endif()
+
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/exp_simd.hpp")
+  add_executable(photospider_numeric_exp_benchmark EXCLUDE_FROM_ALL exp_benchmark.cpp)
+  target_include_directories(photospider_numeric_exp_benchmark PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/ops" "${CMAKE_SOURCE_DIR}/src/lib")
+  target_link_libraries(photospider_numeric_exp_benchmark PRIVATE photospider_test_kernel)
+  target_compile_features(photospider_numeric_exp_benchmark PRIVATE cxx_std_17)
+  target_compile_options(photospider_numeric_exp_benchmark PRIVATE
+    -fno-fast-math -frounding-math -ffp-contract=off)
+endif()
+
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/certified_math.hpp")
+  add_executable(photospider_numeric_math_batch EXCLUDE_FROM_ALL math_batch.cpp)
+  target_include_directories(photospider_numeric_math_batch PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/ops" "${CMAKE_SOURCE_DIR}/src/lib")
+  target_link_libraries(photospider_numeric_math_batch PRIVATE photospider_test_kernel)
+  target_compile_features(photospider_numeric_math_batch PRIVATE cxx_std_17)
+  target_compile_options(photospider_numeric_math_batch PRIVATE
+    -fno-fast-math -frounding-math -ffp-contract=off)
+endif()
+
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/plugins/ops/01-numeric/trig_simd.hpp")
+  add_executable(photospider_numeric_trig_benchmark EXCLUDE_FROM_ALL trig_benchmark.cpp)
+  target_include_directories(photospider_numeric_trig_benchmark PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/ops" "${CMAKE_SOURCE_DIR}/src/lib")
+  target_link_libraries(photospider_numeric_trig_benchmark PRIVATE photospider_test_kernel)
+  target_compile_features(photospider_numeric_trig_benchmark PRIVATE cxx_std_17)
+  target_compile_options(photospider_numeric_trig_benchmark PRIVATE
+    -fno-fast-math -frounding-math -ffp-contract=off)
+endif()

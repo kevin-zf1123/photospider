@@ -71,6 +71,7 @@ struct PHOTOSPIDER_API PlanarImageConfig final {
   std::uint32_t height_axis = 0;
   std::uint32_t width_axis = 1;
   std::optional<std::uint32_t> channel_axis = 2;
+  /** @brief Tile extents must each be a positive power of two (including 1). */
   std::uint64_t tile_height = 128;
   std::uint64_t tile_width = 128;
   /** @brief Continuous-mode row pitch; zero selects tightly packed rows. */
@@ -103,6 +104,23 @@ struct PHOTOSPIDER_API PlanarMutableRowRun final {
   std::uint64_t bytes = 0;
 };
 
+/** @brief Borrowed rectangle: row i begins at row.data + i * row_stride_bytes.
+ * @note Each of the rows contains row.samples samples; padding is excluded.
+ * Bounds stop at ROI and physical tile edges.
+ */
+struct PHOTOSPIDER_API PlanarRectangleRun final {
+  PlanarRowRun row;
+  std::uint64_t rows = 0;
+  std::uint64_t row_stride_bytes = 0;
+};
+
+/** @brief Writable rectangle with the same bounds as PlanarRectangleRun. */
+struct PHOTOSPIDER_API PlanarMutableRectangleRun final {
+  PlanarMutableRowRun row;
+  std::uint64_t rows = 0;
+  std::uint64_t row_stride_bytes = 0;
+};
+
 class PlanarImage;
 
 /**
@@ -129,6 +147,15 @@ class PHOTOSPIDER_API PlanarImageReadWindow final {
    */
   Result<PlanarRowRun> row_run(
       const std::vector<std::uint64_t>& coordinate) const;
+  /** @brief Return an authorized rectangle beginning at a full coordinate.
+   * @param coordinate Global sample coordinate, including the plane index.
+   * @return Borrowed rows bounded by this ROI and physical tile;
+   * InvalidArgument for an invalid window, rank or out-of-window coordinate.
+   * @note Pointers live until this window retires. Immutable reads may run
+   * concurrently. No cache is created; no inter-row padding is exposed.
+   */
+  Result<PlanarRectangleRun> rectangle_run(
+      const std::vector<std::uint64_t>& coordinate) const;
 
  private:
   friend class PlanarImage;
@@ -140,12 +167,12 @@ class PHOTOSPIDER_API PlanarImageReadWindow final {
 /** @brief Prepared transactional writer for exactly one authorized region.
  * @note Move-only. Failure/destruction rolls back newly supplied pages and
  * their budget charge; existing valid samples remain unchanged. A callback
- * receives this window as const and may only write within row_run spans.
+ * receives this window as const and may only write within authorized run rows.
  */
 class PHOTOSPIDER_API PlanarImageWriteWindow final {
  public:
   struct Impl;
-  PlanarImageWriteWindow() noexcept = default;
+  PlanarImageWriteWindow() noexcept;
   PlanarImageWriteWindow(PlanarImageWriteWindow&&) noexcept;
   PlanarImageWriteWindow& operator=(PlanarImageWriteWindow&&) noexcept;
   ~PlanarImageWriteWindow() noexcept;
@@ -155,10 +182,19 @@ class PHOTOSPIDER_API PlanarImageWriteWindow final {
   const Region& region() const;
   Result<PlanarMutableRowRun> row_run(
       const std::vector<std::uint64_t>& coordinate) const;
+  /** @brief Return writable rows beginning at a full global coordinate.
+   * @return Rectangle bounded by ROI and tile; InvalidArgument for an invalid
+   * window, rank or coordinate outside the prepared region.
+   * @note Borrowed until publication or window destruction. Callers must
+   * synchronize writes; padding is excluded. No cache is created.
+   */
+  Result<PlanarMutableRectangleRun> rectangle_run(
+      const std::vector<std::uint64_t>& coordinate) const;
 
  private:
   friend class PlanarImage;
   friend class OperationRegistry;
+  friend class ExecutionContext;
   explicit PlanarImageWriteWindow(std::unique_ptr<Impl> impl);
   Status commit(const CancellationToken& cancellation = {});
   std::unique_ptr<Impl> impl_;
@@ -202,6 +238,50 @@ class PHOTOSPIDER_API PlanarImage final {
       const Value& value, PlanarImageConfig config,
       const CancellationToken& cancellation = {});
 
+  /** @brief Retain one existing plane as a read-only structural image alias.
+   * The output keeps the source's complete virtual owner and all backed pages;
+   * only requested valid samples may be read. No sample pages are copied or
+   * provisioned. keepdims retains a singleton channel axis; otherwise the
+   * output is rank two. Facets are the caller's projected description and
+   * required profile resources remain owned. A later write to this alias is
+   * rejected. The source may retire independently of the alias.
+   * @param channel Zero-based structural channel index.
+   * @param keepdims Retain the selected axis with extent one.
+   * @param requested Nonempty output coverage, fixed for the alias lifetime.
+   * @param projected_facets Explicit output interpretation.
+   * @param metadata_budget Optional alias metadata budget; defaults to source.
+   * @param cancellation Observed while acquiring source coverage or its lock.
+   * @param resources Additional owned resources for projected overrides.
+   * @return Alias, InvalidArgument for invalid structure, NotFound for missing
+   * source coverage, ResourceExhausted for admission, or Cancelled. No partial
+   * alias is published. May throw std::bad_alloc for metadata allocations.
+   * @note Concurrent immutable reads are safe. No sample cache is consulted.
+   */
+  Result<PlanarImage> channel_view(
+      std::uint64_t channel, bool keepdims, const Region& requested,
+      std::vector<ValueFacet> projected_facets = {},
+      std::shared_ptr<PlanarPageBudget> metadata_budget = {},
+      const CancellationToken& cancellation = {},
+      const ResourceBindings& resources = {}) const;
+
+  /** @brief Prove a read-only assembly alias from ordered source planes.
+   * All entries must map to consecutive physical planes of one root owner,
+   * with identical spatial maps. Each source must authorize its corresponding
+   * requested region. Unrelated/reordered/duplicate owners return
+   * InvalidArgument with ViewUnavailable; all other errors are preserved.
+   * The alias retains root storage, resources and exact coverage. No sample
+   * payload is copied. Immutable reads are concurrent-safe; no cache is used.
+   */
+  static Result<PlanarImage> assemble_view(
+      const std::vector<PlanarImage>& sources,
+      const std::vector<std::uint64_t>& channels,
+      const std::vector<std::uint64_t>& channel_counts,
+      ValueDescriptor descriptor, PlanarImageLayout layout,
+      const Region& requested, std::vector<ValueFacet> facets = {},
+      std::shared_ptr<PlanarPageBudget> metadata_budget = {},
+      const CancellationToken& cancellation = {},
+      const ResourceBindings& resources = {});
+
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
   const std::vector<ValueFacet>& facets() const;
@@ -217,7 +297,7 @@ class PHOTOSPIDER_API PlanarImage final {
   /** @brief Atomic snapshot of backed page and metadata charges. */
   std::uint64_t resident_bytes() const;
   /** @brief Opaque same-owner comparison token; never a persistent identity. */
-  const void* owner_token() const noexcept { return impl_.get(); }
+  const void* owner_token() const noexcept;
 
   /** @brief Stable offset in the image reservation; no validity implied. */
   Result<std::uint64_t> byte_offset(
@@ -261,6 +341,7 @@ class PHOTOSPIDER_API PlanarImage final {
  private:
   friend class ExecutionContext;
   friend class PlanarImageReadWindow;
+  void retain_execution_admission(std::shared_ptr<void> admission);
   /** @brief Pin a source against publication for one execution. */
   Result<std::shared_ptr<void>> pin_for_execution(
       const CancellationToken& cancellation) const;

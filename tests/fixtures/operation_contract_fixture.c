@@ -148,7 +148,7 @@ const ps_operation_plugin_api_v9* ps_operation_plugin_get_api_v9(void) {
   operations[0].outputs[0].shape_rule = PS_OPERATION_SHAPE_FIXED_V9;
   operations[0].outputs[0].output_element_type = PS_OPERATION_ELEMENT_UINT8_V9;
 #elif PS_BAD_CONTRACT_CASE == 8
-  input_constraint.element_type_mask = 16;
+  input_constraint.element_type_mask = UINT32_C(1) << 7;
 #elif PS_BAD_CONTRACT_CASE == 9
   input_constraint.element_type = PS_OPERATION_ELEMENT_FLOAT64_V9;
 #elif PS_BAD_CONTRACT_CASE >= 10

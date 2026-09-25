@@ -22,6 +22,12 @@ below. It registers no operation and changes no runtime ABI.
 Decisions belong in this category's specifications; this clarification creates
 neither an ADR nor a separate glossary.
 
+Implementation note: FMT-01/FMT-02/FMT-03/FMT-08 now use the public tensor-description v3 codec and
+native Int8/UInt16/Int16 widths. Its runtime and runnable workflow are documented
+in [Channel and color operations](../../../kernel-architecture/Channel-and-Color-Operations.md).
+This does not complete every category-wide metadata field or operator migration
+listed below; existing ColorArray consumers retain their current contracts.
+
 ## Inherited baseline
 
 The later [relative-coordinate scale decision](FMT_relative_coordinate_scale.md)
@@ -401,8 +407,8 @@ CMS 2.19.1 CPU with explicit optimized/reference configurations and native-unit
 adapters. It adds complete profile-defined RGB/Gray/CMYK/XYZ/Lab spaces plus
 explicit profile-to-analytic endpoint bindings. Arbitrary profile LUTs do not
 imply decomposable primaries/transfer; ICC PCS D50 is not silently equated with
-an analytic white preset. These generic metadata additions are unimplemented
-and do not reinterpret ColorArray v1 bytes.
+an analytic white preset. These generic metadata records are implemented in v3 and do not reinterpret
+ColorArray v1 bytes; LCMS transform integration remains separate.
 
 [FMT-13](FMT-13_ocio_transform_contract.md) separately fixes OpenColorIO v2.5.2
 CPU for configured spaces, display/view, Looks, NamedTransform, files and
@@ -410,8 +416,8 @@ declarative trees. Config-native three-coordinate descriptions use frozen
 resource/context identity with explicit analytic bindings; space names do not
 infer units. Selected Float64 colors pass through RN32/F32/widen while alpha
 and AOVs bypass. Config/file resources and property snapshots are static;
-explicit reference-bridge and alpha-effect admission apply. These descriptors
-and engine integrations remain unimplemented. [FMT-18](FMT-18_softproof_contract.md)
+explicit reference-bridge and alpha-effect admission apply. Configured descriptors and immutable snapshots are implemented in v3; engine
+integrations remain unimplemented. [FMT-18](FMT-18_softproof_contract.md)
 separately specifies proof colors and sampled gamut alarms on the LCMS foundation,
 including an identified source-domain gamut-table correction. It does not infer
 proofing from an OCIO display/view label.
@@ -454,6 +460,14 @@ These are required future acceptance cases, not tests run in this session.
 
 ## Shared representation implementation gate
 
+Runtime update (0.22.0): [TensorDescription v3 and FMT-08](../../../kernel-architecture/Tensor-Semantic-Metadata.md)
+freeze the canonical metadata, typed endpoint, sampling, configured-space and
+immutable-resource representation used by FMT-01/02/03/08. V1/v2 tensor facets
+reject; legacy ColorArray remains an explicit separate old-coordinate contract
+and cannot mix with v3. Numerical FMT-06/09/10/11 and external FMT-12/13 consumer
+implementation gates remain separate; descriptive OCIO snapshots run no engine.
+
+
 Before registering a member that consumes the revised descriptions or emitting
 persisted workflows using them, freeze and review the following shared artifacts:
 
@@ -465,8 +479,9 @@ persisted workflows using them, freeze and review the following shared artifacts
 | Resource binding | Immutable profile/configuration and transitive resource content identities, execution/build settings, owned lifetimes and cache-key rules. Names or host paths alone cannot identify engine results. |
 | Consumer migration | Compiler inference, bindings, NUM/CRV consumers, LUT axes, import paths, fixtures and cache/validation identity must agree on the version and coordinate units. |
 
-The gate is still open. These documents do not select a numeric persisted version,
-provide its codec or claim migration completion. Implementations may prototype
+The representation portion is implemented as v3 in the runtime update above.
+The remaining arithmetic/engine consumer gates are still open; no engine or
+full numerical migration completion is claimed. Implementations may prototype
 arithmetic independently; they must not attach new formulas to old v1 descriptors
 and defer the discriminator until after registration. See the
 [relative-coordinate migration](FMT_relative_coordinate_scale.md).

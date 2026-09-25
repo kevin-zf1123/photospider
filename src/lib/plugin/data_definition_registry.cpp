@@ -54,6 +54,12 @@ Result<ElementType> provider_element_type(std::uint32_t value) {
       return Result<ElementType>(ElementType::Float64);
     case 4U:
       return Result<ElementType>(ElementType::Float32);
+    case 5U:
+      return Result<ElementType>(ElementType::Int8);
+    case 6U:
+      return Result<ElementType>(ElementType::UInt16);
+    case 7U:
+      return Result<ElementType>(ElementType::Int16);
     default:
       return Result<ElementType>(Status::failure(
           ErrorCode::TypeMismatch, "provider schema element type is unknown"));

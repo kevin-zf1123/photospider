@@ -118,7 +118,7 @@ successful resolution for all possible Float64/rational inputs.
 
 The private SLEEF 3.9.0 binary64 u10 kernels, compiled from the
 [builder-supplied source](../../../third_party/SLEEF.md), provide explicit
-AdvSIMD and AVX2/FMA implementations for ordinary exp, ln, sin, cos, tan, pow and
+AdvSIMD and AVX2/FMA implementations for ordinary binary64 exp, ln, sin, cos, tan, pow and
 atan2. Float64 inputs are never narrowed. `accelerated_math.hpp` admits bounded
 ordinary argument ranges, expands kernel results to conservative binary64
 intervals and checks the final output against the shared FP32 budget. Domain,
@@ -1583,3 +1583,25 @@ per line and output, and writes dense offsets without changing stable order or
 source witnesses. Prefix and cumulative integral scans request up to 64 source
 samples per stage, while each published observation retains only its actual
 prefix support. No private thread pool is used.
+
+### NUM-04 Float32 exp batch update (2026-09-24)
+
+Accelerated Float32 exp now uses an IQK-derived NEON/AVX2 polynomial on [-80,80],
+with one callback floating-environment guard, a fixed batch workspace and a
+proved four-step error bound. The comparison backends remain removed. The
+2026-09-25 [adapter update](adapter-performance.md) restores binary64 SLEEF exp
+for Float64 NUM-04 and NUM-01 expression enclosures, preserving input precision,
+final-result certification and strict failure replay. Packed callbacks now copy
+blocks, classify Float32 lanes once and repair only rejected lanes, while
+retaining bounded work/cancellation checks. The [exp report](exp-performance.md) records both platform oracles,
+scalar/batched-SLEEF/IQK comparisons and the limits of the profiler evidence.
+
+### NUM/CRV batches and trigonometric polynomials (2026-09-24)
+
+The [batch update](batch-performance.md) batches remaining supported SLEEF point
+operations and amortizes certified/CRV environment setup. A following
+[trigonometric update](trig-performance.md) replaces eligible Float32
+sin/cos/sinpi/cospi/sinc outputs with proved SIMD polynomials, and implements
+full finite-Float32 sincpi through integer-unit reduction and a central
+polynomial. Proofs include the final output conversion and strict reference;
+benchmark and independent-oracle scopes are recorded separately in those reports.

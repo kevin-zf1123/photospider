@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -13,17 +13,26 @@ inspection_commit: 1b403fb9
 
 # FMT-08: assign and remove semantic interpretation
 
+Runtime update (package 0.22.0): FMT-08A/B are implemented with canonical
+TensorDescription v3, typed encoding/sampling/ICC/OCIO resource descriptions,
+opaque annotations, atomic edits and exact planar/generic-numeric regional
+execution. See the [runtime schema and interfaces](../../../kernel-architecture/Tensor-Semantic-Metadata.md),
+[minimal public workflow](../../../../examples/metadata_workflow/README.md)
+and [measured performance](../../../../examples/metadata_performance/README.md).
+Proposed remains the specification decision status; external FMT-12/13 transform
+engines are not claimed by the metadata/resource implementation.
+
+
 Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
 Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. This target remains
-Proposed and unimplemented.
+those keys and pixel callbacks are no longer available. The target decision remains Proposed; its CPU implementation is recorded above.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM execution/resource baseline,
 canonical straight/internal-alpha rules and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
 Members are [A assign/edit](FMT-08A_assign_metadata.md), a proposed native node,
 and [B remove](FMT-08B_remove_metadata.md), a compile-time deletion-only helper.
-This specification publishes no runtime registration or implementation claim.
+The specification decision and the runtime implementation record remain distinct.
 
 ## Purpose and inspected baseline
 
@@ -291,7 +300,7 @@ public compile/execute workflows with sample-byte and descriptor assertions.
 Benchmark large planar inputs with many metadata records, patch versus replacement
 and cascade, view versus materialize, full and one-channel/tile-crossing requests;
 report metadata/copy work, pixels read, backing and retained resource peaks plus
-build/profile/ISA and timing. No runtime or benchmark result is claimed here.
+build/profile/ISA and timing. Runtime and benchmark evidence is linked in the update above.
 
 Documentation checks covered local links/front matter/whitespace, independent
 expected metadata snapshots and a dependency-closure example, plus exact-bit

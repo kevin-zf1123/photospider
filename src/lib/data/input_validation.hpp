@@ -91,7 +91,8 @@ Status validate_port_metadata(const OperationPortConstraint& port,
 Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind,
+    std::uint32_t input_port = 0);
 /** @brief Returns the canonical image-v2 RGBA facet. */
 ValueFacet image_facet();
 /**
