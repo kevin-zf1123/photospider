@@ -13,13 +13,13 @@
 ```sh
 cmake --build build --target photospider_foundations_workflow -j 8
 build/examples/foundations_workflow/photospider_foundations_workflow --scenario all
-ctest --test-dir build -R '^test_foundations_(numeric|expression-lut|basic-filters)$' --output-on-failure
+ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut|filter_histogram)$' --output-on-failure
 ```
 
 成功结束时打印 `Foundations scenarios=3 oracle=passed backend=cpu`。
 可分别指定 `--scenario numeric`、`expression-lut` 或 `basic-filters`。
 
-消费已有 0.20 安装包时，使用
+消费已有 0.24 安装包时，使用
 `cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install`
 配置，再构建该目录；仅链接 `Photospider::kernel`。
 

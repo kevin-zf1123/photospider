@@ -47,8 +47,8 @@ ctest --test-dir build -R '^test_numeric_operations$' --output-on-failure
 
 [Foundations 示例](../../../examples/foundations_workflow/README.zh.md)提供维护中的
 通用数值、expression/LUT 和 field-filter workflow。
-[退休回归](../../../tests/integration/test_format_color_retirement.cpp)检查旧格式 key
-无法编译，并提供结果为 0.5 的最小绑定 `numeric.add_strict` 图。新规格尚未成为运行时接口。
+`test_compiler` 使用虚构 key 验证未知算子的查询、调用和编译拒绝；历史删除名单
+不再作为运行正确性门禁。格式转换实现见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。
 
 Mean/variance 使用分阶段依赖协议，输出仍为单个 scalar 观察。可选 Int64 参数
 `block_size` 范围 [1,65536]，默认 64，控制每阶段请求样本数。精确 row-major

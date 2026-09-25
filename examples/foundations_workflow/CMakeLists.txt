@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderFoundationsWorkflow LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.20 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.24 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_foundations_workflow
   main.cpp numeric.cpp generators.cpp components.cpp basic.cpp)

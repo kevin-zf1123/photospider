@@ -1,7 +1,9 @@
 #include <cmath>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "photospider/compiler/compiler.hpp"
 #include "support/test_support.hpp"
@@ -40,6 +42,23 @@ int main() {
 
   auto operations = make_default_operation_registry();
   Compiler compiler(operations);
+  // Unknown operations reject consistently without retaining historical keys.
+  const std::string unknown_key = "test.unknown_operation";
+  const std::vector<ps::Value> no_inputs;
+  const std::vector<ps::Region> no_demands;
+  const std::map<std::string, ps::ParameterValue> no_parameters;
+  PS_CHECK(operations->find_traits(unknown_key).status().code ==
+           ErrorCode::NotFound);
+  PS_CHECK(
+      operations->invoke(unknown_key, {no_inputs, no_demands, no_parameters})
+          .status()
+          .code == ErrorCode::NotFound);
+  WorkflowDocument unknown_operation;
+  unknown_operation.nodes = {{1, unknown_key, {}, {}}};
+  unknown_operation.outputs = {{"result", 1, "value"}};
+  GraphContext unknown_graph(std::move(unknown_operation));
+  PS_CHECK(compiler.compile(unknown_graph).status().code ==
+           ErrorCode::NotFound);
   GraphContext first(ps::test::addition_document(2.0, 3.0));
   auto compiled = compiler.compile(first);
   PS_CHECK(compiled.ok());

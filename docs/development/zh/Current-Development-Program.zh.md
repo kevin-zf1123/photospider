@@ -1,89 +1,75 @@
 # 当前开发计划
 
-- 快照日期：2026-09-12
-- 审核起始基线：ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458，包 0.8.0 / ABI 8
-- 已实现里程碑：[#302 独立结果与 Atomic 联合执行](https://github.com/kevin-zf1123/photospider/issues/302)
-- 交付记录：[#314](https://github.com/kevin-zf1123/photospider/pull/314)，目标 ops
-- CI、bot、合并、Issue 结算和分支清理实时状态由 [#302](https://github.com/kevin-zf1123/photospider/issues/302) 维护
+- 快照日期：2026-09-25。
+- 已核验远端基线：`ops@61517151c0d0d2a2c0a70f52965350130eeda3a0`，包0.24.0。
+  本快照不审核或改变 `main`。
+- 本地已审核实现：`99cc11126759a59deeb91f55c56c3443ce1bd28a`，核验时未推送。
+  下述CTest维护是额外的本地工作树修改，不表示已经远端交付。
+- GitHub Issue拥有交付状态，Project反映剩余范围。授权边界见
+  [任务协作](Task-Collaboration.zh.md)，产品权威仍是ADR0015；接受规格不构成实现证据。
 
-GitHub Issue 为实时交付状态权威。ADR 0021 记录已接受目标，接受不表示实现完成。
-基线已经包含算子基础与 G4 执行能力。历史 main@fba06270 和 ops-foundations 快照只说明
-历史里程碑，本快照不审核或改变 main。ADR 0015 保持产品边界权威。
+## 已实现基线与本地增量
 
-M0–M9 实现提交为 `fd796975` 至 `9193d9ac`。M10 提供
-[安装版公开 workflow](../../../examples/multi_output_workflow/README.zh.md)、
-joint on/off 消费者验证，以及参数化 kernel 的共享视图片段合并。
-2026-09-12 本地 static/shared 增量构建、每种链接 13 项 focused tests 和
-安装消费者已通过；片段合并后每种链接的 13 项最终检查同样通过。安装版 static 最大 radius
-workflow 生成完整 129×129 kernel，匹配核与卷积 oracle，kernel-only 图像读取为零。新的全面审查发现输入置换、投影 Region、分阶段内容身份、浮点环境四项契约缺口，
-以及随后发现的缓存克隆预算边界；现已修复，独立复审无剩余 blocker/required。
-static/shared 各 14 项检查和安装消费者通过，新增 owner 分裂缓存回归也通过。
-本仓库快照记录已实现行为与本地验证；PR #314 与 #302 记录实时交付状态。
-完整 CI 中的种子 fixture 已迁移为 ABI 9，并增加 traits-v8 明确拒绝回归。
+远端基线包含公开typed compile/plan/execute流水线、独立输出与Atomic联合执行、
+CPU区域及分阶段执行、本地派生缓存、原生Metal存储/dispatch、planar图像存储。
+维护中的格式能力包含通道提取/组装、通道编辑组合、严格数值转换及元数据赋值。
 
-## 执行顺序
+[#302独立结果里程碑](https://github.com/kevin-zf1123/photospider/issues/302)
+及#303–#313均已关闭。[PR #314](https://github.com/kevin-zf1123/photospider/pull/314)
+在`575a424d`合入ops。其审核/CI/合并流程是历史完成证据，不是每个新任务的强制流程。
 
-- M0 / #303：研究与契约
-- M1 / #304：输出 traits 与 ABI 9
-- M2 / #305：多输出编译与规划
-- M3 / #306：输出独立执行、依赖和缓存
-- M4 / #307：逐观察 C/C++ 结果
-- M5 / #308：Atomic 联合调度
-- M6 / #309：平面语义与 420
-- M7 / #310：横向裁剪输出
-- M8 / #311：独立通道卷积
-- M9 / #312：非整数半径高斯图像与核
-- M10 / #313：安装 workflow 与组合验收
+本地`99cc1112`增加sealed planar preparation复用、显式BitwiseMapped值关系、
+公开run/copy helper及使用现有SIMD的generic转换。版本轴保持独立：traits18、
+semantic/physical v16、C operation ABI9、provider ABI1、WorkflowDocument3、TDM4。
+包仍为0.24.0，C++消费者必须整体重编译。优化器仍是`optimizer-v5-canonical-noop`；
+这些运行时优化没有实现跨节点融合或增量编译，参见英文Compiler Version Contract。
 
-各项依赖前项，分别验证并提交。全部叶项后进行新的独立全面审查、必要修复、PR 到 ops、
-最终 HEAD 的现有六项 CI 与 Codex bot review、merge commit、显式 Issue 结算、本地 ops
-同步及本轮分支清理。仅内核仓库在范围内。动态输出、RequestRecord 联合执行、新 Metal
-算法、daemon 迁移和 #206 通道裁剪另行处理。
+## 正确性测试清单审查
 
-## 当前 milestone 以外的 active backlog
+已按行为审查原79个默认CTest及条件SME测试，默认清单调整为78项：
 
-- [#246](https://github.com/kevin-zf1123/photospider/issues/246) 只保留可复用 operation
-  starter、external consumer example 与精简 usage guide；现有正负 DSO fixture 是
-  baseline。
-- [#247](https://github.com/kevin-zf1123/photospider/issues/247) 只保留可复用
-  data-provider starter、external consumer example 与精简 usage guide；现有 provider
-  ABI fixture 是 baseline。
-- [#248](https://github.com/kevin-zf1123/photospider/issues/248) 保留可选、由 embedding
-  拥有的 operation-set manifest。它对 WorkflowDocument 定义的既有 dependency 已经
-  完成，因此 Issue 解除 blocked 状态，等待优先级判断。
-- [#148](https://github.com/kevin-zf1123/photospider/issues/148) 只保留 structured
-  explain 与剩余显式 IR/plan validator delta。
-- [#149](https://github.com/kevin-zf1123/photospider/issues/149) 与
-  [#203](https://github.com/kevin-zf1123/photospider/issues/203) 在 S1 后依次处理
-  trait-proven optimization 与 disposable incremental recompilation。
-- [#151](https://github.com/kevin-zf1123/photospider/issues/151) 和 #152 保留 S5
-  成本与校准工作；S4 显式选址不依赖 #209，也不结算这些上层 Issue。
-- MED work 只由选定 operation vertical 的 semantic 需求启用。
+- 退休历史13个已删除格式key的名单测试，将虚构未知算子的查询/调用/编译拒绝保留在
+  `test_compiler`。
+- 五个G4及三个foundations注册项按实际依赖、GPU、数值、表达式和滤波行为改名。
+- 退休不合法generic-image STMap正例和计时入口，保留其余稀疏/依赖/缓存workflow。
+  Planar STMap仍未实现。
+- GPU fixture分别验证普通取消与先发生的Protocol错误，两者均检查零发布。
+- 已注册可执行文件随默认构建生成；SME不可用记为skip。安装运行覆盖仅包含嵌套
+  run target的实际命令，不能将所有可选consumer都计为已执行。
 
-## Issue 执行契约
+本地修改后的完整static CTest：macOS为77通过/1失败；FreeBSD为70通过/1失败/
+7个Metal跳过，各78项。条件SME测试在本机Apple M5实际执行通过。以上是本地结果，
+不是远端CI状态。剩余`test_execution`暴露动态opaque facet传播缺陷：缓存契约允许
+通用Drop及其PreserveInput链，但调用验证将运行facet与静态元数据比较。该测试继续
+注册，未删除或放宽断言。当前入口见[测试与验证](Testing-and-Validation.zh.md)。
 
-可执行 leaf Issue 记录 audited baseline commit、remaining delta、governing public
-document、public/API/schema impact、start dependency、integration dependency、
-completion gate、named fixture 或 vertical、精确 test 与 oracle、non-goal，以及预期
-completion evidence。Parent Issue 只作为 index 与 closure aggregator，不携带
-`ready-for-agent`。
+此前`99cc1112`的原生static/shared及sanitizer审查同时记录了基线失败，以及不链接
+Photospider也可复现的FreeBSD `__thr_calloc` TSan报告。精确suppression不等于
+无过滤TSan通过；LeakSanitizer不受支持。本轮清单维护不改写这些限制，也不声称
+重新完成sanitizer矩阵。
 
-任务状态、授权终点和决策/实现完成条件见[任务协作](Task-Collaboration.zh.md)。
+## 剩余内核计划
+
+- Foundations [#139](https://github.com/kevin-zf1123/photospider/issues/139)：
+  #143及#246/#247/#248的operation/provider starter和可选manifest仍未完成；
+  当前正确性失败仍需修复。
+- Compiler [#145](https://github.com/kevin-zf1123/photospider/issues/145)、
+  [#147](https://github.com/kevin-zf1123/photospider/issues/147)：#148 structured
+  explain/validator增量，随后#149保守pass，再到#203可丢弃增量重编译。
+  S1输入契约已接受并完成；#148需要剩余实现范围triage，不需要再次等待S1批准。
+  #150仍为后续明确限定的变换计划。
+- Heterogeneous [#151](https://github.com/kevin-zf1123/photospider/issues/151)、
+  [#152](https://github.com/kevin-zf1123/photospider/issues/152)：CPU区域叶项与
+  #153/#154/#156原生驻留、执行和诊断已交付。#209成本单位及planner消费的机器profile仍未完成。
+- Calibration [#155](https://github.com/kevin-zf1123/photospider/issues/155)：
+  #212/#213保留。已有原生原始测量不等于完成校准profile或自动选址，不能因generic
+  SIMD吞吐结果关闭优化/校准父项。
+
+Daemon Session/Job、IPC与WebUI交付由各自仓库负责，本次内核测试清单任务没有重新审核。
+历史G/S阶段名不定义当前CTest名称，也不恢复退休图像契约。
 
 ## 更新规则
 
-Audited baseline、当前 milestone、critical path 或 blocked reason 变化时更新本快照。
-普通 implementation detail 保留在所属 Issue 与 test 中。每项 status claim 必须引用已
-完成 code 与 test；unchecked item 不定义当前行为。
-
-## 已接受的开发方向，2026-09-05
-
-维护者已明确回复“接受建议内容，采用调整后的方向。”，采用
-[开发计划](Refactor-Development-Plan.zh.md) 的 S1 图像与普通参数、S2 CPU 区域、
-S3 缓存与交互、S4 原生 GPU、S5 实测优化方向。Float32 是 S1 已接受目标，
-daemon 新功能按需推进，兼容维护继续。决策交付状态由
-[#256](https://github.com/kevin-zf1123/photospider/issues/256) 跟踪。
-
-ADR 0016 保留 S1 source/binding/profile 契约。ADR 0017 替代其整图存储/输出、整图
-扫描和估算预算条款。Daemon 兼容维护消费安装的 0.6；新 bindings 和 bulk transport
-继续由 daemon 仓库按实际需求推进。
+已审核基线、当前里程碑、关键路径或阻塞变化时刷新本快照，并引用实际代码、测试及
+交付位置。Issue保留范围与历史，Project反映其状态。接受提案不表示实现，只有本地
+工作的任务不得标为远端完成。普通实现细节保留在所属Issue和测试中。

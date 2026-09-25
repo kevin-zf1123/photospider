@@ -11,7 +11,7 @@ The [format/color catalog](../built-in_ops/02-format-color/representation.md) an
 [FMT common contract](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
 define the replacement direction. FMT-01A/B now have CPU implementations and
 FMT-01C has a public authoring helper. Their specifications retain Proposed
-decision status. FMT-02A/B/C are also implemented. FMT-03A/B have public composition helpers. FMT-04..08 remain unimplemented; FMT-07 is retired. Complete images use planar storage and straight color with
+decision status. FMT-02A/B/C are also implemented. FMT-03A/B have public composition helpers. FMT-06 and FMT-08 are also implemented as described below; FMT-04/05 remain unimplemented and FMT-07 is retired. Complete images use planar storage and straight color with
 alpha inside the tensor. New operators must implement their own exact demand,
 metadata, numerical and layout contracts. Historical typed HWC behavior does
 not constitute a subset implementation of these new specifications.
@@ -20,14 +20,14 @@ Shared ColorArray descriptions, profile ownership and mathematics used by
 maintained NUM/CRV operations remain. Their presence does not register a format
 conversion or imply support for the new FMT families.
 
-The [public retirement regression](../../tests/integration/test_format_color_retirement.cpp)
-checks all removed keys through lookup, direct invocation and compilation,
-and executes `numeric.add_strict` with an independently checked result of 0.5.
-The installed consumer builds and runs the same source:
+Current correctness gates cover extraction, assembly, editing, metadata and
+strict numeric conversion. `test_compiler` checks lookup, invocation and compile
+rejection for an arbitrary unknown operation. The historical removed-key
+checklist is no longer a CTest or installed-consumer gate.
 
 ```sh
-cmake --build build --target test_format_color_retirement -j 8
-ctest --test-dir build -R '^(test_format_color_retirement|test_installed_consumer)$' --output-on-failure
+cmake --build build --target test_compiler test_channel_extraction test_channel_assembly test_channel_editing test_numeric_conversion test_metadata_assignment -j 8
+ctest --test-dir build -R '^test_(compiler|channel_extraction|channel_assembly|channel_editing|numeric_conversion|metadata_assignment|installed_consumer)$' --output-on-failure
 ```
 
 The [Chinese mirror](zh/Channel-and-Color-Operations.zh.md) describes the same boundary.

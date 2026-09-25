@@ -69,7 +69,7 @@ Kernel tests cover:
   cleanup;
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
-  including operation-v3 typed parameter schemas, demand views, and
+  including C operation ABI 9 typed parameter schemas, demand views, and
   deterministic owner-allocation failure with exact destroy/close counts. A
   copy-aware C++ embedding callable is registered by rvalue, armed to reject
   later copies, then survives freeze/invoke and a valid DSO load into an
@@ -136,7 +136,7 @@ Kernel tests cover:
   seam.
 
 Daemon tests live in `photospider-daemon` and cover local frame validation,
-nine-method routing, ephemeral Session/Job lifecycle, restart loss,
+local method routing, ephemeral Session/Job lifecycle, restart loss,
 multi-Session behavior, cancellation, Session close, result release, shutdown,
 and the isolated installed-kernel boundary.
 
@@ -147,11 +147,10 @@ configures an external C/C++ consumer using only
 `find_package(Photospider CONFIG REQUIRED)`. CI runs this gate for both the
 default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
 
-- installed headers match the declared public inventory; all 15 headers
-  compile directly in isolation, and `operation_plugin.hpp` is the consumer's
-  first include with compile-time `element_type_value` and `noexcept`
-  assertions;
-- exports contain no source/private paths;
+- installed public headers compile through the consumer sources;
+  `operation_plugin.hpp` is the consumer's first include with compile-time
+  `element_type_value` and `noexcept` assertions. Exhaustive header
+  self-containment is a separate manual check, not this CTest;
 - the linked C SDK compilation unit runs, and a downstream shared bridge links
   `Photospider::kernel`, executes the C++ compile/execute pipeline, and is
   called by the consumer executable; the default static archive is therefore
@@ -173,7 +172,7 @@ default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
   usage requirements remain the source of dialect elevation. The linked pure-C
   SDK probe remains an explicit C11 translation unit and receives no C++
   standard flag;
-- removed targets, headers, components, and executables are absent.
+- the removed `data_definition_sdk` target is not exported.
 
 The nested consumer project exposes a generator-aware
 `run_photospider_consumer` target whose command uses its executable target-file
@@ -237,7 +236,7 @@ exact library paths, and callback outputs. Malformed local IPC frames belong to
 the daemon repository.
 
 The long-lived manual target `photospider_operation_contract_ir_fuzz` exercises
-operation-v3 trait/parameter vocabulary and compiler validation. It is
+the current OperationTraits trait/parameter vocabulary and compiler validation. It is
 `EXCLUDE_FROM_ALL`, is never registered with CTest, and is enabled explicitly
 with `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` under Clang. Seed inputs are
 maintained in `tests/fuzz/corpus/operation_contract_ir/`; caller-selected crash
@@ -270,9 +269,10 @@ stage seam complements, but does not register, the manual libFuzzer target.
 
 ## CTest ownership
 
-CTest/CI entries are reserved for correctness, performance, stability,
-multithreading, error handling, package consumption, compilation, and runtime
-boundaries. Do not register stale-term searches, source-layout audits,
+CTest entries validate observable correctness, including numerical results,
+resource bounds, multithreading, error handling, package consumption, compilation
+and runtime boundaries. Performance measurements and timing-dependent diagnostics
+remain opt-in tools; elapsed-time thresholds do not define correctness. Do not register stale-term searches, source-layout audits,
 migration checklists, Doxygen audits, Issue replay, or result/provenance
 orchestration. Manual source-quality tools require maintained English and
 Chinese documentation and remain outside CTest/CI. Direct source-tree and
@@ -296,59 +296,69 @@ Format changed C/C++ with ClangFormat 21 and lint the same files with
 `python3 -m cpplint`. Record unsupported sanitizer/GPU platforms as limitations
 rather than successful gates.
 
-## Workflow bindings and binary32 image acceptance
+## Current registered correctness workflows
 
-`test_bindings` runs the ADR0016 `s1-rgba32f-exposure-opacity-v1` fixture through
-public compilation/execution, comparing descriptors and exact A/B bytes. It
-covers sequential/concurrent independent snapshots, scalar/image preflight,
-declaration and binding mismatches, tagged identity, normalized demands, Halo,
-cancellation/stale publication, resource bounds, malformed C port tables and
-provider ABI1 Float32. Floating-environment regressions exercise inherited
-rounding and denormal modes; generic Value bit patterns remain unrestricted.
+Registration names describe behavior, not historical G1/G4/S1/S4 milestones.
+Use `ctest --test-dir <build> --show-only=json-v1` for the actual inventory of
+that configuration. The maintained default has 78 entries; enabling the
+supported SME build adds `test_numeric_conversion_sme`. All registered
+executables, including the three numeric/expression/filter workflows, are
+built by the default testing build.
+
+- `test_workflow_numeric_reductions`, `test_workflow_expression_lut` and
+  `test_workflow_filter_histogram` run public generic numerical oracles.
+- `test_dependency_workflow` checks exact sparse reads, progressive control
+  discovery, dynamic radius, demand replacement, waiter sharing, content cache,
+  ordered reductions/scans and block-state reconvergence. Its former
+  generic-image STMap positive fixture and timing mode are retired; planar
+  STMap execution has not been implemented.
+- `test_planar_image_workflow`, `test_planar_plugin`, `test_planar_import`,
+  `test_planar_preparation`, `test_region_runs` and `test_data_movement_contract`
+  cover current planar storage, C ABI 9 plugins, preparation seals, mapped ROI,
+  raw bits, layout, ownership and publication boundaries.
+- `test_gpu_fragment_execution`, `test_gpu_sync_fallback`,
+  `test_gpu_discovery_workflow` and `test_gpu_c_abi_execution` exercise actual
+  native dispatch, sparse atlases, restart/fallback, discovery and C services.
+  `test_native_gpu`, `test_native_execution` and `test_fragment_atlas_gpu`
+  complement them. No hardware returns 77 and is recorded as skipped.
+  `test_dependency_gpu` and `test_gpu_discovery` retain CPU-runnable protocol
+  validation. Protocol violations detected before cancellation remain Protocol
+  failures; ordinary callback failures can be superseded by cancellation.
+- `test_numeric_conversion_sme` checks bits and deterministic cancellation.
+  Missing SME hardware or an unsupported streaming vector length returns 77.
+  Its `--midflight` timing diagnostic is not registered with CTest.
+
+The removed-format-key checklist is retired. `test_compiler` instead checks
+`NotFound` for one synthetic unknown operation through lookup, invocation and
+compilation. Current ABI/schema/package-version rejection, malformed input,
+integer overflow, quality mathematics and owner-retirement tests remain
+correctness tests; they are not migration checklists.
 
 ```sh
-cmake --build build/issue257-static --target test_bindings test_compiler test_value test_execution test_plugin_registry test_operation_contract_ir_seeds -j 8
-ctest --test-dir build/issue257-static -R '^test_(bindings|compiler|value|execution|plugin_registry|operation_contract_ir_seeds|installed_consumer)$' --output-on-failure
+cmake --build <build> -j 8
+ctest --test-dir <build> --output-on-failure
+ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|gpu_sync_fallback|gpu_discovery_workflow|gpu_c_abi_execution)$' --output-on-failure
 ```
 
-The installed consumer builds its own ABI3 C image plugin, runs the same oracle
-through C++ and C paths, and requires a 0.2 package request to fail against 0.3.
-Configure a separate build with `-DBUILD_SHARED_LIBS=ON`, build `photospider` and
-`test_bindings`, then run `-R '^test_(bindings|installed_consumer)$'` there to
-validate shared exports and installed use. These commands are scoped to the
-changed API/ABI; they do not request sanitizer or platform release matrices.
+## Installed and optional coverage boundaries
 
-## Reusable image vertical acceptance
+The installed gate accepts package 0.24 and rejects a 0.23 request. Its actual
+runtime inventory is the `COMMAND` list of `run_photospider_consumer` in
+`tests/consumer/CMakeLists.txt`, including region runs, planar preparations,
+mapped movement and maintained operator/registry workflows. The four GPU
+workflow targets and foundations example are currently build dependencies only
+in that nested gate, not installed runtime executions. Their in-tree CTests
+remain the native execution coverage. Resource, Result, representation and
+legacy multi-output example targets outside that run target are optional
+consumers and are not evidence of executed installed coverage.
 
-`test_image_vertical` and `test_image_vertical_plugin` execute the same public
-A/B fixture with built-ins and the `plugins/ops/rgba32f` source package. They
-validate one compilation, two runtime bindings, exact output demand, complete
-named results, two CPU callbacks, the independent CPU oracle, and raw benchmark
-identity/backend/transfer/resource/correctness fields. The example and shared
-fixture live in `examples/image_vertical` and use only public APIs.
+Old image-vertical and S3/S4 examples are unregistered migration sources. They
+must not be listed as current passing gates. Their former `test_bindings`,
+`test_image_vertical*`, `test_metal_images`, `test_native_cache` and `test_s4_*`
+entries are absent from the current inventory. Maintained images use the planar
+correctness entries above; old generic-image acceptance is not restored.
 
-```sh
-cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
-ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
-```
-
-Repeat these targets and regex with `build/issue257-shared`. The installed
-consumer builds the same operation package using the installed operation SDK
-and runs the same example through built-ins and the DSO, retaining the shared
-bridge check. See [Image operations](../kernel-architecture/Image-Operations.md)
-for the exact fixture, standalone build, and report semantics.
-
-## S4 Metal and installed consumption
-
-Reuse build directories for `test_native_gpu`, `test_native_execution`,
-`test_metal_images`, `test_native_cache`, `test_s4_*` and
-`test_installed_consumer`. Image/cache tests exercise both builtins and the
-pure C module with independent CPU oracles. Missing hardware returns 77 as an
-explicit skip. `PHOTOSPIDER_ENABLE_METAL=OFF` checks CPU builds and fallback.
-On Apple Silicon, use `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` to validate
-real dispatches.
-
-The installed gate builds the S4 example separately for static/shared kernels;
-consumers enable only C/C++. Commands, checkable outcomes and diagnostics are
-in the [S4 guide](../kernel-architecture/S4-Workflow.md). No GPU duration is a
-pass threshold. CI retains six required Linux/macOS and sanitizer checks.
+For a custom compiler/runtime, propagate the same `CC`/`CXX` environment to
+CTest: the installed gate configures a fresh nested consumer. On Apple Silicon,
+`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` can check native dispatch. Unsupported
+GPU/sanitizer capability is a limitation, not a successful test.

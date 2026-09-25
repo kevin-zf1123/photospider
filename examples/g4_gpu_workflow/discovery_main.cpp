@@ -54,7 +54,7 @@ int check(bool value, const char* message) {
 int main(int argc, char** argv) {
   auto registry = std::make_shared<OperationRegistry>();
   auto loaded =
-      registry->load_plugin(argc > 1 ? argv[1] : PS_G4_DISCOVERY_PLUGIN);
+      registry->load_plugin(argc > 1 ? argv[1] : PS_GPU_DISCOVERY_PLUGIN);
   if (!loaded.ok())
     std::cerr << loaded.message << '\n';
   if (check(loaded.ok() && registry->freeze().ok(), "discovery module failed"))

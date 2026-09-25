@@ -158,11 +158,6 @@ target_compile_options(photospider_semantic_consumer PRIVATE ${_photospider_cons
 target_link_options(photospider_semantic_consumer PRIVATE ${_photospider_consumer_link_options})
 add_dependencies(photospider_semantic_consumer photospider_contract_fixture)
 
-add_executable(photospider_format_retirement_consumer ../integration/test_format_color_retirement.cpp)
-target_include_directories(photospider_format_retirement_consumer PRIVATE ..)
-target_link_libraries(photospider_format_retirement_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_format_retirement_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_format_retirement_consumer PRIVATE ${_photospider_consumer_link_options})
 
 add_executable(photospider_channel_extraction_consumer ../integration/test_channel_extraction.cpp)
 target_include_directories(photospider_channel_extraction_consumer PRIVATE .. ../../examples/numeric_workflow)
@@ -247,37 +242,37 @@ target_include_directories(photospider_gpu_discovery_consumer PRIVATE ..)
 target_link_libraries(photospider_gpu_discovery_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_gpu_discovery_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_gpu_discovery_consumer PRIVATE ${_photospider_consumer_link_options})
-add_library(g4_discovery_plugin MODULE ../../examples/g4_gpu_workflow/discovery_plugin.c)
-target_link_libraries(g4_discovery_plugin PRIVATE Photospider::operation_sdk)
-target_compile_definitions(g4_discovery_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-set_target_properties(g4_discovery_plugin PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_g4_discovery_workflow ../../examples/g4_gpu_workflow/discovery_main.cpp)
-target_link_libraries(photospider_g4_discovery_workflow PRIVATE Photospider::kernel)
-target_compile_options(photospider_g4_discovery_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_g4_discovery_workflow PRIVATE ${_photospider_consumer_link_options})
-target_compile_definitions(photospider_g4_discovery_workflow PRIVATE PS_G4_DISCOVERY_PLUGIN="$<TARGET_FILE:g4_discovery_plugin>")
-add_dependencies(photospider_g4_discovery_workflow g4_discovery_plugin)
+add_library(gpu_discovery_fixture MODULE ../../examples/g4_gpu_workflow/discovery_plugin.c)
+target_link_libraries(gpu_discovery_fixture PRIVATE Photospider::operation_sdk)
+target_compile_definitions(gpu_discovery_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+set_target_properties(gpu_discovery_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_executable(test_gpu_discovery_workflow ../../examples/g4_gpu_workflow/discovery_main.cpp)
+target_link_libraries(test_gpu_discovery_workflow PRIVATE Photospider::kernel)
+target_compile_options(test_gpu_discovery_workflow PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(test_gpu_discovery_workflow PRIVATE ${_photospider_consumer_link_options})
+target_compile_definitions(test_gpu_discovery_workflow PRIVATE PS_GPU_DISCOVERY_PLUGIN="$<TARGET_FILE:gpu_discovery_fixture>")
+add_dependencies(test_gpu_discovery_workflow gpu_discovery_fixture)
 
-add_library(g4_c_gpu_plugin MODULE ../../examples/g4_gpu_workflow/c_plugin.c)
-target_link_libraries(g4_c_gpu_plugin PRIVATE Photospider::operation_sdk)
-target_compile_definitions(g4_c_gpu_plugin PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-set_target_properties(g4_c_gpu_plugin PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_g4_c_gpu_workflow ../../examples/g4_gpu_workflow/c_main.cpp)
-target_link_libraries(photospider_g4_c_gpu_workflow PRIVATE Photospider::kernel)
-target_compile_options(photospider_g4_c_gpu_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_g4_c_gpu_workflow PRIVATE ${_photospider_consumer_link_options})
-target_compile_definitions(photospider_g4_c_gpu_workflow PRIVATE PS_G4_C_GPU_PLUGIN="$<TARGET_FILE:g4_c_gpu_plugin>")
-add_dependencies(photospider_g4_c_gpu_workflow g4_c_gpu_plugin)
+add_library(gpu_dependency_c_fixture MODULE ../../examples/g4_gpu_workflow/c_plugin.c)
+target_link_libraries(gpu_dependency_c_fixture PRIVATE Photospider::operation_sdk)
+target_compile_definitions(gpu_dependency_c_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+set_target_properties(gpu_dependency_c_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_executable(test_gpu_c_abi_execution ../../examples/g4_gpu_workflow/c_main.cpp)
+target_link_libraries(test_gpu_c_abi_execution PRIVATE Photospider::kernel)
+target_compile_options(test_gpu_c_abi_execution PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(test_gpu_c_abi_execution PRIVATE ${_photospider_consumer_link_options})
+target_compile_definitions(test_gpu_c_abi_execution PRIVATE PS_GPU_DEPENDENCY_PLUGIN="$<TARGET_FILE:gpu_dependency_c_fixture>")
+add_dependencies(test_gpu_c_abi_execution gpu_dependency_c_fixture)
 
-add_executable(photospider_g4_sync_gpu_workflow ../../examples/g4_gpu_workflow/sync_main.cpp)
-target_link_libraries(photospider_g4_sync_gpu_workflow PRIVATE Photospider::kernel)
-target_compile_options(photospider_g4_sync_gpu_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_g4_sync_gpu_workflow PRIVATE ${_photospider_consumer_link_options})
+add_executable(test_gpu_sync_fallback ../../examples/g4_gpu_workflow/sync_main.cpp)
+target_link_libraries(test_gpu_sync_fallback PRIVATE Photospider::kernel)
+target_compile_options(test_gpu_sync_fallback PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(test_gpu_sync_fallback PRIVATE ${_photospider_consumer_link_options})
 
-add_executable(photospider_g4_gpu_workflow ../../examples/g4_gpu_workflow/main.cpp)
-target_link_libraries(photospider_g4_gpu_workflow PRIVATE Photospider::kernel)
-target_compile_options(photospider_g4_gpu_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_g4_gpu_workflow PRIVATE ${_photospider_consumer_link_options})
+add_executable(test_gpu_fragment_execution ../../examples/g4_gpu_workflow/main.cpp)
+target_link_libraries(test_gpu_fragment_execution PRIVATE Photospider::kernel)
+target_compile_options(test_gpu_fragment_execution PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(test_gpu_fragment_execution PRIVATE ${_photospider_consumer_link_options})
 
 add_executable(photospider_fragment_atlas_consumer ../unit/test_fragment_atlas.cpp)
 target_include_directories(photospider_fragment_atlas_consumer PRIVATE ..)
@@ -323,7 +318,6 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_fragment_atlas_consumer>"
   COMMAND "$<TARGET_FILE:photospider_ordered_scan_consumer>"
   COMMAND "$<TARGET_FILE:photospider_ordered_reduction_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_format_retirement_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_extraction_consumer>"
   COMMAND "$<TARGET_FILE:photospider_numeric_conversion_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_assembly_consumer>"
@@ -334,7 +328,7 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_basic_consumer>"
   COMMAND "$<TARGET_FILE:photospider_planar_consumer>"
   COMMAND "$<TARGET_FILE:photospider_semantic_consumer>"
-  DEPENDS photospider_metadata_consumer photospider_g4_sync_gpu_workflow photospider_g4_discovery_workflow photospider_gpu_discovery_consumer photospider_g4_c_gpu_workflow photospider_g4_gpu_workflow photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_planar_consumer photospider_foundations_workflow photospider_channel_extraction_consumer photospider_numeric_conversion_consumer photospider_channel_assembly_consumer photospider_channel_editing_consumer photospider_format_retirement_consumer photospider_expression_consumer photospider_component_consumer photospider_semantic_consumer photospider_consumer
+  DEPENDS photospider_metadata_consumer test_gpu_sync_fallback test_gpu_discovery_workflow photospider_gpu_discovery_consumer test_gpu_c_abi_execution test_gpu_fragment_execution photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_planar_consumer photospider_foundations_workflow photospider_channel_extraction_consumer photospider_numeric_conversion_consumer photospider_channel_assembly_consumer photospider_channel_editing_consumer photospider_expression_consumer photospider_component_consumer photospider_semantic_consumer photospider_consumer
   USES_TERMINAL
   VERBATIM)
 

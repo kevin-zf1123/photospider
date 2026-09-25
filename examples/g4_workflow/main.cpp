@@ -17,7 +17,6 @@ void cache_workflow();
 void reductions_workflow();
 void scan_workflow();
 void block_cache_workflow();
-void measure_workflow();
 
 namespace {
 void require(bool condition, const char* message) {
@@ -111,14 +110,10 @@ void data_workflow() {
                "transpose={1}, generic_snapshot=ok\n";
 }
 }  // namespace
-int main(int argc, char** argv) {
+int main(int argc, char**) {
   try {
-    if (argc == 2 && std::string(argv[1]) == "--measure") {
-      measure_workflow();
-      return 0;
-    }
     if (argc != 1)
-      throw std::runtime_error("usage: photospider_g4_workflow [--measure]");
+      throw std::runtime_error("usage: photospider_dependency_workflow");
     data_workflow();
     progressive_workflow();
     dynamic_workflow();

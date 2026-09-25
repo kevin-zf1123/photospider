@@ -81,9 +81,9 @@ and 32768 native allocation bytes; the current C adapter's complete minimum
 stage reservation is 33108 bytes, and 33107 fails finitely.
 
 ```sh
-cmake --build build/issue257-static --target test_gpu_discovery photospider_g4_discovery_workflow -j 8
-ctest --test-dir build/issue257-static -R '^(test_gpu_discovery|photospider_g4_discovery_workflow)$' --output-on-failure
-build/issue257-static/photospider_g4_discovery_workflow
+cmake --build build/issue257-static --target test_gpu_discovery test_gpu_discovery_workflow -j 8
+ctest --test-dir build/issue257-static -R '^(test_gpu_discovery|test_gpu_discovery_workflow)$' --output-on-failure
+build/issue257-static/test_gpu_discovery_workflow
 ```
 
 `test_gpu_discovery` uses explicitly nonnative protocol mocks for malformed

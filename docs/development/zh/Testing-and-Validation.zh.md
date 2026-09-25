@@ -55,7 +55,7 @@ Kernel test 覆盖：
   `ExecutionResult`，并各自以一次健康 execute 证明精确 cleanup；
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
-  operation-v3 typed parameter schema、demand view，以及带精确 destroy/close count 的
+  C operation ABI 9 typed parameter schema、demand view，以及带精确 destroy/close count 的
   deterministic owner-allocation failure。一个 copy-aware C++ embedding callable 通过
   rvalue 注册，随后 arm 为拒绝后续 copy；它仍能完成 freeze/invoke，并允许未冻结 registry
   加载合法 DSO，且只有一次 invocation、copy count 不增加。这证明 registry/map/staging
@@ -106,7 +106,7 @@ Kernel test 覆盖：
   两次 iteration null-diagnostic-then-success sequence，以及通过 noninstalled
   test-kernel seam 暴露的无 oracle post-execute window。
 
-Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、九方法 routing、
+Daemon test 位于 `photospider-daemon`，覆盖 local frame validation、本地方法 routing、
 临时 Session/Job lifecycle、restart loss、multi-Session behavior、cancellation、
 Session close、result release、shutdown 与隔离 installed-kernel boundary。
 
@@ -116,10 +116,9 @@ Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
 `find_package(Photospider CONFIG REQUIRED)` 配置 external C/C++ consumer。CI 会为
 默认 static kernel 与 `BUILD_SHARED_LIBS=ON` 都运行该 gate。它验证：
 
-- installed header 与声明 public inventory 完全一致；全部 15 份 header 都可直接独立
-  编译，且 `operation_plugin.hpp` 是 consumer 的第一个 include，并带有
-  `element_type_value` 与 `noexcept` compile-time assertion；
-- export 不含 source/private path；
+- consumer 源文件实际编译安装公共头；`operation_plugin.hpp` 是首个 include，
+  并有 `element_type_value` 与 `noexcept` 编译期断言。完整头文件自包含扫描
+  是单独手动检查，不属于此 CTest；
 - linked C SDK compilation unit 会实际运行；downstream shared bridge 会链接
   `Photospider::kernel`、执行 C++ compile/execute pipeline，并由 consumer executable
   调用。因此默认 static archive 会作为 position-independent input 被真实 shared
@@ -138,7 +137,7 @@ Package gate 将 Photospider 配置并安装到 fresh prefix，再只通过
   `__cplusplus`。Consumer 不私自添加 `/std:c++17`，也不要求
   `/Zc:__cplusplus`；dialect elevation 仍只来自 imported usage requirement。Linked
   pure-C SDK probe 保持显式 C11 translation unit，且不获得 C++ standard flag；
-- 被删 target、header、component 与 executable 缺失。
+- 已移除的 `data_definition_sdk` target 不导出。
 
 Nested consumer project 暴露 generator-aware 的 `run_photospider_consumer` target，
 其 command 使用 executable 的 target-file expression。Outer gate 会传递精确 generator、
@@ -187,7 +186,7 @@ shared-bridge/final-executable 拓扑，同时不向 installed package export �
 普通 test 覆盖 malformed Value/Region/layout、graph document、operation/provider record、
 精确 library path 与 callback output。Malformed local IPC frame 属于 daemon repository。
 
-长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 operation-v3
+长期手动 target `photospider_operation_contract_ir_fuzz` 覆盖 当前 OperationTraits 的
 trait/parameter vocabulary 与 compiler validation。它使用 `EXCLUDE_FROM_ALL`，绝不注册到
 CTest；Clang 下通过 `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` 显式启用。Seed input
 维护在 `tests/fuzz/corpus/operation_contract_ir/`；调用者选择的 crash/artifact directory
@@ -217,8 +216,8 @@ parameter schema 并到达命名的 registry rejection。该 deterministic stage
 
 ## CTest 所有权
 
-CTest/CI entry 只用于 correctness、performance、stability、multithreading、error
-handling、package consumption、compilation 与 runtime boundary。不得注册 stale-term
+CTest 验证可观察正确性，包括数值结果、资源边界、并发、错误处理、安装消费、
+编译及运行边界。性能测量和依赖计时的诊断保持为可选工具，不以耗时阈值定义正确性。不得注册 stale-term
 search、source-layout audit、migration checklist、Doxygen audit、Issue replay 或
 result/provenance orchestration。Manual source-quality tool 需要维护的中英文文档，并
 保持在 CTest/CI 之外。使用 Clang/GCC 对 source-tree 与 installed-tree header 做 direct
@@ -240,52 +239,54 @@ cmake --install <clean-build> --prefix <fresh-prefix>
 `python3 -m cpplint`。不支持的 sanitizer/GPU platform 记录为 limitation，而不是
 successful gate。
 
-## Workflow binding 与 binary32 图像验收
+## 当前注册的正确性 workflow
 
-`test_bindings` 通过公开 compile/execute 执行 ADR0016 的
-`s1-rgba32f-exposure-opacity-v1` fixture，对照 descriptor 和 A/B 精确 byte。
-覆盖顺序/并发独立快照、scalar/image preflight、declaration/binding mismatch、tagged
-identity、normalized demand、Halo、cancellation/stale publication、resource bound、
-错误 C port table 和 provider ABI1 Float32。浮点环境回归覆盖继承的 rounding 与
-denormal 模式，通用 Value bit pattern 不受图像数值域限制。
+注册名描述行为，不使用历史 G1/G4/S1/S4 阶段名。使用
+`ctest --test-dir <build> --show-only=json-v1` 获取对应配置的实际清单。
+默认维护 78 项；支持的 SME 构建增加 `test_numeric_conversion_sme`。
+所有已注册可执行文件，包括数值、expression、filter 三个 workflow，均由默认测试构建生成。
+
+- `test_workflow_numeric_reductions`、`test_workflow_expression_lut`、
+  `test_workflow_filter_histogram` 执行公开通用数值 oracle。
+- `test_dependency_workflow` 覆盖精确稀疏读取、progressive 控制发现、动态 radius、
+  demand 替换、waiter 共享、内容缓存、有序归约/扫描及块状态重收敛。
+  旧 generic-image STMap 正例与计时入口已退休；planar STMap 尚未实现。
+- `test_planar_image_workflow`、`test_planar_plugin`、`test_planar_import`、
+  `test_planar_preparation`、`test_region_runs`、`test_data_movement_contract`
+  覆盖当前 planar 存储、C ABI9 插件、准备 seal、mapped ROI、原始位、布局、所有权及发布。
+- `test_gpu_fragment_execution`、`test_gpu_sync_fallback`、
+  `test_gpu_discovery_workflow`、`test_gpu_c_abi_execution` 实测原生 dispatch、
+  sparse atlas、restart/fallback、discovery 与 C 服务。`test_native_gpu`、
+  `test_native_execution`、`test_fragment_atlas_gpu` 提供补充。
+  缺少硬件返回77并记为skip。`test_dependency_gpu`、`test_gpu_discovery` 的协议验证
+  可在CPU上运行。取消之前已检测到的Protocol违规保持Protocol错误；普通callback错误
+  可被取消覆盖。
+- `test_numeric_conversion_sme` 检查位结果和确定性取消。SME硬件或streaming vector
+  length不支持时返回77；`--midflight` 计时诊断不注册为CTest。
+
+已删除格式key的历史清单测试退休。`test_compiler` 改用一个虚构未知算子名，验证查询、
+调用及编译均返回NotFound。当前ABI/schema/package版本拒绝、畸形输入、整数溢出、
+质量数学和owner退休仍是正确性检查，不是迁移清单。
 
 ```sh
-cmake --build build/issue257-static --target test_bindings test_compiler test_value test_execution test_plugin_registry test_operation_contract_ir_seeds -j 8
-ctest --test-dir build/issue257-static -R '^test_(bindings|compiler|value|execution|plugin_registry|operation_contract_ir_seeds|installed_consumer)$' --output-on-failure
+cmake --build <build> -j 8
+ctest --test-dir <build> --output-on-failure
+ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|gpu_sync_fallback|gpu_discovery_workflow|gpu_c_abi_execution)$' --output-on-failure
 ```
 
-Installed consumer 独立构建 ABI3 C image plugin，通过 C++ 与 C 路径执行相同 oracle，
-并要求 0.2 package request 对 0.3 消费失败。单独配置 `-DBUILD_SHARED_LIBS=ON`，构建
-`photospider` 和 `test_bindings`，然后在该目录运行
-`-R '^test_(bindings|installed_consumer)$'`，验证共享导出与安装消费。上述命令针对本次
-API/ABI 变化，不要求 sanitizer 或平台 release matrix。
+## 安装与可选覆盖边界
 
-## 可复用图像 vertical 验收
+安装门禁接受0.24、拒绝0.23请求。实际运行清单由 `tests/consumer/CMakeLists.txt`
+中 `run_photospider_consumer` 的COMMAND定义，包括region runs、planar preparation、
+mapped movement及维护中的算子/registry workflow。四个GPU workflow及foundations
+在该嵌套门禁中当前仅作为构建依赖，不执行；原生运行覆盖来自仓库内CTest。
+未接入run target的resource、Result、representation及旧multi-output示例是可选
+consumer，不能作为已执行的安装覆盖。
 
-`test_image_vertical` 和 `test_image_vertical_plugin` 执行相同的公开 A/B fixture，
-分别使用默认算子和 `plugins/ops/rgba32f` 源码包。它们验证一次编译、两份运行期绑定、
-精确 output demand、完整具名结果、两次 CPU callback、独立 CPU oracle，以及
-raw benchmark 的 identity/backend/transfer/resource/correctness 字段。示例与
-fixture 位于 `examples/image_vertical`，仅使用公开 API。
+旧image-vertical和S3/S4示例是未注册的迁移源码，不能列为当前通过的门禁。
+旧 `test_bindings`、`test_image_vertical*`、`test_metal_images`、`test_native_cache`、
+`test_s4_*` 不在当前清单。维护中的图像由上列planar测试验证，不恢复旧generic图像正例。
 
-```sh
-cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
-ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
-```
-
-对 `build/issue257-shared` 执行相同 target 和正则。Installed consumer 用安装后的
-operation SDK 构建同一算子包，并运行同一示例的默认与 DSO 路径，保留 shared bridge
-检查。详细 fixture、独立构建和报告语义见
-[图像算子](../../kernel-architecture/zh/Image-Operations.zh.md)。
-
-## S4 Metal 与安装消费
-
-复用构建目录运行 `test_native_gpu`、`test_native_execution`、`test_metal_images`、
-`test_native_cache`、`test_s4_*` 与 `test_installed_consumer`。图像与缓存测试同时
-运行内置注册和纯 C 模块，使用独立 CPU oracle；硬件缺失时返回 77，明确跳过。
-`PHOTOSPIDER_ENABLE_METAL=OFF` 验证 CPU 构建与回退。Apple Silicon 可设置
-`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` 检查真实 dispatch。
-
-安装消费在 static/shared 下单独构建 S4 示例；消费者只启用 C/C++。示例命令、
-预期结果和诊断见 [S4 指南](../../kernel-architecture/zh/S4-Workflow.zh.md)。
-不设置 GPU 耗时阈值。CI 保持六项必需检查，覆盖 Linux/macOS 与 sanitizer。
+使用自定义编译器/runtime时，将同一CC/CXX环境传给CTest；安装门禁会新配置嵌套consumer。
+Apple Silicon可用 `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` 检查原生dispatch。
+不支持的GPU/sanitizer能力记为限制，不记为测试通过。

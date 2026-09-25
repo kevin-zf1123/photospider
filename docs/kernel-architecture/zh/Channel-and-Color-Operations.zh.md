@@ -8,20 +8,20 @@
 [目录](../../built-in_ops/02-format-color/representation.md)及
 [FMT 公共规格](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
 定义后续方向。FMT-01A/B 已有 CPU 实现，FMT-01C 提供公开 authoring helper；
-规格决策状态仍为 Proposed。FMT-02A/B/C 及 FMT-03A/B 组合接口已实现，FMT-04..08 尚未实现，FMT-07 已退休。完整图像使用
+规格决策状态仍为 Proposed。FMT-02A/B/C 及 FMT-03A/B 组合接口已实现，FMT-06、FMT-08 也已实现，详见下文；FMT-04/05 尚未实现，FMT-07 已退休。完整图像使用
 planar 存储、straight 颜色和同张量内的 alpha。新算子须实现各自的精确请求、
 metadata、数值和布局契约；旧 typed HWC 行为不构成新规格的子集实现。
 
 NUM/CRV 使用的共享 ColorArray 描述、profile 所有权和数学基础设施保留。
 这些能力不代表已注册格式转换，也不代表实现了新 FMT 算子族。
 
-[公开退休回归](../../../tests/integration/test_format_color_retirement.cpp)覆盖
-全部旧 key 的查询、直接调用和编译，并运行独立核验结果为 0.5 的
-`numeric.add_strict` workflow。安装消费测试编译运行同一源码：
+当前正确性测试覆盖提取、组装、编辑、元数据及严格数值转换。`test_compiler`
+使用任意未知算子名验证查询、调用和编译均拒绝。历史删除名称清单不再作为
+CTest 或安装消费门禁。
 
 ```sh
-cmake --build build --target test_format_color_retirement -j 8
-ctest --test-dir build -R '^(test_format_color_retirement|test_installed_consumer)$' --output-on-failure
+cmake --build build --target test_compiler test_channel_extraction test_channel_assembly test_channel_editing test_numeric_conversion test_metadata_assignment -j 8
+ctest --test-dir build -R '^test_(compiler|channel_extraction|channel_assembly|channel_editing|numeric_conversion|metadata_assignment|installed_consumer)$' --output-on-failure
 ```
 
 [英文说明](../Channel-and-Color-Operations.md)为权威来源。

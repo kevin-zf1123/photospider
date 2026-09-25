@@ -27,10 +27,11 @@ lists, dedicated old tests and directly dependent example paths are updated.
 No compatibility aliases, failure-only registered stubs or substitute FMT
 implementations are provided. Lookup, direct invocation and workflow compilation
 of an old key return NotFound through the normal registry/compiler path.
-The [public regression](../../../../tests/integration/test_format_color_retirement.cpp)
-also runs a remaining numeric.add_strict workflow and is used by the installed
-consumer. Kernel inferred-image rejection remains covered by an independent
-fixture in the planar workflow test, without looking up an old channel operation.
+The original removed-key checklist has since been retired from CTest and the
+installed consumer. `tests/unit/test_compiler.cpp` retains lookup, invocation
+and compilation rejection for one synthetic unknown operation. Kernel
+inferred-image rejection remains covered by the planar workflow and semantic
+contract tests without looking up old channel operations.
 
 Shared color_array/semantic/profile data contracts and mathematical helpers used
 by maintained NUM/CRV operations remain. Closed operation-inference enums and

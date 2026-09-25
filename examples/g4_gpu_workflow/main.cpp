@@ -165,11 +165,14 @@ struct SparseState {
   }
 };
 struct CancelState {
-  explicit CancelState(CancellationSource cancellation)
-      : cancellation(std::move(cancellation)) {}
+  CancelState(CancellationSource cancellation, bool protocol_violation)
+      : cancellation(std::move(cancellation)),
+        protocol_violation(protocol_violation) {}
   CancellationSource cancellation;
+  bool protocol_violation;
   Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    static_cast<void>(phase.gpu_buffer(nullptr, 1, false));
+    if (protocol_violation)
+      static_cast<void>(phase.gpu_buffer(nullptr, 1, false));
     cancellation.cancel();
     return Result<DependencyPoll>(
         Status{ErrorCode::InvalidArgument, "ignored native failure"});
@@ -203,17 +206,23 @@ int main() {
   if (check(registry->register_operation(definition).ok(),
             "registration failed"))
     return 1;
-  CancellationSource auxiliary;
-  auto cancel_definition = definition;
-  cancel_definition.key = "example.native_cancel";
-  cancel_definition.traits.outputs[0].continuation_bytes = sizeof(CancelState);
-  cancel_definition.start_dependency =
-      [auxiliary](const DependencyQuery&, const BufferAllocator& allocator) {
-        return DependencyContinuation::make<CancelState>(allocator, auxiliary);
-      };
-  if (check(registry->register_operation(cancel_definition).ok(),
-            "cancel registration failed"))
-    return 1;
+  CancellationSource cancellation, protocol_cancellation;
+  for (bool protocol : {false, true}) {
+    auto cancel_definition = definition;
+    cancel_definition.key =
+        protocol ? "example.native_protocol_cancel" : "example.native_cancel";
+    cancel_definition.traits.outputs[0].continuation_bytes =
+        sizeof(CancelState);
+    cancel_definition.start_dependency =
+        [token = protocol ? protocol_cancellation : cancellation, protocol](
+            const DependencyQuery&, const BufferAllocator& allocator) {
+          return DependencyContinuation::make<CancelState>(allocator, token,
+                                                           protocol);
+        };
+    if (check(registry->register_operation(cancel_definition).ok(),
+              "cancel registration failed"))
+      return 1;
+  }
   if (check(registry->freeze().ok(), "registry freeze failed"))
     return 1;
   WorkflowDocument document;
@@ -365,22 +374,32 @@ int main() {
   }
   std::cout << "native stage admission: " << minimum - 1 << " rejected, "
             << minimum << " passed and reusable\n";
-  document.nodes[0].operation = cancel_definition.key;
-  GraphContext cancel_graph(document);
-  auto cancel_plan =
-      Compiler(registry).compile(cancel_graph, planning).take_value();
-  ExecutionOptions cancelled_options;
-  cancelled_options.dependencies.sets.cancellation = auxiliary.token();
-  unsigned delivered = 0;
-  auto cancelled = context.execute_stream(
-      cancel_plan.plan, bindings,
-      [&](const std::string&, ValueView) {
-        ++delivered;
-        return Status::success();
-      },
-      {}, cancelled_options);
-  if (check(cancelled.status().code == ErrorCode::Cancelled && delivered == 0,
-            "auxiliary cancellation lost to native service error"))
-    return 1;
+  for (bool protocol : {false, true}) {
+    document.nodes[0].operation =
+        protocol ? "example.native_protocol_cancel" : "example.native_cancel";
+    GraphContext cancel_graph(document);
+    auto cancel_plan =
+        Compiler(registry).compile(cancel_graph, planning).take_value();
+    ExecutionOptions cancelled_options;
+    cancelled_options.dependencies.sets.cancellation =
+        (protocol ? protocol_cancellation : cancellation).token();
+    unsigned delivered = 0;
+    auto cancelled = context.execute_stream(
+        cancel_plan.plan, bindings,
+        [&](const std::string&, ValueView) {
+          ++delivered;
+          return Status::success();
+        },
+        {}, cancelled_options);
+    const auto& status = cancelled.status();
+    const bool expected =
+        protocol ? status.code == ErrorCode::InvalidArgument &&
+                       status.reason == FailureReason::UnauthorizedRead &&
+                       status.detail.origin == FailureOrigin::Protocol
+                 : status.code == ErrorCode::Cancelled;
+    if (check(expected && delivered == 0,
+              "native cancellation/protocol priority or publication failed"))
+      return 1;
+  }
   return 0;
 }
