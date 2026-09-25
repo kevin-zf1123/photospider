@@ -1,0 +1,76 @@
+---
+spec_schema_version: 1
+id: GEN-08D
+status: AcceptedDesign
+implementation_status: not_implemented
+registration_status: technical_freeze_gates
+source_maturity: D2_draft
+revised_on: 2026-09-26
+---
+
+# GEN-08D：Bridson-annulus具名分布
+
+本具体规格已按[英文权威决策D01–D12](../decisions.md)修订。数学、端口与验收目标见本文；
+未实现，候选键/新schema及证明算法在[技术门禁](../freeze-gates.md)完成前不得宣称已注册。
+D1/D2仅保留来源成熟度，不表示首批顺序。
+
+## 1. 范围与身份
+
+所属族：[GEN-08 规则、扰动与最小距离点集](GEN-08_point_distributions_contract.md)。本成员与同族其他成员不能隐式互换。
+继承[GEN-common](GEN_common_contract.md)、[NOI-random](NOI_random_contract.md)、[PTH-geometry](PTH_geometry_contract.md)；精度、颜色、结构表示及执行条款通过这些文件继承01/02。
+来源为上传草案，经D01–D12修订；规格不代表运行时已实现。
+
+候选transcend严格oracle/输出golden尚需实施；本包不把Measured序列当strict认证。
+
+来源候选键（全部需含版本；未冻结，不是可调用API）：
+
+- generation.bridson_points_v1_strict
+
+## 3. 端口与输出推断
+
+输入bounds[4],min_distance[1]>0；输出points Result。
+
+## 4. 参数及合法域
+
+k=30范围1..256，seed/stream,max_count；max_iterations为独立硬安全预算（不复用正常停止目标）；frame=0。
+
+## 5. 数学参考与舍入
+
+首点domain5,x=0,y=0,draw=0映射bounds。active按接受序，v1总取最早active（与原论文随机active选择明确不同）；每次对该点尝试k个候选，u,v用domain5,x=iteration+1,y=attempt,draw=0；rho=r*sqrt(1+3u),theta=2*pi*v。接纳第一个有效点并追加active，否则删除该active。距离用发布点精确判；接受点达到max_count即成功并报告count_reached；活动列表耗尽报告active_exhausted；独立迭代/work/内存预算耗尽失败。
+
+## 6. 实现成本与资源
+
+候选RN64由certified transcend，接纳是精确谓词，CPU并行只可评估候选但不可改变选择序。典型O(kM)，保守O(kM²)基准；grid cell=r/sqrt2须有正确邻域界。
+
+## 7. Demand、发布与dirty
+
+目标执行规则：**Whole**。完整结构/全局算法输入与关联；完成全部所选Result后封存，不发布成功前缀。
+完整控制/拓扑/资源改变保守失效全部依赖区域；逐样本输入改变按实际依赖映射失效。
+空Q仅执行静态preflight，不读payload、不推进随机算法。global Region、origin、owner、layout
+与produced coverage真实返回。多输出仅计算所请求数学，必要共享验证不省略。
+具体callback及错误影响范围须按[GEN-common](GEN_common_contract.md)验证。
+
+## 8. 数值、错误与生命周期
+
+继承[GEN-common](GEN_common_contract.md)：strict完整式正确舍入，accelerated最终预算不按
+tap/octave累计；同版本同profile位一致。图像平面存储、合法stride/offset、预算、取消、
+关联及context后保留owner规则均适用。参数/schema错误、无解、未收敛、质量失败和宿主资源
+错误保持区分；有限结果不可表示为ArithmeticOverflow。无效请求不发布成功前缀。
+
+## 10. 成员验收
+
+无越界、pairwise≥r、同seed稳定；r极大时一条点；停止不宣称maximal；rounding挤出bounds拒候选。
+
+还须验证全域与非零ROI同位、真实读取/计算范围、合法负/零stride、独立/joint输出、
+低预算、取消、cache-off、参数和资源版本变化、关联验证及保留owner寿命。
+
+## 11. 公开执行与证据边界
+
+实现验收必须通过WorkflowDocument→Compiler→ExecutionContext公开入口及独立数学参考。
+本文样例是预期结果，不是已运行记录；附件oracle及其旧通过报告不验证修订后行为。
+随机成员使用新版Philox规范和新的独立向量；技术门禁未清除前不发布golden。
+
+## 12. 依赖
+
+来源：[S05](../research-sources.md#s05)、[S09](../research-sources.md#s09)。
+继承本族契约、GEN-common及适用的NOI-random/PTH-geometry。正式字段和算法门禁不得由示例替代。
