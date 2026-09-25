@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_handoff_pending_platform_review
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -20,8 +20,9 @@ proposed_operation_keys:
 # FMT-09A: decode transfer
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
-[scalar definitions](FMT-09_transfer_math.md). These keys are proposed native
-primitives, not registered interfaces or aliases of any removed color operator.
+[scalar definitions](FMT-09_transfer_math.md). These keys are registered native primitives in the development handoff,
+not aliases of any removed color operator. See the [handoff](../../../development/FMT-09-handoff.md)
+for test evidence and platform-review boundaries.
 
 ## Interface and observable behavior
 
@@ -91,4 +92,5 @@ A future public example should bind a tagged sRGB planar RGB+alpha image, reques
 one color component and then alpha independently, and compare to an independent
 scalar oracle. Include the absolute PQ and HLG endpoint cases above. An explicit
 D -> basis/reference stage -> E workflow checks composition, not an automatically
-selected converter. No runnable implementation or benchmark result is claimed.
+selected converter. The correctness-gated executable is in `examples/transfer_performance`;
+local smoke results are not target-platform performance certification.

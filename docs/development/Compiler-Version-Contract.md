@@ -57,6 +57,15 @@ consumers must rebuild. Base operation/provider ABI, WorkflowDocument, TDM4 and
 OperationTraits17 remain unchanged. The independent PixelOE plugin and workflow
 are built with `find_package(Photospider 0.24)` and exercise the new boundary.
 
+Package 0.25.0 adds the synchronous borrowed `consume_work` service to
+`PlanarOperationInvocation` and extends `OperationRegistry::invoke_planar`.
+This breaks the public C++ layout and call ABI. Rebuild the kernel, native C++
+callbacks and installed consumers together; mixing previously compiled C++
+objects or shared libraries across this boundary is unsupported. The installed
+SameMinorVersion gate accepts 0.25 and rejects a 0.24 request. OperationTraits18,
+stage identity domains, C operation ABI9, planar C extension v1, provider ABI1,
+WorkflowDocument schema3 and TDM4 are unchanged.
+
 ## Digests
 
 The planar preparation and mapped-movement extension changes C++ layouts in

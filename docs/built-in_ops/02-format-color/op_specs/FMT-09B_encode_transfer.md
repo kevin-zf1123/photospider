@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_handoff_pending_platform_review
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -20,8 +20,9 @@ proposed_operation_keys:
 # FMT-09B: encode transfer
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
-[scalar definitions](FMT-09_transfer_math.md). These keys are proposed native
-primitives, not registered interfaces or a universal color converter.
+[scalar definitions](FMT-09_transfer_math.md). These keys are registered native primitives in the development handoff,
+not a universal color converter. See the [handoff](../../../development/FMT-09-handoff.md)
+for test evidence and platform-review boundaries.
 
 ## Interface and observable behavior
 

@@ -593,6 +593,21 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
    * This is a C++ API addition; the C operation ABI is unchanged.
    */
   std::shared_ptr<const PreparedOperation> prepared = {};
+  /** @brief Borrowed, bounded report service; errors are sticky at host entry.
+   * The report is retained even when numerical evaluation later fails.
+   * Valid only until the callback returns. Invoke serially on the callback
+   * thread; do not retain it or dispatch concurrent reports to this service.
+   */
+  std::function<Status(const NumericDiagnostics&)> report_numeric = {};
+  /** @brief Host work admission and cancellation/currentness checkpoint.
+   * Nonempty at registry entry, even without a managed resource root. Checks
+   * cancellation first, then plan currentness, and precharges the exact amount
+   * before work begins. Passing zero performs only a checkpoint. Failures are
+   * sticky at host entry, including failures ignored by a plugin. Poll during
+   * long inner/refinement loops, not only before publication. Borrowed for the
+   * callback lifetime; call serially on the callback thread, never retain it.
+   */
+  std::function<Status(std::uint64_t)> consume_work = {};
 };
 /** @brief Callback writes only the requested output window; host publishes
  * that coverage after successful return and cancellation/current checks.
@@ -943,7 +958,10 @@ class PHOTOSPIDER_API OperationRegistry final {
                        const CancellationToken& cancellation = {},
                        const BufferAllocator& allocator = BufferAllocator(),
                        std::shared_ptr<const PreparedOperation> prepared = {},
-                       const std::function<bool()>& current = {}) const;
+                       const std::function<bool()>& current = {},
+                       NumericDiagnostics* numeric = nullptr,
+                       const ResourceBudget* resources = nullptr,
+                       const ErrorCode* metadata_failure = nullptr) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

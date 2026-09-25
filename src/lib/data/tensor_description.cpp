@@ -291,6 +291,8 @@ Status validate_structure(const TensorDescription& value) {
             *a.analytic_binding == *b.analytic_binding);
   };
   std::map<std::uint64_t, TensorChannelDescription> assertions;
+  if (!value.channel_axis && value.component)
+    assertions[0] = *value.component;
   for (std::size_t i = 0; i < value.channels.size(); ++i)
     assertions[i] = value.channels[i];
   for (const auto& group : value.groups)
@@ -984,9 +986,16 @@ Status validate_tensor_description(const TensorDescription& description,
     }
   std::set<std::string> names;
   for (const auto& group : description.groups) {
-    if (!description.channel_axis || !names.insert(group.name).second)
-      return invalid("group requires channel axis and unique name");
-    const auto count = descriptor.shape[*description.channel_axis];
+    if (!names.insert(group.name).second)
+      return invalid("group requires unique name");
+    // A rank-preserving, single Gray plane has no invented channel axis.
+    // Only the unique implicit component zero is addressable in that form.
+    if (!description.channel_axis &&
+        (description.groups.size() != 1 || group.interpretation.model != "gray" ||
+         group.indices != std::vector<std::uint64_t>{0} || group.alpha))
+      return invalid("axis-free group must be one Gray component");
+    const auto count = description.channel_axis
+                           ? descriptor.shape[*description.channel_axis] : 1;
     for (auto index : group.indices)
       if (index >= count)
         return invalid("group index exceeds channel count");

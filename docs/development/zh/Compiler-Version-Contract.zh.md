@@ -353,3 +353,10 @@ v3 明确相对坐标约定，新增精确类型化数值编码、同位采样�
 以及已验证输出元数据，安装包 C++ 消费者需要重新编译。基础 operation/provider
 C ABI、WorkflowDocument、TDM4 和 OperationTraits17 保持不变。
 PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证此边界。
+
+包版本 0.25.0 为 `PlanarOperationInvocation` 增加同步借用的 `consume_work` 服务，
+并扩展 `OperationRegistry::invoke_planar`，改变公共 C++ 布局和调用 ABI。
+内核、原生 C++ 回调与安装消费者必须一起重新编译；不支持跨此边界混用旧、新
+C++ 对象文件或共享库。SameMinorVersion 安装门禁接受 0.25，拒绝 0.24 请求。
+OperationTraits18、各阶段 identity domain、C operation ABI9、planar C 扩展 v1、
+provider ABI1、WorkflowDocument schema3 与 TDM4 保持不变。

@@ -26,7 +26,9 @@ file(WRITE "${PROJECT_BINARY_DIR}/generated/sleef-config.h"
 add_library(photospider_numeric_math OBJECT
   "${PROJECT_SOURCE_DIR}/third_party/photospider_sleef.c"
   "${PROJECT_SOURCE_DIR}/plugins/ops/01-numeric/exp_simd.cpp"
-  "${PROJECT_SOURCE_DIR}/plugins/ops/01-numeric/trig_simd.cpp")
+  "${PROJECT_SOURCE_DIR}/plugins/ops/01-numeric/trig_simd.cpp"
+  "${PROJECT_SOURCE_DIR}/plugins/ops/02-format-color/transfer_simd.cpp")
+target_compile_features(photospider_numeric_math PRIVATE cxx_std_17)
 target_include_directories(photospider_numeric_math PRIVATE
   "${PROJECT_SOURCE_DIR}/plugins/ops"
   "${PROJECT_BINARY_DIR}/generated"
@@ -35,6 +37,12 @@ target_compile_options(photospider_numeric_math PRIVATE
   -O3 -fno-fast-math -ffp-contract=off -fvisibility=hidden)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   target_compile_options(photospider_numeric_math PRIVATE -mavx2 -mfma)
+endif()
+# The separate ISA object must be instrumented too: otherwise tests of SIMD
+# loads/stores would link ASan yet leave their memory accesses unchecked.
+if(NOT PHOTOSPIDER_SANITIZER_MODE STREQUAL "none")
+  target_compile_options(photospider_numeric_math PRIVATE
+    ${PHOTOSPIDER_SANITIZER_FLAG} -fno-omit-frame-pointer)
 endif()
 set_target_properties(photospider_numeric_math PROPERTIES
   POSITION_INDEPENDENT_CODE ON C_STANDARD 99 C_VISIBILITY_PRESET hidden)

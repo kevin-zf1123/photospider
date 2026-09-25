@@ -6778,6 +6778,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       std::condition_variable changed;
       bool done = false;
       std::uint64_t callback_us = 0;
+      NumericDiagnostics numeric;
       ResourceLease lease;
     };
     auto completion = std::make_shared<Completion>();
@@ -6806,11 +6807,30 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
                   "planar execution stopped before callback");
               return;
             }
+            // Worker threads do not inherit the caller's metadata scope.
+            // Keep the root active through all callback-owned temporaries,
+            // matching the generic dependency worker's admission contract.
+            const auto& resources = impl_->budget->resources();
+            ErrorCode metadata_failure = ErrorCode::Ok;
+            std::optional<ResourceAllocationScope> scope;
+            if (resources)
+              scope.emplace(*resources, &metadata_failure);
             completion->status = impl_->operation_registry->invoke_planar(
                 step.operation, windows, step.input_demands, step.parameters,
                 step.output_demand, image, cancellation,
                 impl_->budget->on_demand_allocator(observation), step.prepared,
-                [&plan] { return plan.current(); });
+                [&plan] { return plan.current(); }, &completion->numeric,
+                resources ? &*resources : nullptr, &metadata_failure);
+            if (metadata_failure != ErrorCode::Ok &&
+                completion->status.detail.origin != FailureOrigin::Protocol &&
+                completion->status.code != ErrorCode::ResourceExhausted &&
+                completion->status.code != ErrorCode::Cancelled &&
+                completion->status.code != ErrorCode::Stale)
+              completion->status =
+                  Status{metadata_failure,
+                         "planar metadata allocation failed",
+                         FailureReason::CapacityLimit,
+                         {FailureOrigin::Resource, FailureScope::Unspecified}};
           } catch (const std::bad_alloc&) {
             completion->status = Status{ErrorCode::ResourceExhausted, {}};
           } catch (...) {
@@ -6841,6 +6861,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     timing.output = step.result_ref();
     timing.backend = Backend::Cpu;
     timing.duration_us = completion->callback_us;
+    timing.numeric = completion->numeric;
     timing.outcome = status.code;
     auto count = step.output_demand.element_count();
     if (count.ok())

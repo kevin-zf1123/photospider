@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_handoff_pending_platform_review
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -17,9 +17,11 @@ Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseli
 [model coverage](FMT_model_conversion_coverage.md) and
 [canonical image/codec boundary](FMT_codec_boundary.md). The family contains
 [A decode](FMT-09A_decode_transfer.md) and [B encode](FMT-09B_encode_transfer.md),
-both proposed native primitives. Their exact scalar definitions are normative in
+both registered native primitives in this development handoff. Their exact scalar definitions are normative in
 [FMT-09 mathematics](FMT-09_transfer_math.md). Clarification is complete for the
-selected scope; no runtime registration or implementation is delivered here.
+selected scope. Implementation, codec choices, local test evidence and outstanding
+platform review are recorded in [the handoff](../../../development/FMT-09-handoff.md).
+The mathematical requirements and Proposed specification status are unchanged.
 
 ## Purpose and responsibilities
 
@@ -121,9 +123,10 @@ means smooth, and conflicts with a rounded_10bit source unless overridden.
 B's target defaults never repair or overwrite an inconsistent source implicitly.
 Mode, curve, variant and layout are closed String choices in authoring;
 group and raw selectors are typed static metadata/axis selectors, with bounded
-integer indices. The existing metadata codec cannot encode these new records
-unchanged. These are logical static fields; final canonical codec serialization remains an
-implementation dependency, not an invented current API.
+integer indices. The development implementation encodes complete transfer identities in bounded
+`fmt09-v1:` records inside tensor-description-v4 and exposes a public
+TransferDefinition codec. Raw selectors use a bounded canonical index String.
+See the handoff for the exact serialization, units and remaining review items.
 
 ## Curve identity, metadata and reference checks
 
@@ -263,7 +266,7 @@ Whole upstream failures, exact dirty support, Empty, source immutability,
 view/materialize equality, retained owner lifetime, budgets/cancellation and
 floating-environment restoration. A view must not bypass identity validation.
 
-When implemented, provide public compile/execute examples and correctness-gated
+The development handoff provides public compile/execute examples and correctness-gated
 benchmarks for Float32/64 [4096,4096,4] planar inputs, full/R-only/alpha-only
 requests and sparse tile-crossing ROIs. Record concrete profile/ISA/build,
 workers, page state, time, logical bytes, reserved span, backing and scratch.
