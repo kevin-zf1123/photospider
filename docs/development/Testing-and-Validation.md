@@ -342,7 +342,7 @@ ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|g
 
 ## Installed and optional coverage boundaries
 
-The installed gate accepts package 0.24 and rejects a 0.23 request. Its actual
+The installed gate accepts package 0.25 and rejects 0.23/0.24 requests. Its actual
 runtime inventory is the `COMMAND` list of `run_photospider_consumer` in
 `tests/consumer/CMakeLists.txt`, including region runs, planar preparations,
 mapped movement and maintained operator/registry workflows. The four GPU

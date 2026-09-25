@@ -1,4 +1,4 @@
-# Tensor semantic metadata and FMT-08
+# Tensor semantic metadata, FMT-08 and FMT-11
 
 [Chinese reader version](zh/Tensor-Semantic-Metadata.zh.md).
 
@@ -11,15 +11,21 @@ identical sample bits. There is no native removal key or sample-only result cach
 
 ## Version and interpretation
 
-The only accepted `photospider.tensor-description` runtime version is **4**,
-with the `TDM4` payload discriminator. Versions 1 through 3 are rejected. Rebuild C++
-consumers and explicitly re-author metadata; no old bytes are silently assigned
-new units. WorkflowDocument and the operation/provider C ABI versions do not
-change. Canonical facet bytes and static edit parameters enter compiler identity.
-Legacy ColorArray v1 remains a separate old-coordinate consumer contract and
-cannot coexist with v4 on one Value. FMT-08 rejects legacy typed facets rather
-than reinterpret their implied units. The other FMT arithmetic/engine families
-remain separately implemented or Proposed as recorded in their specifications.
+Package 0.25.0 accepts `photospider.tensor-description` runtime versions **4**
+(`TDM4`) and **5** (`TDM5`). The v4 wire meaning is unchanged. Encoding chooses v5
+when any tensor, component, channel or group interpretation contains a
+`coordinates` record, including a present-but-empty record; otherwise it chooses
+v4. Versions 1 through 3, mismatched version/discriminator pairs, noncanonical
+encodings and trailing bytes are rejected. No old bytes receive new units.
+WorkflowDocument and operation/provider C ABI versions do not change. Canonical
+facet bytes and static edit parameters enter compiler identity. Legacy ColorArray
+v1 remains a separate old-coordinate consumer contract and cannot coexist with
+these tensor facets on one Value. FMT-08 rejects legacy typed facets.
+
+The public C++ layout changes introduced by FMT-11 require rebuilding consumers
+against package 0.25. `find_package(Photospider 0.24)` is rejected, rather than
+claiming compatibility with an earlier layout. See the package migration note
+in [Compiler-Version-Contract](../development/Compiler-Version-Contract.md).
 
 `relative-v1` identifies the new native convention, including CIELAB/CIELCh
 lightness `l=L*/100`, unchanged a/b/chroma and existing XYZ Y=1 reference scale.
@@ -47,13 +53,13 @@ normal host facet limits (64 facets, 64 KiB each, 1 MiB total).
 | Component | `name`, `role`, `unit`, optional `interpretation`, `encoding`, `sampling` |
 | Axis | `name`, `unit`, finite `origin`, positive finite `step`; describes world coordinates without changing indices |
 | Group | unique `name`, ordered distinct `indices`, corresponding `components`, complete `interpretation`, optional same-tensor `alpha` index outside color indices |
-| Interpretation | `model`, `primaries`, `transfer`, `reference`, `association`, `white`, `primaries_xy`, `profile`, `convention`, `configured`, `analytic_binding` |
+| Interpretation | `model`, `primaries`, `transfer`, `reference`, `association`, `white`, `primaries_xy`, `profile`, `convention`, `configured`, `analytic_binding`, `coordinates` |
 | Encoding | exact typed endpoint pairs `stored` and `decoded`; stored endpoints increase, decoded endpoints differ and may descend |
 | Sampling | explicit `grid`, `scale=(1,1)`, `offset=(0,0)` for same-size co-sited internal planes; external subsampling is rejected |
 | Configured space | frozen `config` identity, exact declared canonical `space`, `reference_space=scene|display` |
 | Analytic binding | caller-asserted model/primaries/transfer/reference/white, ordered roles and units, `convention=relative-v1` |
 
-A `TensorEndpoint` is Int64 or finite Float64. Its tag and exact bits survive
+A `TensorEndpoint` is Int64, finite Float64, or an exact bounded rational. Its tag and exact bits survive
 serialization; Int64 maximum never passes through Float64. Encoding means
 `D(x)=decoded[0]+(x-stored[0])*(decoded[1]-decoded[0])/(stored[1]-stored[0])`.
 Stored intervals must fit the tensor dtype. A complete integer color group needs
@@ -67,6 +73,42 @@ component descriptions can remain incomplete provenance. Profiles/configured
 spaces do not invent analytic primaries, transfer or white; explicit bindings
 are caller assertions, not mathematical equivalence proofs. No field certifies
 sample finiteness, coverage range, premultiplied zeros or color validity.
+
+## FMT-11 model-coordinate assertions
+
+`TensorModelCoordinates` carries optional interpretation information:
+
+| Field | Admitted metadata value |
+| --- | --- |
+| `scale` | empty, `relative`, or `absolute` |
+| `observer` | empty or an explicitly supplied UTF-8 identifier (at most 128 bytes) |
+| `gray_kind` | empty, `linear_y`, `encoded_luma`, `cielab_l`, or `oklab_l` |
+| `ncl_coefficients` | absent, or two finite binary64 coefficients `[Kr, Kb]` |
+
+Empty strings and absent coefficients make **no assertion**. Compatible channel,
+component and overlapping group assertions are combined **field by field**. For
+example, `{scale: relative}` and `{gray_kind: linear_y}` are complementary, not
+conflicting. Two nonempty unequal values for the same field are rejected. A
+later declaration that omits a field must not erase a preceding assertion and
+hide a conflict with another group. Exact `operator==` is unchanged: it compares
+whole records, and is not the compatibility predicate. The codec validates
+compatibility without filling or rewriting provenance fields in the supplied
+records; channel assembly resolves overlays in its resulting description.
+
+TDM5 retains the same 4096-byte facet bound, strict UTF-8, finite coefficient and
+canonical presence-byte checks. The codec admitting finite coefficients does
+not imply that a particular conversion formula accepts them: operator semantic
+admission imposes its own required domain and coordinate conditions.
+
+FMT-08 can set/remove the complete `coordinates` subtree or its individual
+`scale`, `observer`, `gray_kind`, and `ncl_coefficients` leaves under:
+`/semantic/coordinates`,
+`/semantic/component/interpretation/coordinates`,
+`/semantic/channels/index:0/interpretation/coordinates`, and
+`/semantic/groups/gray/interpretation/coordinates` (with the usual selectors).
+Whole-subtree replacement remains replacement; leaf patches preserve siblings.
+Deleting the last coordinate record produces canonical v4 again, provided no
+other coordinate records remain. A present empty record remains v5.
 
 ## Frozen resources
 
@@ -131,7 +173,7 @@ records use `kind + decimal-length-or-count + ':' + contents`; `o` is an ordered
 map with string keys, `s` string, `u` unsigned integer, `i` exact signed integer,
 `d` eight little-endian Float64 bits, and `b` opaque bytes. The decoded bound is
 4096 bytes, 1024 nodes and depth 12; the String bound is 8192. This transaction
-codec is separate from the published TDM4 codec. Prefer the typed public helper.
+codec is separate from the published TDM4/TDM5 codec. Prefer the typed public helper.
 
 Cascade follows the closed schema dependencies: channel axis to channel tables
 and groups; encoding/sampling/configured/profile fields to their containing

@@ -227,3 +227,19 @@ __pycache__/
 !examples/metadata_workflow/*.cpp
 !examples/metadata_workflow/*.md
 !examples/metadata_workflow/CMakeLists.txt
+
+# FMT-11 independent oracles and performance workflow.
+!tools/
+!tools/fmt11/
+!tools/fmt11/*.py
+!tools/fmt11/*.sh
+!examples/model_conversion_performance/
+!examples/model_conversion_performance/*.cpp
+!examples/model_conversion_performance/*.md
+!examples/model_conversion_performance/CMakeLists.txt
+
+# FMT-11 package regression and exact-rational/style fixtures.
+!tests/cmake/
+!tests/cmake/test_fmt11_package_version.cmake
+!tests/fixtures/fmt11/rational_oracles.txt
+!tools/fmt11/style_scope.txt

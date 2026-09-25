@@ -443,3 +443,21 @@ workflow acceptance. The installed consumer exercises this structural workflow,
 C SDK/header consumers and generic execution facilities. Older sections above
 record their respective delivery contracts; they do not reinstate retired image
 execution in package 0.19.
+
+## Package 0.25.0: FMT-11 C++ ABI boundary
+
+FMT-11 adds model-coordinate fields to public `TensorDescription`,
+`TensorInterpretation` and metadata value records. The package is 0.25.0;
+`SameMinorVersion` accepts the 0.25 family only (subject to requested version not
+exceeding the installed version), and rejects 0.23/0.24 consumers. Rebuild all C++
+applications and plugins that exchange these objects. Installed examples and
+PixelOE request 0.25. The shared library uses VERSION 0.25.0 and SOVERSION 0.25.
+An old binary linked to a previously unversioned library is not retroactively
+protected by this new SONAME: use a clean prefix and rebuild it; do not replace
+its library beneath a running process. Static consumers must relink too.
+
+The operation C ABI and data-provider C ABI remain unchanged. WorkflowDocument
+and existing identity-framing versions are unchanged; TDM5 bytes are included
+in the existing facet identity. TDM4 retains its existing meaning and canonical
+v4/v5 selection is documented in Tensor-Semantic-Metadata. These are independent
+version boundaries, not a promise of C++ layout compatibility.

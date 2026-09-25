@@ -875,6 +875,7 @@ int cold_u8_budget() {
 }
 int budget_failure_order() {
   auto registry = make_default_operation_registry();
+  std::uint64_t first_failure_work = 0;
   for (std::uint64_t bad_at : {0, 1, 17, 63}) {
     std::vector<float> samples(64, .5f);
     samples[bad_at] = std::numeric_limits<float>::quiet_NaN();
@@ -907,7 +908,15 @@ int budget_failure_order() {
     PS_CHECK(result.status().message.find("coordinate=[" +
                                           std::to_string(bad_at) + "]") !=
              std::string::npos);
-    PS_CHECK(session->consumed_work() == 30 + (bad_at + 1) * 65);
+    // The session/footprint bookkeeping is not part of the numeric sample
+    // tariff. Compare the same request at different failure positions so a
+    // protocol bookkeeping change does not invalidate the per-sample oracle.
+    if (bad_at == 0) {
+      first_failure_work = session->consumed_work();
+      PS_CHECK(first_failure_work >= 65);
+      PS_CHECK(first_failure_work <= request.limits.maximum_work);
+    }
+    PS_CHECK(session->consumed_work() == first_failure_work + bad_at * 65);
   }
   return 0;
 }

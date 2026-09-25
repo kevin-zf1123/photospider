@@ -38,11 +38,29 @@ inline std::uint64_t numeric_bits(double value, bool narrow = false) {
   }
   return bits;
 }
+// Normal-to-normal adjacency is an integer increment in the IEEE binary64
+// encoding. Exceptional boundaries retain nextafter's errno/fenv behavior.
+inline double numeric_neighbor(double value, bool upward) {
+  static_assert(sizeof(double) == sizeof(std::uint64_t) &&
+                std::numeric_limits<double>::is_iec559 &&
+                std::numeric_limits<double>::digits == 53 &&
+                std::numeric_limits<double>::max_exponent == 1024);
+  auto bits = numeric_bits(value);
+  const auto magnitude = bits & UINT64_C(0x7fffffffffffffff);
+  if (magnitude <= UINT64_C(0x0010000000000000) ||
+      magnitude >= UINT64_C(0x7fefffffffffffff))
+    return std::nextafter(value,
+                          upward ? std::numeric_limits<double>::infinity()
+                                 : -std::numeric_limits<double>::infinity());
+  const bool negative = (bits >> 63) != 0;
+  bits += upward != negative ? UINT64_C(1) : UINT64_MAX;
+  return numeric_double(bits);
+}
 inline double numeric_down(double value) {
-  return std::nextafter(value, -std::numeric_limits<double>::infinity());
+  return numeric_neighbor(value, false);
 }
 inline double numeric_up(double value) {
-  return std::nextafter(value, std::numeric_limits<double>::infinity());
+  return numeric_neighbor(value, true);
 }
 // Outward enclosures, evaluated in the caller's scoped nearest/gradual mode.
 // Basic arithmetic encloses the exact real formula and its RN64 result.

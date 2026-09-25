@@ -673,8 +673,137 @@ void override_and_profile_lifetime() {
   require(surviving.resources().icc_profile(identity).ok(),
           "profile survives context/source teardown");
 }
+void source_coordinate_complement() {
+  Fixture fixture;
+  TensorDescription source;
+  source.channel_axis = 1;
+  source.channels = {{"Y", "gray", "relative"}};
+  source.channels[0].interpretation.emplace();
+  source.channels[0].interpretation->coordinates =
+      TensorModelCoordinates{"relative", "", "", {}};
+  TensorColorGroup group;
+  group.name = "gray";
+  group.indices = {0};
+  group.components = {{"Y", "gray", "relative"}};
+  group.interpretation.model = "gray";
+  group.interpretation.coordinates =
+      TensorModelCoordinates{"", "1931-2", "linear_y", {}};
+  source.groups = {group};
+  auto input = fixture.add({ElementType::Float32, {2, 1}},
+                           {take(encode_tensor_description(source))});
+  auto edge = take(format::concatenate_channels(fixture.document, {input}, 1));
+  const auto result = run(fixture, edge);
+  const auto output =
+      take(decode_tensor_description(result.values.at("result").facets()[0]));
+  const auto& coordinates = *output.channels[0].interpretation->coordinates;
+  require(coordinates.scale == "relative" && coordinates.observer == "1931-2" &&
+              coordinates.gray_kind == "linear_y",
+          "source group model completion preserves complementary coordinates");
+}
+void source_group_overrides_defaults() {
+  Fixture fixture;
+  TensorDescription source;
+  source.channel_axis = 1;
+  source.coordinates = TensorModelCoordinates{"absolute", "", "", {}};
+  source.channels = {{"Y", "gray", "relative"}};
+  TensorColorGroup group;
+  group.name = "gray";
+  group.indices = {0};
+  group.components = source.channels;
+  group.interpretation.model = "gray";
+  group.interpretation.coordinates =
+      TensorModelCoordinates{"relative", "", "", {}};
+  source.groups = {group};
+  auto input = fixture.add({ElementType::Float32, {2, 1}},
+                           {take(encode_tensor_description(source))});
+  auto edge = take(format::concatenate_channels(fixture.document, {input}, 1));
+  const auto result = run(fixture, edge);
+  const auto output =
+      take(decode_tensor_description(result.values.at("result").facets()[0]));
+  require(output.channels[0].interpretation->coordinates->scale == "relative",
+          "explicit group coordinate overrides tensor default");
+}
+void partial_coordinate_respect() {
+  for (const unsigned assignment : {0u, 1u, 2u}) {
+    const bool assign_observer = assignment == 2;
+    Fixture fixture;
+    TensorDescription source;
+    source.component = TensorChannelDescription{"Y", "gray", "relative"};
+    source.component->interpretation.emplace();
+    source.component->interpretation->model = "gray";
+    source.component->interpretation->coordinates =
+        TensorModelCoordinates{"relative", "1931-2", "", {}};
+    auto a = fixture.add({ElementType::Float32, {2}},
+                         {take(encode_tensor_description(source))});
+    source.component->interpretation->coordinates->observer = "1964-10";
+    auto b = fixture.add({ElementType::Float32, {2}},
+                         {take(encode_tensor_description(source))});
+    TensorDescription target;
+    target.channel_axis = 1;
+    target.coordinates = TensorModelCoordinates{assignment ? "relative" : "",
+                                                assign_observer ? "1931-2" : "",
+                                                "",
+                                                {}};
+    format::ChannelAssemblyOptions options;
+    options.output_description = target;
+    auto edge =
+        take(format::assemble_channels(fixture.document, {a, b}, 1, options));
+    bool rejected = false;
+    try {
+      run(fixture, edge);
+    } catch (const std::exception&) {
+      rejected = true;
+    }
+    require(rejected != assign_observer,
+            "only explicitly assigned coordinate fields override respect");
+  }
+}
+void model_coordinate_overlay() {
+  TensorDescription source;
+  source.component = TensorChannelDescription{"Y", "gray", "relative"};
+  source.component->interpretation.emplace();
+  source.component->interpretation->model = "gray";
+  source.component->interpretation->coordinates =
+      TensorModelCoordinates{"relative", "1931-2", "", {}};
+  Fixture fixture;
+  auto input = fixture.add({ElementType::Float32, {2}},
+                           {take(encode_tensor_description(source))});
+  TensorDescription target;
+  target.channel_axis = 1;
+  target.channels = {{"Y", "gray", "relative"}};
+  target.channels[0].interpretation.emplace();
+  target.channels[0].interpretation->coordinates =
+      TensorModelCoordinates{"relative", "", "", {}};
+  TensorColorGroup group;
+  group.name = "gray";
+  group.indices = {0};
+  group.components = {{"Y", "gray", "relative"}};
+  group.interpretation.model = "gray";
+  group.interpretation.coordinates =
+      TensorModelCoordinates{"", "", "linear_y", {}};
+  target.groups = {group};
+  format::ChannelAssemblyOptions options;
+  options.output_description = target;
+  auto edge =
+      take(format::assemble_channels(fixture.document, {input}, 1, options));
+  const auto result = run(fixture, edge);
+  const auto output =
+      take(decode_tensor_description(result.values.at("result").facets()[0]));
+  const auto& c = *output.channels[0].interpretation->coordinates;
+  require(c.scale == "relative" && c.gray_kind == "linear_y" &&
+              c.observer == "1931-2",
+          "assembly merges complementary channel/group/source coordinates");
+  check_oracle(result, fixture, 1, {std::nullopt}, {{0, 0}},
+               Region::whole({2, 1}));
+  std::cout
+      << "TDM5 complementary assembly assertions and byte oracle passed\n";
+}
 }  // namespace
 int main() try {
+  source_group_overrides_defaults();
+  source_coordinate_complement();
+  partial_coordinate_respect();
+  model_coordinate_overlay();
   generic_oracle();
   std::cout << "generic coordinate and all-dtype oracle passed\n";
   mapped_and_metadata();

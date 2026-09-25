@@ -1,4 +1,4 @@
-# 张量语义元数据与 FMT-08
+# 张量语义元数据、FMT-08 与 FMT-11
 
 英文权威版本：[Tensor semantic metadata and FMT-08](../Tensor-Semantic-Metadata.md)。
 
@@ -10,12 +10,17 @@ FMT-08B 是事务式公开 helper `format::remove_metadata`，展开为没有 se
 
 ## 版本与解释
 
-`photospider.tensor-description` 只接受运行时版本 **4** 和 `TDM4` 标识。
-拒绝 v1-v3；消费者必须重新编译并显式重新编写元数据，不会给旧字节自动赋新单位。
-WorkflowDocument 和 operation/provider C ABI 版本不变。canonical facet 与静态
-编辑参数参与编译身份。旧 ColorArray v1 保持独立的旧坐标消费约定，不能与 v4
-共存于一个 Value。FMT-08 拒绝旧 typed facet。其他 FMT 数值与外部引擎算子的
-实现状态仍以各自规范为准。
+包 0.25.0 接受 `photospider.tensor-description` 运行时版本 **4**（`TDM4`）
+与 **5**（`TDM5`），v4 的既有字节含义不变。任一 tensor、component、channel 或
+组的 interpretation 包含 `coordinates` 记录时，编码选择 v5；显式存在但字段
+为空的记录也选择 v5。完全没有该记录时选择 v4。拒绝 v1-v3、版本与标识不匹配、
+非 canonical 编码及尾随字节，不会给旧字节自动赋新单位。WorkflowDocument 和
+operation/provider C ABI 版本不变；canonical facet 与静态编辑参数参与编译身份。
+旧 ColorArray v1 保持独立约定，不能与这些 tensor facet 共存于一个 Value。
+
+FMT-11 新增公开字段改变 C++ 布局，因此消费者必须针对 0.25 重新编译；
+`find_package(Photospider 0.24)` 会被拒绝。详见
+[编译器版本契约](../../development/zh/Compiler-Version-Contract.zh.md)。
 
 `relative-v1` 明确 CIELAB/CIELCh 的 `l=L*/100`、不变的 a/b/chroma，以及 XYZ
 参考白 Y=1 的原有比例；该约定不实施数值裁剪。`icc-native`、`ocio-native`
@@ -38,13 +43,13 @@ WorkflowDocument 和 operation/provider C ABI 版本不变。canonical facet 与
 | Component | name、role、unit，以及可选 interpretation、encoding、sampling |
 | Axis | name、unit、有限 origin、有限正 step；解释世界坐标，不改变索引 |
 | Group | 唯一 name、有序且不重复的 indices、对应 components、完整 interpretation、可选同 tensor 内部 alpha；alpha 不得与颜色索引重合 |
-| Interpretation | model、primaries、transfer、reference、association、white、primaries_xy、profile、convention、configured、analytic_binding |
+| Interpretation | model、primaries、transfer、reference、association、white、primaries_xy、profile、convention、configured、analytic_binding、coordinates |
 | Encoding | 精确类型的 stored/decoded 端点对；stored 递增，decoded 不相等且可反向 |
 | Sampling | 显式 grid；内部同尺寸、同位平面要求 scale=(1,1)、offset=(0,0)，外部 subsampling 被拒绝 |
 | Configured space | 冻结 config 身份、显式 canonical space、scene/display reference_space |
 | Analytic binding | 调用者声明的模型、基色、传递、参考、白点、有序角色/单位及 relative-v1 约定 |
 
-`TensorEndpoint` 是 Int64 或有限 Float64，序列化保留类型标签和精确位；Int64
+`TensorEndpoint` 是 Int64、有限 Float64 或有界精确有理数，序列化保留类型标签和精确位；Int64
 最大值不会经 Float64 中转。编码解释为：
 `D(x)=decoded[0]+(x-stored[0])*(decoded[1]-decoded[0])/(stored[1]-stored[0])`。
 存储区间必须适配 dtype。完整整数颜色组必须具有显式 decoder，可以来自组分量、
@@ -55,6 +60,32 @@ WorkflowDocument 和 operation/provider C ABI 版本不变。canonical facet 与
 的顺序/单位。独立分量可以保留不完整的描述来源信息。profile/configured space
 不会生成猜测的基色、传递函数或白点；analytic binding 是调用者断言，不是等价
 证明。任何字段都不会认证样本有限性、coverage 范围或预乘零值条件。
+
+## FMT-11 模型坐标断言
+
+`TensorModelCoordinates` 包含 `scale`（空、relative 或 absolute）、`observer`
+（空或不超过 128 字节的显式 UTF-8 标识）、`gray_kind`（空、linear_y、
+encoded_luma、cielab_l 或 oklab_l）以及可选的两个有限 binary64 系数
+`ncl_coefficients=[Kr,Kb]`。
+
+空字符串和缺失系数表示**未作断言**。channel、component 与重叠组之间逐字段
+检查兼容性：`{scale:relative}` 与 `{gray_kind:linear_y}` 可以互补；同一字段
+出现两个非空且不等的值才是冲突。中间组的空字段不能抹除之前的断言，也不能
+掩盖后续冲突。严格 `operator==` 不变，仍比较完整记录，不能用作兼容性判断。
+codec 只验证兼容性，不回填、改写各条原始描述；channel assembly 在输出描述中
+合并 overlay。
+
+TDM5 保持 4096 字节 facet 上限、严格 UTF-8、有限系数和 canonical presence
+检查。元数据允许有限系数，不代表具体转换公式必然接受；算子的语义准入另行
+检查定义域、模型与坐标要求。
+
+FMT-08 支持整个 `coordinates` 子树和 scale/observer/gray_kind/ncl_coefficients
+叶子的赋值、删除。适用路径为 `/semantic/coordinates`、
+`/semantic/component/interpretation/coordinates`、
+`/semantic/channels/index:0/interpretation/coordinates`、
+`/semantic/groups/gray/interpretation/coordinates`，并沿用原有选择器规则。
+整个子树赋值是替换，叶子 patch 保留兄弟字段；删除最后一个坐标记录后重新编码
+为 v4。显式保留空记录时仍是 v5。
 
 ## 冻结资源
 

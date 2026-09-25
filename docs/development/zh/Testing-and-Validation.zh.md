@@ -276,7 +276,7 @@ ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|g
 
 ## 安装与可选覆盖边界
 
-安装门禁接受0.24、拒绝0.23请求。实际运行清单由 `tests/consumer/CMakeLists.txt`
+安装门禁接受0.25、拒绝0.23/0.24请求。实际运行清单由 `tests/consumer/CMakeLists.txt`
 中 `run_photospider_consumer` 的COMMAND定义，包括region runs、planar preparation、
 mapped movement及维护中的算子/registry workflow。四个GPU workflow及foundations
 在该嵌套门禁中当前仅作为构建依赖，不执行；原生运行覆盖来自仓库内CTest。

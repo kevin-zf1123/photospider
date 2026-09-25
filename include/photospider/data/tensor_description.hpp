@@ -28,8 +28,9 @@ struct TensorRationalEndpoint final {
 /** @brief Exact finite endpoint. Integers never pass through double; binary64
  * retains represented bits, including signed zero. Non-dyadic decoded
  * endpoints use a reduced rational without numerical approximation. */
-using TensorEndpoint =
-    std::variant<std::int64_t, double, TensorRationalEndpoint>;  // NOLINT(whitespace/indent_namespace)
+using TensorEndpoint = std::variant<
+    std::int64_t, double,     // NOLINT(whitespace/indent_namespace)
+    TensorRationalEndpoint>;  // NOLINT(whitespace/indent_namespace)
 /** @brief Affine interpretation of stored codes. stored[0] < stored[1];
  * decoded endpoints differ and may descend. D(x) = decoded[0] +
  * (x-stored[0])*(decoded[1]-decoded[0])/(stored[1]-stored[0]). No clipping or
@@ -76,6 +77,22 @@ PHOTOSPIDER_API bool operator==(const TensorConfiguredSpace& a,
 PHOTOSPIDER_API bool operator==(const TensorAnalyticBinding& a,
                                 const TensorAnalyticBinding& b);
 
+/** @brief Explicit native color-coordinate interpretation (facet v5).
+ * Empty fields make no assertion. scale is relative or absolute (cd/m2 Y);
+ * gray_kind is linear_y, encoded_luma, cielab_l or oklab_l. The observer is
+ * descriptive and is never converted. NCL entries are exact binary64 Kr,Kb,
+ * independent of the underlying RGB primaries/transfer. Hue units remain on
+ * the hue component itself. These fields do not certify sample validity.
+ */
+struct PHOTOSPIDER_API TensorModelCoordinates final {
+  std::string scale;
+  std::string observer;
+  std::string gray_kind;
+  std::optional<std::array<double, 2>> ncl_coefficients;
+};
+PHOTOSPIDER_API bool operator==(const TensorModelCoordinates& a,
+                                const TensorModelCoordinates& b);
+
 /** @brief Descriptive color provenance, never a sample-validity certificate.
  * Empty fields carry no assertion. Profiles are immutable owned resources.
  */
@@ -88,6 +105,7 @@ struct PHOTOSPIDER_API TensorInterpretation final {
   std::string convention = "relative-v1";
   std::optional<TensorConfiguredSpace> configured;
   std::optional<TensorAnalyticBinding> analytic_binding;
+  std::optional<TensorModelCoordinates> coordinates = {};
 };
 
 /** @brief One declared component; fields describe stored samples but certify
@@ -122,7 +140,7 @@ struct PHOTOSPIDER_API TensorColorGroup final {
   std::optional<std::uint64_t> alpha;
 };
 
-/** @brief Composable tensor interpretation carried by the version-four
+/** @brief Composable tensor interpretation carried by the version-four/five
  * photospider.tensor-description facet. The facet does not establish sample
  * validity, color completeness, or image storage. A channel table, when
  * present, is ordered by the declared channel axis. A component describes
@@ -153,6 +171,7 @@ struct PHOTOSPIDER_API TensorDescription final {
   std::string convention = "relative-v1";
   std::optional<TensorConfiguredSpace> configured;
   std::optional<TensorAnalyticBinding> analytic_binding;
+  std::optional<TensorModelCoordinates> coordinates = {};
 };
 
 /** @brief Encode a bounded canonical tensor description. Returns
@@ -160,8 +179,8 @@ struct PHOTOSPIDER_API TensorDescription final {
  * allocation failure. Pure and thread-safe. */
 PHOTOSPIDER_API Result<ValueFacet> encode_tensor_description(
     const TensorDescription& description);
-/** @brief Decode only the canonical version-four facet. Returns
- * InvalidArgument for old, malformed or noncanonical bytes. */
+/** @brief Decode canonical v4/v5 facets. v5 explicitly carries native model
+ * coordinates; v4 keeps its existing meaning. Older formats reject. */
 PHOTOSPIDER_API Result<TensorDescription> decode_tensor_description(
     const ValueFacet& facet);
 /** @brief Encode an invocation-local replacement as lowercase hex of the

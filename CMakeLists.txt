@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.24.0
+  VERSION 0.25.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -109,6 +109,9 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
   plugins/ops/00-foundation/core_identity.cpp
   plugins/ops/02-format-color/channel_extraction.cpp
+  plugins/ops/02-format-color/model_conversion.cpp
+  plugins/ops/02-format-color/model_math.cpp
+  plugins/ops/02-format-color/model_simd.cpp
   plugins/ops/02-format-color/numeric_conversion.cpp
   plugins/ops/02-format-color/metadata_assignment.cpp
   plugins/ops/02-format-color/channel_assembly.cpp
@@ -444,7 +447,10 @@ function(photospider_configure_kernel_target target)
 endfunction()
 
 photospider_configure_kernel_target(photospider)
-set_target_properties(photospider PROPERTIES EXPORT_NAME kernel)
+set_target_properties(photospider PROPERTIES
+  EXPORT_NAME kernel
+  VERSION ${PROJECT_VERSION}
+  SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
 endif()
@@ -520,6 +526,7 @@ add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing EXCLUDE_FROM_ALL)
 add_subdirectory(examples/metadata_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/model_conversion_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/metadata_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
@@ -708,6 +715,29 @@ if(BUILD_TESTING)
   photospider_add_test(test_channel_editing Photospider::kernel tests/integration/test_channel_editing.cpp)
   photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
   target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)
+  photospider_add_test(test_model_math Photospider::kernel tests/unit/test_model_math.cpp)
+  target_include_directories(test_model_math PRIVATE plugins/ops src/lib)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(test_model_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+  endif()
+  photospider_add_test(test_model_conversion Photospider::kernel tests/integration/test_model_conversion.cpp)
+  photospider_add_test(test_model_metadata Photospider::kernel tests/integration/test_model_metadata.cpp)
+  add_executable(test_model_rational tests/unit/test_model_rational.cpp)
+  target_link_libraries(test_model_rational PRIVATE Photospider::kernel)
+  target_compile_options(test_model_rational PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  # This test reads an independently generated exact Fraction oracle.
+  add_test(NAME test_model_rational COMMAND test_model_rational
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/fmt11/rational_oracles.txt")
+  photospider_add_test(test_numeric_neighbors Photospider::kernel tests/unit/test_numeric_neighbors.cpp)
+  foreach(_fmt11_test IN ITEMS test_model_rational test_numeric_neighbors)
+    target_include_directories(${_fmt11_test} PRIVATE plugins/ops src/lib)
+    target_compile_options(${_fmt11_test} PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+  endforeach()
+  add_test(NAME test_fmt11_package_version
+    COMMAND ${CMAKE_COMMAND}
+      -DVERSION_FILE=${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_fmt11_package_version.cmake)
+
   photospider_add_test(test_channel_extraction Photospider::kernel tests/integration/test_channel_extraction.cpp)
   photospider_add_test(test_numeric_conversion Photospider::kernel tests/integration/test_numeric_conversion.cpp)
   photospider_add_test(test_region_runs Photospider::kernel tests/unit/test_region_runs.cpp)

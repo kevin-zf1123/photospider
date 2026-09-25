@@ -55,13 +55,15 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-find_package(Photospider 0.23 CONFIG QUIET COMPONENTS kernel)
-if(Photospider_FOUND)
-  message(FATAL_ERROR "Photospider 0.24 must reject a 0.23 consumer")
-endif()
+foreach(_old_minor IN ITEMS 0.23 0.24)
+  find_package(Photospider ${_old_minor} CONFIG QUIET COMPONENTS kernel)
+  if(Photospider_FOUND)
+    message(FATAL_ERROR "Photospider 0.25 must reject a ${_old_minor} consumer")
+  endif()
+endforeach()
 
 find_package(
-  Photospider 0.24 CONFIG REQUIRED
+  Photospider 0.25 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -323,6 +325,8 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_channel_assembly_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_editing_consumer>"
   COMMAND "$<TARGET_FILE:photospider_metadata_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_model_metadata_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_model_conversion_consumer>"
   COMMAND "$<TARGET_FILE:photospider_expression_consumer>"
   COMMAND "$<TARGET_FILE:photospider_component_consumer>"
   COMMAND "$<TARGET_FILE:photospider_basic_consumer>"
@@ -367,3 +371,14 @@ target_link_libraries(photospider_metadata_consumer PRIVATE Photospider::kernel)
 target_include_directories(photospider_metadata_consumer PRIVATE ../../examples/numeric_workflow)
 target_compile_options(photospider_metadata_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_metadata_consumer PRIVATE ${_photospider_consumer_link_options})
+
+# FMT-11 public metadata and conversion gates use only installed headers.
+foreach(_fmt11_kind IN ITEMS model_metadata model_conversion)
+  add_executable(photospider_${_fmt11_kind}_consumer
+    ../integration/test_${_fmt11_kind}.cpp)
+  target_include_directories(photospider_${_fmt11_kind}_consumer PRIVATE ..)
+  target_link_libraries(photospider_${_fmt11_kind}_consumer PRIVATE Photospider::kernel)
+  target_compile_options(photospider_${_fmt11_kind}_consumer PRIVATE ${_photospider_consumer_compile_options})
+  target_link_options(photospider_${_fmt11_kind}_consumer PRIVATE ${_photospider_consumer_link_options})
+  add_dependencies(run_photospider_consumer photospider_${_fmt11_kind}_consumer)
+endforeach()

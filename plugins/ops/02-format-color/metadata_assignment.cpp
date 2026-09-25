@@ -20,7 +20,7 @@
 namespace ps::metadata_internal {
 namespace {
 // This bounded tree is a transaction representation, not a second Value codec.
-// Published semantics always use the canonical tensor-description-v4 facet.
+// Published semantics always use the canonical tensor-description-v4/v5 facet.
 struct Tree final {
   char kind = 'o';
   std::string bytes;
@@ -88,6 +88,7 @@ Tree tree(const TensorEncoding& p);
 Tree tree(const TensorSampling& p);
 Tree tree(const TensorConfiguredSpace& p);
 Tree tree(const TensorAnalyticBinding& p);
+Tree tree(const TensorModelCoordinates& p);
 template <class T>
 void optional(Tree* out, const char* key, const std::optional<T>& value) {
   if (value) {
@@ -161,6 +162,14 @@ Tree tree(const TensorAnalyticBinding& p) {
   }
   return out;
 }
+Tree tree(const TensorModelCoordinates& p) {
+  Tree out;
+  text(&out, "scale", p.scale);
+  text(&out, "observer", p.observer);
+  text(&out, "gray_kind", p.gray_kind);
+  optional(&out, "ncl_coefficients", p.ncl_coefficients);
+  return out;
+}
 Tree tree(const TensorInterpretation& p) {
   Tree out;
   text(&out, "model", p.model);
@@ -176,6 +185,7 @@ Tree tree(const TensorInterpretation& p) {
   }
   optional(&out, "configured", p.configured);
   optional(&out, "analytic_binding", p.analytic_binding);
+  optional(&out, "coordinates", p.coordinates);
   return out;
 }
 Tree tree(const TensorChannelDescription& p) {
@@ -223,10 +233,10 @@ Tree groups(const std::vector<TensorColorGroup>& values) {
   return out;
 }
 Tree tree(const TensorDescription& p) {
-  Tree out = tree(TensorInterpretation{p.model, p.primaries, p.transfer,
-                                       p.reference, p.association, p.white,
-                                       p.primaries_xy, p.profile, p.convention,
-                                       p.configured, p.analytic_binding});
+  Tree out = tree(TensorInterpretation{
+      p.model, p.primaries, p.transfer, p.reference, p.association, p.white,
+      p.primaries_xy, p.profile, p.convention, p.configured, p.analytic_binding,
+      p.coordinates});
   if (p.channel_axis) {
     out.fields["channel_axis"] =
         tree(static_cast<std::uint64_t>(*p.channel_axis));
@@ -439,11 +449,21 @@ TensorAnalyticBinding binding(const Tree& t) {
   }
   return out;
 }
+TensorModelCoordinates coordinates(const Tree& t) {
+  keys(t, {"scale", "observer", "gray_kind", "ncl_coefficients"});
+  TensorModelCoordinates out;
+  out.scale = field(t, "scale");
+  out.observer = field(t, "observer");
+  out.gray_kind = field(t, "gray_kind");
+  if (auto* p = get(t, "ncl_coefficients"))
+    out.ncl_coefficients = array<2>(*p);
+  return out;
+}
 TensorInterpretation interpretation(const Tree& t, bool check = true) {
   if (check) {
     keys(t, {"model", "primaries", "transfer", "reference", "association",
              "white", "primaries_xy", "profile", "convention", "configured",
-             "analytic_binding"});
+             "analytic_binding", "coordinates"});
   }
   TensorInterpretation out;
   out.model = field(t, "model");
@@ -477,6 +497,8 @@ TensorInterpretation interpretation(const Tree& t, bool check = true) {
   if (auto* p = get(t, "analytic_binding")) {
     out.analytic_binding = binding(*p);
   }
+  if (auto* p = get(t, "coordinates"))
+    out.coordinates = coordinates(*p);
   return out;
 }
 TensorChannelDescription channel(const Tree& t) {
@@ -533,7 +555,7 @@ TensorDescription description(const Tree& t) {
   keys(t, {"channel_axis", "channels", "component", "axes", "groups", "model",
            "primaries", "transfer", "reference", "association", "white",
            "primaries_xy", "profile", "convention", "configured",
-           "analytic_binding", "encoding", "sampling"});
+           "analytic_binding", "coordinates", "encoding", "sampling"});
   auto i = interpretation(t, false);
   TensorDescription out;
   out.model = i.model;
@@ -547,6 +569,7 @@ TensorDescription description(const Tree& t) {
   out.convention = i.convention;
   out.configured = i.configured;
   out.analytic_binding = i.analytic_binding;
+  out.coordinates = i.coordinates;
   if (auto* p = get(t, "encoding")) {
     out.encoding = encoding(*p);
   }
@@ -723,7 +746,8 @@ void schema_path(const std::vector<std::string>& p) {
                "white", "primaries_xy", "profile", "convention"},
               f)) {
         kind = "leaf";
-      } else if (contains({"configured", "analytic_binding"}, f)) {
+      } else if (contains({"configured", "analytic_binding", "coordinates"},
+                          f)) {
         kind = f;
       } else if (kind == "description" &&
                  contains({"encoding", "sampling"}, f)) {
@@ -798,6 +822,10 @@ void schema_path(const std::vector<std::string>& p) {
       if (!contains({"config", "space", "reference_space"}, f)) {
         throw Invalid("unknown configured field");
       }
+      kind = "leaf";
+    } else if (kind == "coordinates") {
+      if (!contains({"scale", "observer", "gray_kind", "ncl_coefficients"}, f))
+        throw Invalid("unknown native model coordinate field");
       kind = "leaf";
     } else if (kind == "analytic_binding") {
       if (!contains({"model", "primaries", "transfer", "reference", "white",
@@ -963,6 +991,13 @@ void static_value(const std::vector<std::string>& p, const Tree& value) {
     sampling(value);
   } else if (leaf == "configured") {
     configured(value);
+  } else if (leaf == "coordinates") {
+    coordinates(value);
+  } else if (leaf == "scale" && p.size() > 2 &&
+             p[p.size() - 2] == "coordinates") {
+    string(value);
+  } else if (leaf == "ncl_coefficients") {
+    array<2>(value);
   } else if (leaf == "analytic_binding") {
     binding(value);
   } else if (leaf == "channel_axis" || leaf == "alpha") {
@@ -1184,9 +1219,9 @@ Result<OperationPreparation> prepare(
     cleanup(&semantics, {"semantic"}, "encoding");
     cleanup(&semantics, {"semantic"}, "sampling");
     const std::vector<std::string> interpretation_fields{
-        "model",       "primaries",  "transfer",        "reference",
-        "association", "white",      "primaries_xy",    "profile",
-        "convention",  "configured", "analytic_binding"};
+        "model",       "primaries",  "transfer",         "reference",
+        "association", "white",      "primaries_xy",     "profile",
+        "convention",  "configured", "analytic_binding", "coordinates"};
     bool changed_interpretation = false;
     Tree global_interpretation;
     for (const auto& key : interpretation_fields) {

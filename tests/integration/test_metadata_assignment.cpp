@@ -855,8 +855,96 @@ void dependency_boundaries() {
             "metadata cannot relabel a different physical image axis");
   }
 }
+void model_coordinate_edits() {
+  for (unsigned location = 0; location < 4; ++location) {
+    TensorDescription description;
+    std::string path = "/semantic/coordinates";
+    ValueDescriptor descriptor{ElementType::Float32, {2, 3, 1}};
+    if (location == 1 || location == 3) {
+      description.channel_axis = 2;
+      description.channels = {{"Y", "gray", "relative"}};
+      if (location == 1) {
+        description.channels[0].interpretation.emplace();
+        path = "/semantic/channels/index:0/interpretation/coordinates";
+      } else {
+        TensorColorGroup group;
+        group.name = "gray";
+        group.indices = {0};
+        group.components = description.channels;
+        group.interpretation.model = "gray";
+        description.groups = {group};
+        path = "/semantic/groups/gray/interpretation/coordinates";
+      }
+    } else if (location == 2) {
+      description.component = TensorChannelDescription{"Y", "gray", "relative"};
+      description.component->interpretation.emplace();
+      path = "/semantic/component/interpretation/coordinates";
+    }
+    const auto original = take(encode_tensor_description(description));
+    Fixture fixture(descriptor, {original});
+    const auto at = [location](const TensorDescription& d)
+        -> std::optional<TensorModelCoordinates> {
+      if (location == 1)
+        return !d.channels.empty() && d.channels[0].interpretation
+                   ? d.channels[0].interpretation->coordinates
+                   : std::nullopt;
+      if (location == 2)
+        return d.component && d.component->interpretation
+                   ? d.component->interpretation->coordinates
+                   : std::nullopt;
+      if (location == 3)
+        return d.groups.empty() ? std::nullopt
+                                : d.groups[0].interpretation.coordinates;
+      return d.coordinates;
+    };
+    const TensorModelCoordinates initial{"relative", "1931-2", "linear_y",
+                                         std::array<double, 2>{.25, .25}};
+    format::MetadataOptions options;
+    options.set = {{path, initial}};
+    auto edge =
+        take(format::assign_metadata(fixture.document, fixture.input, options));
+    auto result = fixture.run(edge);
+    require(
+        at(decoded(facets(result))) && *at(decoded(facets(result))) == initial,
+        "assign native coordinate subtree at every scope");
+    fixture.oracle(result, Region::whole(descriptor.shape));
+    options.set = {{path + "/scale", std::string("absolute")},
+                   {path + "/observer", std::string("1964-10")},
+                   {path + "/gray_kind", std::string("oklab_l")},
+                   {path + "/ncl_coefficients", std::array<double, 2>{.3, .2}}};
+    edge = take(format::assign_metadata(fixture.document, edge, options));
+    result = fixture.run(edge);
+    const auto changed = *at(decoded(facets(result)));
+    require(changed.scale == "absolute" && changed.observer == "1964-10" &&
+                changed.gray_kind == "oklab_l" &&
+                changed.ncl_coefficients == std::array<double, 2>{.3, .2},
+            "patch all native coordinate leaves");
+    edge = take(
+        format::remove_metadata(fixture.document, edge, {path + "/observer"}));
+    result = fixture.run(edge);
+    require(at(decoded(facets(result)))->observer.empty() &&
+                at(decoded(facets(result)))->gray_kind == "oklab_l",
+            "leaf removal keeps independent coordinate assertions");
+    edge = take(format::remove_metadata(fixture.document, edge, {path}));
+    result = fixture.run(edge);
+    require(!at(decoded(facets(result))), "remove coordinate subtree");
+    // An entirely empty semantic description may be removed as a facet.
+    // Its codec representation is still canonical v4, not a spurious TDM5.
+    require(
+        take(encode_tensor_description(decoded(facets(result)))).version == 4,
+        "removing last coordinate record returns to canonical v4");
+    require(fixture.bindings.inputs[0].value.facets().size() == 1 &&
+                fixture.bindings.inputs[0].value.facets()[0].payload ==
+                    original.payload,
+            "coordinate edits preserve source metadata");
+    fixture.oracle(result, Region::whole(descriptor.shape));
+  }
+  std::cout
+      << "TDM5 subtree/leaf assignment and removal at all four scopes passed\n";
+}
 }  // namespace
 int main() try {
+  model_coordinate_edits();
   edits();
   dtypes_and_layouts();
   strided();

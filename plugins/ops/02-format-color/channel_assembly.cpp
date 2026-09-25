@@ -12,6 +12,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "data/model_coordinates.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/execution/data_movement.hpp"
 #include "photospider/format/channel_editing.hpp"
@@ -93,19 +94,21 @@ Result<std::string> unhex(const std::string& text) {
   return Result<std::string>(std::move(out));
 }
 TensorInterpretation interpretation(const TensorDescription& d) {
-  return {d.model,       d.primaries,  d.transfer,        d.reference,
-          d.association, d.white,      d.primaries_xy,    d.profile,
-          d.convention,  d.configured, d.analytic_binding};
+  return {d.model,       d.primaries,  d.transfer,         d.reference,
+          d.association, d.white,      d.primaries_xy,     d.profile,
+          d.convention,  d.configured, d.analytic_binding, d.coordinates};
 }
 bool empty(const TensorInterpretation& d) {
   return d.model.empty() && d.primaries.empty() && d.transfer.empty() &&
          d.reference.empty() && d.association.empty() && !d.white &&
-         !d.primaries_xy && !d.profile && !d.configured && !d.analytic_binding;
+         !d.primaries_xy && !d.profile && !d.configured &&
+         !d.analytic_binding && !d.coordinates;
 }
 Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
                bool assertion) {
   const bool described = !empty(*value);
-  if (!assertion && !target.model.empty() && target.model != value->model) {
+  if (!assertion && !value->model.empty() && !target.model.empty() &&
+      target.model != value->model) {
     value->primaries.clear();
     value->transfer.clear();
     value->white.reset();
@@ -113,6 +116,7 @@ Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
     value->profile.reset();
     value->configured.reset();
     value->analytic_binding.reset();
+    value->coordinates.reset();
     value->association.clear();
   }
   const auto text = [assertion](std::string* a, const std::string& b) {
@@ -146,7 +150,9 @@ Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
       !field(&value->primaries_xy, target.primaries_xy) ||
       !field(&value->profile, target.profile) ||
       !field(&value->configured, target.configured) ||
-      !field(&value->analytic_binding, target.analytic_binding))
+      !field(&value->analytic_binding, target.analytic_binding) ||
+      !data_internal::overlay_model_coordinates(&value->coordinates,
+                                                target.coordinates, assertion))
     return invalid("conflicting component reference");
   return Status::success();
 }
@@ -633,6 +639,7 @@ Result<OperationPreparation> prepare(
               respected.white.reset();
               respected.primaries_xy.reset();
               respected.profile.reset();
+              respected.coordinates.reset();
             }
             if (!assigned.primaries.empty())
               respected.primaries.clear();
@@ -648,6 +655,18 @@ Result<OperationPreparation> prepare(
               respected.primaries_xy.reset();
             if (assigned.profile)
               respected.profile.reset();
+            if (assigned.coordinates && respected.coordinates) {
+              const auto& assigned_coordinates = *assigned.coordinates;
+              auto& remaining = *respected.coordinates;
+              if (!assigned_coordinates.scale.empty())
+                remaining.scale.clear();
+              if (!assigned_coordinates.observer.empty())
+                remaining.observer.clear();
+              if (!assigned_coordinates.gray_kind.empty())
+                remaining.gray_kind.clear();
+              if (assigned_coordinates.ncl_coefficients)
+                remaining.ncl_coefficients.reset();
+            }
           }
           status = overlay(&common, respected, true);
           if (!status.ok())

@@ -353,3 +353,18 @@ v3 明确相对坐标约定，新增精确类型化数值编码、同位采样�
 以及已验证输出元数据，安装包 C++ 消费者需要重新编译。基础 operation/provider
 C ABI、WorkflowDocument、TDM4 和 OperationTraits17 保持不变。
 PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证此边界。
+
+## 包 0.25.0：FMT-11 C++ ABI 边界
+
+FMT-11 为公开 TensorDescription、TensorInterpretation 及 metadata value 增加
+模型坐标字段，改变 C++ 对象布局。包版本升级为 0.25.0；SameMinorVersion 仅接受
+不高于已安装版本的 0.25 请求，拒绝 0.23/0.24。所有交换这些对象的 C++ 应用与
+插件必须重新编译；独立 examples 和 PixelOE 的包请求同步改为 0.25。
+共享库设置 VERSION=0.25.0、SOVERSION=0.25。此前链接到无版本库的旧二进制不会
+自动获得新 SONAME 的保护，应使用干净安装前缀并重新构建，不能直接替换运行中
+进程的库；静态消费者也必须重新链接。
+
+operation C ABI、data-provider C ABI、WorkflowDocument 与既有 identity framing
+版本均不改变。TDM5 字节通过原有 facet identity 路径进入身份；TDM4 含义不变，
+canonical v4/v5 选择规则详见张量语义元数据文档。这些是彼此独立的版本边界，
+不是 C++ 对象布局兼容承诺。

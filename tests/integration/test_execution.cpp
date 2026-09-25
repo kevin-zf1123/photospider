@@ -2512,6 +2512,12 @@ int main() {
   auto facet_operations = std::make_shared<OperationRegistry>();
   OperationTraits facet_source_traits;
   facet_source_traits.outputs[0].output_element_type = ElementType::UInt8;
+  // Runtime facets must match the metadata projected by the compiler. This
+  // fixture tests transfer preservation, not undeclared dynamic semantics.
+  facet_source_traits.outputs[0].output_semantic_rule =
+      ps::OperationSemanticRule::Establish;
+  facet_source_traits.outputs[0].output_facets = {
+      ValueFacet{"test.semantic", 3U, {4U, 5U}}};
   PS_CHECK(facet_operations
                ->register_operation(OperationDefinition{
                    "test.facet_source", facet_source_traits,
@@ -2524,6 +2530,8 @@ int main() {
                .ok());
   OperationTraits facet_identity_traits;
   facet_identity_traits.input_count = 1U;
+  facet_identity_traits.outputs[0].output_semantic_rule =
+      ps::OperationSemanticRule::PreserveInput;
   facet_identity_traits.input_schema.resize(1);
   facet_identity_traits.supports_gpu = true;
   facet_identity_traits.outputs[0].output_element_type = ElementType::UInt8;

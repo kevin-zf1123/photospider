@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "data/exact_numeric.hpp"
+#include "data/model_coordinates.hpp"
 #include "plugin/utf8_validation.hpp"
 
 namespace ps {
@@ -148,7 +149,24 @@ bool valid_extended(const std::string& convention,
   }
   return true;
 }
+bool valid_coordinates(const std::optional<TensorModelCoordinates>& c) {
+  if (!c)
+    return true;
+  if ((!c->scale.empty() && c->scale != "relative" && c->scale != "absolute") ||
+      (!c->gray_kind.empty() && c->gray_kind != "linear_y" &&
+       c->gray_kind != "encoded_luma" && c->gray_kind != "cielab_l" &&
+       c->gray_kind != "oklab_l") ||
+      !valid_text(c->observer))
+    return false;
+  if (c->ncl_coefficients)
+    for (double x : *c->ncl_coefficients)
+      if (!std::isfinite(x))
+        return false;
+  return true;
+}
 bool valid_interpretation(const TensorInterpretation& v) {
+  if (!valid_coordinates(v.coordinates))
+    return false;
   for (const auto* text :
        {&v.model, &v.primaries, &v.transfer, &v.reference, &v.association}) {
     if (!valid_text(*text))
@@ -173,6 +191,8 @@ bool valid_channel(const TensorChannelDescription& channel) {
           valid_interpretation(*channel.interpretation));
 }
 Status validate_structure(const TensorDescription& value) {
+  if (!valid_coordinates(value.coordinates))
+    return invalid("invalid native model coordinates");
   if (!valid_encoding(value.encoding) || !valid_sampling(value.sampling) ||
       !valid_extended(value.convention, value.configured,
                       value.analytic_binding, value.profile.has_value()))
@@ -316,7 +336,33 @@ Status validate_structure(const TensorDescription& value) {
         old.encoding = c.encoding;
       if (c.sampling)
         old.sampling = c.sampling;
-      old.interpretation = c.interpretation;
+      // Accumulate assertions instead of replacing them. Otherwise an empty
+      // intermediate group can erase a field and hide a later contradiction.
+      if (!old.interpretation)
+        old.interpretation.emplace();
+      auto& merged = *old.interpretation;
+      const auto& incoming = *c.interpretation;
+      if (!data_internal::overlay_model_coordinates(&merged.coordinates,
+                                                    incoming.coordinates, true))
+        return invalid("group conflicts with channel or overlapping group");
+      for (auto pair :
+           {std::make_pair(&merged.model, &incoming.model),
+            std::make_pair(&merged.primaries, &incoming.primaries),
+            std::make_pair(&merged.transfer, &incoming.transfer),
+            std::make_pair(&merged.reference, &incoming.reference),
+            std::make_pair(&merged.association, &incoming.association)})
+        if (!pair.second->empty())
+          *pair.first = *pair.second;
+      const auto supplied = [](auto* to, const auto& from) {
+        if (from)
+          *to = from;
+      };
+      supplied(&merged.white, incoming.white);
+      supplied(&merged.primaries_xy, incoming.primaries_xy);
+      supplied(&merged.profile, incoming.profile);
+      supplied(&merged.configured, incoming.configured);
+      supplied(&merged.analytic_binding, incoming.analytic_binding);
+      merged.convention = incoming.convention;
     }
   return Status::success();
 }
@@ -412,8 +458,21 @@ void put_extended_space(std::vector<std::uint8_t>* bytes,
     }
   }
 }
+void put_coordinates(std::vector<std::uint8_t>* bytes,
+                     const std::optional<TensorModelCoordinates>& c) {
+  bytes->push_back(c ? 1 : 0);
+  if (!c)
+    return;
+  put_text(bytes, c->scale);
+  put_text(bytes, c->observer);
+  put_text(bytes, c->gray_kind);
+  bytes->push_back(c->ncl_coefficients ? 1 : 0);
+  if (c->ncl_coefficients)
+    for (double x : *c->ncl_coefficients)
+      put_f64(bytes, x);
+}
 void put_interpretation(std::vector<std::uint8_t>* bytes,
-                        const TensorInterpretation& v) {
+                        const TensorInterpretation& v, bool extended) {
   for (const auto* text :
        {&v.model, &v.primaries, &v.transfer, &v.reference, &v.association})
     put_text(bytes, *text);
@@ -432,21 +491,24 @@ void put_interpretation(std::vector<std::uint8_t>* bytes,
                   v.profile->sha256.end());
   }
   put_extended_space(bytes, v.convention, v.configured, v.analytic_binding);
+  if (extended)
+    put_coordinates(bytes, v.coordinates);
 }
 void put_channel(std::vector<std::uint8_t>* bytes,
-                 const TensorChannelDescription& value) {
+                 const TensorChannelDescription& value, bool extended) {
   put_text(bytes, value.name);
   put_text(bytes, value.role);
   put_text(bytes, value.unit);
   bytes->push_back(value.interpretation ? 1 : 0);
   if (value.interpretation)
-    put_interpretation(bytes, *value.interpretation);
+    put_interpretation(bytes, *value.interpretation, extended);
   put_encoding(bytes, value.encoding);
   put_sampling(bytes, value.sampling);
 }
 struct Reader final {
   const std::vector<std::uint8_t>& bytes;
   std::size_t offset = 0;
+  bool extended = false;
   bool byte(std::uint8_t* value) {
     if (offset == bytes.size())
       return false;
@@ -611,6 +673,24 @@ struct Reader final {
     }
     return true;
   }
+  bool coordinates(std::optional<TensorModelCoordinates>* c) {
+    std::uint8_t present = 0;
+    if (!marker(&present))
+      return false;
+    if (!present)
+      return true;
+    c->emplace();
+    if (!text(&(*c)->scale) || !text(&(*c)->observer) ||
+        !text(&(*c)->gray_kind) || !marker(&present))
+      return false;
+    if (present) {
+      (*c)->ncl_coefficients.emplace();
+      for (double& x : *(*c)->ncl_coefficients)
+        if (!f64(&x))
+          return false;
+    }
+    return valid_coordinates(*c);
+  }
   bool interpretation(TensorInterpretation* v) {
     for (auto* t : {&v->model, &v->primaries, &v->transfer, &v->reference,
                     &v->association})
@@ -645,6 +725,7 @@ struct Reader final {
     }
     return extended_space(&v->convention, &v->configured,
                           &v->analytic_binding) &&
+           (!extended || coordinates(&v->coordinates)) &&
            valid_interpretation(*v);
   }
   bool channel(TensorChannelDescription* value) {
@@ -702,6 +783,12 @@ bool operator==(const TensorAnalyticBinding& a,
                   b.primaries_xy, b.roles, b.units, b.convention);
 }
 
+bool operator==(const TensorModelCoordinates& a,
+                const TensorModelCoordinates& b) {
+  return std::tie(a.scale, a.observer, a.gray_kind, a.ncl_coefficients) ==
+         std::tie(b.scale, b.observer, b.gray_kind, b.ncl_coefficients);
+}
+
 Result<ValueFacet> encode_tensor_description(
     const TensorDescription& description) {
   auto status = validate_structure(description);
@@ -709,18 +796,32 @@ Result<ValueFacet> encode_tensor_description(
     return Result<ValueFacet>(status);
   ValueFacet facet;
   facet.key = kKey;
-  facet.version = 4;
+  bool extended = description.coordinates.has_value();
+  const auto has_coordinates = [](const TensorChannelDescription& c) {
+    return c.interpretation && c.interpretation->coordinates;
+  };
+  for (const auto& c : description.channels)
+    extended |= has_coordinates(c);
+  if (description.component)
+    extended |= has_coordinates(*description.component);
+  for (const auto& g : description.groups) {
+    extended |= g.interpretation.coordinates.has_value();
+    for (const auto& c : g.components)
+      extended |= has_coordinates(c);
+  }
+  facet.version = extended ? 5 : 4;
   auto& bytes = facet.payload;
-  bytes.insert(bytes.end(), {'T', 'D', 'M', '4'});
+  bytes.insert(bytes.end(), {'T', 'D', 'M',
+                             static_cast<std::uint8_t>(extended ? '5' : '4')});
   bytes.push_back(description.channel_axis
                       ? static_cast<std::uint8_t>(*description.channel_axis)
                       : 255);
   put_u16(&bytes, static_cast<std::uint16_t>(description.channels.size()));
   for (const auto& channel : description.channels)
-    put_channel(&bytes, channel);
+    put_channel(&bytes, channel, extended);
   bytes.push_back(description.component ? 1 : 0);
   if (description.component)
-    put_channel(&bytes, *description.component);
+    put_channel(&bytes, *description.component, extended);
   bytes.push_back(static_cast<std::uint8_t>(description.axes.size()));
   for (const auto& axis : description.axes) {
     put_text(&bytes, axis.name);
@@ -752,9 +853,9 @@ Result<ValueFacet> encode_tensor_description(
     put_u16(&bytes, static_cast<std::uint16_t>(group.indices.size()));
     for (std::size_t i = 0; i < group.indices.size(); ++i) {
       put_u64(&bytes, group.indices[i]);
-      put_channel(&bytes, group.components[i]);
+      put_channel(&bytes, group.components[i], extended);
     }
-    put_interpretation(&bytes, group.interpretation);
+    put_interpretation(&bytes, group.interpretation, extended);
     bytes.push_back(group.alpha ? 1 : 0);
     if (group.alpha)
       put_u64(&bytes, *group.alpha);
@@ -763,6 +864,8 @@ Result<ValueFacet> encode_tensor_description(
   put_sampling(&bytes, description.sampling);
   put_extended_space(&bytes, description.convention, description.configured,
                      description.analytic_binding);
+  if (extended)
+    put_coordinates(&bytes, description.coordinates);
   if (bytes.size() > 4096)
     return Result<ValueFacet>(
         invalid("tensor description exceeds facet bound"));
@@ -771,12 +874,13 @@ Result<ValueFacet> encode_tensor_description(
 
 Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   using Answer = Result<TensorDescription>;
-  if (facet.key != kKey || facet.version != 4 || facet.payload.size() < 9 ||
-      facet.payload.size() > 4096 || facet.payload[0] != 'T' ||
-      facet.payload[1] != 'D' || facet.payload[2] != 'M' ||
-      facet.payload[3] != '4')
+  if (facet.key != kKey || (facet.version != 4 && facet.version != 5) ||
+      facet.payload.size() < 9 || facet.payload.size() > 4096 ||
+      facet.payload[0] != 'T' || facet.payload[1] != 'D' ||
+      facet.payload[2] != 'M' ||
+      facet.payload[3] != static_cast<std::uint8_t>('0' + facet.version))
     return Answer(invalid("invalid tensor description facet"));
-  Reader reader{facet.payload, 4};
+  Reader reader{facet.payload, 4, facet.version == 5};
   TensorDescription value;
   std::uint8_t axis = 0, has_component = 0, axes = 0;
   std::uint16_t count = 0;
@@ -861,8 +965,9 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   }
   if (!reader.encoding(&value.encoding) || !reader.sampling(&value.sampling) ||
       !reader.extended_space(&value.convention, &value.configured,
-                             &value.analytic_binding))
-    return Answer(invalid("invalid v3 extended descriptions"));
+                             &value.analytic_binding) ||
+      (reader.extended && !reader.coordinates(&value.coordinates)))
+    return Answer(invalid("invalid extended tensor descriptions"));
   if (reader.offset != facet.payload.size() || !validate_structure(value).ok())
     return Answer(invalid("noncanonical tensor description"));
   auto canonical = encode_tensor_description(value);
@@ -907,6 +1012,8 @@ Result<TensorDescription> tensor_description_from_parameter(
       return Result<TensorDescription>(invalid("invalid tensor override hex"));
     facet.payload.push_back(static_cast<std::uint8_t>((high << 4) | low));
   }
+  if (facet.payload.size() >= 4 && facet.payload[3] == '5')
+    facet.version = 5;
   return decode_tensor_description(facet);
 }
 

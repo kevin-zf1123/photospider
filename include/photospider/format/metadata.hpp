@@ -10,19 +10,21 @@
 #include "photospider/format/channel.hpp"
 
 namespace ps::format {
-/** @brief Closed typed values for the registered tensor-description-v3 schema.
- * Strings never acquire resources or certify samples. Profile identities must
- * resolve in the ResourceBindings supplied to Compiler/ExecutionContext.
+/** @brief Closed typed values for the registered tensor-description-v4/v5
+ * schema. Strings never acquire resources or certify samples. Profile
+ * identities must resolve in the ResourceBindings supplied to
+ * Compiler/ExecutionContext.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
 using MetadataValue = std::variant<
     std::string, std::uint64_t, std::int64_t, double, TensorEncoding,
     TensorSampling, TensorConfiguredSpace, TensorAnalyticBinding,
-    std::array<double, 2>, std::array<double, 6>, ColorProfileIdentity,
-    TensorInterpretation, TensorChannelDescription, TensorAxisDescription,
-    TensorColorGroup, TensorDescription, std::vector<std::uint64_t>,
-    std::vector<TensorChannelDescription>, std::vector<TensorAxisDescription>,
-    std::vector<TensorColorGroup>, ValueFacet>;
+    TensorModelCoordinates, std::array<double, 2>, std::array<double, 6>,
+    ColorProfileIdentity, TensorInterpretation, TensorChannelDescription,
+    TensorAxisDescription, TensorColorGroup, TensorDescription,
+    std::vector<std::uint64_t>, std::vector<TensorChannelDescription>,
+    std::vector<TensorAxisDescription>, std::vector<TensorColorGroup>,
+    ValueFacet>;
 // NOLINTEND
 /** @brief Atomic subtree replacement. Paths start with /semantic or
  * /annotations/<facet-key>. Segments escape '~' as ~0 and '/' as ~1.
