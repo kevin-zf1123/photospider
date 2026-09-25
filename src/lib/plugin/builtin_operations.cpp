@@ -76,8 +76,6 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_numeric_maximum,
                               register_numeric_abs,
                               register_field_smoothstep,
-                              register_field_coordinate,
-                              register_field_constant,
                               register_core_constant,
                               register_core_identity,
                               register_math_add,

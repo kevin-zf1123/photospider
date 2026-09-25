@@ -42,7 +42,7 @@ D1/D2仅保留来源成熟度，不表示首批顺序。
 
 ## 6. 实现成本与资源
 
-O(HW)，scratch O(1)。与旧field.coordinate是不同键，数学相似不等于精度合同相同。
+O(HW)，scratch O(1)。旧field.coordinate实现已删除；本成员尚未实现，不能将旧测试行为当作新精度契约。
 
 ## 7. Demand、发布与dirty
 

@@ -175,7 +175,7 @@ status of this specification.
 
 - [NUM-03 category](../core.md).
 - [Existing scalar producer](../../../../plugins/ops/00-foundation/core_constant.cpp).
-- [Existing field producer](../../../../plugins/ops/03-generation/field_constant.cpp).
+- [Generation specification](../../03-generation/op_specs/GEN-01A_constant_tensor.md); the legacy field producer implementation is retired.
 - [Operator template](../../00-foundation/spec-template.md).
 
 Current Whole validation and timing: [array Whole](../arrays-whole.md).

@@ -38,9 +38,7 @@ enum class Kind {
   Minimum,
   Maximum,
   Abs,
-  Smoothstep,
-  Coordinate,
-  Constant
+  Smoothstep
 };
 template <class Algorithm>
 inline Result<Value> execute(Algorithm algorithm, const OperationTraits& traits,

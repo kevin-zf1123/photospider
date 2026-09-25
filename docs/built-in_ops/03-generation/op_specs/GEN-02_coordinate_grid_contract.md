@@ -17,7 +17,7 @@ D1/D2仅保留来源成熟度，不表示首批顺序。
 ## 1. 族边界
 
 坐标源不依赖目标图像样本，显式canvas控制输出。
-XY同时输出和单轴输出分开，不把两份 scalar field 误称现有 field.coordinate 已是[H,W,2]。
+XY同时输出和单轴输出分开，旧field.coordinate测试实现及注册已退休，不提供兼容入口。
 identity source map 必须使用pixel中心坐标；normalized_edge不是采样器的其他归一约定。
 
 ## 2. 成员

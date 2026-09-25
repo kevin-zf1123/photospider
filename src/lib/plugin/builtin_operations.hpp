@@ -79,8 +79,6 @@ Status register_numeric_minimum(OperationRegistry* registry);
 Status register_numeric_maximum(OperationRegistry* registry);
 Status register_numeric_abs(OperationRegistry* registry);
 Status register_field_smoothstep(OperationRegistry* registry);
-Status register_field_coordinate(OperationRegistry* registry);
-Status register_field_constant(OperationRegistry* registry);
 Status register_core_constant(OperationRegistry* registry);
 Status register_core_identity(OperationRegistry* registry);
 Status register_math_add(OperationRegistry* registry);

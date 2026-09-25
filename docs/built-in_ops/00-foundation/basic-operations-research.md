@@ -1,5 +1,8 @@
 # Basic operation research and implementation contract
 
+Retirement update, 2026-09-26: `field.coordinate` and `field.constant` have been
+removed without compatibility implementations. Their descriptions below are historical research only.
+
 Status update, 2026-09-13: the twelve families below were implemented by
 `ops@00864936`. This page retains the original 2026-09-11 research contract.
 Current package 0.10.0 / C ABI 9 behavior is documented in

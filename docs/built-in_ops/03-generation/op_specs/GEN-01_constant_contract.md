@@ -17,7 +17,7 @@ D1/D2仅保留来源成熟度，不表示首批顺序。
 ## 1. 族边界
 
 raw constant 与 image constant 分开：前者是位/数值填充，后者建立 FMT 完整颜色解释。
-已有 field.constant 为 Float64 静态 value→HW 浮点 Whole 子集，不覆盖动态多通道 tensor 或新 metadata。
+旧测试field.constant实现及注册已退休；新成员采用动态多通道输入与完整明确的metadata规则。
 不从 dtype 范围推断颜色的物理含义。随机性不参与这族。
 
 ## 2. 成员

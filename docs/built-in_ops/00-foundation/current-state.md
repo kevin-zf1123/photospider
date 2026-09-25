@@ -34,7 +34,7 @@ PNT-05A 的 `05f81347` 规格和 `6e429e4b` 实现属于当前 `ops-specs` 的�
 | 能力 | 已实现 key | 实现契约 |
 | --- | --- | --- |
 | 数值与统计 | `numeric.add/subtract/multiply/divide`, `numeric.clamp`, `numeric.mean/variance`, `numeric.minimum/maximum/abs`, `numeric.ordered_scan` | [Numeric](../../kernel-architecture/Numeric-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md)、[ordered scan 源码](../../../plugins/ops/01-numeric/numeric_ordered_scan.cpp) |
-| 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.coordinate`, `field.constant`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
+| 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | mask 与旧标签 | `mask.threshold/components/invert/combine/dilate/erode`, `component.count/area/bbox` | [Components](../../kernel-architecture/Component-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | 滤镜与分析 | `field.box_mean/gaussian_blur/convolve/correlate`, `analysis.histogram`, `analysis.histogram_out_of_range`, `grade.levels` | [Basic](../../kernel-architecture/Basic-Operations.md)；`field.convolve` 已升级 staged regional，correlate/旧直方图等仍 Whole |
 | 原有 RGBA/mask 链路与 mix | `image.exposure_gain/opacity/gaussian_blur/mask/source_over/downsample_box/brush_circle`, `mask.downsample_box`, `image.mix` | [Image](../../kernel-architecture/Image-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
@@ -76,3 +76,5 @@ PNT-05A 仍有编译期 profile/shape 拒绝时机与规格不完全一致的已
 
 资源、错误及数值边界详见[公共契约](contracts.md)。完整需求目录和 D1/D2/D3 成熟度
 不代表所有条目已成为 registry 节点；后续执行链见[路线图](../14-roadmap/implementation.md)。
+
+2026-09-26：旧测试生成算子 `field.coordinate`、`field.constant` 已删除实现及注册；03-generation新规格尚未实现。

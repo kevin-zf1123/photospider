@@ -157,8 +157,6 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
-  plugins/ops/03-generation/field_constant.cpp
-  plugins/ops/03-generation/field_coordinate.cpp
   plugins/ops/04-mask-morphology/component_area.cpp
   plugins/ops/04-mask-morphology/component_bbox.cpp
   plugins/ops/04-mask-morphology/component_count.cpp

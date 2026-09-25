@@ -1,6 +1,6 @@
 # Basic operations
 
-The default registry provides 21 additional CPU operations in twelve families,
+The default registry provides the remaining basic CPU operations,
 using the existing public WorkflowDocument, Compiler and ExecutionContext APIs.
 ABI/Traits remains 7. The [research](../built-in_ops/00-foundation/basic-operations-research.md)
 records algorithm sources and the approved first-version boundaries. The
@@ -31,8 +31,6 @@ required; defaults below are explicit choices in workflow construction.
 | `grade.levels` | Field to same-dtype generic field; finite Float64 `black < white`, `gamma > 0`, `out_min <= out_max`; defaults 0,1,1,0,1. |
 | `numeric.minimum`, `numeric.maximum`, `numeric.abs` | Finite Float32/64 rank-1..8 arrays to same-dtype generic arrays; no parameters. |
 | `field.smoothstep` | Field to Float32 canonical coverage; finite Float64 `edge0 < edge1`, defaults 0,1. |
-| `field.coordinate` | No inputs, generic HW output. Positive Int64 `height/width` <=2^53-1; String `dtype=float32/float64`, `axis=x/y`, `space=pixel/normalized`. Examples float32,x,pixel. |
-| `field.constant` | Same shape/dtype parameters; finite Float64 `value`, example zero. |
 
 ## Numeric and image semantics
 
@@ -75,14 +73,15 @@ Int64. Levels computes `t=clamp((x-black)/(white-black),0,1)`, then
 interpolation in the original input interval to preserve cancellation; gamma>1 lifts midtones.
 Smoothstep computes `t*t*(3-2*t)` using the analogous clamped edge coordinate.
 Min/max zero ties choose negative/positive zero; abs changes negative zero to
-positive zero. Coordinates use pixel centers `i+.5`, or `(i+.5)/axis_length`;
-x increases rightward and y downward. A single normalized pixel is .5.
+positive zero. The legacy `field.coordinate` and `field.constant` test operators
+are retired; their implementations and registry entries are removed without aliases.
+New generation specifications do not imply available replacement operators.
 
 ## Execution, errors and resources
 
 Elementwise: numeric min/max/abs, levels, smoothstep, mask Boolean and image mix.
 Halo: box/Gaussian with the declared positive radius. Whole: curves, field LUT,
-correlation, histogram, morphology and no-input generators. Convolution uses
+correlation, histogram and morphology. Convolution uses
 exact staged kernel/neighborhood reads; see [multi-output operations](Multi-Output-Operations.md). Whole
 materialization must fit the execution budget. Static shape changes require
 recompilation; control/table/kernel samples are execution bindings.
@@ -113,7 +112,6 @@ provides these compiled and executed graphs:
 | `basic-curves` | Unassociate -> PCHIP -> extracted channel LUT -> merge -> associate -> mix; alpha remains .5. |
 | `basic-masks` | Boolean -> dilation/erosion -> box feather; nine coverage samples equal 1/9. |
 | `basic-filters` | Non-symmetric correlation/convolution -> absolute difference `[4,4,4]`; histogram `[0,3]`, out-of-range `[0,0]`. |
-| `basic-fields` | Generated normalized coordinates/constant -> smoothstep -> levels -> local image mix; alpha remains 1. |
 
 `tests/integration/test_basic_operations.cpp` checks independent numerical
 fixtures, parameter/domain failures, ROI/Whole equivalence, unusual views,
