@@ -30,3 +30,8 @@ including `Basic-Operations.md`. CMake's explicit PHOTOSPIDER_OPERATION_SOURCES
 list is reused for the product and test kernel and for strict floating-point
 compile options. Changes to private helper headers participate in cache build
 identity through the existing recursive source inventory.
+
+`PixelOE` is an optional independently built CPU Slang module. It consumes the
+installed package and loads through operation ABI v9 plus planar extension v1;
+it is not registered by the default built-in registry. See
+[its specification and build instructions](PixelOE/README.md).

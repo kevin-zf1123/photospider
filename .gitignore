@@ -49,6 +49,12 @@
 !plugins/ops/rgba32f/*.metal
 !plugins/ops/rgba32f/*.h.in
 !plugins/ops/rgba32f/CMakeLists.txt
+!plugins/ops/PixelOE/CMakeLists.txt
+!plugins/ops/PixelOE/*.md
+!plugins/ops/PixelOE/tools/*.py
+!plugins/ops/PixelOE/third_party/*.md
+!plugins/ops/PixelOE/third_party/LICENSE.PixelOE
+!plugins/ops/PixelOE/third_party/shaders/**/*.slang
 
 # Maintained public-API image example and shared acceptance fixture.
 !examples/inpaint_ns_workflow/
