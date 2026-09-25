@@ -1,5 +1,3 @@
-#include "execution/channel_assembly.hpp"
-
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -14,6 +12,8 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "photospider/data/region_runs.hpp"
+#include "photospider/execution/data_movement.hpp"
 #include "photospider/format/channel_editing.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/utf8_validation.hpp"
@@ -702,6 +702,14 @@ Result<OperationPreparation> prepare(
   output.static_dependency_pieces = std::move(pieces);
   output.regional_atomic = true;
   output.preserve_output_views = layout != "materialize";
+  if (output.metadata.planar_layout) {
+    output.data_movement = DataMovementKind::BitwiseMapped;
+    const auto policy = layout;
+    output.data_movement_view_policy =
+        policy == "materialize" ? DataMovementViewPolicy::Materialize
+        : policy == "view"      ? DataMovementViewPolicy::RequireView
+                                : DataMovementViewPolicy::Auto;
+  }
   OperationPreparation prepared;
   prepared.outputs.push_back(std::move(output));
   prepared.state = std::make_shared<Assembly>(std::move(assembly));
@@ -874,25 +882,21 @@ Result<ValueFragments> evaluate(const DependencyPhase& phase,
             intersection.value().intersect(region.value(), phase.sets);
         if (!clipped.ok())
           return Answer(clipped.status());
-        auto copied = clipped.value().visit(
-            [&](const auto& at) {
-              auto charged = phase.consume_work(at.size() + width);
-              if (!charged.ok())
-                return charged;
-              auto address = view.byte_address(at);
-              if (!address.ok())
-                return address.status();
-              std::uint64_t offset = 0;
-              for (std::size_t d = 0; d < at.size(); ++d)
-                offset = offset * box.dimensions()[d].extent + at[d] -
-                         box.dimensions()[d].offset;
-              std::memcpy(writer.data() + offset * width,
-                          view.bytes().data() + address.value(), width);
-              return Status::success();
-            },
-            phase.sets.maximum_work, phase.query.cancellation);
-        if (!copied.ok())
-          return Answer(copied);
+        for (const auto& copy_box : clipped.value().boxes()) {
+          auto copied = copy_value_region(
+              view, copy_box, box, writer.data(),
+              box.element_count().value() * width, phase.query.cancellation,
+              [&](std::uint64_t n) {
+                for (std::uint64_t i = 0; i < n; ++i) {
+                  auto charged = phase.consume_work(box.rank() + width);
+                  if (!charged.ok())
+                    return charged;
+                }
+                return Status::success();
+              });
+          if (!copied.ok())
+            return Answer(copied);
+        }
       }
       auto value = std::move(writer).publish(facets, phase.query.resources);
       if (!value.ok())
@@ -975,28 +979,15 @@ OperationDefinition definition(const std::string& key, int member,
     return DependencyContinuation::make<State>(
         allocator, static_cast<const Assembly*>(query.prepared->state()));
   };
-  op.planar_callback = [member,
-                        profile](const PlanarOperationInvocation& call) {
+  op.planar_callback = [](const PlanarOperationInvocation& call) {
     if (std::get<std::string>(call.parameters.at("layout")) == "view")
       return invalid(
           "ViewUnavailable: direct planar output cannot replace its owner");
-    std::vector<OperationMetadata> metadata;
-    for (const auto& input : call.inputs) {
-      const auto& c = input.config();
-      metadata.push_back(
-          {input.descriptor(),
-           input.facets(),
-           {},
-           0,
-           PlanarImageLayout{c.order, c.height_axis, c.width_axis,
-                             c.channel_axis, c.row_pitch_bytes, c.groups}});
-    }
-    auto prepared = prepare(metadata, call.parameters, member, profile);
-    if (!prepared.ok())
-      return prepared.status();
-    const auto& out = prepared.value().outputs[0];
-    auto requested = Footprint::from_regions(out.metadata.descriptor.shape,
-                                             {call.output_region});
+    if (!call.prepared)
+      return Status{ErrorCode::Internal, "channel assembly preparation absent"};
+    const auto& out = call.prepared->traits().outputs[0];
+    auto requested = Footprint::from_regions(
+        call.output_metadata.descriptor.shape, {call.output_region});
     if (!requested.ok())
       return requested.status();
     for (const auto& piece : *out.static_dependency_pieces) {
@@ -1005,10 +996,10 @@ OperationDefinition definition(const std::string& key, int member,
         return clipped.status();
       const auto& map = piece.inputs[0];
       for (const auto& box : clipped.value().boxes()) {
-        auto status = execution_internal::copy_channel_piece(
+        auto status = copy_planar_region(
             box, map, &call.inputs[map.port], nullptr, call.output,
-            *out.metadata.planar_layout,
-            Value::element_size(out.metadata.descriptor.element_type),
+            *call.output_metadata.planar_layout,
+            Value::element_size(call.output_metadata.descriptor.element_type),
             call.cancellation);
         if (!status.ok())
           return status;

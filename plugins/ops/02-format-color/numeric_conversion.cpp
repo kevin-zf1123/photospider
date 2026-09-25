@@ -27,6 +27,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "data/exact_numeric.hpp"
+#include "photospider/data/region_runs.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -1091,11 +1092,75 @@ __attribute__((target("avx2"))) std::uint64_t avx2_f64_f32(
 }
 #endif
 
+// Returns only the successfully converted prefix; the caller handles the
+// first unsupported lane with convert_one and may resume SIMD afterwards.
+std::uint64_t convert_span(const std::uint8_t* source, std::uint8_t* target,
+                           std::uint64_t count, const Preparation& state) {
+  if (state.identity) {
+    std::memcpy(target, source, count * sample_width(state.source));
+    return count;
+  }
+  if (state.fast_i64_u8) {
+    i64_u8_span(source, target, count);
+    return count;
+  }
+#if defined(__aarch64__)
+  if (state.fast_u8_f32)
+    return neon_u8_f32(source, target, count);
+  if (state.fast_f32_u8)
+    return neon_f32_u8(source, target, count);
+  if (state.fast_f64_f32)
+    return neon_f64_f32(source, target, count);
+#elif defined(__x86_64__)
+  if (__builtin_cpu_supports("avx2")) {
+    if (state.fast_u8_f32)
+      return avx2_u8_f32(source, target, count);
+    if (state.fast_f32_u8)
+      return avx2_f32_u8(source, target, count);
+    if (state.fast_f64_f32)
+      return avx2_f64_f32(source, target, count);
+  }
+#endif
+  return 0;
+}
+
+// Only these lanes are guaranteed to finish without a domain/overflow error
+// or additional exact-arithmetic work. Do not precharge later lanes before an
+// exceptional lane: low fuel must not mask the earlier numerical failure.
+std::uint64_t infallible_prefix(const std::uint8_t* source, std::uint64_t count,
+                                const Preparation& state) {
+  if (state.identity || state.fast_u8_f32 || state.fast_i64_u8)
+    return count;
+  const auto width = sample_width(state.source);
+  for (std::uint64_t i = 0; i < count; ++i) {
+    if (state.fast_f32_u8) {
+      std::uint32_t bits;
+      std::memcpy(&bits, source + i * width, sizeof(bits));
+      if (bits > UINT32_C(0x3f800000) && bits != UINT32_C(0x80000000))
+        return i;
+    } else if (state.fast_f64_f32) {
+      std::uint64_t bits;
+      std::memcpy(&bits, source + i * width, sizeof(bits));
+      const auto exponent = (bits >> 52) & 2047;
+      // Exclude zero/subnormal endpoint rules and the top binary32 binade,
+      // where rounding may overflow. The established scalar path handles it.
+      if (exponent < 897 || exponent >= 1150)
+        return i;
+    } else {
+      return 0;
+    }
+  }
+  return count;
+}
+
 Result<ValueFragments> publish(const DependencyPhase& phase,
                                const Preparation& state) {
   using Output = Result<ValueFragments>;
   const auto& descriptor = phase.query.output.descriptor;
   const auto& facets = phase.query.output.facets;
+  // Preserve the first scalar sample's accounted lookup initialization before
+  // admitting u8 spans, including cold calls whose full run fits SIMD.
+  bool u8_lookup_ready = !state.fast_u8_f32;
   numeric_ops::ArrayPublication publication(phase.query.outputs.boxes().size(),
                                             descriptor.shape.size());
   std::vector<Value> values;
@@ -1153,28 +1218,56 @@ Result<ValueFragments> publish(const DependencyPhase& phase,
       }
       if (!intersects)
         continue;
-      auto footprint = Footprint::from_regions(
-          descriptor.shape, {Region(std::move(overlap))}, phase.sets);
-      if (!footprint.ok())
-        return Output(footprint.status());
-      auto status = footprint.value().visit(
-          [&](const auto& at) {
-            auto charged = phase.consume_work(at.size() + 64);
-            if (!charged.ok())
-              return charged;
-            std::uint64_t linear = 0;
-            for (std::size_t a = 0; a < at.size(); ++a)
-              linear = linear * box.dimensions()[a].extent + at[a] -
-                       box.dimensions()[a].offset;
-            auto address = fragment.byte_address(at);
-            if (!address.ok())
-              return address.status();
-            const auto& bounds = state.bounds[state.axis ? at[*state.axis] : 0];
-            return convert_one(fragment.bytes().data() + address.value(),
-                               writer.data() + linear * target_width, state,
-                               bounds, at);
-          },
-          phase.sets.maximum_work, phase.query.cancellation);
+      const Region region(std::move(overlap));
+      std::vector<std::uint64_t> at(region.rank());
+      auto status = visit_value_runs(
+          fragment, region, box, 64, state.axis, [&](const ValueReadRun& run) {
+            if (phase.query.cancellation.cancelled())
+              return Status{ErrorCode::Cancelled,
+                            "numeric conversion cancelled"};
+            for (std::uint64_t i = 0; i < run.samples;) {
+              const auto* source =
+                  run.data + static_cast<std::int64_t>(
+                                 static_cast<__int128>(i) * run.stride_bytes);
+              auto* target =
+                  writer.data() + (run.destination_element + i) * target_width;
+              const auto safe =
+                  u8_lookup_ready &&
+                          run.stride_bytes == static_cast<std::int64_t>(
+                                                  sample_width(state.source))
+                      ? infallible_prefix(source, run.samples - i, state)
+                      : 0;
+              const auto count = std::max<std::uint64_t>(1, safe);
+              // Preserve per-sample fuel settlement even when the numeric
+              // instructions run in a span. A rejected charge is not retried.
+              for (std::uint64_t lane = 0; lane < count; ++lane) {
+                auto charged = phase.consume_work(box.rank() + 64);
+                if (!charged.ok())
+                  return charged;
+                if (phase.query.cancellation.cancelled())
+                  return Status{ErrorCode::Cancelled,
+                                "numeric conversion cancelled"};
+              }
+              const auto used =
+                  safe ? convert_span(source, target, safe, state) : 0;
+              for (std::uint64_t lane = used; lane < count; ++lane) {
+                region_run_coordinate(region, run.logical_element + i + lane,
+                                      &at);
+                const auto& bounds =
+                    state.bounds[state.axis ? at[*state.axis] : 0];
+                auto converted = convert_one(
+                    source +
+                        static_cast<std::int64_t>(static_cast<__int128>(lane) *
+                                                  run.stride_bytes),
+                    target + lane * target_width, state, bounds, at);
+                if (!converted.ok())
+                  return converted;
+                u8_lookup_ready = true;
+              }
+              i += count;
+            }
+            return Status::success();
+          });
       if (!status.ok())
         return Output(status);
     }
@@ -1216,24 +1309,11 @@ struct Continuation final {
 
 Status planar(const PlanarOperationInvocation& call) {
   FloatingEnvironment environment;
-  OperationMetadata input;
-  input.descriptor = call.inputs[0].descriptor();
-  input.facets = call.inputs[0].facets();
-  const auto& config = call.inputs[0].config();
-  input.planar_layout = PlanarImageLayout{
-      config.order,        config.height_axis,     config.width_axis,
-      config.channel_axis, config.row_pitch_bytes, config.groups};
-  auto prepared = prepare({input}, call.parameters);
-  if (!prepared.ok())
-    return prepared.status();
-  const auto& state =
-      *static_cast<const Preparation*>(prepared.value().state.get());
-  const auto& output_layout =
-      *prepared.value().outputs[0].metadata.planar_layout;
+  if (!call.prepared || !call.prepared->state())
+    return Status{ErrorCode::Internal, "numeric conversion preparation absent"};
+  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
+  const auto& output_layout = *call.output_metadata.planar_layout;
   const auto& dimensions = call.output_region.dimensions();
-#if defined(__x86_64__)
-  const bool use_avx2 = __builtin_cpu_supports("avx2");
-#endif
   const auto height = output_layout.height_axis;
   const auto width = output_layout.width_axis;
   const auto channels = output_layout.channel_axis;
@@ -1316,41 +1396,12 @@ Status planar(const PlanarOperationInvocation& call) {
             }
             const auto count =
                 std::min<std::uint64_t>(samples - dx, 64 - (dx & 63));
-            if (state.fast_i64_u8) {
-              i64_u8_span(source + dx * source_width,
-                          target + dx * target_width, count);
-              dx += count;
-              continue;
-            }
-#if defined(__aarch64__) || defined(__x86_64__)
-            std::uint64_t vectorized = 0;
-#if defined(__aarch64__)
-            if (state.fast_u8_f32)
-              vectorized = neon_u8_f32(source + dx * source_width,
-                                       target + dx * target_width, count);
-            else if (state.fast_f32_u8)
-              vectorized = neon_f32_u8(source + dx * source_width,
-                                       target + dx * target_width, count);
-            else if (state.fast_f64_f32)
-              vectorized = neon_f64_f32(source + dx * source_width,
-                                        target + dx * target_width, count);
-#else
-            if (use_avx2) {
-              if (state.fast_u8_f32)
-                vectorized = avx2_u8_f32(source + dx * source_width,
-                                         target + dx * target_width, count);
-              else if (state.fast_f32_u8)
-                vectorized = avx2_f32_u8(source + dx * source_width,
-                                         target + dx * target_width, count);
-              else if (state.fast_f64_f32)
-                vectorized = avx2_f64_f32(source + dx * source_width,
-                                          target + dx * target_width, count);
-            }
-#endif
+            const auto vectorized =
+                convert_span(source + dx * source_width,
+                             target + dx * target_width, count, state);
             dx += vectorized;
             if (vectorized == count)
               continue;
-#endif
             at[width] = column + dx;
             const auto& bounds = state.bounds[state.axis ? at[*state.axis] : 0];
             auto status =

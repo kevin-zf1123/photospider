@@ -180,6 +180,10 @@ class PHOTOSPIDER_API PlanarImageWriteWindow final {
   PlanarImageWriteWindow& operator=(const PlanarImageWriteWindow&) = delete;
   bool valid() const noexcept { return impl_ != nullptr; }
   const Region& region() const;
+  /** @brief Immutable writer metadata, borrowed until publication/destruction.
+   */
+  const ValueDescriptor& descriptor() const;
+  const PlanarImageConfig& config() const;
   Result<PlanarMutableRowRun> row_run(
       const std::vector<std::uint64_t>& coordinate) const;
   /** @brief Return writable rows beginning at a full global coordinate.

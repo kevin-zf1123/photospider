@@ -59,6 +59,21 @@ are built with `find_package(Photospider 0.24)` and exercise the new boundary.
 
 ## Digests
 
+The planar preparation and mapped-movement extension changes C++ layouts in
+package 0.24.0; rebuild the kernel, native C++ plugins and installed consumers
+together. OperationTraits is now **18**. Semantic and physical domains are
+`semantic-graph-ir-v16` and `physical-plan-v16`. The unchanged outer
+`plan-cache-key-v15` includes the new physical digest; the optimizer remains
+`optimizer-v5-canonical-noop`. C operation ABI **9**, provider ABI **1**,
+WorkflowDocument schema **3**, and TDM4 are unchanged. Historical package
+sections below describe their versions at delivery.
+
+`DataMovementKind::BitwiseMapped` is an explicit exact-bit value relation,
+independent of dependency read needs. Its kind and view policy enter canonical
+identity alongside the complete static mapping. This extension enables host
+mapped copy and existing constrained views; it adds no cross-node fusion pass,
+composite alias representation, or C DSO service table.
+
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and
 `PlanCacheKey` use canonical domain-separated inputs. They exclude runtime
 allocation, timing, cancellation, ready-queue state, and daemon identity.

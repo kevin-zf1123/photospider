@@ -214,6 +214,7 @@ set(
   src/lib/data/value_fragments.cpp
   src/lib/data/fragment_atlas.cpp
   src/lib/data/region.cpp
+  src/lib/data/region_runs.cpp
   src/lib/data/storage.cpp
   src/lib/data/temporary_storage.cpp
   src/lib/data/representation.cpp
@@ -231,6 +232,7 @@ set(
   src/lib/data/result_relation.cpp
   src/lib/execution/resources.cpp
   src/lib/execution/cancellation.cpp
+  src/lib/execution/data_movement.cpp
   src/lib/data/value.cpp
   src/lib/data/tensor_description.cpp
   src/lib/data/planar_image.cpp
@@ -708,6 +710,9 @@ if(BUILD_TESTING)
   target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)
   photospider_add_test(test_channel_extraction Photospider::kernel tests/integration/test_channel_extraction.cpp)
   photospider_add_test(test_numeric_conversion Photospider::kernel tests/integration/test_numeric_conversion.cpp)
+  photospider_add_test(test_region_runs Photospider::kernel tests/unit/test_region_runs.cpp)
+  photospider_add_test(test_data_movement_contract Photospider::kernel tests/unit/test_data_movement_contract.cpp)
+  photospider_add_test(test_planar_preparation Photospider::kernel tests/unit/test_planar_preparation.cpp)
   if(PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME AND PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
     add_executable(test_numeric_conversion_sme tests/unit/test_numeric_conversion_sme.cpp plugins/ops/02-format-color/numeric_conversion_sme.cpp)
     target_include_directories(test_numeric_conversion_sme PRIVATE include src/lib tests)

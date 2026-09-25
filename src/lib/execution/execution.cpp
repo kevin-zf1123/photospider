@@ -31,7 +31,6 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "data/whole_input_view.hpp"
-#include "execution/channel_assembly.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
@@ -43,6 +42,7 @@
 #include "execution/result_identity.hpp"
 #include "execution/shared_results.hpp"
 #include "execution/structured_execution.hpp"
+#include "photospider/execution/data_movement.hpp"
 #include "plugin/dependency_identity.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
@@ -6218,9 +6218,9 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
   for (const auto& root : plan.outputs())
     active[root.second] = true;
   for (std::size_t i = active.size(); i-- > 0;)
-    if (active[i] &&
-        !(execution_internal::planar_mapped_copy(plan.steps()[i].operation) &&
-          plan.steps()[i].traits.outputs[0].planar_layout))
+    if (active[i] && !((plan.steps()[i].traits.outputs[0].data_movement ==
+                        DataMovementKind::BitwiseMapped) &&
+                       plan.steps()[i].traits.outputs[0].planar_layout))
       for (const auto& input : plan.steps()[i].inputs)
         if (const auto* producer = std::get_if<PlanStepInput>(&input))
           active[producer->step_index] = true;
@@ -6237,7 +6237,8 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     if (step.inputs.size() != step.input_demands.size())
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch, "unsupported planar operation arity"));
-    if (execution_internal::planar_mapped_copy(step.operation) &&
+    if ((step.traits.outputs[0].data_movement ==
+         DataMovementKind::BitwiseMapped) &&
         step.traits.outputs[0].planar_layout) {
       const auto& layout = *step.traits.outputs[0].planar_layout;
       const auto width =
@@ -6382,12 +6383,19 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       if (parts.empty())
         return Result<ExecutionResult>(
             Status{ErrorCode::Internal, "assembly has no requested pieces"});
-      const auto layout_parameter = step.parameters.find("layout");
-      const auto policy = layout_parameter == step.parameters.end()
-                              ? std::string("auto")
-                              : std::get<std::string>(layout_parameter->second);
+      // Declarations may list disjoint pieces in any order. Alias assembly
+      // consumes destination order, not declaration or input-port order.
+      if (layout.channel_axis) {
+        const auto axis = *layout.channel_axis;
+        std::sort(parts.begin(), parts.end(),
+                  [axis](const auto& a, const auto& b) {
+                    return a.output.dimensions()[axis].offset <
+                           b.output.dimensions()[axis].offset;
+                  });
+      }
+      const auto policy = step.traits.outputs[0].data_movement_view_policy;
       bool viewed = false;
-      if (policy != "materialize") {
+      if (policy != DataMovementViewPolicy::Materialize) {
         std::vector<PlanarImage> planes;
         std::vector<std::uint64_t> channels, channel_counts;
         bool images_only = true;
@@ -6415,11 +6423,11 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
                     input_admissions));
             produced[index] = std::move(image);
             viewed = true;
-          } else if (policy == "view" ||
+          } else if (policy == DataMovementViewPolicy::RequireView ||
                      alias.status().message.find("ViewUnavailable:") != 0) {
             return Result<ExecutionResult>(alias.status());
           }
-        } else if (policy == "view") {
+        } else if (policy == DataMovementViewPolicy::RequireView) {
           return Result<ExecutionResult>(
               Status{ErrorCode::InvalidArgument,
                      "ViewUnavailable: mixed generic/planar owners",
@@ -6455,7 +6463,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
               return Result<ExecutionResult>(window.status());
             read = window.take_value();
           }
-          auto copied = execution_internal::copy_channel_piece(
+          auto copied = copy_planar_region(
               part.output, part.map, read ? &*read : nullptr,
               part.value.valid() ? &part.value : nullptr, writer, layout, width,
               cancellation, [&plan] { return plan.current(); });
@@ -6798,13 +6806,11 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
                   "planar execution stopped before callback");
               return;
             }
-            auto parameters = step.parameters;
-            if (channel_extract)
-              parameters["layout"] = std::string("materialize");
             completion->status = impl_->operation_registry->invoke_planar(
-                step.operation, windows, step.input_demands, parameters,
+                step.operation, windows, step.input_demands, step.parameters,
                 step.output_demand, image, cancellation,
-                impl_->budget->on_demand_allocator(observation));
+                impl_->budget->on_demand_allocator(observation), step.prepared,
+                [&plan] { return plan.current(); });
           } catch (const std::bad_alloc&) {
             completion->status = Status{ErrorCode::ResourceExhausted, {}};
           } catch (...) {

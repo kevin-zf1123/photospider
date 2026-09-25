@@ -58,7 +58,7 @@ int main() {
            OperationContractIrStage::CompilerAccepted);
 
   // Current C++ traits reject old schemas independently of C plugin ABI 9.
-  for (const auto version : {8, 9, 10, 11, 12, 13}) {
+  for (const auto version : {8, 9, 10, 11, 12, 13, 14, 15, 16, 17}) {
     auto old_version = valid;
     PS_CHECK(!old_version.empty());
     old_version[0] = version;

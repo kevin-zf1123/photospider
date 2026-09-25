@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
+
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -839,6 +843,192 @@ int rational_codec_rejections() {
   PS_CHECK(invalid({std::vector<std::uint32_t>(129, 1), {3}, false}));
   return 0;
 }
+int cold_u8_budget() {
+  auto registry = make_default_operation_registry();
+  for (std::uint64_t count : {1, 3, 16, 19, 64, 259}) {
+    auto value =
+        Value::create({ElementType::UInt8, {count}}, Region::whole({count}),
+                      {0, {1}}, std::vector<std::uint8_t>(count, 128));
+    PS_CHECK(value.ok());
+    DependencyRequest request;
+    request.inputs = {{value.value().descriptor(), {}}};
+    request.outputs = Footprint::all({count}).take_value();
+    request.parameters = {{"dtype", std::string("float32")}};
+    request.snapshot_identity = "cold-u8-budget";
+    request.limits.maximum_work = 2048;
+    auto started =
+        registry->start_dependency("numeric.convert_format_strict", request);
+    PS_CHECK(started.ok());
+    auto session = started.take_value();
+    PS_CHECK(session->poll().ok());
+    auto input = ValueFragments::create(value.value().descriptor(), {},
+                                        request.outputs, {value.value()});
+    PS_CHECK(input.ok());
+    PS_CHECK(
+        session->supply({input.take_value()}, request.snapshot_identity).ok());
+    auto result = session->poll();
+    PS_CHECK(!result.ok());
+    PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
+    PS_CHECK(session->consumed_work() > 95);
+  }
+  return 0;
+}
+int budget_failure_order() {
+  auto registry = make_default_operation_registry();
+  for (std::uint64_t bad_at : {0, 1, 17, 63}) {
+    std::vector<float> samples(64, .5f);
+    samples[bad_at] = std::numeric_limits<float>::quiet_NaN();
+    auto source = Value::create({ElementType::Float32, {64}},
+                                Region::whole({64}), {0, {4}}, pack(samples));
+    PS_CHECK(source.ok());
+    DependencyRequest request;
+    request.inputs = {{source.value().descriptor(), {}}};
+    request.outputs = Footprint::all({64}).take_value();
+    request.parameters = {{"dtype", std::string("uint8")},
+                          {"metadata_mode", std::string("raw")}};
+    request.snapshot_identity = "fmt06-failure-order";
+    // Permit the erroneous sample, but not the complete next 64-sample run.
+    request.limits.maximum_work = 64 + (bad_at + 1) * 65;
+    auto started =
+        registry->start_dependency("numeric.convert_format_strict", request);
+    PS_CHECK(started.ok());
+    auto session = started.take_value();
+    PS_CHECK(session->poll().ok());
+    auto fragments = ValueFragments::create(source.value().descriptor(), {},
+                                            request.outputs, {source.value()});
+    PS_CHECK(fragments.ok());
+    PS_CHECK(
+        session->supply({fragments.take_value()}, request.snapshot_identity)
+            .ok());
+    auto result = session->poll();
+    PS_CHECK(!result.ok());
+    PS_CHECK(result.status().code == ErrorCode::OperationFailed);
+    PS_CHECK(result.status().reason == FailureReason::InvalidDomain);
+    PS_CHECK(result.status().message.find("coordinate=[" +
+                                          std::to_string(bad_at) + "]") !=
+             std::string::npos);
+    PS_CHECK(session->consumed_work() == 30 + (bad_at + 1) * 65);
+  }
+  return 0;
+}
+int generic_vector_oracles() {
+  std::vector<std::uint8_t> codes(259);
+  for (unsigned i = 0; i < codes.size(); ++i)
+    codes[i] = static_cast<std::uint8_t>(i);
+  auto expanded = run(ElementType::UInt8, {codes.size()}, codes,
+                      {{"dtype", std::string("float32")}});
+  PS_CHECK(expanded.ok());
+  for (unsigned i = 0; i < codes.size(); ++i) {
+    const float expected =
+        static_cast<float>(static_cast<double>(codes[i]) / 255.0);
+    const auto actual =
+        read<float>(expanded.value().values.at("converted"), {i});
+    PS_CHECK(std::memcmp(&actual, &expected, 4) == 0);
+  }
+  // Every rounding boundary, on both sides, plus exact halves and short tails.
+  std::vector<float> samples{-0.0f, 0.0f,
+                             std::numeric_limits<float>::denorm_min(),
+                             -std::numeric_limits<float>::denorm_min()};
+  for (unsigned i = 0; i < 255; ++i) {
+    const float boundary = static_cast<float>((i + .5) / 255.0);
+    samples.push_back(std::nextafter(boundary, -INFINITY));
+    samples.push_back(boundary);
+    samples.push_back(std::nextafter(boundary, INFINITY));
+  }
+  auto compressed = run(ElementType::Float32, {samples.size()}, pack(samples),
+                        {{"dtype", std::string("uint8")}});
+  PS_CHECK(compressed.ok());
+  for (unsigned i = 0; i < samples.size(); ++i) {
+    const double mapped = static_cast<double>(samples[i]) * 255;
+    const auto lower = static_cast<std::int64_t>(std::floor(mapped));
+    const auto expected =
+        lower + (mapped - lower > .5 || (mapped - lower == .5 && (lower & 1)));
+    PS_CHECK(read<std::uint8_t>(compressed.value().values.at("converted"),
+                                {i}) == expected);
+  }
+  return 0;
+}
+int generic_special_bits() {
+  const std::vector<std::pair<std::uint64_t, std::uint32_t>> cases{
+      {0, 0},
+      {UINT64_C(0x8000000000000000), UINT32_C(0x80000000)},
+      {UINT64_C(0x3ff0000000000000), UINT32_C(0x3f800000)},
+      {UINT64_C(0x4000000000000000), UINT32_C(0x40000000)},
+      {UINT64_C(0x4008000000000000), UINT32_C(0x40400000)},
+      {UINT64_C(0x4010000000000000), UINT32_C(0x40800000)},
+      {UINT64_C(0x4014000000000000), UINT32_C(0x40a00000)},
+      {UINT64_C(0x4018000000000000), UINT32_C(0x40c00000)},
+      {UINT64_C(0x36a0000000000000), 1},
+      {UINT64_C(0x3690000000000000), 0},
+      {UINT64_C(0x36a8000000000000), 2},
+      {UINT64_C(0x3810000000000000), UINT32_C(0x00800000)},
+      {UINT64_C(0xfff0000000000001), UINT32_C(0xffc00000)},
+      {UINT64_C(0x7ff8000020000000), UINT32_C(0x7fc00001)},
+      {UINT64_C(0x7ff0000000000000), UINT32_C(0x7f800000)},
+      {UINT64_C(0xfff0000000000000), UINT32_C(0xff800000)},
+      {UINT64_C(0x47f0000000000000), UINT32_C(0x7f7fffff)},
+      {UINT64_C(0x3ff0000010000000), UINT32_C(0x3f800000)},
+      {UINT64_C(0x3ff0000010000001), UINT32_C(0x3f800001)}};
+  std::vector<std::uint64_t> bits(259);
+  for (std::size_t i = 0; i < bits.size(); ++i)
+    bits[i] = cases[i % cases.size()].first;
+  auto value =
+      Value::create({ElementType::Float64, {bits.size()}},
+                    Region::whole({bits.size()}), {0, {8}}, pack(bits));
+  PS_CHECK(value.ok());
+  auto registry = make_default_operation_registry();
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    DependencyRequest request;
+    request.inputs = {{value.value().descriptor(), {}}};
+    request.outputs = Footprint::all({bits.size()}).take_value();
+    request.parameters = {{"dtype", std::string("float32")},
+                          {"rescale", false},
+                          {"overflow", std::string("clip")}};
+    request.snapshot_identity = "generic-special-bits";
+    auto started =
+        registry->start_dependency("numeric.convert_format_strict", request);
+    PS_CHECK(started.ok());
+    auto session = started.take_value();
+    PS_CHECK(session->poll().ok());
+    auto input = ValueFragments::create(value.value().descriptor(), {},
+                                        request.outputs, {value.value()});
+    PS_CHECK(input.ok());
+    PS_CHECK(
+        session->supply({input.take_value()}, request.snapshot_identity).ok());
+#if defined(__x86_64__)
+    const auto saved = _mm_getcsr();
+    _mm_setcsr((saved & ~UINT32_C(0x8040)) | ((mode & 1) ? 0x8000 : 0) |
+               ((mode & 2) ? 0x40 : 0));
+#elif defined(__aarch64__)
+    std::uint64_t saved;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(saved));
+    const auto selected =
+        (saved & ~(UINT64_C(1) << 24)) | ((mode & 1) ? (UINT64_C(1) << 24) : 0);
+    __asm__ volatile("msr fpcr, %0" : : "r"(selected));
+#endif
+    auto result = session->poll();
+#if defined(__x86_64__)
+    const bool restored =
+        _mm_getcsr() == ((saved & ~UINT32_C(0x8040)) |
+                         ((mode & 1) ? 0x8000 : 0) | ((mode & 2) ? 0x40 : 0));
+    _mm_setcsr(saved);
+    PS_CHECK(restored);
+#elif defined(__aarch64__)
+    std::uint64_t restored;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(restored));
+    __asm__ volatile("msr fpcr, %0" : : "r"(saved));
+    PS_CHECK(restored == selected);
+#endif
+    PS_CHECK(result.ok());
+    const auto& output = std::get<DependencyResult>(result.value()).value;
+    for (std::size_t i = 0; i < bits.size(); ++i) {
+      std::uint32_t actual = 0;
+      PS_CHECK(output.read({i}, &actual, sizeof(actual)).ok());
+      PS_CHECK(actual == cases[i % cases.size()].second);
+    }
+  }
+  return 0;
+}
 int direct_limits() {
   auto source = Value::create({ElementType::Float64, {1}}, Region::whole({1}),
                               {0, {8}}, pack<double>({0.25}));
@@ -909,6 +1099,11 @@ int direct_limits() {
 }  // namespace
 
 int main() {
+  if (cold_u8_budget())
+    return 1;
+  if (budget_failure_order() || generic_vector_oracles() ||
+      generic_special_bits())
+    return 1;
   if (numeric_cases())
     return 1;
   if (pair_endpoints())

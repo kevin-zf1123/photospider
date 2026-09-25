@@ -441,7 +441,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 17U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 18U ||
       !traits.supports_cpu || !known_shape || !known_region ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free ||
@@ -1939,7 +1939,10 @@ OperationRegistry::prepare_operation(
              specialization.requires_input_views ||
              specialization.maximum_output_payload_bytes ||
              specialization.input_indices ||
-             specialization.static_dependency_pieces))
+             specialization.static_dependency_pieces ||
+             specialization.data_movement != DataMovementKind::None ||
+             specialization.data_movement_view_policy !=
+                 DataMovementViewPolicy::Auto))
           return Answer(
               Status{ErrorCode::TypeMismatch,
                      "planar specialization changed storage protocol"});
@@ -1973,7 +1976,10 @@ OperationRegistry::prepare_operation(
               specialization.preserve_output_views ||
               specialization.requires_input_views ||
               specialization.maximum_output_payload_bytes ||
-              specialization.static_dependency_pieces)
+              specialization.static_dependency_pieces ||
+              specialization.data_movement != DataMovementKind::None ||
+              specialization.data_movement_view_policy !=
+                  DataMovementViewPolicy::Auto)
             return Answer(
                 Status{ErrorCode::TypeMismatch,
                        "Result specialization must preserve its registered "
@@ -2008,6 +2014,9 @@ OperationRegistry::prepare_operation(
             specialization.maximum_output_payload_bytes;
         output.static_dependency_pieces =
             std::move(specialization.static_dependency_pieces);
+        output.data_movement = specialization.data_movement;
+        output.data_movement_view_policy =
+            specialization.data_movement_view_policy;
       }
       traits.requires_metadata_specialization = false;
       auto expanded_validation = traits;
@@ -2064,6 +2073,23 @@ Status OperationRegistry::validate_prepared(
     return Status{ErrorCode::Stale,
                   "prepared operation does not match static inputs/registry"};
   };
+  const auto same_planar_layout = [](const auto& a, const auto& b) {
+    if (a.has_value() != b.has_value())
+      return false;
+    if (!a)
+      return true;
+    if (a->order != b->order || a->height_axis != b->height_axis ||
+        a->width_axis != b->width_axis || a->channel_axis != b->channel_axis ||
+        a->row_pitch_bytes != b->row_pitch_bytes ||
+        a->groups.size() != b->groups.size())
+      return false;
+    for (std::size_t i = 0; i < a->groups.size(); ++i)
+      if (a->groups[i].role != b->groups[i].role ||
+          a->groups[i].first_channel != b->groups[i].first_channel ||
+          a->groups[i].channel_count != b->groups[i].channel_count)
+        return false;
+    return true;
+  };
   const auto& stored = *prepared.impl_;
   if (stored.registry != impl_->identity ||
       inputs.size() != stored.inputs.size() ||
@@ -2081,6 +2107,7 @@ Status OperationRegistry::validate_prepared(
     if (a.descriptor.element_type != b.descriptor.element_type ||
         a.descriptor.shape != b.descriptor.shape ||
         a.atomic_trailing_axes != b.atomic_trailing_axes ||
+        !same_planar_layout(a.planar_layout, b.planar_layout) ||
         !input_internal::same_facets(a.facets, b.facets) ||
         static_cast<bool>(a.result_schema) !=
             static_cast<bool>(b.result_schema) ||
@@ -2394,8 +2421,9 @@ Status OperationRegistry::invoke_planar(
     const std::vector<Region>& input_demands,
     const std::map<std::string, ParameterValue>& parameters,
     const Region& output_region, PlanarImage& output,
-    const CancellationToken& cancellation,
-    const BufferAllocator& allocator) const {
+    const CancellationToken& cancellation, const BufferAllocator& allocator,
+    std::shared_ptr<const PreparedOperation> prepared,
+    const std::function<bool()>& current) const {
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2424,8 +2452,12 @@ Status OperationRegistry::invoke_planar(
   const bool channel_extract =
       key.compare(0, 22, "channel.extract_index_") == 0 ||
       key.compare(0, 22, "channel.extract_named_") == 0;
+  // A compiled auto selection may materialize after its view proof failed.
+  // Do not rewrite static parameters: that would invalidate the preparation.
   if (channel_extract &&
-      std::get<std::string>(parameters.at("layout")) != "materialize")
+      (std::get<std::string>(parameters.at("layout")) == "view" ||
+       (!prepared &&
+        std::get<std::string>(parameters.at("layout")) != "materialize")))
     return {ErrorCode::InvalidArgument,
             "ViewUnavailable: direct planar output cannot replace its owner",
             FailureReason::InvalidDomain,
@@ -2477,10 +2509,19 @@ Status OperationRegistry::invoke_planar(
         input.config().row_pitch_bytes, input.config().groups};
     metadata.push_back(std::move(item));
   }
-  auto prepared = prepare_operation(key, metadata, parameters);
-  if (!prepared.ok())
-    return prepared.status();
-  const auto& resolved_traits = prepared.value()->traits();
+  if (prepared) {
+    status = validate_prepared(*prepared, key, metadata, parameters);
+    if (!status.ok())
+      return status;
+  } else {
+    auto created = prepare_operation(key, metadata, parameters);
+    if (!created.ok())
+      return created.status();
+    prepared = created.take_value();
+  }
+  if (current && !current())
+    return Status{ErrorCode::Stale, "planar plan changed before write"};
+  const auto& resolved_traits = prepared->traits();
   auto expected_output =
       infer_operation_output(resolved_traits, metadata, parameters);
   if (!expected_output.ok())
@@ -2557,8 +2598,8 @@ Status OperationRegistry::invoke_planar(
     auto scratch = allocator.limited(
         bound, [failure](ErrorCode code) { failure->store(code); });
     const PlanarOperationInvocation invocation{
-        inputs, input_demands, parameters, output_region,
-        window, cancellation,  scratch,    inferred};
+        inputs,       input_demands, parameters, output_region, window,
+        cancellation, scratch,       inferred,   prepared};
     input_internal::Float32Environment environment;
     if (!environment.active())
       return Status{ErrorCode::OperationFailed,
@@ -2571,6 +2612,8 @@ Status OperationRegistry::invoke_planar(
                              "planar operation cancelled after callback");
     if (!status.ok())
       return status;
+    if (current && !current())
+      return Status{ErrorCode::Stale, "planar plan changed before publication"};
     return window.commit(cancellation);
   } catch (const std::bad_alloc&) {
     if (cancellation.cancelled())

@@ -127,17 +127,18 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical framing v15 with semantic OperationTraits v17.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "886a424258d7f889");
+  // Canonical framing v16 with semantic OperationTraits v18 and movement
+  // fields.
+  PS_CHECK(positive_zero.value().semantic.digest().value == "b1586c491d42f45f");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "c8b181bc86e6281d");
-  PS_CHECK(positive_zero.value().plan.digest().value == "59d7797d7401d693");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "43ab18f16399b3ea");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "99417e4e0de27409");
+           "0fde913682f1a931");
+  PS_CHECK(positive_zero.value().plan.digest().value == "32328bccf894ef02");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "dd8bce11d31b7c92");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "c6576141b2004fdf");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "0cd4385e5362a25d");
-  PS_CHECK(negative_zero.value().plan.digest().value == "6b1a21a74c34c4d5");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "59bf57a92f43fff1");
+           "7f62e2bf6b6cb759");
+  PS_CHECK(negative_zero.value().plan.digest().value == "337f8de7a806b929");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "ac07cbd40e83ebe8");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=
