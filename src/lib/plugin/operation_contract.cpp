@@ -503,7 +503,8 @@ Status validate_operation_contract(const OperationTraits& t) {
       selected.data_movement_view_policy != DataMovementViewPolicy::Materialize)
     return invalid("unknown data movement view policy");
   if (selected.data_movement == DataMovementKind::None) {
-    if (selected.data_movement_view_policy != DataMovementViewPolicy::Auto)
+    if (selected.data_movement_view_policy != DataMovementViewPolicy::Auto &&
+        !t.planar_exact_dependencies)
       return invalid("view policy requires a data movement relation");
   } else if (!t.planar_storage_capable || !selected.planar_layout ||
              !selected.static_dependency_pieces || !selected.regional_atomic ||
@@ -517,6 +518,16 @@ Status validate_operation_contract(const OperationTraits& t) {
       selected.dependency_version == 1;
   const bool whole = selected.region_rule == OperationRegionRule::Whole &&
                      selected.dependency_version == 0;
+  if (t.planar_exact_dependencies &&
+      (!t.planar_storage_capable || !t.supports_cpu || t.supports_gpu ||
+       t.joint_contract || !staged_atomic || selected.atomic_trailing_axes ||
+       selected.input_indices || selected.result_schema ||
+       selected.data_movement != DataMovementKind::None ||
+       selected.failure_delivery != FailureDelivery::RequestFailureOnly ||
+       (!t.requires_metadata_specialization &&
+        (!selected.static_dependency_pieces || !selected.regional_atomic))))
+    return invalid(
+        "exact planar capability requires prepared CPU regional pieces");
   if ((selected.regional_atomic || selected.preserve_output_views) &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        selected.observation_kind != ObservationKind::Atomic ||

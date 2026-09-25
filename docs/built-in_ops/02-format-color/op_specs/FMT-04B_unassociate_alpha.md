@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 proposed_operation_keys:
   - alpha.unassociate_strict
@@ -19,8 +19,15 @@ inspection_commit: 1b403fb9
 
 # FMT-04B: import premultiplied numeric samples as straight
 
+CPU implementation (2026-09-25): the source package now includes this member/family,
+its public C++ authoring API, correctness fixtures and a
+[performance/review driver](../../../../examples/alpha_performance/README.md).
+`Proposed`/D1 still describe design-review status, not missing executable code.
+Apple Silicon and FreeBSD performance/portability require target-machine review.
+
+
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-These proposed primitive keys are not aliases of the retired typed-image keys.
+These implemented CPU primitive keys are not aliases of the retired typed-image keys.
 
 ## Interface and representation
 

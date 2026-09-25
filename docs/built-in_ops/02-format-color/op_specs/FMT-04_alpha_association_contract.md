@@ -5,7 +5,7 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -13,18 +13,25 @@ inspection_commit: 1b403fb9
 
 # FMT-04: explicit alpha representation boundary adapters
 
+CPU implementation (2026-09-25): the source package now includes this member/family,
+its public C++ authoring API, correctness fixtures and a
+[performance/review driver](../../../../examples/alpha_performance/README.md).
+`Proposed`/D1 still describe design-review status, not missing executable code.
+Apple Silicon and FreeBSD performance/portability require target-machine review.
+
+
 Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
 Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. This target remains
-Proposed and unimplemented.
+those keys and pixel callbacks are no longer available. The current generic CPU
+implementation uses the keys below, not the retired typed-image registrations.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
 Members [A associate](FMT-04A_associate_alpha.md) and
-[B unassociate](FMT-04B_unassociate_alpha.md) remain proposed default-registry
+[B unassociate](FMT-04B_unassociate_alpha.md) are default-registry CPU
 primitives. The 2026-09-23 decisions replace the former dual-state canonical
 image interface and persistent external alpha bindings. No runtime registration
-or migration is implemented by this document.
+or migration is performed by this specification text itself.
 
 ## Purpose and confirmed boundary
 

@@ -12,6 +12,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "02-format-color/alpha_common.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/execution/data_movement.hpp"
 #include "photospider/format/metadata.hpp"
@@ -1028,6 +1029,11 @@ Result<OperationPreparation> prepare(
     return Answer(available);
   }
   options(params);
+  if (params.count("expected_source") &&
+      plugin_internal::alpha_ops::text(params, "expected_source") !=
+          plugin_internal::alpha_ops::source_assertion(inputs))
+    return Answer(
+        invalid("authoring source metadata disagrees with inference"));
   const auto& input = inputs.at(0);
   TensorDescription source;
   Tree original;
@@ -1562,7 +1568,8 @@ OperationDefinition definition(
   t.planar_storage_capable = true;
   t.cacheable = false;
   t.requires_metadata_specialization = true;
-  for (const auto* p : {"mode", "edits", "dependencies", "missing", "layout"}) {
+  for (const auto* p : {"mode", "edits", "dependencies", "missing", "layout",
+                        "expected_source"}) {
     t.parameter_schema.push_back({p, OperationParameterType::String, false});
   }
   auto& out = t.outputs[0];

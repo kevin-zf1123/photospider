@@ -227,3 +227,11 @@ __pycache__/
 !examples/metadata_workflow/*.cpp
 !examples/metadata_workflow/*.md
 !examples/metadata_workflow/CMakeLists.txt
+
+# FMT-04/05 independent oracle and performance tooling.
+!tests/support/generate_alpha_golden.py
+!examples/alpha_performance/
+!examples/alpha_performance/*.cpp
+!examples/alpha_performance/*.py
+!examples/alpha_performance/*.md
+!examples/alpha_performance/CMakeLists.txt

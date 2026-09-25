@@ -47,6 +47,7 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
 template <class Digest>
 void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->integer(traits.planar_storage_capable);
+  digest->integer(traits.planar_exact_dependencies);
   digest->integer(traits.requires_metadata_specialization);
   digest->integer(traits.share_blocks_across_outputs);
   digest->integer(traits.joint_contract);

@@ -900,6 +900,12 @@ int budget_failure_order() {
     PS_CHECK(
         session->supply({fragments.take_value()}, request.snapshot_identity)
             .ok());
+    // Preparation canonicalizes footprints using the platform std::sort;
+    // its metered comparison count is not a portable constant. Isolate this
+    // poll: one dispatch unit plus exactly 65 units per visited sample. The
+    // invalid sample must win before any charge for the remaining run.
+    const auto before_poll = session->consumed_work();
+    PS_CHECK(before_poll < 64);
     auto result = session->poll();
     PS_CHECK(!result.ok());
     PS_CHECK(result.status().code == ErrorCode::OperationFailed);
@@ -907,7 +913,8 @@ int budget_failure_order() {
     PS_CHECK(result.status().message.find("coordinate=[" +
                                           std::to_string(bad_at) + "]") !=
              std::string::npos);
-    PS_CHECK(session->consumed_work() == 30 + (bad_at + 1) * 65);
+    PS_CHECK(session->consumed_work() == before_poll + 1 + (bad_at + 1) * 65);
+    PS_CHECK(session->consumed_work() <= request.limits.maximum_work);
   }
   return 0;
 }

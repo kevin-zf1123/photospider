@@ -7,7 +7,7 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 proposed_operation_keys:
   - alpha.set_strict
@@ -19,8 +19,15 @@ inspection_commit: 1b403fb9
 
 # FMT-05A: set or add an internal alpha plane
 
+CPU implementation (2026-09-25): the source package now includes this member/family,
+its public C++ authoring API, correctness fixtures and a
+[performance/review driver](../../../../examples/alpha_performance/README.md).
+`Proposed`/D1 still describe design-review status, not missing executable code.
+Apple Silicon and FreeBSD performance/portability require target-machine review.
+
+
 Inherit the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
-These are proposed native entries, not aliases of existing registered operations.
+These are implemented native CPU entries, not aliases of the retired operations.
 This member preserves straight color bytes and establishes the selected group's
 alpha at a declared channel inside the result tensor.
 

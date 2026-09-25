@@ -37,6 +37,7 @@
 #include "photospider/execution/data_movement.hpp"
 #include "photospider/execution/execution.hpp"
 #include "photospider/execution/resources.hpp"
+#include "photospider/format/alpha.hpp"
 #include "photospider/format/channel.hpp"
 #include "photospider/format/channel_assembly.hpp"
 #include "photospider/format/channel_editing.hpp"

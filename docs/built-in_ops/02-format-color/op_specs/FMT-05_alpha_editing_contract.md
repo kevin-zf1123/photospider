@@ -5,13 +5,20 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
 ---
 
 # FMT-05: internal alpha editing, extraction and removal
+
+CPU implementation (2026-09-25): the source package now includes this member/family,
+its public C++ authoring API, correctness fixtures and a
+[performance/review driver](../../../../examples/alpha_performance/README.md).
+`Proposed`/D1 still describe design-review status, not missing executable code.
+Apple Silicon and FreeBSD performance/portability require target-machine review.
+
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
@@ -335,5 +342,8 @@ peaks. Require correctness before timing; no throughput is promised.
 Generic group/encoding metadata, exact partial-region shape changes, constant
 image generation and view validation/publication are implementation dependencies.
 Legacy typed-image/Layer paths and existing generic copy tests do not implement
-this target. The specification is clarified and Proposed/not implemented; no
-runtime or benchmark result is claimed.
+this target on their own. The new generic CPU implementation and test/benchmark
+entry points are linked above. Design review is still pending. In particular,
+FMT-05A planar view selection is conservative: only internal identity mappings
+are optimized as views; other auto layouts materialize and forced views fail
+with ViewUnavailable. No target-machine throughput is claimed.

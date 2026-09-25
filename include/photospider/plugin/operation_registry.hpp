@@ -324,6 +324,11 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * remain charged independently. CPU Whole or staged non-joint execution only.
    * Whole prefers a covering affine input owner, collecting only when needed.
    * This permits auto view/copy choices without dense precharge.
+   * With planar_exact_dependencies this is narrower: the complete Data map
+   * must be an identity map from planar input port 0. The executor proves that
+   * map, invokes a validate-only callback, and publishes a same-owner alias.
+   * It does not preserve arbitrary callback-supplied views. Nonidentity or
+   * non-port-0 maps materialize in Auto and fail in RequireView.
    */
   bool preserve_output_views = false;
   /** @brief CPU Whole requires one affine backing owner per active input.
@@ -363,6 +368,11 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief CPU callback consumes and publishes structural planar image
    * windows. Legacy Value callbacks cannot claim image storage compliance. */
   bool planar_storage_capable = false;
+  /** @brief Host fetches the exact static mapped support, including disjoint
+   * windows and generic scalar/plane inputs. CPU staged native callbacks only.
+   * Kept distinct from a bitwise relation: validation may fail before aliasing.
+   */
+  bool planar_exact_dependencies = false;
   /** @brief Optional CPU joint contract version, zero disables grouping. */
   std::uint32_t joint_contract = 0;
   /** @brief Shared host-owned state capacity, charged once per group. */
@@ -576,6 +586,15 @@ using CallbackSignature = Result<Value>(const OperationInvocation&);
 /** @brief Type-erased callable implementing `CallbackSignature`. */
 using OperationCallback = std::function<CallbackSignature>;
 
+/** @brief One exact authorized input rectangle; exactly one storage is valid.
+ * Host owns the underlying pages/value for the complete callback lifetime. */
+struct PHOTOSPIDER_API PlanarMappedInput final {
+  std::uint32_t port = 0;
+  Region region;
+  PlanarImageReadWindow image;
+  Value value;
+};
+
 /** @brief Borrowed call scope for a structural planar image operation. */
 struct PHOTOSPIDER_API PlanarOperationInvocation final {
   const std::vector<PlanarImageReadWindow>& inputs;
@@ -593,6 +612,12 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
    * This is a C++ API addition; the C operation ABI is unchanged.
    */
   std::shared_ptr<const PreparedOperation> prepared = {};
+  /** @brief Present only for exact-dependency callbacks. Legacy inputs is then
+   * empty. The callback may not read a descriptor-only dependency's samples. */
+  const std::vector<PlanarMappedInput>* exact_inputs = nullptr;
+  /** @brief Validate an immutable identity view without requesting a writer.
+   * Output is invalid in this mode and must not be accessed. */
+  bool validate_only = false;
 };
 /** @brief Callback writes only the requested output window; host publishes
  * that coverage after successful return and cancellation/current checks.
@@ -944,6 +969,14 @@ class PHOTOSPIDER_API OperationRegistry final {
                        const BufferAllocator& allocator = BufferAllocator(),
                        std::shared_ptr<const PreparedOperation> prepared = {},
                        const std::function<bool()>& current = {}) const;
+  Status invoke_planar_exact(
+      const std::string& key, const std::vector<PlanarMappedInput>& inputs,
+      const std::vector<OperationMetadata>& metadata,
+      const std::map<std::string, ParameterValue>& parameters,
+      const Region& region, PlanarImage& output, bool validate_only,
+      const CancellationToken& cancellation, const BufferAllocator& allocator,
+      std::shared_ptr<const PreparedOperation> prepared,
+      const std::function<bool()>& current) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

@@ -10,6 +10,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "02-format-color/alpha_lowering.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/format/channel.hpp"
@@ -256,6 +257,16 @@ Result<OperationPreparation> prepare_extraction(
       return Prepared(invalid("channel index is outside selected axis"));
     selected.index = static_cast<std::uint64_t>(index);
   }
+  if (parameters.count("expected_inputs") &&
+      alpha_ops::text(parameters, "expected_inputs") !=
+          alpha_ops::source_assertion(inputs))
+    return Prepared(
+        invalid("FMT-05B source metadata disagrees with inference"));
+  if (parameters.count("output_description") &&
+      (alpha_ops::text(parameters, "authoring_member") != "FMT-05B" ||
+       !parameters.count("expected_inputs")))
+    return Prepared(invalid(
+        "complete extraction metadata requires FMT-05B source assertions"));
   OperationOutputSpecialization output;
   output.metadata.descriptor.element_type = input.descriptor.element_type;
   output.metadata.descriptor.shape = shape;
@@ -294,6 +305,19 @@ Result<OperationPreparation> prepare_extraction(
       }
       output.metadata.planar_layout = std::move(layout);
     }
+  }
+  if (parameters.count("output_description")) {
+    auto parsed = tensor_description_from_parameter(
+        alpha_ops::text(parameters, "output_description"));
+    if (!parsed.ok())
+      return Prepared(parsed.status());
+    auto checked =
+        validate_tensor_description(parsed.value(), output.metadata.descriptor);
+    if (!checked.ok())
+      return Prepared(checked);
+    output.metadata.facets = alpha_ops::output_facets(input, parsed.value());
+    if (output.metadata.planar_layout)
+      output.metadata.planar_layout->groups.clear();
   }
   auto all = Footprint::all(output.metadata.descriptor.shape);
   if (!all.ok())
@@ -525,7 +549,10 @@ OperationDefinition extraction(const std::string& key, bool named,
       {"keepdims", OperationParameterType::Bool},
       {"layout", OperationParameterType::String},
       {"metadata_mode", OperationParameterType::String},
-      {"metadata_override", OperationParameterType::String, false}};
+      {"metadata_override", OperationParameterType::String, false},
+      {"expected_inputs", OperationParameterType::String, false},
+      {"output_description", OperationParameterType::String, false},
+      {"authoring_member", OperationParameterType::String, false}};
   if (named) {
     traits.parameter_schema.push_back(
         {"match", OperationParameterType::String});
@@ -625,6 +652,11 @@ OperationDefinition extraction(const std::string& key, bool named,
 }
 }  // namespace
 
+Result<OperationPreparation> prepare_alpha_extraction(
+    const std::vector<OperationMetadata>& inputs, const alpha_ops::Params& p,
+    numeric_ops::SequenceProfile profile) {
+  return prepare_extraction(inputs, p, false, profile);
+}
 Status register_channel_extraction(OperationRegistry* registry) {
   for (const auto& profile :
        {std::make_pair("_strict", SequenceProfile::Strict),

@@ -3,6 +3,8 @@
 namespace ps::plugin_internal {
 Status register_builtin_operations(OperationRegistry* registry) {
   for (const auto function : {register_numeric_ranges,
+                              register_channel_literal_like,
+                              register_alpha_operations,
                               register_channel_extraction,
                               register_numeric_conversion,
                               register_channel_assembly,

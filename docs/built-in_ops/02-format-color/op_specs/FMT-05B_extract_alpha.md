@@ -7,7 +7,7 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9
@@ -15,8 +15,15 @@ inspection_commit: 1b403fb9
 
 # FMT-05B: extract internal alpha or explicitly generate opaque alpha
 
+CPU implementation (2026-09-25): the source package now includes this member/family,
+its public C++ authoring API, correctness fixtures and a
+[performance/review driver](../../../../examples/alpha_performance/README.md).
+`Proposed`/D1 still describe design-review status, not missing executable code.
+Apple Silicon and FreeBSD performance/portability require target-machine review.
+
+
 Inherit the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
-The proposed authoring helper `extract_alpha` takes a graph and described input
+The implemented C++ authoring helper `extract_alpha` takes a graph and described input
 edge, returning one `values` edge. It expands into conforming extraction or
 constant-generation nodes; it is not a separate native registry entry.
 

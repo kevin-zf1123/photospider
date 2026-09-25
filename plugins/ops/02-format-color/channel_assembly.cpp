@@ -12,6 +12,7 @@
 
 #include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "02-format-color/alpha_lowering.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/execution/data_movement.hpp"
 #include "photospider/format/channel_editing.hpp"
@@ -1460,6 +1461,11 @@ Result<WorkflowNodeOutput> edit_channels(
   return output;
 }
 }  // namespace
+Result<OperationPreparation> prepare_alpha_channel_mapping(
+    const std::vector<OperationMetadata>& inputs, const alpha_ops::Params& p,
+    numeric_ops::SequenceProfile profile) {
+  return prepare(inputs, p, 2, profile);
+}
 Status register_channel_assembly(OperationRegistry* registry) {
   for (const auto& p :
        {std::make_pair("strict", SequenceProfile::Strict),
