@@ -50,6 +50,13 @@ request. V1-v3 tensor facets and old override bytes reject. The v4 codec keeps
 the 4096-byte facet bound and canonical little-endian representation. Workflow
 document, operation C ABI and provider C ABI versions do not change.
 
+Package 0.24.0 adds the independently versioned planar C operation extension v1,
+loaded through the existing operation ABI v9 module entry. The public C++ planar
+invocation gains accounted scratch and resolved output metadata; installed C++
+consumers must rebuild. Base operation/provider ABI, WorkflowDocument, TDM4 and
+OperationTraits17 remain unchanged. The independent PixelOE plugin and workflow
+are built with `find_package(Photospider 0.24)` and exercise the new boundary.
+
 ## Digests
 
 `SemanticGraphDigest`, `OptimizedGraphDigest`, `ExecutionPlanDigest`, and

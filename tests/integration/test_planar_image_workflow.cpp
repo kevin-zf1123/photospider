@@ -710,7 +710,7 @@ int workflow() {
   unsupported_workspace.planar_callback = copy_region;
   PS_CHECK(invalid_planar_registry
                .register_operation(std::move(unsupported_workspace))
-               .code == ErrorCode::InvalidArgument);
+               .ok());
   OperationDefinition unsupported_multiplier;
   unsupported_multiplier.key = "test.planar_workspace_multiplier";
   unsupported_multiplier.traits = failure_traits;
@@ -718,7 +718,7 @@ int workflow() {
   unsupported_multiplier.planar_callback = copy_region;
   PS_CHECK(invalid_planar_registry
                .register_operation(std::move(unsupported_multiplier))
-               .code == ErrorCode::InvalidArgument);
+               .ok());
   OperationDefinition unsupported_port;
   unsupported_port.key = "test.planar_old_image_port";
   unsupported_port.traits = failure_traits;
@@ -848,6 +848,80 @@ int workflow() {
   }
   return 0;
 }
+int planar_workspace_contract() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  const ValueDescriptor descriptor{ElementType::Float32, {1, 1, 1}};
+  const auto whole = Region::whole(descriptor.shape);
+  auto image = PlanarImage::create(descriptor, {}).take_value();
+  const float value = 0.75f;
+  PS_CHECK(
+      image.publish(whole, reinterpret_cast<const uint8_t*>(&value), 4).ok());
+  auto registry = std::make_shared<OperationRegistry>();
+  for (int mode = 0; mode < 3; ++mode) {
+    OperationDefinition op;
+    op.key = "test.planar_scratch_" + std::to_string(mode);
+    op.traits.planar_storage_capable = true;
+    op.traits.input_count = 1;
+    op.traits.input_schema.resize(1);
+    op.traits.workspace_bytes = 32;
+    op.traits.outputs[0].output_element_type = ElementType::Float32;
+    op.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
+    op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+    op.traits.outputs[0].planar_layout = PlanarImageLayout{};
+    op.planar_callback = [mode](const PlanarOperationInvocation& call) {
+      auto bytes = call.allocator.allocate(mode == 1 ? 33 : 32);
+      if (mode == 1)
+        return Status::success();  // Ignored failure must stay sticky.
+      if (!bytes.ok())
+        return bytes.status();
+      if (mode == 2) {
+        auto second = call.allocator.allocate(1);  // Aggregate live bound.
+        (void)second;
+        return Status::success();
+      }
+      return copy_region(call);
+    };
+    PS_CHECK(registry->register_operation(std::move(op)).ok());
+  }
+  OperationDefinition bad;
+  bad.key = "test.planar_missing_layout";
+  bad.traits = registry->find_traits("test.planar_scratch_0").take_value();
+  bad.traits.requires_metadata_specialization = true;
+  bad.planar_callback = copy_region;
+  bad.specialize_metadata = [descriptor](const auto&, const auto&) {
+    OperationOutputSpecialization result;
+    result.metadata.descriptor = descriptor;
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{result});
+  };
+  PS_CHECK(registry->register_operation(std::move(bad)).ok());
+  PS_CHECK(registry->freeze().ok());
+  WorkflowDocument document;
+  document.inputs = {
+      {1, "image", descriptor, whole, {}, {}, PlanarImageLayout{}}};
+  document.outputs = {{"result", 1, "value"}};
+  ExecutionBindings bindings;
+  bindings.inputs.push_back(
+      {"image", {}, {}, {}, std::make_shared<const PlanarImage>(image)});
+  ExecutionContext context(registry, {1, false, 8, 4 * 1024 * 1024});
+  for (int mode = 0; mode < 3; ++mode) {
+    document.nodes = {{1,
+                       "test.planar_scratch_" + std::to_string(mode),
+                       {WorkflowInputReference{1}},
+                       {}}};
+    GraphContext graph(document);
+    auto compiled = Compiler(registry).compile(graph);
+    PS_CHECK(compiled.ok());
+    auto result = context.execute(compiled.value().plan, bindings);
+    PS_CHECK(mode == 0 ? result.ok()
+                       : result.status().code == ErrorCode::ResourceExhausted);
+  }
+  document.nodes[0].operation = "test.planar_missing_layout";
+  GraphContext graph(document);
+  PS_CHECK(Compiler(registry).compile(graph).status().code ==
+           ErrorCode::TypeMismatch);
+  return 0;
+}
 int page_run_rollback() {
   using namespace ps;  // NOLINT(build/namespaces)
   PlanarImageConfig config;
@@ -892,6 +966,8 @@ int page_run_rollback() {
 }  // namespace
 
 int main() {
+  if (planar_workspace_contract())
+    return 1;
   if (page_run_rollback())
     return 1;
   if (rectangle_bounds())

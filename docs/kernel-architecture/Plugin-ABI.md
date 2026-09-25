@@ -380,3 +380,34 @@ This changes C++ trait/specialization layout, requiring an installed-consumer
 rebuild and rejecting package0.17 consumers. Canonical framing14, document2,
 C operation ABI9 and provider ABI1 are unchanged; traits16 changes semantic
 identity. No daemon ownership or persistent format is introduced.
+
+## Structural planar extension v1 (package 0.24)
+
+`planar_operation_plugin_api.h` adds the optional
+`ps_operation_plugin_get_planar_api_v1` symbol to the existing explicit-path
+loader. The base operation ABI remains v9. Every base descriptor in an extended
+module has one corresponding planar record; mixing legacy Value callbacks and
+planar records in one module is rejected. The base destroy callback owns both
+tables, and shared library leases retain inference and execution callbacks.
+
+This first extension supports CPU Whole operations with one result per record,
+static metadata inference and bounded row access to continuous/tiled images.
+The host copies and validates inferred metadata before execution and supplies
+that validated metadata to execute. Plugins allocate all computation buffers
+through the scratch services, may release them early, and must not retain row,
+parameter, facet or service pointers beyond callback return. Service failures
+are sticky. Successful return publishes the transactional writer only after
+cancellation and current-plan checks. Plugins execute serially on the host-assigned
+callback thread; they must not create workers or submit work to external pools.
+The kernel owns scheduling and thread allocation. Host and plugin preserve the
+caller floating environment. SIMD may process independent lanes on that thread
+while retaining the operation's numerical contract. There is no implicit GPU
+fallback or staging bridge.
+
+The C++ planar invocation now exposes a host scratch allocator and validated
+output metadata. Workspace declarations bound aggregate live scratch; allocations
+share the output's root execution budget. Pure metadata specialization must
+preserve the planar protocol and cannot introduce generic views or projections.
+These C++ layouts and symbols changed: installed C++ consumers must rebuild for
+0.24. The persistent OperationTraits version remains 17 because existing traits
+already encode planar capability, workspace, specialization and output layout.

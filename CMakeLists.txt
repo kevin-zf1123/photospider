@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.23.0
+  VERSION 0.24.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -260,6 +260,7 @@ set(
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
   src/lib/plugin/operation_registry.cpp
+  src/lib/plugin/planar_plugin.cpp
   src/lib/plugin/utf8_validation.cpp)
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_metal.mm)
@@ -657,6 +658,19 @@ if(BUILD_TESTING)
   target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
   add_dependencies(test_multi_output_execution multi_output_fixture)
   photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
+  photospider_add_test(test_planar_plugin photospider_test_kernel tests/integration/test_planar_plugin.cpp)
+  foreach(_variant planar bad_planar projected_planar)
+    add_library(${_variant}_fixture MODULE tests/fixtures/planar_operation_fixture.c)
+    target_link_libraries(${_variant}_fixture PRIVATE Photospider::operation_sdk)
+    set_target_properties(${_variant}_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  endforeach()
+  target_compile_definitions(bad_planar_fixture PRIVATE PS_BAD_PLANAR)
+  target_compile_definitions(projected_planar_fixture PRIVATE PS_PROJECT_PLANAR)
+  target_compile_definitions(test_planar_plugin PRIVATE
+    PS_PLANAR_FIXTURE="$<TARGET_FILE:planar_fixture>"
+    PS_BAD_PLANAR_FIXTURE="$<TARGET_FILE:bad_planar_fixture>"
+    PS_PROJECTED_PLANAR_FIXTURE="$<TARGET_FILE:projected_planar_fixture>")
+  add_dependencies(test_planar_plugin planar_fixture bad_planar_fixture projected_planar_fixture)
   add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
   set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)

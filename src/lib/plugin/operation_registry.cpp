@@ -23,6 +23,7 @@
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/dependency_plugin.hpp"
 #include "plugin/operation_resources.hpp"
+#include "plugin/planar_plugin.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -1045,11 +1046,7 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
               definition.traits.input_count == 0 ||
               definition.start_dependency || definition.start_result ||
               definition.start_joint || definition.validate_dependency ||
-              definition.specialize_metadata || definition.prepare_static ||
-              definition.traits.requires_metadata_specialization ||
-              definition.traits.workspace_bytes ||
-              definition.traits.workspace_input_multiplier ||
-              definition.traits.repeated_maximum ||
+              definition.prepare_static || definition.traits.repeated_maximum ||
               std::any_of(definition.traits.input_schema.begin(),
                           definition.traits.input_schema.end(),
                           [](const auto& port) {
@@ -1279,6 +1276,32 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   // Allocation failure leaves the stack owner intact for exact rollback.
   auto library = std::make_shared<OperationLibrary>(std::move(pending_library));
 
+  using PlanarApiFunction = const ps_planar_operation_plugin_api_v1* (*)();
+  PlanarApiFunction planar_api_function = nullptr;
+  void* planar_symbol =
+      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v1");
+  std::memcpy(&planar_api_function, &planar_symbol,
+              sizeof(planar_api_function));
+  const ps_planar_operation_plugin_api_v1* planar_api = nullptr;
+  if (planar_api_function) {
+    try {
+      planar_api = planar_api_function();
+    } catch (...) {
+      return Status{ErrorCode::OperationFailed, "planar API lookup threw"};
+    }
+    if (!planar_api ||
+        reinterpret_cast<uintptr_t>(planar_api) %
+            alignof(ps_planar_operation_plugin_api_v1) ||
+        planar_api->struct_size != sizeof(*planar_api) ||
+        planar_api->abi_version != PS_PLANAR_OPERATION_ABI_VERSION_1 ||
+        planar_api->operation_count != api->operation_count ||
+        !planar_api->operations ||
+        reinterpret_cast<uintptr_t>(planar_api->operations) %
+            alignof(ps_planar_operation_v1))
+      return Status{ErrorCode::InvalidArgument,
+                    "malformed planar extension table"};
+  }
+
   std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
@@ -1483,6 +1506,16 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       if (!prepared.ok())
         return prepared;
     }
+    if (planar_api) {
+      if (descriptor.dependency_program)
+        return Status{ErrorCode::InvalidArgument,
+                      "planar extension cannot stage"};
+      const auto status = plugin_internal::prepare_planar_plugin(
+          &definition, planar_api->operations[index], descriptor.user_data,
+          library);
+      if (!status.ok())
+        return status;
+    }
     const Status traits_status = validate_traits(definition.traits);
     if (!traits_status.ok()) {
       return traits_status;
@@ -1505,7 +1538,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
     const ps_operation_descriptor_v9* descriptor = &api->operations[index];
-    if (descriptor->dependency_program)
+    if (descriptor->dependency_program || planar_api)
       continue;
     staged[index]->callback =
         [library, descriptor, traits = staged[index]->traits, unused = false](
@@ -1899,6 +1932,17 @@ OperationRegistry::prepare_operation(
         auto& output = traits.outputs[i];
         auto& specialization = specialized.value()[i];
         auto& metadata = specialization.metadata;
+        if (traits.planar_storage_capable && !output.dependency_version &&
+            (!metadata.planar_layout || metadata.result_schema ||
+             metadata.atomic_trailing_axes || specialization.regional_atomic ||
+             specialization.preserve_output_views ||
+             specialization.requires_input_views ||
+             specialization.maximum_output_payload_bytes ||
+             specialization.input_indices ||
+             specialization.static_dependency_pieces))
+          return Answer(
+              Status{ErrorCode::TypeMismatch,
+                     "planar specialization changed storage protocol"});
         if (specialization.input_indices) {
           if (output.region_rule != OperationRegionRule::Whole ||
               output.dependency_version || traits.supports_gpu ||
@@ -2350,7 +2394,8 @@ Status OperationRegistry::invoke_planar(
     const std::vector<Region>& input_demands,
     const std::map<std::string, ParameterValue>& parameters,
     const Region& output_region, PlanarImage& output,
-    const CancellationToken& cancellation) const {
+    const CancellationToken& cancellation,
+    const BufferAllocator& allocator) const {
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2442,6 +2487,8 @@ Status OperationRegistry::invoke_planar(
     return expected_output.status();
   const auto& inferred = expected_output.value();
   const auto& actual_config = output.config();
+  if (!inferred.planar_layout)
+    return Status{ErrorCode::TypeMismatch, "planar output layout is absent"};
   const auto& expected_layout = *inferred.planar_layout;
   bool same_groups =
       expected_layout.groups.size() == actual_config.groups.size();
@@ -2491,9 +2538,34 @@ Status OperationRegistry::invoke_planar(
     if (!writer.ok())
       return writer.status();
     auto window = writer.take_value();
+    uint64_t bound = resolved_traits.workspace_bytes;
+    for (const auto& demand : input_demands) {
+      auto count = demand.element_count();
+      if (!count.ok())
+        return count.status();
+      const size_t index = &demand - input_demands.data();
+      const uint64_t width =
+          Value::element_size(inputs[index].descriptor().element_type);
+      const uint64_t factor =
+          width * resolved_traits.workspace_input_multiplier;
+      if (factor && count.value() > (UINT64_MAX - bound) / factor)
+        return Status{ErrorCode::ResourceExhausted,
+                      "planar workspace overflow"};
+      bound += count.value() * factor;
+    }
+    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+    auto scratch = allocator.limited(
+        bound, [failure](ErrorCode code) { failure->store(code); });
     const PlanarOperationInvocation invocation{
-        inputs, input_demands, parameters, output_region, window, cancellation};
+        inputs, input_demands, parameters, output_region,
+        window, cancellation,  scratch,    inferred};
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Status{ErrorCode::OperationFailed,
+                    "floating environment unavailable"};
     auto status = definition->planar_callback(invocation);
+    if (failure->load() != ErrorCode::Ok)
+      status = Status{failure->load(), "planar scratch allocation failed"};
     if (cancellation.cancelled())
       return Status::failure(ErrorCode::Cancelled,
                              "planar operation cancelled after callback");

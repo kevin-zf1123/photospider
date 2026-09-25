@@ -6803,7 +6803,8 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
               parameters["layout"] = std::string("materialize");
             completion->status = impl_->operation_registry->invoke_planar(
                 step.operation, windows, step.input_demands, parameters,
-                step.output_demand, image, cancellation);
+                step.output_demand, image, cancellation,
+                impl_->budget->on_demand_allocator(observation));
           } catch (const std::bad_alloc&) {
             completion->status = Status{ErrorCode::ResourceExhausted, {}};
           } catch (...) {

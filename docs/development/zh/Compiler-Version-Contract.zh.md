@@ -347,3 +347,9 @@ v3 明确相对坐标约定，新增精确类型化数值编码、同位采样�
 随之变化，0.22 消费者必须重新构建，SameMinorVersion 会拒绝旧包版本请求。
 旧 v1-v3 tensor facet 与 override 字节明确拒绝。v4 保持 4096 字节 facet 上限
 与规范化小端编码。WorkflowDocument、operation C ABI、provider C ABI 版本不变。
+
+包版本 0.24.0 增加独立版本的 planar C operation 扩展 v1，通过现有 ABI v9
+模块加载入口发现。公开 C++ planar invocation 增加受计账约束的 scratch
+以及已验证输出元数据，安装包 C++ 消费者需要重新编译。基础 operation/provider
+C ABI、WorkflowDocument、TDM4 和 OperationTraits17 保持不变。
+PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证此边界。

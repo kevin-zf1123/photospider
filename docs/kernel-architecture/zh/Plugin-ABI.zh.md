@@ -301,3 +301,25 @@ backing 也必须满足输出上界。直接调用已经逐输入提供单个 Va
 C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。
 canonical framing14、document2、C operation ABI9 和 provider ABI1 不变；
 traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。
+
+## 结构化 planar 扩展 v1（包版本 0.24）
+
+`planar_operation_plugin_api.h` 在现有显式路径加载器上增加可选入口
+`ps_operation_plugin_get_planar_api_v1`，基础 operation ABI 保持 v9。
+扩展模块的每条基础记录都必须对应一条 planar 记录；同一模块不混合传统
+Value 与 planar 回调。基础 destroy 管理两张表，共享库租约覆盖推导及执行。
+
+首版支持 CPU Whole、每条记录一个输出、静态元数据推导以及连续或分块图像的
+有界行访问。宿主复制并验证输出元数据，再交给 execute。计算缓冲区必须经
+scratch 服务分配，可提前释放；行、参数、facet 和服务指针仅在回调内有效。
+服务失败保持粘性。成功返回后经取消及计划有效性检查才发布事务输出。
+插件只能在宿主分配的回调线程上串行执行，不得创建工作线程或向外部线程池提交工作。
+内核统一拥有调度与线程分配。宿主及插件必须保存和恢复调用者浮点环境。
+SIMD 可在该线程内处理独立数据通道，同时保留算子的数值契约。不存在隐式 GPU
+回退或 staging 桥接。
+
+C++ planar invocation 新增宿主 scratch allocator 与已验证输出元数据。
+工作区声明约束同时存活的 scratch，临时内存与输出共享执行根预算。
+纯元数据特化必须保留 planar 协议，不能引入 generic view 或输入投影。
+C++ 布局及符号发生变化，安装包消费者须针对 0.24 重编译。已有 traits 已编码
+planar、工作区、特化和输出布局，因此持久 OperationTraits 版本保持 17。
