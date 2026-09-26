@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <type_traits>
 
 #include "01-numeric/directed_functions.hpp"
 
@@ -10,12 +11,15 @@ namespace ps::plugin_internal::numeric_ops {
 // final-result RangeResult classification must not be used at this boundary.
 template <class Math = DirectedInterval>
 struct DirectedColorFunctionsStorage final {
-  // Preserve .functions.math used by existing RGB callers. No other
-  // DirectedFunctions member is used by the color evaluator.
+  // Compact transfer evaluators need only interval storage. Full-width model
+  // conversion also uses the certified trigonometric functions.
   struct State final {
     Math math;
     explicit State(SequenceProfile profile) : math(profile) {}
-  } functions;
+  };
+  std::conditional_t<std::is_same_v<Math, DirectedInterval>, DirectedFunctions,
+                     State>
+      functions;
   using Interval = typename Math::Interval;
   using Number = typename Math::Number;
   using Frame = typename Math::Frame;

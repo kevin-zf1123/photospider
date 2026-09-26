@@ -11,7 +11,7 @@ identical sample bits. There is no native removal key or sample-only result cach
 
 ## Version and interpretation
 
-Package 0.25.0 accepts `photospider.tensor-description` runtime versions **4**
+Package 0.27.0 accepts `photospider.tensor-description` runtime versions **4**
 (`TDM4`) and **5** (`TDM5`). The v4 wire meaning is unchanged. Encoding chooses v5
 when any tensor, component, channel or group interpretation contains a
 `coordinates` record, including a present-but-empty record; otherwise it chooses
@@ -23,7 +23,7 @@ v1 remains a separate old-coordinate consumer contract and cannot coexist with
 these tensor facets on one Value. FMT-08 rejects legacy typed facets.
 
 The public C++ layout changes introduced by FMT-11 require rebuilding consumers
-against package 0.25. `find_package(Photospider 0.24)` is rejected, rather than
+against package 0.27. `find_package(Photospider 0.24)` is rejected, rather than
 claiming compatibility with an earlier layout. See the package migration note
 in [Compiler-Version-Contract](../development/Compiler-Version-Contract.md).
 

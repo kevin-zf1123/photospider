@@ -354,30 +354,24 @@ v3 明确相对坐标约定，新增精确类型化数值编码、同位采样�
 C ABI、WorkflowDocument、TDM4 和 OperationTraits17 保持不变。
 PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证此边界。
 
-## 包 0.25.0：FMT-11 C++ ABI 边界
+## 包 0.27.0：组合 C++ 接口
 
-FMT-11 为公开 TensorDescription、TensorInterpretation 及 metadata value 增加
-模型坐标字段，改变 C++ 对象布局。包版本升级为 0.25.0；SameMinorVersion 仅接受
-不高于已安装版本的 0.25 请求，拒绝 0.23/0.24。所有交换这些对象的 C++ 应用与
-插件必须重新编译；独立 examples 和 PixelOE 的包请求同步改为 0.25。
-共享库设置 VERSION=0.25.0、SOVERSION=0.25。此前链接到无版本库的旧二进制不会
-自动获得新 SONAME 的保护，应使用干净安装前缀并重新构建，不能直接替换运行中
-进程的库；静态消费者也必须重新链接。
+包 0.27.0 提供 FMT-04/05、FMT-09、FMT-10 与 FMT-11 的组合接口。
+`PlanarOperationInvocation` 包含精确映射输入、仅验证调用、数值诊断和同步借用
+的 `consume_work` 服务；`OperationDefinition` 包含映射验证，`OperationTraits`
+包含精确 planar 依赖能力。公开 TensorDescription、TensorInterpretation 和
+metadata records 包含模型坐标。内核、原生 C++ 插件和安装消费者必须一起重新
+编译，不能混用各来源分支编译出的对象。
 
-operation C ABI、data-provider C ABI、WorkflowDocument 与既有 identity framing
-版本均不改变。TDM5 字节通过原有 facet identity 路径进入身份；TDM4 含义不变，
-canonical v4/v5 选择规则详见张量语义元数据文档。这些是彼此独立的版本边界，
-不是 C++ 对象布局兼容承诺。
+`consume_work` 返回借用的 `const Status&`，有效期截止下次 checkpoint 或 callback
+返回；需要保留的失败必须复制。`ResourceBudget::try_consume` 在同一事务中准入
+所有 work 维度，成功时不修改调用者失败对象。普通与精确 planar callback 均
+获得 sticky work 准入与数值诊断服务，无 managed root 时也提供这些服务。
 
-包版本 0.25.0 为 `PlanarOperationInvocation` 增加同步借用的 `consume_work` 服务，
-并扩展 `OperationRegistry::invoke_planar`，改变公共 C++ 布局和调用 ABI。
-内核、原生 C++ 回调与安装消费者必须一起重新编译；不支持跨此边界混用旧、新
-C++ 对象文件或共享库。SameMinorVersion 安装门禁接受 0.25，拒绝 0.24 请求。
-OperationTraits18、各阶段 identity domain、C operation ABI9、planar C 扩展 v1、
-provider ABI1、WorkflowDocument schema3 与 TDM4 保持不变。
+SameMinorVersion 接受不高于安装版本的 0.27 请求，拒绝 0.23 至 0.26。
+独立 examples 和 PixelOE 请求 0.27；共享库 VERSION=0.27.0、SOVERSION=0.27。
+此前链接无版本库的消费者应在干净安装前缀重新构建，静态消费者必须重新链接。
 
-包版本 0.26.0 将 planar `consume_work` 改为返回借用的 `const Status&`，并新增
-`ResourceBudget::try_consume`。成功时不修改调用者的失败对象，所有 work 维度
-在同一个事务中准入。借用状态有效期截止下次 checkpoint 或 callback 返回；
-需要保留的失败必须复制。C++ callback 与消费者必须一起重新编译。
-安装门禁接受 0.26、拒绝 0.25；C ABI、identity 与 schema 域保持不变。
+Tensor description 按张量语义元数据约定选择规范化 TDM4/TDM5 编码。
+OperationTraits 为 18；operation C ABI9、planar C 扩展 v1、provider ABI1 和
+WorkflowDocument schema3 保持各自独立的兼容边界。

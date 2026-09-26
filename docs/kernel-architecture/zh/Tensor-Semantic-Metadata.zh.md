@@ -10,7 +10,7 @@ FMT-08B 是事务式公开 helper `format::remove_metadata`，展开为没有 se
 
 ## 版本与解释
 
-包 0.25.0 接受 `photospider.tensor-description` 运行时版本 **4**（`TDM4`）
+包 0.27.0 接受 `photospider.tensor-description` 运行时版本 **4**（`TDM4`）
 与 **5**（`TDM5`），v4 的既有字节含义不变。任一 tensor、component、channel 或
 组的 interpretation 包含 `coordinates` 记录时，编码选择 v5；显式存在但字段
 为空的记录也选择 v5。完全没有该记录时选择 v4。拒绝 v1-v3、版本与标识不匹配、
@@ -18,7 +18,7 @@ FMT-08B 是事务式公开 helper `format::remove_metadata`，展开为没有 se
 operation/provider C ABI 版本不变；canonical facet 与静态编辑参数参与编译身份。
 旧 ColorArray v1 保持独立约定，不能与这些 tensor facet 共存于一个 Value。
 
-FMT-11 新增公开字段改变 C++ 布局，因此消费者必须针对 0.25 重新编译；
+FMT-11 新增公开字段改变 C++ 布局，因此消费者必须针对 0.27 重新编译；
 `find_package(Photospider 0.24)` 会被拒绝。详见
 [编译器版本契约](../../development/zh/Compiler-Version-Contract.zh.md)。
 

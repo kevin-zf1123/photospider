@@ -44,6 +44,7 @@
 #include "execution/structured_execution.hpp"
 #include "photospider/execution/data_movement.hpp"
 #include "plugin/dependency_identity.hpp"
+#include "plugin/planar_exact.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -6312,8 +6313,9 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
   for (const auto& root : plan.outputs())
     active[root.second] = true;
   for (std::size_t i = active.size(); i-- > 0;)
-    if (active[i] && !((plan.steps()[i].traits.outputs[0].data_movement ==
-                        DataMovementKind::BitwiseMapped) &&
+    if (active[i] && !((plan.steps()[i].traits.planar_exact_dependencies ||
+                        plan.steps()[i].traits.outputs[0].data_movement ==
+                            DataMovementKind::BitwiseMapped) &&
                        plan.steps()[i].traits.outputs[0].planar_layout))
       for (const auto& input : plan.steps()[i].inputs)
         if (const auto* producer = std::get_if<PlanStepInput>(&input))
@@ -6331,6 +6333,316 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     if (step.inputs.size() != step.input_demands.size())
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch, "unsupported planar operation arity"));
+    if (step.traits.planar_exact_dependencies &&
+        step.traits.outputs[0].planar_layout) {
+      const auto& layout = *step.traits.outputs[0].planar_layout;
+      std::vector<OperationMetadata> metadata;
+      for (const auto& edge : step.inputs) {
+        OperationMetadata m;
+        if (const auto* input = std::get_if<PlanWorkflowInput>(&edge)) {
+          const auto& declaration =
+              plan.input_declarations()[input->declaration_index];
+          m.descriptor = declaration.descriptor;
+          m.facets = declaration.facets;
+          m.planar_layout = declaration.planar_layout;
+        } else {
+          const auto& producer =
+              plan.steps()[std::get<PlanStepInput>(edge).step_index];
+          m.descriptor = producer.output_descriptor;
+          m.facets = producer.output_facets;
+          m.planar_layout = producer.traits.outputs[0].planar_layout;
+        }
+        metadata.push_back(std::move(m));
+      }
+      FootprintLimits limits;
+      limits.cancellation = cancellation;
+      if (const auto& root = impl_->budget->resources()) {
+        limits.consume_work = [&root](std::uint64_t n) {
+          return root->consume({n});
+        };
+      }
+      // Bound bookkeeping before normalization or acquiring disjoint windows.
+      const auto capacity =
+          step.traits.outputs[0].static_dependency_pieces->size();
+      auto admitted = impl_->budget->reserve(
+          4096 + capacity * (metadata.size() + 1) * 8192, {}, observation);
+      if (!admitted.ok())
+        return Result<ExecutionResult>(admitted.status());
+      auto bookkeeping = admitted.take_value();
+      auto bookkeeping_owner = bookkeeping->reserve_external(
+          4096 + capacity * (metadata.size() + 1) * 8192);
+      bookkeeping->seal();
+      if (!bookkeeping_owner.ok())
+        return Result<ExecutionResult>(bookkeeping_owner.status());
+      auto required = input_internal::planar_exact_requirements(
+          step.traits, metadata, step.output_descriptor, step.output_demand,
+          limits);
+      if (!required.ok())
+        return Result<ExecutionResult>(required.status());
+      std::vector<PlanarMappedInput> exact_inputs;
+      std::vector<PlanarImage> image_owners;
+      ResourceBindings owned = resources;
+      for (std::size_t port = 0; port < metadata.size(); ++port) {
+        for (const auto& region : required.value()[port].boxes()) {
+          if (cancellation.cancelled() || !plan.current())
+            return Result<ExecutionResult>(
+                Status{cancellation.cancelled() ? ErrorCode::Cancelled
+                                                : ErrorCode::Stale,
+                       "exact planar fetch stopped"});
+          PlanarImage source_image;
+          Value source_value;
+          const auto& edge = step.inputs[port];
+          if (const auto* external = std::get_if<PlanWorkflowInput>(&edge)) {
+            source_image = sources[external->declaration_index];
+            source_value = generic_sources[external->declaration_index];
+            ++diagnostics.source_read_count;
+            diagnostics.source_read_bytes +=
+                region.element_count().value() *
+                Value::element_size(metadata[port].descriptor.element_type);
+          } else {
+            const auto producer = std::get<PlanStepInput>(edge).step_index;
+            ExecutionPlan selected = plan;
+            selected.outputs_ = {{"exact_source", producer}};
+            selected.output_regions_ = {
+                {"exact_source",
+                 Region::whole(metadata[port].descriptor.shape)}};
+            auto subplan = selected.tile_plan("exact_source", region);
+            if (!subplan.ok())
+              return Result<ExecutionResult>(subplan.status());
+            auto run =
+                execute_planar(subplan.value(), bindings, cancellation, {});
+            if (!run.ok())
+              return run;
+            if (run.value().images.count("exact_source"))
+              source_image = run.value().images.at("exact_source");
+            else
+              source_value = run.value().values.at("exact_source");
+            const auto& child = run.value().diagnostics;
+            diagnostics.peak_live_bytes =
+                std::max(diagnostics.peak_live_bytes, child.peak_live_bytes);
+            diagnostics.planned_peak_bytes = std::max(
+                diagnostics.planned_peak_bytes, child.planned_peak_bytes);
+            diagnostics.source_read_count += child.source_read_count;
+            diagnostics.source_read_bytes += child.source_read_bytes;
+            diagnostics.result_copy_bytes += child.result_copy_bytes;
+            diagnostics.operation_timings.insert(
+                diagnostics.operation_timings.end(),
+                child.operation_timings.begin(), child.operation_timings.end());
+          }
+          auto united =
+              owned.unite(source_image.valid() ? source_image.resources()
+                                               : source_value.resources());
+          if (!united.ok())
+            return Result<ExecutionResult>(united.status());
+          owned = united.take_value();
+          PlanarMappedInput input;
+          input.port = static_cast<std::uint32_t>(port);
+          input.region = region;
+          if (source_image.valid()) {
+            auto read = source_image.acquire(region, cancellation);
+            if (!read.ok())
+              return Result<ExecutionResult>(read.status());
+            input.image = read.take_value();
+          } else {
+            auto view = source_value.view(region);
+            if (!view.ok())
+              return Result<ExecutionResult>(view.status());
+            input.value = view.take_value();
+          }
+          image_owners.push_back(std::move(source_image));
+          exact_inputs.push_back(std::move(input));
+        }
+      }
+      PlanarImageConfig config;
+      config.order = layout.order;
+      config.height_axis = layout.height_axis;
+      config.width_axis = layout.width_axis;
+      config.channel_axis = layout.channel_axis;
+      config.row_pitch_bytes = layout.row_pitch_bytes;
+      config.groups = layout.groups;
+      config.tile_height = plan.tile_height();
+      config.tile_width = plan.tile_width();
+      config.aggregate_budget = page_budget;
+      config.maximum_backed_bytes = page_budget->maximum_bytes();
+      auto created = PlanarImage::create(step.output_descriptor, config,
+                                         step.output_facets, owned);
+      if (!created.ok())
+        return Result<ExecutionResult>(created.status());
+      auto image = created.take_value();
+      const auto policy = step.traits.outputs[0].data_movement_view_policy;
+      bool validate_only = step.traits.outputs[0].preserve_output_views &&
+                           policy != DataMovementViewPolicy::Materialize;
+      if (validate_only) {
+        auto proof = input_internal::planar_exact_identity_view(
+            step.traits, metadata, step.output_descriptor, limits);
+        if (!proof.ok())
+          return Result<ExecutionResult>(proof.status());
+        validate_only = proof.value();
+      }
+      if (policy == DataMovementViewPolicy::RequireView && !validate_only)
+        return Result<ExecutionResult>(
+            Status{ErrorCode::InvalidArgument,
+                   "ViewUnavailable: exact operation has no complete identity "
+                   "view proof",
+                   FailureReason::InvalidDomain});
+      // At most two passes: validate a proved identity alias, or materialize if
+      // its requested coverage is spread over incompatible upstream owners.
+      for (;;) {
+        struct Completion final {
+          Status status{ErrorCode::Internal, "planar callback did not run"};
+          std::mutex mutex;
+          std::condition_variable changed;
+          bool done = false;
+          std::uint64_t callback_us = 0;
+          NumericDiagnostics numeric;
+          ResourceLease lease;
+        };
+        auto completion = std::make_shared<Completion>();
+        if (const auto& resources = impl_->budget->resources()) {
+          auto capacity =
+              ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
+          capacity[ResourceKind::Queue] = 1;
+          capacity[ResourceKind::Entries] = 1;
+          auto admitted = resources->reserve(capacity);
+          if (!admitted.ok())
+            return Result<ExecutionResult>(admitted.status());
+          completion->lease = admitted.take_value();
+        }
+        auto admission = impl_->waiting_admission.try_acquire();
+        if (!admission)
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::ResourceExhausted, "planar callback queue is full"));
+        if (const auto& resources = impl_->budget->resources()) {
+          auto issued = resources->consume({0, 0, 0, 1});
+          if (!issued.ok())
+            return Result<ExecutionResult>(issued);
+        }
+        QueuedCallback callback{
+            [&, completion] {
+              const auto callback_started = std::chrono::steady_clock::now();
+              try {
+                if (cancellation.cancelled() || !plan.current()) {
+                  completion->status = Status::failure(
+                      cancellation.cancelled() ? ErrorCode::Cancelled
+                                               : ErrorCode::Stale,
+                      "planar execution stopped before callback");
+                  return;
+                }
+                ErrorCode metadata_failure = ErrorCode::Ok;
+                std::optional<ResourceAllocationScope> resource_scope;
+                if (const auto& budget = impl_->budget->resources())
+                  resource_scope.emplace(*budget, &metadata_failure);
+                completion->status =
+                    impl_->operation_registry->invoke_planar_exact(
+                        step.operation, exact_inputs, metadata, step.parameters,
+                        step.output_demand, image, validate_only, cancellation,
+                        impl_->budget->on_demand_allocator(observation),
+                        step.prepared, [&plan] { return plan.current(); },
+                        &completion->numeric,
+                        impl_->budget->resources()
+                            ? &*impl_->budget->resources()
+                            : nullptr,
+                        &metadata_failure);
+                if (metadata_failure != ErrorCode::Ok &&
+                    completion->status.detail.origin !=
+                        FailureOrigin::Protocol &&
+                    completion->status.code != ErrorCode::ResourceExhausted &&
+                    completion->status.code != ErrorCode::Cancelled &&
+                    completion->status.code != ErrorCode::Stale)
+                  completion->status = Status{
+                      metadata_failure,
+                      "exact planar metadata allocation failed",
+                      FailureReason::CapacityLimit,
+                      {FailureOrigin::Resource, FailureScope::Unspecified}};
+              } catch (const std::bad_alloc&) {
+                completion->status = Status{ErrorCode::ResourceExhausted, {}};
+              } catch (...) {
+                completion->status = Status{ErrorCode::OperationFailed, {}};
+              }
+              completion->callback_us = elapsed_us(callback_started);
+            },
+            std::move(*admission),
+            [completion] {
+              {
+                std::lock_guard<std::mutex> lock(completion->mutex);
+                completion->done = true;
+              }
+              completion->changed.notify_one();
+            },
+            completion->lease};
+        if (!impl_->cpu_pool.submit(std::move(callback)))
+          return Result<ExecutionResult>(Status::failure(
+              ErrorCode::ResourceExhausted, "planar callback queue stopped"));
+        std::unique_lock<std::mutex> completion_lock(completion->mutex);
+        completion->changed.wait(completion_lock,
+                                 [&] { return completion->done; });
+        auto status = std::move(completion->status);
+        if (status.detail.origin != FailureOrigin::Protocol &&
+            (cancellation.cancelled() || !plan.current()))
+          status =
+              Status::failure(cancellation.cancelled() ? ErrorCode::Cancelled
+                                                       : ErrorCode::Stale,
+                              "planar execution stopped after callback");
+        OperationTiming timing;
+        timing.output = step.result_ref();
+        timing.backend = Backend::Cpu;
+        timing.duration_us = completion->callback_us;
+        timing.numeric = completion->numeric;
+        timing.outcome = status.code;
+        auto count = step.output_demand.element_count();
+        if (count.ok())
+          timing.computed_elements = count.value();
+        diagnostics.operation_timings.push_back(std::move(timing));
+        if (!status.ok())
+          return Result<ExecutionResult>(status);
+
+        if (!validate_only) {
+          diagnostics.result_copy_bytes +=
+              step.output_demand.element_count().value() *
+              Value::element_size(step.output_descriptor.element_type);
+          break;
+        }
+        bool viewed = false;
+        for (std::size_t part = 0; part < image_owners.size(); ++part) {
+          if (exact_inputs[part].port != 0 || !image_owners[part].valid())
+            continue;
+          const auto& source = image_owners[part];
+          auto available = source.acquire(step.output_demand, cancellation);
+          if (!available.ok())
+            continue;
+          const auto channels =
+              layout.channel_axis
+                  ? step.output_demand.dimensions()[*layout.channel_axis]
+                  : RegionDimension{0, 1};
+          auto alias = PlanarImage::assemble_view(
+              {source}, {channels.offset}, {channels.extent},
+              step.output_descriptor, layout, step.output_demand,
+              step.output_facets, page_budget, cancellation, owned);
+          if (alias.ok()) {
+            image = alias.take_value();
+            image.retain_execution_admission(
+                std::make_shared<std::vector<std::shared_ptr<void>>>(
+                    input_admissions));
+            viewed = true;
+            break;
+          }
+          if (alias.status().message.find("ViewUnavailable:") != 0)
+            return Result<ExecutionResult>(alias.status());
+        }
+        if (viewed)
+          break;
+        if (policy == DataMovementViewPolicy::RequireView)
+          return Result<ExecutionResult>(Status{
+              ErrorCode::InvalidArgument,
+              "ViewUnavailable: identity source coverage has multiple owners",
+              FailureReason::InvalidDomain});
+        validate_only = false;
+      }
+      produced[index] = std::move(image);
+      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
+      diagnostics.peak_active_tasks = 1;
+      continue;
+    }
     if ((step.traits.outputs[0].data_movement ==
          DataMovementKind::BitwiseMapped) &&
         step.traits.outputs[0].planar_layout) {
@@ -6910,31 +7222,31 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     NumericDiagnostics numeric;
     auto status = run_planar_callback(
         [&] {
-            // Worker threads do not inherit the caller's metadata scope.
-            // Keep the root active through all callback-owned temporaries,
-            // matching the generic dependency worker's admission contract.
-            const auto& resources = impl_->budget->resources();
-            ErrorCode metadata_failure = ErrorCode::Ok;
-            std::optional<ResourceAllocationScope> scope;
-            if (resources)
-              scope.emplace(*resources, &metadata_failure);
-            auto callback_status = impl_->operation_registry->invoke_planar(
-                step.operation, windows, step.input_demands, step.parameters,
-                step.output_demand, image, cancellation,
-                impl_->budget->on_demand_allocator(observation), step.prepared,
-                [&plan] { return plan.current(); }, &numeric,
-                resources ? &*resources : nullptr, &metadata_failure);
-            if (metadata_failure != ErrorCode::Ok &&
-                callback_status.detail.origin != FailureOrigin::Protocol &&
-                callback_status.code != ErrorCode::ResourceExhausted &&
-                callback_status.code != ErrorCode::Cancelled &&
-                callback_status.code != ErrorCode::Stale)
-              callback_status =
-                  Status{metadata_failure,
-                         "planar metadata allocation failed",
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Unspecified}};
-            return callback_status;
+          // Worker threads do not inherit the caller's metadata scope.
+          // Keep the root active through all callback-owned temporaries,
+          // matching the generic dependency worker's admission contract.
+          const auto& resources = impl_->budget->resources();
+          ErrorCode metadata_failure = ErrorCode::Ok;
+          std::optional<ResourceAllocationScope> scope;
+          if (resources)
+            scope.emplace(*resources, &metadata_failure);
+          auto callback_status = impl_->operation_registry->invoke_planar(
+              step.operation, windows, step.input_demands, step.parameters,
+              step.output_demand, image, cancellation,
+              impl_->budget->on_demand_allocator(observation), step.prepared,
+              [&plan] { return plan.current(); }, &numeric,
+              resources ? &*resources : nullptr, &metadata_failure);
+          if (metadata_failure != ErrorCode::Ok &&
+              callback_status.detail.origin != FailureOrigin::Protocol &&
+              callback_status.code != ErrorCode::ResourceExhausted &&
+              callback_status.code != ErrorCode::Cancelled &&
+              callback_status.code != ErrorCode::Stale)
+            callback_status =
+                Status{metadata_failure,
+                       "planar metadata allocation failed",
+                       FailureReason::CapacityLimit,
+                       {FailureOrigin::Resource, FailureScope::Unspecified}};
+          return callback_status;
         },
         &callback_us);
     OperationTiming timing;

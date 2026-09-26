@@ -23,6 +23,7 @@
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/dependency_plugin.hpp"
 #include "plugin/operation_resources.hpp"
+#include "plugin/planar_exact.hpp"
 #include "plugin/planar_plugin.hpp"
 #include "plugin/utf8_validation.hpp"
 
@@ -1023,6 +1024,11 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const bool staged = definition.traits.outputs[0].dependency_version == 1;
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
   const bool planar = definition.traits.planar_storage_capable;
+  if (definition.traits.planar_exact_dependencies &&
+      (!planar || !staged || !definition.prepare_static ||
+       !definition.start_dependency || !definition.planar_callback))
+    return Status{ErrorCode::InvalidArgument,
+                  "invalid exact planar capability"};
   const bool dual_planar = planar && staged && definition.prepare_static &&
                            definition.start_dependency &&
                            definition.planar_callback;
@@ -2721,6 +2727,8 @@ Status OperationRegistry::invoke_planar(
                       "planar metadata allocation failed",
                       FailureReason::CapacityLimit,
                       {FailureOrigin::Resource, FailureScope::Unspecified}};
+    if (status.detail.origin == FailureOrigin::Protocol)
+      return status;
     if (failure->load() != ErrorCode::Ok &&
         status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
       status = Status{failure->load(), "planar scratch allocation failed"};
@@ -2744,6 +2752,262 @@ Status OperationRegistry::invoke_planar(
                              "planar operation cancelled after callback");
     return Status::failure(ErrorCode::OperationFailed,
                            "planar operation callback threw");
+  }
+}
+
+Status OperationRegistry::invoke_planar_exact(
+    const std::string& key, const std::vector<PlanarMappedInput>& inputs,
+    const std::vector<OperationMetadata>& metadata,
+    const std::map<std::string, ParameterValue>& parameters,
+    const Region& output_region, PlanarImage& output, bool validate_only,
+    const CancellationToken& cancellation, const BufferAllocator& allocator,
+    std::shared_ptr<const PreparedOperation> prepared,
+    const std::function<bool()>& current, NumericDiagnostics* numeric,
+    const ResourceBudget* resources, const ErrorCode* metadata_failure) const {
+  try {
+    Impl::DefinitionHandle definition;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      const auto found = impl_->definitions.find(key);
+      if (found == impl_->definitions.end())
+        return Status{ErrorCode::NotFound,
+                      "exact planar operation is not registered"};
+      definition = found->second;
+    }
+    if (!definition->traits.planar_exact_dependencies ||
+        !definition->planar_callback || !prepared || !output.valid() ||
+        output_region.empty())
+      return Status{ErrorCode::InvalidArgument,
+                    "invalid exact planar invocation"};
+    if (cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, "exact planar invocation cancelled"};
+    auto status = validate_operation_parameters(definition->traits, parameters);
+    if (!status.ok())
+      return status;
+    status = validate_prepared(*prepared, key, metadata, parameters);
+    if (!status.ok())
+      return status;
+    const auto& resolved_traits = prepared->traits();
+    auto expected_output =
+        infer_operation_output(resolved_traits, metadata, parameters);
+    if (!expected_output.ok())
+      return expected_output.status();
+    const auto& inferred = expected_output.value();
+    const auto& actual_config = output.config();
+    if (!inferred.planar_layout)
+      return Status{ErrorCode::TypeMismatch, "planar output layout is absent"};
+    const auto& expected_layout = *inferred.planar_layout;
+    bool same_groups =
+        expected_layout.groups.size() == actual_config.groups.size();
+    if (same_groups) {
+      for (std::size_t i = 0; i < expected_layout.groups.size(); ++i) {
+        const auto& left = expected_layout.groups[i];
+        const auto& right = actual_config.groups[i];
+        if (left.role != right.role ||
+            left.first_channel != right.first_channel ||
+            left.channel_count != right.channel_count)
+          same_groups = false;
+      }
+    }
+    if (inferred.descriptor.element_type != output.descriptor().element_type ||
+        inferred.descriptor.shape != output.descriptor().shape ||
+        !input_internal::same_facets(inferred.facets, output.facets()) ||
+        expected_layout.order != actual_config.order ||
+        expected_layout.height_axis != actual_config.height_axis ||
+        expected_layout.width_axis != actual_config.width_axis ||
+        expected_layout.channel_axis != actual_config.channel_axis ||
+        expected_layout.row_pitch_bytes != actual_config.row_pitch_bytes ||
+        !same_groups)
+      return Status::failure(ErrorCode::TypeMismatch,
+                             "planar output differs from inferred contract");
+
+    if (!output_region.validate(output.descriptor().shape).ok())
+      return Status{ErrorCode::InvalidArgument,
+                    "exact planar output region is outside domain"};
+    if (validate_only && !resolved_traits.outputs[0].preserve_output_views)
+      return Status{ErrorCode::InvalidArgument,
+                    "exact planar validation has no view proof"};
+    FootprintLimits limits;
+    limits.cancellation = cancellation;
+    if (const auto* budget = resource_internal::metadata_budget()) {
+      limits.consume_work = [budget](std::uint64_t n) {
+        return budget->consume({n});
+      };
+    }
+    if (validate_only) {
+      auto proof = input_internal::planar_exact_identity_view(
+          resolved_traits, metadata, output.descriptor(), limits);
+      if (!proof.ok())
+        return proof.status();
+      if (!proof.value())
+        return Status{ErrorCode::InvalidArgument,
+                      "ViewUnavailable: exact Data map is not port-0 identity",
+                      FailureReason::InvalidDomain};
+    }
+    auto required = input_internal::planar_exact_requirements(
+        resolved_traits, metadata, output.descriptor(), output_region, limits);
+    if (!required.ok())
+      return required.status();
+    std::vector<std::vector<Region>> actual(metadata.size());
+    for (const auto& input : inputs) {
+      if (input.port >= metadata.size() ||
+          input.image.valid() == input.value.valid())
+        return Status{ErrorCode::InvalidArgument,
+                      "invalid exact planar input storage"};
+      const auto& m = metadata[input.port];
+      const auto& descriptor = input.image.valid() ? input.image.descriptor()
+                                                   : input.value.descriptor();
+      const auto& facets =
+          input.image.valid() ? input.image.facets() : input.value.facets();
+      const auto& region =
+          input.image.valid() ? input.image.region() : input.value.region();
+      auto supplied =
+          Footprint::from_regions(m.descriptor.shape, {region}, limits);
+      auto authorized =
+          Footprint::from_regions(m.descriptor.shape, {input.region}, limits);
+      if (!supplied.ok())
+        return supplied.status();
+      if (!authorized.ok())
+        return authorized.status();
+      if (supplied.value() != authorized.value() ||
+          descriptor.shape != m.descriptor.shape ||
+          descriptor.element_type != m.descriptor.element_type ||
+          !input_internal::same_facets(facets, m.facets))
+        return Status{ErrorCode::TypeMismatch,
+                      "exact planar input differs from authorization"};
+      if (input.image.valid()) {
+        const auto& config = input.image.config();
+        if (!m.planar_layout || config.order != m.planar_layout->order ||
+            config.height_axis != m.planar_layout->height_axis ||
+            config.width_axis != m.planar_layout->width_axis ||
+            config.channel_axis != m.planar_layout->channel_axis ||
+            config.row_pitch_bytes != m.planar_layout->row_pitch_bytes)
+          return Status{ErrorCode::TypeMismatch,
+                        "exact planar input layout mismatch"};
+        if (config.groups.size() != m.planar_layout->groups.size())
+          return Status{ErrorCode::TypeMismatch,
+                        "exact planar input groups differ"};
+        for (std::size_t j = 0; j < config.groups.size(); ++j) {
+          const auto& actual_group = config.groups[j];
+          const auto& expected_group = m.planar_layout->groups[j];
+          if (actual_group.role != expected_group.role ||
+              actual_group.first_channel != expected_group.first_channel ||
+              actual_group.channel_count != expected_group.channel_count)
+            return Status{ErrorCode::TypeMismatch,
+                          "exact planar input groups differ"};
+        }
+      } else if (m.planar_layout) {
+        return Status{ErrorCode::TypeMismatch,
+                      "generic storage supplied for planar input"};
+      }
+      actual[input.port].push_back(input.region);
+    }
+    for (std::size_t port = 0; port < metadata.size(); ++port) {
+      status = input_internal::validate_port_metadata(
+          resolved_traits.input_schema[port], metadata[port].descriptor,
+          metadata[port].facets);
+      if (!status.ok())
+        return status;
+      auto supplied = Footprint::from_regions(metadata[port].descriptor.shape,
+                                              actual[port], limits);
+      if (!supplied.ok())
+        return supplied.status();
+      if (supplied.value() != required.value()[port])
+        return Status{ErrorCode::InvalidArgument,
+                      "exact planar support differs from static map"};
+    }
+    if (current && !current())
+      return Status{ErrorCode::Stale, "plan changed before exact callback"};
+    PlanarImageWriteWindow window;
+    if (!validate_only) {
+      auto writer = output.begin_write(output_region, cancellation);
+      if (!writer.ok())
+        return writer.status();
+      window = writer.take_value();
+    }
+    std::uint64_t bound = resolved_traits.workspace_bytes;
+    for (const auto& input : inputs) {
+      auto count = input.region.element_count();
+      if (!count.ok())
+        return count.status();
+      const auto factor =
+          Value::element_size(metadata[input.port].descriptor.element_type) *
+          resolved_traits.workspace_input_multiplier;
+      if (factor && count.value() > (UINT64_MAX - bound) / factor)
+        return Status{ErrorCode::ResourceExhausted,
+                      "exact planar workspace overflow"};
+      bound += count.value() * factor;
+    }
+    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+    auto scratch = allocator.limited(
+        bound, [failure](ErrorCode code) { failure->store(code); });
+    NumericDiagnostics local_numeric;
+    Status numeric_status = Status::success();
+    const auto report_numeric = [&](const NumericDiagnostics& report) {
+      if (!numeric_status.ok())
+        return numeric_status;
+      numeric_status = merge_numeric_diagnostics(&local_numeric, report);
+      if (numeric && numeric_status.ok())
+        *numeric = local_numeric;
+      return numeric_status;
+    };
+    Status work_status = Status::success();
+    const auto consume_work = [&](std::uint64_t amount) -> const Status& {
+      // Cancellation wins even if a previous checkpoint observed Stale/fuel.
+      if (cancellation.cancelled())
+        work_status =
+            Status{ErrorCode::Cancelled, "planar operation cancelled"};
+      if (!work_status.ok())
+        return work_status;
+      if (current && !current()) {
+        work_status =
+            Status{ErrorCode::Stale, "planar plan changed in callback"};
+      } else if (resources && amount) {
+        resources->try_consume({amount}, work_status);
+      }
+      return work_status;
+    };
+    const std::vector<PlanarImageReadWindow> legacy_inputs;
+    const std::vector<Region> legacy_demands;
+    const PlanarOperationInvocation invocation{
+        legacy_inputs, legacy_demands, parameters,   output_region,
+        window,        cancellation,   scratch,      inferred,
+        prepared,      report_numeric, consume_work, &inputs,
+        validate_only};
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Status{ErrorCode::OperationFailed,
+                    "floating environment unavailable"};
+    status = definition->planar_callback(invocation);
+    if (status.detail.origin == FailureOrigin::Protocol)
+      return status;
+    if (!numeric_status.ok())
+      status = numeric_status;
+    if (!work_status.ok())
+      status = work_status;
+    if (metadata_failure && *metadata_failure != ErrorCode::Ok &&
+        status.code != ErrorCode::ResourceExhausted &&
+        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
+      status = Status{*metadata_failure,
+                      "exact planar metadata allocation failed",
+                      FailureReason::CapacityLimit,
+                      {FailureOrigin::Resource, FailureScope::Unspecified}};
+    if (failure->load() != ErrorCode::Ok &&
+        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
+      status =
+          Status{failure->load(), "exact planar scratch allocation failed"};
+    if (cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, "exact planar callback cancelled"};
+    if (!status.ok())
+      return status;
+    if (current && !current())
+      return Status{ErrorCode::Stale, "plan changed before exact publication"};
+    return validate_only ? Status::success() : window.commit(cancellation);
+  } catch (const std::bad_alloc&) {
+    return Status{ErrorCode::ResourceExhausted,
+                  "exact planar allocation failed"};
+  } catch (...) {
+    return Status{ErrorCode::OperationFailed, "exact planar callback threw"};
   }
 }
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderPixelOE VERSION 1.0.0 LANGUAGES CXX)
-find_package(Photospider 0.25 CONFIG REQUIRED COMPONENTS operation_sdk kernel)
+find_package(Photospider 0.27 CONFIG REQUIRED COMPONENTS operation_sdk kernel)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(SLANGC slangc REQUIRED)
 set(CMAKE_CXX_STANDARD 17)

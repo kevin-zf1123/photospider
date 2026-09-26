@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.26.0
+  VERSION 0.27.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -144,6 +144,9 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_delay.cpp
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
   plugins/ops/00-foundation/core_identity.cpp
+  plugins/ops/02-format-color/alpha_authoring.cpp
+  plugins/ops/02-format-color/channel_literal_like.cpp
+  plugins/ops/02-format-color/alpha_operations.cpp
   plugins/ops/02-format-color/channel_extraction.cpp
   plugins/ops/02-format-color/model_conversion.cpp
   plugins/ops/02-format-color/model_math.cpp
@@ -569,6 +572,7 @@ add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing EXCLUDE_FROM_ALL)
 add_subdirectory(examples/metadata_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/model_conversion_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/alpha_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/metadata_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
@@ -754,6 +758,12 @@ if(BUILD_TESTING)
   add_dependencies(test_expression_operations expression_contract_fixture)
   photospider_add_test(test_metadata_assignment Photospider::kernel tests/integration/test_metadata_assignment.cpp)
   target_include_directories(test_metadata_assignment PRIVATE examples/numeric_workflow)
+  photospider_add_test(test_alpha_operations Photospider::kernel tests/integration/test_alpha_operations.cpp)
+  photospider_add_test(test_alpha_math Photospider::kernel tests/unit/test_alpha_math.cpp)
+  target_include_directories(test_alpha_math PRIVATE plugins/ops src/lib)
+  target_compile_options(test_alpha_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+  photospider_add_test(test_alpha_exact_contract Photospider::kernel tests/unit/test_alpha_exact_contract.cpp)
+  target_include_directories(test_alpha_exact_contract PRIVATE src/lib)
   photospider_add_test(test_channel_editing Photospider::kernel tests/integration/test_channel_editing.cpp)
   photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
   target_include_directories(test_channel_assembly PRIVATE examples/numeric_workflow)
@@ -936,7 +946,8 @@ if(BUILD_TESTING)
   target_include_directories(test_result_metadata_budget PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   target_include_directories(test_shared_results PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
-  target_include_directories(test_resources PRIVATE src/lib)
+  photospider_add_test(test_resource_internals photospider_test_kernel tests/unit/test_resource_internals.cpp)
+  target_include_directories(test_resource_internals PRIVATE src/lib)
   photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)

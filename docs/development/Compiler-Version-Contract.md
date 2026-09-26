@@ -57,22 +57,30 @@ consumers must rebuild. Base operation/provider ABI, WorkflowDocument, TDM4 and
 OperationTraits17 remain unchanged. The independent PixelOE plugin and workflow
 are built with `find_package(Photospider 0.24)` and exercise the new boundary.
 
-Package 0.25.0 adds the synchronous borrowed `consume_work` service to
-`PlanarOperationInvocation` and extends `OperationRegistry::invoke_planar`.
-This breaks the public C++ layout and call ABI. Rebuild the kernel, native C++
-callbacks and installed consumers together; mixing previously compiled C++
-objects or shared libraries across this boundary is unsupported. The installed
-SameMinorVersion gate accepts 0.25 and rejects a 0.24 request. OperationTraits18,
-stage identity domains, C operation ABI9, planar C extension v1, provider ABI1,
-WorkflowDocument schema3 and TDM4 are unchanged.
+Package 0.27.0 provides the combined FMT-04/05, FMT-09, FMT-10 and FMT-11
+C++ interface. `PlanarOperationInvocation` includes exact mapped inputs,
+validation-only invocation, numeric reporting and the synchronous borrowed
+`consume_work` service. `OperationDefinition` includes mapped validation;
+`OperationTraits` includes exact planar dependency capability. Public
+`TensorDescription`, `TensorInterpretation` and metadata records include model
+coordinates. Rebuild the kernel, native C++ plugins and installed consumers
+together. Mixing objects compiled against any source branch is unsupported.
 
-Package 0.26.0 changes the planar `consume_work` callback to return a borrowed
-`const Status&` and adds `ResourceBudget::try_consume`. Success leaves the
-caller's failure object unchanged and admits all work dimensions atomically.
-The returned checkpoint status is valid until the next checkpoint or callback
-return; copy a failure before retaining it. Native C++ callbacks and consumers
-must rebuild together. The installed gate accepts 0.26 and rejects 0.25.
-The C ABI and identity/schema domains listed above remain unchanged.
+`consume_work` returns `const Status&`, borrowed until the next checkpoint or
+callback return; copy a failure before retaining it. `ResourceBudget::try_consume`
+admits all work dimensions atomically and leaves the caller's failure object
+unchanged on success. Both normal and exact planar callbacks receive sticky work
+admission and numeric reporting services, including without a managed root.
+
+`SameMinorVersion` accepts 0.27 requests no newer than the installed version and
+rejects 0.23 through 0.26. Standalone examples and PixelOE request 0.27. Shared
+libraries use VERSION 0.27.0 and SOVERSION 0.27. Rebuild previously unversioned
+binary consumers in a clean installation prefix; static consumers must relink.
+
+Tensor-description encoding uses canonical TDM4/TDM5 selection as specified in
+[Tensor Semantic Metadata](../kernel-architecture/Tensor-Semantic-Metadata.md).
+OperationTraits is 18; operation C ABI9, planar C extension v1, provider ABI1
+and WorkflowDocument schema3 remain separate compatibility axes.
 
 ## Digests
 
@@ -82,7 +90,7 @@ together. OperationTraits is now **18**. Semantic and physical domains are
 `semantic-graph-ir-v16` and `physical-plan-v16`. The unchanged outer
 `plan-cache-key-v15` includes the new physical digest; the optimizer remains
 `optimizer-v5-canonical-noop`. C operation ABI **9**, provider ABI **1**,
-WorkflowDocument schema **3**, and TDM4 are unchanged. Historical package
+WorkflowDocument schema **3** remain unchanged; tensor facets use TDM4/TDM5. Historical package
 sections below describe their versions at delivery.
 
 `DataMovementKind::BitwiseMapped` is an explicit exact-bit value relation,
@@ -460,21 +468,3 @@ workflow acceptance. The installed consumer exercises this structural workflow,
 C SDK/header consumers and generic execution facilities. Older sections above
 record their respective delivery contracts; they do not reinstate retired image
 execution in package 0.19.
-
-## Package 0.25.0: FMT-11 C++ ABI boundary
-
-FMT-11 adds model-coordinate fields to public `TensorDescription`,
-`TensorInterpretation` and metadata value records. The package is 0.25.0;
-`SameMinorVersion` accepts the 0.25 family only (subject to requested version not
-exceeding the installed version), and rejects 0.23/0.24 consumers. Rebuild all C++
-applications and plugins that exchange these objects. Installed examples and
-PixelOE request 0.25. The shared library uses VERSION 0.25.0 and SOVERSION 0.25.
-An old binary linked to a previously unversioned library is not retroactively
-protected by this new SONAME: use a clean prefix and rebuild it; do not replace
-its library beneath a running process. Static consumers must relink too.
-
-The operation C ABI and data-provider C ABI remain unchanged. WorkflowDocument
-and existing identity-framing versions are unchanged; TDM5 bytes are included
-in the existing facet identity. TDM4 retains its existing meaning and canonical
-v4/v5 selection is documented in Tensor-Semantic-Metadata. These are independent
-version boundaries, not a promise of C++ layout compatibility.

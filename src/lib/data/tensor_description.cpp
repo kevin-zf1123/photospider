@@ -224,7 +224,11 @@ Status validate_structure(const TensorDescription& value) {
         !valid_interpretation(group.interpretation) ||
         group.interpretation.model.empty() ||
         (!group.interpretation.association.empty() &&
-         group.interpretation.association != "straight"))
+         group.interpretation.association != "straight" &&
+         !(group.interpretation.association == "premultiplied" &&
+           value.association == "premultiplied" && group.alpha &&
+           (group.interpretation.model == "rgb" ||
+            group.interpretation.model == "gray"))))
       return invalid("invalid explicit color group");
     const std::map<std::string, std::vector<std::string>> roles{
         {"rgb", {"red", "green", "blue"}},

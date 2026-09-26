@@ -6,6 +6,8 @@ namespace ps::plugin_internal {
 Status register_rgb_basis(OperationRegistry* registry);
 Status register_metadata_assignment(OperationRegistry* registry);
 Status register_channel_assembly(OperationRegistry* registry);
+Status register_channel_literal_like(OperationRegistry* registry);
+Status register_alpha_operations(OperationRegistry* registry);
 Status register_channel_extraction(OperationRegistry* registry);
 Status register_model_conversions(OperationRegistry* registry);
 Status register_numeric_conversion(OperationRegistry* registry);

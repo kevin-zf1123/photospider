@@ -1,6 +1,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "support/fmt_handoff.hpp"
@@ -95,6 +96,59 @@ int main() {
     GraphContext graph(document);
     require(!Compiler(registry).compile(graph).ok() && probe->callbacks == 0,
             "malformed movement declaration accepted");
+  }
+  // Exact planar computation is an explicit, sealed capability. Merely having
+  // dependency pieces must not opt an unrelated operation into this path.
+  for (unsigned bad = 0; bad < 4; ++bad) {
+    auto exact_probe = std::make_shared<Probe>();
+    OperationRegistry exact_registry;
+    auto op = probe_operation(exact_probe);
+    op.traits.planar_exact_dependencies = true;
+    if (bad == 0)
+      op.traits.planar_storage_capable = false;
+    if (bad == 1)
+      op.planar_callback = {};
+    if (bad == 2)
+      op.start_dependency = {};
+    if (bad == 3)
+      op.prepare_static = {};
+    require(!exact_registry.register_operation(std::move(op)).ok() &&
+                exact_probe->callbacks == 0,
+            "incomplete exact planar capability accepted");
+  }
+  for (unsigned bad = 0; bad < 3; ++bad) {
+    auto exact_probe = std::make_shared<Probe>();
+    auto exact_registry = std::make_shared<OperationRegistry>();
+    auto corrupt = [bad](OperationOutputSpecialization& out) {
+      if (bad == 0)
+        out.static_dependency_pieces.reset();
+      if (bad == 1)
+        out.regional_atomic = false;
+      if (bad == 2)
+        out.data_movement = DataMovementKind::BitwiseMapped;
+    };
+    auto op = probe_operation(exact_probe, false, DataMovementViewPolicy::Auto,
+                              corrupt);
+    op.traits.planar_exact_dependencies = true;
+    take(exact_registry->register_operation(std::move(op)));
+    take(exact_registry->freeze());
+    GraphContext exact_graph(document);
+    require(!Compiler(exact_registry).compile(exact_graph).ok() &&
+                exact_probe->callbacks == 0,
+            "malformed prepared exact planar contract accepted");
+  }
+  {
+    auto exact_probe = std::make_shared<Probe>();
+    auto exact_registry = std::make_shared<OperationRegistry>();
+    auto op = probe_operation(exact_probe);
+    op.traits.planar_exact_dependencies = true;
+    take(exact_registry->register_operation(std::move(op)));
+    take(exact_registry->freeze());
+    GraphContext exact_graph(document);
+    const auto exact_compiled =
+        take(Compiler(exact_registry).compile(exact_graph));
+    require(exact_compiled.semantic.digest().value != ordinary_digest,
+            "exact planar capability absent from canonical identity");
   }
   // Unsorted disjoint pieces must not silently reverse a zero-copy result.
   auto probe = std::make_shared<Probe>();

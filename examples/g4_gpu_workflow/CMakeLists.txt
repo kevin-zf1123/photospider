@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderGpuDependencyWorkflow LANGUAGES C CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.25 CONFIG REQUIRED COMPONENTS kernel operation_sdk)
+  find_package(Photospider 0.27 CONFIG REQUIRED COMPONENTS kernel operation_sdk)
 endif()
 add_executable(test_gpu_fragment_execution main.cpp)
 target_link_libraries(test_gpu_fragment_execution PRIVATE Photospider::kernel)

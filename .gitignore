@@ -263,3 +263,10 @@ __pycache__/
 !examples/rgb_basis_performance/*.md
 !examples/rgb_basis_performance/CMakeLists.txt
 !tests/fixtures/generate_fmt10_oracles.py
+# FMT-04/05 independent oracle and performance tooling.
+!tests/support/generate_alpha_golden.py
+!examples/alpha_performance/
+!examples/alpha_performance/*.cpp
+!examples/alpha_performance/*.py
+!examples/alpha_performance/*.md
+!examples/alpha_performance/CMakeLists.txt
