@@ -1,8 +1,7 @@
 # Paged four-connected components and area index
 
 Package 0.10 exposes `make_component_operation`, `component_area_schema` and
-`component_filter_schema` through the installed C++ API. C operation ABI 9 and
-the existing Float32 `mask.components` compact-label behavior are unchanged.
+`component_filter_schema` through the installed C++ API. The factory uses C operation ABI 9.
 
 ## Public profile
 

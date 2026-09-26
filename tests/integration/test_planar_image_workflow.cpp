@@ -736,13 +736,26 @@ int workflow() {
       invalid_planar_registry.register_operation(std::move(unsupported_typed))
           .code == ErrorCode::InvalidArgument);
 
-  auto base_operations = make_default_operation_registry();
   auto inferred_registry = std::make_shared<OperationRegistry>();
   unsigned legacy_callbacks = 0;
   OperationDefinition inferred_mask;
   inferred_mask.key = "test.inferred_mask";
-  inferred_mask.traits =
-      base_operations->find_traits("mask.threshold").take_value();
+  inferred_mask.traits.input_count = 1;
+  inferred_mask.traits.input_schema.resize(1);
+  auto& mask_port = inferred_mask.traits.input_schema[0];
+  mask_port.kind = OperationPortKind::Typed;
+  mask_port.rank = 2;
+  mask_port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
+  mask_port.semantic_kind =
+      static_cast<std::uint32_t>(SemanticKind::ScalarField);
+  auto& mask_output = inferred_mask.traits.outputs[0];
+  mask_output.output_element_type = ElementType::Float32;
+  mask_output.shape_rule = OperationShapeRule::PreserveFirstInput;
+  mask_output.requires_dense_output = true;
+  mask_output.output_facets = {
+      encode_semantic(coverage_semantics()).take_value()};
+  mask_output.output_semantic_rule = OperationSemanticRule::Establish;
+  mask_output.output_schema.kind = OperationPortKind::Typed;
   inferred_mask.callback = [&](const OperationInvocation& call) {
     ++legacy_callbacks;
     return Result<Value>(call.inputs[0]);
@@ -778,12 +791,12 @@ int workflow() {
           .take_value();
   const std::vector<Value> mask_input{scalar_field};
   const std::vector<Region> mask_demand{scalar_field.region()};
-  const std::map<std::string, ParameterValue> threshold{{"threshold", 0.0}};
-  PS_CHECK(
-      inferred_registry
-          ->invoke("test.inferred_mask", {mask_input, mask_demand, threshold})
-          .status()
-          .code == ErrorCode::TypeMismatch);
+  const std::map<std::string, ParameterValue> mask_parameters;
+  PS_CHECK(inferred_registry
+               ->invoke("test.inferred_mask",
+                        {mask_input, mask_demand, mask_parameters})
+               .status()
+               .code == ErrorCode::TypeMismatch);
   auto generic_field =
       Value::create({ElementType::Float32, {1, 1, 3}}, Region::whole({1, 1, 3}),
                     {0, {12, 12, 4}}, std::vector<std::uint8_t>(12))

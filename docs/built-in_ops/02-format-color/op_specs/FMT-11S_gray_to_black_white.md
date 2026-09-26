@@ -35,7 +35,7 @@ family; no missing semantic interpretation is inferred from sample magnitudes.
 
 ## Mathematics, sample support and errors
 
-Compile hard x>=threshold, semantic finite validation and exact typed 0/1 selection plus metadata. Retain shape/slots. The current Whole mask.threshold is not a conforming implementation.
+Compile hard x>=threshold, semantic finite validation and exact typed 0/1 selection plus metadata. Retain shape/slots. The required MASK-03 primitive must satisfy this planar contract.
 
 Exact same-position support: selected Gray only; all other channels bypass.
 Take unions for multiple requested outputs and the forward relation for dirty

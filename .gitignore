@@ -82,6 +82,11 @@
 !examples/numeric_workflow/*.md
 !examples/numeric_workflow/*.py
 !examples/numeric_workflow/CMakeLists.txt
+!examples/mask_morphology_oracle/
+!examples/mask_morphology_oracle/*.py
+!examples/mask_morphology_oracle/*.md
+!examples/mask_morphology_oracle/*.json
+!docs/built-in_ops/04-mask-morphology/op_specs/catalog.json
 !examples/
 !examples/components_workflow/
 !examples/components_workflow/*.cpp

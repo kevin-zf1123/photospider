@@ -1,66 +1,117 @@
 # 蒙版、选区与形态学
 
-2026-09-13：另已交付 `make_component_operation` 的 `components4.labels/area/filter` 分页链：UInt8 HW 非零前景、四连通 MinPixel IDs、动态/空属性表和精确 ObjectId 关联，见[Paged components](../../kernel-architecture/Paged-Components.md)。它与原 `mask.components` 的 Float32/compact labels 契约分开；EDT、flood、通用 hole fill 等仍 Proposed。
+## 基本术语
 
-已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
+| 术语 | 含义 |
+| --- | --- |
+| Coverage | Float32/Float64 的有限 `[0,1]` 软 mask。 |
+| Binary | Float32/Float64 的精确 `0/1` 二值 mask。未来可能增加 Bool 表示，当前不规定其布局和接口。 |
+| Field | 有限 Float32/Float64 数值场。 |
+| Distance | 带度量、单位和几何依据的距离场；完整距离用规定的 Inf 表示无特征点。 |
+| Labels | Int64 对象编号，0 表示背景。 |
+| Region | 请求的输出坐标集合；局部邻域和全局依赖由各成员规定。 |
 
-状态Proposed。基本mask代数/有限footprint/离散EDT为D1，连续轮廓offset与复杂区域重建为D2。mask为Float32 `[H,W]`，finite[0,1]；SDF为signed距离场，label为Int64且0表示背景。默认画布外0，扩大画布须显式pad。
+## 基础数值规定
 
-首版 threshold、四连通 labels、独立 count/area/bbox 已通过公开入口实现，范围、运行与结果见[组件算子](../../kernel-architecture/zh/Component-Operations.zh.md)；下述其余目录继续 Proposed。
+数值舍入、strict/accelerated 精度与浮点环境规定统一继承
+[NUM 共同契约](../01-numeric/op_specs/NUM_common_contract.md)和
+[NUM accelerated 契约](../01-numeric/op_specs/NUM_accelerated_contract.md)。
+MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶段和数值域。
+二值消费者不隐式阈值化。完整距离的无特征点 Inf 与有限计算溢出分开处理。
+完整规定见[共同契约](op_specs/MASK_common_contract.md)。各规格的实现状态在文件头标明。
 
-## 软mask逻辑
+## 族目录
 
-| algebra | AND | OR | XOR/对称差 | NOT |
-| --- | --- | --- | --- | --- |
-| binary | 逻辑与 | 逻辑或 | 逻辑异或 | 1-A |
-| fuzzy（建议默认） | min(A,B) | max(A,B) | abs(A-B) | 1-A |
-| independent_coverage | AB | A+B-AB | A+B-2AB | 1-A |
+| 族 | 功能 | 成员数 | 成员 |
+| --- | --- | ---: | --- |
+| [MASK-01](op_specs/MASK-01_boolean_contract.md) | Boolean / 软逻辑 | 3 | binary_logic、fuzzy_logic、independent_coverage |
+| [MASK-02](op_specs/MASK-02_invert_contract.md) | 反相 | 1 | invert |
+| [MASK-03](op_specs/MASK-03_threshold_contract.md) | 阈值与软区间 | 5 | threshold、range_mask、soft_threshold、soft_range、nonzero_to_binary |
+| [MASK-04](op_specs/MASK-04_color_range_contract.md) | 颜色范围 | 7 | coordinate_range、lab76_range、hue_range、lab2000_range、fit_color_groups_table、fit_color_groups_image、apply_color_groups |
+| [MASK-05](op_specs/MASK-05_morphology_contract.md) | 膨胀 / 腐蚀 | 2 | dilate、erode |
+| [MASK-06](op_specs/MASK-06_open_close_contract.md) | 开 / 闭运算 | 2 | opening、closing |
+| [MASK-07](op_specs/MASK-07_offset_contract.md) | 几何 offset | 4 | offset_discrete、shift_distance_field、threshold_distance_field、offset_polygon_grid |
+| [MASK-08](op_specs/MASK-08_gaussian_contract.md) | 高斯羽化 | 1 | gaussian_feather |
+| [MASK-09](op_specs/MASK-09_distance_feather_contract.md) | 距离羽化 | 2 | distance_feather_linear、distance_feather_smoothstep |
+| [MASK-10](op_specs/MASK-10_distance_transform_contract.md) | 距离场 / nearest | 4 | nearest_feature、signed_center_distance、truncated_nearest_feature、truncated_signed_distance |
+| [MASK-11](op_specs/MASK-11_flood_contract.md) | flood / region grow | 3 | flood_fixed、flood_neighbor、flood_barrier |
+| [MASK-12](op_specs/MASK-12_components_contract.md) | 连通分量与属性 | 7 | label_compact、label_min_pixel、component_count、component_areas、component_bboxes、component_bundle、filter_area_index |
+| [MASK-13](op_specs/MASK-13_cleanup_contract.md) | 填洞 / 去小区域 | 3 | fill_holes、remove_small、fill_small_holes |
+| [MASK-14](op_specs/MASK-14_residuals_contract.md) | 边界与形态学残差 | 5 | morph_gradient、inner_border、outer_border、white_top_hat、black_top_hat |
+| [MASK-15](op_specs/MASK-15_topology_reconstruction_contract.md) | 骨架 / 重建 | 7 | thin_topological、thin_distance_ordered、reconstruct_dilate、reconstruct_erode、thin_zhang_suen、thin_guo_hall、medial_axis_maximal_balls |
+| [MASK-16](op_specs/MASK-16_close_gap_contract.md) | 封口填充 | 3 | bridge_axis_gaps、fill_axis_gaps、fill_morphological_gaps |
+| [MASK-17](op_specs/MASK-17_apply_contract.md) | 应用 / 限制样本 | 4 | affect_result、multiply_mask、restricted_mean、apply_alpha |
 
-MASK-01 `boolean`必须声明algebra，MASK-02 `invert`相对画布执行。A=B=.5时fuzzy结果为.5/.5/0，independent结果为.25/.75/.5。独立coverage假设与alpha合成相容，但只知道两个平均coverage无法确定真实子像素重合面积；精确几何Boolean应先组合路径再光栅化。[^comp]
+## 逐成员入口
 
-## 算子目录
-
-| ID / 功能 | 输入 → 输出 | 参数、算法 | Region/验收 |
+| ID / spec | 类别 | 拟议 key / template | oracle entry |
 | --- | --- | --- | --- |
-| MASK-03 threshold/range | scalar→mask | threshold=.5、>=；soft width≥0 | E；端点、超范围与NaN策略 |
-| MASK-04 color range | color+selector→mask | space、target、distance、inner/outer radius | E/W统计；中性、hue接缝 |
-| MASK-05 dilate/erode | binary/gray mask→mask | footprint circle/square/diamond，radius=1px建议；max/min | H；r=0 identity、核大于图、边界 |
-| MASK-06 open/close | mask→mask | erode→dilate / 反序，同footprint | 两步支撑累积；细桥、小洞 |
-| MASK-07 geometric offset | contour/SDF→mask或SDF | signed radius，L2默认、L∞square/L1diamond | 连续边界与离散中心集合分模式；非整数必测 |
-| MASK-08 Gaussian feather | mask→mask | sigma=1px建议、truncate/radius显式 | H；DC/边界；与距离羽化不同 |
-| MASK-09 distance feather | SDF→mask | inner/outer widths、curve、轮廓位置 | E；0等值线和过渡宽度 |
-| MASK-10 EDT/nearest feature | binary→distance/nearest coords | metric、spacing、signed/truncated、背景标签 | W；小图穷举最近点oracle |
-| MASK-11 flood/region grow | image+seed(s)→mask | 4连接默认，8可选；与种子或邻居比较明确 | W；低对比大域、对角接触 |
-| MASK-12 label components | binary→labels+属性 | connectivity=4，稳定label顺序建议按首像素 | W；0背景、细桥、跨tile组件 |
-| MASK-13 fill holes/remove small | mask→mask | area px²、threshold与等号、foreground/background connectivity | W；孔洞与外部连通区不能混淆 |
-| MASK-14 border/top-hat/black-hat | mask→field/mask | difference of morphology具名、输出范围 | H；灰度残差有signed语义时另类型 |
-| MASK-15 skeleton/reconstruct | mask+marker?→skeleton/mask | topology、停止条件、distance weighting | W/迭代；连通性、端点、去枝规则 |
-| MASK-16 close-gap fill | line/reference layers+seed→region | gap max px、连接候选、容差；仅临时边界 | W；原线稿保持、开口大小与误填 |
-| MASK-17 combine/apply | image+mask→image | affect_result与restrict_samples分开 | 前者mix原图/滤镜结果，后者改变统计分母 |
+| [MASK-01A — Binary Boolean operations](op_specs/MASK-01A_binary_logic.md) | primitive / D1_draft | `mask.binary_logic_strict` | `binary_logic` |
+| [MASK-01B — Fuzzy mask operations](op_specs/MASK-01B_fuzzy_logic.md) | primitive / D1_draft | `mask.fuzzy_logic_strict` | `fuzzy_logic` |
+| [MASK-01C — Independent-coverage operations](op_specs/MASK-01C_independent_coverage.md) | primitive / D1_draft | `mask.independent_coverage_strict` | `independent_coverage` |
+| [MASK-02A — Invert coverage on the current canvas](op_specs/MASK-02A_invert.md) | primitive / D1_draft | `mask.invert_strict` | `invert` |
+| [MASK-03A — Hard scalar threshold](op_specs/MASK-03A_threshold.md) | primitive / D1_draft | `mask.threshold_strict` | `threshold` |
+| [MASK-03B — Hard interval mask](op_specs/MASK-03B_range_mask.md) | primitive / D1_draft | `mask.range_mask_strict` | `range_mask` |
+| [MASK-03C — Soft centered threshold](op_specs/MASK-03C_soft_threshold.md) | primitive / D1_draft | `mask.soft_threshold_strict` | `soft_threshold` |
+| [MASK-03D — Soft interval selector](op_specs/MASK-03D_soft_range.md) | primitive / D1_draft | `mask.soft_range_strict` | `soft_range` |
+| [MASK-03E — Explicit UInt8 truthiness adapter](op_specs/MASK-03E_nonzero_to_binary.md) | primitive / D1_draft | `mask.nonzero_to_binary_strict` | `nonzero_to_binary` |
+| [MASK-04A — Scaled coordinate-distance mask](op_specs/MASK-04A_coordinate_range.md) | primitive / D1_draft | `mask.coordinate_range_strict` | `coordinate_range` |
+| [MASK-04B — Normalized-Lab DeltaE76 selector](op_specs/MASK-04B_lab76_range.md) | primitive / D1_draft | `mask.lab76_range_strict` | `lab76_range` |
+| [MASK-04C — Periodic hue selector with explicit neutral policy](op_specs/MASK-04C_hue_range.md) | primitive / D1_draft | `mask.hue_range_strict` | `hue_range` |
+| [MASK-04D — CIEDE2000 color range](op_specs/MASK-04D_lab2000_range.md) | primitive / D1_draft | `mask.lab2000_range_strict` | `lab2000_range` |
+| [MASK-04E — Fit grouped color samples](op_specs/MASK-04E_fit_color_groups_table.md) | primitive / D1_draft | `mask.fit_color_groups_table_strict` | `fit_color_groups_table` |
+| [MASK-04F — Fit image regions by group ID](op_specs/MASK-04F_fit_color_groups_image.md) | primitive / D1_draft | `mask.fit_color_groups_image_strict` | `fit_color_groups_image` |
+| [MASK-04G — Apply grouped color selection](op_specs/MASK-04G_apply_color_groups.md) | primitive / D1_draft | `mask.apply_color_groups_strict` | `apply_color_groups` |
+| [MASK-05A — Flat dilation](op_specs/MASK-05A_dilate.md) | primitive / D1_draft | `mask.dilate_strict` | `dilate` |
+| [MASK-05B — Flat erosion](op_specs/MASK-05B_erode.md) | primitive / D1_draft | `mask.erode_strict` | `erode` |
+| [MASK-06A — Open a soft or binary mask](op_specs/MASK-06A_opening.md) | primitive / D1_draft | `mask.opening_strict` | `opening` |
+| [MASK-06B — Close a soft or binary mask](op_specs/MASK-06B_closing.md) | primitive / D1_draft | `mask.closing_strict` | `closing` |
+| [MASK-07A — Physical-metric binary center offset](op_specs/MASK-07A_offset_discrete.md) | primitive / D1_draft | `mask.offset_discrete_strict` | `offset_discrete` |
+| [MASK-07B — Shift a signed level set](op_specs/MASK-07B_shift_distance_field.md) | primitive / D1_draft | `mask.shift_distance_field_strict` | `shift_distance_field` |
+| [MASK-07C — Threshold a signed distance/level set](op_specs/MASK-07C_threshold_distance_field.md) | primitive / D1_draft | `mask.threshold_distance_field_strict` | `threshold_distance_field` |
+| [MASK-07D — Continuous polygon offset with fixed sample-grid coverage](op_specs/MASK-07D_offset_polygon_grid.md) | primitive / D2_draft | `mask.offset_polygon_grid_strict` | `offset_polygon_grid` |
+| [MASK-08A — Finite normalized Gaussian mask feather](op_specs/MASK-08A_gaussian_feather.md) | primitive / D1_draft | `mask.gaussian_feather_strict` | `gaussian_feather` |
+| [MASK-09A — Linear signed-distance feather](op_specs/MASK-09A_distance_feather_linear.md) | primitive / D1_draft | `mask.distance_feather_linear_strict` | `distance_feather_linear` |
+| [MASK-09B — Smoothstep signed-distance feather](op_specs/MASK-09B_distance_feather_smoothstep.md) | primitive / D1_draft | `mask.distance_feather_smoothstep_strict` | `distance_feather_smoothstep` |
+| [MASK-10A — Nearest discrete feature and distance](op_specs/MASK-10A_nearest_feature.md) | primitive / D1_draft | `mask.nearest_feature_strict` | `nearest_feature` |
+| [MASK-10B — Signed center-to-opposite-class distance](op_specs/MASK-10B_signed_center_distance.md) | primitive / D1_draft | `mask.signed_center_distance_strict` | `signed_center_distance` |
+| [MASK-10C — Local truncated nearest-feature distance](op_specs/MASK-10C_truncated_nearest_feature.md) | primitive / D1_draft | `mask.truncated_nearest_feature_strict` | `truncated_nearest_feature` |
+| [MASK-10D — Local truncated signed center-distance](op_specs/MASK-10D_truncated_signed_distance.md) | primitive / D1_draft | `mask.truncated_signed_distance_strict` | `truncated_signed_distance` |
+| [MASK-11A — Fixed-seed-range region growing](op_specs/MASK-11A_flood_fixed.md) | primitive / D1_draft | `mask.flood_fixed_strict` | `flood_fixed` |
+| [MASK-11B — Neighbor-relative region growing](op_specs/MASK-11B_flood_neighbor.md) | primitive / D1_draft | `mask.flood_neighbor_strict` | `flood_neighbor` |
+| [MASK-11C — Flood regions bounded by a binary barrier](op_specs/MASK-11C_flood_barrier.md) | primitive / D1_draft | `mask.flood_barrier_strict` | `flood_barrier` |
+| [MASK-12A — Four/eight-connected compact component labels](op_specs/MASK-12A_label_compact.md) | primitive / D1_draft | `mask.label_compact_strict` | `label_compact` |
+| [MASK-12B — Four/eight-connected MinPixel labels](op_specs/MASK-12B_label_min_pixel.md) | primitive / D1_draft | `mask.label_min_pixel_strict` | `label_min_pixel` |
+| [MASK-12C — Count declared positive label IDs](op_specs/MASK-12C_component_count.md) | primitive / D1_draft | `mask.component_count_strict` | `component_count` |
+| [MASK-12D — Associated component area table](op_specs/MASK-12D_component_areas.md) | primitive / D1_draft | `mask.component_areas_strict` | `component_areas` |
+| [MASK-12E — Associated component bounding-box table](op_specs/MASK-12E_component_bboxes.md) | primitive / D1_draft | `mask.component_bboxes_strict` | `component_bboxes` |
+| [MASK-12F — MinPixel labels with complete component attributes](op_specs/MASK-12F_component_bundle.md) | primitive / D1_draft | `mask.component_bundle_strict` | `component_bundle` |
+| [MASK-12G — Filter labels through their associated area index](op_specs/MASK-12G_filter_area_index.md) | primitive / D1_draft | `mask.filter_area_index_strict` | `filter_area_index` |
+| [MASK-13A — Fill every enclosed binary hole](op_specs/MASK-13A_fill_holes.md) | primitive / D1_draft | `mask.fill_holes_strict` | `fill_holes` |
+| [MASK-13B — Remove small foreground components](op_specs/MASK-13B_remove_small.md) | primitive / D1_draft | `mask.remove_small_strict` | `remove_small` |
+| [MASK-13C — Fill enclosed holes up to an inclusive size](op_specs/MASK-13C_fill_small_holes.md) | primitive / D1_draft | `mask.fill_small_holes_strict` | `fill_small_holes` |
+| [MASK-14A — Morphological gradient](op_specs/MASK-14A_morph_gradient.md) | primitive / D1_draft | `mask.morph_gradient_strict` | `morph_gradient` |
+| [MASK-14B — Inner morphological border](op_specs/MASK-14B_inner_border.md) | primitive / D1_draft | `mask.inner_border_strict` | `inner_border` |
+| [MASK-14C — Outer morphological border](op_specs/MASK-14C_outer_border.md) | primitive / D1_draft | `mask.outer_border_strict` | `outer_border` |
+| [MASK-14D — White top hat](op_specs/MASK-14D_white_top_hat.md) | primitive / D1_draft | `mask.white_top_hat_strict` | `white_top_hat` |
+| [MASK-14E — Black top hat](op_specs/MASK-14E_black_top_hat.md) | primitive / D1_draft | `mask.black_top_hat_strict` | `black_top_hat` |
+| [MASK-15A — Row-major topology-preserving binary thinning](op_specs/MASK-15A_thin_topological.md) | primitive / D1_draft | `mask.thin_topological_strict` | `thin_topological` |
+| [MASK-15B — Distance-priority topology thinning with radius](op_specs/MASK-15B_thin_distance_ordered.md) | primitive / D1_draft | `mask.thin_distance_ordered_strict` | `thin_distance_ordered` |
+| [MASK-15C — Grayscale reconstruction by dilation](op_specs/MASK-15C_reconstruct_dilate.md) | primitive / D1_draft | `mask.reconstruct_dilate_strict` | `reconstruct_dilate` |
+| [MASK-15D — Grayscale reconstruction by erosion](op_specs/MASK-15D_reconstruct_erode.md) | primitive / D1_draft | `mask.reconstruct_erode_strict` | `reconstruct_erode` |
+| [MASK-15E — Zhang-Suen binary thinning](op_specs/MASK-15E_thin_zhang_suen.md) | primitive / D1_draft | `mask.thin_zhang_suen_strict` | `thin_zhang_suen` |
+| [MASK-15F — Guo-Hall binary thinning](op_specs/MASK-15F_thin_guo_hall.md) | primitive / D1_draft | `mask.thin_guo_hall_strict` | `thin_guo_hall` |
+| [MASK-15G — Maximal digital-ball axis](op_specs/MASK-15G_medial_axis_maximal_balls.md) | primitive / D1_draft | `mask.medial_axis_maximal_balls_strict` | `medial_axis_maximal_balls` |
+| [MASK-16A — Bridge bounded horizontal and vertical barrier gaps](op_specs/MASK-16A_bridge_axis_gaps.md) | primitive / D2_draft | `mask.bridge_axis_gaps_strict` | `bridge_axis_gaps` |
+| [MASK-16B — Flood using a temporary axis-gap boundary](op_specs/MASK-16B_fill_axis_gaps.md) | composite_workflow / D2_draft | `mask.fill_axis_gaps` | `fill_axis_gaps` |
+| [MASK-16C — Flood using a temporary morphology-closed boundary](op_specs/MASK-16C_fill_morphological_gaps.md) | composite_workflow / D2_draft | `mask.fill_morphological_gaps` | `fill_morphological_gaps` |
+| [MASK-17A — Interpolate a processed result by a mask](op_specs/MASK-17A_affect_result.md) | primitive / D1_draft | `mask.affect_result_strict` | `affect_result` |
+| [MASK-17B — Gate or scale selected numeric channels](op_specs/MASK-17B_multiply_mask.md) | primitive / D1_draft | `mask.multiply_mask_strict` | `multiply_mask` |
+| [MASK-17C — Mask-restricted local mean with denominator validity](op_specs/MASK-17C_restricted_mean.md) | primitive / D1_draft | `mask.restricted_mean_strict` | `restricted_mean` |
+| [MASK-17D — Apply coverage to internal straight-image alpha only](op_specs/MASK-17D_apply_alpha.md) | primitive / D1_draft | `mask.apply_alpha_strict` | `apply_alpha` |
 
-灰度dilation是邻域最大值，作用在软mask上无需先阈值化。矩形min/max可两遍滑窗做到与窗口宽度无关的一维O(N)，任意圆形footprint和任意dtype不能自动继承同样复杂度。[^gray][^max]
+## 相关入口
 
-## 非整数扩缩与距离
-
-离散模式按像素中心的L2距离对实数r阈值化，结果仍随离散距离阶梯变化。连续模式先取得明确的矢量轮廓或重建等值线，再offset并计算像素coverage；从软mask的.5等值线开始会丢弃原软权重，必须显式选择。
-
-真正signed distance约定内部d<0。膨胀r≥0得到`d<=r`，腐蚀得到`d<=-r`。distance feather要求inner/outer≥0；和>0时用`1-smoothstep(-inner,outer,d)`，inner=outer>0时轮廓coverage=.5；非对称宽度会改变该值。两者均0时使用hard threshold `d<=0`，不调用smoothstep。验收双零和单侧零宽。非方形pixel spacing必须进入度量。
-
-Felzenszwalb–Huttenlocher的规则网格平方EDT为O(HW)，精确性针对离散输入中心距离，并非任意亚像素曲线距离。GPU PBA是精确EDT候选；Jump Flooding为近似，错误等级独立。[^edt][^pba][^jfa]
-
-## 全局行为与使用
-
-flood、label、hole fill、skeleton、reconstruction存在跨tile依赖，不能申请一个固定小halo就声称与全图相同。截断距离场可以设计有限支持版本，但“超截断全部同值”的输出语义与全距离图不同。参考实现CPU优先，label tie/order必须在并行路径固定。
-
-典型流程：`参考线稿→close-gap→flood→remove small→offset .5px→feather→apply color`；`chroma selector→guided refine→mask grade`；`shape/path→Boolean→SDF→边缘效果`。
-
-验收覆盖空/满、单点、孔洞、对角连接、细桥、触边、r=.25/.5/1.25、4/8邻域和非正方形spacing。全空/全满的EDT若无feature应采用显式无效标记/截断值策略，不能输出未经声明的Inf进入finite类型。
-
-## 来源
-
-[^comp]: W3C，[*Compositing and Blending Level1*](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators)，2024CRD；coverage代数。
-[^gray]: SciPy，[*grey_dilation*](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.grey_dilation.html)，访问v1.18.0。
-[^max]: SciPy，[*maximum_filter1d*](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.maximum_filter1d.html)，访问v1.18.0。
-[^edt]: Felzenszwalb、Huttenlocher，[*Distance Transforms of Sampled Functions*](https://cs.brown.edu/people/pfelzens/papers/dt-final.pdf)，2012-09-02。
-[^pba]: Cao等，[*Parallel Banding Algorithm*](https://www.comp.nus.edu.sg/~tants/pba.html)，I3D2010，作者页含2019更新。
-[^jfa]: Rong、Tan，[*Jump Flooding in GPU*](https://www.comp.nus.edu.sg/~tants/jfa.html)，I3D2006。
+- [研究资料](research-sources.md)
+- [数学 oracle](../../../examples/mask_morphology_oracle/README.md)
+- [机器目录](op_specs/catalog.json)

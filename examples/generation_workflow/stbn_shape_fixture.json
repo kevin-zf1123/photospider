@@ -1,0 +1,39 @@
+{
+  "rank": [
+    [
+      [
+        0,
+        5
+      ],
+      [
+        2,
+        7
+      ]
+    ],
+    [
+      [
+        4,
+        1
+      ],
+      [
+        6,
+        3
+      ]
+    ]
+  ],
+  "manifest": {
+    "shape": [
+      2,
+      2,
+      2
+    ],
+    "count": 8,
+    "sha256": "835d432948521f63c472cdab49189854a9b3f37a80d11d044d7f3044a3170195",
+    "encoding": "little_endian_int64",
+    "qualification": "raw_rank_fixture_only; no blue/STBN certification",
+    "asset_origin": "synthetic_test_fixture",
+    "intended_use": "tests_only",
+    "blue_noise_approved": false,
+    "stbn_approved": false
+  }
+}

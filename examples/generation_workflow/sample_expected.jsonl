@@ -1,0 +1,14 @@
+{"id": "external-philox-zero", "result": {"words": ["16554d9eca36314c", "db20fe9d672d0fdc", "d7e772cee186176b", "7e68b68aec7ba23b"]}}
+{"id": "coordinate-origin", "result": [{"dtype": "float64", "bits": "400c000000000000"}, {"dtype": "float64", "bits": "bfe0000000000000"}]}
+{"id": "rectangle-quarter", "result": {"dtype": "float64", "bits": "3fd0000000000000"}}
+{"id": "sqrt-two", "result": {"dtype": "float64", "bits": "3ff6a09e667f3bcd"}}
+{"id": "rectangle-center", "result": {"dtype": "float64", "bits": "bff0000000000000"}}
+{"id": "linear-quarter", "result": {"dtype": "float64", "bits": "3fd0000000000000"}}
+{"id": "radial-345", "result": {"dtype": "float64", "bits": "4014000000000000"}}
+{"id": "repeat-negative", "result": {"dtype": "float64", "bits": "3fe8000000000000"}}
+{"id": "transparent-red-blue", "result": [{"dtype": "float64", "bits": "0000000000000000"}, {"dtype": "float64", "bits": "0000000000000000"}, {"dtype": "float64", "bits": "3ff0000000000000"}, {"dtype": "float64", "bits": "3fe0000000000000"}]}
+{"id": "lookup-negative-zero-copy", "result": [{"dtype": "float64", "bits": "8000000000000000"}]}
+{"id": "bowtie-half", "result": {"dtype": "float64", "bits": "3fe0000000000000"}}
+{"id": "internal-shared-edge", "result": {"dtype": "float64", "bits": "bff0000000000000"}}
+{"id": "perlin-lattice-zero", "result": {"dtype": "float64", "bits": "0000000000000000"}}
+{"id": "perlin-quarter", "result": {"dtype": "float64", "bits": "3fc2c00000000000"}}

@@ -34,8 +34,7 @@ PNT-05A 的 `05f81347` 规格和 `6e429e4b` 实现属于当前 `ops-specs` 的�
 | 能力 | 已实现 key | 实现契约 |
 | --- | --- | --- |
 | 数值与统计 | `numeric.add/subtract/multiply/divide`, `numeric.clamp`, `numeric.mean/variance`, `numeric.minimum/maximum/abs`, `numeric.ordered_scan` | [Numeric](../../kernel-architecture/Numeric-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md)、[ordered scan 源码](../../../plugins/ops/01-numeric/numeric_ordered_scan.cpp) |
-| 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.coordinate`, `field.constant`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
-| mask 与旧标签 | `mask.threshold/components/invert/combine/dilate/erode`, `component.count/area/bbox` | [Components](../../kernel-architecture/Component-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
+| 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | 滤镜与分析 | `field.box_mean/gaussian_blur/convolve/correlate`, `analysis.histogram`, `analysis.histogram_out_of_range`, `grade.levels` | [Basic](../../kernel-architecture/Basic-Operations.md)；`field.convolve` 已升级 staged regional，correlate/旧直方图等仍 Whole |
 | 原有 RGBA/mask 链路与 mix | `image.exposure_gain/opacity/gaussian_blur/mask/source_over/downsample_box/brush_circle`, `mask.downsample_box`, `image.mix` | [Image](../../kernel-architecture/Image-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | 动态依赖采样 | `image.stmap`, `numeric.radius_gather`, `numeric.radius_scatter` | [Dependency sampling](../../kernel-architecture/Dependency-Sampling.md)；STMap 是明确边界模式的 bilinear 子集 |
@@ -60,8 +59,7 @@ PNT-05A 仍有编译期 profile/shape 拒绝时机与规格不完全一致的已
 | `*_schema` / `*_spec` | Spectrum、Bands、PathSet、DynamicPoints、Components、PlanarYCbCr、BrushState、IterativeState | 已实现描述、分页字段和校验；Haar/causal brush/diagonal iteration 有限定示例；[表示契约](../../kernel-architecture/Structured-Representations.md) |
 
 表示和示例 helper 已交付的范围分别记录；通用 wavelet、路径布尔/描边、smudge、任意迭代 solver
-仍需专用节点。`analysis.histogram` 与 `statistics.histogram`、`mask.components` 与
-`components4.labels` 具有不同输入和结果契约，不能按名称互换。
+仍需专用节点。`analysis.histogram` 与 `statistics.histogram` 具有不同输入和结果契约，不能按名称互换。
 
 ## 当前契约与剩余边界
 
@@ -76,3 +74,5 @@ PNT-05A 仍有编译期 profile/shape 拒绝时机与规格不完全一致的已
 
 资源、错误及数值边界详见[公共契约](contracts.md)。完整需求目录和 D1/D2/D3 成熟度
 不代表所有条目已成为 registry 节点；后续执行链见[路线图](../14-roadmap/implementation.md)。
+
+2026-09-26：旧测试生成算子 `field.coordinate`、`field.constant` 已删除实现及注册；03-generation新规格尚未实现。

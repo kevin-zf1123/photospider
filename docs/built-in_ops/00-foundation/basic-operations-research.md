@@ -1,5 +1,8 @@
 # Basic operation research and implementation contract
 
+Retirement update, 2026-09-26: `field.coordinate` and `field.constant` have been
+removed without compatibility implementations. Their descriptions below are historical research only.
+
 Status update, 2026-09-13: the twelve families below were implemented by
 `ops@00864936`. This page retains the original 2026-09-11 research contract.
 Current package 0.10.0 / C ABI 9 behavior is documented in
@@ -27,10 +30,8 @@ output. Do not extend ABI, implicit broadcasting or GPU support.
 | curve.sample_linear | Generic Kx2 controls, K>=2, finite values, strictly increasing x. Int64 count 2..1048576; Float64 domain_min<domain_max; String out_of_domain reject/clip. N samples include both domain endpoints, same-dtype generic N output. No y clipping. |
 | curve.sample_monotone | Same interface. PCHIP weighted harmonic interior derivatives, limited one-sided end derivatives; two controls give linear interpolation. Turning y values are allowed. |
 | field.apply_lut_1d | Field plus same-dtype generic N table, N>=2. Explicit domain_min/max and reject/clip. Endpoint-exact linear interpolation. Generic field output; existing lut.apply_1d remains separate. |
-| mask.invert/combine | Canonical Float32 coverage. Invert=1-A. Required operation and/or/xor and algebra fuzzy/independent_coverage. Fuzzy=min/max/abs(A-B); independent=AB/A+B-AB/A+B-2AB. |
 | image.mix | Canonical premultiplied RGBA A/B and HW coverage M. (1-M)A+MB on all four channels. Exact M=0/1 endpoints and identical alpha preservation. |
 | field.box_mean/gaussian_blur | Int64 radius 1..64, square support, clamp boundary. Box divides by full window size. Gaussian Float64 sigma 0..64, zero identity; normalized separable sampled Gaussian, Float64 accumulation/intermediate. |
-| mask.dilate/erode | Int64 radius 0..64, String footprint square/disk. Disk uses dx*dx+dy*dy<=r*r. Gray max/min, outside canvas zero; radius zero identity. Opening/closing are compositions. |
 | field.convolve/correlate | Field plus same-dtype KhxKw kernel; required Int64 anchor_y/x within kernel and String boundary clamp/zero. Same output, no normalization/bias. Correlation reads I[p+j-anchor]; convolution reads I[p+anchor-j]. Row-major Float64 accumulation. |
 | analysis.histogram | Int64 bins 1..1048576, Float64 range_min<range_max. Int64 bins output; equal-width left-closed intervals, final bin includes upper endpoint. Out-of-range samples excluded from bins and counted by analysis.histogram_out_of_range as Int64 [underflow,overflow]. |
 | grade.levels | Finite Float64 black<white, gamma>0, out_min<=out_max. t=clamp((x-black)/(white-black),0,1); out_min+(out_max-out_min)*pow(t,1/gamma). Generic output. |

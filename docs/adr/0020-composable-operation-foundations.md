@@ -252,18 +252,8 @@ All new operations use Whole in this first implementation.
 | `color.rgb_to_xyz/xyz_to_rgb/xyz_to_lab/lab_to_xyz` | Float32 HWC RGB/XYZ/Lab, optionally straight alpha; binary64 coefficients/intermediates, Float32 output, unchanged alpha. Same declared reference white, signed/out-of-gamut values preserved. |
 | `numeric.sample_expression` | Static bounded expression, Float64 start/step and Int64 count>=1; step>0, Float32 `[count]` output with sampled-signal semantics. Dynamic coefficients are Float64 `[K]`, K>=1; no per-run shape changes. |
 | `lut.apply_1d` | Float32 sampled signal plus Float32 `[N]` SampledSignal/Lut table with uniform sample-axis semantics (N>=2); linear interpolation, out-of-domain `reject` default or explicit `clip`; result keeps query shape and drops input semantics. No 3D LUT or channel-coupled interpolation. |
-| `mask.threshold` | Finite Float32 HW scalar field to typed coverage mask; threshold .5 explicitly supplied, comparison `>=`. |
-| `mask.components`, `component.count/area/bbox` | Binary typed mask to Int64 HW labels, then separate count/area/bbox nodes. Four-connectivity, row-major first-pixel labels 1..Kcap, background 0. Capacity Kcap>=1 is static; overflow fails. Count Int64 `{1}` counts foreground components; area Int64 `[Kcap+1]`, bbox Int64 `[Kcap+1,4]` in x_min,y_min,x_max_exclusive,y_max_exclusive order. Background and unused records are zero. |
 
-Component capacity is independently declared by each node in the existing exact
-bounded Int64 range `[1,2^53-1]`. Labels use canonical ScalarField metadata:
-Int64 HW, name/role `component_label`, dimensionless value/channel units, no
-capacity facet. Attribute ports require these exact facets and validate every
-label in `[0,capacity]`; sparse IDs are legal and count means distinct nonzero
-IDs. A producer with a larger declared capacity may feed a smaller consumer when
-actual IDs fit. Capacity limits final components, including merged bridges.
-Count's accounted deduplication workspace is bounded by input samples, not capacity.
-See [component operations](../kernel-architecture/Component-Operations.md).
+See [mask specifications](../built-in_ops/04-mask-morphology/masks.md).
 
 Expression grammar is limited to decimal/scientific numeric literals (no hex,
 NaN or infinity names), x, `c[index]`, parentheses,

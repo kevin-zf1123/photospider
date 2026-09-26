@@ -12,30 +12,6 @@ ps::WorkflowInput ref(std::uint64_t id) {
   return ps::WorkflowNodeOutput{id, "value"};
 }
 }  // namespace
-void basic_masks() {
-  const auto impulse = array<float>({0, 0, 0, 0, 1, 0, 0, 0, 0}, {3, 3},
-                                    facets(ps::coverage_semantics()));
-  Parameters footprint{{"radius", std::int64_t{1}},
-                       {"footprint", std::string("square")}};
-  const auto result = output(evaluate(
-      {impulse},
-      {{1, "mask.invert", {ps::WorkflowInputReference{1}}, {}},
-       {2,
-        "mask.combine",
-        {ref(1), ps::WorkflowInputReference{1}},
-        {{"operation", std::string("and")}, {"algebra", std::string("fuzzy")}}},
-       {3,
-        "mask.combine",
-        {ref(2), ps::WorkflowInputReference{1}},
-        {{"operation", std::string("or")}, {"algebra", std::string("fuzzy")}}},
-       next(4, "mask.dilate", 3, footprint),
-       next(5, "mask.erode", 4, footprint),
-       next(6, "field.box_mean", 5, {{"radius", std::int64_t{1}}})}));
-  close(result, std::vector<float>(9, 1.F / 9));
-  close(output(operation("mask.invert", {result})),
-        std::vector<float>(9, 8.F / 9));
-  std::cout << "basic-masks: Boolean -> closing -> feather, coverage=1/9\n";
-}
 void basic_filters() {
   const auto source = array<float>({1, 2, 3}, {1, 3});
   const auto kernel = array<float>({1, 2}, {1, 2});

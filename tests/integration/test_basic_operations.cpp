@@ -179,29 +179,26 @@ void fields() {
                 {0., 3, 4});
   rejected(operation("numeric.abs", {array<float>({NAN})}),
            ErrorCode::OperationFailed);
-  Parameters g{{"height", std::int64_t{2}},
-               {"width", std::int64_t{3}},
-               {"dtype", std::string("float64")},
-               {"axis", std::string("x")},
-               {"space", std::string("pixel")}};
-  exact<double>(output(operation("field.coordinate", {}, g)),
-                {.5, 1.5, 2.5, .5, 1.5, 2.5});
-  g["axis"] = std::string("y");
-  g["space"] = std::string("normalized");
-  exact<double>(output(operation("field.coordinate", {}, g)),
-                {.25, .25, .25, .75, .75, .75});
-  g["height"] = std::int64_t{1};
-  g["width"] = std::int64_t{1};
-  exact<double>(output(operation("field.coordinate", {}, g)), {.5});
-  g.erase("axis");
-  g.erase("space");
-  g["value"] = -2.;
-  exact<double>(output(operation("field.constant", {}, g)), {-2});
-  g["dtype"] = std::string("float32");
-  g["value"] = std::numeric_limits<double>::max();
-  rejected(operation("field.constant", {}, g), ErrorCode::OperationFailed);
-  g["height"] = std::int64_t{0};
-  rejected(operation("field.constant", {}, g), ErrorCode::InvalidArgument);
+  const auto registry = ps::make_default_operation_registry();
+  for (const auto* key : {"field.coordinate", "field.constant"}) {
+    const auto traits = registry->find_traits(key);
+    require(!traits.ok() && traits.status().code == ErrorCode::NotFound,
+            "retired generation key remains registered");
+    rejected(operation(key, {},
+                       {{"height", std::int64_t{1}},
+                        {"width", std::int64_t{1}},
+                        {"dtype", std::string("float64")}}),
+             ErrorCode::NotFound);
+  }
+  for (const auto* key :
+       {"mask.threshold", "mask.components", "mask.invert", "mask.combine",
+        "mask.dilate", "mask.erode", "component.count", "component.area",
+        "component.bbox"}) {
+    const auto traits = registry->find_traits(key);
+    require(!traits.ok() && traits.status().code == ErrorCode::NotFound,
+            "retired mask key remains registered");
+    rejected(operation(key, {}, {}), ErrorCode::NotFound);
+  }
   auto cancellation_levels = levels();
   cancellation_levels["white"] = 5.;
   cancellation_levels["out_min"] = -3 * 0x1p100;

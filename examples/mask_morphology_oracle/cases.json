@@ -1,0 +1,8001 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "binary_logic.analytic",
+      "op": "binary_logic",
+      "dtype": "float64",
+      "inputs": {
+        "a": [
+          [
+            0,
+            1,
+            0,
+            1
+          ]
+        ],
+        "b": [
+          [
+            0,
+            0,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "operation": "xor"
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Boolean XOR truth table."
+    },
+    {
+      "id": "fuzzy_logic.analytic",
+      "op": "fuzzy_logic",
+      "dtype": "float64",
+      "inputs": {
+        "a": [
+          [
+            0.25,
+            0.75
+          ]
+        ],
+        "b": [
+          [
+            0.5,
+            0.25
+          ]
+        ]
+      },
+      "params": {
+        "operation": "subtract"
+      },
+      "expected": [
+        [
+          0.25,
+          0.75
+        ]
+      ],
+      "evidence": "min(a,1-b)."
+    },
+    {
+      "id": "independent_coverage.analytic",
+      "op": "independent_coverage",
+      "dtype": "float64",
+      "inputs": {
+        "a": [
+          [
+            0.5
+          ]
+        ],
+        "b": [
+          [
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "operation": "or"
+      },
+      "expected": [
+        [
+          0.75
+        ]
+      ],
+      "evidence": "1/2+1/2-1/4=3/4."
+    },
+    {
+      "id": "invert.analytic",
+      "op": "invert",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0.25,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          0.75,
+          0
+        ]
+      ],
+      "evidence": "Exact complements."
+    },
+    {
+      "id": "threshold.analytic",
+      "op": "threshold",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0.5,
+            2
+          ]
+        ]
+      },
+      "params": {
+        "threshold": 0.5,
+        "comparison": "ge"
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Inclusive threshold equality."
+    },
+    {
+      "id": "range_mask.analytic",
+      "op": "range_mask",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "lower": 0,
+        "upper": 1,
+        "lower_closed": false,
+        "upper_closed": false
+      },
+      "expected": [
+        [
+          0,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Both endpoints open."
+    },
+    {
+      "id": "soft_threshold.analytic",
+      "op": "soft_threshold",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "threshold": 0,
+        "width": 2,
+        "curve": "smoothstep"
+      },
+      "expected": [
+        [
+          0,
+          0.5,
+          1
+        ]
+      ],
+      "evidence": "Cubic ramp endpoints and midpoint."
+    },
+    {
+      "id": "soft_range.analytic",
+      "op": "soft_range",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1,
+            2,
+            3
+          ]
+        ]
+      },
+      "params": {
+        "lower": 0,
+        "upper": 2,
+        "lower_width": 2,
+        "upper_width": 2,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          0,
+          0.5,
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Min of rising and falling linear ramps."
+    },
+    {
+      "id": "nonzero_to_binary.analytic",
+      "op": "nonzero_to_binary",
+      "dtype": "uint8",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            2,
+            255
+          ]
+        ]
+      },
+      "params": {
+        "output_dtype": "float64"
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Explicit UInt8 truthiness adapter."
+    },
+    {
+      "id": "coordinate_range.analytic",
+      "op": "coordinate_range",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              1,
+              2
+            ]
+          ]
+        ],
+        "target": [
+          0
+        ],
+        "scales": [
+          1
+        ]
+      },
+      "params": {
+        "channels": "0",
+        "inner": 0,
+        "outer": 2,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "One-coordinate distances 0,1,2."
+    },
+    {
+      "id": "lab76_range.analytic",
+      "op": "lab76_range",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              0.5,
+              1
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ]
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ]
+      },
+      "params": {
+        "channels": "0,1,2",
+        "inner": 0,
+        "outer": 100,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Stored l is multiplied by100 in delta-L*."
+    },
+    {
+      "id": "hue_range.analytic",
+      "op": "hue_range",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.875,
+              0,
+              0.5
+            ]
+          ],
+          [
+            [
+              1,
+              1,
+              1
+            ]
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0,1",
+        "center_turns": 0,
+        "inner": 0,
+        "outer": 0.25,
+        "curve": "linear",
+        "minimum_chroma": 0,
+        "neutral_policy": "exclude"
+      },
+      "expected": [
+        [
+          0.5,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Wrapped distance of7/8 to0 is1/8."
+    },
+    {
+      "id": "dilate.analytic",
+      "op": "dilate",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Radius1 square reaches one cell left/right."
+    },
+    {
+      "id": "erode.analytic",
+      "op": "erode",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Zero exterior wins min."
+    },
+    {
+      "id": "opening.analytic",
+      "op": "opening",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Point cannot contain a radius1 square."
+    },
+    {
+      "id": "closing.analytic",
+      "op": "closing",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Infinite-lattice dilation extends beyond canvas before erosion."
+    },
+    {
+      "id": "offset_discrete.analytic",
+      "op": "offset_discrete",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1,
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "One-unit positive discrete offset."
+    },
+    {
+      "id": "shift_distance_field.analytic",
+      "op": "shift_distance_field",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0.5
+      },
+      "expected": [
+        [
+          -1.5,
+          -0.5,
+          0.5
+        ]
+      ],
+      "evidence": "Level-field d-r, not recomputed SDF."
+    },
+    {
+      "id": "threshold_distance_field.analytic",
+      "op": "threshold_distance_field",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0
+      },
+      "expected": [
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Closed sublevel set d<=0."
+    },
+    {
+      "id": "offset_polygon_grid.analytic",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            0.5
+          ],
+          [
+            0.5,
+            0.5
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "radius": 0,
+        "sy": 1,
+        "sx": 1,
+        "samples_per_axis": 2,
+        "output_dtype": "float64",
+        "sample_pattern": "grid_center"
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "All four fixed subpixel centres lie in the square."
+    },
+    {
+      "id": "gaussian_feather.analytic",
+      "op": "gaussian_feather",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "sigma_y": 1,
+        "sigma_x": 1,
+        "radius_y": 1,
+        "radius_x": 1,
+        "boundary": "replicate"
+      },
+      "expected": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "evidence": "Every mapped tap has value1; numerator equals denominator exactly."
+    },
+    {
+      "id": "distance_feather_linear.analytic",
+      "op": "distance_feather_linear",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "inner": 1,
+        "outer": 1
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Negative-inside distance, endpoints and midpoint."
+    },
+    {
+      "id": "distance_feather_smoothstep.analytic",
+      "op": "distance_feather_smoothstep",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "inner": 1,
+        "outer": 1
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Negative-inside distance, endpoints and midpoint."
+    },
+    {
+      "id": "nearest_feature.analytic",
+      "op": "nearest_feature",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "feature": "foreground",
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "none",
+        "squared": false,
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "distance": [
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "nearest": [
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              2
+            ]
+          ]
+        ]
+      },
+      "evidence": "Equal centre distances choose lexicographically smaller(y,x)."
+    },
+    {
+      "id": "signed_center_distance.analytic",
+      "op": "signed_center_distance",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "background",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "distance": [
+          [
+            1,
+            -1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Each pixel is one unit from opposite class; inside negative."
+    },
+    {
+      "id": "truncated_nearest_feature.analytic",
+      "op": "truncated_nearest_feature",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "limit": 1,
+        "feature": "foreground",
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "none",
+        "squared": false,
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "distance": [
+          [
+            0,
+            1,
+            1
+          ]
+        ],
+        "within": [
+          [
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "evidence": "Limit equality is within; farther distances clamp."
+    },
+    {
+      "id": "truncated_signed_distance.analytic",
+      "op": "truncated_signed_distance",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "limit": 0.5,
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "background",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "distance": [
+          [
+            0.5,
+            -0.5,
+            0.5
+          ]
+        ],
+        "within": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "No opposite centre lies within half-unit."
+    },
+    {
+      "id": "flood_fixed.analytic",
+      "op": "flood_fixed",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              1,
+              2,
+              3
+            ]
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "tolerance": 1,
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Fixed seed reference0 rejects2."
+    },
+    {
+      "id": "flood_neighbor.analytic",
+      "op": "flood_neighbor",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              1,
+              2,
+              3
+            ]
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "tolerance": 1,
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Each adjacent difference1 permits propagation."
+    },
+    {
+      "id": "flood_barrier.analytic",
+      "op": "flood_barrier",
+      "dtype": "float64",
+      "inputs": {
+        "seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            0,
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Barrier blocks the one-dimensional path."
+    },
+    {
+      "id": "label_compact.analytic",
+      "op": "label_compact",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4,
+        "maximum_count": 6
+      },
+      "expected": [
+        [
+          1,
+          0,
+          2
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "First row-major sites define compact IDs."
+    },
+    {
+      "id": "label_min_pixel.analytic",
+      "op": "label_min_pixel",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4,
+        "maximum_count": 6
+      },
+      "expected": [
+        [
+          1,
+          0,
+          3
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Minimum linear indices0,2 give IDs1,3."
+    },
+    {
+      "id": "component_count.analytic",
+      "op": "component_count",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            1,
+            0,
+            3
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        2
+      ],
+      "evidence": "Distinct positive IDs count; max-ID3 is not count."
+    },
+    {
+      "id": "component_areas.analytic",
+      "op": "component_areas",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            1,
+            0,
+            3
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {},
+      "expected": {
+        "rows": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            1
+          ]
+        ]
+      },
+      "evidence": "Exact pixel counts by sorted ID."
+    },
+    {
+      "id": "component_bboxes.analytic",
+      "op": "component_bboxes",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            1,
+            0,
+            3
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {},
+      "expected": {
+        "rows": [
+          [
+            1,
+            0,
+            0,
+            2,
+            1
+          ],
+          [
+            3,
+            0,
+            2,
+            1,
+            3
+          ]
+        ]
+      },
+      "evidence": "Half-open bbox coordinates."
+    },
+    {
+      "id": "component_bundle.analytic",
+      "op": "component_bundle",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4,
+        "maximum_count": 6
+      },
+      "expected": {
+        "labels": [
+          1,
+          0,
+          3,
+          1,
+          0,
+          0
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            0,
+            0,
+            0,
+            2,
+            1
+          ],
+          [
+            3,
+            1,
+            2,
+            0,
+            2,
+            1,
+            3
+          ]
+        ]
+      },
+      "evidence": "Combined MinPixel label and attribute schema."
+    },
+    {
+      "id": "filter_area_index.analytic",
+      "op": "filter_area_index",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            1,
+            0,
+            3
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "area_index": {
+          "source_id": "object-A",
+          "rows": [
+            [
+              1,
+              2
+            ],
+            [
+              3,
+              1
+            ]
+          ]
+        }
+      },
+      "params": {
+        "labels_id": "object-A",
+        "minimum_area": 2
+      },
+      "expected": [
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Area equal to minimum is retained, foreign IDs are not implied."
+    },
+    {
+      "id": "fill_holes.analytic",
+      "op": "fill_holes",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "One enclosed background pixel."
+    },
+    {
+      "id": "remove_small.analytic",
+      "op": "remove_small",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": 2,
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Remove area<=2, including equality."
+    },
+    {
+      "id": "fill_small_holes.analytic",
+      "op": "fill_small_holes",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_area": 1,
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Fill hole area<=1 including equality."
+    },
+    {
+      "id": "morph_gradient.analytic",
+      "op": "morph_gradient",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "inner_border.analytic",
+      "op": "inner_border",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "outer_border.analytic",
+      "op": "outer_border",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "white_top_hat.analytic",
+      "op": "white_top_hat",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "black_top_hat.analytic",
+      "op": "black_top_hat",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "thin_topological.analytic",
+      "op": "thin_topological",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Endpoints preserved and deleting centre would split component."
+    },
+    {
+      "id": "thin_distance_ordered.analytic",
+      "op": "thin_distance_ordered",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "sy": 1,
+        "sx": 1,
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "skeleton": [
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Line retained; exterior row at distance1 supplies radius."
+    },
+    {
+      "id": "reconstruct_dilate.analytic",
+      "op": "reconstruct_dilate",
+      "dtype": "float64",
+      "inputs": {
+        "marker": [
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "limit": [
+          [
+            1,
+            0.5,
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0.5
+        ]
+      ],
+      "evidence": "Propagation capped by limit at half."
+    },
+    {
+      "id": "reconstruct_erode.analytic",
+      "op": "reconstruct_erode",
+      "dtype": "float64",
+      "inputs": {
+        "marker": [
+          [
+            0,
+            1,
+            1
+          ]
+        ],
+        "limit": [
+          [
+            0,
+            0.5,
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          0,
+          0.5,
+          0.5
+        ]
+      ],
+      "evidence": "Dual propagation floored by limit at half."
+    },
+    {
+      "id": "bridge_axis_gaps.analytic",
+      "op": "bridge_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            0,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 1
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1,
+          0,
+          0,
+          1
+        ]
+      ],
+      "evidence": "Only bounded zero-run length1 is filled, length2 remains."
+    },
+    {
+      "id": "fill_axis_gaps.analytic",
+      "op": "fill_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 1,
+        "fill_connectivity": 4
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Flood the surviving length2 run on temporary barrier."
+    },
+    {
+      "id": "fill_morphological_gaps.analytic",
+      "op": "fill_morphological_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0,
+        "fill_connectivity": 4
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Radius0 leaves original barrier and floods enclosed run."
+    },
+    {
+      "id": "affect_result.analytic",
+      "op": "affect_result",
+      "dtype": "float64",
+      "inputs": {
+        "original": [
+          [
+            [
+              2,
+              2,
+              2
+            ]
+          ]
+        ],
+        "processed": [
+          [
+            [
+              10,
+              10,
+              10
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected": [
+        [
+          [
+            2,
+            6,
+            10
+          ]
+        ]
+      ],
+      "evidence": "Complete convex expression at endpoints and midpoint."
+    },
+    {
+      "id": "multiply_mask.analytic",
+      "op": "multiply_mask",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              2,
+              2,
+              2
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected": [
+        [
+          [
+            0,
+            1,
+            2
+          ]
+        ]
+      ],
+      "evidence": "Complete product at zero, half and one weights."
+    },
+    {
+      "id": "restricted_mean.analytic",
+      "op": "restricted_mean",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              2,
+              4,
+              8
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1,
+        "empty_policy": "zero",
+        "request": "both"
+      },
+      "expected": {
+        "values": [
+          [
+            [
+              2,
+              5,
+              8
+            ]
+          ]
+        ],
+        "valid": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Zero-weight finite4 contributes zero; centre mean is(2+8)/2."
+    },
+    {
+      "id": "apply_alpha.analytic",
+      "op": "apply_alpha",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              5,
+              7
+            ]
+          ],
+          [
+            [
+              0.5,
+              1
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0.5,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "alpha_channel": 1
+      },
+      "expected": [
+        [
+          [
+            5,
+            7
+          ]
+        ],
+        [
+          [
+            0.25,
+            0
+          ]
+        ]
+      ],
+      "evidence": "Straight color unchanged; alpha multiplied."
+    },
+    {
+      "id": "thin_zhang_suen.analytic",
+      "op": "thin_zhang_suen",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Horizontal chain is a fixed point."
+    },
+    {
+      "id": "thin_zhang_suen.single",
+      "op": "thin_zhang_suen",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Single pixel is retained."
+    },
+    {
+      "id": "thin_guo_hall.analytic",
+      "op": "thin_guo_hall",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Horizontal chain is a fixed point."
+    },
+    {
+      "id": "thin_guo_hall.single",
+      "op": "thin_guo_hall",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Single pixel is retained."
+    },
+    {
+      "id": "thin_zhang_suen.block2",
+      "op": "thin_zhang_suen",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "evidence": "All four pixels satisfy the first synchronous deletion phase."
+    },
+    {
+      "id": "thin_guo_hall.block2",
+      "op": "thin_guo_hall",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "evidence": "Phase0 removes left column; phase1 removes bottom-right."
+    },
+    {
+      "id": "medial_axis_maximal_balls.single.l1",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l1",
+        "sy": 2,
+        "sx": 3,
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            1
+          ]
+        ],
+        "radius": [
+          [
+            2
+          ]
+        ]
+      },
+      "evidence": "Nearest exterior center is two units away."
+    },
+    {
+      "id": "medial_axis_maximal_balls.empty.l1",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l1",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Empty foreground has no centers."
+    },
+    {
+      "id": "medial_axis_maximal_balls.block2.l1",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l1",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Four singleton balls are mutually non-containing."
+    },
+    {
+      "id": "medial_axis_maximal_balls.single.l2",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "sy": 2,
+        "sx": 3,
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            1
+          ]
+        ],
+        "radius": [
+          [
+            2
+          ]
+        ]
+      },
+      "evidence": "Nearest exterior center is two units away."
+    },
+    {
+      "id": "medial_axis_maximal_balls.empty.l2",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Empty foreground has no centers."
+    },
+    {
+      "id": "medial_axis_maximal_balls.block2.l2",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Four singleton balls are mutually non-containing."
+    },
+    {
+      "id": "medial_axis_maximal_balls.single.linf",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "sy": 2,
+        "sx": 3,
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            1
+          ]
+        ],
+        "radius": [
+          [
+            2
+          ]
+        ]
+      },
+      "evidence": "Nearest exterior center is two units away."
+    },
+    {
+      "id": "medial_axis_maximal_balls.empty.linf",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Empty foreground has no centers."
+    },
+    {
+      "id": "medial_axis_maximal_balls.block2.linf",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Four singleton balls are mutually non-containing."
+    },
+    {
+      "id": "medial_axis_maximal_balls.full3_linf",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            2,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Central open square contains every other candidate ball."
+    },
+    {
+      "id": "lab2000_range.neutral",
+      "op": "lab2000_range",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.25,
+              0.75
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ]
+          ]
+        ],
+        "target": [
+          0.25,
+          0,
+          0
+        ]
+      },
+      "params": {
+        "channels": "0,1,2",
+        "kL": 1,
+        "kC": 1,
+        "kH": 1,
+        "inner": 0,
+        "outer": 100,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5
+        ]
+      ],
+      "evidence": "Neutral symmetric L*=25/75 gives exact distance50."
+    },
+    {
+      "id": "lab2000_range.nonunit",
+      "op": "lab2000_range",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.75
+            ]
+          ],
+          [
+            [
+              0
+            ]
+          ],
+          [
+            [
+              0
+            ]
+          ]
+        ],
+        "target": [
+          0.25,
+          0,
+          0
+        ]
+      },
+      "params": {
+        "kL": 2,
+        "kC": 1,
+        "kH": 1,
+        "inner": 0,
+        "outer": 100,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          0.75
+        ]
+      ],
+      "evidence": "Pure lightness distance50 divided by kL2."
+    },
+    {
+      "id": "fit_color_groups_table.analytic",
+      "op": "fit_color_groups_table",
+      "dtype": "float64",
+      "inputs": {
+        "samples": [
+          [
+            1,
+            2,
+            3
+          ],
+          [
+            4,
+            5,
+            6
+          ]
+        ],
+        "group_ids": [
+          7,
+          11
+        ],
+        "weights": [
+          2,
+          0
+        ],
+        "epsilon": [
+          1,
+          2,
+          3
+        ]
+      },
+      "params": {},
+      "expected": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                2,
+                0
+              ],
+              [
+                0,
+                0,
+                3
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      },
+      "evidence": "Single contributing color; diagonal factor equals epsilon."
+    },
+    {
+      "id": "fit_color_groups_image.analytic",
+      "op": "fit_color_groups_image",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              1,
+              4
+            ]
+          ],
+          [
+            [
+              2,
+              5
+            ]
+          ],
+          [
+            [
+              3,
+              6
+            ]
+          ]
+        ],
+        "group_ids": [
+          [
+            7,
+            11
+          ]
+        ],
+        "weights": [
+          [
+            2,
+            0
+          ]
+        ],
+        "epsilon": [
+          1,
+          2,
+          3
+        ]
+      },
+      "params": {
+        "channels": "0,1,2"
+      },
+      "expected": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                2,
+                0
+              ],
+              [
+                0,
+                0,
+                3
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      },
+      "evidence": "Image and table admit identical samples."
+    },
+    {
+      "id": "apply_color_groups.analytic",
+      "op": "apply_color_groups",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          [
+            [
+              2,
+              2,
+              2
+            ]
+          ],
+          [
+            [
+              3,
+              3,
+              3
+            ]
+          ]
+        ],
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                2,
+                0
+              ],
+              [
+                0,
+                0,
+                3
+              ]
+            ]
+          ]
+        }
+      },
+      "params": {
+        "channels": "0,1,2",
+        "inner": 0,
+        "outer": 2,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Triangular solve gives distances0,1,2."
+    },
+    {
+      "id": "hue_range.zero_neutral",
+      "op": "hue_range",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.5,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0.25
+            ]
+          ]
+        ]
+      },
+      "params": {
+        "center_turns": 0,
+        "minimum_chroma": 0,
+        "neutral_policy": "include",
+        "inner": 0,
+        "outer": 0.1
+      },
+      "expected": [
+        [
+          1,
+          1
+        ]
+      ],
+      "evidence": "Exact zero chroma uses include even when threshold is zero."
+    },
+    {
+      "id": "binary_logic.analytic.f32",
+      "op": "binary_logic",
+      "dtype": "float32",
+      "inputs": {
+        "a": [
+          [
+            0,
+            1,
+            0,
+            1
+          ]
+        ],
+        "b": [
+          [
+            0,
+            0,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "operation": "xor"
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Boolean XOR truth table."
+    },
+    {
+      "id": "fuzzy_logic.analytic.f32",
+      "op": "fuzzy_logic",
+      "dtype": "float32",
+      "inputs": {
+        "a": [
+          [
+            0.25,
+            0.75
+          ]
+        ],
+        "b": [
+          [
+            0.5,
+            0.25
+          ]
+        ]
+      },
+      "params": {
+        "operation": "subtract"
+      },
+      "expected": [
+        [
+          0.25,
+          0.75
+        ]
+      ],
+      "evidence": "min(a,1-b)."
+    },
+    {
+      "id": "independent_coverage.analytic.f32",
+      "op": "independent_coverage",
+      "dtype": "float32",
+      "inputs": {
+        "a": [
+          [
+            0.5
+          ]
+        ],
+        "b": [
+          [
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "operation": "or"
+      },
+      "expected": [
+        [
+          0.75
+        ]
+      ],
+      "evidence": "1/2+1/2-1/4=3/4."
+    },
+    {
+      "id": "invert.analytic.f32",
+      "op": "invert",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0.25,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          0.75,
+          0
+        ]
+      ],
+      "evidence": "Exact complements."
+    },
+    {
+      "id": "threshold.analytic.f32",
+      "op": "threshold",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0.5,
+            2
+          ]
+        ]
+      },
+      "params": {
+        "threshold": 0.5,
+        "comparison": "ge"
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Inclusive threshold equality."
+    },
+    {
+      "id": "range_mask.analytic.f32",
+      "op": "range_mask",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "lower": 0,
+        "upper": 1,
+        "lower_closed": false,
+        "upper_closed": false
+      },
+      "expected": [
+        [
+          0,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Both endpoints open."
+    },
+    {
+      "id": "soft_threshold.analytic.f32",
+      "op": "soft_threshold",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "threshold": 0,
+        "width": 2,
+        "curve": "smoothstep"
+      },
+      "expected": [
+        [
+          0,
+          0.5,
+          1
+        ]
+      ],
+      "evidence": "Cubic ramp endpoints and midpoint."
+    },
+    {
+      "id": "soft_range.analytic.f32",
+      "op": "soft_range",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1,
+            2,
+            3
+          ]
+        ]
+      },
+      "params": {
+        "lower": 0,
+        "upper": 2,
+        "lower_width": 2,
+        "upper_width": 2,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          0,
+          0.5,
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Min of rising and falling linear ramps."
+    },
+    {
+      "id": "coordinate_range.analytic.f32",
+      "op": "coordinate_range",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              1,
+              2
+            ]
+          ]
+        ],
+        "target": [
+          0
+        ],
+        "scales": [
+          1
+        ]
+      },
+      "params": {
+        "channels": "0",
+        "inner": 0,
+        "outer": 2,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "One-coordinate distances 0,1,2."
+    },
+    {
+      "id": "lab76_range.analytic.f32",
+      "op": "lab76_range",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              0.5,
+              1
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ]
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ]
+      },
+      "params": {
+        "channels": "0,1,2",
+        "inner": 0,
+        "outer": 100,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Stored l is multiplied by100 in delta-L*."
+    },
+    {
+      "id": "hue_range.analytic.f32",
+      "op": "hue_range",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.875,
+              0,
+              0.5
+            ]
+          ],
+          [
+            [
+              1,
+              1,
+              1
+            ]
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0,1",
+        "center_turns": 0,
+        "inner": 0,
+        "outer": 0.25,
+        "curve": "linear",
+        "minimum_chroma": 0,
+        "neutral_policy": "exclude"
+      },
+      "expected": [
+        [
+          0.5,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Wrapped distance of7/8 to0 is1/8."
+    },
+    {
+      "id": "dilate.analytic.f32",
+      "op": "dilate",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Radius1 square reaches one cell left/right."
+    },
+    {
+      "id": "erode.analytic.f32",
+      "op": "erode",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Zero exterior wins min."
+    },
+    {
+      "id": "opening.analytic.f32",
+      "op": "opening",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Point cannot contain a radius1 square."
+    },
+    {
+      "id": "closing.analytic.f32",
+      "op": "closing",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Infinite-lattice dilation extends beyond canvas before erosion."
+    },
+    {
+      "id": "offset_discrete.analytic.f32",
+      "op": "offset_discrete",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1,
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "One-unit positive discrete offset."
+    },
+    {
+      "id": "shift_distance_field.analytic.f32",
+      "op": "shift_distance_field",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0.5
+      },
+      "expected": [
+        [
+          -1.5,
+          -0.5,
+          0.5
+        ]
+      ],
+      "evidence": "Level-field d-r, not recomputed SDF."
+    },
+    {
+      "id": "threshold_distance_field.analytic.f32",
+      "op": "threshold_distance_field",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0
+      },
+      "expected": [
+        [
+          1,
+          1,
+          0
+        ]
+      ],
+      "evidence": "Closed sublevel set d<=0."
+    },
+    {
+      "id": "offset_polygon_grid.analytic.f32",
+      "op": "offset_polygon_grid",
+      "dtype": "float32",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            0.5
+          ],
+          [
+            0.5,
+            0.5
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "radius": 0,
+        "sy": 1,
+        "sx": 1,
+        "samples_per_axis": 2,
+        "output_dtype": "float32",
+        "sample_pattern": "grid_center"
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "All four fixed subpixel centres lie in the square."
+    },
+    {
+      "id": "gaussian_feather.analytic.f32",
+      "op": "gaussian_feather",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "sigma_y": 1,
+        "sigma_x": 1,
+        "radius_y": 1,
+        "radius_x": 1,
+        "boundary": "replicate"
+      },
+      "expected": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "evidence": "Every mapped tap has value1; numerator equals denominator exactly."
+    },
+    {
+      "id": "distance_feather_linear.analytic.f32",
+      "op": "distance_feather_linear",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "inner": 1,
+        "outer": 1
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Negative-inside distance, endpoints and midpoint."
+    },
+    {
+      "id": "distance_feather_smoothstep.analytic.f32",
+      "op": "distance_feather_smoothstep",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            -1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "inner": 1,
+        "outer": 1
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Negative-inside distance, endpoints and midpoint."
+    },
+    {
+      "id": "nearest_feature.analytic.f32",
+      "op": "nearest_feature",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "feature": "foreground",
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "none",
+        "squared": false,
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "distance": [
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "nearest": [
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              2
+            ]
+          ]
+        ]
+      },
+      "evidence": "Equal centre distances choose lexicographically smaller(y,x)."
+    },
+    {
+      "id": "signed_center_distance.analytic.f32",
+      "op": "signed_center_distance",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "background",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "distance": [
+          [
+            1,
+            -1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Each pixel is one unit from opposite class; inside negative."
+    },
+    {
+      "id": "truncated_nearest_feature.analytic.f32",
+      "op": "truncated_nearest_feature",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "limit": 1,
+        "feature": "foreground",
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "none",
+        "squared": false,
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "distance": [
+          [
+            0,
+            1,
+            1
+          ]
+        ],
+        "within": [
+          [
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "evidence": "Limit equality is within; farther distances clamp."
+    },
+    {
+      "id": "truncated_signed_distance.analytic.f32",
+      "op": "truncated_signed_distance",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "limit": 0.5,
+        "metric": "l2",
+        "sy": 1,
+        "sx": 1,
+        "exterior": "background",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "distance": [
+          [
+            0.5,
+            -0.5,
+            0.5
+          ]
+        ],
+        "within": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "No opposite centre lies within half-unit."
+    },
+    {
+      "id": "flood_fixed.analytic.f32",
+      "op": "flood_fixed",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              1,
+              2,
+              3
+            ]
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "tolerance": 1,
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Fixed seed reference0 rejects2."
+    },
+    {
+      "id": "flood_neighbor.analytic.f32",
+      "op": "flood_neighbor",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0,
+              1,
+              2,
+              3
+            ]
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "tolerance": 1,
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Each adjacent difference1 permits propagation."
+    },
+    {
+      "id": "flood_barrier.analytic.f32",
+      "op": "flood_barrier",
+      "dtype": "float32",
+      "inputs": {
+        "seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            0,
+            0,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Barrier blocks the one-dimensional path."
+    },
+    {
+      "id": "label_compact.analytic.f32",
+      "op": "label_compact",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4,
+        "maximum_count": 6
+      },
+      "expected": [
+        [
+          1,
+          0,
+          2
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "First row-major sites define compact IDs."
+    },
+    {
+      "id": "label_min_pixel.analytic.f32",
+      "op": "label_min_pixel",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4,
+        "maximum_count": 6
+      },
+      "expected": [
+        [
+          1,
+          0,
+          3
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Minimum linear indices0,2 give IDs1,3."
+    },
+    {
+      "id": "fill_holes.analytic.f32",
+      "op": "fill_holes",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "One enclosed background pixel."
+    },
+    {
+      "id": "remove_small.analytic.f32",
+      "op": "remove_small",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": 2,
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ],
+      "evidence": "Remove area<=2, including equality."
+    },
+    {
+      "id": "fill_small_holes.analytic.f32",
+      "op": "fill_small_holes",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_area": 1,
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Fill hole area<=1 including equality."
+    },
+    {
+      "id": "morph_gradient.analytic.f32",
+      "op": "morph_gradient",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "inner_border.analytic.f32",
+      "op": "inner_border",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "outer_border.analytic.f32",
+      "op": "outer_border",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "white_top_hat.analytic.f32",
+      "op": "white_top_hat",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "black_top_hat.analytic.f32",
+      "op": "black_top_hat",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Point dilation1, erosion0, opening0, closing1."
+    },
+    {
+      "id": "thin_topological.analytic.f32",
+      "op": "thin_topological",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Endpoints preserved and deleting centre would split component."
+    },
+    {
+      "id": "thin_distance_ordered.analytic.f32",
+      "op": "thin_distance_ordered",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "sy": 1,
+        "sx": 1,
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "skeleton": [
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Line retained; exterior row at distance1 supplies radius."
+    },
+    {
+      "id": "reconstruct_dilate.analytic.f32",
+      "op": "reconstruct_dilate",
+      "dtype": "float32",
+      "inputs": {
+        "marker": [
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "limit": [
+          [
+            1,
+            0.5,
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0.5
+        ]
+      ],
+      "evidence": "Propagation capped by limit at half."
+    },
+    {
+      "id": "reconstruct_erode.analytic.f32",
+      "op": "reconstruct_erode",
+      "dtype": "float32",
+      "inputs": {
+        "marker": [
+          [
+            0,
+            1,
+            1
+          ]
+        ],
+        "limit": [
+          [
+            0,
+            0.5,
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "connectivity": 4
+      },
+      "expected": [
+        [
+          0,
+          0.5,
+          0.5
+        ]
+      ],
+      "evidence": "Dual propagation floored by limit at half."
+    },
+    {
+      "id": "bridge_axis_gaps.analytic.f32",
+      "op": "bridge_axis_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            0,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 1
+      },
+      "expected": [
+        [
+          1,
+          1,
+          1,
+          0,
+          0,
+          1
+        ]
+      ],
+      "evidence": "Only bounded zero-run length1 is filled, length2 remains."
+    },
+    {
+      "id": "fill_axis_gaps.analytic.f32",
+      "op": "fill_axis_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 1,
+        "fill_connectivity": 4
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Flood the surviving length2 run on temporary barrier."
+    },
+    {
+      "id": "fill_morphological_gaps.analytic.f32",
+      "op": "fill_morphological_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0,
+        "fill_connectivity": 4
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Radius0 leaves original barrier and floods enclosed run."
+    },
+    {
+      "id": "affect_result.analytic.f32",
+      "op": "affect_result",
+      "dtype": "float32",
+      "inputs": {
+        "original": [
+          [
+            [
+              2,
+              2,
+              2
+            ]
+          ]
+        ],
+        "processed": [
+          [
+            [
+              10,
+              10,
+              10
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected": [
+        [
+          [
+            2,
+            6,
+            10
+          ]
+        ]
+      ],
+      "evidence": "Complete convex expression at endpoints and midpoint."
+    },
+    {
+      "id": "multiply_mask.analytic.f32",
+      "op": "multiply_mask",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              2,
+              2,
+              2
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            0.5,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected": [
+        [
+          [
+            0,
+            1,
+            2
+          ]
+        ]
+      ],
+      "evidence": "Complete product at zero, half and one weights."
+    },
+    {
+      "id": "restricted_mean.analytic.f32",
+      "op": "restricted_mean",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              2,
+              4,
+              8
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1,
+        "empty_policy": "zero",
+        "request": "both"
+      },
+      "expected": {
+        "values": [
+          [
+            [
+              2,
+              5,
+              8
+            ]
+          ]
+        ],
+        "valid": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Zero-weight finite4 contributes zero; centre mean is(2+8)/2."
+    },
+    {
+      "id": "apply_alpha.analytic.f32",
+      "op": "apply_alpha",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              5,
+              7
+            ]
+          ],
+          [
+            [
+              0.5,
+              1
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0.5,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "alpha_channel": 1
+      },
+      "expected": [
+        [
+          [
+            5,
+            7
+          ]
+        ],
+        [
+          [
+            0.25,
+            0
+          ]
+        ]
+      ],
+      "evidence": "Straight color unchanged; alpha multiplied."
+    },
+    {
+      "id": "thin_zhang_suen.analytic.f32",
+      "op": "thin_zhang_suen",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Horizontal chain is a fixed point."
+    },
+    {
+      "id": "thin_zhang_suen.single.f32",
+      "op": "thin_zhang_suen",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Single pixel is retained."
+    },
+    {
+      "id": "thin_guo_hall.analytic.f32",
+      "op": "thin_guo_hall",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Horizontal chain is a fixed point."
+    },
+    {
+      "id": "thin_guo_hall.single.f32",
+      "op": "thin_guo_hall",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          1
+        ]
+      ],
+      "evidence": "Single pixel is retained."
+    },
+    {
+      "id": "thin_zhang_suen.block2.f32",
+      "op": "thin_zhang_suen",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "evidence": "All four pixels satisfy the first synchronous deletion phase."
+    },
+    {
+      "id": "thin_guo_hall.block2.f32",
+      "op": "thin_guo_hall",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "evidence": "Phase0 removes left column; phase1 removes bottom-right."
+    },
+    {
+      "id": "medial_axis_maximal_balls.single.l1.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l1",
+        "sy": 2,
+        "sx": 3,
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            1
+          ]
+        ],
+        "radius": [
+          [
+            2
+          ]
+        ]
+      },
+      "evidence": "Nearest exterior center is two units away."
+    },
+    {
+      "id": "medial_axis_maximal_balls.empty.l1.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l1",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Empty foreground has no centers."
+    },
+    {
+      "id": "medial_axis_maximal_balls.block2.l1.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l1",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Four singleton balls are mutually non-containing."
+    },
+    {
+      "id": "medial_axis_maximal_balls.single.l2.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "sy": 2,
+        "sx": 3,
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            1
+          ]
+        ],
+        "radius": [
+          [
+            2
+          ]
+        ]
+      },
+      "evidence": "Nearest exterior center is two units away."
+    },
+    {
+      "id": "medial_axis_maximal_balls.empty.l2.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Empty foreground has no centers."
+    },
+    {
+      "id": "medial_axis_maximal_balls.block2.l2.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "l2",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Four singleton balls are mutually non-containing."
+    },
+    {
+      "id": "medial_axis_maximal_balls.single.linf.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "sy": 2,
+        "sx": 3,
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            1
+          ]
+        ],
+        "radius": [
+          [
+            2
+          ]
+        ]
+      },
+      "evidence": "Nearest exterior center is two units away."
+    },
+    {
+      "id": "medial_axis_maximal_balls.empty.linf.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Empty foreground has no centers."
+    },
+    {
+      "id": "medial_axis_maximal_balls.block2.linf.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        "radius": [
+          [
+            1,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "evidence": "Four singleton balls are mutually non-containing."
+    },
+    {
+      "id": "medial_axis_maximal_balls.full3_linf.f32",
+      "op": "medial_axis_maximal_balls",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "metric": "linf",
+        "output_dtype": "float32"
+      },
+      "expected": {
+        "axis": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "radius": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            2,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Central open square contains every other candidate ball."
+    },
+    {
+      "id": "lab2000_range.neutral.f32",
+      "op": "lab2000_range",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.25,
+              0.75
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0
+            ]
+          ]
+        ],
+        "target": [
+          0.25,
+          0,
+          0
+        ]
+      },
+      "params": {
+        "channels": "0,1,2",
+        "kL": 1,
+        "kC": 1,
+        "kH": 1,
+        "inner": 0,
+        "outer": 100,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5
+        ]
+      ],
+      "evidence": "Neutral symmetric L*=25/75 gives exact distance50."
+    },
+    {
+      "id": "lab2000_range.nonunit.f32",
+      "op": "lab2000_range",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.75
+            ]
+          ],
+          [
+            [
+              0
+            ]
+          ],
+          [
+            [
+              0
+            ]
+          ]
+        ],
+        "target": [
+          0.25,
+          0,
+          0
+        ]
+      },
+      "params": {
+        "kL": 2,
+        "kC": 1,
+        "kH": 1,
+        "inner": 0,
+        "outer": 100,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          0.75
+        ]
+      ],
+      "evidence": "Pure lightness distance50 divided by kL2."
+    },
+    {
+      "id": "fit_color_groups_table.analytic.f32",
+      "op": "fit_color_groups_table",
+      "dtype": "float32",
+      "inputs": {
+        "samples": [
+          [
+            1,
+            2,
+            3
+          ],
+          [
+            4,
+            5,
+            6
+          ]
+        ],
+        "group_ids": [
+          7,
+          11
+        ],
+        "weights": [
+          2,
+          0
+        ],
+        "epsilon": [
+          1,
+          2,
+          3
+        ]
+      },
+      "params": {},
+      "expected": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                2,
+                0
+              ],
+              [
+                0,
+                0,
+                3
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      },
+      "evidence": "Single contributing color; diagonal factor equals epsilon."
+    },
+    {
+      "id": "fit_color_groups_image.analytic.f32",
+      "op": "fit_color_groups_image",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              1,
+              4
+            ]
+          ],
+          [
+            [
+              2,
+              5
+            ]
+          ],
+          [
+            [
+              3,
+              6
+            ]
+          ]
+        ],
+        "group_ids": [
+          [
+            7,
+            11
+          ]
+        ],
+        "weights": [
+          [
+            2,
+            0
+          ]
+        ],
+        "epsilon": [
+          1,
+          2,
+          3
+        ]
+      },
+      "params": {
+        "channels": "0,1,2"
+      },
+      "expected": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                2,
+                0
+              ],
+              [
+                0,
+                0,
+                3
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      },
+      "evidence": "Image and table admit identical samples."
+    },
+    {
+      "id": "apply_color_groups.analytic.f32",
+      "op": "apply_color_groups",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          [
+            [
+              2,
+              2,
+              2
+            ]
+          ],
+          [
+            [
+              3,
+              3,
+              3
+            ]
+          ]
+        ],
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              1,
+              2,
+              3
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                2,
+                0
+              ],
+              [
+                0,
+                0,
+                3
+              ]
+            ]
+          ]
+        }
+      },
+      "params": {
+        "channels": "0,1,2",
+        "inner": 0,
+        "outer": 2,
+        "curve": "linear"
+      },
+      "expected": [
+        [
+          1,
+          0.5,
+          0
+        ]
+      ],
+      "evidence": "Triangular solve gives distances0,1,2."
+    },
+    {
+      "id": "hue_range.zero_neutral.f32",
+      "op": "hue_range",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              0.5,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0.25
+            ]
+          ]
+        ]
+      },
+      "params": {
+        "center_turns": 0,
+        "minimum_chroma": 0,
+        "neutral_policy": "include",
+        "inner": 0,
+        "outer": 0.1
+      },
+      "expected": [
+        [
+          1,
+          1
+        ]
+      ],
+      "evidence": "Exact zero chroma uses include even when threshold is zero."
+    },
+    {
+      "id": "nearest_feature.no_feature",
+      "op": "nearest_feature",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "feature": "foreground",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "distance": [
+          [
+            "bits:7ff0000000000000",
+            "bits:7ff0000000000000"
+          ]
+        ],
+        "nearest": [
+          [
+            [
+              -1,
+              -1
+            ]
+          ],
+          [
+            [
+              -1,
+              -1
+            ]
+          ]
+        ]
+      },
+      "evidence": "No feature gives positive infinity."
+    },
+    {
+      "id": "signed_center_distance.no_opposite",
+      "op": "signed_center_distance",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "exterior": "none",
+        "output_dtype": "float64"
+      },
+      "expected": {
+        "distance": [
+          [
+            "bits:fff0000000000000"
+          ]
+        ]
+      },
+      "evidence": "Foreground without background gives negative infinity."
+    },
+    {
+      "id": "component_areas.empty_result",
+      "op": "component_areas",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {},
+      "expected": {
+        "rows": []
+      },
+      "evidence": "RuntimeCount zero; no background row."
+    },
+    {
+      "id": "component_count.disconnected_id",
+      "op": "component_count",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            8,
+            0,
+            8
+          ]
+        ]
+      },
+      "params": {},
+      "expected": [
+        1
+      ],
+      "evidence": "Repeated imported label is one declared object."
+    },
+    {
+      "id": "gaussian_feather.identity_negative_zero",
+      "op": "gaussian_feather",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            "bits:8000000000000000"
+          ]
+        ]
+      },
+      "params": {
+        "sigma_y": 0,
+        "sigma_x": 0,
+        "radius_y": 0,
+        "radius_x": 0
+      },
+      "expected": [
+        [
+          "bits:8000000000000000"
+        ]
+      ],
+      "evidence": "Two zero radii perform bit-copy including negative zero."
+    },
+    {
+      "id": "affect_result.unselected_nan",
+      "op": "affect_result",
+      "dtype": "float64",
+      "inputs": {
+        "original": [
+          [
+            [
+              2,
+              "bits:7ff8000000000001"
+            ]
+          ]
+        ],
+        "processed": [
+          [
+            [
+              "bits:7ff8000000000002",
+              7
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "evidence": "Zero coefficients still consume and reject nonfinite arithmetic operands.",
+      "expected_error": "InvalidDomain"
+    },
+    {
+      "id": "multiply_mask.gating",
+      "op": "multiply_mask",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7ff8000000000001",
+              -0.0
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "evidence": "Zero coefficients still consume and reject nonfinite arithmetic operands.",
+      "expected_error": "InvalidDomain"
+    },
+    {
+      "id": "restricted_mean.masked_nan",
+      "op": "restricted_mean",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7ff8000000000001",
+              6
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1,
+        "empty_policy": "zero"
+      },
+      "evidence": "Zero coefficients still consume and reject nonfinite arithmetic operands.",
+      "expected_error": "InvalidDomain"
+    },
+    {
+      "id": "restricted_mean.valid_only",
+      "op": "restricted_mean",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7ff8000000000001"
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0,
+        "request": "valid",
+        "empty_policy": "error"
+      },
+      "expected": {
+        "valid": [
+          [
+            1
+          ]
+        ]
+      },
+      "evidence": "Valid-only requires weights, not finite image samples."
+    },
+    {
+      "id": "fill_holes.complementary8",
+      "op": "fill_holes",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "foreground_connectivity": 4
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1
+        ],
+        [
+          1,
+          0,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Background8 connects centre diagonally to canvas."
+    },
+    {
+      "id": "fill_holes.complementary4",
+      "op": "fill_holes",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0,
+            1,
+            1
+          ],
+          [
+            1,
+            0,
+            1
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "foreground_connectivity": 8
+      },
+      "expected": [
+        [
+          0,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Background4 makes centre an enclosed hole."
+    },
+    {
+      "id": "dilate.signed_zero_tie",
+      "op": "dilate",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            "bits:8000000000000000",
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": [
+        [
+          "bits:8000000000000000",
+          0
+        ]
+      ],
+      "evidence": "Equal extrema choose centre first."
+    },
+    {
+      "id": "offset_polygon_grid.half_coverage",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            0
+          ],
+          [
+            0.5,
+            0
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "samples_per_axis": 2,
+        "sample_pattern": "grid_center"
+      },
+      "expected": [
+        [
+          0.5
+        ]
+      ],
+      "evidence": "Two of four fixed samples lie in the half-square."
+    },
+    {
+      "id": "threshold.f64_static",
+      "op": "threshold",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "threshold": "bits:3ff0000000000001"
+      },
+      "expected": [
+        [
+          0
+        ]
+      ],
+      "evidence": "Float64 static threshold is not narrowed to input Float32."
+    },
+    {
+      "id": "remove_small.inclusive.float32",
+      "op": "remove_small",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1,
+            1,
+            0,
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": 2
+      },
+      "expected": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Areas 1 and 2 removed; area 3 retained."
+    },
+    {
+      "id": "remove_small.zero.float32",
+      "op": "remove_small",
+      "dtype": "float32",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": 0
+      },
+      "expected": [
+        [
+          1,
+          0,
+          1
+        ]
+      ],
+      "evidence": "Zero maximum removes no nonempty component."
+    },
+    {
+      "id": "remove_small.inclusive.float64",
+      "op": "remove_small",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1,
+            1,
+            0,
+            1,
+            1,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": 2
+      },
+      "expected": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "evidence": "Areas 1 and 2 removed; area 3 retained."
+    },
+    {
+      "id": "remove_small.zero.float64",
+      "op": "remove_small",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1,
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": 0
+      },
+      "expected": [
+        [
+          1,
+          0,
+          1
+        ]
+      ],
+      "evidence": "Zero maximum removes no nonempty component."
+    },
+    {
+      "id": "remove_small.negative_maximum",
+      "op": "remove_small",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_removed_area": -1
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Negative area limit rejected."
+    },
+    {
+      "id": "binary_logic.invalid.00",
+      "op": "binary_logic",
+      "dtype": "float64",
+      "inputs": {
+        "a": [
+          [
+            2
+          ]
+        ],
+        "b": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {},
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "invert.invalid.01",
+      "op": "invert",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1.01
+          ]
+        ]
+      },
+      "params": {},
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "soft_threshold.invalid.02",
+      "op": "soft_threshold",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "width": -1
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "range_mask.invalid.03",
+      "op": "range_mask",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "lower": 2,
+        "upper": 1
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "dilate.invalid.04",
+      "op": "dilate",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "footprint": "custom",
+        "offsets": "0:0;0:1"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "dilate.invalid.05",
+      "op": "dilate",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "footprint": "custom",
+        "offsets": "-0:0"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "nearest_feature.invalid.06",
+      "op": "nearest_feature",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "sy": 0
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "truncated_nearest_feature.invalid.07",
+      "op": "truncated_nearest_feature",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "limit": -1
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "gaussian_feather.invalid.08",
+      "op": "gaussian_feather",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "sigma_y": 0,
+        "radius_y": 1
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "flood_barrier.invalid.09",
+      "op": "flood_barrier",
+      "dtype": "float64",
+      "inputs": {
+        "seeds": [
+          [
+            1
+          ]
+        ],
+        "barrier": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {},
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "label_compact.invalid.10",
+      "op": "label_compact",
+      "dtype": "float64",
+      "inputs": {
+        "input": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "maximum_count": 0
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "filter_area_index.invalid.11",
+      "op": "filter_area_index",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            1
+          ]
+        ],
+        "area_index": {
+          "source_id": "B",
+          "rows": [
+            [
+              1,
+              1
+            ]
+          ]
+        }
+      },
+      "params": {
+        "labels_id": "A",
+        "minimum_area": 1
+      },
+      "expected_error": "InvalidAssociation",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "filter_area_index.invalid.12",
+      "op": "filter_area_index",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            1
+          ]
+        ],
+        "area_index": {
+          "source_id": "A",
+          "rows": [
+            [
+              1,
+              1.0
+            ]
+          ]
+        }
+      },
+      "params": {
+        "labels_id": "A",
+        "minimum_area": 1
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "component_count.invalid.13",
+      "op": "component_count",
+      "dtype": "float64",
+      "inputs": {
+        "labels": [
+          [
+            -1
+          ]
+        ]
+      },
+      "params": {},
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "reconstruct_dilate.invalid.14",
+      "op": "reconstruct_dilate",
+      "dtype": "float64",
+      "inputs": {
+        "marker": [
+          [
+            1
+          ]
+        ],
+        "limit": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {},
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "restricted_mean.invalid.15",
+      "op": "restricted_mean",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              2
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0,
+        "empty_policy": "error"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "affect_result.invalid.16",
+      "op": "affect_result",
+      "dtype": "float64",
+      "inputs": {
+        "original": [
+          [
+            [
+              "bits:7ff8000000000001"
+            ]
+          ]
+        ],
+        "processed": [
+          [
+            [
+              1
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0.5
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "offset_polygon_grid.invalid.17",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            1
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "grid_center",
+        "samples_per_axis": 4
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "Explicit forbidden domain/schema/association."
+    },
+    {
+      "id": "multiply_mask.arithmetic_zero.float32",
+      "op": "multiply_mask",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              -0.0,
+              -0.0
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected": [
+        [
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "evidence": "Arithmetic zero is +0; no endpoint bit-copy."
+    },
+    {
+      "id": "affect_result.zero_weight_inf.float32",
+      "op": "affect_result",
+      "dtype": "float32",
+      "inputs": {
+        "original": [
+          [
+            [
+              "bits:7f800000"
+            ]
+          ]
+        ],
+        "processed": [
+          [
+            [
+              2
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "All arithmetic operands are validated."
+    },
+    {
+      "id": "multiply_mask.zero_weight_inf.float32",
+      "op": "multiply_mask",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7f800000"
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "All arithmetic operands are validated."
+    },
+    {
+      "id": "restricted_mean.zero_weight_inf.float32",
+      "op": "restricted_mean",
+      "dtype": "float32",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7f800000"
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0,
+        "empty_policy": "zero"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "All arithmetic operands are validated."
+    },
+    {
+      "id": "multiply_mask.arithmetic_zero.float64",
+      "op": "multiply_mask",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              -0.0,
+              -0.0
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0,
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected": [
+        [
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "evidence": "Arithmetic zero is +0; no endpoint bit-copy."
+    },
+    {
+      "id": "affect_result.zero_weight_inf.float64",
+      "op": "affect_result",
+      "dtype": "float64",
+      "inputs": {
+        "original": [
+          [
+            [
+              "bits:7ff0000000000000"
+            ]
+          ]
+        ],
+        "processed": [
+          [
+            [
+              2
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            1
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "All arithmetic operands are validated."
+    },
+    {
+      "id": "multiply_mask.zero_weight_inf.float64",
+      "op": "multiply_mask",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7ff0000000000000"
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "channels": "0"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "All arithmetic operands are validated."
+    },
+    {
+      "id": "restricted_mean.zero_weight_inf.float64",
+      "op": "restricted_mean",
+      "dtype": "float64",
+      "inputs": {
+        "image": [
+          [
+            [
+              "bits:7ff0000000000000"
+            ]
+          ]
+        ],
+        "mask": [
+          [
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 0,
+        "empty_policy": "zero"
+      },
+      "expected_error": "InvalidDomain",
+      "evidence": "All arithmetic operands are validated."
+    },
+    {
+      "id": "offset_polygon_grid.standard1.float32",
+      "op": "offset_polygon_grid",
+      "dtype": "float32",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 1,
+        "output_dtype": "float32"
+      },
+      "expected": [
+        [
+          0.0
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard2.float32",
+      "op": "offset_polygon_grid",
+      "dtype": "float32",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 2,
+        "output_dtype": "float32"
+      },
+      "expected": [
+        [
+          0.0
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard4.float32",
+      "op": "offset_polygon_grid",
+      "dtype": "float32",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 4,
+        "output_dtype": "float32"
+      },
+      "expected": [
+        [
+          0.25
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard8.float32",
+      "op": "offset_polygon_grid",
+      "dtype": "float32",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 8,
+        "output_dtype": "float32"
+      },
+      "expected": [
+        [
+          0.25
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard16.float32",
+      "op": "offset_polygon_grid",
+      "dtype": "float32",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 16,
+        "output_dtype": "float32"
+      },
+      "expected": [
+        [
+          0.25
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard1.float64",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 1,
+        "output_dtype": "float64"
+      },
+      "expected": [
+        [
+          0.0
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard2.float64",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 2,
+        "output_dtype": "float64"
+      },
+      "expected": [
+        [
+          0.0
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard4.float64",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 4,
+        "output_dtype": "float64"
+      },
+      "expected": [
+        [
+          0.25
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard8.float64",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 8,
+        "output_dtype": "float64"
+      },
+      "expected": [
+        [
+          0.25
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "offset_polygon_grid.standard16.float64",
+      "op": "offset_polygon_grid",
+      "dtype": "float64",
+      "inputs": {
+        "vertices": [
+          [
+            -0.5,
+            -0.5
+          ],
+          [
+            -0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.3125
+          ],
+          [
+            0.5,
+            -0.5
+          ]
+        ]
+      },
+      "params": {
+        "H": 1,
+        "W": 1,
+        "sample_pattern": "vulkan_standard",
+        "sample_count": 16,
+        "output_dtype": "float64"
+      },
+      "expected": [
+        [
+          0.25
+        ]
+      ],
+      "evidence": "Exact standard-table horizontal counts at u<=3/16."
+    },
+    {
+      "id": "fill_axis_gaps.seed_override.float32",
+      "op": "fill_axis_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Only the seeded newly closed pixel reopens; neighboring closure stays."
+    },
+    {
+      "id": "fill_axis_gaps.multi_seed_override.float32",
+      "op": "fill_axis_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seed-site additions cleared simultaneously."
+    },
+    {
+      "id": "fill_axis_gaps.original_barrier_seed.float32",
+      "op": "fill_axis_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seeds on original barrier are ignored; barrier retained."
+    },
+    {
+      "id": "fill_morphological_gaps.seed_override.float32",
+      "op": "fill_morphological_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Only the seeded newly closed pixel reopens; neighboring closure stays."
+    },
+    {
+      "id": "fill_morphological_gaps.multi_seed_override.float32",
+      "op": "fill_morphological_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seed-site additions cleared simultaneously."
+    },
+    {
+      "id": "fill_morphological_gaps.original_barrier_seed.float32",
+      "op": "fill_morphological_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seeds on original barrier are ignored; barrier retained."
+    },
+    {
+      "id": "fill_axis_gaps.seed_override.float64",
+      "op": "fill_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Only the seeded newly closed pixel reopens; neighboring closure stays."
+    },
+    {
+      "id": "fill_axis_gaps.multi_seed_override.float64",
+      "op": "fill_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seed-site additions cleared simultaneously."
+    },
+    {
+      "id": "fill_axis_gaps.original_barrier_seed.float64",
+      "op": "fill_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seeds on original barrier are ignored; barrier retained."
+    },
+    {
+      "id": "fill_morphological_gaps.seed_override.float64",
+      "op": "fill_morphological_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Only the seeded newly closed pixel reopens; neighboring closure stays."
+    },
+    {
+      "id": "fill_morphological_gaps.multi_seed_override.float64",
+      "op": "fill_morphological_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            1,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seed-site additions cleared simultaneously."
+    },
+    {
+      "id": "fill_morphological_gaps.original_barrier_seed.float64",
+      "op": "fill_morphological_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "All seeds on original barrier are ignored; barrier retained."
+    },
+    {
+      "id": "fill_axis_gaps.mixed_seed_filter.float32",
+      "op": "fill_axis_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Original-barrier seed ignored, surviving seed reopens only its added barrier."
+    },
+    {
+      "id": "fill_morphological_gaps.mixed_seed_filter.float32",
+      "op": "fill_morphological_gaps",
+      "dtype": "float32",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Original-barrier seed ignored, surviving seed reopens only its added barrier."
+    },
+    {
+      "id": "fill_axis_gaps.mixed_seed_filter.float64",
+      "op": "fill_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Original-barrier seed ignored, surviving seed reopens only its added barrier."
+    },
+    {
+      "id": "fill_morphological_gaps.mixed_seed_filter.float64",
+      "op": "fill_morphological_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            1,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            0,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            1,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            1,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "Original-barrier seed ignored, surviving seed reopens only its added barrier."
+    },
+    {
+      "id": "fill_axis_gaps.empty_seed_diagnostics",
+      "op": "fill_axis_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "maximum_gap": 2
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "No seeds: closure diagnostics still returned."
+    },
+    {
+      "id": "fill_morphological_gaps.empty_seed_diagnostics",
+      "op": "fill_morphological_gaps",
+      "dtype": "float64",
+      "inputs": {
+        "barrier": [
+          [
+            1,
+            0,
+            0,
+            1
+          ]
+        ],
+        "seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "params": {
+        "radius": 1
+      },
+      "expected": {
+        "fill": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "barrier": [
+          [
+            1,
+            1,
+            1,
+            1
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      },
+      "evidence": "No seeds: closure diagnostics still returned."
+    }
+  ]
+}

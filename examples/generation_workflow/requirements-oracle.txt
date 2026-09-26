@@ -1,0 +1,2 @@
+# Optional Measured diagnostics only; exact/rng/geometry tests use stdlib.
+mpmath==1.3.0

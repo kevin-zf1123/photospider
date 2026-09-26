@@ -259,11 +259,9 @@ The required black_value and white_value are finite same-dtype typed constants;
 they may coincide or be reversed. Select their exact stored bits without
 interpolation. Integer code-domain binary data must first be explicitly decoded.
 
-Current mask.threshold is a typed Float32 Whole implementation. It is not already
-a conforming generic/Float64/exact-region building block for S. Implementing S
-requires an admitted MASK-03 primitive with the requested target contract (or a
-formally equivalent composition), not a silent switch to Whole or a claimed
-working helper over the retired representation.
+Implementing S requires an admitted MASK-03 primitive with the requested
+planar, Float32/Float64 and exact-region contract, or a formally equivalent
+composition. The MASK specification alone does not establish runtime support.
 
 ## Static interface and interpretation
 
