@@ -51,3 +51,4 @@
 #include "photospider/plugin/statistics_operation.hpp"
 
 #include "photospider/format/transfer.hpp"
+#include "photospider/format/rgb_basis.hpp"

@@ -9,6 +9,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
       register_transfer_operations,
                               register_channel_assembly,
                               register_metadata_assignment,
+                              register_rgb_basis,
                               register_numeric_interpolation,
                               register_numeric_layouts,
                               register_numeric_indexing,

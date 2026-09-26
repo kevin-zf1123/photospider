@@ -256,3 +256,10 @@ __pycache__/
 # FMT-09 revision-2 independently reproducible corpus and ABBA driver.
 !tests/oracles/fmt09_sweep.py
 !examples/transfer_performance/compare.py
+# FMT-10 configure-required benchmark and reproducible exact oracle fixtures.
+!examples/rgb_basis_performance/
+!examples/rgb_basis_performance/*.cpp
+!examples/rgb_basis_performance/*.py
+!examples/rgb_basis_performance/*.md
+!examples/rgb_basis_performance/CMakeLists.txt
+!tests/fixtures/generate_fmt10_oracles.py

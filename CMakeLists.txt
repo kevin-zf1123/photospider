@@ -110,6 +110,34 @@ option(PHOTOSPIDER_TRANSFER_GAMMA2_SIMD "Enable FMT-09 exact arithmetic and bit-
 add_compile_definitions(
   PHOTOSPIDER_TRANSFER_COMPACT_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_COMPACT_MATH}>
   PHOTOSPIDER_TRANSFER_GAMMA2_SIMD=$<BOOL:${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD}>)
+# FMT-10 algorithm controls are private implementation choices, not semantics.
+set(PHOTOSPIDER_FMT10_ALGORITHM "CERTIFIED" CACHE STRING "FMT-10: CERTIFIED or EXACT")
+set_property(CACHE PHOTOSPIDER_FMT10_ALGORITHM PROPERTY STRINGS CERTIFIED EXACT)
+if(NOT PHOTOSPIDER_FMT10_ALGORITHM MATCHES "^(CERTIFIED|EXACT)$")
+  message(FATAL_ERROR "Unknown PHOTOSPIDER_FMT10_ALGORITHM")
+endif()
+option(PHOTOSPIDER_FMT10_SIMD "FMT-10 AVX2/Apple NEON certified candidates" ON)
+if(PHOTOSPIDER_FMT10_ALGORITHM STREQUAL "EXACT")
+  set_property(SOURCE plugins/ops/02-format-color/rgb_basis.cpp
+    plugins/ops/02-format-color/rgb_basis_math.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS PHOTOSPIDER_FMT10_EXACT_ONLY)
+endif()
+if(NOT PHOTOSPIDER_FMT10_SIMD)
+  set_property(SOURCE plugins/ops/02-format-color/rgb_basis.cpp
+    plugins/ops/02-format-color/rgb_basis_math.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS PHOTOSPIDER_FMT10_NO_SIMD)
+endif()
+
+# Retain the allocation-based exact evaluator for controlled comparisons.
+set(PHOTOSPIDER_FMT10_EXACT_KERNEL "LIMB" CACHE STRING "FMT-10 exact kernel: LIMB or REFERENCE")
+set_property(CACHE PHOTOSPIDER_FMT10_EXACT_KERNEL PROPERTY STRINGS LIMB REFERENCE)
+if(NOT PHOTOSPIDER_FMT10_EXACT_KERNEL MATCHES "^(LIMB|REFERENCE)$")
+  message(FATAL_ERROR "Unknown PHOTOSPIDER_FMT10_EXACT_KERNEL")
+endif()
+if(PHOTOSPIDER_FMT10_EXACT_KERNEL STREQUAL "REFERENCE")
+  set_property(SOURCE plugins/ops/02-format-color/rgb_basis_math.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS PHOTOSPIDER_FMT10_REFERENCE_EXACT)
+endif()
 
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_constant.cpp
@@ -120,6 +148,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/02-format-color/model_conversion.cpp
   plugins/ops/02-format-color/model_math.cpp
   plugins/ops/02-format-color/model_simd.cpp
+  plugins/ops/02-format-color/rgb_basis.cpp
+  plugins/ops/02-format-color/rgb_basis_math.cpp
   plugins/ops/02-format-color/numeric_conversion.cpp
   plugins/ops/02-format-color/transfer.cpp
   plugins/ops/02-format-color/transfer_definition.cpp
@@ -370,7 +400,7 @@ list(APPEND _cache_identity_inputs ${_numeric_math_identity_inputs}
 list(SORT _cache_identity_inputs)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _cache_config)
-set(_cache_identity "transfer-compact=${PHOTOSPIDER_TRANSFER_COMPACT_MATH};transfer-gamma2-simd=${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD};transfer-filter=${PHOTOSPIDER_TRANSFER_FAST_MATH};matrix-backend=${PHOTOSPIDER_MATRIX_BACKEND};sme=${PHOTOSPIDER_ENABLE_MATRIX_SME};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE};accelerate=${PHOTOSPIDER_ENABLE_ACCELERATE}")
+set(_cache_identity "fmt10-algorithm=${PHOTOSPIDER_FMT10_ALGORITHM};fmt10-exact=${PHOTOSPIDER_FMT10_EXACT_KERNEL};fmt10-simd=${PHOTOSPIDER_FMT10_SIMD};transfer-compact=${PHOTOSPIDER_TRANSFER_COMPACT_MATH};transfer-gamma2-simd=${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD};transfer-filter=${PHOTOSPIDER_TRANSFER_FAST_MATH};matrix-backend=${PHOTOSPIDER_MATRIX_BACKEND};sme=${PHOTOSPIDER_ENABLE_MATRIX_SME};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE};accelerate=${PHOTOSPIDER_ENABLE_ACCELERATE}")
 foreach(_cache_input IN LISTS _cache_identity_inputs)
   file(SHA256 "${_cache_input}" _cache_source_hash)
   file(RELATIVE_PATH _cache_relative "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_input}")
@@ -532,6 +562,7 @@ add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_conversion_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/transfer_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/rgb_basis_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/codec_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
@@ -776,6 +807,12 @@ if(BUILD_TESTING)
   target_include_directories(test_channel_extraction PRIVATE examples/numeric_workflow)
   photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
+  photospider_add_test(test_rgb_basis_math photospider_test_kernel tests/unit/test_rgb_basis_math.cpp)
+  target_include_directories(test_rgb_basis_math PRIVATE plugins/ops src/lib)
+  target_compile_options(test_rgb_basis_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+  photospider_add_test(test_rgb_basis Photospider::kernel tests/integration/test_rgb_basis.cpp)
+  photospider_add_test(test_planar_mapped_validation photospider_test_kernel tests/unit/test_planar_mapped_validation.cpp)
+  target_include_directories(test_planar_mapped_validation PRIVATE src/lib)
   photospider_add_test(test_matrix_certificate photospider_test_kernel tests/unit/test_matrix_certificate.cpp)
   target_include_directories(test_matrix_certificate PRIVATE plugins/ops src/lib)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

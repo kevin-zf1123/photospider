@@ -1026,6 +1026,9 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const bool dual_planar = planar && staged && definition.prepare_static &&
                            definition.start_dependency &&
                            definition.planar_callback;
+  if (definition.validate_planar_mapped && !dual_planar)
+    return Status{ErrorCode::InvalidArgument,
+                  "mapped planar validation requires dual static preparation"};
   if (!valid_key(definition.key) || !traits_status.ok() ||
       definition.traits.requires_metadata_specialization !=
           (static_cast<bool>(definition.specialize_metadata) ||
@@ -2018,6 +2021,19 @@ OperationRegistry::prepare_operation(
         output.data_movement_view_policy =
             specialization.data_movement_view_policy;
       }
+      for (const auto& output : traits.outputs) {
+        if (output.data_movement != DataMovementKind::BitwiseMapped ||
+            !output.static_dependency_pieces)
+          continue;
+        for (const auto& piece : *output.static_dependency_pieces)
+          for (const auto& need : piece.inputs)
+            if ((need.roles &
+                 static_cast<std::uint32_t>(DependencyRole::Validation)) &&
+                !definition->validate_planar_mapped)
+              return Answer(Status{
+                  ErrorCode::InvalidArgument,
+                  "mapped validation needs an explicit read-only callback"});
+      }
       traits.requires_metadata_specialization = false;
       auto expanded_validation = traits;
       expanded_validation.repeated_minimum = 0;
@@ -2414,6 +2430,64 @@ Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
 Result<Value> OperationRegistry::invoke(
     const std::string& key, const OperationInvocation& invocation) const {
   return invoke_current(key, invocation, {});
+}
+
+Status OperationRegistry::invoke_planar_mapped_validation(
+    std::shared_ptr<const PreparedOperation> prepared,
+    const PlanarImageReadWindow& input, std::uint32_t input_port,
+    const Region& output_region, const CancellationToken& cancellation,
+    const std::function<bool()>& current) const {
+  if (cancellation.cancelled())
+    return Status{ErrorCode::Cancelled, "mapped validation cancelled"};
+  if (current && !current())
+    return Status{ErrorCode::Stale, "mapped validation plan changed"};
+  if (!prepared || !input.valid() ||
+      input_port >= prepared->impl_->inputs.size())
+    return Status{ErrorCode::InvalidArgument,
+                  "invalid mapped validation window"};
+  const auto& stored = *prepared->impl_;
+  if (!stored.definition->validate_planar_mapped ||
+      stored.traits.outputs[0].data_movement != DataMovementKind::BitwiseMapped)
+    return Status{ErrorCode::InvalidArgument,
+                  "missing mapped validation contract"};
+  // Callback exit, including exceptions, must use one precedence rule.
+  const auto finish = [&](Status status) {
+    if (cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, "mapped validation cancelled"};
+    if (current && !current())
+      return Status{ErrorCode::Stale, "mapped validation plan changed"};
+    return status;
+  };
+  try {
+    auto metadata = stored.inputs;
+    auto& actual = metadata[input_port];
+    actual.descriptor = input.descriptor();
+    actual.facets = input.facets();
+    actual.planar_layout = PlanarImageLayout{
+        input.config().order,           input.config().height_axis,
+        input.config().width_axis,      input.config().channel_axis,
+        input.config().row_pitch_bytes, input.config().groups};
+    auto status = validate_prepared(*prepared, stored.definition->key, metadata,
+                                    stored.parameters);
+    if (!status.ok())
+      return finish(std::move(status));
+    status =
+        output_region.validate(stored.traits.outputs[0].fixed_output_shape);
+    if (!status.ok())
+      return finish(std::move(status));
+    const PlanarMappedValidationInvocation invocation{
+        input, input_port, output_region, cancellation, prepared};
+    status = stored.definition->validate_planar_mapped(invocation);
+    return finish(std::move(status));
+  } catch (const std::bad_alloc&) {
+    return finish(Status{ErrorCode::ResourceExhausted,
+                         "mapped validation allocation",
+                         FailureReason::CapacityLimit});
+  } catch (...) {
+    return finish(Status{ErrorCode::OperationFailed,
+                         "mapped validation exception",
+                         FailureReason::HostException});
+  }
 }
 
 Status OperationRegistry::invoke_planar(
