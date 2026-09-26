@@ -8,6 +8,7 @@ Status register_channel_assembly(OperationRegistry* registry);
 Status register_channel_extraction(OperationRegistry* registry);
 Status register_model_conversions(OperationRegistry* registry);
 Status register_numeric_conversion(OperationRegistry* registry);
+Status register_transfer_operations(OperationRegistry* registry);
 /** @brief Registers the source-tree operations grouped by docs/built-in_ops. */
 Status register_builtin_operations(OperationRegistry* registry);
 Status register_numeric_layouts(OperationRegistry* registry);

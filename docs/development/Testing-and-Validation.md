@@ -342,10 +342,10 @@ ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|g
 
 ## Installed and optional coverage boundaries
 
-The installed gate accepts package 0.25 and rejects 0.23/0.24 requests. Its actual
+The installed gate accepts package 0.25 and rejects a 0.24 request. Its actual
 runtime inventory is the `COMMAND` list of `run_photospider_consumer` in
 `tests/consumer/CMakeLists.txt`, including region runs, planar preparations,
-mapped movement and maintained operator/registry workflows. The four GPU
+mapped movement, FMT-09 transfer golden workflows and maintained operator/registry workflows. The four GPU
 workflow targets and foundations example are currently build dependencies only
 in that nested gate, not installed runtime executions. Their in-tree CTests
 remain the native execution coverage. Resource, Result, representation and

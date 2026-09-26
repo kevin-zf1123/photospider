@@ -49,3 +49,5 @@
 #include "photospider/plugin/operation_plugin.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/statistics_operation.hpp"
+
+#include "photospider/format/transfer.hpp"

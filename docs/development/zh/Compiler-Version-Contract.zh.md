@@ -368,3 +368,16 @@ operation C ABI、data-provider C ABI、WorkflowDocument 与既有 identity fram
 版本均不改变。TDM5 字节通过原有 facet identity 路径进入身份；TDM4 含义不变，
 canonical v4/v5 选择规则详见张量语义元数据文档。这些是彼此独立的版本边界，
 不是 C++ 对象布局兼容承诺。
+
+包版本 0.25.0 为 `PlanarOperationInvocation` 增加同步借用的 `consume_work` 服务，
+并扩展 `OperationRegistry::invoke_planar`，改变公共 C++ 布局和调用 ABI。
+内核、原生 C++ 回调与安装消费者必须一起重新编译；不支持跨此边界混用旧、新
+C++ 对象文件或共享库。SameMinorVersion 安装门禁接受 0.25，拒绝 0.24 请求。
+OperationTraits18、各阶段 identity domain、C operation ABI9、planar C 扩展 v1、
+provider ABI1、WorkflowDocument schema3 与 TDM4 保持不变。
+
+包版本 0.26.0 将 planar `consume_work` 改为返回借用的 `const Status&`，并新增
+`ResourceBudget::try_consume`。成功时不修改调用者的失败对象，所有 work 维度
+在同一个事务中准入。借用状态有效期截止下次 checkpoint 或 callback 返回；
+需要保留的失败必须复制。C++ callback 与消费者必须一起重新编译。
+安装门禁接受 0.26、拒绝 0.25；C ABI、identity 与 schema 域保持不变。

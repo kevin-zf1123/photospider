@@ -6,6 +6,7 @@ Status register_builtin_operations(OperationRegistry* registry) {
                               register_channel_extraction,
                               register_model_conversions,
                               register_numeric_conversion,
+      register_transfer_operations,
                               register_channel_assembly,
                               register_metadata_assignment,
                               register_numeric_interpolation,

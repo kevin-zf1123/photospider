@@ -130,6 +130,7 @@
 !tests/**/*.cpp
 !tests/**/*.h
 !tests/**/*.hpp
+!tests/oracles/fmt09_division.py
 !tests/**/CMakeLists.txt
 # Exact long-lived manual-fuzz seeds; generated corpus mutations stay ignored.
 !tests/fuzz/corpus/operation_contract_ir/malformed-schema
@@ -243,3 +244,15 @@ __pycache__/
 !tests/cmake/test_fmt11_package_version.cmake
 !tests/fixtures/fmt11/rational_oracles.txt
 !tools/fmt11/style_scope.txt
+
+# FMT-09 reproducible constants/oracles and performance harness.
+!tests/oracles/fmt09_constants.py
+!tests/oracles/fmt09_reference.py
+!examples/transfer_performance/
+!examples/transfer_performance/*.cpp
+!examples/transfer_performance/*.md
+!examples/transfer_performance/CMakeLists.txt
+
+# FMT-09 revision-2 independently reproducible corpus and ABBA driver.
+!tests/oracles/fmt09_sweep.py
+!examples/transfer_performance/compare.py

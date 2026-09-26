@@ -2423,7 +2423,8 @@ Status OperationRegistry::invoke_planar(
     const Region& output_region, PlanarImage& output,
     const CancellationToken& cancellation, const BufferAllocator& allocator,
     std::shared_ptr<const PreparedOperation> prepared,
-    const std::function<bool()>& current) const {
+    const std::function<bool()>& current, NumericDiagnostics* numeric,
+    const ResourceBudget* resources, const ErrorCode* metadata_failure) const {
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2597,15 +2598,57 @@ Status OperationRegistry::invoke_planar(
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
     auto scratch = allocator.limited(
         bound, [failure](ErrorCode code) { failure->store(code); });
+    NumericDiagnostics local_numeric;
+    Status numeric_status = Status::success();
+    const auto report_numeric = [&](const NumericDiagnostics& report) {
+      if (!numeric_status.ok())
+        return numeric_status;
+      numeric_status = merge_numeric_diagnostics(&local_numeric, report);
+      if (numeric && numeric_status.ok())
+        *numeric = local_numeric;
+      return numeric_status;
+    };
+    Status work_status = Status::success();
+    const auto consume_work = [&](std::uint64_t amount) -> const Status& {
+      // Cancellation wins even if a previous checkpoint observed Stale/fuel.
+      if (cancellation.cancelled())
+        work_status =
+            Status{ErrorCode::Cancelled, "planar operation cancelled"};
+      if (!work_status.ok())
+        return work_status;
+      if (current && !current()) {
+        work_status =
+            Status{ErrorCode::Stale, "planar plan changed in callback"};
+      } else if (resources && amount) {
+        resources->try_consume({amount}, work_status);
+      }
+      return work_status;
+    };
     const PlanarOperationInvocation invocation{
-        inputs,       input_demands, parameters, output_region, window,
-        cancellation, scratch,       inferred,   prepared};
+        inputs,   input_demands,  parameters,  output_region,
+        window,   cancellation,   scratch,     inferred,
+        prepared, report_numeric, consume_work};
     input_internal::Float32Environment environment;
     if (!environment.active())
       return Status{ErrorCode::OperationFailed,
                     "floating environment unavailable"};
     auto status = definition->planar_callback(invocation);
-    if (failure->load() != ErrorCode::Ok)
+    if (!numeric_status.ok())
+      status = numeric_status;
+    if (!work_status.ok())
+      status = work_status;
+    // A plugin may catch bad_alloc. The worker's sticky metadata failure must
+    // still be observed before commit, not merely before returning the result.
+    if (metadata_failure && *metadata_failure != ErrorCode::Ok &&
+        status.detail.origin != FailureOrigin::Protocol &&
+        status.code != ErrorCode::ResourceExhausted &&
+        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
+      status = Status{*metadata_failure,
+                      "planar metadata allocation failed",
+                      FailureReason::CapacityLimit,
+                      {FailureOrigin::Resource, FailureScope::Unspecified}};
+    if (failure->load() != ErrorCode::Ok &&
+        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
       status = Status{failure->load(), "planar scratch allocation failed"};
     if (cancellation.cancelled())
       return Status::failure(ErrorCode::Cancelled,

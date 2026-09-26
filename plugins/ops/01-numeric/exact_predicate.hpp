@@ -43,9 +43,10 @@ struct BinaryParts final {
 // therefore uses 4352 bits; exact cubic callers select a larger fixed capacity.
 template <std::size_t Words>
 struct FixedInteger final {
-  static_assert(Words >= 68 && Words % 4 == 0);
+  static_assert(Words >= 4 && Words % 4 == 0);
   std::array<std::uint64_t, Words> words{};
   void set_product(const BinaryParts& a, const BinaryParts& b) {
+    static_assert(Words >= 68, "full-domain binary64 product needs 4352 bits");
     words.fill(0);
     const auto product =
         static_cast<unsigned __int128>(a.significand) * b.significand;
@@ -58,6 +59,7 @@ struct FixedInteger final {
   // Finite parts only; callers use fractional_bits 1074 or 2148, ensuring
   // every decoded significand has a nonnegative in-capacity shift.
   void set(const BinaryParts& value, unsigned fractional_bits = 2148) {
+    static_assert(Words >= 68, "full-domain binary64 import needs 4352 bits");
     words.fill(0);
     const unsigned shift = static_cast<unsigned>(
         value.exponent + static_cast<int>(fractional_bits));

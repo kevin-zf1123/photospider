@@ -55,15 +55,15 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-foreach(_old_minor IN ITEMS 0.23 0.24)
+foreach(_old_minor IN ITEMS 0.23 0.24 0.25)
   find_package(Photospider ${_old_minor} CONFIG QUIET COMPONENTS kernel)
   if(Photospider_FOUND)
-    message(FATAL_ERROR "Photospider 0.25 must reject a ${_old_minor} consumer")
+    message(FATAL_ERROR "Photospider 0.26 must reject a ${_old_minor} consumer")
   endif()
 endforeach()
 
 find_package(
-  Photospider 0.25 CONFIG REQUIRED
+  Photospider 0.26 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -166,6 +166,12 @@ target_include_directories(photospider_channel_extraction_consumer PRIVATE .. ..
 target_link_libraries(photospider_channel_extraction_consumer PRIVATE Photospider::kernel)
 target_compile_options(photospider_channel_extraction_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_channel_extraction_consumer PRIVATE ${_photospider_consumer_link_options})
+
+add_executable(photospider_transfer_consumer ../integration/test_transfer_operations.cpp)
+target_include_directories(photospider_transfer_consumer PRIVATE ..)
+target_link_libraries(photospider_transfer_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_transfer_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_transfer_consumer PRIVATE ${_photospider_consumer_link_options})
 
 add_executable(photospider_numeric_conversion_consumer ../integration/test_numeric_conversion.cpp)
 target_include_directories(photospider_numeric_conversion_consumer PRIVATE ..)
@@ -322,6 +328,7 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_ordered_reduction_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_extraction_consumer>"
   COMMAND "$<TARGET_FILE:photospider_numeric_conversion_consumer>"
+  COMMAND "$<TARGET_FILE:photospider_transfer_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_assembly_consumer>"
   COMMAND "$<TARGET_FILE:photospider_channel_editing_consumer>"
   COMMAND "$<TARGET_FILE:photospider_metadata_consumer>"
@@ -336,7 +343,7 @@ add_custom_target(
   USES_TERMINAL
   VERBATIM)
 
-add_dependencies(run_photospider_consumer photospider_region_runs_consumer
+add_dependencies(run_photospider_consumer photospider_transfer_consumer photospider_region_runs_consumer
   photospider_planar_preparation_consumer photospider_data_movement_contract_consumer)
 
 # Focused installed managed-resource consumer; only installed kernel headers.

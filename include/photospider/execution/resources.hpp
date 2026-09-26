@@ -126,6 +126,14 @@ class PHOTOSPIDER_API ResourceBudget final {
   static std::uint64_t lease_metadata_bytes() noexcept;
   Result<ResourceLease> reserve(ResourceCapacity capacity) const;
   Status consume(ResourceWork work) const;
+  /** @brief Atomically admits all work dimensions before computation.
+   * @param failure Receives the owning failure only when returning false;
+   * unchanged on success. May be reused serially by the caller.
+   * @return True on admission; false without incrementing any issued count.
+   * Thread-safe for callers with distinct failure objects. Uses the same
+   * limits, sticky resource failure and locking as consume().
+   */
+  bool try_consume(ResourceWork work, Status& failure) const;
   ResourceStatistics statistics() const;
   /** @brief Compares capacity ownership only; never a semantic result key. */
   bool same_owner(const ResourceBudget& other) const noexcept {

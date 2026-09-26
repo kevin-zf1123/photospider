@@ -8,18 +8,24 @@ namespace ps::plugin_internal::numeric_ops {
 // Color expressions retain real enclosures for intermediate results, including
 // values outside the IEEE destination range. The elementary NUM exp adapter's
 // final-result RangeResult classification must not be used at this boundary.
-struct DirectedColorFunctions final {
-  DirectedFunctions functions;
-  using Interval = DirectedInterval::Interval;
-  using Number = DirectedInterval::Number;
-  using Frame = DirectedInterval::Frame;
-  explicit DirectedColorFunctions(SequenceProfile profile)
+template <class Math = DirectedInterval>
+struct DirectedColorFunctionsStorage final {
+  // Preserve .functions.math used by existing RGB callers. No other
+  // DirectedFunctions member is used by the color evaluator.
+  struct State final {
+    Math math;
+    explicit State(SequenceProfile profile) : math(profile) {}
+  } functions;
+  using Interval = typename Math::Interval;
+  using Number = typename Math::Number;
+  using Frame = typename Math::Frame;
+  explicit DirectedColorFunctionsStorage(SequenceProfile profile)
       : functions(profile) {}
 
   void logarithm_point(Interval output, const Number& input) {
     auto& math = functions.math;
     if (input.negative || math.top(input) < 0)
-      throw DirectedInterval::Unresolved{};
+      throw typename Math::Unresolved{};
     Frame frame(math);
     const int exponent = math.top(input) - static_cast<int>(math.precision);
     auto normalized = math.interval(), one = math.interval(),
@@ -53,13 +59,19 @@ struct DirectedColorFunctions final {
         return;
       }
     }
-    throw DirectedInterval::Unresolved{};
+    throw typename Math::Unresolved{};
   }
   void logarithm(Interval output, Interval input) {
     auto& math = functions.math;
     Frame frame(math);
     auto lower = math.interval(), upper = math.interval();
     logarithm_point(lower, input.low);
+    if constexpr (Math::kWords < 192) {
+      if (math.compare(input.low, input.high) == 0) {
+        math.copy(output, lower);
+        return;
+      }
+    }
     logarithm_point(upper, input.high);
     math.copy(output.low, lower.low);
     math.copy(output.high, upper.high);
@@ -82,10 +94,11 @@ struct DirectedColorFunctions final {
     // their raw products below 12288 bits, with space for outward error.
     auto capacity = math.interval();
     math.constant(limit, false);
-    math.integer(capacity, 6144 - static_cast<int>(math.precision) - 64);
+    math.integer(capacity, static_cast<int>(Math::kWords * 32) -
+                               static_cast<int>(math.precision) - 64);
     math.multiply(limit, limit, capacity);
     if (math.compare(input, limit.low) > 0)
-      DirectedInterval::capacity();
+      Math::capacity();
     auto reduced = math.interval(), term = math.interval(),
          sum = math.interval();
     math.shift(reduced.low, input, -17, true);
@@ -109,7 +122,7 @@ struct DirectedColorFunctions final {
       }
       math.add(sum, sum, term);
     }
-    throw DirectedInterval::Unresolved{};
+    throw typename Math::Unresolved{};
   }
   void exponential(Interval output, Interval input) {
     auto& math = functions.math;
@@ -126,7 +139,7 @@ struct DirectedColorFunctions final {
     auto& math = functions.math;
     if (base.low.negative || exponent.low.negative ||
         math.top(exponent.low) < 0)
-      throw DirectedInterval::Unresolved{};
+      throw typename Math::Unresolved{};
     if (math.top(base.high) < 0) {
       math.integer(output, 0);
       return;
@@ -145,4 +158,5 @@ struct DirectedColorFunctions final {
     exponential(output, product);
   }
 };
+using DirectedColorFunctions = DirectedColorFunctionsStorage<>;
 }  // namespace ps::plugin_internal::numeric_ops

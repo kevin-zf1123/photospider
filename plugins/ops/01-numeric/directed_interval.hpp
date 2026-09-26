@@ -8,13 +8,20 @@
 
 #include "01-numeric/exact_product.hpp"
 #include "01-numeric/math_constants.hpp"
+#include "execution/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Fixed-capacity signed dyadic enclosures. The full pool is owned/admitted as
 // part of its operation continuation. No arithmetic limb allocates on the heap.
 // Inputs and every intermediate are checked against the 12288-bit capacity.
-struct DirectedInterval final {
-  static constexpr std::size_t kWords = 192, kSlots = 128;
+// Internal retry is distinct from caller resource/cancellation failures.
+// Only the FMT-09 compact instantiation uses it; the historical 192-word
+// implementation retains its public Status failure behavior.
+struct DirectedCapacityRetry final {};
+template <std::size_t Words = 192>
+struct DirectedIntervalStorage final {
+  static_assert(Words >= 4 && Words <= 192 && Words % 4 == 0);
+  static constexpr std::size_t kWords = Words, kSlots = 128;
   using Integer = FixedInteger<kWords>;
   using Workspace = ExactRatioWorkspace<kWords>;
   struct Unresolved {};
@@ -30,21 +37,20 @@ struct DirectedInterval final {
   Workspace rounding;
   std::size_t used = 0;
   unsigned precision = 128;
-  const std::function<Status(std::uint64_t)>* consume = nullptr;
-  explicit DirectedInterval(SequenceProfile profile) : rounding(profile) {}
+  execution_internal::WorkConsumer consume;
+  explicit DirectedIntervalStorage(SequenceProfile profile)
+      : rounding(profile) {}
   struct Frame {
-    DirectedInterval& context;
+    DirectedIntervalStorage& context;
     std::size_t saved;
-    explicit Frame(DirectedInterval& owner)
+    explicit Frame(DirectedIntervalStorage& owner)
         : context(owner), saved(owner.used) {}
     ~Frame() { context.used = saved; }
   };
-  void work(std::uint64_t amount) const {
-    const auto status = (*consume)(amount);
-    if (!status.ok())
-      throw status;
-  }
+  void work(std::uint64_t amount) const { consume.check(amount); }
   [[noreturn]] static void capacity() {
+    if constexpr (Words < 192)
+      throw DirectedCapacityRetry{};
     throw Status{ErrorCode::ResourceExhausted,
                  "directed math precision/state capacity",
                  FailureReason::CapacityLimit};
@@ -57,8 +63,14 @@ struct DirectedInterval final {
     return result;
   }
   Interval interval() {
-    auto& low = number();
-    auto& high = number();
+    if (used + 2 > pool.size())
+      capacity();
+    work(2 * kWords);
+    auto& low = pool[used++];
+    auto& high = pool[used++];
+    low.magnitude.words.fill(0);
+    high.magnitude.words.fill(0);
+    low.negative = high.negative = false;
     return {low, high};
   }
   void clear(Number& value) const {
@@ -71,8 +83,9 @@ struct DirectedInterval final {
     output = value;
   }
   void copy(Interval output, Interval value) const {
-    copy(output.low, value.low);
-    copy(output.high, value.high);
+    work(2 * kWords);
+    output.low = value.low;
+    output.high = value.high;
   }
   int top(const Number& value) const { return Workspace::top(value.magnitude); }
   void normalize(Number& value) const {
@@ -106,13 +119,22 @@ struct DirectedInterval final {
     }
     const auto bits = static_cast<unsigned>(-shift), whole = bits / 64,
                tail = bits % 64;
-    output.words.fill(0);
-    for (std::size_t j = whole; j < kWords; ++j) {
-      output.words[j - whole] |= value.words[j] >> tail;
-      if (tail && j > whole)
-        output.words[j - whole - 1] |= value.words[j] << (64 - tail);
+    if (whole >= kWords) {
+      output.words.fill(0);
+      return;
     }
+    const auto count = kWords - whole;
+    if (!tail) {
+      std::copy_n(value.words.begin() + whole, count, output.words.begin());
+    } else {
+      for (std::size_t i = 0; i + 1 < count; ++i)
+        output.words[i] = (value.words[i + whole] >> tail) |
+                          (value.words[i + whole + 1] << (64 - tail));
+      output.words[count - 1] = value.words[kWords - 1] >> tail;
+    }
+    std::fill(output.words.begin() + count, output.words.end(), 0);
   }
+
   bool discarded(const Integer& value, unsigned bits) const {
     const auto whole = std::min<std::size_t>(bits / 64, kWords);
     const auto tail = bits % 64;
@@ -135,6 +157,8 @@ struct DirectedInterval final {
     clear(output);
     const auto raw = static_cast<std::uint64_t>(value);
     const auto magnitude = value < 0 ? UINT64_C(0) - raw : raw;
+    if (precision / 64 + (precision % 64 != 0) >= kWords)
+      capacity();
     output.magnitude.words[precision / 64] = magnitude << (precision % 64);
     if (precision % 64)
       output.magnitude.words[precision / 64 + 1] =
@@ -175,7 +199,33 @@ struct DirectedInterval final {
     error.negative = false;
     add(value.high, value.high, error);
   }
+  template <std::size_t N>
+  void constant_prefix(Interval output,
+                       const std::array<std::uint64_t, N>& words) {
+    if (precision < 128 || precision > 4096)
+      capacity();
+    const unsigned shift = 4096 - precision;
+    const auto whole = shift / 64, tail = shift % 64;
+    // Check discarded HIGH bits separately; low discarded bits are enclosed
+    // by the +1 upper endpoint. Source is a certified floor in Q_4096.
+    for (std::size_t j = whole + kWords; j < N; ++j)
+      if (words[j] >> (j == whole + kWords ? tail : 0))
+        capacity();
+    clear(output.low);
+    for (std::size_t i = 0; i < kWords && i + whole < N; ++i) {
+      const auto j = i + whole;
+      output.low.magnitude.words[i] = words[j] >> tail;
+      if (tail && j + 1 < N)
+        output.low.magnitude.words[i] |= words[j + 1] << (64 - tail);
+    }
+    copy(output.high, output.low);
+    increment(output.high.magnitude);
+  }
   void constant(Interval output, bool pi) {
+    if constexpr (Words < 192) {
+      constant_prefix(output, pi ? pi_floor_4096 : ln2_floor_4096);
+      return;
+    }
     if (precision < 128 || precision > 4096)
       capacity();
     Frame frame(*this);
@@ -195,17 +245,17 @@ struct DirectedInterval final {
     if (a.negative == b.negative) {
       if (std::max(top(a), top(b)) + 1 >= static_cast<int>(kWords * 64))
         capacity();
-      copy(temporary, a);
-      work(kWords);
+      work(3 * kWords);
+      temporary = a;
       temporary.magnitude.add(b.magnitude);
     } else {
       const auto order = compare_unsigned(a.magnitude, b.magnitude);
-      copy(temporary, order >= 0 ? a : b);
-      work(kWords);
+      work(3 * kWords);
+      temporary = order >= 0 ? a : b;
       temporary.magnitude.subtract(order >= 0 ? b.magnitude : a.magnitude);
     }
     normalize(temporary);
-    copy(output, temporary);
+    output = temporary;
   }
   void negate(Interval output, Interval value) {
     Frame frame(*this);
@@ -234,6 +284,10 @@ struct DirectedInterval final {
   void multiply(Number& output, const Number& a, const Number& b, bool lower) {
     Frame frame(*this);
     auto& product = number();
+    if constexpr (Words < 192)
+      if (top(a) >= 0 && top(b) >= 0 &&
+          top(a) + top(b) + 1 >= static_cast<int>(kWords * 64))
+        capacity();
     auto status =
         multiply_fixed(a.magnitude, b.magnitude, &product.magnitude, *consume);
     if (!status.ok())
@@ -255,6 +309,10 @@ struct DirectedInterval final {
     bool first = true;
     for (const auto* left : {&a.low, &a.high})
       for (const auto* right : {&b.low, &b.high}) {
+        if constexpr (Words < 192)
+          if (top(*left) >= 0 && top(*right) >= 0 &&
+              top(*left) + top(*right) + 1 >= static_cast<int>(kWords * 64))
+            capacity();
         auto status = multiply_fixed(left->magnitude, right->magnitude,
                                      &product.magnitude, *consume);
         if (!status.ok())
@@ -271,8 +329,118 @@ struct DirectedInterval final {
     copy(output, result);
   }
   // All outputs/scratch are distinct from both immutable inputs.
+  // Base-2^64 long division. Normalization bounds the trial quotient error
+  // to two; an overestimate after subtraction is repaired by one add-back.
+  // Only the small tier uses this path; each digit is charged before mutation.
+  void divide_words(Integer& quotient, Integer& remainder,
+                    const Integer& numerator, const Integer& denominator) {
+    Frame frame(*this);
+    const auto n = static_cast<unsigned>((Workspace::top(numerator) + 64) / 64);
+    const auto d =
+        static_cast<unsigned>((Workspace::top(denominator) + 64) / 64);
+    if (!d)
+      capacity();
+    work(2 * kWords);
+    quotient.words.fill(0);
+    remainder = numerator;
+    if (n < d)
+      return;
+    if (d == 1) {
+      work(4 * n);
+      std::uint64_t rest = 0;
+      for (unsigned i = n; i; --i) {
+        const auto value = (static_cast<unsigned __int128>(rest) << 64) |
+                           numerator.words[i - 1];
+        quotient.words[i - 1] =
+            static_cast<std::uint64_t>(value / denominator.words[0]);
+        rest = static_cast<std::uint64_t>(value % denominator.words[0]);
+      }
+      remainder.words.fill(0);
+      remainder.words[0] = rest;
+      return;
+    }
+    auto& u = number().magnitude;
+    auto& v = number().magnitude;
+    work(2 * (n + d));
+    const unsigned shift =
+        static_cast<unsigned>(__builtin_clzll(denominator.words[d - 1]));
+    std::uint64_t extra = 0;
+    for (unsigned i = 0; i < n; ++i)
+      u.words[i] = (numerator.words[i] << shift) |
+                   (shift && i ? numerator.words[i - 1] >> (64 - shift) : 0);
+    if (shift)
+      extra = numerator.words[n - 1] >> (64 - shift);
+    if (n < kWords) {
+      u.words[n] = extra;
+      extra = 0;
+    }
+    for (unsigned i = 0; i < d; ++i)
+      v.words[i] = (denominator.words[i] << shift) |
+                   (shift && i ? denominator.words[i - 1] >> (64 - shift) : 0);
+    auto upper = [&](unsigned i) -> std::uint64_t& {
+      return i == kWords ? extra : u.words[i];
+    };
+    for (unsigned digit = n - d + 1; digit; --digit) {
+      const unsigned j = digit - 1;
+      work(8 * d + 8);
+      const auto high = upper(j + d), low = u.words[j + d - 1];
+      const auto leading = v.words[d - 1];
+      std::uint64_t q, r;
+      bool overflow = false;
+      if (high == leading) {
+        q = UINT64_MAX;
+        r = low + leading;
+        overflow = r < low;
+      } else {
+        const auto value = (static_cast<unsigned __int128>(high) << 64) | low;
+        q = static_cast<std::uint64_t>(value / leading);
+        r = static_cast<std::uint64_t>(value % leading);
+      }
+      while (!overflow && static_cast<unsigned __int128>(q) * v.words[d - 2] >
+                              ((static_cast<unsigned __int128>(r) << 64) |
+                               u.words[j + d - 2])) {
+        --q;
+        const auto prior = r;
+        r += leading;
+        overflow = r < prior;
+      }
+      std::uint64_t carry = 0;
+      for (unsigned i = 0; i < d; ++i) {
+        const auto product =
+            static_cast<unsigned __int128>(q) * v.words[i] + carry;
+        const auto lower = static_cast<std::uint64_t>(product);
+        carry = static_cast<std::uint64_t>(product >> 64) +
+                (u.words[j + i] < lower);
+        u.words[j + i] -= lower;
+      }
+      const bool negative = upper(j + d) < carry;
+      upper(j + d) -= carry;
+      if (negative) {
+        --q;
+        carry = 0;
+        for (unsigned i = 0; i < d; ++i) {
+          const auto sum = static_cast<unsigned __int128>(u.words[j + i]) +
+                           v.words[i] + carry;
+          u.words[j + i] = static_cast<std::uint64_t>(sum);
+          carry = static_cast<std::uint64_t>(sum >> 64);
+        }
+        upper(j + d) += carry;
+      }
+      quotient.words[j] = q;
+    }
+    work(kWords);
+    remainder.words.fill(0);
+    for (unsigned i = 0; i < d; ++i)
+      remainder.words[i] =
+          (u.words[i] >> shift) |
+          (shift && i + 1 < d ? u.words[i + 1] << (64 - shift) : 0);
+  }
   void divide_unsigned(Integer& quotient, Integer& remainder,
                        const Integer& numerator, const Integer& denominator) {
+    if constexpr (kWords <= 16) {
+      divide_words(quotient, remainder, numerator, denominator);
+      return;
+    }
     Frame frame(*this);
     auto& shifted = number();
     if (Workspace::top(denominator) < 0)
@@ -351,6 +519,14 @@ struct DirectedInterval final {
       throw Unresolved{};
     Frame frame(*this);
     auto result = interval();
+    if constexpr (Words < 192) {
+      if (!a.low.negative && !b.low.negative) {
+        divide(result.low, a.low, b.high, true);
+        divide(result.high, a.high, b.low, false);
+        copy(output, result);
+        return;
+      }
+    }
     auto& candidate = number();
     bool first = true;
     for (const auto* left : {&a.low, &a.high})
@@ -412,4 +588,5 @@ struct DirectedInterval final {
     return result.value();
   }
 };
+using DirectedInterval = DirectedIntervalStorage<>;
 }  // namespace ps::plugin_internal::numeric_ops

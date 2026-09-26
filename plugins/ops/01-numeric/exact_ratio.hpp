@@ -8,6 +8,7 @@
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
+#include "execution/work_consumer.hpp"
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -24,6 +25,13 @@ struct ExactRatioWorkspace final {
   SequenceProfile profile;
   explicit ExactRatioWorkspace(SequenceProfile selected) : profile(selected) {}
   int compare(const Integer& a, const Integer& b) {
+    if constexpr (Words <= 16) {
+      // Short exact limbs avoid materializing two four-lane predicate arrays.
+      for (std::size_t i = Words; i; --i)
+        if (a.words[i - 1] != b.words[i - 1])
+          return a.words[i - 1] < b.words[i - 1] ? -1 : 1;
+      return 0;
+    }
     for (std::size_t end = a.words.size(); end; end -= 4) {
       compare_keys(a.words.data() + end - 4, b.words.data() + end - 4,
                    greater.data(), less.data(), profile);
@@ -37,31 +45,40 @@ struct ExactRatioWorkspace final {
     return 0;
   }
   static int top(const Integer& value) {
-    for (std::size_t i = value.words.size(); i; --i)
-      if (value.words[i - 1])
-        return static_cast<int>((i - 1) * 64 + 63 -
-                                __builtin_clzll(value.words[i - 1]));
+    for (std::size_t end = value.words.size(); end; end -= 4) {
+      const auto* w = value.words.data() + end - 4;
+      if (!(w[0] | w[1] | w[2] | w[3]))
+        continue;
+      for (unsigned j = 4; j; --j)
+        if (w[j - 1])
+          return static_cast<int>((end - 4 + j - 1) * 64 + 63 -
+                                  __builtin_clzll(w[j - 1]));
+    }
     return -1;
   }
-  // Distinct input/output. Reject a nonzero bit shifted beyond capacity.
+  // Distinct input/output. Independent destination limbs enable vectorization.
   static bool shift(const Integer& source, unsigned bits, Integer* output) {
     output->words.fill(0);
+    const int high = top(source);
+    if (high < 0)
+      return true;
+    if (bits >= Words * 64 || static_cast<unsigned>(high) >= Words * 64 - bits)
+      return false;
     const auto whole = bits / 64, tail = bits % 64;
-    for (std::size_t i = 0; i < source.words.size(); ++i) {
-      const auto value = source.words[i];
-      if (!value)
-        continue;
-      if (i + whole >= output->words.size())
-        return false;
-      output->words[i + whole] |= value << tail;
-      if (tail && (value >> (64 - tail))) {
-        if (i + whole + 1 >= output->words.size())
-          return false;
-        output->words[i + whole + 1] |= value >> (64 - tail);
-      }
+    const auto count = static_cast<unsigned>(high / 64 + 1);
+    if (!tail) {
+      std::copy_n(source.words.begin(), count, output->words.begin() + whole);
+      return true;
     }
+    output->words[whole] = source.words[0] << tail;
+    for (unsigned i = 1; i < count; ++i)
+      output->words[whole + i] =
+          (source.words[i] << tail) | (source.words[i - 1] >> (64 - tail));
+    if (whole + count < Words)
+      output->words[whole + count] = source.words[count - 1] >> (64 - tail);
     return true;
   }
+
   void add_term(bool sign) {
     if (sign == negative) {
       numerator.add(term);
@@ -83,16 +100,16 @@ struct ExactRatioWorkspace final {
     term.set_product(a, b);
     add_term((a.negative != b.negative) != subtract);
   }
-  Result<std::uint64_t> round(
-      bool narrow, const std::function<Status(std::uint64_t)>& consume,
-      int scale = -1074, bool approximate = false) {
+  Result<std::uint64_t> round(bool narrow,
+                              const execution_internal::WorkConsumer& consume,
+                              int scale = -1074, bool approximate = false) {
     using Answer = Result<std::uint64_t>;
     const auto capacity = [] {
       return Answer(Status{ErrorCode::ResourceExhausted,
                            "exact ratio scratch capacity",
                            FailureReason::CapacityLimit});
     };
-    auto work = consume(512);
+    const auto& work = consume(512);
     if (!work.ok())
       return Answer(work);
     const auto n_top = top(numerator), d_top = top(denominator);
@@ -213,7 +230,7 @@ struct ExactRatioWorkspace final {
     }
     std::uint64_t significand = 0;
     for (unsigned i = fraction + 1; i; --i) {
-      work = consume(256);
+      const auto& work = consume(256);
       if (!work.ok())
         return Answer(work);
       if (!shift(shifted, i - 1, &candidate))

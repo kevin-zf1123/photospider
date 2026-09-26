@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <utility>
 
@@ -13,10 +14,7 @@ namespace ps::plugin_internal {
  */
 class FailureLatch final {
  public:
-  ErrorCode load() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return failure_.code();
-  }
+  ErrorCode load() const { return code_.load(std::memory_order_acquire); }
   Status snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return copy();
@@ -29,6 +27,7 @@ class FailureLatch final {
       else
         failure_.record(status);
     }
+    code_.store(failure_.code(), std::memory_order_release);
     return copy();
   }
   void enrich(const Status& status) {
@@ -42,6 +41,7 @@ class FailureLatch final {
       return false;
     }
     failure_.record(Status{desired, {}});
+    code_.store(failure_.code(), std::memory_order_release);
     return true;
   }
 
@@ -53,6 +53,8 @@ class FailureLatch final {
       return failure_.fixed_status();
     }
   }
+  // Publish only after the locked diagnostic record is complete.
+  std::atomic<ErrorCode> code_{ErrorCode::Ok};
   mutable std::mutex mutex_;
   core_internal::StoredFailure failure_;
 };

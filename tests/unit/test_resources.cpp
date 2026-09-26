@@ -1,3 +1,5 @@
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -9,16 +11,115 @@
 #include "execution/memory_budget.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
+#include "plugin/failure_latch.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
+int failure_latch_publication() {
+  auto owner = std::make_shared<plugin_internal::FailureLatch>();
+  auto latch = owner;
+  owner.reset();
+  std::atomic<bool> valid{true};
+  std::vector<std::thread> threads;
+  for (unsigned t = 0; t < 8; ++t) {
+    threads.emplace_back([&, t] {
+      const Status candidate{t % 2 ? ErrorCode::Cancelled : ErrorCode::Internal,
+                             t % 2 ? "cancelled winner" : "internal winner"};
+      const auto recorded = latch->record(candidate);
+      for (unsigned i = 0; i < 1000; ++i) {
+        const auto code = latch->load();
+        const auto snapshot = latch->snapshot();
+        if (code == ErrorCode::Ok || code != recorded.code ||
+            snapshot.code != code || snapshot.message != recorded.message ||
+            snapshot.message != (code == ErrorCode::Cancelled
+                                     ? "cancelled winner"
+                                     : "internal winner"))
+          valid = false;
+      }
+    });
+  }
+  for (auto& thread : threads)
+    thread.join();
+  PS_CHECK(valid);
+  auto expected = ErrorCode::Ok;
+  PS_CHECK(!latch->compare_exchange_strong(expected, ErrorCode::Cancelled));
+  PS_CHECK(expected == latch->load());
+  plugin_internal::FailureLatch success_record;
+  PS_CHECK(success_record.record(Status::success()).code ==
+           ErrorCode::Internal);
+  PS_CHECK(success_record.load() == ErrorCode::Internal);
+  plugin_internal::FailureLatch success_exchange;
+  expected = ErrorCode::Ok;
+  PS_CHECK(success_exchange.compare_exchange_strong(expected, ErrorCode::Ok));
+  PS_CHECK(success_exchange.load() == ErrorCode::Internal);
+  PS_CHECK(success_exchange.snapshot().code == ErrorCode::Internal);
+  return 0;
+}
 ResourceLimits limits(std::uint64_t host) {
   ResourceLimits l;
   l.capacity[ResourceKind::Host] = host;
   l.capacity[ResourceKind::Shared] = host;
   l.capacity[ResourceKind::Metadata] = host;
   return l;
+}
+int concurrent_work() {
+  ResourceLimits l;
+  l.maximum_work = 10000;
+  l.maximum_io_bytes = 4000;
+  l.maximum_io_requests = l.maximum_stages = 2000;
+  ResourceBudget root(l);
+  std::array<ResourceWork, 8> accepted{};
+  std::atomic<bool> valid{true};
+  std::vector<std::thread> threads;
+  for (unsigned t = 0; t < accepted.size(); ++t)
+    threads.emplace_back([&, t] {
+      Status failure;
+      for (unsigned i = 0; i < 3000; ++i) {
+        const bool mixed = (i + t) % 2;
+        ResourceWork next = mixed ? ResourceWork{3, 2, 1, 1} : ResourceWork{1};
+        if (root.try_consume(next, failure)) {
+          accepted[t].work += next.work;
+          accepted[t].io_bytes += next.io_bytes;
+          accepted[t].io_requests += next.io_requests;
+          accepted[t].stages += next.stages;
+        }
+        const auto seen = root.statistics().issued;
+        if (seen.work > 10000 || seen.io_bytes != seen.io_requests * 2 ||
+            seen.stages != seen.io_requests || seen.work < seen.io_requests * 3)
+          valid = false;
+      }
+    });
+  for (auto& thread : threads)
+    thread.join();
+  ResourceWork sum;
+  for (const auto& a : accepted) {
+    sum.work += a.work;
+    sum.io_bytes += a.io_bytes;
+    sum.io_requests += a.io_requests;
+    sum.stages += a.stages;
+  }
+  const auto got = root.statistics().issued;
+  PS_CHECK(valid);
+  PS_CHECK(got.work == 10000);
+  PS_CHECK(got.work == sum.work && got.io_bytes == sum.io_bytes &&
+           got.io_requests == sum.io_requests && got.stages == sum.stages);
+  Status failure;
+  PS_CHECK(!root.try_consume({UINT64_MAX, 0, 0, UINT64_MAX}, failure));
+  PS_CHECK(failure.reason == FailureReason::WorkLimit);
+  for (auto maximum : {UINT64_C(0), UINT64_MAX}) {
+    ResourceLimits exact;
+    exact.maximum_work = maximum;
+    ResourceBudget bounded(exact);
+    Status failure;
+    PS_CHECK(bounded.try_consume({maximum}, failure));
+    PS_CHECK(bounded.statistics().issued.work == maximum);
+    PS_CHECK(bounded.try_consume({0}, failure));
+    PS_CHECK(!bounded.try_consume({1}, failure));
+    PS_CHECK(failure.reason == FailureReason::WorkLimit);
+    PS_CHECK(bounded.statistics().issued.work == maximum);
+  }
+  return 0;
 }
 int ledger() {
   const auto overhead = ResourceBudget::lease_metadata_bytes();
@@ -48,6 +149,14 @@ int ledger() {
   }
   PS_CHECK(root.statistics().live[ResourceKind::Host] == 0);
   PS_CHECK(root.statistics().issued.work == 7);
+  Status detail{ErrorCode::Internal, "unchanged on success"};
+  PS_CHECK(root.try_consume({0}, detail));
+  PS_CHECK(detail.code == ErrorCode::Internal);
+  PS_CHECK(!root.try_consume({4}, detail));
+  PS_CHECK(detail.code == ErrorCode::ResourceExhausted);
+  PS_CHECK(detail.reason == FailureReason::WorkLimit);
+  PS_CHECK(root.statistics().issued.work == 7);
+
   PS_CHECK(root.consume({0, 0, 0, 1}).ok());
   PS_CHECK(root.consume({0, 0, 0, 1}).reason == FailureReason::StageLimit);
   PS_CHECK(root.statistics().protected_cleanup[ResourceKind::Host] == 2);
@@ -625,7 +734,9 @@ int on_demand_payload() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(failure_latch_publication() == 0);
   PS_CHECK(ledger() == 0);
+  PS_CHECK(concurrent_work() == 0);
   PS_CHECK(execution_owner() == 0);
   PS_CHECK(referenced_owner() == 0);
   PS_CHECK(normalized_work() == 0);
@@ -641,5 +752,3 @@ int main() {
   PS_CHECK(mixed_certificate_roots() == 0);
   return 0;
 }
-#include <array>
-#include <atomic>

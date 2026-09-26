@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.25.0
+  VERSION 0.26.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -103,6 +103,14 @@ if(PHOTOSPIDER_ENABLE_INPAINT_OPENCV)
   find_package(OpenCV 4.12.0 EXACT REQUIRED COMPONENTS core photo)
 endif()
 
+option(PHOTOSPIDER_TRANSFER_FAST_MATH "Enable certified FMT-09 SIMD interval filter" ON)
+add_compile_definitions(PHOTOSPIDER_TRANSFER_FAST_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_FAST_MATH}>)
+option(PHOTOSPIDER_TRANSFER_COMPACT_MATH "Enable FMT-09 compact strict enclosure tier" ON)
+option(PHOTOSPIDER_TRANSFER_GAMMA2_SIMD "Enable FMT-09 exact arithmetic and bit-classification SIMD" ON)
+add_compile_definitions(
+  PHOTOSPIDER_TRANSFER_COMPACT_MATH=$<BOOL:${PHOTOSPIDER_TRANSFER_COMPACT_MATH}>
+  PHOTOSPIDER_TRANSFER_GAMMA2_SIMD=$<BOOL:${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD}>)
+
 set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/00-foundation/core_constant.cpp
   plugins/ops/00-foundation/core_delay.cpp
@@ -113,6 +121,8 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/02-format-color/model_math.cpp
   plugins/ops/02-format-color/model_simd.cpp
   plugins/ops/02-format-color/numeric_conversion.cpp
+  plugins/ops/02-format-color/transfer.cpp
+  plugins/ops/02-format-color/transfer_definition.cpp
   plugins/ops/02-format-color/metadata_assignment.cpp
   plugins/ops/02-format-color/channel_assembly.cpp
   plugins/ops/01-numeric/curve_sample_linear.cpp
@@ -360,7 +370,7 @@ list(APPEND _cache_identity_inputs ${_numeric_math_identity_inputs}
 list(SORT _cache_identity_inputs)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_cache_identity_inputs})
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _cache_config)
-set(_cache_identity "matrix-backend=${PHOTOSPIDER_MATRIX_BACKEND};sme=${PHOTOSPIDER_ENABLE_MATRIX_SME};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE};accelerate=${PHOTOSPIDER_ENABLE_ACCELERATE}")
+set(_cache_identity "transfer-compact=${PHOTOSPIDER_TRANSFER_COMPACT_MATH};transfer-gamma2-simd=${PHOTOSPIDER_TRANSFER_GAMMA2_SIMD};transfer-filter=${PHOTOSPIDER_TRANSFER_FAST_MATH};matrix-backend=${PHOTOSPIDER_MATRIX_BACKEND};sme=${PHOTOSPIDER_ENABLE_MATRIX_SME};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_VERSION};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_${_cache_config}};${BUILD_SHARED_LIBS};${PHOTOSPIDER_SANITIZER_MODE};accelerate=${PHOTOSPIDER_ENABLE_ACCELERATE}")
 foreach(_cache_input IN LISTS _cache_identity_inputs)
   file(SHA256 "${_cache_input}" _cache_source_hash)
   file(RELATIVE_PATH _cache_relative "${CMAKE_CURRENT_SOURCE_DIR}" "${_cache_input}")
@@ -521,6 +531,7 @@ add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_conversion_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/transfer_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/codec_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
@@ -740,6 +751,16 @@ if(BUILD_TESTING)
 
   photospider_add_test(test_channel_extraction Photospider::kernel tests/integration/test_channel_extraction.cpp)
   photospider_add_test(test_numeric_conversion Photospider::kernel tests/integration/test_numeric_conversion.cpp)
+  photospider_add_test(test_transfer_operations Photospider::kernel tests/integration/test_transfer_operations.cpp)
+  photospider_add_test(test_transfer_runtime photospider_test_kernel tests/integration/test_transfer_runtime.cpp)
+  target_include_directories(test_transfer_runtime PRIVATE src/lib plugins/ops)
+  photospider_add_test(test_transfer_simd photospider_test_kernel tests/unit/test_transfer_simd.cpp)
+  target_include_directories(test_transfer_simd PRIVATE src/lib plugins/ops)
+  target_compile_options(test_transfer_simd PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+  set_tests_properties(test_transfer_simd PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_transfer_math photospider_test_kernel tests/unit/test_transfer_math.cpp)
+  target_include_directories(test_transfer_math PRIVATE src/lib plugins/ops)
+  target_compile_options(test_transfer_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   photospider_add_test(test_region_runs Photospider::kernel tests/unit/test_region_runs.cpp)
   photospider_add_test(test_data_movement_contract Photospider::kernel tests/unit/test_data_movement_contract.cpp)
   photospider_add_test(test_planar_preparation Photospider::kernel tests/unit/test_planar_preparation.cpp)
