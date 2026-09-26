@@ -157,15 +157,6 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
-  plugins/ops/04-mask-morphology/component_area.cpp
-  plugins/ops/04-mask-morphology/component_bbox.cpp
-  plugins/ops/04-mask-morphology/component_count.cpp
-  plugins/ops/04-mask-morphology/mask_combine.cpp
-  plugins/ops/04-mask-morphology/mask_components.cpp
-  plugins/ops/04-mask-morphology/mask_dilate.cpp
-  plugins/ops/04-mask-morphology/mask_erode.cpp
-  plugins/ops/04-mask-morphology/mask_invert.cpp
-  plugins/ops/04-mask-morphology/mask_threshold.cpp
   plugins/ops/05-filter/field_box_mean.cpp
   plugins/ops/05-filter/field_convolve.cpp
   plugins/ops/05-filter/field_correlate.cpp
@@ -636,7 +627,6 @@ if(BUILD_TESTING)
   endforeach()
   photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
   target_include_directories(test_basic_operations PRIVATE examples)
-  photospider_add_test(test_generic_component_operations Photospider::kernel tests/integration/test_generic_component_operations.cpp)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
   add_library(expression_contract_fixture MODULE tests/fixtures/expression_contract_fixture.c)
   target_link_libraries(expression_contract_fixture PRIVATE Photospider::operation_sdk)

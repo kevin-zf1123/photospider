@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "scope": "independent mathematical oracle, NOT production conformance",
+  "python": "3.11.14",
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "dependencies": {
+    "numpy": "2.4.6",
+    "scipy": "1.17.1",
+    "scikit-image": "0.26.0",
+    "MPFR": "4.2.2"
+  },
+  "tests_run": 22,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "passed": true,
+  "elapsed_seconds": 1.083,
+  "scenario_counts": {
+    "hand_derived_and_error_vectors": 223,
+    "ciede2000_decimal_pairs": 4,
+    "maximal_ball_reconstruction_inputs": 384,
+    "mpfr_quadratic_certificates": 300,
+    "mpfr_rational_certificates": 600,
+    "ieee_boundary_assertions": 18,
+    "binary_morphology_configurations": 768,
+    "standard_thinning_fixed_point_inputs": 1024,
+    "topology_exhaustive_inputs": 512,
+    "scipy_component_hole_configurations": 1024,
+    "scipy_edt_arrays": 80,
+    "scipy_gaussian_arrays": 3,
+    "scipy_padded_morphology_comparisons": 480,
+    "skimage_reconstruction_comparisons": 160
+  },
+  "failure_details": [],
+  "untested": [
+    "production registration/API",
+    "Region demand and no-overread",
+    "TDM3/Result codecs and real ObjectIds",
+    "host budgets and cancellation",
+    "owner lifetime/cache/backend",
+    "production fenv preservation",
+    "signaling-NaN payload transfer"
+  ]
+}

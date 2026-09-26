@@ -3,8 +3,7 @@
 英文权威文档：[Paged-Components.md](../Paged-Components.md)。
 
 Package 0.10 的安装 C++ API 提供 `make_component_operation`、
-`component_area_schema` 和 `component_filter_schema`。C operation ABI 保持 9，
-既有 Float32 `mask.components` 的 compact-label 行为不变。
+`component_area_schema` 和 `component_filter_schema`。工厂使用 C operation ABI 9。
 
 ## 公开 profile
 

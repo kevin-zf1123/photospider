@@ -15,7 +15,6 @@ shape、参数、Region、预期结果和修改组合方法。
 | Cast/range、signed 算术/归约 | [数值算子](Numeric-Operations.zh.md) |
 | Extract/process/merge、alpha、参考白转换 | [通道与颜色](Channel-and-Color-Operations.zh.md) |
 | Expression、LUT、compile-once 动态 gain | [Expression/LUT](Expression-and-LUT-Operations.zh.md)、[图像端口](Image-Operations.zh.md) |
-| Binary mask、稳定 labels、固定容量属性 | [组件算子](Component-Operations.zh.md) |
 | 曲线局部调色、选区羽化、滤波统计、生成场 | [基础算子](Basic-Operations.zh.md) |
 | Image-v2 快照、frozen input、有界结果缓存 | [缓存模型](Cache-Model.zh.md) |
 
@@ -23,7 +22,7 @@ shape、参数、Region、预期结果和修改组合方法。
 示例，按 producer 传入 sanitizer 选项。Focused 跨功能命令：
 
 ```sh
-cmake --build build/issue257-static --target test_numeric_operations test_color_operations test_expression_operations test_component_operations test_basic_operations test_computed_scalar -j 8
+cmake --build build/issue257-static --target test_numeric_operations test_color_operations test_expression_operations test_basic_operations test_computed_scalar -j 8
 ctest --test-dir build/issue257-static -R '^test_(foundations_.*|numeric_operations|color_operations|expression_operations|component_operations|basic_operations|computed_scalar|installed_consumer)$' --output-on-failure
 ```
 

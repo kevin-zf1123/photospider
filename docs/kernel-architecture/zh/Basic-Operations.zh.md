@@ -15,12 +15,9 @@ dtype；二元数值、mask、image 还要求形状匹配。没有隐式广播�
 | --- | --- |
 | `curve.sample_linear/monotone` | 普通 `[K,2]`，K>=2，输出普通 `[count]`；Int64 count 2..1048576，有限 Float64 domain_min<domain_max，String out_of_domain=reject/clip。示例默认 256、0、1、reject。控制点全部有限，x 严格递增，y 可转向、有符号或 HDR。 |
 | `field.apply_lut_1d` | 场及同 dtype 普通 `[N]` 表，N>=2，输出普通场；Float64 domain_min/max、String out_of_domain=reject/clip，默认 0、1、reject。 |
-| `mask.invert` | canonical Float32 coverage 输入输出，无参数。 |
-| `mask.combine` | 同 HW coverage；String operation=and/or/xor、algebra=fuzzy/independent_coverage；示例默认 fuzzy。 |
 | `image.mix` | 同规格 canonical premul RGBA A/B 与同 HW coverage M，保留图像解释，无参数。 |
 | `field.box_mean` | 场输出同 dtype/解释；Int64 radius 1..64，示例 1。 |
 | `field.gaussian_blur` | 同 box，增加有限 Float64 sigma 0..64，示例 1；零表示 identity。 |
-| `mask.dilate/erode` | coverage 输入输出；Int64 radius 0..64、String footprint=square/disk，示例 1、square。 |
 | `field.convolve/correlate` | 场及同 dtype 普通 `[Kh,Kw]` 核，输出普通场；非负 Int64 anchor_y/x，位于核内（相关另限制 <=2^53-1）；String boundary=clamp/zero。奇数核同样显式给 anchor。 |
 | `analysis.histogram` | 场到 Int64 `[bins]`；Int64 bins 1..1048576、有限 Float64 range_min<range_max，默认 256、0、1。 |
 | `analysis.histogram_out_of_range` | 场到 Int64 `[2]`，顺序 underflow、overflow；有限 Float64 range_min<range_max。 |
@@ -36,16 +33,13 @@ PCHIP 使用加权调和内部斜率及受限单侧端点斜率，两点退化�
 LUT 使用包含两端的表坐标、线性插值及相同 reject/clip 策略。普通表不自动建立
 既有 `lut.apply_1d` 使用的 SampledSignal 元数据。
 
-NOT=`1-A`。fuzzy AND/OR/XOR 分别为 min、max、abs(A-B)；independent coverage
-分别为 AB、A+B-AB、A+B-2AB。image.mix 对 RGBA 全部执行 `(1-M)A+MB`，M=0/1
+image.mix 对 RGBA 全部执行 `(1-M)A+MB`，M=0/1
 精确返回端点；相同 alpha 保持不变。RGB 调色在提取前 unassociate，合并后 associate，
 见 basic-curves 示例。
 
 box/Gaussian 为可分离方形支撑滤波，画布外 clamp，按完整窗口归一化，使用 Float64
 中间值。Gaussian 样本为 `exp(-.5*(distance/sigma)^2)` 并对有限支撑归一化；极小 sigma
-使非中心权重为零。形态学为灰度 max/min，画布外零，尺寸不变；disk 精确包含
-`dx²+dy²<=radius²` 的离散偏移。r=0 identity；opening/closing 组合两节点。
-直接形态学复杂度 O(HW*r²)，可分离模糊 O(HW*r)。
+使非中心权重为零。可分离模糊复杂度 O(HW*r)。
 
 correlate=`sum(K[j]*I[p+j-anchor])`；convolve=`sum(K[j]*I[p+anchor-j])`。
 同尺寸 signed 输出，核按行优先顺序 Float64 累加，复杂度 O(HW*Kh*Kw)。没有自动
@@ -62,9 +56,8 @@ min/max 的零 tie 选负零/正零，abs 把负零变正零。旧测试算子
 
 ## 执行、错误与资源
 
-Elementwise：numeric min/max/abs、levels、smoothstep、mask Boolean、image mix。
-Halo：声明正半径的 box/Gaussian。Whole：曲线、field LUT、相关、直方图、
-形态学。卷积使用精确分阶段 kernel/邻域读取，详见
+Elementwise：numeric min/max/abs、levels、smoothstep、image mix。
+Halo：声明正半径的 box/Gaussian。Whole：曲线、field LUT、相关、直方图。卷积使用精确分阶段 kernel/邻域读取，详见
 [多输出算子](Multi-Output-Operations.zh.md)。Whole 完整物化必须满足预算。静态 shape 改变需要重新编译，
 控制点、表和核样本是每次执行绑定。
 
@@ -87,7 +80,6 @@ TypeMismatch；非法静态参数返回 InvalidArgument。现有 traits 无法�
 | 场景 | 可检查结果 |
 | --- | --- |
 | basic-curves | unassociate → PCHIP → 通道 LUT → merge → associate → mix；alpha=.5。 |
-| basic-masks | Boolean → 膨胀/腐蚀 → box 羽化；九个 coverage 样本均为 1/9。 |
 | basic-filters | 非对称相关/卷积 → 绝对差 `[4,4,4]`；直方图 `[0,3]`、范围外 `[0,0]`。 |
 
 `tests/integration/test_basic_operations.cpp` 检查独立数值样本、参数与定义域错误、

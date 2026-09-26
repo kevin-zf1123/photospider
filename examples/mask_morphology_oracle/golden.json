@@ -1,0 +1,3013 @@
+{
+  "schema_version": 1,
+  "results": {
+    "binary_logic.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "fuzzy_logic.analytic": {
+      "result": [
+        [
+          "bits:3fd0000000000000",
+          "bits:3fe8000000000000"
+        ]
+      ]
+    },
+    "independent_coverage.analytic": {
+      "result": [
+        [
+          "bits:3fe8000000000000"
+        ]
+      ]
+    },
+    "invert.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe8000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "threshold.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "range_mask.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "soft_threshold.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3fe0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "soft_range.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3fe0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "nonzero_to_binary.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "coordinate_range.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "lab76_range.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "hue_range.analytic": {
+      "result": [
+        [
+          "bits:3fe0000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "dilate.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "erode.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "opening.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "closing.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "offset_discrete.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "shift_distance_field.analytic": {
+      "result": [
+        [
+          "bits:bff8000000000000",
+          "bits:bfe0000000000000",
+          "bits:3fe0000000000000"
+        ]
+      ]
+    },
+    "threshold_distance_field.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "gaussian_feather.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "distance_feather_linear.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "distance_feather_smoothstep.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "nearest_feature.analytic": {
+      "result": {
+        "distance": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "nearest": [
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              2
+            ]
+          ]
+        ]
+      }
+    },
+    "signed_center_distance.analytic": {
+      "result": {
+        "distance": [
+          [
+            "bits:3ff0000000000000",
+            "bits:bff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "truncated_nearest_feature.analytic": {
+      "result": {
+        "distance": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "within": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "truncated_signed_distance.analytic": {
+      "result": {
+        "distance": [
+          [
+            "bits:3fe0000000000000",
+            "bits:bfe0000000000000",
+            "bits:3fe0000000000000"
+          ]
+        ],
+        "within": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "flood_fixed.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "flood_neighbor.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "flood_barrier.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "label_compact.analytic": {
+      "result": [
+        [
+          1,
+          0,
+          2
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ]
+    },
+    "label_min_pixel.analytic": {
+      "result": [
+        [
+          1,
+          0,
+          3
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ]
+    },
+    "component_count.analytic": {
+      "result": [
+        2
+      ]
+    },
+    "component_areas.analytic": {
+      "result": {
+        "rows": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            1
+          ]
+        ]
+      }
+    },
+    "component_bboxes.analytic": {
+      "result": {
+        "rows": [
+          [
+            1,
+            0,
+            0,
+            2,
+            1
+          ],
+          [
+            3,
+            0,
+            2,
+            1,
+            3
+          ]
+        ]
+      }
+    },
+    "component_bundle.analytic": {
+      "result": {
+        "labels": [
+          1,
+          0,
+          3,
+          1,
+          0,
+          0
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            0,
+            0,
+            0,
+            2,
+            1
+          ],
+          [
+            3,
+            1,
+            2,
+            0,
+            2,
+            1,
+            3
+          ]
+        ]
+      }
+    },
+    "filter_area_index.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "fill_holes.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "remove_small.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ],
+        [
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "fill_small_holes.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "morph_gradient.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "inner_border.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "outer_border.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "white_top_hat.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "black_top_hat.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "thin_topological.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "thin_distance_ordered.analytic": {
+      "result": {
+        "skeleton": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "reconstruct_dilate.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:3fe0000000000000"
+        ]
+      ]
+    },
+    "reconstruct_erode.analytic": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3fe0000000000000",
+          "bits:3fe0000000000000"
+        ]
+      ]
+    },
+    "bridge_axis_gaps.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "fill_axis_gaps.analytic": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.analytic": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "affect_result.analytic": {
+      "result": [
+        [
+          [
+            "bits:4000000000000000",
+            "bits:4018000000000000",
+            "bits:4024000000000000"
+          ]
+        ]
+      ]
+    },
+    "multiply_mask.analytic": {
+      "result": [
+        [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:4000000000000000"
+          ]
+        ]
+      ]
+    },
+    "restricted_mean.analytic": {
+      "result": {
+        "values": [
+          [
+            [
+              "bits:4000000000000000",
+              "bits:4014000000000000",
+              "bits:4020000000000000"
+            ]
+          ]
+        ],
+        "valid": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "apply_alpha.analytic": {
+      "result": [
+        [
+          [
+            "bits:4014000000000000",
+            "bits:401c000000000000"
+          ]
+        ],
+        [
+          [
+            "bits:3fd0000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      ]
+    },
+    "thin_zhang_suen.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "thin_zhang_suen.single": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "thin_guo_hall.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "thin_guo_hall.single": {
+      "result": [
+        [
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "thin_zhang_suen.block2": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ],
+        [
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "thin_guo_hall.block2": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:0000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "medial_axis_maximal_balls.single.l1": {
+      "result": {
+        "axis": [
+          [
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:4000000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.empty.l1": {
+      "result": {
+        "axis": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.block2.l1": {
+      "result": {
+        "axis": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ],
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ],
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.single.l2": {
+      "result": {
+        "axis": [
+          [
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:4000000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.empty.l2": {
+      "result": {
+        "axis": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.block2.l2": {
+      "result": {
+        "axis": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ],
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ],
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.single.linf": {
+      "result": {
+        "axis": [
+          [
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:4000000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.empty.linf": {
+      "result": {
+        "axis": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.block2.linf": {
+      "result": {
+        "axis": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ],
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ],
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.full3_linf": {
+      "result": {
+        "axis": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ],
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ],
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ],
+          [
+            "bits:0000000000000000",
+            "bits:4000000000000000",
+            "bits:0000000000000000"
+          ],
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "lab2000_range.neutral": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000"
+        ]
+      ]
+    },
+    "lab2000_range.nonunit": {
+      "result": [
+        [
+          "bits:3fe8000000000000"
+        ]
+      ]
+    },
+    "fit_color_groups_table.analytic": {
+      "result": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              "bits:3ff0000000000000",
+              "bits:4000000000000000",
+              "bits:4008000000000000"
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                "bits:3ff0000000000000",
+                "bits:0000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:4000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:0000000000000000",
+                "bits:4008000000000000"
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      }
+    },
+    "fit_color_groups_image.analytic": {
+      "result": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              "bits:3ff0000000000000",
+              "bits:4000000000000000",
+              "bits:4008000000000000"
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                "bits:3ff0000000000000",
+                "bits:0000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:4000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:0000000000000000",
+                "bits:4008000000000000"
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      }
+    },
+    "apply_color_groups.analytic": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3fe0000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "hue_range.zero_neutral": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "binary_logic.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "fuzzy_logic.analytic.f32": {
+      "result": [
+        [
+          "bits:3e800000",
+          "bits:3f400000"
+        ]
+      ]
+    },
+    "independent_coverage.analytic.f32": {
+      "result": [
+        [
+          "bits:3f400000"
+        ]
+      ]
+    },
+    "invert.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f400000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "threshold.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "range_mask.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f800000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "soft_threshold.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f000000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "soft_range.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f000000",
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "coordinate_range.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "lab76_range.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "hue_range.analytic.f32": {
+      "result": [
+        [
+          "bits:3f000000",
+          "bits:3f800000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "dilate.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "erode.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "opening.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "closing.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "offset_discrete.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "shift_distance_field.analytic.f32": {
+      "result": [
+        [
+          "bits:bfc00000",
+          "bits:bf000000",
+          "bits:3f000000"
+        ]
+      ]
+    },
+    "threshold_distance_field.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "gaussian_feather.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000"
+        ],
+        [
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "distance_feather_linear.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "distance_feather_smoothstep.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "nearest_feature.analytic.f32": {
+      "result": {
+        "distance": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ],
+        "nearest": [
+          [
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          [
+            [
+              0,
+              0,
+              2
+            ]
+          ]
+        ]
+      }
+    },
+    "signed_center_distance.analytic.f32": {
+      "result": {
+        "distance": [
+          [
+            "bits:3f800000",
+            "bits:bf800000",
+            "bits:3f800000"
+          ]
+        ]
+      }
+    },
+    "truncated_nearest_feature.analytic.f32": {
+      "result": {
+        "distance": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "within": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "truncated_signed_distance.analytic.f32": {
+      "result": {
+        "distance": [
+          [
+            "bits:3f000000",
+            "bits:bf000000",
+            "bits:3f000000"
+          ]
+        ],
+        "within": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "flood_fixed.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:00000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "flood_neighbor.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "flood_barrier.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:00000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "label_compact.analytic.f32": {
+      "result": [
+        [
+          1,
+          0,
+          2
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ]
+    },
+    "label_min_pixel.analytic.f32": {
+      "result": [
+        [
+          1,
+          0,
+          3
+        ],
+        [
+          1,
+          0,
+          0
+        ]
+      ]
+    },
+    "fill_holes.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ],
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ],
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "remove_small.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:00000000",
+          "bits:00000000"
+        ],
+        [
+          "bits:00000000",
+          "bits:00000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "fill_small_holes.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ],
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ],
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "morph_gradient.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "inner_border.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "outer_border.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "white_top_hat.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "black_top_hat.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "thin_topological.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "thin_distance_ordered.analytic.f32": {
+      "result": {
+        "skeleton": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ]
+      }
+    },
+    "reconstruct_dilate.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:3f000000"
+        ]
+      ]
+    },
+    "reconstruct_erode.analytic.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f000000",
+          "bits:3f000000"
+        ]
+      ]
+    },
+    "bridge_axis_gaps.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:00000000",
+          "bits:00000000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "fill_axis_gaps.analytic.f32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.analytic.f32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "affect_result.analytic.f32": {
+      "result": [
+        [
+          [
+            "bits:40000000",
+            "bits:40c00000",
+            "bits:41200000"
+          ]
+        ]
+      ]
+    },
+    "multiply_mask.analytic.f32": {
+      "result": [
+        [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:40000000"
+          ]
+        ]
+      ]
+    },
+    "restricted_mean.analytic.f32": {
+      "result": {
+        "values": [
+          [
+            [
+              "bits:40000000",
+              "bits:40a00000",
+              "bits:41000000"
+            ]
+          ]
+        ],
+        "valid": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ]
+      }
+    },
+    "apply_alpha.analytic.f32": {
+      "result": [
+        [
+          [
+            "bits:40a00000",
+            "bits:40e00000"
+          ]
+        ],
+        [
+          [
+            "bits:3e800000",
+            "bits:00000000"
+          ]
+        ]
+      ]
+    },
+    "thin_zhang_suen.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "thin_zhang_suen.single.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "thin_guo_hall.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "thin_guo_hall.single.f32": {
+      "result": [
+        [
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "thin_zhang_suen.block2.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:00000000"
+        ],
+        [
+          "bits:00000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "thin_guo_hall.block2.f32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:3f800000"
+        ],
+        [
+          "bits:00000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "medial_axis_maximal_balls.single.l1.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:40000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.empty.l1.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.block2.l1.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ],
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ],
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.single.l2.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:40000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.empty.l2.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.block2.l2.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ],
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ],
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.single.linf.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:40000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.empty.linf.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.block2.linf.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ],
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ],
+          [
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ]
+      }
+    },
+    "medial_axis_maximal_balls.full3_linf.f32": {
+      "result": {
+        "axis": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ],
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000"
+          ],
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "radius": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ],
+          [
+            "bits:00000000",
+            "bits:40000000",
+            "bits:00000000"
+          ],
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "lab2000_range.neutral.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000"
+        ]
+      ]
+    },
+    "lab2000_range.nonunit.f32": {
+      "result": [
+        [
+          "bits:3f400000"
+        ]
+      ]
+    },
+    "fit_color_groups_table.analytic.f32": {
+      "result": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              "bits:3ff0000000000000",
+              "bits:4000000000000000",
+              "bits:4008000000000000"
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                "bits:3ff0000000000000",
+                "bits:0000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:4000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:0000000000000000",
+                "bits:4008000000000000"
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      }
+    },
+    "fit_color_groups_image.analytic.f32": {
+      "result": {
+        "model": {
+          "ids": [
+            7
+          ],
+          "mean": [
+            [
+              "bits:3ff0000000000000",
+              "bits:4000000000000000",
+              "bits:4008000000000000"
+            ]
+          ],
+          "cholesky": [
+            [
+              [
+                "bits:3ff0000000000000",
+                "bits:0000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:4000000000000000",
+                "bits:0000000000000000"
+              ],
+              [
+                "bits:0000000000000000",
+                "bits:0000000000000000",
+                "bits:4008000000000000"
+              ]
+            ]
+          ]
+        },
+        "skipped_group_ids": [
+          11
+        ]
+      }
+    },
+    "apply_color_groups.analytic.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f000000",
+          "bits:00000000"
+        ]
+      ]
+    },
+    "hue_range.zero_neutral.f32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "nearest_feature.no_feature": {
+      "result": {
+        "distance": [
+          [
+            "bits:7ff0000000000000",
+            "bits:7ff0000000000000"
+          ]
+        ],
+        "nearest": [
+          [
+            [
+              -1,
+              -1
+            ]
+          ],
+          [
+            [
+              -1,
+              -1
+            ]
+          ]
+        ]
+      }
+    },
+    "signed_center_distance.no_opposite": {
+      "result": {
+        "distance": [
+          [
+            "bits:fff0000000000000"
+          ]
+        ]
+      }
+    },
+    "component_areas.empty_result": {
+      "result": {
+        "rows": []
+      }
+    },
+    "component_count.disconnected_id": {
+      "result": [
+        1
+      ]
+    },
+    "gaussian_feather.identity_negative_zero": {
+      "result": [
+        [
+          "bits:8000000000000000"
+        ]
+      ]
+    },
+    "affect_result.unselected_nan": {
+      "error": "InvalidDomain"
+    },
+    "multiply_mask.gating": {
+      "error": "InvalidDomain"
+    },
+    "restricted_mean.masked_nan": {
+      "error": "InvalidDomain"
+    },
+    "restricted_mean.valid_only": {
+      "result": {
+        "valid": [
+          [
+            "bits:3ff0000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_holes.complementary8": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "fill_holes.complementary4": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ],
+        [
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "dilate.signed_zero_tie": {
+      "result": [
+        [
+          "bits:8000000000000000",
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.half_coverage": {
+      "result": [
+        [
+          "bits:3fe0000000000000"
+        ]
+      ]
+    },
+    "threshold.f64_static": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "remove_small.inclusive.float32": {
+      "result": [
+        [
+          "bits:00000000",
+          "bits:00000000",
+          "bits:00000000",
+          "bits:00000000",
+          "bits:00000000",
+          "bits:3f800000",
+          "bits:3f800000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "remove_small.zero.float32": {
+      "result": [
+        [
+          "bits:3f800000",
+          "bits:00000000",
+          "bits:3f800000"
+        ]
+      ]
+    },
+    "remove_small.inclusive.float64": {
+      "result": [
+        [
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:0000000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "remove_small.zero.float64": {
+      "result": [
+        [
+          "bits:3ff0000000000000",
+          "bits:0000000000000000",
+          "bits:3ff0000000000000"
+        ]
+      ]
+    },
+    "remove_small.negative_maximum": {
+      "error": "InvalidDomain"
+    },
+    "binary_logic.invalid.00": {
+      "error": "InvalidDomain"
+    },
+    "invert.invalid.01": {
+      "error": "InvalidDomain"
+    },
+    "soft_threshold.invalid.02": {
+      "error": "InvalidDomain"
+    },
+    "range_mask.invalid.03": {
+      "error": "InvalidDomain"
+    },
+    "dilate.invalid.04": {
+      "error": "InvalidDomain"
+    },
+    "dilate.invalid.05": {
+      "error": "InvalidDomain"
+    },
+    "nearest_feature.invalid.06": {
+      "error": "InvalidDomain"
+    },
+    "truncated_nearest_feature.invalid.07": {
+      "error": "InvalidDomain"
+    },
+    "gaussian_feather.invalid.08": {
+      "error": "InvalidDomain"
+    },
+    "flood_barrier.invalid.09": {
+      "error": "InvalidDomain"
+    },
+    "label_compact.invalid.10": {
+      "error": "InvalidDomain"
+    },
+    "filter_area_index.invalid.11": {
+      "error": "InvalidAssociation"
+    },
+    "filter_area_index.invalid.12": {
+      "error": "InvalidDomain"
+    },
+    "component_count.invalid.13": {
+      "error": "InvalidDomain"
+    },
+    "reconstruct_dilate.invalid.14": {
+      "error": "InvalidDomain"
+    },
+    "restricted_mean.invalid.15": {
+      "error": "InvalidDomain"
+    },
+    "affect_result.invalid.16": {
+      "error": "InvalidDomain"
+    },
+    "offset_polygon_grid.invalid.17": {
+      "error": "InvalidDomain"
+    },
+    "multiply_mask.arithmetic_zero.float32": {
+      "result": [
+        [
+          [
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      ]
+    },
+    "affect_result.zero_weight_inf.float32": {
+      "error": "InvalidDomain"
+    },
+    "multiply_mask.zero_weight_inf.float32": {
+      "error": "InvalidDomain"
+    },
+    "restricted_mean.zero_weight_inf.float32": {
+      "error": "InvalidDomain"
+    },
+    "multiply_mask.arithmetic_zero.float64": {
+      "result": [
+        [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      ]
+    },
+    "affect_result.zero_weight_inf.float64": {
+      "error": "InvalidDomain"
+    },
+    "multiply_mask.zero_weight_inf.float64": {
+      "error": "InvalidDomain"
+    },
+    "restricted_mean.zero_weight_inf.float64": {
+      "error": "InvalidDomain"
+    },
+    "offset_polygon_grid.standard1.float32": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard2.float32": {
+      "result": [
+        [
+          "bits:00000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard4.float32": {
+      "result": [
+        [
+          "bits:3e800000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard8.float32": {
+      "result": [
+        [
+          "bits:3e800000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard16.float32": {
+      "result": [
+        [
+          "bits:3e800000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard1.float64": {
+      "result": [
+        [
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard2.float64": {
+      "result": [
+        [
+          "bits:0000000000000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard4.float64": {
+      "result": [
+        [
+          "bits:3fd0000000000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard8.float64": {
+      "result": [
+        [
+          "bits:3fd0000000000000"
+        ]
+      ]
+    },
+    "offset_polygon_grid.standard16.float64": {
+      "result": [
+        [
+          "bits:3fd0000000000000"
+        ]
+      ]
+    },
+    "fill_axis_gaps.seed_override.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.multi_seed_override.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.original_barrier_seed.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.seed_override.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.multi_seed_override.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.original_barrier_seed.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.seed_override.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.multi_seed_override.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.original_barrier_seed.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.seed_override.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.multi_seed_override.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.original_barrier_seed.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.mixed_seed_filter.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.mixed_seed_filter.float32": {
+      "result": {
+        "fill": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:3f800000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:00000000",
+            "bits:3f800000",
+            "bits:00000000",
+            "bits:00000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.mixed_seed_filter.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.mixed_seed_filter.float64": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:3ff0000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_axis_gaps.empty_seed_diagnostics": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    },
+    "fill_morphological_gaps.empty_seed_diagnostics": {
+      "result": {
+        "fill": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "barrier": [
+          [
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000",
+            "bits:3ff0000000000000"
+          ]
+        ],
+        "ignored_seeds": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ],
+        "reopened_barrier": [
+          [
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000",
+            "bits:0000000000000000"
+          ]
+        ]
+      }
+    }
+  }
+}

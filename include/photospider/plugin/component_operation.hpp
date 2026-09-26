@@ -27,14 +27,13 @@ PHOTOSPIDER_API Result<SchemaTemplate> component_filter_schema(
  * rank union on a mandatory 32-byte {parent,rank,minimum,area} record per
  * pixel. Resident source, union and output windows are bounded; provisional
  * capacity is charged independently of final component count. IDs are 1+minimum
- * raster position (components_min_pixel_v1), with background zero. This does
- * not alter the existing mask.components compact-label operation. Area consumes
- * complete Components and builds a paged sorted index; Filter takes Components
- * plus that index and required Int64 minimum_area. Filter verifies the
- * association and uses bounded binary-search windows. Missing or inconsistent
- * properties fail; dynamic zero count is valid. All outputs use CompleteBundle
- * and Conservative support and own their backing/associations. Only
- * ComponentIdScheme::MinPixel is supported here. Work, stages, windows,
+ * raster position (components_min_pixel_v1), with background zero. Area
+ * consumes complete Components and builds a paged sorted index; Filter takes
+ * Components plus that index and required Int64 minimum_area. Filter verifies
+ * the association and uses bounded binary-search windows. Missing or
+ * inconsistent properties fail; dynamic zero count is valid. All outputs use
+ * CompleteBundle and Conservative support and own their backing/associations.
+ * Only ComponentIdScheme::MinPixel is supported here. Work, stages, windows,
  * temporary backing and maximum_count can fail explicitly within root budgets;
  * managed capacity is not a process RSS bound. The representation's count/basis
  * validator alone does not establish connectivity of arbitrary imported labels.

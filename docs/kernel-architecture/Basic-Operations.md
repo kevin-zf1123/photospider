@@ -19,12 +19,9 @@ required; defaults below are explicit choices in workflow construction.
 | --- | --- |
 | `curve.sample_linear`, `curve.sample_monotone` | Generic controls `[K,2]`, K>=2, to generic `[count]`. Int64 `count` 2..1048576; finite Float64 `domain_min < domain_max`; String `out_of_domain=reject/clip`. Defaults: 256, 0, 1, reject. Finite controls have strictly increasing x; y may turn, be signed or HDR. |
 | `field.apply_lut_1d` | Field plus generic same-dtype `[N]`, N>=2, to generic field. Explicit Float64 `domain_min/max` and String `out_of_domain=reject/clip`; defaults 0,1,reject. |
-| `mask.invert` | Canonical Float32 coverage to coverage; no parameters. |
-| `mask.combine` | Two equal HW coverage inputs; String `operation=and/or/xor`, String `algebra=fuzzy/independent_coverage`. Example default fuzzy. |
 | `image.mix` | Equal canonical premul RGBA A/B plus same-HW coverage mask; no parameters. Output retains image interpretation. |
 | `field.box_mean` | Field to same-dtype/interpretation field; Int64 `radius` 1..64, example 1. |
 | `field.gaussian_blur` | As box, plus finite Float64 `sigma` 0..64, example 1. Sigma zero is identity. |
-| `mask.dilate`, `mask.erode` | Coverage to coverage; Int64 `radius` 0..64, String `footprint=square/disk`; examples 1,square. |
 | `field.convolve`, `field.correlate` | Field plus same-dtype generic `[Kh,Kw]` kernel to generic field. Nonnegative Int64 `anchor_y/x` within kernel (correlation additionally bounds them to <=2^53-1); String `boundary=clamp/zero`. Every anchor is explicit, including odd kernels. |
 | `analysis.histogram` | Field to Int64 `[bins]`; Int64 `bins` 1..1048576, finite Float64 `range_min < range_max`; defaults 256,0,1. |
 | `analysis.histogram_out_of_range` | Field to Int64 `[2]` ordered underflow,overflow; finite Float64 `range_min < range_max`. |
@@ -44,8 +41,7 @@ nearest endpoint. LUT coordinates include both table-domain endpoints, with
 linear interpolation and the same reject/clip policy. These ordinary tables do
 not establish the SampledSignal metadata used by the separate `lut.apply_1d`.
 
-NOT is `1-A`. Fuzzy AND/OR/XOR are `min(A,B)`, `max(A,B)`, `abs(A-B)`;
-independent-coverage uses `AB`, `A+B-AB`, `A+B-2AB`. Image mix interpolates all
+Image mix interpolates all
 RGBA channels as `(1-M)A+MB`. M=0/1 returns exact endpoint samples; identical
 alpha remains unchanged. RGB grading should unassociate before extraction and
 associate after merging, as shown in `basic-curves`.
@@ -53,10 +49,7 @@ associate after merging, as shown in `basic-curves`.
 Box/Gaussian are separable square-support filters with clamp canvas extension,
 full-window normalization and Float64 intermediate values. Gaussian samples
 `exp(-.5*(distance/sigma)^2)` and normalizes the finite support. Very small
-sigma gives zero off-center weights. Morphology uses gray maximum/minimum,
-zero canvas extension and unchanged output size. Disk includes exactly offsets
-with `dx²+dy² <= radius²`; zero radius is identity. Opening/closing are two
-explicit nodes. Direct morphology costs O(HW*r²); separable smoothing O(HW*r).
+sigma gives zero off-center weights. Separable smoothing costs O(HW*r).
 
 Correlation computes `sum(K[j]*I[p+j-anchor])`; convolution computes
 `sum(K[j]*I[p+anchor-j])`. Both produce same-sized signed output, use fixed
@@ -79,9 +72,9 @@ New generation specifications do not imply available replacement operators.
 
 ## Execution, errors and resources
 
-Elementwise: numeric min/max/abs, levels, smoothstep, mask Boolean and image mix.
+Elementwise: numeric min/max/abs, levels, smoothstep and image mix.
 Halo: box/Gaussian with the declared positive radius. Whole: curves, field LUT,
-correlation, histogram and morphology. Convolution uses
+correlation and histogram. Convolution uses
 exact staged kernel/neighborhood reads; see [multi-output operations](Multi-Output-Operations.md). Whole
 materialization must fit the execution budget. Static shape changes require
 recompilation; control/table/kernel samples are execution bindings.
@@ -110,7 +103,6 @@ provides these compiled and executed graphs:
 | Scenario | Oracle |
 | --- | --- |
 | `basic-curves` | Unassociate -> PCHIP -> extracted channel LUT -> merge -> associate -> mix; alpha remains .5. |
-| `basic-masks` | Boolean -> dilation/erosion -> box feather; nine coverage samples equal 1/9. |
 | `basic-filters` | Non-symmetric correlation/convolution -> absolute difference `[4,4,4]`; histogram `[0,3]`, out-of-range `[0,0]`. |
 
 `tests/integration/test_basic_operations.cpp` checks independent numerical

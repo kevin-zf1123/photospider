@@ -190,6 +190,15 @@ void fields() {
                         {"dtype", std::string("float64")}}),
              ErrorCode::NotFound);
   }
+  for (const auto* key :
+       {"mask.threshold", "mask.components", "mask.invert", "mask.combine",
+        "mask.dilate", "mask.erode", "component.count", "component.area",
+        "component.bbox"}) {
+    const auto traits = registry->find_traits(key);
+    require(!traits.ok() && traits.status().code == ErrorCode::NotFound,
+            "retired mask key remains registered");
+    rejected(operation(key, {}, {}), ErrorCode::NotFound);
+  }
   auto cancellation_levels = levels();
   cancellation_levels["white"] = 5.;
   cancellation_levels["out_min"] = -3 * 0x1p100;

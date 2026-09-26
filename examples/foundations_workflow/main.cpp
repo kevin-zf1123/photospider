@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--help") {
       std::cout << "--scenario "
                    "all|numeric|expression-lut|"
-                   "generator-gain|components|basic-masks|basic-"
+                   "generator-gain|basic-"
                    "filters\n";
       return 0;
     }
@@ -24,8 +24,6 @@ int main(int argc, char** argv) {
         {"numeric", foundations::numeric},
         {"expression-lut", foundations::expressions},
         {"generator-gain", foundations::generator_gain},
-        {"components", foundations::components},
-        {"basic-masks", foundations::basic_masks},
         {"basic-filters", foundations::basic_filters}};
     unsigned ran = 0;
     for (const auto& scene : scenes)

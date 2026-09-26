@@ -24,8 +24,8 @@ For an existing installed 0.20 package, configure this directory with
 `cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install`,
 then build that directory. It consumes only `Photospider::kernel`.
 
-Explicit `generator-gain`, `components` and `basic-masks` selectors remain as
-legacy typed-image/mask migration sources. They are excluded from `all` and the
-active acceptance set; their former typed paths are not evidence of planar
+The explicit `generator-gain` selector remains as a
+legacy typed-image migration source. It is excluded from `all` and the
+active acceptance set; its former typed path is not evidence of planar
 support. The [retirement record](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md)
 lists removed operations. No replacement format conversion is supplied here.

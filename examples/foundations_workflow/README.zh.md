@@ -23,7 +23,7 @@ ctest --test-dir build -R '^test_foundations_(numeric|expression-lut|basic-filte
 `cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install`
 配置，再构建该目录；仅链接 `Photospider::kernel`。
 
-显式 `generator-gain`、`components`、`basic-masks` 选择器保留为旧 typed image/mask
+显式 `generator-gain` 选择器保留为旧 typed image
 迁移源码，已排除在 `all` 和活动验收集之外，其旧路径不代表 planar 支持。
 完整删除范围见[退休记录](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md)。
 此示例不提供替代格式转换。[英文说明](README.md)为权威来源。
