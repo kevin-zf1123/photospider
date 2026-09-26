@@ -1,0 +1,1251 @@
+{
+  "schema_version": 1,
+  "scope": "Finite independent mathematical helper coverage, not kernel/operator completion or full-domain certification. RNG addressing is experimental.",
+  "member_count": 95,
+  "levels": {
+    "E": "exact finite mathematical helper subset",
+    "B": "specific proved bound",
+    "M": "Measured diagnostic only",
+    "A": "analytic/structural fixture or necessary check only",
+    "G": "unimplemented reference gate"
+  },
+  "members": [
+    {
+      "id": "GEN-01A",
+      "level": "E",
+      "callables": [
+        "exact.constant_bits"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Bit-fill fixture only; complete color description and tensor publication are not implemented.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-01B",
+      "level": "A",
+      "callables": [
+        "exact.constant_bits"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Bit-fill fixture only; complete color description and tensor publication are not implemented.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-02A",
+      "level": "E",
+      "callables": [
+        "exact.coordinate"
+      ],
+      "test_files": [
+        "test_exact.py",
+        "test_protocol.py"
+      ],
+      "scope": "Exact pixel-center and edge-normalized formulas; no runtime Region/layout validation.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-02B",
+      "level": "E",
+      "callables": [
+        "exact.coordinate"
+      ],
+      "test_files": [
+        "test_exact.py",
+        "test_protocol.py"
+      ],
+      "scope": "Exact pixel-center and edge-normalized formulas; no runtime Region/layout validation.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-03A",
+      "level": "E",
+      "callables": [
+        "exact.rectangle_coverage"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-03B",
+      "level": "M",
+      "callables": [
+        "measured.ellipse_coverage"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-03C",
+      "level": "E",
+      "callables": [
+        "geometry.polygon_pixel_area"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-03D",
+      "level": "M",
+      "callables": [
+        "measured.star_vertices"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-03E",
+      "level": "E",
+      "callables": [
+        "geometry.rectangle_sdf",
+        "exact.round_sqrt_plus"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-03F",
+      "level": "M",
+      "callables": [
+        "measured.ellipse_distance",
+        "exact.disk_sdf"
+      ],
+      "test_files": [
+        "test_exact.py",
+        "test_measured.py"
+      ],
+      "scope": "Exact rectangle/polygon/disk cases; general ellipse area/distance and star coordinates remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04A",
+      "level": "E",
+      "callables": [
+        "exact.checker"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04B",
+      "level": "E",
+      "callables": [
+        "exact.grid_pattern"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04C",
+      "level": "E",
+      "callables": [
+        "exact.ramp"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04D",
+      "level": "E",
+      "callables": [
+        "exact.impulse"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04E",
+      "level": "M",
+      "callables": [
+        "measured.zone_plate"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04F",
+      "level": "M",
+      "callables": [
+        "measured.siemens_star"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-04G",
+      "level": "E",
+      "callables": [
+        "exact.color_bar"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Analytic integer/rational patterns; zone-plate and angular transcendental paths remain Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05A",
+      "level": "E",
+      "callables": [
+        "exact.linear_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05B",
+      "level": "E",
+      "callables": [
+        "exact.radial_coordinate",
+        "exact.sqrt_fraction"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05C",
+      "level": "M",
+      "callables": [
+        "measured.angular"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_measured.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05D",
+      "level": "E",
+      "callables": [
+        "exact.norm_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05E",
+      "level": "E",
+      "callables": [
+        "exact.norm_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05F",
+      "level": "A",
+      "callables": [
+        "geometry.point_segment_distance2",
+        "geometry.region_sdf"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_geometry.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-05G",
+      "level": "E+M",
+      "callables": [
+        "exact.quadratic_coefficients",
+        "measured.two_circle",
+        "exact.two_circle_rational"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py",
+        "test_measured.py"
+      ],
+      "scope": "Exact rational coordinate formulas, rational-root two-circle subset; angular and general roots are Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-06A",
+      "level": "E",
+      "callables": [
+        "exact.spread",
+        "exact.spread_rounded"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Exact spread/table and linear RGB subset; other color models and full metadata behavior are not covered.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-06B",
+      "level": "E",
+      "callables": [
+        "exact.numeric_lookup",
+        "run_oracles.evaluate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py",
+        "test_protocol.py"
+      ],
+      "scope": "Exact spread/table and linear RGB subset; other color models and full metadata behavior are not covered.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-06C",
+      "level": "A",
+      "callables": [
+        "exact.linear_rgba_mix"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Exact spread/table and linear RGB subset; other color models and full metadata behavior are not covered.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-07A",
+      "level": "E",
+      "callables": [
+        "exact.bilinear"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Generic component-weighting formulas, no color/alpha semantics; no full mesh topology validator.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-07B",
+      "level": "A",
+      "callables": [
+        "exact.barycentric",
+        "geometry.orientation"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py",
+        "test_geometry.py"
+      ],
+      "scope": "Generic component-weighting formulas, no color/alpha semantics; no full mesh topology validator.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-07C",
+      "level": "E",
+      "callables": [
+        "exact.bicubic_patch"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Generic component-weighting formulas, no color/alpha semantics; no full mesh topology validator.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-08A",
+      "level": "E",
+      "callables": [
+        "exact.grid_points"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Candidate-layout grid/rejection references; FIFO Bridson positions are Measured; normal count stops tested.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-08B",
+      "level": "E",
+      "callables": [
+        "rng.jitter_points"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_rng.py"
+      ],
+      "scope": "Candidate-layout grid/rejection references; FIFO Bridson positions are Measured; normal count stops tested.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-08C",
+      "level": "E",
+      "callables": [
+        "rng.rejection_points",
+        "rng.pairwise_distances"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_rng.py"
+      ],
+      "scope": "Candidate-layout grid/rejection references; FIFO Bridson positions are Measured; normal count stops tested.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "GEN-08D",
+      "level": "M",
+      "callables": [
+        "rng.bridson_reference",
+        "rng.pairwise_distances"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_rng.py"
+      ],
+      "scope": "Candidate-layout grid/rejection references; FIFO Bridson positions are Measured; normal count stops tested.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-01A",
+      "level": "E",
+      "callables": [
+        "rng.philox4x64",
+        "rng.pack_counter",
+        "rng.uniform"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_protocol.py",
+        "test_rng.py"
+      ],
+      "scope": "Official Philox4x64 core KATs; addressed uniform results use experimental packing, not production goldens.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-02A",
+      "level": "M",
+      "callables": [
+        "rng.gaussian_inputs",
+        "measured.gaussian"
+      ],
+      "test_files": [
+        "test_measured.py",
+        "test_rng.py"
+      ],
+      "scope": "Candidate uniform slots and Measured Box-Muller; no full transcendental correct-rounding certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-03A",
+      "level": "E+M",
+      "callables": [
+        "exact.correlate_kernel",
+        "measured.l2_kernel"
+      ],
+      "test_files": [
+        "test_exact.py",
+        "test_measured.py"
+      ],
+      "scope": "Exact finite scalar correlation for none/sum, Measured L2; no kernel halo callbacks or GPU validation.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-03B",
+      "level": "A",
+      "callables": [
+        "rng.gaussian_inputs",
+        "measured.gaussian",
+        "exact.correlate_kernel"
+      ],
+      "test_files": [
+        "test_exact.py",
+        "test_measured.py",
+        "test_rng.py"
+      ],
+      "scope": "Exact finite scalar correlation for none/sum, Measured L2; no kernel halo callbacks or GPU validation.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-04A",
+      "level": "E",
+      "callables": [
+        "rng.perlin2002_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Fixed Perlin polynomial is exact; seeded gradient uses candidate RNG mapping, not frozen sequence.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-04B",
+      "level": "E",
+      "callables": [
+        "rng.gradient2d_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Fixed Perlin polynomial is exact; seeded gradient uses candidate RNG mapping, not frozen sequence.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-05A",
+      "level": "E",
+      "callables": [
+        "rng.cellular2d"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Finite nearest-site geometry and search bounds; generated sites use candidate RNG mapping.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-05B",
+      "level": "E",
+      "callables": [
+        "geometry.nearest_points",
+        "exact.sqrt_fraction"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite nearest-site geometry and search bounds; generated sites use candidate RNG mapping.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-06A",
+      "level": "E",
+      "callables": [
+        "rng.fractal_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Exact octave arithmetic under the selected basis; Philox basis inherits experimental packing.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-06B",
+      "level": "E",
+      "callables": [
+        "rng.fractal_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Exact octave arithmetic under the selected basis; Philox basis inherits experimental packing.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-06C",
+      "level": "E",
+      "callables": [
+        "rng.fractal_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Exact octave arithmetic under the selected basis; Philox basis inherits experimental packing.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-06D",
+      "level": "E",
+      "callables": [
+        "rng.fractal_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Exact octave arithmetic under the selected basis; Philox basis inherits experimental packing.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-07A",
+      "level": "E",
+      "callables": [
+        "resources.validate_rank",
+        "resources.rank_lookup"
+      ],
+      "test_files": [
+        "test_resources.py"
+      ],
+      "scope": "Raw rank structure/hash/period/threshold fixtures only; no production blue qualification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-07B",
+      "level": "E",
+      "callables": [
+        "resources.threshold_points"
+      ],
+      "test_files": [
+        "test_resources.py"
+      ],
+      "scope": "Raw rank structure/hash/period/threshold fixtures only; no production blue qualification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-08A",
+      "level": "M",
+      "callables": [
+        "rng.poisson_input",
+        "measured.poisson_quantile",
+        "measured.poisson_cdf"
+      ],
+      "test_files": [
+        "test_measured.py",
+        "test_rng.py"
+      ],
+      "scope": "Measured quantile limited to lambda<=1000; no large-rate certified CDF or electron metadata integration.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-08B",
+      "level": "A",
+      "callables": [
+        "measured.poisson_quantile"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Measured quantile limited to lambda<=1000; no large-rate certified CDF or electron metadata integration.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-09A",
+      "level": "M",
+      "callables": [
+        "measured.speckle",
+        "rng.block"
+      ],
+      "test_files": [
+        "test_measured.py",
+        "test_rng.py"
+      ],
+      "scope": "Measured speckle and exact grain mixing subset; no full noise-pipeline/metadata runtime.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-09B",
+      "level": "A",
+      "callables": [
+        "measured.gaussian",
+        "exact.correlate_kernel",
+        "exact.linear_grain"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py",
+        "test_measured.py"
+      ],
+      "scope": "Measured speckle and exact grain mixing subset; no full noise-pipeline/metadata runtime.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-10A",
+      "level": "E",
+      "callables": [
+        "rng.advected_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Exact fixed Perlin slicing; advected seeded fields use candidate RNG; rank volume has no STBN qualification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-10B",
+      "level": "E",
+      "callables": [
+        "rng.temporal_fraction"
+      ],
+      "test_files": [
+        "test_rng.py"
+      ],
+      "scope": "Exact fixed Perlin slicing; advected seeded fields use candidate RNG; rank volume has no STBN qualification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "NOI-10C",
+      "level": "E",
+      "callables": [
+        "resources.stbn_lookup",
+        "resources.validate_rank"
+      ],
+      "test_files": [
+        "test_resources.py"
+      ],
+      "scope": "Exact fixed Perlin slicing; advected seeded fields use candidate RNG; rank volume has no STBN qualification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-01A",
+      "level": "A",
+      "callables": [
+        "geometry.validate_core_fixture"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Logical path/primitive fixtures only; no public Result codec, attribute associations or full mixed authority.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-01B",
+      "level": "A",
+      "callables": [
+        "geometry.concat_paths"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Logical path/primitive fixtures only; no public Result codec, attribute associations or full mixed authority.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-01C",
+      "level": "A",
+      "callables": [
+        "geometry.split_subpaths"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Logical path/primitive fixtures only; no public Result codec, attribute associations or full mixed authority.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-01D",
+      "level": "A",
+      "callables": [
+        "geometry.reverse_polyline",
+        "geometry.reverse_bezier"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Logical path/primitive fixtures only; no public Result codec, attribute associations or full mixed authority.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-01E",
+      "level": "A",
+      "callables": [
+        "geometry.validate_arc_fixture",
+        "geometry.bspline_fraction"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Logical path/primitive fixtures only; no public Result codec, attribute associations or full mixed authority.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-02A",
+      "level": "E",
+      "callables": [
+        "geometry.bezier_bernstein",
+        "geometry.bezier_casteljau",
+        "geometry.bezier_derivative",
+        "geometry.unit_tangent_fixture",
+        "geometry.rounded_bezier_position"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Rational polynomial/spline evaluation and analytic tangent subset; arc trig remains Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-02B",
+      "level": "M",
+      "callables": [
+        "measured.arc_evaluate"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Rational polynomial/spline evaluation and analytic tangent subset; arc trig remains Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-02C",
+      "level": "E",
+      "callables": [
+        "geometry.hermite"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Rational polynomial/spline evaluation and analytic tangent subset; arc trig remains Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-02D",
+      "level": "E",
+      "callables": [
+        "geometry.bspline_fraction"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Rational polynomial/spline evaluation and analytic tangent subset; arc trig remains Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-02E",
+      "level": "A",
+      "callables": [
+        "geometry.bezier_casteljau",
+        "geometry.hermite",
+        "geometry.bspline_fraction",
+        "measured.arc_evaluate"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_measured.py"
+      ],
+      "scope": "Rational polynomial/spline evaluation and analytic tangent subset; arc trig remains Measured.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-03A",
+      "level": "B+M",
+      "callables": [
+        "geometry.bezier_length_bounds",
+        "measured.bezier_length"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_measured.py"
+      ],
+      "scope": "Certified chord/control-polygon length bounds plus Measured integrals; no full correctly-rounded length table.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-03B",
+      "level": "M",
+      "callables": [
+        "measured.arc_length",
+        "measured.bspline_length"
+      ],
+      "test_files": [
+        "test_measured.py"
+      ],
+      "scope": "Certified chord/control-polygon length bounds plus Measured integrals; no full correctly-rounded length table.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-04A",
+      "level": "E",
+      "callables": [
+        "geometry.uniform_t_samples"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite Bezier flatten certificates and rational-length polyline samples; no general inverse-arc certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-04B",
+      "level": "A",
+      "callables": [
+        "geometry.polyline_arc_samples",
+        "measured.inverse_bezier_arc"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite Bezier flatten certificates and rational-length polyline samples; no general inverse-arc certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-04C",
+      "level": "A",
+      "callables": [
+        "geometry.polyline_spacing_samples"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite Bezier flatten certificates and rational-length polyline samples; no general inverse-arc certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-04D",
+      "level": "B",
+      "callables": [
+        "geometry.flatten_bezier",
+        "geometry.verify_flatten_certificate"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite Bezier flatten certificates and rational-length polyline samples; no general inverse-arc certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-05A",
+      "level": "E",
+      "callables": [
+        "exact.width_linear",
+        "exact.source_width_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Rational profile evaluation and source-position coordinate mapping; no formal bindings or codecs.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-05B",
+      "level": "A",
+      "callables": [
+        "exact.pchip_fixture",
+        "exact.source_width_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Rational profile evaluation and source-position coordinate mapping; no formal bindings or codecs.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-05C",
+      "level": "A",
+      "callables": [
+        "exact.width_linear",
+        "exact.source_width_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_exact.py"
+      ],
+      "scope": "Rational profile evaluation and source-position coordinate mapping; no formal bindings or codecs.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-06A",
+      "level": "A",
+      "callables": [
+        "geometry.affine_transform"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite affine transformations; no full primitive/width remapping or complete publication proof.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-06B",
+      "level": "A",
+      "callables": [
+        "geometry.affine_transform",
+        "geometry.polygon_area"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite affine transformations; no full primitive/width remapping or complete publication proof.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-07A",
+      "level": "A",
+      "callables": [
+        "geometry.split_bezier",
+        "geometry.trim_bezier_t",
+        "geometry.trim_polyline",
+        "exact.source_width_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_geometry.py"
+      ],
+      "scope": "Rational-length polyline trim/dash plus source-width coordinate fixture; no arbitrary-curve snapshot remapping.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-07B",
+      "level": "A",
+      "callables": [
+        "geometry.dash_intervals",
+        "geometry.dash_polyline",
+        "exact.source_width_coordinate"
+      ],
+      "test_files": [
+        "test_contract_regressions.py",
+        "test_geometry.py"
+      ],
+      "scope": "Rational-length polyline trim/dash plus source-width coordinate fixture; no arbitrary-curve snapshot remapping.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-08A",
+      "level": "A",
+      "callables": [
+        "geometry.simplify_polyline"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Polyline simplify/Chaikin fixtures; cubic endpoint check is not a fitter or continuous Hausdorff verifier.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-08B",
+      "level": "A",
+      "callables": [
+        "geometry.cubic_candidate_checks"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Polyline simplify/Chaikin fixtures; cubic endpoint check is not a fitter or continuous Hausdorff verifier.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-08C",
+      "level": "E",
+      "callables": [
+        "geometry.chaikin"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Polyline simplify/Chaikin fixtures; cubic endpoint check is not a fitter or continuous Hausdorff verifier.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-09A",
+      "level": "E",
+      "callables": [
+        "geometry.polygon_pixel_area"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_protocol.py"
+      ],
+      "scope": "Exact rational polygon area and finite flatten bounds; no full source topology certification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-09B",
+      "level": "A",
+      "callables": [
+        "geometry.flatten_bezier",
+        "geometry.polygon_pixel_area"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Exact rational polygon area and finite flatten bounds; no full source topology certification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-10A",
+      "level": "A",
+      "callables": [
+        "geometry.straight_stroke_rectangles",
+        "geometry.polygon_pixel_area",
+        "measured.disk_area"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_measured.py"
+      ],
+      "scope": "Axis-aligned stroke fixtures and varying-disk membership; no complete circular arrangement/coverage solver.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-10B",
+      "level": "A",
+      "callables": [
+        "geometry.variable_sweep_contains"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Axis-aligned stroke fixtures and varying-disk membership; no complete circular arrangement/coverage solver.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-10C",
+      "level": "A",
+      "callables": [
+        "geometry.canonical_polygon",
+        "geometry.straight_stroke_rectangles"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Axis-aligned stroke fixtures and varying-disk membership; no complete circular arrangement/coverage solver.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-11A",
+      "level": "E+M",
+      "callables": [
+        "geometry.point_segment_distance2",
+        "geometry.closest_polyline",
+        "measured.closest_bezier"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_measured.py"
+      ],
+      "scope": "Finite polyline/region distance and Measured curve candidates; no general global curve-minimum certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-11B",
+      "level": "E",
+      "callables": [
+        "geometry.region_boundary",
+        "geometry.region_sdf"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Finite polyline/region distance and Measured curve candidates; no general global curve-minimum certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-11C",
+      "level": "A",
+      "callables": [
+        "exact.rectangle_sdf",
+        "exact.disk_sdf",
+        "geometry.region_sdf"
+      ],
+      "test_files": [
+        "test_exact.py",
+        "test_geometry.py"
+      ],
+      "scope": "Finite polyline/region distance and Measured curve candidates; no general global curve-minimum certificate.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-12A",
+      "level": "E+A",
+      "callables": [
+        "geometry.boolean_regions",
+        "geometry.boolean_axis_aligned",
+        "geometry.publish_polygon_fixture"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_protocol.py"
+      ],
+      "scope": "Exact rational Boolean boundary fixtures before publication; publication helper only rejects selected failures, not full certification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-12B",
+      "level": "A",
+      "callables": [
+        "exact.rectangle_erosion",
+        "exact.disk_sdf"
+      ],
+      "test_files": [
+        "test_exact.py"
+      ],
+      "scope": "Exact rational Boolean boundary fixtures before publication; publication helper only rejects selected failures, not full certification.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-12C",
+      "level": "E",
+      "callables": [
+        "geometry.boolean_regions"
+      ],
+      "test_files": [
+        "test_geometry.py",
+        "test_protocol.py"
+      ],
+      "scope": "Exact rational boundary fixture supports chained mathematical operations, not a formal exact Result or production backend.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-12D",
+      "level": "G",
+      "callables": [],
+      "test_files": [],
+      "scope": "No grid backend reference until quantization/intersection/degeneracy rules are frozen.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-12E",
+      "level": "A",
+      "callables": [
+        "geometry.publish_polygon_fixture"
+      ],
+      "test_files": [
+        "test_geometry.py"
+      ],
+      "scope": "Necessary finite displacement/incidence/nesting checks only; success does not certify the full publication contract.",
+      "runtime_implemented": false
+    },
+    {
+      "id": "PTH-12F",
+      "level": "G",
+      "callables": [],
+      "test_files": [],
+      "scope": "Grid semantics and grid-to-Float64 publication reference remain unimplemented.",
+      "runtime_implemented": false
+    }
+  ]
+}

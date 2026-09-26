@@ -3,146 +3,329 @@ spec_schema_version: 1
 id: GEN-common
 kind: shared_operator_contract
 category: 03-generation
-status: AcceptedDesign
-document_maturity: D1_draft
+status: Accepted
 implementation_status: not_implemented
-registration_status: technical_freeze_gates
-inspection_date: 2026-09-25
-inspection_source: user_uploaded_archive
-inspection_package_version: 0.24.0
 ---
 
-# GEN / NOI / PTH：共享定稿契约
+# Generation shared contract
 
-## 1. 状态、继承与边界
+These are target specifications, not registry/ABI implementation claims. Inherit [NUM
+common](../../01-numeric/op_specs/NUM_common_contract.md), [NUM
+accelerated](../../01-numeric/op_specs/NUM_accelerated_contract.md), [FMT
+common](../../02-format-color/op_specs/FMT_common_contract.md) and [FMT
+color](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md). The
+[generators](../generators.md) and [paths](../paths.md) indexes link every member;
+[oracle coverage](../oracle-coverage.md) states current mathematical evidence.
 
-本轮全部规格随已接受D01–D12修订，尚未实现；[英文决策](../decisions.md)为权威。
-旧field.constant/field.coordinate测试实现退休，不保留兼容键。具体技术冻结事项见
-[门禁](../freeze-gates.md)，不能用附件测试报告宣称实现完成。
+## Coordinates, descriptors and numerical baseline
 
-必须继承 [NUM-common](../../01-numeric/op_specs/NUM_common_contract.md)、
-[NUM-acceleration](../../01-numeric/op_specs/NUM_accelerated_contract.md)、
-[FMT-common](../../02-format-color/op_specs/FMT_common_contract.md)、
-[FMT-COLOR](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md) 和
-[相对坐标尺度](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)。
-01/02 已确定的数值、精度与颜色基线优先，不由本章放宽。对于基线未定义的新增03语义，
-成员明确差异 > 本族几何/随机算法 > 本文件；显式中间RN阶段也必须在既定规则允许范围内列明。
-本规格不重开已确定的数值、精度、颜色和错误枚举；01/02 中后发迁移目标优先于旧研究概述。
+Canvas H,W>=1 is static; rank1..8 and logical element count<=2^40 with checked
+arithmetic. origin_x/y are Int64, default0. Pixel cells are [ox+x,ox+x+1] by
+[oy+y,oy+y+1], centers at half units, x right/y down. Logical HW/HWC axes do not imply
+interleaved storage. Images use planar storage. normalized_edge uses local
+(x+1/2)/W,(y+1/2)/H, while pixel coordinates include global origin. Cache identity
+includes origin; ROI does not reset it. Construct large coordinates exactly; never
+recover discrete addresses from rounded floating coordinates.
 
-## 2. 数值与 profile
+Float ports accept their explicitly declared Float32/64 types without hidden
+broadcast/promotion. RN_T denotes correctly rounding the complete real/rational
+expression once, except explicit public-node or RN64 stages. Use ties-to-even, gradual
+underflow and restored floating environment, not fast-math/FTZ. Ordinary computed exact
+zero is +0 unless a member declares otherwise; copy/endpoint paths preserve source bits
+and nonzero negative underflow retains -0. Raw constant copies allow nonfinite bits;
+semantic geometry/color inputs require finite values.
 
-`RN_T(E)` 表示把精确表示的输入代入整个已指定实数/有理数表达式 E，最终仅舍入一次到 T；
-除明确列出的中间 `RN64` 外，不允许把双精度循环求和冒充 strict。
-默认 Float64；另可 Float32。整数、选择、计数、拓扑、分支和端点复制精确。
-finite-only 几何/颜色输入拒绝 NaN/Inf；普通 constant raw tensor 允许相同 dtype 的按位复制。
-默认 nearest/ties-to-even，渐进下溢，恢复调用者 fenv；禁用 fast-math/FTZ。
-数学正零是 +0，显式端点/恒等复制保留原位（含 -0）；非零负值下溢保留 -0。
+Accelerated Float32 finite results obey the established four-ULP limit. Float64 inputs
+are not narrowed; normal finite FP32-range reference r permits
+abs(a-r)<=4*2^(floor(log2(abs(r)))-23). Zero, outside-normal-FP32-range and uncertain
+classification use strict behavior. Discrete decisions/copies remain exact. This is a
+final-output budget, not per-tap/octave error. Admission requires proved bounds or
+strict fallback, not only sampled agreement.
 
-独立提议键后缀 `_v1_strict`、`_v1_accelerated_apple_silicon`、
-`_v1_accelerated_x86_64`。不是mode参数或unsuffixed alias。部分成员提供GPU实际负载；GPU按后端独立profile。
-同一算子/版本/profile输出逐位一致，改变合法输出需新版本；设备准入须验证。
-离散/结构成员仅提议 strict；复合 workflow 不额外注册数学替身。
-Float32 accelerated 与 strict 有序有限 IEEE 距离≤4；特殊值/零号单独检查。
-Float64 **不窄化输入**；当 strict r 在正常有限 FP32 范围内：
-`|a-r| <= 4 * 2^(floor(log2(|r|))-23)`，直接比较实际 Float64 值。
-零、|r|<2^-126、|r|>0x1.fffffep127、分类不确定必须 strict。
-许可是最终输出预算，不是每项/每 octave 4 ULP；支持、拓扑和统计抽样分支不能因加速改变。
-加速候选须完整误差包络/证明 admission，不能仅凭本包样本自测准入。回退计数记诊断。
+PathSet controls are finite Float64; exact polygon Results use their separately
+specified rational representation. DynamicPoints use finite Float64 positions and
+associated Int64-width IDs. Zero Result counts are valid; ordinary Value extents are
+positive. No new unsigned runtime dtype follows from internal RNG words.
 
-几何误差与数值误差是两件事：具名 flatten/smooth 版本可以近似原几何，
-但 strict 仍须正确舍入它**明确选择的几何对象**的运算。
-`epsilon_geom_px` 不能换成 `epsilon_numeric`；coverage tolerance 也不能从轮廓误差猜出。
-证书须包含转换/flatten/求值/发布量化误差；没有界的高精度估计只能标 Measured。
-没有达到界，返回 NotConverged/InvalidQuality，不把耗尽预算的近似当成功。
+## Publication, resources and error boundaries
 
-## 3. 坐标、shape、单位、类型
+Validate shape/dtype/schema before evaluation; static parameters and input descriptors
+alone determine Value shapes. Dynamic counts use formal Results. No Python dictionary or
+oracle fixture constitutes a public codec or association. Accept valid negative/zero
+strides, unaligned offsets and nonzero source origins. Return actual global Region,
+layout, owner and produced coverage; missing is not ExplicitZero. Materialize only the
+range required by the member execution rule. No data-dependent identity/view guess is an
+implicit contract.
 
-Canvas 的静态 H,W≥1，rank 1..8，每个 Value 的逻辑元素总数≤2^40，所有乘加检查溢出。
-`origin_x/origin_y` 静态 Int64 默认0，像素为 `[ox+x,ox+x+1]×[oy+y,oy+y+1]`，
-中心 `p=(ox+x+1/2,oy+y+1/2)`，x右、y下。顺序 HW/HWC；坐标分量固定 xy。
-normalized_edge 坐标相对于画布为 `((x+1/2)/W,(y+1/2)/H)`；不使用 W-1/H-1。
-原点进入 cache；请求 ROI 不能重新定义原点。大坐标用精确整数构造，浮点输出允许按 dtype
-自然合并相邻像素，但离散索引/随机 counter 不从舍入后坐标反推。
+Charge outputs, scratch, exact integer limbs, events/indexes, backing, validation
+I/O/work and retained ancestry. Work/stage/capacity are distinct; managed peak does not
+promise RSS. Poll bounded loops and preserve ResourceExhausted, Cancelled, Stale and
+upstream statuses. Invalid parameters, NoSolution, NotConverged, InvalidQuality and
+ArithmeticOverflow remain distinct. Never mask budget failure with strict fallback or
+lower quality. Complete Results publish atomically; independent completed outputs follow
+host rules. Retained values/read windows remain valid after context destruction until
+their final owner is released.
 
-除说明外浮点 Value 接受独立 Float32/64 输入，以精确表示值参与数学；没有隐式广播或 dtype 推断升级。
-PathSet 控制点固定有限 Float64；DynamicPoints positions 固定有限 Float64，ID 为现有 Int64-width 记录。
-不新增 Float16/UInt32/UInt64 等 runtime dtype。RNG 内部 uint64 不等于公开 dtype。
-结构零 count 合法；普通 Value 仍不能有零 extent。通用字段不因 3/4 通道被称为 RGB/RGBA。
+## Members and identity
 
-## 4. 颜色、alpha、coverage
+The family identifiers are GEN-01..08, NOI-01..10 and PTH-01..12 with 91 original member
+concepts and separately specified variants. Concrete technical details are completed per
+family. Distinct output semantics, units, color rules and reproducible algorithm
+identities receive distinct members. Candidate count is not a registry-key count.
+Solver-specific fitting members and exact/grid geometry variants may expand it.
 
-完整 image 输出是 FMT 的 **straight** 多平面同尺寸 tensor；内部 alpha 在同一 tensor，角色显式，
-不一定最后一通道，无 alpha 也合法。metadata 不携带外部 alpha owner。
-需要颜色语义的生成器必须提供完整 model/primaries/white/transfer/reference/units/encoding；
-草稿的构造器可显式写入 linear sRGB/D65，不能靠 C=3/4 猜测。
-Lab/LCh 的 lightness 用 `l=L*/100`，a*/b*/C* 与 hue 单位沿用 FMT；禁止把旧 ColorArray v1 静默重解释。
-无隐式 gamut/tone/transfer/quantization；先生成 Float32/64，再显式 FMT-06。
+Every public operation key includes a version. Within the same operation version and
+public profile, identical valid inputs and parameters produce identical output bits,
+counts, order, IDs and topology. This includes CPU dispatch and all supported devices of
+one GPU-backend profile. Different profiles may differ only within their specified
+numerical contract. Accelerated error bounds do not authorize within-profile output
+drift.
 
-coverage 是像素面积比例 [0,1]，不是中心 SDF 的 smoothstep；SDF 单位 px，区域内负外正、边界+0。
-coverage Float64 是通用 scalar coverage 描述目标，不能声称当前仅 Float32 的旧 mask facet 已接收。
-透明端点和零 alpha 策略由颜色成员指定，raw numeric table 不建立 image 元数据。
-metadata_mode=respect（构造器默认）/override/raw 仅用于消费已有颜色；新 image 源必须显式建立完整描述。
+Changes to FMA use, reduction order, approximations, fallback selection or solver
+behavior require a new version when they change otherwise legal outputs. Bit-preserving
+optimization can retain the version. Contract violations are bugs; a version bump does
+not legalize them. A correction affecting stored results must invalidate affected caches
+and document its impact.
 
-## 5. 端口、静态参数与输出推断
+The field.constant and field.coordinate keys are unavailable; there are no compatibility
+aliases.
 
-成员按列表顺序给出 Value/Result 端口。`canvas` 是静态参数组，不是未定义的输入对象；
-几何向量/矩阵和颜色/表一般是动态 Value；seed/stream/frame/算法版本与预算是静态参数。
-默认是构造器写入的建议值；直接节点仍提交全部 required 参数，未知字段 preflight 拒绝。
-字符串、typed constants、表等复用现有参数 codec，不假装新 Python dict 已是 C ABI 参数。
+## Execution and backend scope
 
-Value 形状仅由输入 descriptor 和静态参数决定，不执行 producer 推断大小。
-动态多段/点集合输出使用现有 Result/schema specialization/RuntimeCount；
-新增 `ArcLengthTableV1` / `PathSamplesV1` 等为待完成正式审查的逻辑schema，需 review/公开实现，
-不能以 JSON fixtures 宣称现有 representation.hpp 已支持。
-CompleteBundle 校验关联后才发布；无成功前缀、无伪造 zero extent、无隐式对象快照。
+Use exact requested-region computation for local members, necessary input halos for
+neighborhood members, and Whole execution for genuinely global algorithms. Each member
+separately specifies output computation, input reads, complete input validation and
+dirty propagation. Regional output does not imply regional control validation: a local
+fill may still require complete path validation.
 
-## 6. 实际执行、Region、dirty
+Global-coordinate outputs are invariant under request size, tile partition, request
+order and thread scheduling. Do not derive RNG addresses from tile IDs, thread IDs,
+execution order or local ROI origins.
 
-按成员数学依赖定义Regional、Halo或Whole，不能统一退回Whole。输出计算、输入读取、
-完整验证和dirty分别声明。局部场只计算Q，相关filter读取必要halo，结构全局算法完整运行；
-局部输出仍可依赖完整控制/路径/资源验证。全局坐标样本不受分块、线程和顺序影响。
-无输入源无上游样本需求；所有控制与版本进入缓存身份。共享控制变更保守失效依赖区域。
-空Q仅静态preflight，无payload读取或随机推进。Result完整封存后才可观察。
-多输出仅运行所请求数学，必要共享typed validation不省略。GPU通过真实公开workflow验证。
+Provide selected GPU members as real workloads for subsequent scheduler work; Perlin
+noise is a candidate workload. Validate through public workflows including demand,
+allocation, transfers, dependencies and result return, rather than only isolated device
+kernels. GPU profiles are separated by backend. All admitted devices within one backend
+profile must reproduce its versioned result bits. Cross-backend substitution requires
+explicit workflow permission to change profile; it is not an invisible scheduling
+optimization.
 
-## 7. 布局、返回映射、资源与寿命
+## Color coverage
 
-接受合法负/零 stride、unaligned byte offset 和非零来源 origin；字段由现有访问器读取。
-图像使用 FMT 同尺寸平面发布；不得把 HWC 逻辑轴当交错内存保证。
-按所选执行规则materialize实际请求或完整Result；除结构按位复用的成员外 view 拒绝，不能 data-dependent 猜 identity。
-返回 global Region、真实 owner、layout/stride 和 produced coverage；缺失不等于 ExplicitZero。
-所有 outputs、scratch、堆/索引、动态 backing、validation I/O/work、resource snapshot 和 ancestry 计费。
-work/stage/capacity 独立；managed peak 不承诺 RSS。cache-off 也必须能正确执行。
+Preserve the established FMT baseline: straight image representation, explicit
+same-tensor alpha roles, complete color interpretation, and Lab/LCh lightness l=L*/100.
+Never infer RGB/RGBA from three/four raw components.
 
-每成员给 O()，实际准入用 checked 字节/操作计数；大数组生成不允许 unaccounted 容器或私有线程池。
-按像素行、细分、候选、积分或拓扑事件轮询取消；保留原 ResourceExhausted/Cancelled/Stale/upstream 状态。
-不得以 strict fallback 隐藏资源失败。失败不发布该失败请求输出；独立已完成 output 保留宿主允许的结果。
-保留值/Result/read window 在 context 销毁后仍可读；最后 consumer 释放时所有 owner/backing 终结。
+Choose support by operation: constant images validate and copy models supported by
+complete descriptions; color ramps define RGB, XYZ, CMYK, Lab, LCh, OKLab, OKLCh, HSL
+and YCbCr separately and follow the current CRV/FMT mathematics. GEN-07 uses generic
+numeric components; NOI-09B requires linear RGB.
 
-## 8. 错误模型
+## Geometry object, error and topology
 
-| 条件 | 阶段 | 现有 Status | 范围 |
-| --- | --- | --- | --- |
-| 缺失/未知参数、非法静态半径/阈值/上限 | compile/preflight | InvalidArgument / InvalidDomain | Schema |
-| shape/dtype/authority/schema 不支持 | compile/preflight | TypeMismatch / None | Schema |
-| 动态 NaN/Inf、退化几何、负 width、乱序 stop | evaluation | InvalidArgument / InvalidDomain | 按实际demand的失败范围 |
-| exact 最终数值无法有限表示 | evaluation | OperationFailed / ArithmeticOverflow | 按实际demand的失败范围 |
-| 空集合上请求不存在的最近点等 | evaluation | OperationFailed / NoSolution | 按实际demand的失败范围 |
-| 迭代上限仍无有效证明 | evaluation | OperationFailed / NotConverged | 按实际demand的失败范围 |
-| 质量契约/拓扑验证失败 | evaluation | OperationFailed / InvalidQuality | 按实际demand的失败范围 |
-| Result ObjectId/字段关系错误 | schema/publish | 宿主 InvalidAssociation 等原状态 | 保留 Association |
-| 预算/取消/上游/不兼容 CPU | 原阶段 | NUM 原 Code/Reason | 不覆盖原 scope |
+Keep original-geometry operations and explicitly named approximation operations
+separate. Exact polygon area concerns the chosen polygon. A flatten-based member
+computes on its deterministic published polyline; correctly rounding that area is not
+correctly rounding the source curve's area. Ellipse area, circular stroke boundaries and
+true-curve distance still require their own algorithms.
 
-`InvalidRadius`/`FoldedMesh`/`RankTileMismatch` 等仅 bounded detail，不发明 FailureReason。
-诊断至少标 operation/output、全局坐标或 segment/candidate ID、offending input、原始值位。
+Flatten accepts epsilon_geom_px > 0 in target-canvas pixel units. Constructors write
+0.05 by default; an explicit preview preset writes 0.25. Persist the numeric value and
+include it in cache identity. These are engineering defaults, not measured optimal
+settings. Include flattening and coordinate-publication error in the bound. Subsequent
+transforms require propagation/revalidation of that bound. Do not silently loosen it on
+budget exhaustion.
 
-## 9. 最小实现验收
+Default source_topology_policy is allow_change. reject_unproven explicitly requires
+proof of the topology properties declared by the member. Distance error alone proves
+neither coverage error nor topology. Report unverified when no proof/check was
+performed; report actual change only if established. An unproved strict request fails.
+Fixed algorithm/version/parameters also fix the approximation bits.
 
-解析数值、独立 oracle、whole 与非零 ROI 投影、不同分块/线程顺序、特殊输入和边界、
-低内存/work/stage、取消、cache-off、修改 seed/原点/资源重绑定、context 销毁后的 owner/read-window，
-以及多输出单独/joint 等价均须测试。数学 oracle 自测不等于公开 kernel 工作流测试。
-实际注册前必须增加 WorkflowDocument→Compiler→ExecutionContext 的公开 runner，
-strict 比位、accelerated 比最终预算；本包没有伪造 runner 或 C++ 通过记录。
+## Structured results, attributes and width
 
-来源见[research-sources](../research-sources.md)，具体成员及族契约均在本目录。
-旧附件oracle不作为修订后规格的运行证据。新增Result、随机序列与后端门禁见[freeze-gates](../freeze-gates.md)。
+Add formal Result schemas where existing types cannot accurately express fields, source
+associations and quality. Review ArcLengthTable, PathSamples, PathPartition, FitReport
+and GeometryReport as candidates; five names do not mandate five new schemas. Review
+factories, codecs, ownership, lifetime, validation, counts and consumers. JSON examples
+are not implemented associations. Exact geometry Results defined by the geometry
+contracts belong to this review as well.
+
+Default attribute_policy=reject_unmappable. Explicit drop_unmappable drops only
+unmappable attributes and reports their keys and reasons. Propagate attributes with
+defined correct mappings; do not invent interpolation for labels or IDs. Failure must
+not publish a successful result with silently missing attributes.
+
+Width denotes finite nonnegative full stroke width (diameter), in geometry pixel units.
+Support a formal attached width attribute and an independent width input; each
+invocation explicitly selects exactly one source, with no fallback/override precedence.
+Freeze the standard key during schema review; do not infer semantics from arbitrary
+attribute names.
+
+Explicitly distinguish these parameter domains (field spelling remains a schema
+requirement): pathset_normalized_arclength, subpath_normalized_arclength, and
+subpath_arclength_px. The first concatenates subpath lengths in declared order,
+excluding spatial jumps; the second restarts [0,1] on each subpath; the third restarts
+physical distance on each subpath. Store the domain with the binding. Do not silently
+reinterpret an existing generic ArcLength tag.
+
+Trim/dash preserves source-position width by default. Carry or rebuild the source
+mapping; reapplying the full width function to each output fragment requires an explicit
+rebind. An unrepresentable mapping follows the attribute failure policy, not approximate
+interpolation. This preserves width, not every raster pixel: new endpoints can introduce
+new caps. Zero length, closed seams, domain bounds and exact mapping representation
+remain unimplemented member/schema details.
+
+## Periodic coordinates and two-circle roots
+
+Repeat uses the exact mathematical coordinate t-floor(t) in [0,1), then normal NUM
+rounding. Exact period boundaries output +0. A value inside the period that rounds to 1
+remains 1: no nextDown adjustment or second wrap. The following lookup interprets it as
+the endpoint. Angular periodic coordinates follow this rounding policy; pad/reflect
+retain their separately defined endpoints. Periodic query mapping does not normalize
+stored color hue or remove winding. CRV/FMT original hue interpolation remains
+authoritative.
+
+For two circles define q=p-c0, d=c1-c0, s=r1-r0 and solve A*t^2+B*t+C=0 with A=d.d-s^2,
+B=-2*(q.d+r0*s), C=q.q-r0^2. Use exact classification, not epsilon snapping. Keep roots
+with r0+t*s >= 0; select the largest valid real root before spread, without clamping to
+[0,1]. A=0 uses the linear equation when applicable.
+
+Identical circles are invalid input. For other circles, if A=B=C=0, inspect the radius
+constraint: s<0 gives maximum t=-r0/s; s>=0 with nonnegative input radii has no finite
+maximum. Return the finite maximum if present. Treat absence of roots or of a finite
+maximum as absence of a returnable coordinate.
+
+Default no_solution=valid_zero returns t=+0 and UInt8 valid=0; a returnable coordinate
+has valid=1. Explicit reject fails on invalid requested coordinates. valid is geometric
+coordinate validity, not alpha. Preserve resource, cancellation, arithmetic and
+unfinished-certification errors; they cannot become valid=0.
+
+## Generic mesh fields
+
+Retain rectangular bilinear, triangle mesh and regular-parameter bicubic patch members.
+Do not include arbitrary curved geometry inversion or folded patches. Use generic
+numeric interpolation: accept an explicit component axis and produce numeric fields,
+without inferring color or alpha semantics. No special alpha interpolation is provided.
+
+Bilinear uses four corner vectors and the full weighted expression. Triangle mesh uses
+exact containment/barycentric decisions and independent geometric validity; concrete
+boundary/overlap rules must be fixed with the member. Bicubic uses the 4x4
+tensor-product cubic Bernstein control vectors on the regular parameter domain, not an
+unspecified cubic filter. No channel receives special alpha treatment.
+
+Color interpretation, conversions and alpha weighting belong to explicit workflows.
+Their individual public-node rounding stages are part of the workflow contract and must
+not be described as one final rounding of a fused expression.
+
+## Random identity
+
+Use Philox4x64-10 with direct, lossless address encoding into its 256-bit counter.
+Global x/y are signed32. frame, draw and stream each range 0..2^32-1, carried by
+existing Int64 parameters. Retain channel 16-bit and built-in domain 8-bit pending full
+layout review; seed denotes a 64-bit bit pattern. Reject out-of-range addresses rather
+than truncating or wrapping.
+
+The 184 address bits fit without lossy hashing. Concrete field order, seed-to-key
+injection, unused bits, output-word selection, floating-grid mappings and each member's
+draw allocation remain member implementation requirements. The candidate c0=(x,y),
+c1=(frame,draw), c2=(stream,channel,domain), c3=0 layout is a candidate, not a frozen
+sequence. Unused bits cannot acquire new semantics silently.
+
+Address injectivity is not uniqueness of individual output samples or a proof of
+statistical independence across keys. Do not seed implicitly from node identity, clock,
+pointers or scheduling. The integer core agrees across CPU/GPU profiles; floating
+transforms follow their declared profiles. Core known-answer tests validate
+Philox4x64-10 independently of the candidate addressed sequence; addressed goldens
+require a fully specified production packing and floating mapping.
+
+## Point distributions and completion
+
+Keep finite-candidate rejection and FIFO-active Bridson as separate members. Finite
+rejection examines candidates in ordinal order and accepts only published points
+satisfying the exact squared minimum-distance predicate. FIFO always processes the
+earliest remaining active point; success retains it and appends the new point, while
+exhausting its fixed attempts removes it. IDs follow acceptance order. Spatial indexes
+and parallel candidate evaluation must preserve decisions.
+
+max_count is a normal stop target: reaching it succeeds; exhausting candidates or the
+active list first succeeds with fewer points. Report the stop reason, with final field
+names to be reviewed. Candidate count, attempt count and max_count are algorithm inputs
+in cache identity. Neither completion nor count satisfaction proves maximal packing or a
+fixed density. No promise of exactly N points is made.
+
+Memory/work/iteration safety budgets remain separate hard limits. Exhaustion fails
+without successful partial publication; it is not evidence that no additional point
+fits. Freeze boundary cases and member address allocation with the RNG.
+
+## Rank resources
+
+Deliver generic rank lookup semantics first. Validate structure, layout, ranges,
+addressing and immutable resource identity. A permutation/rank fixture proves neither
+spatial blue-noise quality nor temporal STBN quality.
+
+Named blue/STBN production capability remains gated on selecting a specific
+resource/release or generator, recording provenance, license and byte SHA256, and
+accepting spatial/temporal spectrum and threshold-set quality reports. Resource
+conversion produces a new identity and requires revalidation. No production resource or
+external SDK is approved by these specifications. Generic lookup can exercise real
+resource/demand/scheduler paths without a blue-noise claim.
+
+## Noise model boundaries
+
+Keep separate electron Poisson shot, integer-looks multiplicative speckle and linear-RGB
+artistic grain. Shot consumes nonnegative expected electrons and returns Int64 counts;
+it adds no implicit dark current, read noise, gain, black level, full well or ADC. The
+finite random grid is not an exact continuous ideal distribution. Speckle retains a
+separate explicit multiplier formula; signed raw inputs do not acquire
+physical-intensity meaning.
+
+Grain forms correlated Gaussian g, then RN_T(C+strength*g). Expose explicit
+normalization=none/sum/l2; strength is only the final multiplier, not a guaranteed
+standard deviation. sum requires nonzero sum of weights; l2 requires nonzero sum of
+squares. Boundary aliases refer to the same source variable, not independent samples.
+Persist normalization, kernel, boundary, strength and RNG parameters.
+
+Retain monochrome/shared and independent-RGB addressing choices. Apply the same RGB
+formula even at alpha=0, modifying hidden RGB; copy alpha bits unchanged. Do not clip
+finite signed/HDR results. Other working domains or a calibrated camera pipeline require
+separate explicit members/workflows.
+
+## Geometry variants, publication and fitting
+
+Define exact-input and explicit-grid Boolean members separately. Exact members interpret
+input floats as exact dyadic geometry. Grid members specify quantization, scale,
+arithmetic and observable backend behavior, and report quantization effects. No
+automatic fallback between them, snapping or small-feature removal is authorized for
+exact members. Grid behavior must also be specified rather than inferred from a library
+name. The geometry approximation contract's source-curve approximation permission does
+not authorize additional unreported Boolean quantization.
+
+Provide separate exact Result output and Float64 PathSet output members. Exact polygon
+results retain rational coordinates/topology for exact consumers. Float64 output
+performs deterministic rounding and validates displacement, incidence and absence of
+newly introduced crossings/merges before publication; failure is InvalidQuality. Define
+an explicit exact-to-Float64 conversion with matching publication rules. Chained Float64
+outputs operate on the newly rounded geometry, not an implicitly preserved exact
+history. Grid-to-Float64 conversion also requires its representability checks. Exact
+offset/circular constructions may need a different number domain; rational polygon
+support does not prove them.
+
+Validate candidate backends before selecting production dependencies. Check crossings,
+overlaps, contacts, holes, degeneracy and narrow gaps; exact Result round trips and
+chained consumption; canonical output order; accounting, cancellation and lifetime; and
+publication failures. Review license/build/platform requirements before adopting a
+concrete package. No CGAL/Clipper2 backend is selected by this specification.
+
+Different fitting solvers are different public operators. They share quality acceptance:
+endpoint/locked/corner constraints and a continuous bidirectional Hausdorff bound
+including publication error. Sample residuals are not a continuous certificate. Each
+solver operator/version/profile fixes initialization, solving, splitting, tie handling,
+stopping and returned bits. Distinct solvers may produce different valid
+controls/counts. No silent runtime solver substitution and no minimum-segment optimality
+promise. Register only after the concrete solver and verifier are validated and frozen.
+
+Fitting defaults to allow_change topology policy, with explicit reject_unproven. Specify
+topology properties for that member; distance success does not prove them. Unverified
+topology is reported as such; strict unproved results fail. Resource exhaustion cannot
+publish an uncertified best guess.

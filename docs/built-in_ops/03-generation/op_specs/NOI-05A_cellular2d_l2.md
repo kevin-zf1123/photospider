@@ -1,78 +1,69 @@
 ---
 spec_schema_version: 1
 id: NOI-05A
-status: AcceptedDesign
+parent_id: NOI-05
+function: cellular2d_l2
+kind: primitive
+category: 03-generation
+status: Accepted
 implementation_status: not_implemented
-registration_status: technical_freeze_gates
-source_maturity: D1_draft
-revised_on: 2026-09-26
----
-
-# NOI-05A：每格一站点的精确F1/F2
-
-本具体规格已按[英文权威决策D01–D12](../decisions.md)修订。数学、端口与验收目标见本文；
-未实现，候选键/新schema及证明算法在[技术门禁](../freeze-gates.md)完成前不得宣称已注册。
-D1/D2仅保留来源成熟度，不表示首批顺序。
-
-## 1. 范围与身份
-
-所属族：[NOI-05 无限格点cellular与有限点Voronoi](NOI-05_cellular_contract.md)。本成员与同族其他成员不能隐式互换。
-继承[GEN-common](GEN_common_contract.md)、[NOI-random](NOI_random_contract.md)；精度、颜色、结构表示及执行条款通过这些文件继承01/02。
-来源为上传草案，经D01–D12修订；规格不代表运行时已实现。
-
-没有商业软件黑盒bit identity或未核验GPU支持声明。
-
-来源候选键（全部需含版本；未冻结，不是可调用API）：
-
-- noise.cellular2d_l2_v1_strict
+clarification_status: member_technical_details_pending
+proposed_operation_keys:
+  - noise.cellular2d_l2_v1_strict
   - noise.cellular2d_l2_v1_accelerated_apple_silicon
   - noise.cellular2d_l2_v1_accelerated_x86_64
+---
 
-## 3. 端口与输出推断
+# NOI-05A: cellular2d l2
 
-输入coordinates[S...,2]；输出f1[S...],f2[S...],nearest_cell[S...,2] Int64；输出空间单位同coordinates。
+Inherit [NOI-05](NOI-05_cellular_contract.md), [GEN common](GEN_common_contract.md), and
+the applicable [random](NOI_random_contract.md) and [geometry](PTH_geometry_contract.md)
+contracts. Proposed keys are not runtime registrations. A key includes algorithm version
+and profile; within one version/profile, output bits and discrete decisions are fixed.
 
-## 4. 参数及合法域
+## Interface and representation
 
-dtype=float64,seed/stream/frame；格点范围signed32；metric仅L2；max_search_rings=64建议；无jitter mode。
+coordinates[S...,2]; f1,f2[S...], nearest_cell[S...,2] Int64.
 
-## 5. 数学参考与舍入
+## Parameters and domain
 
-每整数格(ix,iy)用domain7 draw0的两个halfopen53，站点RN64(ix+Ux,iy+Uy)，上界投影nextDown使站点仍在原格。对所有支持范围内格点站点算距离，按(d²,iy,ix)排序，取前2。实现按Chebyshev环展开；只有到未访问格闭包的最小距离下界严格大于当前F2才停（等距须继续解决tie）。到signed32边界不假设未存在格而静默截断：若停止证书仍需域外格则InvalidDomain。
+dtype,seed/stream/frame; signed32 lattice; L2 metric; max_search_rings default 64.
 
-## 6. 实现成本与资源
+## Mathematical specialization
 
-最坏O(|S| R²)，逐环资源计费；超ring而证书不足NotConverged；strict sqrt RN，ID精确。
+Each domain7 cell gets two halfopen53 offsets, published RN64 with explicit
+half-open-cell endpoint adjustment. Sort all supported sites by
+(distance_squared,iy,ix). Expand Chebyshev rings until the unvisited-cell closure lower
+bound is strictly greater than current F2; equality cannot discard a tie. If proof needs
+out-of-range cells, fail rather than truncating the field.
 
-## 7. Demand、发布与dirty
+## Dependencies, resources and failures
 
-目标执行规则：**Regional**。按Q计算输出；坐标/查询Value按所需样本读取。小型控制、stop/table、路径/mesh拓扑和资源描述完整验证；依赖全路径时可以完整读取路径，但不因此计算全画布。
-完整控制/拓扑/资源改变保守失效全部依赖区域；逐样本输入改变按实际依赖映射失效。
-空Q仅执行静态preflight，不读payload、不推进随机算法。global Region、origin、owner、layout
-与produced coverage真实返回。多输出仅计算所请求数学，必要共享验证不省略。
-具体callback及错误影响范围须按[GEN-common](GEN_common_contract.md)验证。
+Execution rule: **Regional**. Compute requested output coordinates only. Read
+corresponding query/sample inputs and necessary controls; path/mesh/resource validation
+may require complete control data without computing the whole output canvas. Full
+shared-control/topology/resource changes conservatively invalidate dependent output;
+sample changes follow the actual dependency map. Empty requests perform static preflight
+without payload reads or advancing a random sequence. Compute only requested output
+mathematics, retaining required shared validation.
 
-## 8. 数值、错误与生命周期
+Regional queries; O(count(Q)*R^2) reference; charge rings and certification.
 
-继承[GEN-common](GEN_common_contract.md)：strict完整式正确舍入，accelerated最终预算不按
-tap/octave累计；同版本同profile位一致。图像平面存储、合法stride/offset、预算、取消、
-关联及context后保留owner规则均适用。参数/schema错误、无解、未收敛、质量失败和宿主资源
-错误保持区分；有限结果不可表示为ArithmeticOverflow。无效请求不发布成功前缀。
+All output, scratch, indices, validation work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
+Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
+lifetime and actual returned coverage inherit GEN-common.
 
-## 10. 成员验收
+## Independent fixtures and acceptance
 
-与足够大穷举窗且外界证书交叉检验；F1≤F2；负坐标；同距按iy/ix；站点落边界的发布检查。
+F1<=F2, brute-force crosscheck with exterior certificate, negative cells and distance
+ties; ring exhaustion fails.
 
-还须验证全域与非零ROI同位、真实读取/计算范围、合法负/零stride、独立/joint输出、
-低预算、取消、cache-off、参数和资源版本变化、关联验证及保留owner寿命。
-
-## 11. 公开执行与证据边界
-
-实现验收必须通过WorkflowDocument→Compiler→ExecutionContext公开入口及独立数学参考。
-本文样例是预期结果，不是已运行记录；附件oracle及其旧通过报告不验证修订后行为。
-随机成员使用新版Philox规范和新的独立向量；技术门禁未清除前不发布golden。
-
-## 12. 依赖
-
-来源：[S05](../research-sources.md#s05)、[S14](../research-sources.md#s14)。
-继承本族契约、GEN-common及适用的NOI-random/PTH-geometry。正式字段和算法门禁不得由示例替代。
+Check requested-region/full-output equivalence, actual read/work bounds, legal
+strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
+associations and retained owners as applicable. The [oracle
+coverage](../oracle-coverage.md) describes the available finite reference subset; it is
+not runtime completion. Formal schemas, unresolved algorithms and backend admission must
+be implemented and validated before registration. No unverified GPU or third-party bit
+identity is implied by these requirements.

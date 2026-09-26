@@ -1,8 +1,8 @@
 # Perlin 2002 fixed permutation
 
-NOI-04A uses the following 256-entry permutation, duplicated logically for indexing.
-It is algorithm data, independent of the revised Philox sequence. Integer indices
-use Euclidean modulo 256. Strict evaluates the full polynomial, not Java rounding.
+NOI-04A uses the following 256-entry permutation, duplicated logically for indexing. It
+is algorithm data, independent of the revised Philox sequence. Integer indices use
+Euclidean modulo 256. Strict evaluates the full polynomial, not Java rounding.
 
 ```text
 (

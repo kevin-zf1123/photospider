@@ -1,86 +1,82 @@
 ---
 spec_schema_version: 1
 id: PTH-07B
-status: AcceptedDesign
+parent_id: PTH-07
+function: dash_path
+kind: primitive
+category: 03-generation
+status: Accepted
 implementation_status: not_implemented
-registration_status: technical_freeze_gates
-source_maturity: D2_draft
-revised_on: 2026-09-26
+clarification_status: member_technical_details_pending
+proposed_operation_keys:
+  - path.dash_path_v1_strict
 ---
 
-# PTH-07B：弧长pattern切割
+# PTH-07B: dash path
 
-本具体规格已按[英文权威决策D01–D12](../decisions.md)修订。数学、端口与验收目标见本文；
-未实现，候选键/新schema及证明算法在[技术门禁](../freeze-gates.md)完成前不得宣称已注册。
-D1/D2仅保留来源成熟度，不表示首批顺序。
+Inherit [PTH-07](PTH-07_trim_dash_contract.md), [GEN common](GEN_common_contract.md),
+and the applicable [random](NOI_random_contract.md) and
+[geometry](PTH_geometry_contract.md) contracts. Proposed keys are not runtime
+registrations. A key includes algorithm version and profile; within one version/profile,
+output bits and discrete decisions are fixed.
 
-## 1. 范围与身份
+## Interface and representation
 
-所属族：[PTH-07 按真实弧长裁段与虚线](PTH-07_trim_dash_contract.md)。本成员与同族其他成员不能隐式互换。
-继承[GEN-common](GEN_common_contract.md)、[PTH-geometry](PTH_geometry_contract.md)；精度、颜色、结构表示及执行条款通过这些文件继承01/02。
-来源为上传草案，经D01–D12修订；规格不代表运行时已实现。
+Core/Bezier PathSet,nonnegative pattern[K],finite offset[1] in px; dashed PathSet with
+source mappings.
 
-没有商业软件黑盒bit identity或未核验GPU支持声明。
+## Parameters and domain
 
-来源候选键（全部需含版本；未冻结，不是可调用API）：
+K>=1,at least one positive entry; restart=per_subpath; max_output_segments;
+attribute_policy.
 
-- path.dash_path_v1_strict
+## Mathematical specialization
 
-## 3. 端口与输出推断
+Duplicate odd patterns, even entries on/odd off. P=sum(pattern),
+q=offset-P*floor(offset/P); phase=(s+q) mod P. Half-open intervals, skip zero entries
+without zero-length dashes. Closed seam-connected on pieces join into one open dash;
+only all-on retains closed. Each piece uses PTH-07A and preserves original width
+positions, not a fresh normalized profile.
 
-输入path,pattern[K] Float32/64非负px,offset[1]有限px；输出dashed PathSet(CoreVerbs)。
+## Dependencies, resources and failures
 
-## 4. 参数及合法域
+Execution rule: **Whole**. Read complete structural/global inputs and publish the
+selected complete Result atomically. Full shared-control/topology/resource changes
+conservatively invalidate dependent output; sample changes follow the actual dependency
+map. Empty requests perform static preflight without payload reads or advancing a random
+sequence. Compute only requested output mathematics, retaining required shared
+validation.
 
-K≥1，至少一项>0；restart=per_subpath唯一v1；attribute_policy；max_output_segments。
+Whole; charge dash count, true inverse and source mappings; hard limits never erase tiny
+dashes.
 
-## 5. 数学参考与舍入
+All output, scratch, indices, validation work and retained owners are accounted. Poll
+cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
+InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
+Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
+lifetime and actual returned coverage inherit GEN-common.
 
-奇数K将整序列复制一次变偶数；偶下标on、奇下标off，总周期P>0。在起点处相位q=offset-P*floor(offset/P)，随s增加phase=(s+q) mod P；区间半开，零长项仅推进index不输出零长dash。每subpath重置同q。closed上起末on区间跨缝相连时合并成一个open dash；全程on才保留closed；每个on段按A截取，gap不连线。
+## Independent fixtures and acceptance
 
-宽度默认保留源位置：每个输出片段保存源subpath/snapshot及有序源弧长区间[a,b]。
-在尚未发布舍入的截取几何上，片段弧长s对应原路径a+s；闭合wrap片段按[a,L]、[0,b]
-两段分别映射，不能把连接后长度重新铺为原profile的[0,1]。输出控制点舍入后，须保留
-截取参数到原参数的准确映射，不能假设新几何弧长仍精确等于原弧长差。
-查询时先恢复源位置：逐子路径px域使用源s；逐子路径归一域使用源s/源L；
-整PathSet归一域使用(源子路径前缀长度+源s)/源总长。三域均使用源绑定的原始长度和顺序。
-附着width重建该绑定；独立width消费者使用同一源映射。需要把profile重新铺满每个片段时
-必须显式rebind。正式Result必须能够表达并验证映射，否则默认reject_unmappable；
-显式drop_unmappable仅删除无法映射属性并报告键/原因，不能改用未经批准的插值。
+L10 pattern3,2 gives[0,3],[5,8]; offset1 gives[0,2],[4,7],[9,10]; odd3 equals3,3;
+all-zero fails; closed seam.
 
-## 6. 实现成本与资源
+Check requested-region/full-output equivalence, actual read/work bounds, legal
+strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
+associations and retained owners as applicable. The [oracle
+coverage](../oracle-coverage.md) describes the available finite reference subset; it is
+not runtime completion. Formal schemas, unresolved algorithms and backend admission must
+be implemented and validated before registration. No unverified GPU or third-party bit
+identity is implied by these requirements.
 
-O(segments+dash_count+inverse)，显式跳过0项防死循环；无限微小周期仍受work/count限制，不能悄悄抹去dash。
+## Source width mapping
 
-## 7. Demand、发布与dirty
-
-目标执行规则：**Whole**。完整结构/全局算法输入与关联；完成全部所选Result后封存，不发布成功前缀。
-完整控制/拓扑/资源改变保守失效全部依赖区域；逐样本输入改变按实际依赖映射失效。
-空Q仅执行静态preflight，不读payload、不推进随机算法。global Region、origin、owner、layout
-与produced coverage真实返回。多输出仅计算所请求数学，必要共享验证不省略。
-具体callback及错误影响范围须按[GEN-common](GEN_common_contract.md)验证。
-
-## 8. 数值、错误与生命周期
-
-继承[GEN-common](GEN_common_contract.md)：strict完整式正确舍入，accelerated最终预算不按
-tap/octave累计；同版本同profile位一致。图像平面存储、合法stride/offset、预算、取消、
-关联及context后保留owner规则均适用。参数/schema错误、无解、未收敛、质量失败和宿主资源
-错误保持区分；有限结果不可表示为ArithmeticOverflow。无效请求不发布成功前缀。
-
-## 10. 成员验收
-
-L10,pattern[3,2],offset0得到[0,3],[5,8]；offset1第一段[0,2]；odd[3]等[3,3]；[0,2]无on；all0拒绝；closed缝接。
-
-还须验证全域与非零ROI同位、真实读取/计算范围、合法负/零stride、独立/joint输出、
-低预算、取消、cache-off、参数和资源版本变化、关联验证及保留owner寿命。
-
-## 11. 公开执行与证据边界
-
-实现验收必须通过WorkflowDocument→Compiler→ExecutionContext公开入口及独立数学参考。
-本文样例是预期结果，不是已运行记录；附件oracle及其旧通过报告不验证修订后行为。
-随机成员使用新版Philox规范和新的独立向量；技术门禁未清除前不发布golden。
-
-## 12. 依赖
-
-来源：[S02](../research-sources.md#s02)、[S03](../research-sources.md#s03)。
-继承本族契约、GEN-common及适用的NOI-random/PTH-geometry。正式字段和算法门禁不得由示例替代。
+For every output fragment retain source snapshot, subpath and ordered source arc
+intervals. Before publication, local fragment arc s maps to source a+s; a wrapped
+fragment uses [a,L] then [0,b]. After rounded-control publication retain the exact
+source parameter mapping rather than equating new arc length with old arc length.
+Per-subpath pixel domain queries source s; normalized subpath queries s/source_L;
+whole-PathSet normalized queries (source_prefix+source_s)/source_total_L. Attached and
+independent width use the same mapping. If the formal representation cannot express it,
+reject_unmappable fails; explicit drop removes only unmappable fields and reports
+keys/reasons. No guessed interpolation or implicit rebind.

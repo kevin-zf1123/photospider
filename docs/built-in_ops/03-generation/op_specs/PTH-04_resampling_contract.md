@@ -1,42 +1,44 @@
 ---
 spec_schema_version: 1
 id: PTH-04
-status: AcceptedDesign
+kind: shared_operator_contract
+category: 03-generation
+status: Accepted
 implementation_status: not_implemented
-registration_status: technical_freeze_gates
-source_maturity: D2_draft
-revised_on: 2026-09-26
 ---
 
-# PTH-04：参数、弧长与几何误差采样
+# PTH-04: Resampling and flattening
 
-本具体规格已按[英文权威决策D01–D12](../decisions.md)修订。数学、端口与验收目标见本文；
-未实现，候选键/新schema及证明算法在[技术门禁](../freeze-gates.md)完成前不得宣称已注册。
-D1/D2仅保留来源成熟度，不表示首批顺序。
+Samples carry Float64 positions, source segment and independently rounded local t; arc
+variants additionally carry arc_s. No arc_s is invented for parameter-only sampling.
+Formal variants must bind fields to source snapshots. Empty paths are empty Results,
+M-only paths are valid points. Flattening is a deterministic approximation, not
+original-curve exactness.
 
-## 1. 族边界
+## Members
 
-输出PathSamplesV1逻辑Result字段为positions[count,2] Float64、source_segment[count] Int64、
-local_t[count] Float64、arc_s[count] Float64（无弧长计算的A/D不公开arc_s；具体schema变体另审）。
-共享端点、闭合缝是否重复固定在成员；空path返回空Result，M-only是有效单点。
+| ID | Specialization |
+| --- | --- |
+| [PTH-04A](PTH-04A_resample_uniform_t.md) | resample uniform t |
+| [PTH-04B](PTH-04B_resample_uniform_arc.md) | resample uniform arc |
+| [PTH-04C](PTH-04C_resample_arc_spacing.md) | resample arc spacing |
+| [PTH-04D](PTH-04D_flatten_bezier_path.md) | flatten bezier path |
 
-## 2. 成员
+## Shared execution and numerical rules
 
-| ID | 功能 | 对象 | 文档成熟度 |
-| --- | --- | --- | --- |
-| [PTH-04A](PTH-04A_resample_uniform_t.md) | 每段等t采样 | primitive | D2_draft |
-| [PTH-04B](PTH-04B_resample_uniform_arc.md) | 每子路径等弧长count | primitive | D2_draft |
-| [PTH-04C](PTH-04C_resample_arc_spacing.md) | 每子路径固定spacing | primitive | D2_draft |
-| [PTH-04D](PTH-04D_flatten_bezier_path.md) | 有参数距离证书的折线 | primitive | D1_draft |
+Inherit [GEN common](GEN_common_contract.md), and applicable
+[random](NOI_random_contract.md) and [path geometry](PTH_geometry_contract.md) rules.
+Members declare Regional, Halo or Whole from actual mathematical dependencies,
+independently of complete control validation. GPU capability is member/backend-specific.
+Same version/profile means bit-identical output; numerical error, geometry error and
+topology guarantees are separate. Public Result data requires validated source
+associations and lifetime.
 
-## 3. 共享约束
+## Acceptance and implementation boundary
 
-继承[GEN-common](GEN_common_contract.md)、适用的[随机契约](NOI_random_contract.md)及
-[路径契约](PTH_geometry_contract.md)。执行按成员Regional/Halo/Whole定义，GPU按后端profile；
-同版本同profile位一致，质量/数值/拓扑独立，公开Result需关联及生命周期审查。
-
-## 4. 验收与技术门禁
-
-成员的公式、参数、边界样例及独立数学验证必须经公开运行路径确认。
-来源成熟度不代表实现；不沿用附件oracle通过记录。
-具体schema、随机packing、后端、求解器及认证算法按[技术门禁](../freeze-gates.md)冻结。
+Use member-specific independent fixtures plus actual public workflow execution. The
+[oracle coverage](../oracle-coverage.md) identifies finite exact helpers, Measured
+diagnostics and remaining unsupported cases. It cannot establish public schema support,
+GPU admission or complete domain certification. Concrete schema, RNG mapping and
+backend/solver details identified by the member must be specified and validated before
+registering that member.
