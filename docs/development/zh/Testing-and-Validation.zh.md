@@ -243,11 +243,10 @@ successful gate。
 
 注册名描述行为，不使用历史 G1/G4/S1/S4 阶段名。使用
 `ctest --test-dir <build> --show-only=json-v1` 获取对应配置的实际清单。
-默认维护 78 项；支持的 SME 构建增加 `test_numeric_conversion_sme`。
-所有已注册可执行文件，包括数值、expression、filter 三个 workflow，均由默认测试构建生成。
+支持的 SME 构建增加 `test_numeric_conversion_sme`。
+所有已注册可执行文件，包括数值、expression 两个 workflow，均由默认测试构建生成。
 
-- `test_workflow_numeric_reductions`、`test_workflow_expression_lut`、
-  `test_workflow_filter_histogram` 执行公开通用数值 oracle。
+- `test_workflow_numeric_reductions`、`test_workflow_expression_lut` 执行公开通用数值 oracle。
 - `test_dependency_workflow` 覆盖精确稀疏读取、progressive 控制发现、动态 radius、
   demand 替换、waiter 共享、内容缓存、有序归约/扫描及块状态重收敛。
   旧 generic-image STMap 正例与计时入口已退休；planar STMap 尚未实现。

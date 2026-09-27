@@ -13,7 +13,7 @@ individual operation callbacks/specializations.
 | `01-numeric` | Array arithmetic, curves, expressions, LUTs and smoothstep |
 | `02-format-color` (implementation removed) | Replacement channel, encoding and color specs are Proposed; see [retirement record](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md) |
 | `03-generation` | Coordinate and constant fields |
-| `05-filter` | Field/image spatial filters and fixed-kernel algorithms |
+| `05-filter` (implementation removed) | [Proposed filter contracts](../../docs/built-in_ops/05-filter/spatial.md); no repository-owned built-in filter registrations |
 | `07-grade` | Exposure gain and levels |
 | `08-transform` | Image/mask downsampling |
 | `09-composite` | Opacity, masks, image mix, source-over and brush stamping |
@@ -21,8 +21,8 @@ individual operation callbacks/specializations.
 
 `rgba32f` is the existing independently buildable C operation-module/Metal
 backend package. Its C ABI translation unit and shaders retain their separate
-backend packaging; the eight corresponding C++ operations follow the categories
-above. New first-version basic operations are CPU only.
+backend packaging; its registrations are independent of the built-in C++
+registry listed above. New first-version basic operations are CPU only.
 
 Public behavior and examples are documented in `docs/kernel-architecture`,
 including `Basic-Operations.md`. CMake's explicit PHOTOSPIDER_OPERATION_SOURCES

@@ -4,15 +4,16 @@
 
 ## W0 当前已存在的使用基础
 
-现有 [image vertical](../../../examples/image_vertical/main.cpp) 为 exposure→opacity；[regional image vertical](../../../examples/regional_image_vertical/main.cpp) 为 Gaussian→exposure→mask→source-over；[S4 example](../../../examples/s4_gpu_workflow/main.cpp) 为公开CPU/Metal调用与8项场景。命令、数据及既有oracle参见[现有图像文档](../../kernel-architecture/Image-Operations.md)。本次未重跑，不新增通过声明。
+当前 [image vertical](../../../examples/image_vertical/main.cpp) 提供 exposure→opacity 的公开示例。
+05-filter 新规格与 oracle 仍是 Proposed，不列为已运行的内核流程。
 
 ## 已交付的公开 workflow
 
 | 入口 / 对应需求 | 实际链路与注册方式 | 可检查结果 / 剩余范围 |
 | --- | --- | --- |
-| [Foundations](../../../examples/foundations_workflow)；W1/W2/W3 子集 | 默认 registry 的 expression/LUT、channel/alpha、basic-curves/masks/filters/fields | LUT x=.25→.125；曲线 workflow 保留 alpha=.5；非对称卷积/相关差 `[4,4,4]`；通用 shape/路径仍待实现 |
+| [Foundations](../../../examples/foundations_workflow)；W1/W2/W3 子集 | 默认 registry 的 numeric、expression/LUT 与仍保留的 generator-gain 迁移入口 | LUT x=.25→.125；滤镜流程等待新规格实现 |
 | [G4](../../../examples/g4_workflow/README.md)；W5 采样子集 | computed STMap → image；radius scatter → snapshot patch | 稀疏源像素 {0,1023} 共 32 bytes；远处 radius 修改触发依赖；完整 liquify/map compose 仍待实现 |
-| [Multi-output](../../../examples/multi_output_workflow/README.md) | 默认 registry 的 420、split、per-channel convolution、Gaussian + kernel | 按端口独立 ROI；kernel-only 无图像样本读取；joint/singleton 结果等价 |
+| [Multi-output](../../../examples/multi_output_workflow/README.md) | 默认 registry 的 `image.split_horizontal` | 按端口独立 ROI；typed 图像示例尚需 planar 迁移 |
 | [Statistics](../../../examples/statistics_workflow/README.md) | 显式 `make_statistics_operation`；Int64 source + UInt8 mask → histogram → parameters → grade → active sink | `x[i]=(3*i+1)%8`，target=2；Counter/有理数 oracle 检查频数/mean/每个 pixel；空或零 mean 的 grade 明确失败 |
 | [FFT](../../../examples/fft_workflow/README.md)；W10 频域子集 | 显式 `make_fft_operation`；Float64 source → FFT + imported response → multiply → inverse → sink | response `exp(-2*pi*i*(u/H+v/W))` 使图像循环下移/右移各一像素；独立 direct DFT；Full/Half、奇偶维度和 imaginary residual；PSD/Wiener 未交付 |
 | [Components](../../../examples/components_workflow/README.md) | 显式 `make_component_operation`；UInt8 mask → labels → associated area → filter | `101/111` 的 `[id,area,min]=[1,5,0]`；filter 为 `label!=0 && area>=minimum_area`；BFS oracle、空 K、跨页细桥 |

@@ -16,9 +16,6 @@ dtype；二元数值、mask、image 还要求形状匹配。没有隐式广播�
 | `curve.sample_linear/monotone` | 普通 `[K,2]`，K>=2，输出普通 `[count]`；Int64 count 2..1048576，有限 Float64 domain_min<domain_max，String out_of_domain=reject/clip。示例默认 256、0、1、reject。控制点全部有限，x 严格递增，y 可转向、有符号或 HDR。 |
 | `field.apply_lut_1d` | 场及同 dtype 普通 `[N]` 表，N>=2，输出普通场；Float64 domain_min/max、String out_of_domain=reject/clip，默认 0、1、reject。 |
 | `image.mix` | 同规格 canonical premul RGBA A/B 与同 HW coverage M，保留图像解释，无参数。 |
-| `field.box_mean` | 场输出同 dtype/解释；Int64 radius 1..64，示例 1。 |
-| `field.gaussian_blur` | 同 box，增加有限 Float64 sigma 0..64，示例 1；零表示 identity。 |
-| `field.convolve/correlate` | 场及同 dtype 普通 `[Kh,Kw]` 核，输出普通场；非负 Int64 anchor_y/x，位于核内（相关另限制 <=2^53-1）；String boundary=clamp/zero。奇数核同样显式给 anchor。 |
 | `analysis.histogram` | 场到 Int64 `[bins]`；Int64 bins 1..1048576、有限 Float64 range_min<range_max，默认 256、0、1。 |
 | `analysis.histogram_out_of_range` | 场到 Int64 `[2]`，顺序 underflow、overflow；有限 Float64 range_min<range_max。 |
 | `grade.levels` | 场到同 dtype 普通场；有限 Float64 black<white、gamma>0、out_min<=out_max，默认 0、1、1、0、1。 |
@@ -37,14 +34,6 @@ image.mix 对 RGBA 全部执行 `(1-M)A+MB`，M=0/1
 精确返回端点；相同 alpha 保持不变。RGB 调色在提取前 unassociate，合并后 associate，
 见 basic-curves 示例。
 
-box/Gaussian 为可分离方形支撑滤波，画布外 clamp，按完整窗口归一化，使用 Float64
-中间值。Gaussian 样本为 `exp(-.5*(distance/sigma)^2)` 并对有限支撑归一化；极小 sigma
-使非中心权重为零。可分离模糊复杂度 O(HW*r)。
-
-correlate=`sum(K[j]*I[p+j-anchor])`；convolve=`sum(K[j]*I[p+anchor-j])`。
-同尺寸 signed 输出，核按行优先顺序 Float64 累加，复杂度 O(HW*Kh*Kw)。没有自动
-核归一化、bias、alpha 或传递函数处理。
-
 直方图边界使用保留端点的补偿 Float64 均匀插值，边界重合时报错；二分比较边界，
 复杂度 O(HW*log(bins)+bins)。区间左闭右开，最后一格包含上界；范围外样本不进入 bins，由独立节点计数。
 使用 checked Int64。levels 先计算 `t=clamp((x-black)/(white-black),0,1)`，再计算
@@ -57,13 +46,11 @@ min/max 的零 tie 选负零/正零，abs 把负零变正零。旧测试算子
 ## 执行、错误与资源
 
 Elementwise：numeric min/max/abs、levels、smoothstep、image mix。
-Halo：声明正半径的 box/Gaussian。Whole：曲线、field LUT、相关、直方图。卷积使用精确分阶段 kernel/邻域读取，详见
-[多输出算子](Multi-Output-Operations.zh.md)。Whole 完整物化必须满足预算。静态 shape 改变需要重新编译，
+Whole：曲线、field LUT、直方图。Whole 完整物化必须满足预算。静态 shape 改变需要重新编译，
 控制点、表和核样本是每次执行绑定。
 
 输入支持 byte offset、负/零 stride 和非零 storage origin。输出与 scratch 使用宿主
-allocator。PCHIP 每个控制点预留三个 Float64 数组元素；模糊预留 129 个 Float64 权重
-及限制在声明输入 demand 内的横向 Float64 中间场。其余新增算子不申请样本 scratch。遍历轮询取消，错误释放
+allocator。PCHIP 每个控制点预留三个 Float64 数组元素；遍历轮询取消，错误释放
 未发布分配，并恢复调用者浮点环境。
 
 非有限样本及不可表示的算术/输出返回 OperationFailed；元数据或 shape 不兼容返回
@@ -74,22 +61,11 @@ TypeMismatch；非法静态参数返回 InvalidArgument。现有 traits 无法�
 
 ## 公开 workflow 与验证
 
-[独立示例](../../../examples/foundations_workflow) 仅通过
-`find_package(Photospider CONFIG REQUIRED COMPONENTS kernel)` 构建，basic.cpp 提供：
-
-| 场景 | 可检查结果 |
-| --- | --- |
-| basic-curves | unassociate → PCHIP → 通道 LUT → merge → associate → mix；alpha=.5。 |
-| basic-filters | 非对称相关/卷积 → 绝对差 `[4,4,4]`；直方图 `[0,3]`、范围外 `[0,0]`。 |
-
-`tests/integration/test_basic_operations.cpp` 检查独立数值样本、参数与定义域错误、
-ROI/Whole、特殊视图、执行绑定变化、浮点环境恢复、取消、scratch 拒绝及预算。
-同一测试源与四个示例同时进入隔离 installed-consumer 验证。
+[独立示例](../../../examples/foundations_workflow) 提供当前 numeric 与 expression-lut 流程；
+`tests/integration/test_basic_operations.cpp` 检查数值样本、ROI、特殊视图、执行绑定、
+浮点环境、取消及资源预算。
 
 ```sh
-cmake --build build/issue257-static --target test_basic_operations photospider_foundations_workflow -j 8
-ctest --test-dir build/issue257-static -R '^(test_basic_operations|test_workflow_filter_histogram)$' --output-on-failure
+cmake --build build --target test_basic_operations photospider_foundations_workflow -j 8
+ctest --test-dir build -R '^(test_basic_operations|test_workflow_numeric_reductions|test_workflow_expression_lut)$' --output-on-failure
 ```
-
-[源码目录](../../../plugins/ops/README.md) 使用与文档相同的分类。每个已注册 C++
-算子拥有一个实现文件；共用算法和宿主适配器为内部辅助。迁移保留已有 key 与 ABI。

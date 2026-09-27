@@ -1,23 +1,22 @@
 # Foundations workflow
 
 本 C++17 示例使用公开 WorkflowDocument、Compiler 和 ExecutionContext，
-消费 0.27 安装包。默认 `all` 运行三个维护中的 generic 场景；格式和颜色算子族
+消费 0.27 安装包。默认 `all` 运行两个维护中的 generic 场景；格式和颜色算子族
 使用各自的集成测试与示例。
 
 | 场景 | 独立核验的结果 |
 | --- | --- |
 | `numeric` | `[3,2,1]-[4,4,4]=[-1,-2,-3]`；`[1,2,3]` 的 mean=2、variance=2/3 |
 | `expression-lut` | 平方采样 `[0,.25,1]`；线性 LUT 在 .25 得到 .125 |
-| `basic-filters` | 非对称卷积／相关与误差直方图符合 fixture oracle |
 
 ```sh
 cmake --build build --target photospider_foundations_workflow -j 8
 build/examples/foundations_workflow/photospider_foundations_workflow --scenario all
-ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut|filter_histogram)$' --output-on-failure
+ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut)$' --output-on-failure
 ```
 
-成功结束时打印 `Foundations scenarios=3 oracle=passed backend=cpu`。
-可分别指定 `--scenario numeric`、`expression-lut` 或 `basic-filters`。
+成功结束时打印 `Foundations scenarios=2 oracle=passed backend=cpu`。
+可分别指定 `--scenario numeric`或 `expression-lut`。
 
 消费已有 0.27 安装包时，使用
 `cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install`

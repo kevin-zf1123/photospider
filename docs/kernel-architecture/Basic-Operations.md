@@ -20,9 +20,6 @@ required; defaults below are explicit choices in workflow construction.
 | `curve.sample_linear`, `curve.sample_monotone` | Generic controls `[K,2]`, K>=2, to generic `[count]`. Int64 `count` 2..1048576; finite Float64 `domain_min < domain_max`; String `out_of_domain=reject/clip`. Defaults: 256, 0, 1, reject. Finite controls have strictly increasing x; y may turn, be signed or HDR. |
 | `field.apply_lut_1d` | Field plus generic same-dtype `[N]`, N>=2, to generic field. Explicit Float64 `domain_min/max` and String `out_of_domain=reject/clip`; defaults 0,1,reject. |
 | `image.mix` | Equal canonical premul RGBA A/B plus same-HW coverage mask; no parameters. Output retains image interpretation. |
-| `field.box_mean` | Field to same-dtype/interpretation field; Int64 `radius` 1..64, example 1. |
-| `field.gaussian_blur` | As box, plus finite Float64 `sigma` 0..64, example 1. Sigma zero is identity. |
-| `field.convolve`, `field.correlate` | Field plus same-dtype generic `[Kh,Kw]` kernel to generic field. Nonnegative Int64 `anchor_y/x` within kernel (correlation additionally bounds them to <=2^53-1); String `boundary=clamp/zero`. Every anchor is explicit, including odd kernels. |
 | `analysis.histogram` | Field to Int64 `[bins]`; Int64 `bins` 1..1048576, finite Float64 `range_min < range_max`; defaults 256,0,1. |
 | `analysis.histogram_out_of_range` | Field to Int64 `[2]` ordered underflow,overflow; finite Float64 `range_min < range_max`. |
 | `grade.levels` | Field to same-dtype generic field; finite Float64 `black < white`, `gamma > 0`, `out_min <= out_max`; defaults 0,1,1,0,1. |
@@ -46,16 +43,6 @@ RGBA channels as `(1-M)A+MB`. M=0/1 returns exact endpoint samples; identical
 alpha remains unchanged. RGB grading should unassociate before extraction and
 associate after merging, as shown in `basic-curves`.
 
-Box/Gaussian are separable square-support filters with clamp canvas extension,
-full-window normalization and Float64 intermediate values. Gaussian samples
-`exp(-.5*(distance/sigma)^2)` and normalizes the finite support. Very small
-sigma gives zero off-center weights. Separable smoothing costs O(HW*r).
-
-Correlation computes `sum(K[j]*I[p+j-anchor])`; convolution computes
-`sum(K[j]*I[p+anchor-j])`. Both produce same-sized signed output, use fixed
-kernel row-major Float64 accumulation and cost O(HW*Kh*Kw). There is no automatic
-kernel normalization, bias, alpha operation or transfer conversion.
-
 Histogram edges use endpoint-exact, compensated uniform Float64 interpolation;
 collapsed edges fail. Bins are left-closed/right-open, with the final bin
 including the upper endpoint. Binary search compares these edges directly,
@@ -73,17 +60,13 @@ New generation specifications do not imply available replacement operators.
 ## Execution, errors and resources
 
 Elementwise: numeric min/max/abs, levels, smoothstep and image mix.
-Halo: box/Gaussian with the declared positive radius. Whole: curves, field LUT,
-correlation and histogram. Convolution uses
-exact staged kernel/neighborhood reads; see [multi-output operations](Multi-Output-Operations.md). Whole
-materialization must fit the execution budget. Static shape changes require
-recompilation; control/table/kernel samples are execution bindings.
+Whole: curves, field LUT and histogram. Whole materialization must fit the execution budget. Static shape changes require
+recompilation; control/table samples are execution bindings.
 
 Inputs honor byte offsets, signed/zero strides and nonzero storage origins.
 Outputs and scratch use the invocation allocator. PCHIP reserves three Float64
-arrays per control; smoothing reserves 129 Float64 weights and a Float64
-horizontal intermediate restricted to the declared input demand. Other new operations use no sample scratch allocation.
-Traversal polls cancellation, and unpublished allocations are released on error.
+arrays per control. Traversal polls cancellation, and unpublished allocations
+are released on error.
 The caller's floating environment is restored.
 
 Nonfinite samples and unrepresentable arithmetic/output fail with OperationFailed.
@@ -96,27 +79,13 @@ ResourceExhausted retain their own codes. No partial successful Value is returne
 
 ## Public workflows and validation
 
-[The standalone example](../../examples/foundations_workflow) builds using only
-`find_package(Photospider CONFIG REQUIRED COMPONENTS kernel)`. Its `basic.cpp`
-provides these compiled and executed graphs:
-
-| Scenario | Oracle |
-| --- | --- |
-| `basic-curves` | Unassociate -> PCHIP -> extracted channel LUT -> merge -> associate -> mix; alpha remains .5. |
-| `basic-filters` | Non-symmetric correlation/convolution -> absolute difference `[4,4,4]`; histogram `[0,3]`, out-of-range `[0,0]`. |
-
-`tests/integration/test_basic_operations.cpp` checks independent numerical
-fixtures, parameter/domain failures, ROI/Whole equivalence, unusual views,
-mutable execution bindings, floating-environment restoration, cancellation,
-scratch refusal and budget enforcement. The same source and all four example
-scenarios are included in the isolated installed-consumer gate.
+[The standalone example](../../examples/foundations_workflow) uses the installed
+public kernel to execute maintained numeric and expression workflows.
+`tests/integration/test_basic_operations.cpp` checks numerical fixtures,
+parameter failures, ROI equivalence, views, execution bindings, cancellation,
+resource limits and floating-environment restoration.
 
 ```sh
-cmake --build build/issue257-static --target test_basic_operations photospider_foundations_workflow -j 8
-ctest --test-dir build/issue257-static -R '^(test_basic_operations|test_workflow_filter_histogram)$' --output-on-failure
+cmake --build build --target test_basic_operations photospider_foundations_workflow -j 8
+ctest --test-dir build -R '^(test_basic_operations|test_workflow_numeric_reductions|test_workflow_expression_lut)$' --output-on-failure
 ```
-
-Source organization follows [the operation directory guide](../../plugins/ops/README.md).
-Each registered C++ operation owns one implementation file; shared algorithms
-and host adapters are private helpers. Existing operation keys and ABI records
-are retained during this source migration.

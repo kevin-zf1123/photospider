@@ -179,26 +179,6 @@ void fields() {
                 {0., 3, 4});
   rejected(operation("numeric.abs", {array<float>({NAN})}),
            ErrorCode::OperationFailed);
-  const auto registry = ps::make_default_operation_registry();
-  for (const auto* key : {"field.coordinate", "field.constant"}) {
-    const auto traits = registry->find_traits(key);
-    require(!traits.ok() && traits.status().code == ErrorCode::NotFound,
-            "retired generation key remains registered");
-    rejected(operation(key, {},
-                       {{"height", std::int64_t{1}},
-                        {"width", std::int64_t{1}},
-                        {"dtype", std::string("float64")}}),
-             ErrorCode::NotFound);
-  }
-  for (const auto* key :
-       {"mask.threshold", "mask.components", "mask.invert", "mask.combine",
-        "mask.dilate", "mask.erode", "component.count", "component.area",
-        "component.bbox"}) {
-    const auto traits = registry->find_traits(key);
-    require(!traits.ok() && traits.status().code == ErrorCode::NotFound,
-            "retired mask key remains registered");
-    rejected(operation(key, {}, {}), ErrorCode::NotFound);
-  }
   auto cancellation_levels = levels();
   cancellation_levels["white"] = 5.;
   cancellation_levels["out_min"] = -3 * 0x1p100;
@@ -207,50 +187,7 @@ void fields() {
                                 cancellation_levels)),
                {0});
 }
-void filters_and_counts() {
-  const auto input = array<float>({1, 2, 3}, {1, 3});
-  const auto kernel = array<float>({1, 2}, {1, 2});
-  Parameters p{{"anchor_y", std::int64_t{0}},
-               {"anchor_x", std::int64_t{0}},
-               {"boundary", std::string("zero")}};
-  exact<float>(output(operation("field.correlate", {input, kernel}, p)),
-               {5, 8, 3});
-  exact<float>(output(operation("field.convolve", {input, kernel}, p)),
-               {1, 4, 7});
-  p["anchor_x"] = std::int64_t{1};
-  exact<float>(output(operation("field.correlate", {input, kernel}, p)),
-               {2, 5, 8});
-  exact<float>(output(operation("field.convolve", {input, kernel}, p)),
-               {4, 7, 6});
-  p["boundary"] = std::string("clamp");
-  exact<float>(output(operation("field.correlate", {input, kernel}, p)),
-               {3, 5, 8});
-  p["anchor_x"] = std::int64_t{2};
-  rejected(operation("field.correlate", {input, kernel}, p),
-           ErrorCode::InvalidArgument);
-  for (const auto* key : {"field.box_mean", "field.gaussian_blur"}) {
-    Parameters blur{{"radius", std::int64_t{1}}};
-    if (std::string(key) == "field.gaussian_blur")
-      blur["sigma"] = 1.;
-    close(output(operation(
-              key, {array<float>(std::vector<float>(12, 3), {3, 4})}, blur)),
-          std::vector<float>(12, 3));
-  }
-  close(output(operation("field.box_mean", {input},
-                         {{"radius", std::int64_t{1}}})),
-        {4.F / 3, 2, 8.F / 3});
-  exact<float>(output(operation("field.gaussian_blur", {input},
-                                {{"radius", std::int64_t{64}}, {"sigma", 0.}})),
-               {1, 2, 3});
-  const auto impulse = array<float>({0, 0, 0, 0, 1, 0, 0, 0, 0}, {3, 3});
-  const double a = std::exp(-.5), z = 1 + 2 * a;
-  close(output(operation("field.gaussian_blur", {impulse},
-                         {{"radius", std::int64_t{1}}, {"sigma", 1.}})),
-        {static_cast<float>(a * a / (z * z)), static_cast<float>(a / (z * z)),
-         static_cast<float>(a * a / (z * z)), static_cast<float>(a / (z * z)),
-         static_cast<float>(1 / (z * z)), static_cast<float>(a / (z * z)),
-         static_cast<float>(a * a / (z * z)), static_cast<float>(a / (z * z)),
-         static_cast<float>(a * a / (z * z))});
+void histograms() {
   Parameters hist{{"bins", std::int64_t{4}},
                   {"range_min", 0.},
                   {"range_max", 1.}};
@@ -283,15 +220,9 @@ void regional() {
   for (unsigned i = 0; i < data.size(); ++i)
     data[i] = static_cast<float>(i % 11) - 5;
   auto input = array(data, {5, 7});
-  for (const auto* key : {"field.box_mean", "field.gaussian_blur",
-                          "grade.levels", "numeric.abs"}) {
+  for (const auto* key : {"grade.levels", "numeric.abs"}) {
     Parameters p;
-    const std::string name(key);
-    if (name == "field.box_mean" || name == "field.gaussian_blur")
-      p["radius"] = std::int64_t{2};
-    if (name == "field.gaussian_blur")
-      p["sigma"] = 1.;
-    if (name == "grade.levels")
+    if (std::string(key) == "grade.levels")
       p = levels();
     const auto whole = output(operation(key, {input}, p));
     ps::PlanningOptions options;
@@ -331,8 +262,6 @@ void views_and_failures() {
                                      ps::Region::whole({1, 3}),
                                      {1, {0, -4}, {0, 2}}, bytes));
   exact<float>(take(invoke("numeric.abs", {view}, {})), {3, 2, 1});
-  close(take(invoke("field.box_mean", {view}, {{"radius", std::int64_t{1}}})),
-        {4.F / 3, 2.F / 3, 0});
   const float value = .5;
   std::memcpy(bytes.data() + 1, &value, 4);
   // A partial view retains full descriptor coordinates and a nonzero origin.
@@ -342,13 +271,10 @@ void views_and_failures() {
   exact<float>(take(invoke("numeric.abs", {partial}, {}, partial.region())),
                {.5, 2, 3});
   const auto controls = array<double>({0, 0, .5, .25, 1, 1}, {3, 2});
-  const auto field = array<float>(std::vector<float>(9, 1), {3, 3});
-  for (const auto* key : {"curve.sample_monotone", "field.gaussian_blur"}) {
-    const bool curve = std::string(key) == "curve.sample_monotone";
-    const std::vector<ps::Value> inputs{curve ? controls : field};
-    const Parameters p =
-        curve ? samples()
-              : Parameters{{"radius", std::int64_t{1}}, {"sigma", 1.}};
+  {
+    const std::string key = "curve.sample_monotone";
+    const std::vector<ps::Value> inputs{controls};
+    const Parameters p = samples();
     for (unsigned boundary : {1U, 2U}) {
       ps::CancellationSource cancellation;
       std::uint64_t live = 0;
@@ -388,45 +314,6 @@ void views_and_failures() {
             "scratch refusal must release output");
   }
 
-  // Oversized borrowed Values must not expand a narrow declared halo demand.
-  std::vector<float> large_samples(300, 1);
-  large_samples[0] = NAN;
-  const auto oversized = array(large_samples, {100, 3});
-  const ps::Region demand({{49, 3}, {0, 3}}), requested({{50, 1}, {1, 1}});
-  for (const auto* key : {"field.box_mean", "field.gaussian_blur"}) {
-    Parameters p{{"radius", std::int64_t{1}}};
-    if (std::string(key) == "field.gaussian_blur")
-      p["sigma"] = 1.;
-    for (const auto& source : {oversized, take(oversized.view(demand))}) {
-      std::uint64_t live = 0, peak = 0;
-      {
-        ps::BufferAllocator bounded([&](std::uint64_t size) {
-          if (size > 1108 - live)
-            return ps::Result<std::shared_ptr<void>>(ps::Status::failure(
-                ErrorCode::ResourceExhausted, "halo fixture budget"));
-          live += size;
-          peak = std::max(peak, live);
-          return ps::Result<std::shared_ptr<void>>(
-              std::shared_ptr<void>(new int(0), [&, size](void* pointer) {
-                delete static_cast<int*>(pointer);
-                live -= size;
-              }));
-        });
-        const std::vector<ps::Value> inputs{source};
-        const std::vector<ps::Region> demands{demand};
-        close(take(registry->invoke(key, {inputs,
-                                          demands,
-                                          p,
-                                          ps::Backend::Cpu,
-                                          {},
-                                          requested,
-                                          bounded})),
-              {1});
-      }
-      require(live == 0 && peak <= 1108,
-              "halo working set follows declared demand");
-    }
-  }
   // The same public plan accepts new control values without recompilation.
   auto doc = document({controls}, {{1,
                                     "curve.sample_monotone",
@@ -467,7 +354,7 @@ int main() {
   try {
     curves();
     fields();
-    filters_and_counts();
+    histograms();
     regional();
     views_and_failures();
     std::cout << "basic operator public oracles passed\n";

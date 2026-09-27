@@ -35,10 +35,10 @@ PNT-05A 的 `05f81347` 规格和 `6e429e4b` 实现属于当前 `ops-specs` 的�
 | --- | --- | --- |
 | 数值与统计 | `numeric.add/subtract/multiply/divide`, `numeric.clamp`, `numeric.mean/variance`, `numeric.minimum/maximum/abs`, `numeric.ordered_scan` | [Numeric](../../kernel-architecture/Numeric-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md)、[ordered scan 源码](../../../plugins/ops/01-numeric/numeric_ordered_scan.cpp) |
 | 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
-| 滤镜与分析 | `field.box_mean/gaussian_blur/convolve/correlate`, `analysis.histogram`, `analysis.histogram_out_of_range`, `grade.levels` | [Basic](../../kernel-architecture/Basic-Operations.md)；`field.convolve` 已升级 staged regional，correlate/旧直方图等仍 Whole |
-| 原有 RGBA/mask 链路与 mix | `image.exposure_gain/opacity/gaussian_blur/mask/source_over/downsample_box/brush_circle`, `mask.downsample_box`, `image.mix` | [Image](../../kernel-architecture/Image-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
+| 分析与等级 | `analysis.histogram`, `analysis.histogram_out_of_range`, `grade.levels` | [Basic](../../kernel-architecture/Basic-Operations.md)；05-filter 原实现已退役，新规格仍 Proposed |
+| 原有 RGBA/mask 链路与 mix | `image.exposure_gain/opacity/mask/source_over/downsample_box/brush_circle`, `mask.downsample_box`, `image.mix` | [Image](../../kernel-architecture/Image-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
 | 动态依赖采样 | `image.stmap`, `numeric.radius_gather`, `numeric.radius_scatter` | [Dependency sampling](../../kernel-architecture/Dependency-Sampling.md)；STMap 是明确边界模式的 bilinear 子集 |
-| 命名多输出 | `image.split_horizontal` → `full/left/right`；`image.convolve_channels` → `r/g/b`；`image.gaussian_blur_with_kernel` → `image/kernel` | [Multi-output](../../kernel-architecture/Multi-Output-Operations.md)；端口独立请求，joint 为可选 CPU 优化 |
+| 命名多输出 | `image.split_horizontal` → `full/left/right` | [Multi-output](../../kernel-architecture/Multi-Output-Operations.md)；旧 filter 多输出已退役 |
 | 当前分支局部修复 | `image.local_inpaint_navier_stokes_native_apple_silicon`；可选 `image.local_inpaint_navier_stokes_openCV` | [PNT-05A 实现](../09-composite/inpaint-ns-implementation.md)；Whole、opaque RGBA、binary mask，OpenCV adapter 需构建开关 |
 
 原有 8 项有可选 Metal 后端；新增 CPU 算子、joint 与 structured Result 不因此获得 GPU 支持。

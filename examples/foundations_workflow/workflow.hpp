@@ -125,5 +125,4 @@ inline Parameters indices(std::initializer_list<std::uint32_t> list) {
 void numeric();
 void expressions();
 void generator_gain();
-void basic_filters();
 }  // namespace foundations

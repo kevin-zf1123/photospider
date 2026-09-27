@@ -1,6 +1,6 @@
 # 内建图像算子需求与研究规格
 
-2026-09-13 更新：已对齐本地 `ops@66b16339` 的合并记录及当前 `ops-specs@6e429e4b`。package 0.10.0 / C operation ABI 9 已提供命名多输出、managed resources、分页全局结果、结构化表示、Layer/alpha/emission 和 atom 错误/质量模型。基础节点与统计、FFT、连通域、Layer 流程已交付；当前分支另含 PNT-05A。具体 key、注册方式、提交依据和限制见[当前实现](00-foundation/current-state.md)。
+2026-09-13 更新：已对齐本地 `ops@66b16339` 的合并记录及当前 `ops-specs@6e429e4b`。package 0.10.0 / C operation ABI 9 已提供命名多输出、managed resources、分页全局结果、结构化表示、Layer/alpha/emission 和 atom 错误/质量模型。统计、FFT、连通域与 Layer 的已有流程按各自实现入口记录；05-filter 的旧内建实现已退役，新契约仍是 Proposed。具体 key、注册方式、提交依据和限制见[当前实现](00-foundation/current-state.md)。
 
 本目录面向 Photospider 算子实现者、workflow 作者和使用这些能力的图像应用。目标是覆盖 Photoshop、Lightroom、Camera Raw、DaVinci Resolve、Clip Studio Paint、Nuke、After Effects 中主要的图像处理与分析能力，并拆解为可组合、可验证的计算接口。
 
@@ -47,10 +47,10 @@
 2. 颜色模型、RGB 原色/白点、传递函数、场景/显示参照、存储类型、数值编码范围和 alpha 关联方式分别定义。一个“格式转换”菜单应组合多个基础算子。
 3. 滤镜的单通道数学核心可以复用到多通道；颜色图像包装层负责线性化、alpha 和颜色空间语义。有符号导数与复数频谱需要通用数据表示。
 4. 菜单功能可能是一个基础算子、一个复合 workflow、交互工具，或依赖模型/时域的数据系统。目录中的功能覆盖不能换算为相同数量的独立 C++ 算子。
-5. 通道组合、基础曲线/LUT、mask、卷积、STMap 和具名全局流程已有实现；后续重点是专用节点、更多采样/颜色/距离算法与上层完整 workflow，见更新后的执行路线。
+5. 已注册功能以当前实现页和 registry 为准；05-filter 的 44 族是拟议目标，旧内建滤镜已退役。
 
 ## 规格完整程度
 
 `D1` 表示给出可实现的数学核心、主要参数与验收；`D2` 表示功能族与算法选择已界定，落地前仍须补专用接口或数据表示；`D3` 表示覆盖与依赖规划。D1 也不等于当前 ABI 已能承载，前置条件见每篇和公共契约。未列入已实现入口的名称仍为提议名；默认 registry key 与需显式注册的 factory key 分别列于现状页。
 
-文档中的“建议默认值”属于研究设计。调用者须显式提交实现契约中的必填参数；仅声明为 optional 的参数使用节点规定的默认值，例如 `image.gaussian_blur_with_kernel.boundary=clamp`。本次为文档同步，未改变运行行为或重跑产品测试。
+文档中的“建议默认值”属于研究设计。调用者须显式提交实现契约中的必填参数；仅声明为 optional 的参数使用节点规定的默认值。05-filter 的拟议参数尚不能用于当前 registry。

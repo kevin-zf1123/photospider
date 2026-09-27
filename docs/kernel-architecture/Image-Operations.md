@@ -130,61 +130,15 @@ same executable with built-ins and the module. Static and shared kernel builds
 exercise this path and package 0.7/rejected 0.6 requests; see
 [Testing and Validation](../development/Testing-and-Validation.md).
 
-## S2 Gaussian, mask and composition
+## S2 mask and composition
 
-The built-in registry and maintained ABI9 C package also provide:
-
-| Operation | Ordered inputs | Required static parameters | Region rule |
-| --- | --- | --- | --- |
-| `image.gaussian_blur` | RGBA image | `radius:Int64 [1,64]`, `sigma:Float64 [0.1,64]` | Halo resolved from radius; all RGBA channels |
-| `image.mask` | RGBA image, Float32 `{H,W}` mask | None | Elementwise; mask maps matching H/W |
-| `image.source_over` | Foreground RGBA, background RGBA of identical shape | None | Elementwise; MatchAllInputs |
-
-All operations are CPU, deterministic and side-effect-free. Images preserve
-logical shape and the profile above. Masks carry `encode_semantic(coverage_semantics())` and finite samples
-in `[0,1]`; each mask sample multiplies all foreground RGBA channels. Source-over
-computes `F + B * (1 - F.alpha)` separately for each channel using premultiplied
-values, following the [W3C formula](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover).
-The subtraction, multiplication and addition round to Float32 with no FMA.
-
-Gaussian computes normalized binary64 `exp(-tap²/(2*sigma²))` weights in tap order
-`-radius..radius`. Each horizontal and then vertical pass accumulates binary64
-products in that order and rounds its output to Float32. Edges clamp at the
-full logical image boundary; tile edges never clamp independently. Radius and
-sigma are source parameters and changes require recompilation. Workspace bounds
-are 1032 fixed coefficient bytes plus one byte per demanded input byte; the
-horizontal scratch only stores demanded rows and output columns. All coefficient,
-scratch and output buffers come from the host allocator. Fast-math and FMA
-contraction are disabled for both C++ and C implementations.
-
-[`photospider_regional_image_vertical`](../../examples/regional_image_vertical/main.cpp)
-runs `foreground -> Gaussian -> exposure -> mask -> source-over(background)`
-through public compile/execute/execute_stream. Fixture `S2Image.RegionAndTiles`
-checks a hand-computed uniform scene (RGB .3125, alpha .625), a separate full-image
-2D Gaussian oracle (`atol=1e-6, rtol=1e-5`), and bitwise equality between whole and
-1x1/2x3/5x7/128x128 tiles. It includes a nonzero ROI, edges, non-divisible tiles,
-radius 64, sigma .1, transparent/HDR values, mask 0/1, dynamic gain reuse and
-invalid parameter/mask/shape cases. The independent oracle shares no operation
-callback or separable-pass implementation.
-
-A 65536x65536 procedural source variant streams a 5x7 ROI in nine tiles, checks
-sample values, 9900 source bytes and an actual peak of 1808 bytes, and tests its
-3840-byte conservative reservation
-exactly and one byte short. This proves a controlled
-buffer bound, not a process RSS bound. Regional-source, fan-out, concurrent-Run,
-cancellation, stale and sink-failure coverage is in `test_regional_execution`
-and `test_memory_liveness`.
-
-```sh
-cmake --build build/issue257-static --target photospider_regional_image_vertical -j 8
-build/issue257-static/examples/regional_image_vertical/photospider_regional_image_vertical
-ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
-```
-
-The example directory is also an independent `find_package(Photospider 0.7)`
-consumer. `test_installed_consumer` builds and runs it against isolated static
-and shared installations, both with built-ins and with the separately built C
-module. Pass the trusted module's exact path as the sole optional argument.
+The default registry retains `image.mask` and `image.source_over`. The former
+accepts an RGBA image and a matching Float32 `{H,W}` coverage mask; each finite
+mask sample in `[0,1]` multiplies all foreground channels. Source-over accepts
+matching foreground and background images and computes `F + B * (1 - F.alpha)`
+per premultiplied channel. Both are elementwise CPU operations. The former
+built-in `image.gaussian_blur` has been removed; proposed replacement behavior
+is in [05-filter](../built-in_ops/05-filter/spatial.md).
 
 ## S3 box shrink and circle stamp
 
@@ -218,75 +172,15 @@ independent box-distribution and circle oracles, including odd sizes, edge ROIs,
 factors 1/2/4/16 and invalid scalar inputs. The reusable interactive example is
 tracked by #275/#277.
 
-## S4 native Metal implementations
+## S4 native Metal boundary
 
-Package 0.9 / operation ABI 9 implements all eight operations with the same
-trusted pure C host GPU service. The built-in adapter and independently built
-C11 module share the maintained `plugins/ops/rgba32f/image.metal` program and
-host marshalling. CMake embeds shader text in a generated build header; installed
-consumers need no source-tree shader path or Objective-C++ toolchain settings.
-
-`PlanningOptions::execution_mode` defaults to `ExecutionMode::CpuExact`.
-`MetalFp32` explicitly permits the approximate native implementation;
-`ExecutionContextConfig::gpu_enabled=true` attempts actual Apple Silicon device
-creation. Unsupported builds/hardware retain per-operation CPU fallback.
-
-The native domain is conservative: image/mask samples must be zero or have
-magnitude at least 1e-20 and at most FLT_MAX/1024; mask multipliers, ordinary
-gain/opacity, and brush color/alpha use a nonzero minimum of 1e-8. Positive
-Gaussian coefficients below 1e-8 also select CPU. Logical spatial dimensions
-must fit uint32; native views need nonnegative strides and four-byte-aligned
-byte offsets/strides. Storage origins must not exceed demand offsets on any
-axis (the image channel origin is zero). Other legal native predecessors fall
-back per invocation.
-These restrictions only select an implementation; legal values
-outside them retain the full CPU contract. Malformed inputs remain errors.
-Safe Metal math and no contraction, compensated sums and host double weights
-are checked against independent per-operation and representative-chain oracles
-with atol=1e-6 and rtol=1e-5. This is not CPU bit identity or a graph-size-independent
-error bound. Circle coverage uses host double row spans, including large logical
-coordinates; GPU color computation preserves outside pixel bits.
-
-`test_metal_images` and `test_metal_images_plugin` cover all eight operations,
-positive and signed/HDR whole/tiled/nonzero ROI scenes, alpha 0/1/1e-10,
-invalid numeric/facet/association inputs, radius 64, factor 16, HDR/subnormal
-fallback and exact
-large-coordinate stamp coverage. The public fixture is
-[`examples/s4_gpu_workflow/image_fixture.hpp`](../../examples/s4_gpu_workflow/image_fixture.hpp).
-Use Xcode's command-line validation on actual hardware:
-
-```sh
-cmake --build build/issue257-static --target test_metal_images -j 8
-MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static \
-  -R '^test_metal_images' --output-on-failure
-```
-
-Unavailable hardware returns an explicit CTest skip; it is not a successful
-native execution result. The image CPU implementations and prior numerical
-contracts remain the exact default.
-
-The independently installable `examples/s4_gpu_workflow` consumer exposes the
-same signed scenes through public WorkflowDocument, compile and execute APIs:
-
-```sh
-cmake --build build/issue257-static --target photospider_s4_gpu_workflow -j 8
-build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend cpu
-build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend metal --require-native
-```
-
-Append `--module /absolute/path/to/libphotospider_rgba32f_ops.so` for the C
-package. Expected output includes `operations=8 signed_hdr=passed` (with the
-`dispatches` field between them) and `oracle=passed`. CPU and eligible native
-runs report `fallback_count=0`; native runs must report nonzero dispatches.
-Without a device, Metal mode reports the actual positive fallback count;
-`--require-native` additionally exits 77. Each scene checks every demanded sample and its
-typed facet. For example, signed exposure at `(y=0,x=1)` transforms
-`[-2.125,4,-.125,.5]` with gain 2 into `[-4.25,8,-.25,.5]`. In
-`image_fixture.hpp`, modify `foreground`, `background`, brush inputs or
-`scene()` parameters to compose another experiment, and update the independent
-oracle accordingly. Whole execution and the nonzero ROI with 2x3 tiles use the
-same mathematical oracle; no negative RGB result is clipped or sent to CPU
-solely because of its sign.
+The independently built [`rgba32f` operation module](../../plugins/ops/rgba32f)
+has its own C ABI registration and shader package. It is separate from the
+default repository-owned built-in registry. Removing the built-in 05-filter
+implementation does not register a replacement filter or establish native
+support for any proposed FIL member. Current default-registry image and Metal
+behavior must be checked against the corresponding registered operation and
+planar execution tests.
 
 ## Computed scalar composition
 

@@ -207,13 +207,6 @@ set(PHOTOSPIDER_OPERATION_SOURCES
   plugins/ops/01-numeric/sequence_profiles.cpp
   plugins/ops/01-numeric/numeric_subtract.cpp
   plugins/ops/01-numeric/numeric_variance.cpp
-  plugins/ops/05-filter/field_box_mean.cpp
-  plugins/ops/05-filter/field_convolve.cpp
-  plugins/ops/05-filter/field_correlate.cpp
-  plugins/ops/05-filter/field_gaussian_blur.cpp
-  plugins/ops/05-filter/image_gaussian_blur.cpp
-  plugins/ops/05-filter/image_gaussian_blur_with_kernel.cpp
-  plugins/ops/05-filter/image_convolve_channels.cpp
   plugins/ops/07-grade/grade_levels.cpp
   plugins/ops/07-grade/image_exposure_gain.cpp
   plugins/ops/08-transform/dependency_sampling.cpp
@@ -735,7 +728,6 @@ if(BUILD_TESTING)
   set_property(TARGET photospider_foundations_workflow PROPERTY EXCLUDE_FROM_ALL FALSE)
   add_test(NAME test_workflow_numeric_reductions COMMAND photospider_foundations_workflow --scenario numeric)
   add_test(NAME test_workflow_expression_lut COMMAND photospider_foundations_workflow --scenario expression-lut)
-  add_test(NAME test_workflow_filter_histogram COMMAND photospider_foundations_workflow --scenario basic-filters)
   photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
   target_include_directories(test_basic_operations PRIVATE examples)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
@@ -803,7 +795,6 @@ if(BUILD_TESTING)
   endif()
 
   target_include_directories(test_channel_extraction PRIVATE examples/numeric_workflow)
-  photospider_add_test(test_generic_convolution_roi Photospider::kernel tests/integration/test_generic_convolution_roi.cpp)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_rgb_basis_math photospider_test_kernel tests/unit/test_rgb_basis_math.cpp)
   target_include_directories(test_rgb_basis_math PRIVATE plugins/ops src/lib)

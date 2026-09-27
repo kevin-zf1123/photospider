@@ -18,7 +18,7 @@ modify the graphs. [中文](zh/Foundations-Workflow.zh.md) mirrors this guide.
 | Cast/range and signed arithmetic/reductions | [Numeric operations](Numeric-Operations.md) |
 | Extract/process/merge, alpha and reference-white conversion | [Channel and color operations](Channel-and-Color-Operations.md) |
 | Expression sampling, LUT and compile-once dynamic gain | [Expression and LUT](Expression-and-LUT-Operations.md), [bounded image ports](Image-Operations.md) |
-| Curve grading, selection feathering, filter statistics and generated fields | [Basic operations](Basic-Operations.md) |
+| Curve grading, selection feathering and generated fields | [Basic operations](Basic-Operations.md) |
 | Image-v2 snapshots, frozen inputs and bounded result retention | [Cache model](Cache-Model.md) |
 
 Ten independently selectable scenarios and `all` are registered in CTest. The
@@ -27,16 +27,15 @@ including the matching sanitizer options when applicable. A representative
 focused cross-feature command is:
 
 ```sh
-cmake --build build/issue257-static --target test_numeric_operations test_color_operations test_expression_operations test_basic_operations test_computed_scalar -j 8
-ctest --test-dir build/issue257-static -R '^test_(foundations_.*|numeric_operations|color_operations|expression_operations|component_operations|basic_operations|computed_scalar|installed_consumer)$' --output-on-failure
+cmake --build build/issue257-static --target test_numeric_operations test_color_operations test_expression_operations test_basic_operations -j 8
+ctest --test-dir build/issue257-static -R '^test_(foundations_.*|numeric_operations|color_operations|expression_operations|component_operations|basic_operations|installed_consumer)$' --output-on-failure
 ```
 
 Use an existing shared build path for shared consumption. Exact sample and
 failure oracles are maintained alongside the scenario source; deeper limits,
 strided views, floating environments, cancellation and cache races remain in the
-focused integration tests linked by each operator guide. The eight migrated
-image operations retain independent CPU/C/Metal acceptance in the
-[S4 guide](S4-Workflow.md); a successful CPU example does not assert GPU dispatch.
+focused integration tests linked by each operator guide. Native and proposed filter support is scoped in the
+[S4 guide](S4-Workflow.md).
 
 The retained boundary excludes G4 per-port spatial dependency expansion, G6 host
 assets, daemon migration, full paths, FFT, ICC/OCIO and the remaining Proposed

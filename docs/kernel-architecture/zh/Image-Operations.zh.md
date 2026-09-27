@@ -104,50 +104,14 @@ build/image-example/photospider_image_vertical /absolute/path/to/native-module
 并以默认算子和 module 分别运行相同示例。Static/shared 内核均验证此路径、package
 0.7 消费及 0.6 拒绝，参见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
 
-## S2 Gaussian、蒙版与合成
+## S2 蒙版与合成
 
-默认 registry 和受维护 ABI9 C 包还提供：
-
-| Operation | 有序输入 | 必填静态参数 | Region 规则 |
-| --- | --- | --- | --- |
-| `image.gaussian_blur` | RGBA 图像 | `radius:Int64 [1,64]`、`sigma:Float64 [0.1,64]` | 从 radius 解析 Halo，完整 RGBA |
-| `image.mask` | RGBA 图像、Float32 `{H,W}` 蒙版 | 无 | Elementwise，蒙版映射相同 H/W |
-| `image.source_over` | 前景 RGBA、相同 shape 的背景 RGBA | 无 | Elementwise、MatchAllInputs |
-
-三个算子均为 CPU、确定且无副作用，保留图像逻辑 shape 和上述 profile。蒙版带有 `encode_semantic(coverage_semantics())`，
-样本有限且在 `[0,1]`，逐像素缩放前景全部 RGBA。Source-over 按预乘值对每个通道计算
-`F + B * (1 - F.alpha)`，遵循 [W3C 公式](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover)。
-减法、乘法和加法分别舍入到 Float32，不使用 FMA。
-
-Gaussian 按 `-radius..radius` 顺序计算归一化 binary64 `exp(-tap²/(2*sigma²))` 系数。
-先横向再纵向，每遍按该顺序累计 binary64 乘积，再将该遍输出舍入到 Float32。边缘 clamp
-到完整逻辑图像边界，不在 tile 边界单独 clamp。radius/sigma 属于源码参数，修改需要重新
-编译。Workspace 上限为固定 1032 字节系数加需求输入字节数的一倍；横向 scratch 只保留
-需求行和输出列。系数、scratch 和输出全部通过宿主分配器申请。C++/C 均禁用 fast-math
-和 FMA contraction。
-
-[`photospider_regional_image_vertical`](../../../examples/regional_image_vertical/main.cpp)
-通过公开 compile/execute/execute_stream 运行
-`foreground -> Gaussian -> exposure -> mask -> source-over(background)`。
-`S2Image.RegionAndTiles` 验证手算均匀场景（RGB .3125、alpha .625）、独立整图二维
-Gaussian oracle（`atol=1e-6, rtol=1e-5`），以及整图与 1x1/2x3/5x7/128x128 tile 的逐位
-一致。覆盖非零 ROI、边缘、不可整除 tile、radius 64、sigma .1、透明/HDR、蒙版 0/1、
-逐次 gain 复用，以及非法参数/蒙版/shape。独立 oracle 不复用算子 callback 或两遍实现。
-
-65536x65536 程序化源场景以九个 tile 流式处理 5x7 ROI，核对样本、9900 字节源读取和 1808 字节实际分配峰值，
-验证 3840 字节保守预留恰好足够和少一字节。此处证明受控缓冲区上限，不代表进程 RSS。
-区域源、fan-out、并发 Run、取消、stale 和 sink 失败覆盖位于 test_regional_execution
-与 test_memory_liveness。
-
-```sh
-cmake --build build/issue257-static --target photospider_regional_image_vertical -j 8
-build/issue257-static/examples/regional_image_vertical/photospider_regional_image_vertical
-ctest --test-dir build/issue257-static -R '^test_(s2_vertical|s2_vertical_plugin|regional_execution|installed_consumer)$' --output-on-failure
-```
-
-示例目录也可作为独立 find_package(Photospider 0.7) 消费者。test_installed_consumer
-针对隔离 static/shared 安装构建并运行它，分别使用内置算子和单独构建的 C module。
-唯一可选参数为可信 module 的精确路径。
+默认 registry 保留 `image.mask` 与 `image.source_over`。前者接收 RGBA 图像及
+同 H/W 的 Float32 coverage 蒙版，以 `[0,1]` 有限样本乘前景各通道。
+后者接收形状一致的前景与背景，按预乘通道计算
+`F + B * (1 - F.alpha)`。两者是 CPU elementwise 算子。旧内建
+`image.gaussian_blur` 已移除，拟议替代契约见
+[05-filter](../../built-in_ops/05-filter/spatial.md)。
 
 ## S3 box 缩小与圆章
 
@@ -169,48 +133,12 @@ test_s3_operations [trusted-module] 通过公开 compile/execute 使用独立 bo
 和圆公式验证，覆盖奇数尺寸、边缘 ROI、因子 1/2/4/16 与无效标量。可复用交互
 示例由 #275/#277 跟踪。
 
-## S4 原生 Metal 实现
+## S4 原生 Metal 边界
 
-package 0.9 / operation ABI 9 的内置适配与独立 C11 模块通过相同宿主 GPU 服务实现
-八个算子，共用 image.metal 与参数转换。CMake 在构建目录生成 shader 字符串头；
-安装消费者不依赖源码路径或 Objective-C++ 配置。
-
-PlanningOptions::execution_mode 默认 CpuExact；显式 MetalFp32 允许近似原生实现。
-ExecutionContextConfig::gpu_enabled=true 尝试建立真实 Apple Silicon 设备；不支持时
-按算子回退 CPU。原生数值域保守：图像/mask 非零样本绝对值至少 1e-20、至多
-FLT_MAX/1024；mask 乘数、gain/opacity、圆章颜色/alpha 非零值至少 1e-8；Gaussian
-正系数低于 1e-8 回退。空间尺寸须适合 uint32；原生视图须有非负步长，byte offset
-与步长须按四字节对齐，各轴 storage origin 不得超过 demand offset（图像通道 origin
-为零）。其他合法原生前驱按次调用回退。这些规则只选择实现，其他合法输入
-继续使用完整 CPU 契约，非法输入仍失败。
-
-关闭 fast-math/contraction，使用补偿累加、宿主 double 系数。每算子和代表链对独立
-oracle 的 atol=1e-6、rtol=1e-5 不构成 CPU 位相同或与图规模无关的总误差保证。
-圆章由宿主 double 行区间保持大坐标覆盖，GPU 颜色计算保留圆外像素位型。
-
-test_metal_images 与插件版本覆盖八算子正值与 signed/HDR whole/tile/非零 ROI、
-alpha 0/1/1e-10、非法数值/facet/association、radius 64、factor 16、
-HDR/subnormal 回退和大坐标圆章。公开 fixture 位于 examples/s4_gpu_workflow/image_fixture.hpp。
-运行对应构建目标后，以 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 执行 ctest
--R '^test_metal_images'。无硬件明确 skip，不宣称原生验收成功。CPU 精确默认保持。
-
-可独立安装消费的 examples/s4_gpu_workflow 通过公开 WorkflowDocument、compile、execute
-运行同一 signed 场景：
-
-```sh
-cmake --build build/issue257-static --target photospider_s4_gpu_workflow -j 8
-build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend cpu
-build/issue257-static/examples/s4_gpu_workflow/photospider_s4_gpu_workflow --scenario all-operations --backend metal --require-native
-```
-
-追加 `--module /absolute/path/to/libphotospider_rgba32f_ops.so` 使用 C 包。预期输出包含
-`operations=8`、`signed_hdr=passed`、`oracle=passed`。CPU 和符合资格的原生执行
-报告 `fallback_count=0`，原生执行必须报告非零 dispatches。无设备时 Metal 模式报告
-真实正数 fallback count；传入 `--require-native` 还会以 77 退出。每个场景检查所有需求样本和 typed facet。例如 signed exposure
-在 `(y=0,x=1)` 将 `[-2.125,4,-.125,.5]` 以 gain 2 转为 `[-4.25,8,-.25,.5]`。
-修改 image_fixture.hpp 的 foreground、background、brush 输入或 scene() 参数即可组合
-其他实验，同时更新独立 oracle。整图与 2x3 tile 的非零 ROI 共用数学 oracle；RGB
-结果不会仅因负号被夹紧或回退 CPU。
+独立构建的 [`rgba32f` 算子模块](../../../plugins/ops/rgba32f) 有自己的 C ABI 注册与
+shader 包，与仓库默认内建 registry 分开。移除内建 05-filter 实现不会注册替代滤镜，
+也不表示任何拟议 FIL 成员已经有原生后端。默认 registry 的图像与 Metal 行为
+应以当前注册算子和 planar 执行测试核对。
 
 ## Computed scalar 组合
 

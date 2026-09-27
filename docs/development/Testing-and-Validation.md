@@ -300,13 +300,11 @@ rather than successful gates.
 
 Registration names describe behavior, not historical G1/G4/S1/S4 milestones.
 Use `ctest --test-dir <build> --show-only=json-v1` for the actual inventory of
-that configuration. The maintained default has 78 entries; enabling the
-supported SME build adds `test_numeric_conversion_sme`. All registered
-executables, including the three numeric/expression/filter workflows, are
+that configuration. Enabling the supported SME build adds `test_numeric_conversion_sme`. All registered
+executables, including the two numeric/expression workflows, are
 built by the default testing build.
 
-- `test_workflow_numeric_reductions`, `test_workflow_expression_lut` and
-  `test_workflow_filter_histogram` run public generic numerical oracles.
+- `test_workflow_numeric_reductions` and `test_workflow_expression_lut` run public generic numerical oracles.
 - `test_dependency_workflow` checks exact sparse reads, progressive control
   discovery, dynamic radius, demand replacement, waiter sharing, content cache,
   ordered reductions/scans and block-state reconvergence. Its former

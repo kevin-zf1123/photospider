@@ -54,7 +54,7 @@ CPU exact execution is the default. Explicit `MetalFp32` planning and
 queue with completion-safe shared buffers and trait-permitted CPU fallback.
 Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF`
 for the CPU configuration. See the [S4 workflow guide](docs/kernel-architecture/S4-Workflow.md)
-for installed examples, numeric eligibility, Xcode validation and checkable results.
+for the current native-support boundary and active validation entry points.
 
 ## Install and consume
 
@@ -105,7 +105,7 @@ Issues rather than implied by local example success.
 | Current ownership and behavior | [Architecture overview](docs/kernel-architecture/Overview.md) |
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
-| Native Metal workflows | [S4 examples](docs/kernel-architecture/S4-Workflow.md) |
+| Native Metal workflows | [S4 support boundary](docs/kernel-architecture/S4-Workflow.md) |
 | Composable foundations | [Foundations examples](docs/kernel-architecture/Foundations-Workflow.md) |
 | Runnable image workflow | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |

@@ -15,21 +15,20 @@ shape、参数、Region、预期结果和修改组合方法。
 | Cast/range、signed 算术/归约 | [数值算子](Numeric-Operations.zh.md) |
 | Extract/process/merge、alpha、参考白转换 | [通道与颜色](Channel-and-Color-Operations.zh.md) |
 | Expression、LUT、compile-once 动态 gain | [Expression/LUT](Expression-and-LUT-Operations.zh.md)、[图像端口](Image-Operations.zh.md) |
-| 曲线局部调色、选区羽化、滤波统计、生成场 | [基础算子](Basic-Operations.zh.md) |
+| 曲线局部调色、选区羽化、生成场 | [基础算子](Basic-Operations.zh.md) |
 | Image-v2 快照、frozen input、有界结果缓存 | [缓存模型](Cache-Model.zh.md) |
 
 十个独立场景及 all 已注册 CTest。隔离 installed consumer 使用导出 target 构建同一
 示例，按 producer 传入 sanitizer 选项。Focused 跨功能命令：
 
 ```sh
-cmake --build build/issue257-static --target test_numeric_operations test_color_operations test_expression_operations test_basic_operations test_computed_scalar -j 8
-ctest --test-dir build/issue257-static -R '^test_(foundations_.*|numeric_operations|color_operations|expression_operations|component_operations|basic_operations|computed_scalar|installed_consumer)$' --output-on-failure
+cmake --build build/issue257-static --target test_numeric_operations test_color_operations test_expression_operations test_basic_operations -j 8
+ctest --test-dir build/issue257-static -R '^test_(foundations_.*|numeric_operations|color_operations|expression_operations|component_operations|basic_operations|installed_consumer)$' --output-on-failure
 ```
 
 共享消费替换为既有 shared build。场景源码维护独立样本/错误 oracle，更深边界、strided
 view、浮点环境、取消和缓存竞态由各算子指南链接的 focused integration tests 验证。
-八个迁移图像算子的 CPU/C/Metal 独立验收见 [S4](S4-Workflow.zh.md)，CPU 示例成功
-不表示发生 GPU dispatch。
+当前原生后端与拟议滤镜的边界见 [S4](S4-Workflow.zh.md)。
 
 G4 逐端口空间依赖、G6 宿主资产、daemon 迁移、完整路径、FFT、ICC/OCIO 与其余 Proposed
 目录均在范围外。新增全局/shape-changing 操作 Whole，每节点单输出。

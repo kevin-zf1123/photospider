@@ -171,170 +171,23 @@ void split(bool joint) {
                   data[(i * 5 + source_x[i]) * 3 + c],
               "split oracle");
 }
-void channels(bool joint) {
-  auto data = pixels();
-  const std::vector<std::vector<float>> kernels{{.5F, -.25F, .75F, 1.F},
-                                                {1, 2, -1},
-                                                {.25F, .5F, .25F}};
-  const std::array<int, 3> kh{2, 1, 3}, kw{2, 3, 1}, ay{0, 0, 2}, ax{1, 1, 0};
-  std::vector<Value> inputs{samples({3, 5, 3}, data, true)};
-  std::map<std::string, ParameterValue> parameters;
-  const std::array<std::string, 3> names{"r", "g", "b"};
-  for (unsigned c = 0; c < 3; ++c) {
-    inputs.push_back(samples(
-        {static_cast<std::uint64_t>(kh[c]), static_cast<std::uint64_t>(kw[c])},
-        kernels[c]));
-    parameters[names[c] + "_anchor_y"] = static_cast<std::int64_t>(ay[c]);
-    parameters[names[c] + "_anchor_x"] = static_cast<std::int64_t>(ax[c]);
-    parameters[names[c] + "_boundary"] = std::string(c == 1 ? "clamp" : "zero");
-  }
-  WorkflowDocument doc;
-  doc.nodes = {{1,
-                "image.convolve_channels",
-                {WorkflowInputReference{1}, WorkflowInputReference{2},
-                 WorkflowInputReference{3}, WorkflowInputReference{4}},
-                parameters}};
-  doc.outputs = {{"r", 1, "r"}, {"g", 1, "g"}, {"b", 1, "b"}};
-  auto result = run(doc, inputs, joint, "channels");
-  for (unsigned c = 0; c < 3; ++c)
-    for (int y = 0; y < 3; ++y)
-      for (int x = 0; x < 5; ++x) {
-        double expected = 0;
-        for (int ky = 0; ky < kh[c]; ++ky)
-          for (int kx = 0; kx < kw[c]; ++kx) {
-            int sy = y + ay[c] - ky, sx = x + ax[c] - kx;
-            if (c == 1) {
-              sy = std::clamp(sy, 0, 2);
-              sx = std::clamp(sx, 0, 4);
-            }
-            if (sy >= 0 && sy < 3 && sx >= 0 && sx < 5)
-              expected += static_cast<double>(kernels[c][ky * kw[c] + kx]) *
-                          data[(sy * 5 + sx) * 3 + c];
-          }
-        require(sample(result.values.at(names[c]),
-                       {static_cast<std::uint64_t>(y),
-                        static_cast<std::uint64_t>(x)}) ==
-                    static_cast<float>(expected),
-                "channel oracle");
-      }
-  doc.outputs = {{"g", 1, "g"}};
-  auto only = run(doc, inputs, joint, "channels-only-g");
-  for (const auto& timing : only.diagnostics.operation_timings)
-    require(timing.output.output_index == 1, "unrequested channel executed");
-  for (const auto& name : {"input1", "input3"}) {
-    auto dirty = take(only.dependencies.potential_dirty(
-        name, take(Footprint::all(inputs[name == std::string("input1") ? 1 : 3]
-                                      .descriptor()
-                                      .shape))));
-    require(dirty.at("g").empty(), "sibling kernel dependency");
-  }
-}
-void gaussian(bool joint, double radius, double sigma) {
-  require(std::isfinite(radius) && radius >= 0 && radius <= 64 &&
-              std::isfinite(sigma) && sigma >= 0 && sigma <= 64,
-          "radius/sigma range");
-  const auto extent = static_cast<std::int64_t>(std::ceil(radius));
-  const auto side = static_cast<std::uint64_t>(2 * extent + 1);
-  auto data = pixels();
-  WorkflowDocument doc;
-  doc.nodes = {{1,
-                "image.gaussian_blur_with_kernel",
-                {WorkflowInputReference{1}},
-                {{"radius", radius}, {"sigma", sigma}}},
-               {3,
-                "field.convolve",
-                {WorkflowInputReference{2}, WorkflowNodeOutput{1, "kernel"}},
-                {{"anchor_y", extent},
-                 {"anchor_x", extent},
-                 {"boundary", std::string("clamp")}}}};
-  doc.outputs = {{"image", 1, "image"},
-                 {"kernel", 1, "kernel"},
-                 {"recomputed", 3, "value"}};
-  auto image = samples({3, 5, 3}, data, true);
-  std::vector<float> reference_values;
-  for (std::size_t i = 0; i < data.size(); i += 3)
-    reference_values.push_back(data[i]);
-  const auto reference = samples({3, 5}, reference_values);
-  PlanningOptions planning;
-  // Keep the maximum-kernel demonstration small while retaining its complete
-  // kernel output and a real independently recomputed image observation.
-  if (side > 17) {
-    planning.output_regions = {{"image", Region({{1, 1}, {2, 1}, {0, 3}})},
-                               {"recomputed", Region({{1, 1}, {2, 1}})}};
-  }
-  auto result = run(doc, {image, reference}, joint, "gaussian", planning);
-  require(result.values.at("kernel").descriptor().shape ==
-              std::vector<std::uint64_t>({side, side}),
-          "kernel shape");
-  long double normalizer = 0;
-  std::vector<long double> weights;
-  for (auto y = -extent; y <= extent; ++y)
-    for (auto x = -extent; x <= extent; ++x) {
-      const auto a = [&](std::int64_t d) {
-        return std::clamp(static_cast<long double>(radius) - (std::abs(d) - 1),
-                          0.L, 1.L);
-      };
-      const long double s = sigma;
-      const auto weight =
-          sigma == 0
-              ? (x == 0 && y == 0 ? 1.L : 0.L)
-              : std::exp(-.5L * ((x / s) * (x / s) + (y / s) * (y / s))) *
-                    a(x) * a(y);
-      weights.push_back(weight);
-      normalizer += weight;
-    }
-  for (std::uint64_t y = 0; y < side; ++y)
-    for (std::uint64_t x = 0; x < side; ++x)
-      require(std::abs(sample(result.values.at("kernel"), {y, x}) -
-                       weights[y * side + x] / normalizer) < 1e-7L,
-              "kernel oracle");
-  for (std::uint64_t y = side > 17 ? 1 : 0; y < (side > 17 ? 2U : 3U); ++y)
-    for (std::uint64_t x = side > 17 ? 2 : 0; x < (side > 17 ? 3U : 5U); ++x)
-      require(sample(result.values.at("image"), {y, x, 0}) ==
-                  sample(result.values.at("recomputed"), {y, x}),
-              "public convolution recomputation");
-  doc.outputs = {{"kernel", 1, "kernel"}};
-  auto only = run(doc, {image, reference}, joint, "gaussian-only-kernel");
-  require(only.diagnostics.source_read_count == 0, "kernel read image samples");
-}
 }  // namespace
 int main(int argc, char** argv) {
   try {
-    std::string scenario = "all";
     bool joint = true;
-    double radius = 1.25, sigma = .9;
     for (int i = 1; i < argc; ++i) {
       const std::string option = argv[i];
       if (option == "--help") {
-        std::cout << "--scenario all|split|channels|gaussian --joint "
-                     "on|off --radius FLOAT --sigma FLOAT\n";
+        std::cout << "--joint on|off\n";
         return 0;
       }
-      require(i + 1 < argc, "missing option value");
+      require(option == "--joint" && i + 1 < argc, "use --joint on|off");
       const std::string value = argv[++i];
-      if (option == "--scenario") {
-        scenario = value;
-      } else if (option == "--radius") {
-        radius = std::stod(value);
-      } else if (option == "--sigma") {
-        sigma = std::stod(value);
-      } else if (option == "--joint") {
-        require(value == "on" || value == "off", "joint value");
-        joint = value == "on";
-      } else {
-        require(false, "unknown option");
-      }
+      require(value == "on" || value == "off", "joint value");
+      joint = value == "on";
     }
-    require(scenario == "all" || scenario == "split" ||
-                scenario == "channels" || scenario == "gaussian",
-            "scenario");
-    if (scenario == "all" || scenario == "split")
-      split(joint);
-    if (scenario == "all" || scenario == "channels")
-      channels(joint);
-    if (scenario == "all" || scenario == "gaussian")
-      gaussian(joint, radius, sigma);
-    std::cout << "multi-output oracle=passed\n";
+    split(joint);
+    std::cout << "multi-output split oracle=passed\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "multi-output failed: " << error.what() << '\n';

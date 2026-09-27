@@ -31,7 +31,7 @@ durable work, process supervisor, policy DSO, plugin security product, durable
 result object, or release evidence. Pre-reset documents are available only
 through Git history and `pre-breaking-scope-reset-2026-09-01`.
 
-- [S4 native Metal workflow](S4-Workflow.md): installed examples, numeric modes, residency and validation.
+- [S4 native Metal workflow](S4-Workflow.md): current native support and validation entry points.
 - [Composable foundations workflow](Foundations-Workflow.md): standalone installed public API scenarios and reusable operations.
 
 - [Integer statistics workflow](Integer-Statistics.md): paged histogram, global parameters and streaming grade.
