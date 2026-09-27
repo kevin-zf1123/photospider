@@ -16,7 +16,8 @@
 | 一个编号族的共同端口、参数或数学规则 | `op_specs/<PREFIX>-NN_<topic>_contract.md` | 该族成员的例外与继承链接 |
 | 独立算子或 workflow 的可验收契约 | `op_specs/<ID>_<function>.md`，例如 `NUM-04A_abs.md`；单成员也可直接用编号规格 | 所属主题页、当前实现入口及相关示例 |
 | 当前注册、后端、限制和实测性能 | 类别根目录的 `implementation.md` 或明确限定范围的 `<topic>-implementation.md`、`<topic>-performance.md` | 公开实现文档、对应规格的实现状态和可运行示例 |
-| 独立 oracle、可执行 workflow 与复现命令 | `examples/<workflow-or-oracle>/README.md` 及其代码；类别根目录可放 `oracle-coverage.md` 等覆盖索引 | 规格的验收链接与主题页入口 |
+| 独立 oracle 与复现命令 | `oracle/ops/<category>/README.md` 及其代码；类别根目录可放 `oracle-coverage.md` 等覆盖索引 | 规格的验收链接与主题页入口 |
+| 可执行 workflow 与复现命令 | `examples/<workflow>/README.md` 及其代码 | 规格的示例链接与主题页入口 |
 | 跨类别的覆盖、路线或资料 | `13-coverage/`、`14-roadmap/`、`15-references/` | 受影响类别的入口链接 |
 
 `op_specs/` 中的英文共享、族和成员规格是目标行为的权威定义；中文主题页须准确

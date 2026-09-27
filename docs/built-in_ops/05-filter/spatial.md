@@ -1,73 +1,42 @@
 # 空间滤波、边缘与细节
 
-2026-09-13：`field.convolve` 已有 staged regional 实现；`image.convolve_channels` 输出 `r/g/b`，`image.gaussian_blur_with_kernel` 输出 `image/kernel`，按输出独立声明邻域与整核需求。见[多输出契约](../../kernel-architecture/Multi-Output-Operations.md)。其他新增滤镜需求和建议参数不覆盖既有节点契约。
+状态：Proposed。旧测试 kernel 不作为规格依据。本文是空间滤波的中文功能目录，说明成员范围、区别和使用边界；具体端口、公式、数值、需求及资源契约以链接的英文族与成员规格为准。旧版 field/image 实现曾经存在，不代表这些规格已经 Accepted 或运行时已注册。
 
-已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
+空间滤波族列于本页；其余 24 个频域、去噪与恢复族见[频域、去噪与恢复](frequency-restoration.md)。
 
-状态Proposed。确定核/局部统计/导数为D1，复杂保边、多尺度和后处理AA为D2。通用核输入为signed real `[H,W,C]`和kernel `[Kh,Kw]`；颜色wrapper另负责alpha/transfer。CPU参考Float64累加，输出Float32/64；GPU支持须逐算法验证。
+## 20 个空间族 / 47 个成员
 
-## 共同参数
-
-kernel anchor、convolution/correlation方向、normalization(none/sum/l1)、bias、same/full/valid与输出原点均显式。既有 `field.convolve/correlate` 与 `image.convolve_channels` 均要求显式 anchor，包括奇数核。新 UI 可按所选规则填中心值。零和导数核不得sum归一化。边界模式要定义短数组延拓，不能只写reflect。
-
-非负归一模糊同时处理linear premul RGB和alpha；一般signed卷积、导数、高通不自动卷积alpha并反预乘。mask有两个不同用途：`mix(I,filter(I),M)`限制应用结果；对非负可归一权重核，`sum(KMI)/sum(KM)`限制参与样本并需要零权重策略。signed核的缺失样本处理另定，不能套此分母；导数零和不表示没有样本。
-
-OpenCV `filter2D`实际为correlation，调用库时必须翻核/anchor才能实现convolution，这是第一个方向性验收。[^opencv]
-
-## 算子目录
-
-P=H×W，A=Kh×Kw；含C的公式已计入通道数，其他公式按单通道表示。
-
-| ID / 功能 | 参数、算法和复杂度 | 依赖 / 支持 / 验收 |
+| 族 | 族契约 | 成员 |
 | --- | --- | --- |
-| FIL-01 convolve2d/correlate2d | input+K→field，默认normalization=none；直接O(PCA)，稀疏按非零tap | H按anchor两侧支持；表输入G4；impulse+非对称核、偶数anchor |
-| FIL-02 separable | kx,ky；两遍O(PC(Kh+Kw))，中间场/行缓冲 | 精确只对目标可分离核；逐像素变两遍半径通常不是期望二维核 |
-| FIL-03 box sum/mean | width/height≥1；滑动和/前缀O(PC) | sum和mean分开；均匀矩形mean与box共用；与downsample不同 |
-| FIL-04 Gaussian | sigma_x/y≥0，radius或truncate；建议新通用版本ceil(4σ)离散归一 | H；σ=0轴identity；当前既有radius1..64/sigma.1..64保持原契约 |
-| FIL-05 median/percentile | footprint、q∈[0,1]；偶数样本tie显式 | 小窗排序网络；一般sort/select；定值域hist优化不泛化到任意float |
-| FIL-06 bilateral/joint bilateral | spatial_sigma、range_sigma、guide与距离空间、radius必填 | O(PA)参考，H(r)；guide固定时对待滤数据线性，颜色距离不能猜 |
-| FIL-07 guided filter | guide+data，radius=r、epsilon>0；局部线性回归 | 盒统计O(P)固定guide维度；标准两次窗口最坏H(2r)；边缘/常量 |
-| FIL-08 gradient/Sobel/Scharr | x/y导数、spacing、normalization | signed Gx/Gy；H；linear ramp确认符号和每px单位 |
-| FIL-09 magnitude/orientation | Gx,Gy→sqrt(Gx²+Gy²),atan2 | E；zero gradient angle策略；向下y正方向明确 |
-| FIL-10 Laplacian | stencil、spacing、scale | signed二阶，4/8邻域具名；常量0、二次函数解析 |
-| FIL-11 LoG/DoG | sigma/ratio、scale normalization | LoG与两个Gaussian差不同，后者是尺度近似 |
-| FIL-12 Hessian/structure tensor | derivatives/smoothing→components/eigenvalues | derivative halo+outer smooth；方向/脊线/纹理，G3多输出 |
-| FIL-13 Canny | single channel，sigma、low<high、L1/L2、connectivity | Gaussian→gradient→NMS→hysteresis，最终W或全局连通协调 |
-| FIL-14 Gabor/filter bank | frequency cycles/px、angle、phase、scale、aspect | 实/虚响应，H截断；用于周期纹理/线网分析 |
-| FIL-15 Gaussian/Laplacian pyramid | levels、paired down/up kernels→多尺度 | 不同shape输出G3，重建误差与相位明确 |
-| FIL-16 unsharp/detail gain | `I+a(I-GI)`，amount=0默认，sigma与threshold | signed残差；negative/HDR需G2，color/luma方式显式 |
-| FIL-17 local contrast/local Laplacian | bands、edge threshold、remap | base/detail或特定Local Laplacian；D2，不能把所有Clarity称USM |
-| FIL-18 variable box/disk gather | data+radius field→field，每输出位置核、最大radius、有效样本归一 | 动态支持G4；详见bokeh中的gather数学 |
-| FIL-19 post antialias | image→image；threshold、search bound、quality | 启发式边缘重建，如SMAA静态子集；D2，与采样预滤波不同 |
-| FIL-20 local moments | data→mean/variance/covariance；box sum、square/cross product sum→统计 | H/scan实现；cancellation/大值相减稳定性 |
+| FIL-01 | [一般二维核](op_specs/FIL-01_contract.md) | [FIL-01A](op_specs/FIL-01A_convolve2d.md)、[FIL-01B](op_specs/FIL-01B_correlate2d.md)、[FIL-01C](op_specs/FIL-01C_normalized_convolution.md)、[FIL-01D](op_specs/FIL-01D_positive_color_blur.md) |
+| FIL-02 | [可分离核](op_specs/FIL-02_contract.md) | [FIL-02A](op_specs/FIL-02A_separable_convolution.md)、[FIL-02B](op_specs/FIL-02B_separable_correlation.md) |
+| FIL-03 | [盒式统计](op_specs/FIL-03_contract.md) | [FIL-03A](op_specs/FIL-03A_box_sum.md)、[FIL-03B](op_specs/FIL-03B_box_mean.md) |
+| FIL-04 | [有限离散 Gaussian](op_specs/FIL-04_contract.md) | [FIL-04A](op_specs/FIL-04A_gaussian_coefficients.md)、[FIL-04B](op_specs/FIL-04B_gaussian_filter.md) |
+| FIL-05 | [秩滤波](op_specs/FIL-05_contract.md) | [FIL-05A](op_specs/FIL-05A_median.md)、[FIL-05B](op_specs/FIL-05B_percentile.md) |
+| FIL-06 | [双边与联合双边](op_specs/FIL-06_contract.md) | [FIL-06A](op_specs/FIL-06A_bilateral.md)、[FIL-06B](op_specs/FIL-06B_joint_bilateral.md) |
+| FIL-07 | [导向滤波](op_specs/FIL-07_contract.md) | [FIL-07A](op_specs/FIL-07A_guided_scalar.md)、[FIL-07B](op_specs/FIL-07B_guided_vector.md) |
+| FIL-08 | [一阶导数](op_specs/FIL-08_contract.md) | [FIL-08A](op_specs/FIL-08A_central_gradient.md)、[FIL-08B](op_specs/FIL-08B_sobel_gradient.md)、[FIL-08C](op_specs/FIL-08C_scharr_gradient.md) |
+| FIL-09 | [梯度派生量](op_specs/FIL-09_contract.md) | [FIL-09A](op_specs/FIL-09A_gradient_magnitude.md)、[FIL-09B](op_specs/FIL-09B_gradient_orientation.md) |
+| FIL-10 | [二阶 Laplacian](op_specs/FIL-10_contract.md) | [FIL-10A](op_specs/FIL-10A_laplacian4.md)、[FIL-10B](op_specs/FIL-10B_laplacian8_isotropic.md) |
+| FIL-11 | [LoG 与 DoG](op_specs/FIL-11_contract.md) | [FIL-11A](op_specs/FIL-11A_log_kernel.md)、[FIL-11B](op_specs/FIL-11B_log_filter.md)、[FIL-11C](op_specs/FIL-11C_difference_of_gaussians.md) |
+| FIL-12 | [局部二阶结构](op_specs/FIL-12_contract.md) | [FIL-12A](op_specs/FIL-12A_hessian2d.md)、[FIL-12B](op_specs/FIL-12B_structure_tensor2d.md)、[FIL-12C](op_specs/FIL-12C_symmetric_eigen2d.md) |
+| FIL-13 | [Canny 与滞后连通](op_specs/FIL-13_contract.md) | [FIL-13A](op_specs/FIL-13A_canny_quantized4.md)、[FIL-13B](op_specs/FIL-13B_hysteresis_edges.md) |
+| FIL-14 | [Gabor 与滤波器组](op_specs/FIL-14_contract.md) | [FIL-14A](op_specs/FIL-14A_gabor_kernel.md)、[FIL-14B](op_specs/FIL-14B_gabor_response.md)、[FIL-14C](op_specs/FIL-14C_gabor_bank.md) |
+| FIL-15 | [Gaussian/Laplacian 金字塔](op_specs/FIL-15_contract.md) | [FIL-15A](op_specs/FIL-15A_gaussian_pyramid.md)、[FIL-15B](op_specs/FIL-15B_laplacian_pyramid.md)、[FIL-15C](op_specs/FIL-15C_reconstruct_laplacian.md) |
+| FIL-16 | [锐化与残差增益](op_specs/FIL-16_contract.md) | [FIL-16A](op_specs/FIL-16A_unsharp_mask.md)、[FIL-16B](op_specs/FIL-16B_detail_gain.md) |
+| FIL-17 | [局部对比与 Local Laplacian](op_specs/FIL-17_contract.md) | [FIL-17A](op_specs/FIL-17A_local_contrast_tanh.md)、[FIL-17B](op_specs/FIL-17B_local_laplacian_reference.md) |
+| FIL-18 | [变半径 gather](op_specs/FIL-18_contract.md) | [FIL-18A](op_specs/FIL-18A_variable_box_gather.md)、[FIL-18B](op_specs/FIL-18B_variable_disk_gather.md) |
+| FIL-19 | [静态后处理抗锯齿](op_specs/FIL-19_contract.md) | [FIL-19A](op_specs/FIL-19A_directional_post_aa_v1.md)、[FIL-19B](op_specs/FIL-19B_smaa_1x_native.md) |
+| FIL-20 | [局部矩与协方差](op_specs/FIL-20_contract.md) | [FIL-20A](op_specs/FIL-20A_local_mean_variance.md)、[FIL-20B](op_specs/FIL-20B_local_covariance.md) |
 
-高斯参考权重为`exp(-x²/(2σx²)-y²/(2σy²))`截断后归一化。大sigma递归、重复box、降采样是具名近似，不能沿用exact标签。连续Gaussian方差相加性质在截断离散核上通常不严格成立；多次圆盘卷积也不是更大均匀圆盘。
+## 重要语义区别
 
-Guided Filter的局部系数求解与系数再平均构成两层窗口，2r来自数学依赖上界；同一输入充当guide是一个用法，不应取消独立guide端口。[^guided] Canny的弱边连接可传播任意距离，局部halo无法独立保证全图一致。[^canny]
+语义图像沿用 FMT straight-color 语义，alpha 不是普通独立颜色通道；raw numerical field 与语义颜色组也须区分。FIL-01A 卷积与 FIL-01B 相关使用不同坐标方向；偶数核 anchor、full/valid 输出全局原点、reflect_half/reflect_whole 边界、参与 mask 与应用 mask 不能互换。FIL-01D 为正核语义颜色模糊提供融合 primitive，输出保持 straight；它与 raw-field 卷积及 FMT 的分阶段 associate/filter/unassociate 有不同舍入链。Gaussian 使用明确的 baked64 系数定义，不依赖库的中间 dtype 默认。
 
-## 细节与抗锯齿
+可分离滤波要求两遍实现保留同一精确表达式，不能未经声明引入中间舍入。导向滤波由两层局部均值构成，最坏支持半径为 2r。Canny 滞后连通是全平面问题。金字塔各层保留奇偶尺寸与采样相位。Local Laplacian 不等同于直接细节增益。FIL-19A 是自定义方向后处理，不冒称 FXAA 或 SMAA；FIL-19B 是独立的原生 SMAA 1x 规格目标，第三方对照实现、版本、资源及验收细节仍待确定。
 
-建议复用`decompose→remap bands→reconstruct`支持锐化、频率分离、去噪和局部对比。Local Laplacian是有专门局部remapping的算法族，应与直接乘Laplacian pyramid系数区分。[^lap]
+边界与 anchor 规则见[边界契约](op_specs/FILTER_boundary_contract.md)，数值类别与舍入规则见[数值参考](op_specs/FILTER_numeric_reference.md)，颜色模糊边界见[颜色组合](op_specs/FILTER_color_composition.md)，参考程序与验收要求见[oracle 协议](op_specs/FILTER_oracle_protocol.md)。规格提案不代表运行时已注册，也不代表性能或第三方兼容已经验证。
 
-抗锯齿拆三类：图形生成coverage、重采样前低通、已有图像的后处理。前两类有采样模型，第三类推测原边缘。warp的minification与各向异性见几何章节，bilinear不等于充分低通。[^pbr] SMAA有空间与时域变体，首期只能声明经过实现的静态子集。[^smaa]
-
-## 产品覆盖与使用
-
-Photoshop Custom/Box/Gaussian/Median/High Pass/Unsharp Mask、ACR锐化与亮度/色彩降噪、Lightroom Texture/Clarity、CSP Smoothing可映射到这些基础或组合。官方功能描述并不公开所有核系数、舍入和隐藏处理；规格采用具名数学算法。[^adobe][^csp]
-
-最小链路：`ramp/impulse→kernel→signed output→explicit display normalize`；`image→base+residual→gain→reconstruct`；`guide+mask→guided refine→grade`。颜色边缘以checkerboard背景检查透明黑边，但数值oracle直接检查premul值。
-
-验收必须包括DC、impulse、线性ramp、核大于图、单px、anchor、whole/ROI/tile、导数负值、HDR、小alpha。近似算法另报kernel L1/max误差和高光振铃；性能对比需相同算法语义和质量。Canny加入跨多个tile的长弱边，guided加入距输出r到2r处改变输入的反例。
-
-## 来源
-
-[^opencv]: OpenCV，[*Image Filtering*](https://docs.opencv.org/4.13.0/d4/d86/group__imgproc__filter.html)，4.13.0；correlation、核和边界接口。
-[^guided]: He、Sun、Tang，[*Guided Image Filtering*](https://people.csail.mit.edu/kaiming/publications/eccv10guidedfilter.pdf)，ECCV2010，公式5/6/8。
-[^canny]: OpenCV，[*Feature Detection*](https://docs.opencv.org/5.0/main_modules/imgproc_feature.html)，访问5.0文档；Canny阈值/连接。
-[^lap]: Paris、Hasinoff、Kautz，[*Local Laplacian Filters*](https://people.csail.mit.edu/sparis/publi/2011/siggraph/)，SIGGRAPH2011。
-[^pbr]: Pharr等，[*Image Reconstruction*](https://www.pbr-book.org/4ed/Sampling_and_Reconstruction/Image_Reconstruction)，PBRT4，2023。
-[^smaa]: Jimenez等，[*SMAA*](https://www.iryoku.com/smaa/)，Eurographics2012。
-[^adobe]: Adobe，[*Filter effects reference*](https://helpx.adobe.com/uk/photoshop/using/filter-effects-reference.html)，2024-10-14；[ACR Sharpening](https://helpx.adobe.com/ca/camera-raw/desktop/using/sharpening-noise-reduction-camera-raw.html)，2023-11-03。
-[^csp]: CELSYS，[*Filters*](https://help.clip-studio.com/en-us/manual_en/390_filters/Filters.htm)，CSP英文手册；Smoothing等功能。
-
-Texture/Clarity使用面：Adobe，[Lightroom Enhance texture and details](https://helpx.adobe.com/lt/lightroom-cc/how-to/enhance-texture-details.html)，英文官方说明，页面日期未核验。
+本类别合计 44 族、114 成员，包含 108 个 primitive 和 6 个 authoring helper。
+逐成员参考范围见 [oracle 覆盖](oracle-coverage.md)，异步早停规则见
+[迭代共享契约](op_specs/FILTER_iterative_contract.md)。
