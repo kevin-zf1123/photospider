@@ -196,7 +196,7 @@ unbounded workers, auto-eviction, or a paging claim.
 
 ## Independent acceptance and public implementation gate
 
-[Oracle README](../../../../examples/mask_morphology_oracle/README.md) gives
+[Oracle README](../../../../oracle/ops/mask_morphology/README.md) gives
 commands, certified rational/MPFR scope, golden cases and optional external
 comparisons. Every member names its oracle entry and analytic case. Numeric
 checks do not replace separate descriptor/support/dirty/publication testing.

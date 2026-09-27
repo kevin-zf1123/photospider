@@ -29,8 +29,8 @@ Apple/NEON and x86/AVX2 keys remain; NUM-14's 8uA certificate is not used.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_expression -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_expression strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_expression apple
-python3 examples/numeric_workflow/expression_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_expression strict
-python3 examples/numeric_workflow/expression_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_expression apple
+python3 oracle/ops/numeric/expression_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_expression strict
+python3 oracle/ops/numeric/expression_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_expression apple
 ```
 
 Strict and Apple passed 715 independent coordinate/stepwise Fraction/MPFR

@@ -3,7 +3,7 @@
 本页按功能整理当前已接受的目标规格；各新成员尚未实现。具体英文规格记录端口、
 参数、数学定义与依赖规则，继承 01-numeric 与 02-format-color。
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
-[oracle 使用说明](../../../examples/generation_workflow/README.md)与
+[oracle 使用说明](../../../oracle/ops/generation/README.md)与
 [研究来源及采用边界](research-sources.md)分别说明公共语义、可运行参考及证据范围。
 具体 schema、随机映射或后端细节中仍标明未完成的部分，需要在注册成员前明确并验证。
 

@@ -36,6 +36,6 @@ float can become 1 then 0. Floating binary complement is exactly involutive.
 Project-defined arithmetic/contract; inherited NUM/FMT baseline.
 
 The reference material supports the explicitly cited concept, not every project
-choice in this draft. Member examples and the [oracle suite](../../../../examples/mask_morphology_oracle/README.md)
+choice in this draft. Member examples and the [oracle suite](../../../../oracle/ops/mask_morphology/README.md)
 are the acceptance starting point. Proposed scope does not relax the inherited
 NUM numerical standard.

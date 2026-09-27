@@ -30,8 +30,8 @@ NUM-14 Scalar/Accelerate/SME comparisons remain; no8uA shortcut is generalized.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_calculus -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus apple
-python3 examples/numeric_workflow/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
-python3 examples/numeric_workflow/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus apple
+python3 oracle/ops/numeric/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
+python3 oracle/ops/numeric/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus apple
 ```
 
 Both public suites and1810 independent Fraction/raw-bit oracle cases per profile

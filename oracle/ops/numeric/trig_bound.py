@@ -38,7 +38,7 @@ def half_ulp(maximum, precision=24):
 
 
 def coefficients():
-    source = (Path(__file__).resolve().parents[2] /
+    source = (Path(__file__).resolve().parents[3] /
               'plugins/ops/01-numeric/trig_simd.cpp').read_text()
     result = {}
     for dtype, name, body in re.findall(r'constexpr (float|double) k(\w+)\[\] = \{([^}]+)\}', source):

@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 from exact import OracleError, param, integer, from_bits, rn
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'numeric_workflow'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'numeric'))
 from math_oracle_support import MPFR, fraction_bounds
 
 

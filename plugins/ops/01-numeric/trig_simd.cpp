@@ -1,5 +1,5 @@
 // Taylor polynomials with independently bounded coefficient/FMA/rounding error.
-// Certificate and coefficient check: examples/numeric_workflow/trig_bound.py.
+// Certificate and coefficient check: oracle/ops/numeric/trig_bound.py.
 #include "01-numeric/trig_simd.hpp"
 
 #include <cstddef>

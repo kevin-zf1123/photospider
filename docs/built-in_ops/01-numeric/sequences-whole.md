@@ -21,8 +21,8 @@ Per-atom numeric diagnostics are unavailable for Whole.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_sequences -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences apple_silicon
-python3 examples/numeric_workflow/sequence_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences strict
-python3 examples/numeric_workflow/sequence_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences apple_silicon
+python3 oracle/ops/numeric/sequence_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences strict
+python3 oracle/ops/numeric/sequence_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences apple_silicon
 ```
 
 Both native profiles passed the public workflows and 960 independent

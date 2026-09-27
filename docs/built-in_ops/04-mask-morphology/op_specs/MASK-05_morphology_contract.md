@@ -55,6 +55,6 @@ exact required support and page legality. Scratch/radius preparation is budgeted
 [S05](../research-sources.md#s05); [S06](../research-sources.md#s06); [S07](../research-sources.md#s07)
 
 The reference material supports the explicitly cited concept, not every project
-choice in this draft. Member examples and the [oracle suite](../../../../examples/mask_morphology_oracle/README.md)
+choice in this draft. Member examples and the [oracle suite](../../../../oracle/ops/mask_morphology/README.md)
 are the acceptance starting point. Proposed scope does not relax the inherited
 NUM numerical standard.

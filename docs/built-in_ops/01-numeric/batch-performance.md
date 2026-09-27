@@ -80,13 +80,13 @@ cmake --build build --target photospider_numeric_math_batch \
   photospider_numeric_lowpass_execution -j 8
 build/examples/numeric_workflow/photospider_numeric_math_batch
 build/examples/numeric_workflow/photospider_numeric_math_batch time
-python3 examples/numeric_workflow/unary_oracle.py \
+python3 oracle/ops/numeric/unary_oracle.py \
   build/examples/numeric_workflow/photospider_numeric_unary apple
-python3 examples/numeric_workflow/binary_oracle.py \
+python3 oracle/ops/numeric/binary_oracle.py \
   build/examples/numeric_workflow/photospider_numeric_binary apple
-python3 examples/numeric_workflow/inverse_oracle.py \
+python3 oracle/ops/numeric/inverse_oracle.py \
   build/examples/numeric_workflow/photospider_numeric_inverse apple
-python3 examples/numeric_workflow/lowpass_oracle.py \
+python3 oracle/ops/numeric/lowpass_oracle.py \
   build/examples/numeric_workflow/photospider_numeric_lowpass apple
 build/examples/numeric_workflow/photospider_numeric_lowpass_execution apple
 ```

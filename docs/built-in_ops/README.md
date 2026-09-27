@@ -13,6 +13,7 @@
 | 目录 / 文档 | 内容 |
 | --- | --- |
 | [文档组织与规格模板](00-foundation/spec-template.md) | 类别目录、英文契约、实现说明、示例的职责及每份规格的验收内容 |
+| [独立算子 oracle](../../oracle/ops/README.md) | 数值、生成、蒙版和滤镜参考程序及复现入口 |
 | [综合研究报告](00-foundation/research-report.md) | 主要结论、设计取舍、专项核验与实施建议 |
 | [候选依赖](00-foundation/dependencies.md) | 第三方库的职责、版本、许可标识和适配要求 |
 | [当前实现与差距](00-foundation/current-state.md) | ops 合并依据、默认节点、显式 factory 与剩余限制 |

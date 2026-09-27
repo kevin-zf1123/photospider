@@ -56,7 +56,7 @@ retain their existing full-domain fallback beyond the listed fast intervals.
 
 ## Analytic certificate
 
-Run `python3 examples/numeric_workflow/trig_bound.py`. It reads the actual C++
+Run `python3 oracle/ops/numeric/trig_bound.py`. It reads the actual C++
 hexadecimal coefficients and uses exact Python Fractions, not sampled libm
 errors. Pi is enclosed using Machin's identity and alternating atan series.
 The certificate bounds coefficient quantization, the square, every Horner FMA,
@@ -194,8 +194,8 @@ on both hosts; the independent public unary oracle used MPFR 4.2.2 locally and
 cmake -S . -B build
 cmake --build build --target photospider_numeric_trig_benchmark \
   photospider_numeric_math_batch photospider_numeric_unary -j 8
-python3 examples/numeric_workflow/trig_bound.py
-python3 examples/numeric_workflow/trig_oracle.py build/trig-corpus
+python3 oracle/ops/numeric/trig_bound.py
+python3 oracle/ops/numeric/trig_oracle.py build/trig-corpus
 for f in sin cos sinpi cospi sinc sincpi; do
   build/examples/numeric_workflow/photospider_numeric_trig_benchmark \
     check "$f" "build/trig-corpus/$f.bin"

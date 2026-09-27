@@ -113,5 +113,5 @@ MASK 不另设舍入模式或误差容限；各成员只明确公式、舍入阶
 ## 相关入口
 
 - [研究资料](research-sources.md)
-- [数学 oracle](../../../examples/mask_morphology_oracle/README.md)
+- [数学 oracle](../../../oracle/ops/mask_morphology/README.md)
 - [机器目录](op_specs/catalog.json)

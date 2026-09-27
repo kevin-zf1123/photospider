@@ -57,9 +57,9 @@ DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-nu
   --target photospider_numeric_unary photospider_numeric_binary -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_unary apple
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_binary apple
-/opt/homebrew/bin/python3.11 examples/numeric_workflow/unary_oracle.py \
+/opt/homebrew/bin/python3.11 oracle/ops/numeric/unary_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_unary apple
-/opt/homebrew/bin/python3.11 examples/numeric_workflow/binary_oracle.py \
+/opt/homebrew/bin/python3.11 oracle/ops/numeric/binary_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_binary apple
 ```
 

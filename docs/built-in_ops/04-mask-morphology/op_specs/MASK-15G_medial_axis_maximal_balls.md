@@ -82,7 +82,7 @@ input/output dtypes, underflowed radius with axis=1, radius overflow, and
 axis-only requests. Verify exact ball-union reconstruction using independently
 constructed integer metric balls; do not reconstruct using rounded radii.
 
-The [oracle](../../../../examples/mask_morphology_oracle/reference.py) entry is
+The [oracle](../../../../oracle/ops/mask_morphology/reference.py) entry is
 medial_axis_maximal_balls. Native acceptance requires real public workflow,
 Region, lifetime, budget and cancellation checks. [S25](../research-sources.md#s25)
 supports the maximal digital-ball concept; this member fixes its own strict

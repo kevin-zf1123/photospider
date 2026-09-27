@@ -19,7 +19,7 @@ and [current implementation and measurements](../../docs/built-in_ops/01-numeric
 ```sh
 cmake --build build/numeric --target photospider_numeric_expression photospider_numeric_unary photospider_numeric_binary photospider_numeric_category_benchmark photospider_numeric_inventory -j 6
 build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
-python3 examples/numeric_workflow/expression_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
+python3 oracle/ops/numeric/expression_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
 build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_quick
 build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple
 build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple extended
@@ -71,7 +71,7 @@ proofs, cross-atom isolation and floating environment restoration.
 ```sh
 cmake --build build/numeric --target photospider_numeric_color_array -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_color_array
-python3 examples/numeric_workflow/color_array_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_color_array
+python3 oracle/ops/numeric/color_array_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_color_array
 ```
 
 The standalone Fraction oracle checks 1,847 exact metadata decisions, including
@@ -105,7 +105,7 @@ numeric samples remain separate.
 ```sh
 cmake --build build/numeric --target photospider_numeric_icc -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_icc
-python3 examples/numeric_workflow/icc_oracle.py \
+python3 oracle/ops/numeric/icc_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_icc
 # Explicit local file loader, with a 64 MiB manual loader limit:
 build/numeric/examples/numeric_workflow/photospider_numeric_icc --inspect profile.icc
@@ -179,9 +179,9 @@ Whole has no per-observation numerical diagnostic counters; these are N/A.
 ```sh
 cmake --build build/numeric --target photospider_numeric_color_ramps -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_color_ramps strict
-python3 examples/numeric_workflow/color_ramp_oracle.py \
+python3 oracle/ops/numeric/color_ramp_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_color_ramps strict
-python3 examples/numeric_workflow/rgb_ramp_oracle.py \
+python3 oracle/ops/numeric/rgb_ramp_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_color_ramps strict
 ```
 
@@ -237,7 +237,7 @@ invalid values and upstream failures anywhere are observable. Direct/all-negativ
 ```sh
 cmake --build build/numeric --target photospider_numeric_lut3d -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_lut3d strict
-python3 examples/numeric_workflow/lut3d_oracle.py \
+python3 oracle/ops/numeric/lut3d_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_lut3d strict
 ```
 
@@ -292,7 +292,7 @@ cmake -S . -B build/numeric -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang+
 cmake --build build/numeric --target photospider_numeric_sequences photospider_numeric_facilities -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_sequences strict
 build/numeric/examples/numeric_workflow/photospider_numeric_facilities
-python3 examples/numeric_workflow/sequence_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_sequences strict
+python3 oracle/ops/numeric/sequence_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_sequences strict
 ```
 
 Use `apple_silicon` or `x86_64` instead of `strict` to exercise the corresponding
@@ -367,7 +367,7 @@ the end payload. Axis-only requests skip coefficients and expression evaluation.
 cmake --build build/numeric --target photospider_numeric_expression photospider_numeric_prepared -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_expression strict
 build/numeric/examples/numeric_workflow/photospider_numeric_prepared
-python3 examples/numeric_workflow/expression_oracle.py \
+python3 oracle/ops/numeric/expression_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_expression strict
 ```
 
@@ -477,7 +477,7 @@ versioned `numeric.remap_range` and `numeric.clamp` keys through one
 ```sh
 cmake --build build/numeric --target photospider_numeric_ranges -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_ranges _strict
-python3 examples/numeric_workflow/range_oracle.py \
+python3 oracle/ops/numeric/range_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_ranges _strict
 ```
 
@@ -511,7 +511,7 @@ These are manual targets without CTest or integration registration.
 ```sh
 cmake --build build/numeric --target photospider_numeric_interpolation -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
-python3 examples/numeric_workflow/interpolation_oracle.py \
+python3 oracle/ops/numeric/interpolation_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
 ```
 
@@ -547,7 +547,7 @@ and run the manual target with Clang:
 ```sh
 cmake --build build/numeric --target photospider_numeric_layouts -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_layouts strict
-python3 examples/numeric_workflow/layout_oracle.py \
+python3 oracle/ops/numeric/layout_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_layouts strict
 ```
 
@@ -581,7 +581,7 @@ concatenate View requires one compatible affine owner across every input.
 ```sh
 cmake --build build/clang21-numeric --target photospider_numeric_indexing -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
-python3 examples/numeric_workflow/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+python3 oracle/ops/numeric/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
 ```
 
 Use `apple` or `x86` to select an available accelerated profile. Expected fixtures:
@@ -601,7 +601,7 @@ and still represents a huge keepdims output with8 bytes.
 ```sh
 cmake --build build/clang21-numeric --target photospider_numeric_reductions -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 examples/numeric_workflow/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
+python3 oracle/ops/numeric/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
 ```
 
 Use `apple` or `x86` for available accelerated profiles. On input[[1,2,3],[4,5,6]],
@@ -621,7 +621,7 @@ axis length is1. For longer axes, source failures can precede q validation.
 ```sh
 cmake --build build/clang21-numeric --target photospider_numeric_ordering -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
-python3 examples/numeric_workflow/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
+python3 oracle/ops/numeric/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
 ```
 
 Select `apple`/`x86` for available accelerated profiles. Sort[3,1,1,2] yields
@@ -641,7 +641,7 @@ Clang:
 ```sh
 cmake --build build/numeric --target photospider_numeric_comparisons -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
-python3 examples/numeric_workflow/comparison_oracle.py \
+python3 oracle/ops/numeric/comparison_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
 ```
 
@@ -678,7 +678,7 @@ compact column carries; rounded outputs never become arithmetic state.
 ```sh
 cmake --build build/clang21-numeric --target photospider_numeric_scans -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
-python3 examples/numeric_workflow/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
+python3 oracle/ops/numeric/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
 ```
 
 Use `apple`/`x86` for available accelerated profiles. Nonempty demand reads all
@@ -698,7 +698,7 @@ there is no inverse, cast, implicit broadcasting or homogeneous division.
 ```sh
 cmake --build build/numeric --target photospider_numeric_matrix -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_matrix strict
-python3 examples/numeric_workflow/matrix_oracle.py \
+python3 oracle/ops/numeric/matrix_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_matrix strict
 ```
 
@@ -730,7 +730,7 @@ cmake -S . -B build/numeric -DPHOTOSPIDER_ENABLE_ACCELERATE=ON \
 cmake --build build/numeric --target photospider_numeric_matrix \
   photospider_numeric_matrix_kernel_benchmark -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple
-python3 examples/numeric_workflow/matrix_oracle.py \
+python3 oracle/ops/numeric/matrix_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_matrix apple
 
 # Public execution: profile benchmark N Cin Cout dtype [cancellation]
@@ -850,7 +850,7 @@ source NaN priority and raw initial at output0 are preserved.
 ```sh
 cmake --build build/clang21-numeric --target photospider_numeric_calculus -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
-python3 examples/numeric_workflow/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
+python3 oracle/ops/numeric/calculus_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_calculus strict
 ```
 
 Use `apple`/`x86` for available accelerated profiles. Any N>1 nonempty request
@@ -879,7 +879,7 @@ including zero numerators. Both rational sources remain dependencies.
 ```sh
 cmake --build build/numeric --target photospider_numeric_unary -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_unary strict
-python3 examples/numeric_workflow/unary_oracle.py \
+python3 oracle/ops/numeric/unary_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_unary strict
 ```
 
@@ -945,7 +945,7 @@ Use explicit broadcast for shape adaptation; dtype conversion awaits FMT-06.
 ```sh
 cmake --build build/numeric --target photospider_numeric_binary -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_binary strict
-python3 examples/numeric_workflow/binary_oracle.py \
+python3 oracle/ops/numeric/binary_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_binary strict
 ```
 
@@ -1018,7 +1018,7 @@ and end with the explicit `_strict`, `_accelerated_apple_silicon` or
 ```sh
 cmake --build build/numeric --target photospider_numeric_curves -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_curves strict
-python3 examples/numeric_workflow/curve_oracle.py \
+python3 oracle/ops/numeric/curve_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_curves strict
 ```
 
@@ -1108,7 +1108,7 @@ Changing only count, bindings or requested Regions reuses the public API.
 ```sh
 cmake --build build/numeric --target photospider_numeric_bezier -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_bezier strict
-python3 examples/numeric_workflow/bezier_oracle.py \
+python3 oracle/ops/numeric/bezier_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_bezier strict
 ```
 
@@ -1186,7 +1186,7 @@ Float64 and profile to Strict. `apple` and `x86` require their corresponding CPU
 ```sh
 cmake --build build/numeric --target photospider_numeric_parametric -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_parametric strict
-python3 examples/numeric_workflow/parametric_oracle.py \
+python3 oracle/ops/numeric/parametric_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_parametric strict
 ```
 
@@ -1372,7 +1372,7 @@ does not retain the source interpolation method.
 ```sh
 cmake --build build/numeric --target photospider_numeric_lut1d -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_lut1d strict
-python3 examples/numeric_workflow/lut1d_oracle.py \
+python3 oracle/ops/numeric/lut1d_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_lut1d strict
 ```
 
@@ -1447,7 +1447,7 @@ negative values to canonical NaN, and `+Inf` to `+Inf`; inverse maps `-Inf` to
 ```sh
 cmake --build build/numeric --target photospider_numeric_shapers -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_shapers strict
-python3 examples/numeric_workflow/shaper_oracle.py \
+python3 oracle/ops/numeric/shaper_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_shapers strict
 ```
 
@@ -1553,7 +1553,7 @@ parameter snapshots cause a new measurement; matching shapes alone are insuffici
 ```sh
 cmake --build build/numeric --target photospider_numeric_baking3d -j 8
 build/numeric/examples/numeric_workflow/photospider_numeric_baking3d strict
-python3 examples/numeric_workflow/baking3d_oracle.py \
+python3 oracle/ops/numeric/baking3d_oracle.py \
   build/numeric/examples/numeric_workflow/photospider_numeric_baking3d strict
 ```
 
@@ -1617,9 +1617,9 @@ forward/inverse outputs need not round-trip arbitrary query bits.
 cmake --build build/clang21-numeric --target photospider_numeric_inverse -j 6
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse apple
-python3 examples/numeric_workflow/inverse_oracle.py \
+python3 oracle/ops/numeric/inverse_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse strict
-python3 examples/numeric_workflow/inverse_oracle.py \
+python3 oracle/ops/numeric/inverse_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_inverse apple
 # A supported Clang x86-64/AVX2 build uses x86 instead of apple.
 ```
@@ -1761,7 +1761,7 @@ cmake --build build/clang21-numeric --target \
   photospider_numeric_lowpass photospider_numeric_lowpass_execution -j 6
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass_execution strict
-python3 examples/numeric_workflow/lowpass_oracle.py \
+python3 oracle/ops/numeric/lowpass_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass strict
 ```
 
@@ -1810,7 +1810,7 @@ minima, in both Float32 and Float64.
 ```sh
 cmake --build build/clang21-numeric --target photospider_numeric_lowpass_nonuniform -j 6
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform strict
-python3 examples/numeric_workflow/nonuniform_lowpass_oracle.py \
+python3 oracle/ops/numeric/nonuniform_lowpass_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform strict
 ```
 
@@ -2047,8 +2047,8 @@ provides scope, accuracy, platform results and profiler limitations.
 ```sh
 mkdir -p build/num04-exp
 cmake --build build --target photospider_numeric_exp_benchmark -j8
-python3 examples/numeric_workflow/exp_bound.py
-python3 examples/numeric_workflow/exp_oracle.py build/num04-exp/oracle.bin
+python3 oracle/ops/numeric/exp_bound.py
+python3 oracle/ops/numeric/exp_oracle.py build/num04-exp/oracle.bin
 build/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
 python3 examples/numeric_workflow/exp_measure.py build/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/timings.csv
 ```

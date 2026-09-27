@@ -32,8 +32,8 @@ are released. There are no per-output point plans or dependency association rows
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_scans -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans apple
-python3 examples/numeric_workflow/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
-python3 examples/numeric_workflow/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans apple
+python3 oracle/ops/numeric/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans strict
+python3 oracle/ops/numeric/scan_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_scans apple
 ```
 
 Both public suites and2544 independent Fraction/raw-bit cases per profile pass.

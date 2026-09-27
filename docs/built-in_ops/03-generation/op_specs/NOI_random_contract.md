@@ -13,7 +13,7 @@ clarification_status: packing_and_mapping_pending
 Inherit [GEN common](GEN_common_contract.md). The core algorithm is Philox4x64-10;
 production address packing, seed injection and floating-bit mappings require
 specification and validation before any addressed sequence is registered. The
-[oracle](../../../../examples/generation_workflow/README.md) tests the core against
+[oracle](../../../../oracle/ops/generation/README.md) tests the core against
 independent upstream answers. Its addressed layout is explicitly a candidate.
 
 ## Address range and identity

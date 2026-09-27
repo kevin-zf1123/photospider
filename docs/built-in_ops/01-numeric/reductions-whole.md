@@ -24,8 +24,8 @@ publication or numeric atom diagnostic remains.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_reductions -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions apple
-python3 examples/numeric_workflow/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 examples/numeric_workflow/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions apple
+python3 oracle/ops/numeric/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
+python3 oracle/ops/numeric/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions apple
 ```
 
 Both profiles pass all public fixtures and4740 independent Fraction/midpoint-square

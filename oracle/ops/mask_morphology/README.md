@@ -3,20 +3,20 @@
 Independent small-image references for all 63 specified MASK members. The scripts
 never call a production mask kernel. They are not WorkflowDocument APIs, a native
 implementation, metadata interpreter or Region/resource/ownership simulator.
-See the [spec index](../../docs/built-in_ops/04-mask-morphology/masks.md) and
-[shared acceptance obligations](../../docs/built-in_ops/04-mask-morphology/op_specs/MASK_common_contract.md#independent-acceptance-and-public-implementation-gate).
+See the [spec index](../../../docs/built-in_ops/04-mask-morphology/masks.md) and
+[shared acceptance obligations](../../../docs/built-in_ops/04-mask-morphology/op_specs/MASK_common_contract.md#independent-acceptance-and-public-implementation-gate).
 
 ## Run from the repository root
 
 ```sh
-python examples/mask_morphology_oracle/run_cases.py --verify
-python examples/mask_morphology_oracle/test_oracles.py --report /tmp/mask-test-report.json
+python oracle/ops/mask_morphology/run_cases.py --verify
+python oracle/ops/mask_morphology/test_oracles.py --report /tmp/mask-test-report.json
 ```
 
 Python 3.10+ is required. Rational, discrete and quadratic references use the
 standard library only. Gaussian references and MPFR comparison tests additionally
 require **MPFR 4.2+ on an LP64 Linux/macOS host**. They reuse only the repository's
-manual binding in `examples/numeric_workflow/math_oracle_support.py`. Set
+manual binding in `oracle/ops/numeric/math_oracle_support.py`. Set
 `PHOTOSPIDER_ORACLE_MPFR` to the absolute shared-library path when automatic lookup
 fails. The module frees MPFR temporaries at context exit and does not install
 allocation hooks into any kernel. Windows/LLP64 is not supported by that binding.
@@ -45,8 +45,8 @@ Default verification never rewrites golden. Regeneration is an explicit action,
 and still checks all hand-derived expectations before writing:
 
 ```sh
-python examples/mask_morphology_oracle/run_cases.py --emit --output /tmp/mask-golden.json
-python examples/mask_morphology_oracle/run_cases.py --candidate /tmp/candidate.json
+python oracle/ops/mask_morphology/run_cases.py --emit --output /tmp/mask-golden.json
+python oracle/ops/mask_morphology/run_cases.py --candidate /tmp/candidate.json
 ```
 
 The candidate file has exactly the same `{"schema_version":1,"results":{...}}`
@@ -70,7 +70,7 @@ new accelerated registry profiles.
 ```
 
 ```sh
-python examples/mask_morphology_oracle/run_cases.py --case /tmp/case.json
+python oracle/ops/mask_morphology/run_cases.py --case /tmp/case.json
 ```
 
 Use `bits:XXXXXXXX` or `bits:XXXXXXXXXXXXXXXX` for exact IEEE inputs, especially

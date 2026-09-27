@@ -56,7 +56,7 @@ the upstream C/C++ implementation is not bundled as a production backend.
 Source: <https://raw.githubusercontent.com/DEShawResearch/random123/main/tests/kat_vectors>
 
 Adoption boundary: three external Philox4x64-10 known-answer vectors are retained in
-[the oracle fixture](../../../examples/generation_workflow/philox4x64_kat.json).
+[the oracle fixture](../../../oracle/ops/generation/philox4x64_kat.json).
 These validate the core permutation; they do not approve candidate address packing
 or floating conversion. Self-generated goldens cannot replace independent answers.
 
@@ -177,5 +177,5 @@ for these specifications. No commercial-product black-box comparison is claimed.
 Defaults, resource limits, algorithm encodings and geometric quality thresholds are
 Photospider contract choices unless a member explicitly identifies an adopted rule.
 The oracle's dependencies and supported reference subsets are documented in its
-[README](../../../examples/generation_workflow/README.md) and
-[SOURCES](../../../examples/generation_workflow/SOURCES.md).
+[README](../../../oracle/ops/generation/README.md) and
+[SOURCES](../../../oracle/ops/generation/SOURCES.md).

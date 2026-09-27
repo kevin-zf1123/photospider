@@ -54,10 +54,10 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single foreground at row-major index3 in 2x2 -> id4,area1,min3,bbox[1,1,2,2].
 
 Independent reference entry: `component_bundle` in
-[`reference.py`](../../../../examples/mask_morphology_oracle/reference.py).
+[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
-Run the [suite commands](../../../../examples/mask_morphology_oracle/README.md),
+Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),
 then add the relevant common ROI/disjoint support, special-value, invalid
 parameter, dtype, association, cancellation and owner-lifetime checks before
 implementation acceptance.

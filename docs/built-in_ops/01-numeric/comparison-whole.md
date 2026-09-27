@@ -51,7 +51,7 @@ RelWithDebInfo; numerical code disables fast math and FP contraction:
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric \
   --target photospider_numeric_comparisons -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
-python3 examples/numeric_workflow/comparison_oracle.py \
+python3 oracle/ops/numeric/comparison_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
 ```
 

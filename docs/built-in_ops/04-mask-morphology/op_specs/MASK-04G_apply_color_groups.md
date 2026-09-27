@@ -62,4 +62,4 @@ application to another image with matching descriptions. Numeric oracle inputs
 carry model ids/mean/cholesky only; real metadata codecs, public graph execution,
 Region reads, budgets and ownership require separate native validation.
 
-Oracle entry: `apply_color_groups` in [reference.py](../../../../examples/mask_morphology_oracle/reference.py).
+Oracle entry: `apply_color_groups` in [reference.py](../../../../oracle/ops/mask_morphology/reference.py).

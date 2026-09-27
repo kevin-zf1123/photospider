@@ -72,4 +72,4 @@ non-unit factors, threshold equality, both dtypes, selected-channel demand,
 invalid parameters and low budgets. Native acceptance requires a real public
 workflow and host-level read/resource/lifetime checks.
 
-Oracle entry: `lab2000_range` in [reference.py](../../../../examples/mask_morphology_oracle/reference.py).
+Oracle entry: `lab2000_range` in [reference.py](../../../../oracle/ops/mask_morphology/reference.py).

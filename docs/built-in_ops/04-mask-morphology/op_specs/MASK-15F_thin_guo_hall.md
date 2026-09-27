@@ -76,7 +76,7 @@ input and fixed-point idempotence. Exercise both floating dtypes and reject
 nonbinary inputs. Compare any library only with aligned padding and phase order.
 
 The oracle entry is `thin_guo_hall` in
-[reference.py](../../../../examples/mask_morphology_oracle/reference.py).
+[reference.py](../../../../oracle/ops/mask_morphology/reference.py).
 A real public Compiler/ExecutionContext workflow is required for native acceptance.
 [S24](../research-sources.md#s24) provides algorithm and implementation references;
 borrowing predicates does not import UInt8/255 storage or protected canvas edges.

@@ -41,7 +41,7 @@ retain existing exact handling. Tail lanes duplicate a valid sanitized operand;
 all widths/layouts use the same per-lane FMA graph. No global fast-math flag is
 introduced and no Float64 argument is narrowed.
 
-`examples/numeric_workflow/exp_bound.py` is a deterministic exact-rational
+`oracle/ops/numeric/exp_bound.py` is a deterministic exact-rational
 certificate, not a random accuracy test. It encloses ln(2) with an atanh series,
 proves the first reduction FMA exact via Sterbenz, bounds the second FMA, bounds
 P-exp using translated Taylor polynomials over 256 complete intervals, and
@@ -227,10 +227,10 @@ and throughput only, not cycle, cache-miss or instruction-count explanations.
 
 ```sh
 cmake --build build --target photospider_numeric_exp_benchmark photospider_numeric_unary test_numeric_operations -j8
-python3 examples/numeric_workflow/exp_bound.py
-python3 examples/numeric_workflow/exp_oracle.py build/num04-exp/oracle.bin
+python3 oracle/ops/numeric/exp_bound.py
+python3 oracle/ops/numeric/exp_oracle.py build/num04-exp/oracle.bin
 build/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
-python3 examples/numeric_workflow/unary_oracle.py build/examples/numeric_workflow/photospider_numeric_unary apple
+python3 oracle/ops/numeric/unary_oracle.py build/examples/numeric_workflow/photospider_numeric_unary apple
 ctest --test-dir build -R '^test_numeric_operations$' --output-on-failure
 python3 examples/numeric_workflow/exp_measure.py build/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/mac.csv
 ```

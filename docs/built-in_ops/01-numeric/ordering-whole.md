@@ -25,8 +25,8 @@ removed. Scalar/NEON/AVX2 comparisons remain; NUM-14 Accelerate/SME are unchange
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_ordering -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering apple
-python3 examples/numeric_workflow/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
-python3 examples/numeric_workflow/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering apple
+python3 oracle/ops/numeric/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering strict
+python3 oracle/ops/numeric/ordering_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ordering apple
 ```
 
 Both public suites and2072 independent stable-order/Fraction quantile cases per

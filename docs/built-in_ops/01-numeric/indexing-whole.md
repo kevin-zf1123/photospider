@@ -25,8 +25,8 @@ is5168 bytes on this build. Coordinate vectors are bounded by rank8 and reused.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_indexing -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing apple
-python3 examples/numeric_workflow/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
-python3 examples/numeric_workflow/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing apple
+python3 oracle/ops/numeric/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing strict
+python3 oracle/ops/numeric/index_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_indexing apple
 ```
 
 Both public suites and3858 independent coordinate/contributor/Fraction oracle

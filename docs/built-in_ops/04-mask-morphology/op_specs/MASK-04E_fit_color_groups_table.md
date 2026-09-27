@@ -88,4 +88,4 @@ Native public workflows additionally test metadata, resource bounds, immutable
 lifetimes, atomic failure and actual source reads. [S27](../research-sources.md#s27)
 provides mathematical reference context; all choices above are explicit MASK rules.
 
-Oracle entry: `fit_color_groups_table` in [reference.py](../../../../examples/mask_morphology_oracle/reference.py).
+Oracle entry: `fit_color_groups_table` in [reference.py](../../../../oracle/ops/mask_morphology/reference.py).

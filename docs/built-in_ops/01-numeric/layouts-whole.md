@@ -26,8 +26,8 @@ All three retain cacheable=false because content caches do not witness layout.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_layouts photospider_numeric_prepared -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts strict
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts apple
-python3 examples/numeric_workflow/layout_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts strict
-python3 examples/numeric_workflow/layout_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts apple
+python3 oracle/ops/numeric/layout_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts strict
+python3 oracle/ops/numeric/layout_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts apple
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_prepared
 ```
 

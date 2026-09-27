@@ -1,6 +1,6 @@
 # Generation mathematical oracles
 
-Runnable references for the [generation specifications](../../docs/built-in_ops/03-generation/generators.md).
+Runnable references for the [generation specifications](../../../docs/built-in_ops/03-generation/generators.md).
 These Python tools do not register operators or implement the C++ kernel, public
 WorkflowDocument protocol, Result codecs, runtime Region callbacks or GPU execution.
 
@@ -13,9 +13,9 @@ NumPy is optional for non-gating spectrum diagnostics only.
 
 ```sh
 python3 -m venv build/generation-oracle-venv
-build/generation-oracle-venv/bin/python -m pip install -r examples/generation_workflow/requirements-oracle.txt
-build/generation-oracle-venv/bin/python examples/generation_workflow/run_oracles.py --self-test --report build/generation-oracle/self-test.json
-build/generation-oracle-venv/bin/python examples/generation_workflow/run_oracles.py --input examples/generation_workflow/sample_requests.jsonl --candidate examples/generation_workflow/sample_expected.jsonl --profile strict --report build/generation-oracle/candidate-check.json
+build/generation-oracle-venv/bin/python -m pip install -r oracle/ops/generation/requirements-oracle.txt
+build/generation-oracle-venv/bin/python oracle/ops/generation/run_oracles.py --self-test --report build/generation-oracle/self-test.json
+build/generation-oracle-venv/bin/python oracle/ops/generation/run_oracles.py --input oracle/ops/generation/sample_requests.jsonl --candidate oracle/ops/generation/sample_expected.jsonl --profile strict --report build/generation-oracle/candidate-check.json
 ```
 
 Reports/logs go under ignored `build/`, not into source fixtures. Exit codes:
@@ -33,7 +33,7 @@ Test results are written by the current invocation.
 | resources.py | Raw rank structure/hash/lookup/threshold checks | Synthetic fixtures are not approved blue/STBN assets |
 | run_oracles.py | Finite JSONL reference/candidate comparison | Oracle protocol, not kernel workflow JSON; accelerated sample comparison is not admission |
 
-[Per-member coverage](../../docs/built-in_ops/03-generation/oracle-coverage.md)
+[Per-member coverage](../../../docs/built-in_ops/03-generation/oracle-coverage.md)
 lists the available helper subset and remaining limitations for all 95 current member
 specifications. No coverage level means the corresponding operator is implemented.
 A helper test is not complete validation of every member using it.
@@ -56,7 +56,7 @@ gradient2d and fractal operations reject by default; `--allow-candidate-rng` opt
 in and labels results as candidate. Statistics also requires this flag:
 
 ```sh
-python3 examples/generation_workflow/run_oracles.py --statistics --allow-candidate-rng --report build/generation-oracle/statistics.json
+python3 oracle/ops/generation/run_oracles.py --statistics --allow-candidate-rng --report build/generation-oracle/statistics.json
 ```
 
 Do not use these addressed results as production goldens until packing and mappings

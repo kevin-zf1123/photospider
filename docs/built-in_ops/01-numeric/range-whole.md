@@ -57,7 +57,7 @@ matrix was run. Historical pre-Whole platform checks are not current evidence.
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric \
   --target photospider_numeric_ranges -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ranges _strict
-python3 examples/numeric_workflow/range_oracle.py \
+python3 oracle/ops/numeric/range_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_ranges _strict
 ```
 

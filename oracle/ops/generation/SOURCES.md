@@ -15,7 +15,7 @@ Perlin's 256-entry numerical permutation follows
 [the author's reference](https://mrl.cs.nyu.edu/~perlin/noise/).
 The oracle evaluates the complete exact polynomial with Fraction arithmetic;
 it does not promise Java intermediate-rounding identity. Compare the table with
-the committed [specification data](../../docs/built-in_ops/03-generation/op_specs/NOI_perlin2002_permutation.md).
+the committed [specification data](../../../docs/built-in_ops/03-generation/op_specs/NOI_perlin2002_permutation.md).
 
 Remaining fixtures are hand analytic values, rational derivations or explicitly
 labelled finite diagnostics. High-precision mpmath values, ordinary-math Bridson

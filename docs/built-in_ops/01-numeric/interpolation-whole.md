@@ -55,7 +55,7 @@ RelWithDebInfo, no fast math and disabled FP contraction for numerical code:
 DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric \
   --target photospider_numeric_interpolation -j8
 build/clang21-numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
-python3 examples/numeric_workflow/interpolation_oracle.py \
+python3 oracle/ops/numeric/interpolation_oracle.py \
   build/clang21-numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
 ```
 
